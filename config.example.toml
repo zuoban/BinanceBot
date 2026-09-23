@@ -1,0 +1,61 @@
+# ===================================================================
+# 币安合约网格交易机器人配置文件 (Binance Futures Grid Trading Bot)
+# ===================================================================
+
+[exchange]
+# 交易币种 (Symbol)
+symbol = "SOLUSDC"
+
+# 币安 API Key (实盘交易时填写，模拟盘/Dry-Run 可留空)
+api_key = ""
+
+# 币安 API Secret (实盘交易时填写，模拟盘/Dry-Run 可留空)
+api_secret = ""
+
+# 是否使用币安合约测试网 (Testnet)
+is_testnet = false
+
+# 是否启用模拟盘模式 (Dry-Run / Paper Trading)
+# true: 不向币安发送真实订单，订阅币安实时行情并在本地内存中进行撮合仿真和收益统计，零风险测试策略
+# false: 使用 API Key 在币安合约执行真实挂单
+dry_run = true
+
+# 接收窗口时间 (毫秒)
+recv_window = 5000
+
+# 订单同步与对齐轮询间隔 (秒)
+sync_interval_secs = 3
+
+[grid]
+# 网格间距 (USDC)
+# 每上涨 0.1 USDC 则卖出，每下跌 0.1 USDC 则买入
+grid_interval = 0.1
+
+# 每个网格订单交易金额 (USDC)
+# 每次买入或卖出的名义金额 (U)
+order_amount_usdc = 100.0
+
+# 买单预先挂单窗口数量 (当前市价下方挂 N 笔买单)
+buy_window = 5
+
+# 卖单预先挂单窗口数量 (当前市价上方挂 N 笔卖单)
+sell_window = 5
+
+# 挂单类型：只做 Maker 单 (Post-Only, timeInForce=GTX)，防止吃单，节省手续费
+post_only = true
+
+# 网格价格下限 (可选，例如 80.0)
+# min_price = 80.0
+
+# 网格价格上限 (可选，例如 200.0)
+# max_price = 200.0
+
+# 最大持仓名义价值上限 (USDC)，超出时停止同向挂单以控制风险
+max_position_usdc = 2000.0
+
+[server]
+# Web 监控控制台监听地址
+host = "127.0.0.1"
+
+# Web 监控控制台端口 (浏览器访问 http://127.0.0.1:8080)
+port = 8080

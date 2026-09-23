@@ -1,0 +1,14 @@
+services:
+  binance-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ghcr.io/zuoban/binancebot:latest
+    container_name: binance-grid-bot
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config.toml:/app/config.toml
+    environment:
+      - RUST_LOG=binance_grid_bot=info,tower_http=info
