@@ -224,3 +224,30 @@ pub struct WebConfigView {
 fn default_true() -> bool {
     true
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthStatusResponse {
+    pub initialized: bool,
+    pub authenticated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AuthSetupPayload {
+    pub password: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AuthLoginPayload {
+    pub password: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ChangePasswordPayload {
+    pub old_password: String,
+    pub new_password: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuthTokenResponse {
+    pub token: String,
+}

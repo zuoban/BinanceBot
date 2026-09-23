@@ -441,6 +441,35 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       flex-wrap: wrap;
       gap: 12px;
     }
+
+    .modal-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(10, 14, 23, 0.88);
+      backdrop-filter: blur(14px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 99999;
+      padding: 16px;
+    }
+    .modal-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 28px 24px;
+      width: 100%;
+      max-width: 440px;
+      box-shadow: 0 24px 48px rgba(0, 0, 0, 0.6);
+      animation: modalFadeIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    @keyframes modalFadeIn {
+      from { opacity: 0; transform: translateY(-12px) scale(0.98); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
   </style>
 </head>
 <body>
@@ -459,6 +488,8 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       <button id="btn-pause-resume" onclick="togglePauseResume()">⏸️ 暂停策略</button>
       <button onclick="rebalanceGrid()">🔄 刷新网格</button>
       <button class="btn-danger" onclick="cancelAllOrders()">🛑 撤销全部挂单</button>
+      <button onclick="openChangePasswordModal()" title="修改管理员密码">🔑 修改密码</button>
+      <button onclick="logout()" title="安全退出登录" style="color: var(--red); border-color: rgba(244, 63, 94, 0.4);">🚪 退出</button>
     </div>
   </header>
 
@@ -696,14 +727,381 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
     </div>
   </main>
 
+  <!-- Modal: Initial Admin Password Setup -->
+  <div id="modal-auth-setup" class="modal-overlay" style="display: none;">
+    <div class="modal-card">
+      <div style="text-align: center; margin-bottom: 20px;">
+        <div style="font-size: 38px; margin-bottom: 8px;">🛡️</div>
+        <h3 style="font-size: 20px; font-weight: 700; color: #fff;">首次启动初始化</h3>
+        <p style="color: var(--text-dim); font-size: 13px; margin-top: 6px; line-height: 1.5;">
+          为保障您的币安 API 密钥与交易资产安全，首次使用请先设定系统管理员访问密码（至少 6 位）。
+        </p>
+      </div>
+      <form id="form-auth-setup" onsubmit="event.preventDefault(); submitAuthSetup();">
+        <div class="form-group" style="margin-bottom: 14px;">
+          <label style="font-size: 12px; color: var(--text-dim); margin-bottom: 6px; display: block;">设置管理员密码 (至少 6 位)</label>
+          <input type="password" id="setup-pwd" required minlength="6" placeholder="输入管理员密码" style="width: 100%; box-sizing: border-box;" autofocus />
+        </div>
+        <div class="form-group" style="margin-bottom: 18px;">
+          <label style="font-size: 12px; color: var(--text-dim); margin-bottom: 6px; display: block;">确认管理员密码</label>
+          <input type="password" id="setup-pwd-confirm" required minlength="6" placeholder="再次输入密码进行确认" style="width: 100%; box-sizing: border-box;" />
+        </div>
+        <div id="setup-alert" style="display: none; padding: 10px 14px; border-radius: 6px; font-size: 13px; margin-bottom: 14px;"></div>
+        <button type="submit" class="btn-primary" id="btn-submit-setup" style="width: 100%; padding: 12px; font-size: 14px; font-weight: 600;">
+          🚀 设置密码并进入系统
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Modal: Admin Login -->
+  <div id="modal-auth-login" class="modal-overlay" style="display: none;">
+    <div class="modal-card">
+      <div style="text-align: center; margin-bottom: 20px;">
+        <div style="font-size: 38px; margin-bottom: 8px;">🔐</div>
+        <h3 style="font-size: 20px; font-weight: 700; color: #fff;">管理员身份认证</h3>
+        <p style="color: var(--text-dim); font-size: 13px; margin-top: 6px; line-height: 1.5;">
+          控制台已受密码保护，请输入管理员密码以进入仪表盘与管理网格策略。
+        </p>
+      </div>
+      <form id="form-auth-login" onsubmit="event.preventDefault(); submitAuthLogin();">
+        <div class="form-group" style="margin-bottom: 18px;">
+          <label style="font-size: 12px; color: var(--text-dim); margin-bottom: 6px; display: block;">管理员密码</label>
+          <input type="password" id="login-pwd" required placeholder="请输入管理员密码" style="width: 100%; box-sizing: border-box;" autofocus />
+        </div>
+        <div id="login-alert" style="display: none; padding: 10px 14px; border-radius: 6px; font-size: 13px; margin-bottom: 14px;"></div>
+        <button type="submit" class="btn-primary" id="btn-submit-login" style="width: 100%; padding: 12px; font-size: 14px; font-weight: 600;">
+          🔓 验证并登录
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Modal: Change Password -->
+  <div id="modal-change-password" class="modal-overlay" style="display: none;">
+    <div class="modal-card">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+        <h3 style="font-size: 18px; font-weight: 700; color: #fff;">🔑 修改管理员密码</h3>
+        <button type="button" onclick="closeChangePasswordModal()" style="background: none; border: none; color: var(--text-dim); font-size: 20px; cursor: pointer; padding: 4px 8px;">✕</button>
+      </div>
+      <form id="form-change-pwd" onsubmit="event.preventDefault(); submitChangePassword();">
+        <div class="form-group" style="margin-bottom: 12px;">
+          <label style="font-size: 12px; color: var(--text-dim); margin-bottom: 6px; display: block;">当前原密码</label>
+          <input type="password" id="chg-old-pwd" required placeholder="输入当前使用的密码" style="width: 100%; box-sizing: border-box;" />
+        </div>
+        <div class="form-group" style="margin-bottom: 12px;">
+          <label style="font-size: 12px; color: var(--text-dim); margin-bottom: 6px; display: block;">新管理员密码 (至少 6 位)</label>
+          <input type="password" id="chg-new-pwd" required minlength="6" placeholder="输入新密码" style="width: 100%; box-sizing: border-box;" />
+        </div>
+        <div class="form-group" style="margin-bottom: 18px;">
+          <label style="font-size: 12px; color: var(--text-dim); margin-bottom: 6px; display: block;">确认新密码</label>
+          <input type="password" id="chg-new-pwd-confirm" required minlength="6" placeholder="再次输入新密码" style="width: 100%; box-sizing: border-box;" />
+        </div>
+        <div id="chg-alert" style="display: none; padding: 10px 14px; border-radius: 6px; font-size: 13px; margin-bottom: 14px;"></div>
+        <div style="display: flex; gap: 10px; justify-content: flex-end;">
+          <button type="button" onclick="closeChangePasswordModal()">取消</button>
+          <button type="submit" class="btn-primary" id="btn-submit-chg">确认修改</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+
   <script>
+
+    const AUTH_TOKEN_KEY = "binance_bot_auth_token";
+
+    function getAuthToken() {
+      return localStorage.getItem(AUTH_TOKEN_KEY) || "";
+    }
+
+    function setAuthToken(token) {
+      if (token) {
+        localStorage.setItem(AUTH_TOKEN_KEY, token);
+      } else {
+        localStorage.removeItem(AUTH_TOKEN_KEY);
+      }
+    }
+
+    async function authFetch(url, options = {}) {
+      options.headers = options.headers || {};
+      const token = getAuthToken();
+      if (token) {
+        options.headers["Authorization"] = `Bearer ${token}`;
+      }
+      const res = await fetch(url, options);
+      if (res.status === 401) {
+        setAuthToken("");
+        if (ws) {
+          try { ws.close(); } catch (e) {}
+          ws = null;
+        }
+        checkAuthAndInit();
+        throw new Error("未授权或登录已过期");
+      }
+      return res;
+    }
+
+    async function checkAuthAndInit() {
+      try {
+        const token = getAuthToken();
+        const headers = token ? { "Authorization": `Bearer ${token}` } : {};
+        const res = await fetch("/api/auth/status", { headers });
+        const json = await res.json();
+
+        if (!json.success || !json.data) {
+          showLoginModal();
+          return;
+        }
+
+        const { initialized, authenticated } = json.data;
+        if (!initialized) {
+          showSetupModal();
+        } else if (!authenticated) {
+          showLoginModal();
+        } else {
+          hideAllModals();
+          initWebSocket();
+          loadConfigForm();
+        }
+      } catch (e) {
+        console.error("Failed to check auth status:", e);
+        showLoginModal();
+      }
+    }
+
+    function showSetupModal() {
+      document.getElementById("modal-auth-setup").style.display = "flex";
+      document.getElementById("modal-auth-login").style.display = "none";
+      document.getElementById("setup-pwd").focus();
+    }
+
+    function showLoginModal(alertMsg = "") {
+      document.getElementById("modal-auth-setup").style.display = "none";
+      const modal = document.getElementById("modal-auth-login");
+      modal.style.display = "flex";
+      const alertBox = document.getElementById("login-alert");
+      if (alertMsg) {
+        alertBox.style.display = "block";
+        alertBox.style.background = "rgba(244, 63, 94, 0.15)";
+        alertBox.style.border = "1px solid var(--red)";
+        alertBox.style.color = "var(--red)";
+        alertBox.textContent = alertMsg;
+      } else {
+        alertBox.style.display = "none";
+      }
+      document.getElementById("login-pwd").focus();
+    }
+
+    function hideAllModals() {
+      document.getElementById("modal-auth-setup").style.display = "none";
+      document.getElementById("modal-auth-login").style.display = "none";
+      document.getElementById("modal-change-password").style.display = "none";
+    }
+
+    async function submitAuthSetup() {
+      const pwd = document.getElementById("setup-pwd").value;
+      const pwdConfirm = document.getElementById("setup-pwd-confirm").value;
+      const alertBox = document.getElementById("setup-alert");
+      alertBox.style.display = "none";
+
+      if (pwd.length < 6) {
+        alertBox.style.display = "block";
+        alertBox.style.background = "rgba(244, 63, 94, 0.15)";
+        alertBox.style.border = "1px solid var(--red)";
+        alertBox.style.color = "var(--red)";
+        alertBox.textContent = "❌ 密码长度不能少于 6 位";
+        return;
+      }
+
+      if (pwd !== pwdConfirm) {
+        alertBox.style.display = "block";
+        alertBox.style.background = "rgba(244, 63, 94, 0.15)";
+        alertBox.style.border = "1px solid var(--red)";
+        alertBox.style.color = "var(--red)";
+        alertBox.textContent = "❌ 两次输入的密码不一致，请重新检查";
+        return;
+      }
+
+      const btn = document.getElementById("btn-submit-setup");
+      btn.textContent = "⏳ 设置中...";
+      btn.disabled = true;
+
+      try {
+        const res = await fetch("/api/auth/setup", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ password: pwd })
+        });
+        const json = await res.json();
+        if (json.success && json.data && json.data.token) {
+          setAuthToken(json.data.token);
+          hideAllModals();
+          initWebSocket();
+          loadConfigForm();
+        } else {
+          alertBox.style.display = "block";
+          alertBox.style.background = "rgba(244, 63, 94, 0.15)";
+          alertBox.style.border = "1px solid var(--red)";
+          alertBox.style.color = "var(--red)";
+          alertBox.textContent = "❌ " + (json.message || "初始化密码失败");
+        }
+      } catch (e) {
+        alertBox.style.display = "block";
+        alertBox.style.background = "rgba(244, 63, 94, 0.15)";
+        alertBox.style.border = "1px solid var(--red)";
+        alertBox.style.color = "var(--red)";
+        alertBox.textContent = "❌ 请求异常: " + e.message;
+      } finally {
+        btn.textContent = "🚀 设置密码并进入系统";
+        btn.disabled = false;
+      }
+    }
+
+    async function submitAuthLogin() {
+      const pwd = document.getElementById("login-pwd").value;
+      const alertBox = document.getElementById("login-alert");
+      alertBox.style.display = "none";
+
+      const btn = document.getElementById("btn-submit-login");
+      btn.textContent = "⏳ 认证中...";
+      btn.disabled = true;
+
+      try {
+        const res = await fetch("/api/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ password: pwd })
+        });
+        const json = await res.json();
+        if (json.success && json.data && json.data.token) {
+          setAuthToken(json.data.token);
+          hideAllModals();
+          initWebSocket();
+          loadConfigForm();
+        } else {
+          alertBox.style.display = "block";
+          alertBox.style.background = "rgba(244, 63, 94, 0.15)";
+          alertBox.style.border = "1px solid var(--red)";
+          alertBox.style.color = "var(--red)";
+          alertBox.textContent = "❌ " + (json.message || "密码错误");
+        }
+      } catch (e) {
+        alertBox.style.display = "block";
+        alertBox.style.background = "rgba(244, 63, 94, 0.15)";
+        alertBox.style.border = "1px solid var(--red)";
+        alertBox.style.color = "var(--red)";
+        alertBox.textContent = "❌ 请求异常: " + e.message;
+      } finally {
+        btn.textContent = "🔓 验证并登录";
+        btn.disabled = false;
+      }
+    }
+
+    async function logout() {
+      if (!confirm("确定要退出当前管理员登录吗？")) return;
+      try {
+        await authFetch("/api/auth/logout", { method: "POST" });
+      } catch (e) {}
+      setAuthToken("");
+      if (ws) {
+        try { ws.close(); } catch (e) {}
+        ws = null;
+      }
+      showLoginModal("已安全退出登录");
+    }
+
+    function openChangePasswordModal() {
+      document.getElementById("modal-change-password").style.display = "flex";
+      document.getElementById("chg-old-pwd").value = "";
+      document.getElementById("chg-new-pwd").value = "";
+      document.getElementById("chg-new-pwd-confirm").value = "";
+      document.getElementById("chg-alert").style.display = "none";
+      document.getElementById("chg-old-pwd").focus();
+    }
+
+    function closeChangePasswordModal() {
+      document.getElementById("modal-change-password").style.display = "none";
+    }
+
+    async function submitChangePassword() {
+      const oldPwd = document.getElementById("chg-old-pwd").value;
+      const newPwd = document.getElementById("chg-new-pwd").value;
+      const newPwdConfirm = document.getElementById("chg-new-pwd-confirm").value;
+      const alertBox = document.getElementById("chg-alert");
+      alertBox.style.display = "none";
+
+      if (newPwd.length < 6) {
+        alertBox.style.display = "block";
+        alertBox.style.background = "rgba(244, 63, 94, 0.15)";
+        alertBox.style.border = "1px solid var(--red)";
+        alertBox.style.color = "var(--red)";
+        alertBox.textContent = "❌ 新密码长度至少需为 6 位";
+        return;
+      }
+
+      if (newPwd !== newPwdConfirm) {
+        alertBox.style.display = "block";
+        alertBox.style.background = "rgba(244, 63, 94, 0.15)";
+        alertBox.style.border = "1px solid var(--red)";
+        alertBox.style.color = "var(--red)";
+        alertBox.textContent = "❌ 两次输入的新密码不一致";
+        return;
+      }
+
+      const btn = document.getElementById("btn-submit-chg");
+      btn.textContent = "⏳ 修改中...";
+      btn.disabled = true;
+
+      try {
+        const res = await authFetch("/api/auth/change_password", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ old_password: oldPwd, new_password: newPwd })
+        });
+        const json = await res.json();
+        if (json.success) {
+          alert("密码修改成功，所有在线会话已重置，请使用新密码重新登录！");
+          closeChangePasswordModal();
+          setAuthToken("");
+          if (ws) {
+            try { ws.close(); } catch (e) {}
+            ws = null;
+          }
+          showLoginModal("密码已修改，请使用新密码登录");
+        } else {
+          alertBox.style.display = "block";
+          alertBox.style.background = "rgba(244, 63, 94, 0.15)";
+          alertBox.style.border = "1px solid var(--red)";
+          alertBox.style.color = "var(--red)";
+          alertBox.textContent = "❌ " + (json.message || "修改失败");
+        }
+      } catch (e) {
+        alertBox.style.display = "block";
+        alertBox.style.background = "rgba(244, 63, 94, 0.15)";
+        alertBox.style.border = "1px solid var(--red)";
+        alertBox.style.color = "var(--red)";
+        alertBox.textContent = "❌ 请求异常: " + e.message;
+      } finally {
+        btn.textContent = "确认修改";
+        btn.disabled = false;
+      }
+    }
+
     let ws = null;
     let currentBotStatus = 'RUNNING';
 
     function initWebSocket() {
+      const token = getAuthToken();
+      if (!token) return;
+
+      if (ws) {
+        try { ws.close(); } catch (e) {}
+      }
+
       const loc = window.location;
       const wsProto = loc.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${wsProto}//${loc.host}/ws`;
+      const wsUrl = `${wsProto}//${loc.host}/ws?token=${encodeURIComponent(token)}`;
 
       ws = new WebSocket(wsUrl);
 
@@ -992,7 +1390,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
 
     async function loadConfigForm() {
       try {
-        const res = await fetch('/api/config');
+        const res = await authFetch('/api/config');
         const json = await res.json();
         if (json.success && json.data) {
           const c = json.data;
@@ -1059,7 +1457,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       btn.disabled = true;
 
       try {
-        const res = await fetch('/api/config', {
+        const res = await authFetch('/api/config', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)
@@ -1093,7 +1491,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
 
     async function sendControlAction(action) {
       try {
-        const res = await fetch('/api/control', {
+        const res = await authFetch('/api/control', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action })
@@ -1126,8 +1524,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
     }
 
     window.addEventListener('DOMContentLoaded', () => {
-      initWebSocket();
-      loadConfigForm();
+      checkAuthAndInit();
     });
   </script>
 </body>

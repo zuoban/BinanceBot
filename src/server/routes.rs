@@ -1,48 +1,341 @@
 use crate::server::state::AppState;
 use crate::server::ui::INDEX_HTML;
 use crate::types::{
-    BotControlAction, GridOrder, LogEntry, TradeRecord, UpdateConfigPayload, WebConfigView,
+    AuthLoginPayload, AuthSetupPayload, AuthStatusResponse, AuthTokenResponse,
+    BotControlAction, ChangePasswordPayload, GridOrder, LogEntry, TradeRecord,
+    UpdateConfigPayload, WebConfigView,
 };
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::State;
-use axum::response::{Html, Response};
+use axum::extract::{Query, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::middleware::{self, Next};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 #[derive(Debug, Deserialize)]
 pub struct ControlRequest {
     pub action: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, serde::Serialize)]
 pub struct ApiResponse<T> {
     pub success: bool,
     pub data: Option<T>,
     pub message: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct WsQuery {
+    pub token: Option<String>,
+}
+
+fn extract_token(headers: &HeaderMap, query_token: Option<&str>) -> Option<String> {
+    if let Some(auth_val) = headers.get(axum::http::header::AUTHORIZATION) {
+        if let Ok(auth_str) = auth_val.to_str() {
+            if let Some(token) = auth_str
+                .strip_prefix("Bearer ")
+                .or_else(|| auth_str.strip_prefix("bearer "))
+            {
+                let t = token.trim();
+                if !t.is_empty() {
+                    return Some(t.to_string());
+                }
+            }
+        }
+    }
+
+    if let Some(token_val) = headers.get("X-Auth-Token") {
+        if let Ok(token_str) = token_val.to_str() {
+            let t = token_str.trim();
+            if !t.is_empty() {
+                return Some(t.to_string());
+            }
+        }
+    }
+
+    if let Some(token) = query_token {
+        let t = token.trim();
+        if !t.is_empty() {
+            return Some(t.to_string());
+        }
+    }
+
+    None
+}
+
+async fn require_auth_middleware(
+    State(state): State<Arc<AppState>>,
+    req: axum::extract::Request,
+    next: Next,
+) -> Result<Response, (StatusCode, Json<ApiResponse<()>>)> {
+    let query_token = req.uri().query().and_then(|q| {
+        q.split('&').find_map(|pair| {
+            let mut parts = pair.split('=');
+            if parts.next()? == "token" {
+                parts.next().map(|v| v.to_string())
+            } else {
+                None
+            }
+        })
+    });
+
+    let token_opt = extract_token(req.headers(), query_token.as_deref());
+    let is_valid = match token_opt {
+        Some(ref t) => state.is_token_valid(t).await,
+        None => false,
+    };
+
+    if !is_valid {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some("未授权访问：请先输入管理员密码进行身份认证".to_string()),
+            }),
+        ));
+    }
+
+    Ok(next.run(req).await)
+}
+
 pub fn create_router(state: Arc<AppState>) -> Router {
-    Router::new()
-        .route("/", get(dashboard_handler))
+    let api_protected = Router::new()
         .route("/api/status", get(get_status_handler))
         .route("/api/orders", get(get_orders_handler))
         .route("/api/trades", get(get_trades_handler))
         .route("/api/logs", get(get_logs_handler))
-        .route("/api/config", get(get_config_handler))
-        .route("/api/config", post(post_config_handler))
+        .route("/api/config", get(get_config_handler).post(post_config_handler))
         .route("/api/control", post(post_control_handler))
+        .route("/api/auth/change_password", post(post_change_password_handler))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_auth_middleware,
+        ));
+
+    Router::new()
+        .route("/", get(dashboard_handler))
+        .route("/api/auth/status", get(get_auth_status_handler))
+        .route("/api/auth/setup", post(post_auth_setup_handler))
+        .route("/api/auth/login", post(post_auth_login_handler))
+        .route("/api/auth/logout", post(post_auth_logout_handler))
         .route("/ws", get(ws_handler))
+        .merge(api_protected)
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
 
 async fn dashboard_handler() -> Html<&'static str> {
     Html(INDEX_HTML)
+}
+
+async fn get_auth_status_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Json<ApiResponse<AuthStatusResponse>> {
+    let initialized = state.db.is_admin_password_set().unwrap_or(false);
+    let token = extract_token(&headers, None);
+    let authenticated = match token {
+        Some(ref t) => state.is_token_valid(t).await,
+        None => false,
+    };
+
+    Json(ApiResponse {
+        success: true,
+        data: Some(AuthStatusResponse {
+            initialized,
+            authenticated,
+        }),
+        message: None,
+    })
+}
+
+async fn post_auth_setup_handler(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<AuthSetupPayload>,
+) -> (StatusCode, Json<ApiResponse<AuthTokenResponse>>) {
+    let is_set = state.db.is_admin_password_set().unwrap_or(false);
+    if is_set {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some("管理员密码已初始化，不能重复设置。如需修改请在登录后操作。".to_string()),
+            }),
+        );
+    }
+
+    let password = payload.password.trim();
+    if password.len() < 6 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some("管理员密码长度至少需为 6 位字符".to_string()),
+            }),
+        );
+    }
+
+    if let Err(e) = state.db.set_admin_password(password) {
+        error!("Failed to set admin password: {}", e);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some(format!("保存管理员密码失败: {}", e)),
+            }),
+        );
+    }
+
+    let token = crate::auth::generate_session_token();
+    let _ = state.create_session(&token).await;
+    info!("Admin password successfully initialized and initial session created");
+
+    (
+        StatusCode::OK,
+        Json(ApiResponse {
+            success: true,
+            data: Some(AuthTokenResponse { token }),
+            message: Some("管理员密码设置成功并已自动登录！".to_string()),
+        }),
+    )
+}
+
+async fn post_auth_login_handler(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<AuthLoginPayload>,
+) -> (StatusCode, Json<ApiResponse<AuthTokenResponse>>) {
+    let is_set = state.db.is_admin_password_set().unwrap_or(false);
+    if !is_set {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some("系统尚未设置管理员密码，请先完成初始密码设置".to_string()),
+            }),
+        );
+    }
+
+    match state.db.verify_admin_password(&payload.password) {
+        Ok(true) => {
+            let token = crate::auth::generate_session_token();
+            let _ = state.create_session(&token).await;
+            info!("Admin authentication successful");
+            (
+                StatusCode::OK,
+                Json(ApiResponse {
+                    success: true,
+                    data: Some(AuthTokenResponse { token }),
+                    message: Some("管理员身份认证成功！".to_string()),
+                }),
+            )
+        }
+        Ok(false) => {
+            warn!("Failed admin authentication attempt: incorrect password");
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    message: Some("管理员密码错误，请重新输入".to_string()),
+                }),
+            )
+        }
+        Err(e) => {
+            error!("Database error during password verification: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    message: Some(format!("认证服务异常: {}", e)),
+                }),
+            )
+        }
+    }
+}
+
+async fn post_auth_logout_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Json<ApiResponse<()>> {
+    if let Some(token) = extract_token(&headers, None) {
+        let _ = state.delete_session(&token).await;
+    }
+    Json(ApiResponse {
+        success: true,
+        data: None,
+        message: Some("已安全退出登录".to_string()),
+    })
+}
+
+async fn post_change_password_handler(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<ChangePasswordPayload>,
+) -> (StatusCode, Json<ApiResponse<()>>) {
+    let new_password = payload.new_password.trim();
+    if new_password.len() < 6 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some("新密码长度至少需为 6 位字符".to_string()),
+            }),
+        );
+    }
+
+    match state.db.verify_admin_password(&payload.old_password) {
+        Ok(true) => {
+            if let Err(e) = state.db.set_admin_password(new_password) {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiResponse {
+                        success: false,
+                        data: None,
+                        message: Some(format!("修改密码失败: {}", e)),
+                    }),
+                );
+            }
+            // Clear other sessions to enforce re-login
+            let _ = state.clear_all_sessions().await;
+            info!("Admin password changed successfully, all sessions cleared");
+            (
+                StatusCode::OK,
+                Json(ApiResponse {
+                    success: true,
+                    data: None,
+                    message: Some("管理员密码已成功修改，所有会话已重置，请重新登录".to_string()),
+                }),
+            )
+        }
+        Ok(false) => (
+            StatusCode::UNAUTHORIZED,
+            Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some("原密码校验失败，请重新输入".to_string()),
+            }),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some(format!("系统异常: {}", e)),
+            }),
+        ),
+    }
 }
 
 async fn get_status_handler(
@@ -167,13 +460,11 @@ async fn post_config_handler(
         return Json(ApiResponse {
             success: false,
             data: None,
-            message: Some("买卖窗口订单数量必须至少为 1".to_string()),
+            message: Some("买入/卖出窗口挂单数必须大于 0".to_string()),
         });
     }
 
     let mut current_config = state.config.read().await.clone();
-
-    // Update fields
     current_config.exchange.symbol = symbol;
     current_config.grid.grid_interval = payload.grid_interval;
     current_config.grid.order_amount_usdc = payload.order_amount_usdc;
@@ -304,7 +595,20 @@ async fn post_control_handler(
     })
 }
 
-async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> Response {
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    Query(query): Query<WsQuery>,
+    State(state): State<Arc<AppState>>,
+) -> Response {
+    let token = query.token.as_deref().unwrap_or_default();
+    if !state.is_token_valid(token).await {
+        return (
+            StatusCode::UNAUTHORIZED,
+            "Unauthorized: Missing or invalid authentication token",
+        )
+            .into_response();
+    }
+
     ws.on_upgrade(|socket| handle_socket(socket, state))
 }
 

@@ -183,3 +183,24 @@ impl AppState {
         }
     }
 }
+
+impl AppState {
+    pub async fn is_token_valid(&self, token: &str) -> bool {
+        if token.is_empty() {
+            return false;
+        }
+        self.db.is_session_valid(token).unwrap_or(false)
+    }
+
+    pub async fn create_session(&self, token: &str) -> anyhow::Result<()> {
+        self.db.create_session(token)
+    }
+
+    pub async fn delete_session(&self, token: &str) -> anyhow::Result<()> {
+        self.db.delete_session(token)
+    }
+
+    pub async fn clear_all_sessions(&self) -> anyhow::Result<()> {
+        self.db.clear_all_sessions()
+    }
+}

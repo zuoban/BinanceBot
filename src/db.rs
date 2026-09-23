@@ -1,3 +1,4 @@
+use crate::auth;
 use crate::config::AppConfig;
 use crate::types::{GridStats, OrderSide, TradeRecord};
 use anyhow::{Context, Result};
@@ -84,11 +85,95 @@ impl Database {
                 total_volume_usdc TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS admin_auth (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                password_hash TEXT NOT NULL,
+                salt TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS auth_sessions (
+                token TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL
+            );
             "#,
         )
         .context("Failed to initialize SQLite tables")?;
 
         info!("SQLite schema verified for database: {}", self.path);
+        Ok(())
+    }
+
+    pub fn is_admin_password_set(&self) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT count(*) FROM admin_auth WHERE id = 1;")?;
+        let count: i64 = stmt.query_row([], |row| row.get(0))?;
+        Ok(count > 0)
+    }
+
+    pub fn set_admin_password(&self, password: &str) -> Result<()> {
+        let salt = auth::generate_salt();
+        let hash = auth::hash_password(password, &salt);
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            r#"
+            INSERT INTO admin_auth (id, password_hash, salt, updated_at)
+            VALUES (1, ?1, ?2, ?3)
+            ON CONFLICT(id) DO UPDATE SET
+                password_hash = excluded.password_hash,
+                salt = excluded.salt,
+                updated_at = excluded.updated_at;
+            "#,
+            params![hash, salt, Utc::now().to_rfc3339()],
+        )
+        .context("Failed to save admin password into SQLite database")?;
+
+        Ok(())
+    }
+
+    pub fn verify_admin_password(&self, password: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT password_hash, salt FROM admin_auth WHERE id = 1;")?;
+        let mut rows = stmt.query([])?;
+        if let Some(row) = rows.next()? {
+            let stored_hash: String = row.get(0)?;
+            let salt: String = row.get(1)?;
+            let computed_hash = auth::hash_password(password, &salt);
+            Ok(stored_hash == computed_hash)
+        } else {
+            Ok(false)
+        }
+    }
+
+    pub fn create_session(&self, token: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO auth_sessions (token, created_at) VALUES (?1, ?2);",
+            params![token, Utc::now().to_rfc3339()],
+        )
+        .context("Failed to insert session token into SQLite database")?;
+        Ok(())
+    }
+
+    pub fn is_session_valid(&self, token: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT count(*) FROM auth_sessions WHERE token = ?1;")?;
+        let count: i64 = stmt.query_row(params![token], |row| row.get(0))?;
+        Ok(count > 0)
+    }
+
+    pub fn delete_session(&self, token: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM auth_sessions WHERE token = ?1;", params![token])
+            .context("Failed to delete session token from SQLite database")?;
+        Ok(())
+    }
+
+    pub fn clear_all_sessions(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM auth_sessions;", [])
+            .context("Failed to clear sessions from SQLite database")?;
         Ok(())
     }
 
@@ -339,5 +424,29 @@ mod tests {
         assert_eq!(cycles, 21);
         assert_eq!(profit, dec!(15.75));
         assert_eq!(volume, dec!(4200.0));
+    }
+
+    #[test]
+    fn test_db_admin_auth_and_sessions() {
+        let db = Database::open(":memory:").unwrap();
+        assert!(!db.is_admin_password_set().unwrap());
+
+        // Set password
+        db.set_admin_password("Secret123").unwrap();
+        assert!(db.is_admin_password_set().unwrap());
+
+        // Verify password
+        assert!(db.verify_admin_password("Secret123").unwrap());
+        assert!(!db.verify_admin_password("WrongPassword").unwrap());
+
+        // Session tokens
+        let token = "test_token_123456";
+        assert!(!db.is_session_valid(token).unwrap());
+
+        db.create_session(token).unwrap();
+        assert!(db.is_session_valid(token).unwrap());
+
+        db.delete_session(token).unwrap();
+        assert!(!db.is_session_valid(token).unwrap());
     }
 }

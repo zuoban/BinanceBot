@@ -160,9 +160,17 @@ async fn main() -> anyhow::Result<()> {
         db.save_config(&config)?;
     }
 
+    let has_admin_pwd = db.is_admin_password_set()?;
+    if !has_admin_pwd {
+        info!("🛡️  【首次安全初始化】系统尚未设置管理员密码！请打开控制台 http://{}:{} 进行初始密码设置。", config.server.host, config.server.port);
+    } else {
+        info!("🔒 管理员密码认证已启用");
+    }
+
     info!("============================================================");
     info!("🚀 Binance Futures Grid Trading Robot (Rust Engine)");
     info!("• Persistence:      SQLite ({:?}) - Zero config files required!", args.db);
+    info!("• Admin Auth:       {}", if has_admin_pwd { "PROTECTED (Password Set)" } else { "PENDING SETUP (Visit Web to initialize)" });
     info!("• Symbol:           {}", config.exchange.symbol);
     info!("• Grid Interval:    {} USDC", config.grid.grid_interval);
     info!("• Order Size:       {} USDC per grid", config.grid.order_amount_usdc);
