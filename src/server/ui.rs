@@ -98,6 +98,8 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       gap: 10px;
     }
 
+    .mobile-actions-toggle { display: none; }
+
     button {
       background: var(--card-bg);
       border: 1px solid var(--card-border);
@@ -201,6 +203,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       display: flex;
       align-items: center;
       gap: 6px;
+      flex-wrap: wrap;
     }
 
     /* Visual Grid Ladder */
@@ -289,6 +292,8 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       background: rgba(13, 19, 33, 0.7);
       border-bottom: 1px solid var(--card-border);
       padding: 0 12px;
+      overflow-x: auto;
+      scrollbar-width: thin;
     }
 
     .tab-button {
@@ -301,6 +306,8 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       font-size: 13px;
       font-weight: 600;
       cursor: pointer;
+      flex: 0 0 auto;
+      scroll-margin-top: 80px;
     }
 
     .tab-button.active {
@@ -318,6 +325,12 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
     }
 
     /* Tables */
+    .table-scroll {
+      width: 100%;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+
     table {
       width: 100%;
       border-collapse: collapse;
@@ -381,6 +394,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
     .config-container {
       max-width: 960px;
       margin: 0 auto;
+      min-width: 0;
     }
 
     .config-header {
@@ -399,6 +413,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       display: flex;
       flex-direction: column;
       gap: 6px;
+      min-width: 0;
     }
 
     .form-group label {
@@ -470,6 +485,89 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       from { opacity: 0; transform: translateY(-12px) scale(0.98); }
       to { opacity: 1; transform: translateY(0) scale(1); }
     }
+
+    @media (max-width: 1280px) {
+      header { flex-wrap: wrap; gap: 10px; }
+      .brand { min-width: 0; flex: 1; }
+      .brand-title { flex-wrap: wrap; }
+      .mobile-actions-toggle {
+        display: inline-flex;
+        min-height: 44px;
+        flex: 0 0 auto;
+      }
+      .header-actions {
+        display: none;
+        width: 100%;
+        flex-wrap: wrap;
+        gap: 8px;
+        padding-top: 10px;
+        border-top: 1px solid var(--card-border);
+      }
+      .header-actions.is-open { display: flex; }
+      .header-actions button { min-height: 44px; }
+    }
+
+    @media (max-width: 700px) {
+      header { position: static; padding: 10px 14px; }
+      main { padding: 14px; gap: 14px; min-width: 0; }
+      .brand { align-items: flex-start; gap: 8px; }
+      .brand-icon { width: 28px; height: 28px; flex: 0 0 auto; }
+      .brand-title { gap: 5px; font-size: 16px; line-height: 1.25; }
+      .brand-name { flex-basis: 100%; }
+      .badge { font-size: 10px; }
+      .header-actions { display: none; }
+      .header-actions.is-open { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .header-actions button { justify-content: center; padding: 8px; text-align: center; }
+      .metrics-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+      .metric-card { min-width: 0; padding: 12px; }
+      .metric-card:last-child { grid-column: 1 / -1; }
+      .metric-value { font-size: clamp(17px, 5vw, 24px); overflow-wrap: anywhere; }
+      .metric-sub { font-size: 11px; overflow-wrap: anywhere; }
+      .ladder-section { min-width: 0; padding: 14px 12px; }
+      .section-title { align-items: flex-start; flex-direction: column; gap: 6px; line-height: 1.4; }
+      .ladder-row { grid-template-columns: 54px minmax(0, 1fr) auto; gap: 8px; padding: 8px; font-size: 12px; }
+      .ladder-row > :nth-child(3),
+      .ladder-row > :nth-child(5),
+      .ladder-row > :nth-child(6) { display: none; }
+      .ladder-row > :nth-child(4) { text-align: right; }
+      .ladder-current { gap: 8px; padding: 9px; font-size: 11px; }
+      .ladder-current > :last-child { display: none; }
+      .ladder-current > :nth-child(2) { font-size: 14px !important; letter-spacing: 0 !important; text-align: right; }
+      .tabs-card { min-width: 0; }
+      .tab-nav { padding: 0 6px; }
+      .tab-button { min-height: 44px; padding: 10px 12px; white-space: nowrap; scroll-margin-top: 12px; }
+      .tab-content { min-width: 0; padding: 12px; }
+      .table-scroll table { min-width: 800px; }
+      .table-scroll th, .table-scroll td { white-space: nowrap; }
+      .table-scroll th:first-child, .table-scroll td:first-child {
+        position: sticky;
+        left: 0;
+        z-index: 1;
+        background: var(--card-bg);
+      }
+      .table-scroll tr:hover td:first-child { background: var(--card-hover); }
+      .table-scroll td[colspan] { position: static; text-align: left !important; }
+      .config-form-grid { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+      input[type="text"], input[type="number"], input[type="password"], select {
+        width: 100%;
+        min-width: 0;
+        min-height: 44px;
+        font-size: 16px;
+      }
+      .form-actions { align-items: stretch; }
+      .form-actions > div { flex-wrap: wrap; }
+      .form-actions > div:last-child { width: 100%; }
+      .form-actions button { min-height: 44px; flex: 1; justify-content: center; }
+      .modal-overlay { overflow-y: auto; align-items: safe center; }
+      .modal-card { padding: 22px 18px; }
+      .log-line { min-width: 0; }
+      .log-msg { overflow-wrap: anywhere; }
+    }
+
+    @media (max-width: 380px) {
+      .metrics-grid { grid-template-columns: minmax(0, 1fr); }
+      .metric-value { font-size: 23px; }
+    }
   </style>
 </head>
 <body>
@@ -477,13 +575,14 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
     <div class="brand">
       <div class="brand-icon">⚡</div>
       <div class="brand-title">
-        <span>Binance Grid Bot</span>
+        <span class="brand-name">Binance Grid Bot</span>
         <span class="badge badge-purple" id="symbol-badge">SOLUSDC PERP</span>
         <span class="badge badge-green" id="status-badge"><span class="pulse-dot"></span> RUNNING</span>
         <span class="badge badge-amber" id="mode-badge">PAPER TRADING</span>
       </div>
     </div>
-    <div class="header-actions">
+    <button type="button" class="mobile-actions-toggle" aria-controls="header-actions" aria-expanded="false" onclick="toggleMobileActions()">☰ 操作</button>
+    <div class="header-actions" id="header-actions">
       <button class="btn-primary" onclick="openConfigTab()">⚙️ 修改策略参数</button>
       <button id="btn-pause-resume" onclick="togglePauseResume()">⏸️ 暂停策略</button>
       <button onclick="rebalanceGrid()">🔄 刷新网格</button>
@@ -563,6 +662,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
 
       <!-- Tab: Active Orders -->
       <div class="tab-content active" id="tab-orders">
+        <div class="table-scroll" role="region" aria-label="当前有效挂单，可横向滚动" tabindex="0">
         <table>
           <thead>
             <tr>
@@ -581,10 +681,12 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
             <tr><td colspan="9" style="text-align: center; color: var(--text-dim); padding: 30px;">暂无挂单</td></tr>
           </tbody>
         </table>
+        </div>
       </div>
 
       <!-- Tab: Trade History -->
       <div class="tab-content" id="tab-trades">
+        <div class="table-scroll" role="region" aria-label="成交与套利历史，可横向滚动" tabindex="0">
         <table>
           <thead>
             <tr>
@@ -602,6 +704,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
             <tr><td colspan="8" style="text-align: center; color: var(--text-dim); padding: 30px;">暂无成交记录</td></tr>
           </tbody>
         </table>
+        </div>
       </div>
 
       <!-- Tab: Strategy Config (Interactive Form) -->
@@ -1430,9 +1533,23 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       }
     }
 
+    function toggleMobileActions() {
+      const actions = document.getElementById('header-actions');
+      const toggle = document.querySelector('.mobile-actions-toggle');
+      const isOpen = actions.classList.toggle('is-open');
+      toggle.setAttribute('aria-expanded', String(isOpen));
+    }
+
+    function closeMobileActions() {
+      document.getElementById('header-actions').classList.remove('is-open');
+      document.querySelector('.mobile-actions-toggle').setAttribute('aria-expanded', 'false');
+    }
+
     function openConfigTab() {
       const cfgBtn = document.getElementById('tab-btn-config');
       switchTab('tab-config', cfgBtn);
+      closeMobileActions();
+      requestAnimationFrame(() => cfgBtn.scrollIntoView({ behavior: 'smooth', block: 'start', inline: 'center' }));
     }
 
     async function loadConfigForm() {
@@ -1579,6 +1696,9 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
     }
 
     window.addEventListener('DOMContentLoaded', () => {
+      document.getElementById('header-actions').addEventListener('click', (event) => {
+        if (event.target.closest('button')) closeMobileActions();
+      });
       checkAuthAndInit();
     });
   </script>
