@@ -47,7 +47,7 @@ struct CliArgs {
     #[arg(long)]
     sell_window: Option<usize>,
 
-    /// Web server dashboard host
+    /// Web server dashboard host (default: 0.0.0.0 for external access)
     #[arg(long)]
     host: Option<String>,
 
@@ -142,6 +142,11 @@ async fn main() -> anyhow::Result<()> {
     if let Some(h) = args.host {
         config.server.host = h;
         overridden = true;
+    } else if config.server.host == "127.0.0.1" {
+        // Automatically upgrade legacy loopback binding to 0.0.0.0 so server and docker deployments can be accessed externally
+        info!("Updating server host binding from 127.0.0.1 to 0.0.0.0 for remote/external web access");
+        config.server.host = "0.0.0.0".to_string();
+        overridden = true;
     }
     if let Some(p) = args.port {
         config.server.port = p;
@@ -162,7 +167,11 @@ async fn main() -> anyhow::Result<()> {
 
     let has_admin_pwd = db.is_admin_password_set()?;
     if !has_admin_pwd {
-        info!("🛡️  【首次安全初始化】系统尚未设置管理员密码！请打开控制台 http://{}:{} 进行初始密码设置。", config.server.host, config.server.port);
+        if config.server.host == "0.0.0.0" {
+            info!("🛡️  【首次安全初始化】系统尚未设置管理员密码！请打开控制台 http://<服务器公网IP>:{} (本地: http://127.0.0.1:{}) 进行初始密码设置。", config.server.port, config.server.port);
+        } else {
+            info!("🛡️  【首次安全初始化】系统尚未设置管理员密码！请打开控制台 http://{}:{} 进行初始密码设置。", config.server.host, config.server.port);
+        }
     } else {
         info!("🔒 管理员密码认证已启用");
     }
@@ -177,7 +186,11 @@ async fn main() -> anyhow::Result<()> {
     info!("• Window Orders:    {} Buy / {} Sell", config.grid.buy_window, config.grid.sell_window);
     info!("• Order Type:       Post-Only Maker (GTX)");
     info!("• Trading Mode:     {}", if config.exchange.dry_run { "PAPER TRADING (Simulation)" } else if config.exchange.is_testnet { "TESTNET" } else { "LIVE REAL" });
-    info!("• Dashboard Web:    http://{}:{}", config.server.host, config.server.port);
+    if config.server.host == "0.0.0.0" {
+        info!("• Dashboard Web:    http://<服务器公网IP>:{} (本地: http://127.0.0.1:{})", config.server.port, config.server.port);
+    } else {
+        info!("• Dashboard Web:    http://{}:{}", config.server.host, config.server.port);
+    }
     info!("============================================================");
 
     // Channels
@@ -216,7 +229,11 @@ async fn main() -> anyhow::Result<()> {
     // Start Web Server
     let app = create_router(state.clone());
     let addr: SocketAddr = format!("{}:{}", config.server.host, config.server.port).parse()?;
-    info!("Web Dashboard running at http://{}", addr);
+    if config.server.host == "0.0.0.0" {
+        info!("🌐 Web Dashboard 运行中: 远程访问 http://<服务器公网IP>:{} | 本地访问 http://127.0.0.1:{}", config.server.port, config.server.port);
+    } else {
+        info!("🌐 Web Dashboard running at http://{}", addr);
+    }
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     

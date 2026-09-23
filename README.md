@@ -117,6 +117,46 @@ cargo run --release -- --symbol SOLUSDC --interval 0.1 --amount 100 --buy-window
 
 ---
 
+## 🌐 远程服务器访问排查指南
+
+如果在远程服务器（阿里云、腾讯云、华为云、AWS EC2、GCP 等）部署后，在本地电脑浏览器访问 `http://<服务器公网IP>:8080` 提示「无法访问此网站」或「连接被拒绝 (Connection Refused)」，请按以下步骤排查：
+
+### 1. 检查云厂商控制台「安全组 / 防火墙」规则（最常见原因 90%）
+云服务器默认通常只开放 22 端口（SSH），需要手动放行 `8080` 端口：
+- **阿里云 ECS / 轻量应用服务器**：控制台 -> 安全组 -> 入方向规则 -> 添加规则 -> 协议选择 `TCP`，端口范围填 `8080`，授权对象填 `0.0.0.0/0`。
+- **腾讯云 CVM / Lighthouse**：控制台 -> 防火墙 / 安全组 -> 添加规则 -> 来源 `0.0.0.0/0`，协议 `TCP`，端口 `8080`，策略 `允许`。
+- **AWS EC2**：Security Groups -> Inbound rules -> Edit inbound rules -> Type: Custom TCP, Port: `8080`, Source: `0.0.0.0/0`。
+
+### 2. 检查服务器内部 Linux 系统防火墙
+部分 Linux 发行版内置防火墙可能会拦截非标准端口：
+```bash
+# Ubuntu / Debian (UFW 防火墙)
+sudo ufw status
+sudo ufw allow 8080/tcp
+sudo ufw reload
+
+# CentOS / RHEL / Alibaba Cloud Linux (Firewalld 防火墙)
+sudo firewall-cmd --zone=public --add-port=8080/tcp --permanent
+sudo firewall-cmd --reload
+```
+
+### 3. 在服务器本地测试服务是否正常运行
+登录服务器终端，执行命令测试本地回环是否可以正常响应：
+```bash
+curl -I http://127.0.0.1:8080
+```
+如果返回 `HTTP/1.1 200 OK`，说明机器人服务本身运行完全正常，外部无法访问必为第 1 步或第 2 步的**安全组/防火墙**未开放。
+
+### 4. 检查 Docker 端口映射与监听地址
+若使用 Docker 部署，请确保：
+```bash
+docker ps
+```
+查看容器的 `PORTS` 列是否显示为 `0.0.0.0:8080->8080/tcp` 或 `:::8080->8080/tcp`。
+*(切勿写成 `-p 127.0.0.1:8080:8080`，否则只允许服务器本地回环访问)*
+
+---
+
 ## 🧪 单元测试
 
 运行项目完整测试套件：

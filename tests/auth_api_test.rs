@@ -170,3 +170,10 @@ async fn test_full_auth_lifecycle() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 }
+
+#[test]
+fn test_default_server_binding_is_all_interfaces() {
+    let config = AppConfig::default();
+    assert_eq!(config.server.host, "0.0.0.0");
+    assert_eq!(config.server.port, 8080);
+}
