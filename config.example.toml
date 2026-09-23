@@ -59,3 +59,11 @@ host = "0.0.0.0"
 
 # Web 监控控制台端口 (浏览器访问 http://<服务器IP>:8080)
 port = 8080
+
+[telegram]
+# 成交通知。也可在网页「策略参数在线配置」中填写并立即生效。
+enabled = false
+# 从 @BotFather 获取；启用时必填
+bot_token = ""
+# 个人聊天、群组或频道的 Chat ID；启用时必填
+chat_id = ""

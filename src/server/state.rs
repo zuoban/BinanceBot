@@ -1,13 +1,14 @@
 use crate::config::AppConfig;
 use crate::db::Database;
 use crate::strategy::precision::SymbolRules;
+use crate::telegram::send_trade_notification;
 use crate::types::*;
 use chrono::Utc;
 use rust_decimal::Decimal;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, RwLock};
-use tracing::error;
+use tracing::{error, warn};
 
 pub struct AppState {
     pub db: Arc<Database>,
@@ -24,6 +25,7 @@ pub struct AppState {
 
     pub action_tx: mpsc::Sender<BotControlAction>,
     pub ws_broadcast_tx: broadcast::Sender<String>,
+    telegram_client: reqwest::Client,
 }
 
 impl AppState {
@@ -80,10 +82,14 @@ impl AppState {
             recent_logs: RwLock::new(VecDeque::with_capacity(300)),
             action_tx,
             ws_broadcast_tx,
+            telegram_client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .expect("Failed to build Telegram HTTP client"),
         })
     }
 
-    pub async fn record_trade(&self, trade: TradeRecord, is_completed_cycle: bool) {
+    pub async fn record_trade(self: &Arc<Self>, trade: TradeRecord, is_completed_cycle: bool) {
         // Persist trade into SQLite
         if let Err(e) = self.db.insert_trade(&trade) {
             error!("Failed to persist trade to SQLite database: {}", e);
@@ -118,6 +124,23 @@ impl AppState {
             "data": trade
         })) {
             let _ = self.ws_broadcast_tx.send(json);
+        }
+
+        let config = self.config.read().await;
+        if config.telegram.enabled {
+            let telegram = config.telegram.clone();
+            let is_dry_run = config.exchange.dry_run;
+            let is_testnet = config.exchange.is_testnet;
+            let client = self.telegram_client.clone();
+            let state = Arc::clone(self);
+            tokio::spawn(async move {
+                if let Err(err) = send_trade_notification(
+                    &client, &telegram, &trade, is_dry_run, is_testnet,
+                ).await {
+                    warn!("Failed to send Telegram trade notification: {}", err);
+                    state.add_log("WARN", format!("Telegram 成交通知发送失败: {}", err)).await;
+                }
+            });
         }
     }
 

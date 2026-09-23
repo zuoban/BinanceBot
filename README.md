@@ -41,6 +41,7 @@
 8. **全套 Docker 容器化与 GitHub Packages 支持**：
    - 包含多阶段构建 `Dockerfile` 与 `docker-compose.yml`。
    - 配置 GitHub Actions 自动化 CI/CD，自动编译多架构镜像发布至 GitHub Packages (`ghcr.io/zuoban/binancebot`)。
+9. **Telegram 成交通知**：在网页配置 Bot Token、Chat ID 并启用后，每笔确认成交的买单或卖单都会发送通知，消息首行显示成交方向和价格。模拟盘、测试网及实盘均支持。
 
 ---
 
@@ -93,6 +94,14 @@ cargo run --release
 👉 **http://127.0.0.1:8080**
 
 在「策略参数在线配置」面板中自由调整参数并点击保存，策略引擎将实时热更新。
+
+### Telegram 成交通知
+
+1. 在 Telegram 使用 @BotFather 创建 Bot，复制 Bot Token。
+2. 给 Bot 发送一条消息；打开 `https://api.telegram.org/bot<Bot Token>/getUpdates`，从返回内容中的 `message.chat.id` 获取 Chat ID。群组通知需先将 Bot 加入群组并获取该群组的 Chat ID。
+3. 在网页「策略参数在线配置」填写 Bot Token 和 Chat ID，勾选「启用 Telegram 成交通知」，点击「保存并立即生效」。Bot Token 不会在网页回显；留空可保留已保存的 Token。
+
+也可在首次启动时通过 `config.toml` 的 `[telegram]` 段配置，格式见 `config.example.toml`。配置会存入 SQLite，关闭开关即可暂停通知。
 
 #### 命令行快速指定数据库路径或参数
 ```bash

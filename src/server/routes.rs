@@ -414,6 +414,9 @@ async fn get_config_handler(State(state): State<Arc<AppState>>) -> Json<ApiRespo
         has_api_key: has_key,
         has_api_secret: has_secret,
         api_key_preview: key_preview,
+        telegram_enabled: config.telegram.enabled,
+        has_telegram_bot_token: !config.telegram.bot_token.trim().is_empty(),
+        telegram_chat_id: config.telegram.chat_id.clone(),
         min_price: config.grid.min_price,
         max_price: config.grid.max_price,
         max_position_usdc: config.grid.max_position_usdc,
@@ -491,6 +494,32 @@ async fn post_config_handler(
         }
     }
 
+    if let Some(enabled) = payload.telegram_enabled {
+        current_config.telegram.enabled = enabled;
+    }
+    if let Some(token) = payload.telegram_bot_token {
+        let token = token.trim();
+        if !token.is_empty() {
+            current_config.telegram.bot_token = token.to_string();
+        }
+    }
+    if let Some(chat_id) = payload.telegram_chat_id {
+        let chat_id = chat_id.trim();
+        if !chat_id.is_empty() {
+            current_config.telegram.chat_id = chat_id.to_string();
+        }
+    }
+    if current_config.telegram.enabled
+        && (current_config.telegram.bot_token.trim().is_empty()
+            || current_config.telegram.chat_id.trim().is_empty())
+    {
+        return Json(ApiResponse {
+            success: false,
+            data: None,
+            message: Some("启用 Telegram 通知前请填写 Bot Token 和 Chat ID".to_string()),
+        });
+    }
+
     // Persist to SQLite database
     if let Err(e) = state.db.save_config(&current_config) {
         error!("Failed to save configuration to SQLite database: {}", e);
@@ -547,6 +576,9 @@ async fn post_config_handler(
         has_api_key: has_key,
         has_api_secret: has_secret,
         api_key_preview: key_preview,
+        telegram_enabled: current_config.telegram.enabled,
+        has_telegram_bot_token: !current_config.telegram.bot_token.trim().is_empty(),
+        telegram_chat_id: current_config.telegram.chat_id.clone(),
         min_price: current_config.grid.min_price,
         max_price: current_config.grid.max_price,
         max_position_usdc: current_config.grid.max_position_usdc,
@@ -555,7 +587,7 @@ async fn post_config_handler(
     Json(ApiResponse {
         success: true,
         data: Some(view),
-        message: Some("配置已成功更新并保存至 SQLite 数据库，策略引擎已实时生效".to_string()),
+        message: Some("配置已保存至 SQLite 数据库并立即生效".to_string()),
     })
 }
 

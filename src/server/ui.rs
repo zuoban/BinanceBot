@@ -607,7 +607,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
         <div class="config-container">
           <div class="config-header">
             <h3>⚙️ 策略运行参数在线设置</h3>
-            <p style="color: var(--text-dim); font-size: 13px; margin-top: 4px;">无需任何配置文件，修改后点击「保存并立即生效」将自动持久化至 SQLite 数据库 (<code>data/bot.db</code>)，并立即重新对齐和更新网格挂单。</p>
+            <p style="color: var(--text-dim); font-size: 13px; margin-top: 4px;">无需任何配置文件，点击「保存并立即生效」后配置将持久化至 SQLite 数据库 (<code>data/bot.db</code>)。策略参数变更时会重新对齐网格挂单。</p>
           </div>
 
           <form id="config-form" onsubmit="event.preventDefault(); submitConfig();">
@@ -700,6 +700,26 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                 <label>币安 API Secret (实盘使用)</label>
                 <input type="password" id="cfg-api-secret" placeholder="留空则保持当前配置不变" />
                 <span class="form-hint" id="cfg-api-secret-status">当前状态: 未配置</span>
+              </div>
+
+              <div class="form-group" style="justify-content: center;">
+                <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                  <input type="checkbox" id="cfg-telegram-enabled" style="width: 17px; height: 17px; accent-color: var(--accent);" />
+                  <span>启用 Telegram 成交通知</span>
+                </label>
+                <span class="form-hint">每笔订单成交后发送消息，首行显示方向和成交价格</span>
+              </div>
+
+              <div class="form-group">
+                <label>Telegram Bot Token</label>
+                <input type="password" id="cfg-telegram-token" autocomplete="new-password" placeholder="留空则保持当前配置不变" />
+                <span class="form-hint" id="cfg-telegram-token-status">当前状态: 未配置</span>
+              </div>
+
+              <div class="form-group">
+                <label>Telegram Chat ID</label>
+                <input type="text" id="cfg-telegram-chat-id" placeholder="如 123456789 或 -100..." />
+                <span class="form-hint">先给 Bot 发送消息，再从 getUpdates 查询 Chat ID；群组 ID 通常以 -100 开头</span>
               </div>
             </div>
 
@@ -1418,6 +1438,10 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
 
           document.getElementById('cfg-api-key-status').textContent = c.has_api_key ? `已配置 (${c.api_key_preview})` : '未配置';
           document.getElementById('cfg-api-secret-status').textContent = c.has_api_secret ? '已配置 (已隐藏保护)' : '未配置';
+          document.getElementById('cfg-telegram-enabled').checked = c.telegram_enabled;
+          document.getElementById('cfg-telegram-token').value = '';
+          document.getElementById('cfg-telegram-token-status').textContent = c.has_telegram_bot_token ? '已配置 (已隐藏保护)' : '未配置';
+          document.getElementById('cfg-telegram-chat-id').value = c.telegram_chat_id || '';
         }
       } catch (e) {
         console.error('Failed to load configuration:', e);
@@ -1434,6 +1458,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
 
       const apiKey = document.getElementById('cfg-api-key').value.trim();
       const apiSecret = document.getElementById('cfg-api-secret').value.trim();
+      const telegramToken = document.getElementById('cfg-telegram-token').value.trim();
 
       const payload = {
         symbol: document.getElementById('cfg-symbol').value.trim().toUpperCase(),
@@ -1446,6 +1471,9 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
         is_testnet: is_testnet,
         api_key: apiKey ? apiKey : null,
         api_secret: apiSecret ? apiSecret : null,
+        telegram_enabled: document.getElementById('cfg-telegram-enabled').checked,
+        telegram_bot_token: telegramToken ? telegramToken : null,
+        telegram_chat_id: document.getElementById('cfg-telegram-chat-id').value.trim() || null,
         min_price: document.getElementById('cfg-min-price').value ? document.getElementById('cfg-min-price').value : null,
         max_price: document.getElementById('cfg-max-price').value ? document.getElementById('cfg-max-price').value : null,
         max_position_usdc: document.getElementById('cfg-max-position').value ? document.getElementById('cfg-max-position').value : null,

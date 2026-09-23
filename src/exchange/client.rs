@@ -142,6 +142,24 @@ impl BinanceFuturesClient {
         Ok(orders)
     }
 
+    /// Fetch an order's final status before treating it as a fill.
+    pub async fn get_order(&self, symbol: &str, order_id: i64) -> Result<BinanceOrderResponse> {
+        let ts = self.current_timestamp();
+        let query = format!(
+            "symbol={}&orderId={}&recvWindow={}&timestamp={}",
+            symbol, order_id, self.recv_window, ts
+        );
+        let signed_query = self.sign_params(&query);
+        let url = format!("{}/fapi/v1/order?{}", self.base_url, signed_query);
+        let resp = self.client.get(&url).send().await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("Failed to get order: {} - {}", status, body));
+        }
+        Ok(resp.json().await?)
+    }
+
     /// Place an order. If post_only is true, timeInForce is set to GTX (Maker Only)
     pub async fn place_order(
         &self,

@@ -111,6 +111,53 @@ async fn test_full_auth_lifecycle() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 
+    // Telegram credentials are required when enabled and are never echoed by the API.
+    let mut config_payload = serde_json::json!({
+        "symbol": "SOLUSDC",
+        "grid_interval": "0.1",
+        "order_amount_usdc": "100",
+        "buy_window": 5,
+        "sell_window": 5,
+        "telegram_enabled": true
+    });
+    let post_config = |payload: &Value| {
+        Request::builder()
+            .method("POST")
+            .uri("/api/config")
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(Body::from(payload.to_string()))
+            .unwrap()
+    };
+    let res = app.clone().oneshot(post_config(&config_payload)).await.unwrap();
+    let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["success"], false);
+
+    config_payload["telegram_bot_token"] = Value::String("123:secret-token".into());
+    config_payload["telegram_chat_id"] = Value::String("987654321".into());
+    let res = app.clone().oneshot(post_config(&config_payload)).await.unwrap();
+    let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["success"], true);
+    assert_eq!(json["data"]["has_telegram_bot_token"], true);
+    assert_eq!(json["data"]["telegram_chat_id"], "987654321");
+    assert!(!String::from_utf8_lossy(&body).contains("123:secret-token"));
+    assert_eq!(db.load_config().unwrap().unwrap().telegram.bot_token, "123:secret-token");
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/config")
+                .header("Authorization", format!("Bearer {}", token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    assert!(!String::from_utf8_lossy(&body).contains("123:secret-token"));
+
     // 7. Login with wrong password: should be 401
     let res = app
         .clone()

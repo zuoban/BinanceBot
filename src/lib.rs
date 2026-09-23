@@ -4,4 +4,5 @@ pub mod db;
 pub mod exchange;
 pub mod server;
 pub mod strategy;
+pub mod telegram;
 pub mod types;

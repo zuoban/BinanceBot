@@ -68,6 +68,8 @@ pub struct BinanceOrderResponse {
     pub symbol: String,
     pub status: String,
     pub price: Decimal,
+    #[serde(rename = "avgPrice", default)]
+    pub avg_price: Option<Decimal>,
     #[serde(rename = "origQty")]
     pub orig_qty: Decimal,
     #[serde(rename = "executedQty")]

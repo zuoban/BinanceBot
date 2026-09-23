@@ -9,9 +9,21 @@ pub struct AppConfig {
     pub exchange: ExchangeConfig,
     pub grid: GridConfig,
     pub server: ServerConfig,
+    #[serde(default)]
+    pub telegram: TelegramConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TelegramConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub bot_token: String,
+    #[serde(default)]
+    pub chat_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExchangeConfig {
     pub symbol: String,
     #[serde(default)]
@@ -28,7 +40,7 @@ pub struct ExchangeConfig {
     pub sync_interval_secs: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GridConfig {
     /// Grid spacing / interval (e.g. 0.1 USDC)
     #[serde(default = "default_grid_interval")]
@@ -145,6 +157,7 @@ impl Default for AppConfig {
                 host: "0.0.0.0".to_string(),
                 port: 8080,
             },
+            telegram: TelegramConfig::default(),
         }
     }
 }
@@ -180,5 +193,20 @@ impl AppConfig {
             is_testnet: self.exchange.is_testnet,
             dry_run: self.exchange.dry_run,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppConfig;
+
+    #[test]
+    fn existing_config_without_telegram_still_loads() {
+        let mut legacy = serde_json::to_value(AppConfig::default()).unwrap();
+        legacy.as_object_mut().unwrap().remove("telegram");
+        let config: AppConfig = serde_json::from_value(legacy).unwrap();
+        assert!(!config.telegram.enabled);
+        assert!(config.telegram.bot_token.is_empty());
+        assert!(config.telegram.chat_id.is_empty());
     }
 }

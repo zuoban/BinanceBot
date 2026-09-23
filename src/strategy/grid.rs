@@ -215,8 +215,10 @@ impl GridTradingEngine {
                 self.rebalance_grid().await;
             }
             BotControlAction::UpdateConfig(new_config) => {
-                info!("Strategy configuration updated via Web Dashboard");
-                let old_exchange = self.state.config.read().await.exchange.clone();
+                let old_config = self.state.config.read().await.clone();
+                let old_exchange = &old_config.exchange;
+                let strategy_changed = *old_exchange != new_config.exchange
+                    || old_config.grid != new_config.grid;
                 let symbol_changed = old_exchange.symbol != new_config.exchange.symbol;
                 let client_changed = old_exchange.api_key != new_config.exchange.api_key
                     || old_exchange.api_secret != new_config.exchange.api_secret
@@ -250,22 +252,25 @@ impl GridTradingEngine {
                     }
                 }
 
-                self.state
-                    .add_log(
-                        "SUCCESS",
-                        format!(
-                            "⚙️ 策略配置已在线更新: 币种={}, 间距={} USDC, 每单={} U, 窗口={}/{}, 模式={}",
-                            new_config.exchange.symbol,
-                            new_config.grid.grid_interval,
-                            new_config.grid.order_amount_usdc,
-                            new_config.grid.buy_window,
-                            new_config.grid.sell_window,
-                            if new_config.exchange.dry_run { "模拟盘" } else { "实盘" }
-                        ),
-                    )
-                    .await;
-
-                self.rebalance_grid().await;
+                if strategy_changed {
+                    self.state
+                        .add_log(
+                            "SUCCESS",
+                            format!(
+                                "⚙️ 策略配置已在线更新: 币种={}, 间距={} USDC, 每单={} U, 窗口={}/{}, 模式={}",
+                                new_config.exchange.symbol,
+                                new_config.grid.grid_interval,
+                                new_config.grid.order_amount_usdc,
+                                new_config.grid.buy_window,
+                                new_config.grid.sell_window,
+                                if new_config.exchange.dry_run { "模拟盘" } else { "实盘" }
+                            ),
+                        )
+                        .await;
+                    self.rebalance_grid().await;
+                } else {
+                    self.state.add_log("SUCCESS", "Telegram 通知配置已更新").await;
+                }
             }
         }
     }
@@ -372,8 +377,27 @@ impl GridTradingEngine {
                 }
 
                 for mut order in filled_or_closed {
-                    // Order was filled on Binance!
-                    self.on_order_filled(&mut order).await;
+                    let Some(order_id) = order.order_id else { continue };
+                    match self.client.get_order(&order.symbol, order_id).await {
+                        Ok(exchange_order) => {
+                            let terminal = matches!(exchange_order.status.as_str(), "FILLED" | "CANCELED" | "EXPIRED" | "REJECTED");
+                            if !terminal {
+                                continue;
+                            }
+                            if exchange_order.executed_qty > Decimal::ZERO {
+                                order.quantity = exchange_order.executed_qty;
+                                if let Some(avg_price) = exchange_order.avg_price.filter(|price| *price > Decimal::ZERO) {
+                                    order.price = avg_price;
+                                }
+                                order.amount_usdc = order.price * order.quantity;
+                                self.on_order_filled(&mut order).await;
+                            } else {
+                                self.state.active_orders.write().await.remove(&order.client_order_id);
+                                debug!("Order {} closed without a fill ({})", order.client_order_id, exchange_order.status);
+                            }
+                        }
+                        Err(e) => warn!("Could not verify order {} status: {}", order.client_order_id, e),
+                    }
                 }
             }
             Err(e) => {
