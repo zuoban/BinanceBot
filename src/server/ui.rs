@@ -528,6 +528,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
         <div class="metric-value" id="card-balance">-- USDC</div>
         <div class="metric-sub">
           <span>可用: <span id="card-available">-- USDC</span></span>
+          <span id="card-account-status" style="color: var(--text-dim);"></span>
         </div>
       </div>
 
@@ -1238,10 +1239,16 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       document.getElementById('card-entry').textContent = entryPrice > 0 ? `$${entryPrice.toFixed(2)}` : '--';
 
       // Account Card
+      const accountAsset = data.account.asset || (data.symbol.endsWith('USDT') ? 'USDT' : 'USDC');
       const walletBal = parseFloat(data.account.total_wallet_balance || 0);
+      const marginBal = parseFloat(data.account.margin_balance || 0);
       const availBal = parseFloat(data.account.available_balance || 0);
-      document.getElementById('card-balance').textContent = `${walletBal.toFixed(2)} USDC`;
-      document.getElementById('card-available').textContent = `${availBal.toFixed(2)} USDC`;
+      const accountUpdatedAt = Date.parse(data.account.update_time || '');
+      const accountFresh = data.dry_run || (Number.isFinite(accountUpdatedAt) && Date.now() - accountUpdatedAt < 30000);
+      const equity = data.dry_run ? walletBal + unPnl : marginBal;
+      document.getElementById('card-balance').textContent = accountFresh ? `${equity.toFixed(2)} ${accountAsset}` : `-- ${accountAsset}`;
+      document.getElementById('card-available').textContent = accountFresh ? `${availBal.toFixed(2)} ${accountAsset}` : `-- ${accountAsset}`;
+      document.getElementById('card-account-status').textContent = accountFresh ? '' : '账户数据暂未更新';
 
       // Grid Info Card
       document.getElementById('card-grid-info').textContent = `${data.grid_config.grid_interval} USDC / ${data.grid_config.order_amount_usdc} U`;

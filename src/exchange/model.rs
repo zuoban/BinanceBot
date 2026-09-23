@@ -154,7 +154,17 @@ pub struct BinanceAccountInfoResponse {
     #[serde(rename = "availableBalance")]
     pub available_balance: Decimal,
     pub assets: Vec<BinanceAccountAsset>,
-    pub positions: Vec<BinancePositionRisk>,
+}
+
+impl BinanceAccountInfoResponse {
+    /// USDⓈ-M balances are reported per asset. The account-wide totals can be zero
+    /// for a USDC-margined symbol even when its USDC balance is nonzero.
+    pub fn margin_asset_for_symbol(&self, symbol: &str) -> Option<&BinanceAccountAsset> {
+        self.assets
+            .iter()
+            .filter(|asset| symbol.ends_with(&asset.asset))
+            .max_by_key(|asset| asset.asset.len())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -186,7 +196,7 @@ pub struct BinanceWs24hrTicker {
 
 #[cfg(test)]
 mod tests {
-    use super::BinanceMarkPrice;
+    use super::{BinanceAccountInfoResponse, BinanceMarkPrice};
     use rust_decimal_macros::dec;
 
     #[test]
@@ -194,5 +204,23 @@ mod tests {
         let response = r#"{"symbol":"SOLUSDC","markPrice":"114.56873000","indexPrice":"114.57000000"}"#;
         let mark: BinanceMarkPrice = serde_json::from_str(response).unwrap();
         assert_eq!(mark.mark_price, dec!(114.56873000));
+    }
+
+    #[test]
+    fn usdc_account_balance_comes_from_matching_asset() {
+        let response = r#"{
+            "totalWalletBalance":"0.00000000",
+            "totalMarginBalance":"0.00000000",
+            "totalUnrealizedProfit":"0.00000000",
+            "availableBalance":"0.00000000",
+            "assets":[{"asset":"USDT","walletBalance":"0","marginBalance":"0","availableBalance":"0","unrealizedProfit":"0"},
+                      {"asset":"USDC","walletBalance":"10091.02762121","marginBalance":"9852.87142345","availableBalance":"6358.01937745","unrealizedProfit":"-238.15619776"}],
+            "positions":[{"symbol":"SOLUSDC","positionAmt":"20.00"}]
+        }"#;
+        let account: BinanceAccountInfoResponse = serde_json::from_str(response).unwrap();
+        let asset = account.margin_asset_for_symbol("SOLUSDC").unwrap();
+        assert_eq!(asset.asset, "USDC");
+        assert_eq!(asset.margin_balance, dec!(9852.87142345));
+        assert_eq!(asset.available_balance, dec!(6358.01937745));
     }
 }

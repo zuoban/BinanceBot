@@ -518,13 +518,21 @@ impl GridTradingEngine {
             state_pos.leverage = pos.leverage.parse().unwrap_or(20);
         }
 
-        if let Ok(acc) = self.client.get_account().await {
-            let mut state_acc = self.state.account.write().await;
-            state_acc.total_wallet_balance = acc.total_wallet_balance;
-            state_acc.available_balance = acc.available_balance;
-            state_acc.margin_balance = acc.total_margin_balance;
-            state_acc.unrealized_profit = acc.total_unrealized_profit;
-            state_acc.update_time = Utc::now();
+        match self.client.get_account().await {
+            Ok(acc) => {
+                if let Some(asset) = acc.margin_asset_for_symbol(&symbol) {
+                    let mut state_acc = self.state.account.write().await;
+                    state_acc.asset = asset.asset.clone();
+                    state_acc.total_wallet_balance = asset.wallet_balance;
+                    state_acc.available_balance = asset.available_balance;
+                    state_acc.margin_balance = asset.margin_balance;
+                    state_acc.unrealized_profit = asset.unrealized_profit;
+                    state_acc.update_time = Utc::now();
+                } else {
+                    warn!("No matching margin asset in Binance account response for {}", symbol);
+                }
+            }
+            Err(e) => warn!("Could not sync Binance account balance: {}", e),
         }
     }
 

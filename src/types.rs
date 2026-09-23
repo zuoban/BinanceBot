@@ -82,6 +82,7 @@ pub struct PositionInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountInfo {
+    pub asset: String,
     pub total_wallet_balance: Decimal,
     pub available_balance: Decimal,
     pub margin_balance: Decimal,
@@ -92,11 +93,12 @@ pub struct AccountInfo {
 impl Default for AccountInfo {
     fn default() -> Self {
         Self {
+            asset: String::new(),
             total_wallet_balance: Decimal::ZERO,
             available_balance: Decimal::ZERO,
             margin_balance: Decimal::ZERO,
             unrealized_profit: Decimal::ZERO,
-            update_time: Utc::now(),
+            update_time: DateTime::<Utc>::default(),
         }
     }
 }
