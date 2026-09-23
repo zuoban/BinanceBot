@@ -15,6 +15,16 @@ use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
+/// Binance Futures allows at most 36 characters for newClientOrderId.
+fn new_grid_client_order_id(side: OrderSide) -> String {
+    let uuid = Uuid::new_v4().simple().to_string();
+    let side_code = match side {
+        OrderSide::Buy => "b",
+        OrderSide::Sell => "s",
+    };
+    format!("gb_{}_{}", side_code, &uuid[..30])
+}
+
 pub struct GridTradingEngine {
     state: Arc<AppState>,
     client: Arc<BinanceFuturesClient>,
@@ -206,11 +216,23 @@ impl GridTradingEngine {
             }
             BotControlAction::UpdateConfig(new_config) => {
                 info!("Strategy configuration updated via Web Dashboard");
-                let old_symbol = self.state.config.read().await.exchange.symbol.clone();
-                let symbol_changed = old_symbol != new_config.exchange.symbol;
+                let old_exchange = self.state.config.read().await.exchange.clone();
+                let symbol_changed = old_exchange.symbol != new_config.exchange.symbol;
+                let client_changed = old_exchange.api_key != new_config.exchange.api_key
+                    || old_exchange.api_secret != new_config.exchange.api_secret
+                    || old_exchange.is_testnet != new_config.exchange.is_testnet
+                    || old_exchange.recv_window != new_config.exchange.recv_window;
 
                 // Update config in state
                 *self.state.config.write().await = *new_config.clone();
+
+                // API credentials and endpoint are stored in the HTTP client, not in AppState.
+                if client_changed {
+                    self.client = Arc::new(BinanceFuturesClient::new(&new_config.exchange));
+                    if let Err(e) = self.client.sync_server_time().await {
+                        warn!("Failed to synchronize Binance server time after config update: {}", e);
+                    }
+                }
 
                 if symbol_changed {
                     self.cancel_all_orders().await;
@@ -424,7 +446,7 @@ impl GridTradingEngine {
 
                 // Place paired SELL order at (buy_price + grid_interval) to lock in profit!
                 let paired_sell_price = rules.round_price(order.price + grid_interval);
-                let paired_client_id = format!("gb_s_{}", Uuid::new_v4().simple());
+                let paired_client_id = new_grid_client_order_id(OrderSide::Sell);
 
                 self.place_grid_order(
                     OrderSide::Sell,
@@ -495,7 +517,7 @@ impl GridTradingEngine {
 
                 // Place paired BUY order at (sell_price - grid_interval)
                 let paired_buy_price = rules.round_price(order.price - grid_interval);
-                let paired_client_id = format!("gb_b_{}", Uuid::new_v4().simple());
+                let paired_client_id = new_grid_client_order_id(OrderSide::Buy);
 
                 self.place_grid_order(
                     OrderSide::Buy,
@@ -584,7 +606,7 @@ impl GridTradingEngine {
 
             if !already_exists && target_price < current_price {
                 if let Some(qty) = rules.calculate_quantity(target_price, amount_usdc) {
-                    let client_id = format!("gb_b_{}", Uuid::new_v4().simple());
+                    let client_id = new_grid_client_order_id(OrderSide::Buy);
                     self.place_grid_order(
                         OrderSide::Buy,
                         target_price,
@@ -619,7 +641,7 @@ impl GridTradingEngine {
 
             if !already_exists && target_price > current_price {
                 if let Some(qty) = rules.calculate_quantity(target_price, amount_usdc) {
-                    let client_id = format!("gb_s_{}", Uuid::new_v4().simple());
+                    let client_id = new_grid_client_order_id(OrderSide::Sell);
                     self.place_grid_order(
                         OrderSide::Sell,
                         target_price,
@@ -808,6 +830,27 @@ impl GridTradingEngine {
             "data": snapshot
         })) {
             let _ = self.state.ws_broadcast_tx.send(json);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::new_grid_client_order_id;
+    use crate::types::OrderSide;
+
+    #[test]
+    fn grid_client_order_ids_fit_binance_limit() {
+        for (side, prefix) in [(OrderSide::Buy, "gb_b_"), (OrderSide::Sell, "gb_s_")] {
+            let first = new_grid_client_order_id(side);
+            let second = new_grid_client_order_id(side);
+
+            assert!(first.starts_with(prefix));
+            assert_eq!(first.len(), 35);
+            assert!(first
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_'));
+            assert_ne!(first, second);
         }
     }
 }
