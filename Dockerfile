@@ -30,8 +30,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy compiled binary from builder
 COPY --from=builder /usr/src/app/target/release/binance-grid-bot /app/binance-grid-bot
-COPY config.example.toml /app/config.example.toml
-RUN cp /app/config.example.toml /app/config.toml
+
+# Ensure data directory for SQLite persistence
+RUN mkdir -p /app/data
+VOLUME ["/app/data"]
 
 # Expose web dashboard port
 EXPOSE 8080
@@ -39,4 +41,4 @@ EXPOSE 8080
 ENV RUST_LOG="binance_grid_bot=info,tower_http=info"
 
 ENTRYPOINT ["/app/binance-grid-bot"]
-CMD ["--config", "/app/config.toml"]
+CMD ["--db", "/app/data/bot.db"]

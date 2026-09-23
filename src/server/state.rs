@@ -1,4 +1,5 @@
 use crate::config::AppConfig;
+use crate::db::Database;
 use crate::strategy::precision::SymbolRules;
 use crate::types::*;
 use chrono::Utc;
@@ -6,8 +7,10 @@ use rust_decimal::Decimal;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, RwLock};
+use tracing::error;
 
 pub struct AppState {
+    pub db: Arc<Database>,
     pub config: RwLock<AppConfig>,
     pub rules: RwLock<SymbolRules>,
     pub status: RwLock<BotStatus>,
@@ -24,7 +27,11 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(config: AppConfig, action_tx: mpsc::Sender<BotControlAction>) -> Arc<Self> {
+    pub fn new(
+        config: AppConfig,
+        db: Arc<Database>,
+        action_tx: mpsc::Sender<BotControlAction>,
+    ) -> Arc<Self> {
         let (ws_broadcast_tx, _) = broadcast::channel(100);
         let symbol = config.exchange.symbol.clone();
 
@@ -40,7 +47,24 @@ impl AppState {
             AccountInfo::default()
         };
 
+        // Preload recent trades from SQLite database
+        let saved_trades = db.get_recent_trades(100).unwrap_or_default();
+        let mut recent_trades = VecDeque::with_capacity(200);
+        for trade in saved_trades.into_iter().rev() {
+            recent_trades.push_back(trade);
+        }
+
+        // Restore cumulative grid stats from SQLite database if available
+        let mut initial_stats = GridStats::default();
+        if let Ok(Some((total_trades, cycles, profit, volume))) = db.load_stats() {
+            initial_stats.total_trades = total_trades;
+            initial_stats.completed_cycles = cycles;
+            initial_stats.total_realized_profit = profit;
+            initial_stats.total_volume_usdc = volume;
+        }
+
         Arc::new(Self {
+            db,
             config: RwLock::new(config),
             rules: RwLock::new(SymbolRules::default()),
             status: RwLock::new(BotStatus::Running),
@@ -48,15 +72,53 @@ impl AppState {
                 symbol,
                 ..Default::default()
             }),
-            stats: RwLock::new(GridStats::default()),
+            stats: RwLock::new(initial_stats),
             position: RwLock::new(PositionInfo::default()),
             account: RwLock::new(initial_account),
             active_orders: RwLock::new(HashMap::new()),
-            recent_trades: RwLock::new(VecDeque::with_capacity(200)),
+            recent_trades: RwLock::new(recent_trades),
             recent_logs: RwLock::new(VecDeque::with_capacity(300)),
             action_tx,
             ws_broadcast_tx,
         })
+    }
+
+    pub async fn record_trade(&self, trade: TradeRecord, is_completed_cycle: bool) {
+        // Persist trade into SQLite
+        if let Err(e) = self.db.insert_trade(&trade) {
+            error!("Failed to persist trade to SQLite database: {}", e);
+        }
+
+        // Update grid performance statistics
+        {
+            let mut stats = self.stats.write().await;
+            stats.total_trades += 1;
+            stats.total_volume_usdc += trade.amount_usdc;
+            if is_completed_cycle {
+                stats.completed_cycles += 1;
+                stats.total_realized_profit += trade.realized_pnl;
+            }
+            if let Err(e) = self.db.save_stats(&stats) {
+                error!("Failed to persist grid stats to SQLite database: {}", e);
+            }
+        }
+
+        // Add to in-memory recent trades
+        {
+            let mut trades = self.recent_trades.write().await;
+            if trades.len() >= 200 {
+                trades.pop_front();
+            }
+            trades.push_back(trade.clone());
+        }
+
+        // Broadcast trade update event to WebSocket clients
+        if let Ok(json) = serde_json::to_string(&serde_json::json!({
+            "type": "trade",
+            "data": trade
+        })) {
+            let _ = self.ws_broadcast_tx.send(json);
+        }
     }
 
     pub async fn add_log(&self, level: &str, message: impl Into<String>) {

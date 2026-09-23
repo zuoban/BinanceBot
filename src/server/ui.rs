@@ -576,7 +576,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
         <div class="config-container">
           <div class="config-header">
             <h3>⚙️ 策略运行参数在线设置</h3>
-            <p style="color: var(--text-dim); font-size: 13px; margin-top: 4px;">修改后点击「保存并应用」将立即重新对齐和更新网格挂单；可勾选同步持久化至本地 config.toml。</p>
+            <p style="color: var(--text-dim); font-size: 13px; margin-top: 4px;">无需任何配置文件，修改后点击「保存并立即生效」将自动持久化至 SQLite 数据库 (<code>data/bot.db</code>)，并立即重新对齐和更新网格挂单。</p>
           </div>
 
           <form id="config-form" onsubmit="event.preventDefault(); submitConfig();">
@@ -674,12 +674,11 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
 
             <!-- 底部保存栏 -->
             <div class="form-actions">
-              <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px;">
-                <input type="checkbox" id="cfg-save-to-file" checked style="accent-color: var(--accent);" />
-                <span>同时保存到本地 <code>config.toml</code> (重启后继续保留)</span>
-              </label>
+              <div style="display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-dim);">
+                <span style="color: var(--accent);">💾 数据持久化:</span> 本地 SQLite 数据库 (<code>data/bot.db</code>，重启自动保留，无需配置文件)
+              </div>
               <div style="display: flex; gap: 10px;">
-                <button type="button" onclick="loadConfigForm()">↺ 还原运行配置</button>
+                <button type="button" onclick="loadConfigForm()">↺ 还原当前配置</button>
                 <button type="submit" class="btn-primary" id="btn-save-cfg">💾 保存并立即生效</button>
               </div>
             </div>
@@ -1052,7 +1051,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
         min_price: document.getElementById('cfg-min-price').value ? document.getElementById('cfg-min-price').value : null,
         max_price: document.getElementById('cfg-max-price').value ? document.getElementById('cfg-max-price').value : null,
         max_position_usdc: document.getElementById('cfg-max-position').value ? document.getElementById('cfg-max-position').value : null,
-        save_to_file: document.getElementById('cfg-save-to-file').checked
+        save_to_file: true
       };
 
       const btn = document.getElementById('btn-save-cfg');

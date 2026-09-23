@@ -70,7 +70,13 @@ async fn get_orders_handler(
 async fn get_trades_handler(
     State(state): State<Arc<AppState>>,
 ) -> Json<ApiResponse<Vec<TradeRecord>>> {
-    let trades: Vec<TradeRecord> = state.recent_trades.read().await.iter().cloned().collect();
+    let trades = match state.db.get_recent_trades(100) {
+        Ok(t) => t,
+        Err(e) => {
+            error!("Failed to fetch trades from SQLite: {}", e);
+            state.recent_trades.read().await.iter().cloned().collect()
+        }
+    };
     Json(ApiResponse {
         success: true,
         data: Some(trades),
@@ -194,13 +200,19 @@ async fn post_config_handler(
         }
     }
 
-    // Persist to file if requested
-    if payload.save_to_file {
-        if let Err(e) = current_config.save_to_file("config.toml") {
-            error!("Failed to save configuration to config.toml: {}", e);
-        } else {
-            info!("Configuration successfully saved to config.toml");
-        }
+    // Persist to SQLite database
+    if let Err(e) = state.db.save_config(&current_config) {
+        error!("Failed to save configuration to SQLite database: {}", e);
+        return Json(ApiResponse {
+            success: false,
+            data: None,
+            message: Some(format!("保存到 SQLite 数据库失败: {}", e)),
+        });
+    } else {
+        info!(
+            "Configuration successfully saved to SQLite database ({})",
+            state.db.path()
+        );
     }
 
     // Notify strategy engine
@@ -252,7 +264,7 @@ async fn post_config_handler(
     Json(ApiResponse {
         success: true,
         data: Some(view),
-        message: Some("配置已成功更新并实时应用至交易引擎".to_string()),
+        message: Some("配置已成功更新并保存至 SQLite 数据库，策略引擎已实时生效".to_string()),
     })
 }
 

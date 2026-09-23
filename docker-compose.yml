@@ -9,6 +9,6 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./config.toml:/app/config.toml
+      - ./data:/app/data
     environment:
       - RUST_LOG=binance_grid_bot=info,tower_http=info

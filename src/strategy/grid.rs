@@ -521,29 +521,13 @@ impl GridTradingEngine {
             amount_usdc: order.price * order.quantity,
             realized_pnl,
             commission: dec!(0.0), // Maker fee is 0 or minimal
-            is_maker: true,
-            timestamp: Utc::now(),
-            note,
-        };
+           is_maker: true,
+           timestamp: Utc::now(),
+           note,
+       };
 
-        {
-            let mut trades = self.state.recent_trades.write().await;
-            if trades.len() >= 200 {
-                trades.pop_front();
-            }
-            trades.push_back(trade);
-        }
-
-        // Update grid performance statistics
-        {
-            let mut stats = self.state.stats.write().await;
-            stats.total_trades += 1;
-            stats.total_volume_usdc += order.price * order.quantity;
-            if is_completed_cycle {
-                stats.completed_cycles += 1;
-                stats.total_realized_profit += realized_pnl;
-            }
-        }
+        // Persist trade to SQLite and update runtime stats
+        self.state.record_trade(trade, is_completed_cycle).await;
     }
 
     /// Ensure the active pre-placed order window matches buy_window and sell_window
