@@ -105,12 +105,20 @@ impl BinanceFuturesClient {
         Ok(info)
     }
 
-    /// Fetch latest mark / ticker price
+    /// Fetch the latest traded price.
     pub async fn get_ticker_price(&self, symbol: &str) -> Result<Decimal> {
         let url = format!("{}/fapi/v1/ticker/price?symbol={}", self.base_url, symbol);
         let resp = self.client.get(&url).send().await?.error_for_status()?;
         let ticker: BinanceTickerPrice = resp.json().await?;
         Ok(ticker.price)
+    }
+
+    /// Fetch the futures mark price, which differs from the latest traded price.
+    pub async fn get_mark_price(&self, symbol: &str) -> Result<Decimal> {
+        let url = format!("{}/fapi/v1/premiumIndex?symbol={}", self.base_url, symbol);
+        let resp = self.client.get(&url).send().await?.error_for_status()?;
+        let mark: BinanceMarkPrice = resp.json().await?;
+        Ok(mark.mark_price)
     }
 
     /// Fetch 24-hour ticker statistics

@@ -497,11 +497,12 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
     <!-- Top Metric Cards -->
     <div class="metrics-grid">
       <div class="metric-card">
-        <div class="metric-title">SOLUSDC 标记价格</div>
+        <div class="metric-title" id="card-price-title">SOLUSDC 标记价格</div>
         <div class="metric-value" id="card-price">--</div>
         <div class="metric-sub">
           <span id="card-price-change">--</span>
           <span style="color: var(--text-dim);">| 24h 高: <span id="card-high">--</span> 低: <span id="card-low">--</span></span>
+          <span id="card-price-status" style="color: var(--text-dim);"></span>
         </div>
       </div>
 
@@ -1110,6 +1111,21 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
 
     let ws = null;
     let currentBotStatus = 'RUNNING';
+    let latestSymbol = 'SOLUSDC';
+    let latestMarkPrice = 0;
+    let latestMarkUpdatedAt = NaN;
+
+    function renderMarkPrice() {
+      const fresh = latestMarkPrice > 0 && Number.isFinite(latestMarkUpdatedAt)
+        && Date.now() - latestMarkUpdatedAt < 15000;
+      document.getElementById('card-price').textContent = fresh ? `$${latestMarkPrice.toFixed(4)}` : '--';
+      document.getElementById('card-price-status').textContent = fresh ? '' : '标记价格行情暂未更新';
+      document.title = fresh
+        ? `$${latestMarkPrice.toFixed(4)} | ${latestSymbol} 标记价格 | Binance Grid Bot`
+        : `${latestSymbol} 标记价格 | Binance Grid Bot`;
+    }
+
+    setInterval(renderMarkPrice, 1000);
 
     function initWebSocket() {
       const token = getAuthToken();
@@ -1187,7 +1203,11 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
 
       // Ticker & Price Card
       const price = parseFloat(data.ticker.last_price || 0);
-      document.getElementById('card-price').textContent = `$${price.toFixed(4)}`;
+      latestSymbol = data.symbol;
+      latestMarkPrice = parseFloat(data.ticker.mark_price || 0);
+      latestMarkUpdatedAt = Date.parse(data.ticker.mark_update_time || '');
+      document.getElementById('card-price-title').textContent = `${data.symbol} 标记价格`;
+      renderMarkPrice();
 
       const chgPct = parseFloat(data.ticker.change_percent_24h || 0);
       const chgVal = parseFloat(data.ticker.change_24h || 0);

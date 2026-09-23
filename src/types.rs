@@ -142,6 +142,7 @@ pub struct TickerInfo {
     pub symbol: String,
     pub last_price: Decimal,
     pub mark_price: Decimal,
+    pub mark_update_time: DateTime<Utc>,
     pub high_24h: Decimal,
     pub low_24h: Decimal,
     pub change_24h: Decimal,

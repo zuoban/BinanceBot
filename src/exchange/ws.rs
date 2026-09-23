@@ -66,7 +66,9 @@ impl BinanceWsStream {
                                             let info = TickerInfo {
                                                 symbol: ticker_msg.symbol,
                                                 last_price: ticker_msg.close_price,
-                                                mark_price: ticker_msg.close_price,
+                                                // The 24h ticker stream does not include a mark price.
+                                                mark_price: rust_decimal::Decimal::ZERO,
+                                                mark_update_time: chrono::DateTime::<Utc>::default(),
                                                 high_24h: ticker_msg.high_price,
                                                 low_24h: ticker_msg.low_price,
                                                 change_24h: change,

@@ -90,6 +90,12 @@ pub struct BinanceTickerPrice {
     pub time: i64,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct BinanceMarkPrice {
+    #[serde(rename = "markPrice")]
+    pub mark_price: Decimal,
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct Binance24hrTicker {
     pub symbol: String,
@@ -176,4 +182,17 @@ pub struct BinanceWs24hrTicker {
     pub volume: Decimal,
     #[serde(rename = "q")]
     pub quote_volume: Decimal,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BinanceMarkPrice;
+    use rust_decimal_macros::dec;
+
+    #[test]
+    fn premium_index_uses_mark_price_field() {
+        let response = r#"{"symbol":"SOLUSDC","markPrice":"114.56873000","indexPrice":"114.57000000"}"#;
+        let mark: BinanceMarkPrice = serde_json::from_str(response).unwrap();
+        assert_eq!(mark.mark_price, dec!(114.56873000));
+    }
 }

@@ -25,6 +25,16 @@ fn new_grid_client_order_id(side: OrderSide) -> String {
     format!("gb_{}_{}", side_code, &uuid[..30])
 }
 
+fn has_nearby_grid_order(
+    prices: &[Decimal],
+    target: Decimal,
+    grid_interval: Decimal,
+    tick_size: Decimal,
+) -> bool {
+    let spacing = grid_interval.max(tick_size);
+    prices.iter().any(|&price| (price - target).abs() < spacing)
+}
+
 pub struct GridTradingEngine {
     state: Arc<AppState>,
     client: Arc<BinanceFuturesClient>,
@@ -101,13 +111,21 @@ impl GridTradingEngine {
                 let mut ticker = self.state.ticker.write().await;
                 ticker.symbol = symbol.clone();
                 ticker.last_price = price;
-                ticker.mark_price = price;
                 ticker.update_time = Utc::now();
                 info!("Initial market price for {}: {}", symbol, price);
             }
             Err(e) => {
                 warn!("Failed to fetch initial market price: {}", e);
             }
+        }
+
+        match self.client.get_mark_price(&symbol).await {
+            Ok(price) => {
+                let mut ticker = self.state.ticker.write().await;
+                ticker.mark_price = price;
+                ticker.mark_update_time = Utc::now();
+            }
+            Err(e) => warn!("Failed to fetch initial mark price: {}", e),
         }
 
         // Fetch 24hr stats
@@ -238,6 +256,10 @@ impl GridTradingEngine {
 
                 if symbol_changed {
                     self.cancel_all_orders().await;
+                    *self.state.ticker.write().await = TickerInfo {
+                        symbol: new_config.exchange.symbol.clone(),
+                        ..Default::default()
+                    };
                     // Fetch new rules
                     if let Ok(info) = self.client.get_exchange_info(Some(&new_config.exchange.symbol)).await {
                         if let Some(rules) = SymbolRules::from_exchange_info(&info, &new_config.exchange.symbol) {
@@ -248,8 +270,9 @@ impl GridTradingEngine {
                         let mut ticker = self.state.ticker.write().await;
                         ticker.symbol = new_config.exchange.symbol.clone();
                         ticker.last_price = price;
-                        ticker.mark_price = price;
+                        ticker.update_time = Utc::now();
                     }
+                    self.refresh_mark_price(&new_config.exchange.symbol, new_config.exchange.dry_run).await;
                 }
 
                 if strategy_changed {
@@ -276,11 +299,18 @@ impl GridTradingEngine {
     }
 
     async fn handle_ticker_update(&mut self, ticker_update: TickerInfo) {
+        if ticker_update.symbol != self.state.config.read().await.exchange.symbol {
+            return;
+        }
+
         // Update state ticker
         {
             let mut ticker = self.state.ticker.write().await;
             ticker.last_price = ticker_update.last_price;
-            ticker.mark_price = ticker_update.mark_price;
+            if ticker_update.mark_price > Decimal::ZERO {
+                ticker.mark_price = ticker_update.mark_price;
+                ticker.mark_update_time = ticker_update.mark_update_time;
+            }
             ticker.high_24h = ticker_update.high_24h;
             ticker.low_24h = ticker_update.low_24h;
             ticker.change_24h = ticker_update.change_24h;
@@ -290,16 +320,22 @@ impl GridTradingEngine {
         }
 
         // Update unrealized PnL for current position
-        {
+        let is_dry_run = self.state.config.read().await.exchange.dry_run;
+        if is_dry_run {
+            let mark_price = self.state.ticker.read().await.mark_price;
+            let valuation_price = if mark_price > Decimal::ZERO {
+                mark_price
+            } else {
+                ticker_update.last_price
+            };
             let mut pos = self.state.position.write().await;
             if !pos.size.is_zero() {
-                pos.mark_price = ticker_update.last_price;
-                pos.unrealized_pnl = (ticker_update.last_price - pos.entry_price) * pos.size;
+                pos.mark_price = valuation_price;
+                pos.unrealized_pnl = (valuation_price - pos.entry_price) * pos.size;
             }
         }
 
         let is_running = *self.state.status.read().await == BotStatus::Running;
-        let is_dry_run = self.state.config.read().await.exchange.dry_run;
 
         // In Paper Trading / Dry Run mode, match simulated orders against live market price
         if is_running && is_dry_run {
@@ -343,7 +379,11 @@ impl GridTradingEngine {
     /// Periodic sync cycle
     async fn sync_cycle(&mut self) {
         let is_running = *self.state.status.read().await == BotStatus::Running;
-        let is_dry_run = self.state.config.read().await.exchange.dry_run;
+        let config = self.state.config.read().await.clone();
+        let is_dry_run = config.exchange.dry_run;
+
+        self.refresh_mark_price(&config.exchange.symbol, is_dry_run).await;
+        self.refresh_stale_ticker(&config.exchange.symbol).await;
 
         if !is_dry_run {
             self.sync_live_orders().await;
@@ -353,6 +393,63 @@ impl GridTradingEngine {
         if is_running {
             self.maintain_grid_window().await;
         }
+    }
+
+    async fn refresh_mark_price(&self, symbol: &str, is_dry_run: bool) {
+        match self.client.get_mark_price(symbol).await {
+            Ok(price) if price > Decimal::ZERO => {
+                let mut ticker = self.state.ticker.write().await;
+                ticker.mark_price = price;
+                ticker.mark_update_time = Utc::now();
+                drop(ticker);
+
+                if is_dry_run {
+                    let mut pos = self.state.position.write().await;
+                    if !pos.size.is_zero() {
+                        pos.mark_price = price;
+                        pos.unrealized_pnl = (price - pos.entry_price) * pos.size;
+                    }
+                }
+            }
+            Ok(_) => warn!("Binance returned a zero mark price for {}", symbol),
+            Err(e) => debug!("Could not refresh mark price for {}: {}", symbol, e),
+        }
+    }
+
+    async fn refresh_stale_ticker(&mut self, symbol: &str) {
+        let ticker = self.state.ticker.read().await.clone();
+        if ticker.symbol == symbol && (Utc::now() - ticker.update_time).num_seconds() < 5 {
+            return;
+        }
+
+        let mut update = ticker;
+        update.symbol = symbol.to_string();
+        match self.client.get_24hr_ticker(symbol).await {
+            Ok(stats) => {
+                update.last_price = stats.last_price;
+                update.high_24h = stats.high_price;
+                update.low_24h = stats.low_price;
+                update.change_24h = stats.price_change;
+                update.change_percent_24h = stats.price_change_percent;
+                update.volume_24h = stats.volume;
+            }
+            Err(e) => {
+                debug!("Could not refresh 24h ticker for {}: {}", symbol, e);
+                match self.client.get_ticker_price(symbol).await {
+                    Ok(price) => update.last_price = price,
+                    Err(e) => {
+                        warn!("Could not refresh stale market price for {}: {}", symbol, e);
+                        return;
+                    }
+                }
+            }
+        }
+        if update.last_price <= Decimal::ZERO {
+            return;
+        }
+        update.mark_price = Decimal::ZERO;
+        update.update_time = Utc::now();
+        self.handle_ticker_update(update).await;
     }
 
     /// Reconcile open orders from Binance in Live mode
@@ -623,10 +720,13 @@ impl GridTradingEngine {
         }
 
         for target_price in desired_buy_prices {
-            // Check if we already have an active order near this price (within 0.5 tick)
-            let already_exists = active_buy_prices
-                .iter()
-                .any(|&p| (p - target_price).abs() < (rules.tick_size / dec!(2.0)));
+            // Keep the existing grid anchor while the market moves within one grid interval.
+            let already_exists = has_nearby_grid_order(
+                &active_buy_prices,
+                target_price,
+                grid_interval,
+                rules.tick_size,
+            );
 
             if !already_exists && target_price < current_price {
                 if let Some(qty) = rules.calculate_quantity(target_price, amount_usdc) {
@@ -641,6 +741,7 @@ impl GridTradingEngine {
                         false,
                     )
                     .await;
+                    active_buy_prices.push(target_price);
                 }
             }
         }
@@ -659,9 +760,12 @@ impl GridTradingEngine {
         }
 
         for target_price in desired_sell_prices {
-            let already_exists = active_sell_prices
-                .iter()
-                .any(|&p| (p - target_price).abs() < (rules.tick_size / dec!(2.0)));
+            let already_exists = has_nearby_grid_order(
+                &active_sell_prices,
+                target_price,
+                grid_interval,
+                rules.tick_size,
+            );
 
             if !already_exists && target_price > current_price {
                 if let Some(qty) = rules.calculate_quantity(target_price, amount_usdc) {
@@ -676,6 +780,7 @@ impl GridTradingEngine {
                         false,
                     )
                     .await;
+                    active_sell_prices.push(target_price);
                 }
             }
         }
@@ -860,8 +965,52 @@ impl GridTradingEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::new_grid_client_order_id;
-    use crate::types::OrderSide;
+    use super::{has_nearby_grid_order, new_grid_client_order_id, GridTradingEngine};
+    use crate::config::AppConfig;
+    use crate::db::Database;
+    use crate::exchange::client::BinanceFuturesClient;
+    use crate::server::state::AppState;
+    use crate::types::{OrderSide, TickerInfo};
+    use chrono::Utc;
+    use rust_decimal_macros::dec;
+    use std::sync::Arc;
+    use tokio::sync::{broadcast, mpsc};
+
+    #[test]
+    fn small_price_moves_do_not_duplicate_grid_orders() {
+        let existing = [dec!(113.13), dec!(112.13), dec!(111.13)];
+        assert!(has_nearby_grid_order(&existing, dec!(113.15), dec!(1), dec!(0.01)));
+        assert!(has_nearby_grid_order(&existing, dec!(112.15), dec!(1), dec!(0.01)));
+        assert!(!has_nearby_grid_order(&existing, dec!(114.15), dec!(1), dec!(0.01)));
+    }
+
+    #[tokio::test]
+    async fn ticker_update_keeps_independent_mark_price() {
+        let config = AppConfig::default();
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let (action_tx, action_rx) = mpsc::channel(1);
+        let (_ticker_tx, ticker_rx) = broadcast::channel(1);
+        let state = AppState::new(config.clone(), db, action_tx);
+        let client = Arc::new(BinanceFuturesClient::new(&config.exchange));
+        let mut engine = GridTradingEngine::new(state.clone(), client, action_rx, ticker_rx);
+        let mark_updated_at = Utc::now();
+        {
+            let mut ticker = state.ticker.write().await;
+            ticker.mark_price = dec!(114.3);
+            ticker.mark_update_time = mark_updated_at;
+        }
+
+        engine.handle_ticker_update(TickerInfo {
+            symbol: config.exchange.symbol,
+            last_price: dec!(114.5),
+            ..Default::default()
+        }).await;
+
+        let ticker = state.ticker.read().await;
+        assert_eq!(ticker.last_price, dec!(114.5));
+        assert_eq!(ticker.mark_price, dec!(114.3));
+        assert_eq!(ticker.mark_update_time, mark_updated_at);
+    }
 
     #[test]
     fn grid_client_order_ids_fit_binance_limit() {
