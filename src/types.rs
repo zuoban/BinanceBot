@@ -187,13 +187,16 @@ pub struct BotSnapshot {
     pub recent_logs: Vec<LogEntry>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum BotControlAction {
     Pause,
     Resume,
     CancelAll,
     Rebalance,
-    UpdateConfig(Box<crate::config::AppConfig>),
+    UpdateConfig {
+        config: Box<crate::config::AppConfig>,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -203,12 +206,12 @@ pub struct UpdateConfigPayload {
     pub order_amount_usdc: Decimal,
     pub buy_window: usize,
     pub sell_window: usize,
-    #[serde(default = "default_true")]
-    pub post_only: bool,
     #[serde(default)]
-    pub dry_run: bool,
+    pub post_only: Option<bool>,
     #[serde(default)]
-    pub is_testnet: bool,
+    pub dry_run: Option<bool>,
+    #[serde(default)]
+    pub is_testnet: Option<bool>,
     pub api_key: Option<String>,
     pub api_secret: Option<String>,
     #[serde(default)]
@@ -256,6 +259,8 @@ pub struct AuthStatusResponse {
 #[derive(Debug, Deserialize)]
 pub struct AuthSetupPayload {
     pub password: String,
+    #[serde(default)]
+    pub setup_code: String,
 }
 
 #[derive(Debug, Deserialize)]

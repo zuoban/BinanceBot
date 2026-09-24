@@ -1,4 +1,4 @@
-use crate::exchange::client::{BinanceFuturesClient, ExchangeError};
+use crate::exchange::client::{BinanceFuturesClient, ExchangeError, NewOrderRequest};
 use crate::exchange::{BinanceOrderResponse, BinanceUserTrade};
 use crate::server::state::AppState;
 use crate::strategy::precision::SymbolRules;
@@ -8,8 +8,8 @@ use chrono::Utc;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::{broadcast, mpsc};
+use std::time::{Duration, Instant};
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::interval;
 use tracing::{debug, error, info, warn};
@@ -25,6 +25,21 @@ fn new_grid_client_order_id(side: OrderSide) -> String {
     format!("gb_{}_{}", side_code, &uuid[..30])
 }
 
+const GRID_ORDER_PREFIX: &str = "gb_";
+
+fn is_grid_order(client_order_id: &str) -> bool {
+    client_order_id.starts_with(GRID_ORDER_PREFIX)
+}
+
+fn buy_exposure_usdc(position_size: Decimal, mark_price: Decimal, orders: &[GridOrder]) -> Decimal {
+    position_size.max(Decimal::ZERO) * mark_price
+        + orders
+            .iter()
+            .filter(|order| order.side == OrderSide::Buy)
+            .map(|order| order.price * order.quantity)
+            .sum::<Decimal>()
+}
+
 fn has_nearby_grid_order(
     prices: &[Decimal],
     target: Decimal,
@@ -36,22 +51,36 @@ fn has_nearby_grid_order(
 }
 
 fn reserved_sell_quantity(orders: &[GridOrder]) -> Decimal {
-    orders.iter().filter(|o| o.side == OrderSide::Sell).map(|o| o.quantity).sum()
+    orders
+        .iter()
+        .filter(|o| o.side == OrderSide::Sell)
+        .map(|o| o.quantity)
+        .sum()
 }
 
 fn sell_quantity_available(position_size: Decimal, orders: &[GridOrder]) -> Decimal {
     (position_size.max(Decimal::ZERO) - reserved_sell_quantity(orders)).max(Decimal::ZERO)
 }
 
-fn aggregate_execution_pnl(symbol: &str, fills: &[BinanceUserTrade]) -> Result<(Decimal, Decimal, bool)> {
+fn aggregate_execution_pnl(
+    symbol: &str,
+    fills: &[BinanceUserTrade],
+) -> Result<(Decimal, Decimal, bool)> {
     let quote = ["USDC", "USDT", "FDUSD", "BUSD"]
-        .into_iter().find(|asset| symbol.ends_with(asset))
+        .into_iter()
+        .find(|asset| symbol.ends_with(asset))
         .ok_or_else(|| anyhow!("Unsupported quote asset for {}", symbol))?;
     if fills.is_empty() {
         return Err(anyhow!("No exchange fills found for {}", symbol));
     }
-    if fills.iter().any(|fill| !fill.commission_asset.eq_ignore_ascii_case(quote)) {
-        return Err(anyhow!("Execution commission is not denominated in {}", quote));
+    if fills
+        .iter()
+        .any(|fill| !fill.commission_asset.eq_ignore_ascii_case(quote))
+    {
+        return Err(anyhow!(
+            "Execution commission is not denominated in {}",
+            quote
+        ));
     }
     Ok((
         fills.iter().map(|fill| fill.realized_pnl).sum(),
@@ -69,6 +98,9 @@ pub struct GridTradingEngine {
     paired_buy_prices: HashMap<String, (Decimal, Decimal)>,
     pnl_reconcile_offset: usize,
     pnl_reconcile_task: Option<JoinHandle<()>>,
+    last_account_sync: Option<Instant>,
+    last_orders_sync: Option<Instant>,
+    market_stream_tx: Option<watch::Sender<(String, bool)>>,
 }
 
 impl GridTradingEngine {
@@ -86,6 +118,19 @@ impl GridTradingEngine {
             paired_buy_prices: HashMap::new(),
             pnl_reconcile_offset: 0,
             pnl_reconcile_task: None,
+            last_account_sync: None,
+            last_orders_sync: None,
+            market_stream_tx: None,
+        }
+    }
+
+    pub fn set_market_stream_tx(&mut self, tx: watch::Sender<(String, bool)>) {
+        self.market_stream_tx = Some(tx);
+    }
+
+    async fn pause_trading(&self) {
+        if let Err(error) = self.state.pause_trading().await {
+            error!("Could not persist paused bot status: {}", error);
         }
     }
 
@@ -127,10 +172,22 @@ impl GridTradingEngine {
                         symbol, rules.tick_size, rules.step_size, rules.min_notional
                     );
                     *self.state.rules.write().await = rules;
+                } else if !config.exchange.dry_run {
+                    return Err(anyhow!("Missing Binance exchange rules for {}", symbol));
                 }
             }
             Err(e) => {
-                warn!("Could not fetch exchangeInfo for {}, using defaults: {}", symbol, e);
+                warn!(
+                    "Could not fetch exchangeInfo for {}, using defaults: {}",
+                    symbol, e
+                );
+                if !config.exchange.dry_run {
+                    return Err(anyhow!(
+                        "Could not load Binance exchange rules for {}: {}",
+                        symbol,
+                        e
+                    ));
+                }
             }
         }
 
@@ -145,6 +202,9 @@ impl GridTradingEngine {
             }
             Err(e) => {
                 warn!("Failed to fetch initial market price: {}", e);
+                if !config.exchange.dry_run {
+                    return Err(anyhow!("Could not load initial market price: {}", e));
+                }
             }
         }
 
@@ -169,41 +229,21 @@ impl GridTradingEngine {
 
         // If not dry-run, load existing open orders
         if !config.exchange.dry_run {
-            match self.client.get_open_orders(&symbol).await {
-                Ok(open_orders) => {
-                    info!("Found {} existing open orders on exchange", open_orders.len());
-                    let mut active_map = self.state.active_orders.write().await;
-                    for o in open_orders {
-                        let side = if o.side == "BUY" { OrderSide::Buy } else { OrderSide::Sell };
-                        let grid_order = GridOrder {
-                            client_order_id: o.client_order_id.clone(),
-                            order_id: Some(o.order_id),
-                            symbol: o.symbol.clone(),
-                            side,
-                            price: o.price,
-                            quantity: (o.orig_qty - o.executed_qty).max(Decimal::ZERO),
-                            amount_usdc: o.price * (o.orig_qty - o.executed_qty).max(Decimal::ZERO),
-                            status: if o.executed_qty > Decimal::ZERO {
-                                OrderStatus::PartiallyFilled
-                            } else {
-                                OrderStatus::New
-                            },
-                            created_at: Utc::now(),
-                            updated_at: Utc::now(),
-                            grid_level: 0,
-                            paired_client_order_id: None,
-                            is_take_profit: false,
-                        };
-                        active_map.insert(o.client_order_id, grid_order);
-                    }
-                }
-                Err(e) => {
-                    warn!("Failed to fetch existing open orders: {}", e);
+            let restored = self.state.db.load_managed_orders(&symbol)?;
+            {
+                let mut active_map = self.state.active_orders.write().await;
+                for order in restored
+                    .into_iter()
+                    .filter(|order| is_grid_order(&order.client_order_id))
+                {
+                    active_map.insert(order.client_order_id.clone(), order);
                 }
             }
-
-            // Fetch live position and account
-            self.sync_account_and_position().await;
+            if !self.sync_account_and_position().await || !self.sync_live_orders().await {
+                return Err(anyhow!(
+                    "Could not reconcile Binance account and managed orders at startup"
+                ));
+            }
         }
 
         Ok(())
@@ -211,18 +251,32 @@ impl GridTradingEngine {
 
     /// Primary execution loop
     pub async fn run(&mut self) {
-        let mut sync_timer = interval(Duration::from_secs(3));
+        let sync_secs = self
+            .state
+            .config
+            .read()
+            .await
+            .exchange
+            .sync_interval_secs
+            .max(1);
+        let mut sync_timer = interval(Duration::from_secs(sync_secs));
         let mut snapshot_timer = interval(Duration::from_millis(800));
         let mut pnl_timer = interval(Duration::from_secs(60));
 
-        // Initial grid placement
-        self.rebalance_grid().await;
+        // Preserve recovered orders. Reconciliation and the regular window
+        // maintenance will add only the missing levels.
+        if *self.state.status.read().await == BotStatus::Running {
+            self.maintain_grid_window().await;
+        }
 
         loop {
             tokio::select! {
                 // UI control actions (Pause, Resume, CancelAll, Rebalance, UpdateConfig)
-                Some(action) = self.action_rx.recv() => {
-                    self.handle_control_action(action).await;
+                action = self.action_rx.recv() => {
+                    match action {
+                        Some(action) => self.handle_control_action(action).await,
+                        None => break,
+                    }
                 }
 
                 // Live price updates from Binance WebSocket
@@ -251,91 +305,222 @@ impl GridTradingEngine {
         match action {
             BotControlAction::Pause => {
                 info!("Bot paused by user command");
-                *self.state.status.write().await = BotStatus::Paused;
-                self.state.add_log("WARN", "Trading bot paused by user").await;
+                self.pause_trading().await;
+                if self.cancel_all_orders().await {
+                    self.state
+                        .add_log("WARN", "Trading bot paused and managed orders canceled")
+                        .await;
+                } else {
+                    self.state.add_log("ERROR", "Trading bot paused, but some managed orders may still be open on Binance").await;
+                }
             }
             BotControlAction::Resume => {
                 info!("Bot resumed by user command");
-                *self.state.status.write().await = BotStatus::Running;
-                self.state.add_log("INFO", "Trading bot resumed by user").await;
-                self.rebalance_grid().await;
+                if let Err(error) = self.state.resume_trading().await {
+                    error!("Could not persist resumed bot status: {}", error);
+                    self.state
+                        .add_log("ERROR", format!("Resume failed: {}", error))
+                        .await;
+                    return;
+                }
+                self.state
+                    .add_log("INFO", "Trading bot resumed by user")
+                    .await;
+                self.sync_cycle().await;
             }
             BotControlAction::CancelAll => {
                 info!("Cancel all orders requested");
+                self.pause_trading().await;
                 if self.cancel_all_orders().await {
-                    self.state.add_log("WARN", "All active grid orders canceled").await;
+                    self.state
+                        .add_log("WARN", "Managed grid orders canceled; bot paused")
+                        .await;
+                } else {
+                    self.state
+                        .add_log("ERROR", "Cancellation incomplete; bot paused")
+                        .await;
                 }
             }
             BotControlAction::Rebalance => {
-                info!("Grid rebalance requested");
-                self.state.add_log("INFO", "Manual grid rebalance triggered").await;
-                self.rebalance_grid().await;
-            }
-            BotControlAction::UpdateConfig(new_config) => {
-                let old_config = self.state.config.read().await.clone();
-                let old_exchange = &old_config.exchange;
-                let strategy_changed = *old_exchange != new_config.exchange
-                    || old_config.grid != new_config.grid;
-                let symbol_changed = old_exchange.symbol != new_config.exchange.symbol;
-                let client_changed = old_exchange.api_key != new_config.exchange.api_key
-                    || old_exchange.api_secret != new_config.exchange.api_secret
-                    || old_exchange.is_testnet != new_config.exchange.is_testnet
-                    || old_exchange.recv_window != new_config.exchange.recv_window;
-
-                // Update config in state
-                *self.state.config.write().await = *new_config.clone();
-
-                // API credentials and endpoint are stored in the HTTP client, not in AppState.
-                if client_changed {
-                    self.client = Arc::new(BinanceFuturesClient::new(&new_config.exchange));
-                    if let Err(e) = self.client.sync_server_time().await {
-                        warn!("Failed to synchronize Binance server time after config update: {}", e);
-                    }
-                }
-
-                if symbol_changed {
-                    self.state.refresh_pnl_stats().await;
-                    self.cancel_all_orders().await;
-                    *self.state.ticker.write().await = TickerInfo {
-                        symbol: new_config.exchange.symbol.clone(),
-                        ..Default::default()
-                    };
-                    // Fetch new rules
-                    if let Ok(info) = self.client.get_exchange_info(Some(&new_config.exchange.symbol)).await {
-                        if let Some(rules) = SymbolRules::from_exchange_info(&info, &new_config.exchange.symbol) {
-                            *self.state.rules.write().await = rules;
-                        }
-                    }
-                    if let Ok(price) = self.client.get_ticker_price(&new_config.exchange.symbol).await {
-                        let mut ticker = self.state.ticker.write().await;
-                        ticker.symbol = new_config.exchange.symbol.clone();
-                        ticker.last_price = price;
-                        ticker.update_time = Utc::now();
-                    }
-                    self.refresh_mark_price(&new_config.exchange.symbol, new_config.exchange.dry_run).await;
-                }
-
-                if strategy_changed {
+                if *self.state.status.read().await == BotStatus::Running {
+                    info!("Grid rebalance requested");
                     self.state
-                        .add_log(
-                            "SUCCESS",
-                            format!(
-                                "⚙️ 策略配置已在线更新: 币种={}, 间距={} USDC, 每单={} U, 窗口={}/{}, 模式={}",
-                                new_config.exchange.symbol,
-                                new_config.grid.grid_interval,
-                                new_config.grid.order_amount_usdc,
-                                new_config.grid.buy_window,
-                                new_config.grid.sell_window,
-                                if new_config.exchange.dry_run { "模拟盘" } else { "实盘" }
-                            ),
-                        )
+                        .add_log("INFO", "Manual grid rebalance triggered")
                         .await;
                     self.rebalance_grid().await;
-                } else {
-                    self.state.add_log("SUCCESS", "Telegram 通知配置已更新").await;
                 }
             }
+            BotControlAction::UpdateConfig { config, reply } => {
+                let result = self.apply_config(*config).await;
+                if let Err(error) = &result {
+                    self.state
+                        .add_log("ERROR", format!("Configuration update rejected: {}", error))
+                        .await;
+                }
+                let _ = reply.send(result.map_err(|error| error.to_string()));
+            }
         }
+    }
+
+    async fn apply_config(&mut self, new_config: crate::config::AppConfig) -> Result<()> {
+        new_config.validate()?;
+        let old_config = self.state.config.read().await.clone();
+        let strategy_changed =
+            old_config.exchange != new_config.exchange || old_config.grid != new_config.grid;
+        let market_changed = old_config.exchange.symbol != new_config.exchange.symbol
+            || old_config.exchange.is_testnet != new_config.exchange.is_testnet;
+        let mode_changed = old_config.exchange.dry_run != new_config.exchange.dry_run;
+        let client_changed = old_config.exchange.api_key != new_config.exchange.api_key
+            || old_config.exchange.api_secret != new_config.exchange.api_secret
+            || old_config.exchange.is_testnet != new_config.exchange.is_testnet
+            || old_config.exchange.recv_window != new_config.exchange.recv_window;
+
+        if !strategy_changed {
+            self.state.db.save_config(&new_config)?;
+            *self.state.config.write().await = new_config;
+            self.state
+                .add_log("SUCCESS", "Notification configuration updated")
+                .await;
+            return Ok(());
+        }
+
+        let new_client = if client_changed {
+            Arc::new(BinanceFuturesClient::new(&new_config.exchange))
+        } else {
+            Arc::clone(&self.client)
+        };
+        if !new_config.exchange.dry_run {
+            new_client.sync_server_time().await?;
+            new_client
+                .get_position(&new_config.exchange.symbol)
+                .await?
+                .ok_or_else(|| anyhow!("New symbol has no position information"))?;
+            let account = new_client.get_account().await?;
+            if account
+                .margin_asset_for_symbol(&new_config.exchange.symbol)
+                .is_none()
+            {
+                return Err(anyhow!("New symbol has no matching margin asset"));
+            }
+        }
+
+        let new_rules = if market_changed || mode_changed {
+            let info = new_client
+                .get_exchange_info(Some(&new_config.exchange.symbol))
+                .await?;
+            let symbol_info = info
+                .symbols
+                .iter()
+                .find(|item| {
+                    item.symbol
+                        .eq_ignore_ascii_case(&new_config.exchange.symbol)
+                })
+                .ok_or_else(|| anyhow!("Unknown Binance symbol {}", new_config.exchange.symbol))?;
+            if symbol_info.status != "TRADING" {
+                return Err(anyhow!(
+                    "Symbol {} is not trading",
+                    new_config.exchange.symbol
+                ));
+            }
+            SymbolRules::from_exchange_info(&info, &new_config.exchange.symbol).ok_or_else(
+                || anyhow!("Missing exchange rules for {}", new_config.exchange.symbol),
+            )?
+        } else {
+            self.state.rules.read().await.clone()
+        };
+        let new_price = if market_changed || mode_changed {
+            let price = new_client
+                .get_ticker_price(&new_config.exchange.symbol)
+                .await?;
+            if price <= Decimal::ZERO {
+                return Err(anyhow!(
+                    "Invalid market price for {}",
+                    new_config.exchange.symbol
+                ));
+            }
+            Some(price)
+        } else {
+            None
+        };
+
+        // The old client, symbol and mode are still active here. Never switch
+        // credentials or environment before old managed orders are canceled.
+        if !self.cancel_all_orders().await {
+            return Err(anyhow!(
+                "Could not cancel old managed orders; configuration unchanged"
+            ));
+        }
+        if let Err(error) = self.state.db.save_config(&new_config) {
+            self.pause_trading().await;
+            return Err(error);
+        }
+
+        self.client = new_client;
+        *self.state.config.write().await = new_config.clone();
+        if market_changed || mode_changed {
+            *self.state.rules.write().await = new_rules;
+            let mut ticker = TickerInfo {
+                symbol: new_config.exchange.symbol.clone(),
+                ..Default::default()
+            };
+            if let Some(price) = new_price {
+                ticker.last_price = price;
+                ticker.update_time = Utc::now();
+            }
+            *self.state.ticker.write().await = ticker;
+            *self.state.position.write().await = PositionInfo::default();
+            self.last_account_sync = None;
+            self.last_orders_sync = None;
+            if new_config.exchange.dry_run {
+                *self.state.account.write().await = AccountInfo {
+                    asset: if new_config.exchange.symbol.ends_with("USDT") {
+                        "USDT"
+                    } else {
+                        "USDC"
+                    }
+                    .to_string(),
+                    total_wallet_balance: rust_decimal_macros::dec!(10000),
+                    available_balance: rust_decimal_macros::dec!(10000),
+                    margin_balance: rust_decimal_macros::dec!(10000),
+                    unrealized_profit: Decimal::ZERO,
+                    update_time: Utc::now(),
+                };
+            } else {
+                *self.state.account.write().await = AccountInfo::default();
+            }
+            if let Some(tx) = &self.market_stream_tx {
+                let _ = tx.send((
+                    new_config.exchange.symbol.clone(),
+                    new_config.exchange.is_testnet,
+                ));
+            }
+            self.state.refresh_pnl_stats().await;
+        }
+
+        let ready = if new_config.exchange.dry_run {
+            true
+        } else {
+            self.sync_live_orders().await && self.sync_account_and_position().await
+        };
+        if !ready {
+            self.pause_trading().await;
+            return Err(anyhow!(
+                "Configuration saved, but exchange reconciliation failed; bot paused"
+            ));
+        }
+        if *self.state.status.read().await == BotStatus::Running {
+            self.maintain_grid_window().await;
+        }
+        self.state
+            .add_log(
+                "SUCCESS",
+                format!(
+                    "Strategy configuration updated for {}",
+                    new_config.exchange.symbol
+                ),
+            )
+            .await;
+        Ok(())
     }
 
     async fn handle_ticker_update(&mut self, ticker_update: TickerInfo) {
@@ -418,21 +603,27 @@ impl GridTradingEngine {
 
     /// Periodic sync cycle
     async fn sync_cycle(&mut self) {
-        let is_running = *self.state.status.read().await == BotStatus::Running;
         let config = self.state.config.read().await.clone();
         let is_dry_run = config.exchange.dry_run;
 
-        self.refresh_mark_price(&config.exchange.symbol, is_dry_run).await;
+        self.refresh_mark_price(&config.exchange.symbol, is_dry_run)
+            .await;
         self.refresh_stale_ticker(&config.exchange.symbol).await;
 
-        if !is_dry_run {
-            self.sync_live_orders().await;
-            self.sync_account_and_position().await;
-        }
+        let account_ready = if !is_dry_run {
+            let orders_ready = self.sync_live_orders().await;
+            if !orders_ready {
+                self.last_orders_sync = None;
+            }
+            let account_ready = self.sync_account_and_position().await;
+            orders_ready && account_ready
+        } else {
+            true
+        };
 
         self.trim_sell_orders_to_position().await;
 
-        if is_running {
+        if *self.state.status.read().await == BotStatus::Running && account_ready {
             self.maintain_grid_window().await;
         }
     }
@@ -495,28 +686,69 @@ impl GridTradingEngine {
     }
 
     /// Reconcile open orders from Binance in Live mode
-    async fn sync_live_orders(&mut self) {
+    async fn sync_live_orders(&mut self) -> bool {
         let symbol = self.state.config.read().await.exchange.symbol.clone();
         match self.client.get_open_orders(&symbol).await {
             Ok(live_orders) => {
+                self.last_orders_sync = Some(Instant::now());
                 let live_ids: HashMap<String, BinanceOrderResponse> = live_orders
                     .into_iter()
+                    .filter(|order| is_grid_order(&order.client_order_id))
                     .map(|o| (o.client_order_id.clone(), o))
                     .collect();
 
                 let mut filled_or_closed = Vec::new();
+                let mut persistence_ok = true;
 
                 {
                     let mut active = self.state.active_orders.write().await;
                     for (client_id, live_order) in &live_ids {
                         if let Some(order) = active.get_mut(client_id) {
-                            order.quantity = (live_order.orig_qty - live_order.executed_qty).max(Decimal::ZERO);
+                            order.order_id = Some(live_order.order_id);
+                            order.quantity =
+                                (live_order.orig_qty - live_order.executed_qty).max(Decimal::ZERO);
                             order.amount_usdc = order.price * order.quantity;
                             order.status = if live_order.executed_qty > Decimal::ZERO {
                                 OrderStatus::PartiallyFilled
                             } else {
                                 OrderStatus::New
                             };
+                            if let Err(e) = self.state.db.save_managed_order(order) {
+                                error!("Could not persist managed order {}: {}", client_id, e);
+                                persistence_ok = false;
+                            }
+                        } else {
+                            let order = GridOrder {
+                                client_order_id: client_id.clone(),
+                                order_id: Some(live_order.order_id),
+                                symbol: live_order.symbol.clone(),
+                                side: if live_order.side == "BUY" {
+                                    OrderSide::Buy
+                                } else {
+                                    OrderSide::Sell
+                                },
+                                price: live_order.price,
+                                quantity: (live_order.orig_qty - live_order.executed_qty)
+                                    .max(Decimal::ZERO),
+                                amount_usdc: live_order.price
+                                    * (live_order.orig_qty - live_order.executed_qty)
+                                        .max(Decimal::ZERO),
+                                status: if live_order.executed_qty > Decimal::ZERO {
+                                    OrderStatus::PartiallyFilled
+                                } else {
+                                    OrderStatus::New
+                                },
+                                created_at: Utc::now(),
+                                updated_at: Utc::now(),
+                                grid_level: 0,
+                                paired_client_order_id: None,
+                                is_take_profit: false,
+                            };
+                            if let Err(e) = self.state.db.save_managed_order(&order) {
+                                error!("Could not persist recovered order {}: {}", client_id, e);
+                                persistence_ok = false;
+                            }
+                            active.insert(client_id.clone(), order);
                         }
                     }
                 }
@@ -531,43 +763,85 @@ impl GridTradingEngine {
                 }
 
                 for mut order in filled_or_closed {
-                    let Some(order_id) = order.order_id else { continue };
-                    match self.client.get_order(&order.symbol, order_id).await {
+                    let exchange_result = match order.order_id {
+                        Some(order_id) => self.client.get_order(&order.symbol, order_id).await,
+                        None => {
+                            self.client
+                                .get_order_by_client_id(&order.symbol, &order.client_order_id)
+                                .await
+                        }
+                    };
+                    match exchange_result {
                         Ok(exchange_order) => {
-                            let terminal = matches!(exchange_order.status.as_str(), "FILLED" | "CANCELED" | "EXPIRED" | "REJECTED");
+                            let terminal = matches!(
+                                exchange_order.status.as_str(),
+                                "FILLED" | "CANCELED" | "EXPIRED" | "REJECTED"
+                            );
                             if !terminal {
                                 continue;
                             }
                             if exchange_order.executed_qty > Decimal::ZERO {
                                 order.quantity = exchange_order.executed_qty;
-                                if let Some(avg_price) = exchange_order.avg_price.filter(|price| *price > Decimal::ZERO) {
+                                if let Some(avg_price) = exchange_order
+                                    .avg_price
+                                    .filter(|price| *price > Decimal::ZERO)
+                                {
                                     order.price = avg_price;
                                 }
                                 order.amount_usdc = order.price * order.quantity;
                                 self.on_order_filled(&mut order).await;
                             } else {
-                                self.state.active_orders.write().await.remove(&order.client_order_id);
-                                debug!("Order {} closed without a fill ({})", order.client_order_id, exchange_order.status);
+                                self.state
+                                    .active_orders
+                                    .write()
+                                    .await
+                                    .remove(&order.client_order_id);
+                                if let Err(e) =
+                                    self.state.db.delete_managed_order(&order.client_order_id)
+                                {
+                                    error!(
+                                        "Could not delete closed order {}: {}",
+                                        order.client_order_id, e
+                                    );
+                                    persistence_ok = false;
+                                }
+                                debug!(
+                                    "Order {} closed without a fill ({})",
+                                    order.client_order_id, exchange_order.status
+                                );
                             }
                         }
-                        Err(e) => warn!("Could not verify order {} status: {}", order.client_order_id, e),
+                        Err(e) => warn!(
+                            "Could not verify order {} status: {}",
+                            order.client_order_id, e
+                        ),
                     }
                 }
+                persistence_ok
             }
             Err(e) => {
-                debug!("Error during live orders sync: {}", e);
+                warn!("Error during live orders sync: {}", e);
+                false
             }
         }
     }
 
-    async fn fetch_execution_pnl(&self, symbol: &str, order_id: i64) -> Result<(Decimal, Decimal, bool)> {
+    async fn fetch_execution_pnl(
+        &self,
+        symbol: &str,
+        order_id: i64,
+    ) -> Result<(Decimal, Decimal, bool)> {
         let fills = self.client.get_user_trades(symbol, order_id).await?;
         aggregate_execution_pnl(symbol, &fills)
     }
 
     /// Fill the exchange PnL and fees for rows saved before this version or during API outages.
     async fn reconcile_unverified_trades(&mut self) {
-        if self.pnl_reconcile_task.as_ref().is_some_and(|task| !task.is_finished()) {
+        if self
+            .pnl_reconcile_task
+            .as_ref()
+            .is_some_and(|task| !task.is_finished())
+        {
             return;
         }
         let config = self.state.config.read().await.clone();
@@ -580,7 +854,11 @@ impl GridTradingEngine {
             return;
         }
         let offset = self.pnl_reconcile_offset % pending_count;
-        let pending = match self.state.db.get_unverified_trades(&config.exchange.symbol, 3, offset) {
+        let pending = match self
+            .state
+            .db
+            .get_unverified_trades(&config.exchange.symbol, 3, offset)
+        {
             Ok(trades) => trades,
             Err(e) => {
                 warn!("Could not load trades awaiting PnL verification: {}", e);
@@ -593,10 +871,15 @@ impl GridTradingEngine {
         self.pnl_reconcile_task = Some(tokio::spawn(async move {
             for mut trade in pending {
                 let result = async {
-                    let order = client.get_order_by_client_id(&trade.symbol, &trade.client_order_id).await?;
-                    let fills = client.get_user_trades(&trade.symbol, order.order_id).await?;
+                    let order = client
+                        .get_order_by_client_id(&trade.symbol, &trade.client_order_id)
+                        .await?;
+                    let fills = client
+                        .get_user_trades(&trade.symbol, order.order_id)
+                        .await?;
                     aggregate_execution_pnl(&trade.symbol, &fills)
-                }.await;
+                }
+                .await;
                 match result {
                     Ok((pnl, commission, maker)) => {
                         trade.realized_pnl = pnl;
@@ -607,17 +890,20 @@ impl GridTradingEngine {
                             warn!("Could not save verified trade PnL: {}", e);
                         }
                     }
-                    Err(e) => debug!("PnL verification deferred for {}: {}", trade.client_order_id, e),
+                    Err(e) => debug!(
+                        "PnL verification deferred for {}: {}",
+                        trade.client_order_id, e
+                    ),
                 }
             }
         }));
     }
 
     /// Fetch position and account balances from Binance in Live mode
-    async fn sync_account_and_position(&mut self) {
+    async fn sync_account_and_position(&mut self) -> bool {
         let symbol = self.state.config.read().await.exchange.symbol.clone();
 
-        if let Ok(Some(pos)) = self.client.get_position(&symbol).await {
+        let position_ok = if let Ok(Some(pos)) = self.client.get_position(&symbol).await {
             let mut state_pos = self.state.position.write().await;
             state_pos.symbol = pos.symbol;
             state_pos.size = pos.position_amt;
@@ -626,9 +912,13 @@ impl GridTradingEngine {
             state_pos.unrealized_pnl = pos.un_realized_profit;
             state_pos.liquidation_price = pos.liquidation_price;
             state_pos.leverage = pos.leverage.parse().unwrap_or(20);
-        }
+            true
+        } else {
+            warn!("Could not sync Binance position for {}", symbol);
+            false
+        };
 
-        match self.client.get_account().await {
+        let account_ok = match self.client.get_account().await {
             Ok(acc) => {
                 if let Some(asset) = acc.margin_asset_for_symbol(&symbol) {
                     let mut state_acc = self.state.account.write().await;
@@ -638,11 +928,26 @@ impl GridTradingEngine {
                     state_acc.margin_balance = asset.margin_balance;
                     state_acc.unrealized_profit = asset.unrealized_profit;
                     state_acc.update_time = Utc::now();
+                    true
                 } else {
-                    warn!("No matching margin asset in Binance account response for {}", symbol);
+                    warn!(
+                        "No matching margin asset in Binance account response for {}",
+                        symbol
+                    );
+                    false
                 }
             }
-            Err(e) => warn!("Could not sync Binance account balance: {}", e),
+            Err(e) => {
+                warn!("Could not sync Binance account balance: {}", e);
+                false
+            }
+        };
+        if position_ok && account_ok {
+            self.last_account_sync = Some(Instant::now());
+            true
+        } else {
+            self.last_account_sync = None;
+            false
         }
     }
 
@@ -652,8 +957,11 @@ impl GridTradingEngine {
         order.updated_at = Utc::now();
 
         // Remove from active orders
-        self.state.active_orders.write().await.remove(&order.client_order_id);
-
+        self.state
+            .active_orders
+            .write()
+            .await
+            .remove(&order.client_order_id);
         let config = self.state.config.read().await.clone();
         let rules = self.state.rules.read().await.clone();
         let grid_interval = config.grid.grid_interval;
@@ -661,6 +969,7 @@ impl GridTradingEngine {
         // larger paired trade. The regular grid window can place full units.
         let full_grid_fill = rules.calculate_quantity(order.price, config.grid.order_amount_usdc)
             == Some(order.quantity);
+        let trading_enabled = *self.state.status.read().await == BotStatus::Running;
 
         let mut cycle_profit = Decimal::ZERO;
         let mut simulated_pnl = Decimal::ZERO;
@@ -669,7 +978,10 @@ impl GridTradingEngine {
 
         match order.side {
             OrderSide::Buy => {
-                note = format!("Grid BUY filled at {} (Qty: {})", order.price, order.quantity);
+                note = format!(
+                    "Grid BUY filled at {} (Qty: {})",
+                    order.price, order.quantity
+                );
 
                 // Update simulated position in dry-run
                 if config.exchange.dry_run {
@@ -692,37 +1004,62 @@ impl GridTradingEngine {
                 // Place paired SELL order at (buy_price + grid_interval) to lock in profit!
                 let paired_sell_price = rules.round_price(order.price + grid_interval);
                 let paired_client_id = new_grid_client_order_id(OrderSide::Sell);
+                let paired_exists =
+                    self.state
+                        .active_orders
+                        .read()
+                        .await
+                        .values()
+                        .any(|candidate| {
+                            candidate.side == OrderSide::Sell
+                                && candidate.paired_client_order_id.as_deref()
+                                    == Some(order.client_order_id.as_str())
+                        });
 
-                let placed = if full_grid_fill {
-                    self.place_grid_order(
-                        OrderSide::Sell,
-                        paired_sell_price,
-                        paired_client_id.clone(),
-                        order.grid_level + 1,
-                        Some(order.client_order_id.clone()),
-                        true,
-                    )
-                    .await
+                let placed = if full_grid_fill && trading_enabled {
+                    paired_exists
+                        || self
+                            .place_grid_order(
+                                OrderSide::Sell,
+                                paired_sell_price,
+                                paired_client_id.clone(),
+                                order.grid_level + 1,
+                                Some(order.client_order_id.clone()),
+                                true,
+                            )
+                            .await
                 } else {
                     false
                 };
 
                 if placed {
                     // Only a placed paired exit needs this purchase price.
-                    self.paired_buy_prices.insert(order.client_order_id.clone(), (order.price, order.quantity));
-                    self.state.add_log(
-                        "INFO",
-                        format!(
+                    self.paired_buy_prices
+                        .insert(order.client_order_id.clone(), (order.price, order.quantity));
+                    self.state
+                        .add_log(
+                            "INFO",
+                            format!(
                             "🟢 BUY Filled at {}! Placed paired Maker SELL at {} (+{} USDC spread)",
                             order.price, paired_sell_price, grid_interval
                         ),
-                    ).await;
+                        )
+                        .await;
                 }
             }
             OrderSide::Sell => {
                 // Check if this sell closed a previously tracked buy order
                 if let Some(paired_id) = &order.paired_client_order_id {
-                    if let Some((buy_price, buy_qty)) = self.paired_buy_prices.remove(paired_id) {
+                    let purchase = self.paired_buy_prices.remove(paired_id).or_else(|| {
+                        self.state
+                            .db
+                            .get_trade_by_client_id(paired_id)
+                            .ok()
+                            .flatten()
+                            .filter(|trade| trade.side == OrderSide::Buy)
+                            .map(|trade| (trade.price, trade.quantity))
+                    });
+                    if let Some((buy_price, buy_qty)) = purchase {
                         let exec_qty = order.quantity.min(buy_qty);
                         cycle_profit = (order.price - buy_price) * exec_qty;
                         is_completed_cycle = true;
@@ -744,11 +1081,17 @@ impl GridTradingEngine {
                         )
                         .await;
                 } else {
-                    note = format!("Grid SELL filled at {} (Qty: {})", order.price, order.quantity);
+                    note = format!(
+                        "Grid SELL filled at {} (Qty: {})",
+                        order.price, order.quantity
+                    );
                     self.state
                         .add_log(
                             "INFO",
-                            format!("🔴 SELL Filled at {} (Qty: {})", order.price, order.quantity),
+                            format!(
+                                "🔴 SELL Filled at {} (Qty: {})",
+                                order.price, order.quantity
+                            ),
                         )
                         .await;
                 }
@@ -770,8 +1113,19 @@ impl GridTradingEngine {
                 // Place paired BUY order at (sell_price - grid_interval)
                 let paired_buy_price = rules.round_price(order.price - grid_interval);
                 let paired_client_id = new_grid_client_order_id(OrderSide::Buy);
+                let paired_exists =
+                    self.state
+                        .active_orders
+                        .read()
+                        .await
+                        .values()
+                        .any(|candidate| {
+                            candidate.side == OrderSide::Buy
+                                && candidate.paired_client_order_id.as_deref()
+                                    == Some(order.client_order_id.as_str())
+                        });
 
-                if full_grid_fill {
+                if full_grid_fill && trading_enabled && !paired_exists {
                     self.place_grid_order(
                         OrderSide::Buy,
                         paired_buy_price,
@@ -791,7 +1145,10 @@ impl GridTradingEngine {
             match self.fetch_execution_pnl(&order.symbol, order_id).await {
                 Ok((pnl, fee, maker)) => (pnl, fee, maker, true),
                 Err(e) => {
-                    warn!("Exchange PnL unavailable for {}: {}", order.client_order_id, e);
+                    warn!(
+                        "Exchange PnL unavailable for {}: {}",
+                        order.client_order_id, e
+                    );
                     (Decimal::ZERO, Decimal::ZERO, true, false)
                 }
             }
@@ -801,7 +1158,7 @@ impl GridTradingEngine {
 
         // Record trade in history
         let trade = TradeRecord {
-            trade_id: Uuid::new_v4().to_string(),
+            trade_id: format!("grid:{}", order.client_order_id),
             client_order_id: order.client_order_id.clone(),
             symbol: order.symbol.clone(),
             side: order.side,
@@ -810,14 +1167,35 @@ impl GridTradingEngine {
             amount_usdc: order.price * order.quantity,
             realized_pnl,
             commission,
-           pnl_verified,
-           is_maker,
-           timestamp: Utc::now(),
-           note,
-       };
+            pnl_verified,
+            is_maker,
+            timestamp: Utc::now(),
+            note,
+        };
 
         // Persist trade to SQLite and update runtime stats
-        self.state.record_trade(trade, is_completed_cycle.then_some(cycle_profit)).await;
+        let recorded = self
+            .state
+            .record_trade(trade, is_completed_cycle.then_some(cycle_profit))
+            .await;
+        if !recorded {
+            self.pause_trading().await;
+            self.state
+                .active_orders
+                .write()
+                .await
+                .insert(order.client_order_id.clone(), order.clone());
+            return;
+        }
+        if !config.exchange.dry_run {
+            if let Err(e) = self.state.db.delete_managed_order(&order.client_order_id) {
+                error!(
+                    "Could not clear filled managed order {}: {}",
+                    order.client_order_id, e
+                );
+                self.pause_trading().await;
+            }
+        }
     }
 
     /// Ensure the active pre-placed order window matches buy_window and sell_window
@@ -835,7 +1213,14 @@ impl GridTradingEngine {
         let buy_window = config.grid.buy_window;
         let sell_window = config.grid.sell_window;
         // Collect current active order prices
-        let active_orders: Vec<GridOrder> = self.state.active_orders.read().await.values().cloned().collect();
+        let active_orders: Vec<GridOrder> = self
+            .state
+            .active_orders
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect();
         let mut active_buy_prices: Vec<Decimal> = active_orders
             .iter()
             .filter(|o| o.side == OrderSide::Buy)
@@ -924,27 +1309,39 @@ impl GridTradingEngine {
         let mut orders_to_cancel = Vec::new();
         for order in active_orders {
             // Keep take-profit orders alive, but prune background grid orders that are too far away
-            if !order.is_take_profit {
-                if order.side == OrderSide::Buy && order.price < max_drift_buy {
-                    orders_to_cancel.push(order);
-                } else if order.side == OrderSide::Sell && order.price > max_drift_sell {
-                    orders_to_cancel.push(order);
-                }
+            if !order.is_take_profit
+                && ((order.side == OrderSide::Buy && order.price < max_drift_buy)
+                    || (order.side == OrderSide::Sell && order.price > max_drift_sell))
+            {
+                orders_to_cancel.push(order);
             }
         }
 
         for order in orders_to_cancel {
-            debug!("Pruning drifted grid order at {}: client_id={}", order.price, order.client_order_id);
+            debug!(
+                "Pruning drifted grid order at {}: client_id={}",
+                order.price, order.client_order_id
+            );
             self.cancel_single_order(&order).await;
         }
     }
 
     /// Keep outstanding sells within the actual long position. Paired exits take priority.
-    async fn trim_sell_orders_to_position(&self) {
-        let mut sell_orders: Vec<GridOrder> = self.state.active_orders.read().await.values()
-            .filter(|order| order.side == OrderSide::Sell).cloned().collect();
-        sell_orders.sort_by(|a, b| b.is_take_profit.cmp(&a.is_take_profit)
-            .then_with(|| a.price.cmp(&b.price)));
+    async fn trim_sell_orders_to_position(&mut self) {
+        let mut sell_orders: Vec<GridOrder> = self
+            .state
+            .active_orders
+            .read()
+            .await
+            .values()
+            .filter(|order| order.side == OrderSide::Sell)
+            .cloned()
+            .collect();
+        sell_orders.sort_by(|a, b| {
+            b.is_take_profit
+                .cmp(&a.is_take_profit)
+                .then_with(|| a.price.cmp(&b.price))
+        });
 
         let mut remaining = self.state.position.read().await.size.max(Decimal::ZERO);
         for order in sell_orders {
@@ -973,21 +1370,65 @@ impl GridTradingEngine {
             return false;
         };
 
+        if !config.exchange.dry_run
+            && !self
+                .last_account_sync
+                .is_some_and(|at| at.elapsed() < Duration::from_secs(10))
+        {
+            warn!("Skipping order: Binance account or position has not been synchronized recently");
+            return false;
+        }
+        if !config.exchange.dry_run
+            && !self
+                .last_orders_sync
+                .is_some_and(|at| at.elapsed() < Duration::from_secs(10))
+        {
+            warn!("Skipping order: Binance open orders have not been synchronized recently");
+            return false;
+        }
+
         // Enforce Maker pricing check
         let current_market_price = self.state.ticker.read().await.last_price;
         if !current_market_price.is_zero() {
             if side == OrderSide::Buy && price >= current_market_price {
-                warn!("Buy price {} >= market price {}, skipping to prevent Taker fill", price, current_market_price);
+                warn!(
+                    "Buy price {} >= market price {}, skipping to prevent Taker fill",
+                    price, current_market_price
+                );
                 return false;
             }
             if side == OrderSide::Sell && price <= current_market_price {
-                warn!("Sell price {} <= market price {}, skipping to prevent Taker fill", price, current_market_price);
+                warn!(
+                    "Sell price {} <= market price {}, skipping to prevent Taker fill",
+                    price, current_market_price
+                );
                 return false;
             }
         }
 
-        if side == OrderSide::Sell {
-            let orders: Vec<GridOrder> = self.state.active_orders.read().await.values().cloned().collect();
+        let orders: Vec<GridOrder> = self
+            .state
+            .active_orders
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect();
+        if side == OrderSide::Buy {
+            if let Some(limit) = config.grid.max_position_usdc {
+                let position_size = self.state.position.read().await.size;
+                let valuation_price = current_market_price.max(price);
+                let exposure =
+                    buy_exposure_usdc(position_size, valuation_price, &orders) + price * quantity;
+                if exposure > limit {
+                    debug!(
+                        "Skipping BUY at {}: projected exposure {} exceeds limit {}",
+                        price, exposure, limit
+                    );
+                    return false;
+                }
+            }
+        } else {
             let available = sell_quantity_available(self.state.position.read().await.size, &orders);
             // A reduce-only sell must be funded by a full grid unit. Never turn
             // the leftover position into a smaller order.
@@ -1002,71 +1443,93 @@ impl GridTradingEngine {
 
         let formatted_price = rules.format_price(price);
         let formatted_qty = rules.format_quantity(quantity);
+        let mut order = GridOrder {
+            client_order_id: client_order_id.clone(),
+            order_id: None,
+            symbol: symbol.clone(),
+            side,
+            price,
+            quantity,
+            amount_usdc: price * quantity,
+            status: OrderStatus::New,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            grid_level,
+            paired_client_order_id,
+            is_take_profit,
+        };
 
         if config.exchange.dry_run {
             // Paper Trading simulation
-            let order = GridOrder {
-                client_order_id: client_order_id.clone(),
-                order_id: Some(rand::random::<i64>().abs()),
-                symbol: symbol.clone(),
-                side,
-                price,
-                quantity,
-                amount_usdc: price * quantity,
-                status: OrderStatus::New,
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-                grid_level,
-                paired_client_order_id,
-                is_take_profit,
-            };
+            order.order_id = Some(rand::random::<i64>().abs());
 
-            self.state.active_orders.write().await.insert(client_order_id.clone(), order);
+            self.state
+                .active_orders
+                .write()
+                .await
+                .insert(client_order_id.clone(), order);
             debug!(
                 "[DRY-RUN] Placed {} Maker order: price={}, qty={}, id={}",
-                side.as_str(), formatted_price, formatted_qty, client_order_id
+                side.as_str(),
+                formatted_price,
+                formatted_qty,
+                client_order_id
             );
             true
         } else {
             // Real Binance Futures API order with GTX Post-Only
+            if let Err(e) = self.state.db.save_managed_order(&order) {
+                error!("Could not persist order intent {}: {}", client_order_id, e);
+                self.pause_trading().await;
+                return false;
+            }
             match self
                 .client
-                .place_order(
-                    &symbol,
-                    side.as_str(),
-                    &formatted_price,
-                    &formatted_qty,
-                    &client_order_id,
-                    config.grid.post_only,
-                    side == OrderSide::Sell,
-                )
+                .place_order(NewOrderRequest {
+                    symbol: &symbol,
+                    side: side.as_str(),
+                    price: &formatted_price,
+                    quantity: &formatted_qty,
+                    client_order_id: &client_order_id,
+                    post_only: config.grid.post_only,
+                    reduce_only: side == OrderSide::Sell,
+                })
                 .await
             {
                 Ok(resp) => {
-                    let order = GridOrder {
-                        client_order_id: resp.client_order_id.clone(),
-                        order_id: Some(resp.order_id),
-                        symbol: resp.symbol,
-                        side,
-                        price,
-                        quantity,
-                        amount_usdc: price * quantity,
-                        status: OrderStatus::New,
-                        created_at: Utc::now(),
-                        updated_at: Utc::now(),
-                        grid_level,
-                        paired_client_order_id,
-                        is_take_profit,
-                    };
+                    order.order_id = Some(resp.order_id);
+                    order.symbol = resp.symbol;
+                    order.client_order_id = resp.client_order_id.clone();
 
-                    self.state.active_orders.write().await.insert(resp.client_order_id, order);
+                    if let Err(e) = self.state.db.save_managed_order(&order) {
+                        error!(
+                            "Order {} was accepted but could not be persisted: {}",
+                            resp.client_order_id, e
+                        );
+                        self.pause_trading().await;
+                    }
+                    self.state
+                        .active_orders
+                        .write()
+                        .await
+                        .insert(resp.client_order_id, order);
                     info!(
                         "Placed {} Maker order on Binance: price={}, qty={}, orderId={}",
-                        side.as_str(), formatted_price, formatted_qty, resp.order_id
+                        side.as_str(),
+                        formatted_price,
+                        formatted_qty,
+                        resp.order_id
                     );
                     true
                 }
                 Err(ExchangeError::PostOnlyRejected(msg)) => {
+                    if let Err(e) = self.state.db.delete_managed_order(&client_order_id) {
+                        error!(
+                            "Could not clear rejected order intent {}: {}",
+                            client_order_id, e
+                        );
+                        self.pause_trading().await;
+                    }
                     warn!(
                         "Maker GTX rejected (would take liquidity): {}. Will retry next tick.",
                         msg
@@ -1074,10 +1537,58 @@ impl GridTradingEngine {
                     false
                 }
                 Err(e) => {
-                    error!("Failed to place {} order at {}: {}", side.as_str(), formatted_price, e);
+                    error!(
+                        "Failed to place {} order at {}: {}",
+                        side.as_str(),
+                        formatted_price,
+                        e
+                    );
                     self.state
-                        .add_log("ERROR", format!("Order placement failed ({} @ {}): {}", side.as_str(), formatted_price, e))
+                        .add_log(
+                            "ERROR",
+                            format!(
+                                "Order placement failed ({} @ {}): {}",
+                                side.as_str(),
+                                formatted_price,
+                                e
+                            ),
+                        )
                         .await;
+                    // A timed-out request may already have reached Binance. Reserve
+                    // its grid level until exchange reconciliation resolves this ID.
+                    if matches!(e, ExchangeError::HttpError(_) | ExchangeError::Other(_)) {
+                        match self
+                            .client
+                            .get_order_by_client_id(&symbol, &client_order_id)
+                            .await
+                        {
+                            Ok(found) => {
+                                order.order_id = Some(found.order_id);
+                                order.status = if found.executed_qty > Decimal::ZERO {
+                                    OrderStatus::PartiallyFilled
+                                } else {
+                                    OrderStatus::New
+                                };
+                            }
+                            Err(query_error) => warn!(
+                                "Order {} remains unresolved after placement error: {}",
+                                client_order_id, query_error
+                            ),
+                        }
+                        self.state
+                            .active_orders
+                            .write()
+                            .await
+                            .insert(client_order_id, order);
+                    } else if let Err(clear_error) =
+                        self.state.db.delete_managed_order(&client_order_id)
+                    {
+                        error!(
+                            "Could not clear failed order intent {}: {}",
+                            client_order_id, clear_error
+                        );
+                        self.pause_trading().await;
+                    }
                     false
                 }
             }
@@ -1085,7 +1596,7 @@ impl GridTradingEngine {
     }
 
     /// Cancel a single order
-    async fn cancel_single_order(&self, order: &GridOrder) -> bool {
+    async fn cancel_single_order(&mut self, order: &GridOrder) -> bool {
         let is_dry_run = self.state.config.read().await.exchange.dry_run;
         if !is_dry_run {
             if let Err(e) = self
@@ -1096,8 +1607,50 @@ impl GridTradingEngine {
                 warn!("Failed to cancel order {}: {}", order.client_order_id, e);
                 return false;
             }
+            let exchange_order = match order.order_id {
+                Some(id) => self.client.get_order(&order.symbol, id).await,
+                None => {
+                    self.client
+                        .get_order_by_client_id(&order.symbol, &order.client_order_id)
+                        .await
+                }
+            };
+            match exchange_order {
+                Ok(exchange_order) if exchange_order.executed_qty > Decimal::ZERO => {
+                    let mut filled = order.clone();
+                    filled.quantity = exchange_order.executed_qty;
+                    if let Some(price) = exchange_order
+                        .avg_price
+                        .filter(|price| *price > Decimal::ZERO)
+                    {
+                        filled.price = price;
+                    }
+                    self.on_order_filled(&mut filled).await;
+                    return true;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    warn!(
+                        "Canceled order {} but could not confirm fill status: {}",
+                        order.client_order_id, e
+                    );
+                    return false;
+                }
+            }
         }
-        self.state.active_orders.write().await.remove(&order.client_order_id);
+        self.state
+            .active_orders
+            .write()
+            .await
+            .remove(&order.client_order_id);
+        if let Err(e) = self.state.db.delete_managed_order(&order.client_order_id) {
+            error!(
+                "Could not delete managed order {}: {}",
+                order.client_order_id, e
+            );
+            self.pause_trading().await;
+            return false;
+        }
         true
     }
 
@@ -1105,27 +1658,80 @@ impl GridTradingEngine {
     async fn cancel_all_orders(&mut self) -> bool {
         let is_dry_run = self.state.config.read().await.exchange.dry_run;
         let symbol = self.state.config.read().await.exchange.symbol.clone();
+        let was_running = *self.state.status.read().await == BotStatus::Running;
+        if let Err(e) = self.state.pause_trading().await {
+            error!("Failed to persist paused status before cancellation: {}", e);
+            return false;
+        }
 
         if !is_dry_run {
-            if let Err(e) = self.client.cancel_all_orders(&symbol).await {
-                error!("Failed to cancel all orders on Binance: {}", e);
+            let live_orders = match self.client.get_open_orders(&symbol).await {
+                Ok(orders) => orders,
+                Err(e) => {
+                    error!("Failed to list managed orders before cancellation: {}", e);
+                    self.pause_trading().await;
+                    return false;
+                }
+            };
+            for order in live_orders
+                .into_iter()
+                .filter(|order| is_grid_order(&order.client_order_id))
+            {
+                if let Err(e) = self
+                    .client
+                    .cancel_order(&symbol, Some(order.order_id), None)
+                    .await
+                {
+                    error!(
+                        "Failed to cancel managed order {}: {}",
+                        order.client_order_id, e
+                    );
+                    self.pause_trading().await;
+                    return false;
+                }
+            }
+            if !self.sync_live_orders().await || !self.state.active_orders.read().await.is_empty() {
+                error!("Managed orders could not be fully reconciled after cancellation");
+                self.pause_trading().await;
                 return false;
             }
         }
 
         self.state.active_orders.write().await.clear();
         self.paired_buy_prices.clear();
+        if !is_dry_run {
+            if let Err(e) = self.state.db.clear_managed_orders(&symbol) {
+                error!("Failed to clear persisted managed orders: {}", e);
+                self.pause_trading().await;
+                return false;
+            }
+        }
+        if was_running {
+            if let Err(e) = self.state.resume_trading().await {
+                error!("Failed to restore running status after cancellation: {}", e);
+                return false;
+            }
+        }
         true
     }
 
     /// Rebalance grid centered around current price
     async fn rebalance_grid(&mut self) {
         if !self.cancel_all_orders().await {
-            self.state.add_log("ERROR", "Grid rebalance stopped: failed to cancel existing orders").await;
+            self.state
+                .add_log(
+                    "ERROR",
+                    "Grid rebalance stopped: failed to cancel existing orders",
+                )
+                .await;
             return;
         }
-        self.maintain_grid_window().await;
-        self.state.add_log("INFO", "Grid window refreshed and rebalanced").await;
+        if *self.state.status.read().await == BotStatus::Running {
+            self.maintain_grid_window().await;
+        }
+        self.state
+            .add_log("INFO", "Grid window refreshed and rebalanced")
+            .await;
     }
 
     /// Broadcast latest snapshot to WebSocket clients
@@ -1142,33 +1748,232 @@ impl GridTradingEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::{aggregate_execution_pnl, has_nearby_grid_order, new_grid_client_order_id, reserved_sell_quantity, sell_quantity_available, GridTradingEngine};
+    use super::{
+        aggregate_execution_pnl, buy_exposure_usdc, has_nearby_grid_order, is_grid_order,
+        new_grid_client_order_id, reserved_sell_quantity, sell_quantity_available,
+        GridTradingEngine,
+    };
     use crate::config::AppConfig;
     use crate::db::Database;
     use crate::exchange::client::BinanceFuturesClient;
-    use crate::exchange::BinanceUserTrade;
+    use crate::exchange::{BinanceOrderResponse, BinanceUserTrade};
     use crate::server::state::AppState;
-    use crate::types::{GridOrder, OrderSide, OrderStatus, TickerInfo};
+    use crate::types::{
+        BotControlAction, BotStatus, GridOrder, OrderSide, OrderStatus, TickerInfo,
+    };
+    use axum::{
+        extract::{Query, State},
+        routing::{delete, get},
+        Json, Router,
+    };
     use chrono::Utc;
     use rust_decimal_macros::dec;
-    use std::sync::Arc;
+    use std::collections::HashMap;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    };
     use tokio::sync::{broadcast, mpsc};
 
     #[test]
     fn small_price_moves_do_not_duplicate_grid_orders() {
         let existing = [dec!(113.13), dec!(112.13), dec!(111.13)];
-        assert!(has_nearby_grid_order(&existing, dec!(113.15), dec!(1), dec!(0.01)));
-        assert!(has_nearby_grid_order(&existing, dec!(112.15), dec!(1), dec!(0.01)));
-        assert!(!has_nearby_grid_order(&existing, dec!(114.15), dec!(1), dec!(0.01)));
+        assert!(has_nearby_grid_order(
+            &existing,
+            dec!(113.15),
+            dec!(1),
+            dec!(0.01)
+        ));
+        assert!(has_nearby_grid_order(
+            &existing,
+            dec!(112.15),
+            dec!(1),
+            dec!(0.01)
+        ));
+        assert!(!has_nearby_grid_order(
+            &existing,
+            dec!(114.15),
+            dec!(1),
+            dec!(0.01)
+        ));
+    }
+
+    #[test]
+    fn managed_order_prefix_excludes_manual_orders() {
+        assert!(is_grid_order("gb_b_123"));
+        assert!(!is_grid_order("manual-123"));
+    }
+
+    #[tokio::test]
+    async fn cancel_all_only_touches_managed_exchange_orders() {
+        #[derive(Clone)]
+        struct FakeExchange {
+            fetches: Arc<AtomicUsize>,
+            canceled: Arc<Mutex<Vec<String>>>,
+        }
+        let fake = FakeExchange {
+            fetches: Arc::new(AtomicUsize::new(0)),
+            canceled: Arc::new(Mutex::new(Vec::new())),
+        };
+        let app = Router::new()
+            .route(
+                "/fapi/v1/openOrders",
+                get(|State(fake): State<FakeExchange>| async move {
+                    let order = |id, client_id: &str| BinanceOrderResponse {
+                        order_id: id,
+                        client_order_id: client_id.into(),
+                        symbol: "SOLUSDC".into(),
+                        status: "NEW".into(),
+                        price: dec!(100),
+                        avg_price: None,
+                        orig_qty: dec!(1),
+                        executed_qty: dec!(0),
+                        side: "BUY".into(),
+                        order_type: "LIMIT".into(),
+                        time_in_force: "GTX".into(),
+                        update_time: None,
+                    };
+                    let orders = if fake.fetches.fetch_add(1, Ordering::SeqCst) == 0 {
+                        vec![order(99, "manual-order"), order(42, "gb_b_owned")]
+                    } else {
+                        Vec::new()
+                    };
+                    Json(orders)
+                }),
+            )
+            .route(
+                "/fapi/v1/order",
+                delete(
+                    |State(fake): State<FakeExchange>,
+                     Query(query): Query<HashMap<String, String>>| async move {
+                        fake.canceled.lock().unwrap().push(query["orderId"].clone());
+                        Json(serde_json::json!({}))
+                    },
+                ),
+            )
+            .with_state(fake.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let mut config = AppConfig::default();
+        config.exchange.dry_run = false;
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let (action_tx, action_rx) = mpsc::channel(1);
+        let (_ticker_tx, ticker_rx) = broadcast::channel(1);
+        let state = AppState::new(config.clone(), db, action_tx);
+        let client = Arc::new(BinanceFuturesClient::with_base_url(&config.exchange, url));
+        let mut engine = GridTradingEngine::new(state, client, action_rx, ticker_rx);
+
+        assert!(engine.cancel_all_orders().await);
+        assert_eq!(*fake.canceled.lock().unwrap(), vec!["42"]);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn switching_live_to_paper_cancels_live_orders_before_commit() {
+        #[derive(Clone)]
+        struct FakeExchange {
+            fetches: Arc<AtomicUsize>,
+            cancellations: Arc<AtomicUsize>,
+        }
+        let fake = FakeExchange {
+            fetches: Arc::new(AtomicUsize::new(0)),
+            cancellations: Arc::new(AtomicUsize::new(0)),
+        };
+        let app = Router::new()
+            .route("/fapi/v1/exchangeInfo", get(|| async {
+                Json(serde_json::json!({"symbols":[{"symbol":"SOLUSDC","status":"TRADING","pricePrecision":2,"quantityPrecision":2,"filters":[{"filterType":"PRICE_FILTER","minPrice":"0.01","maxPrice":"100000","tickSize":"0.01"},{"filterType":"LOT_SIZE","minQty":"0.01","maxQty":"100000","stepSize":"0.01"},{"filterType":"MIN_NOTIONAL","notional":"5"}]}]}))
+            }))
+            .route("/fapi/v1/ticker/price", get(|| async {
+                Json(serde_json::json!({"symbol":"SOLUSDC","price":"100","time":0}))
+            }))
+            .route("/fapi/v1/openOrders", get(|State(fake): State<FakeExchange>| async move {
+                if fake.fetches.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Json(serde_json::json!([{"orderId":42,"clientOrderId":"gb_b_live","symbol":"SOLUSDC","status":"NEW","price":"99","origQty":"1","executedQty":"0","side":"BUY","type":"LIMIT","timeInForce":"GTX","updateTime":0}]))
+                } else {
+                    Json(serde_json::json!([]))
+                }
+            }))
+            .route("/fapi/v1/order", delete(|State(fake): State<FakeExchange>| async move {
+                fake.cancellations.fetch_add(1, Ordering::SeqCst);
+                Json(serde_json::json!({}))
+            }))
+            .with_state(fake.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let mut config = AppConfig::default();
+        config.exchange.dry_run = false;
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let (action_tx, action_rx) = mpsc::channel(1);
+        let (_ticker_tx, ticker_rx) = broadcast::channel(1);
+        let state = AppState::new(config.clone(), db, action_tx);
+        let client = Arc::new(BinanceFuturesClient::with_base_url(&config.exchange, url));
+        let mut engine = GridTradingEngine::new(state.clone(), client, action_rx, ticker_rx);
+        let mut paper = config;
+        paper.exchange.dry_run = true;
+
+        engine.apply_config(paper).await.unwrap();
+        assert_eq!(fake.cancellations.load(Ordering::SeqCst), 1);
+        assert!(state.config.read().await.exchange.dry_run);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn buy_window_respects_position_and_open_buy_exposure() {
+        let mut config = AppConfig::default();
+        config.grid.grid_interval = dec!(1);
+        config.grid.order_amount_usdc = dec!(100);
+        config.grid.buy_window = 3;
+        config.grid.sell_window = 1;
+        config.grid.max_position_usdc = Some(dec!(150));
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let (action_tx, action_rx) = mpsc::channel(1);
+        let (_ticker_tx, ticker_rx) = broadcast::channel(1);
+        let state = AppState::new(config.clone(), db, action_tx);
+        let client = Arc::new(BinanceFuturesClient::new(&config.exchange));
+        let mut engine = GridTradingEngine::new(state.clone(), client, action_rx, ticker_rx);
+        state.ticker.write().await.last_price = dec!(100);
+        state.position.write().await.size = dec!(0.5);
+
+        engine.maintain_grid_window().await;
+        let orders: Vec<_> = state.active_orders.read().await.values().cloned().collect();
+        assert_eq!(
+            orders
+                .iter()
+                .filter(|order| order.side == OrderSide::Buy)
+                .count(),
+            1
+        );
+        assert!(buy_exposure_usdc(dec!(0.5), dec!(100), &orders) <= dec!(150));
+
+        engine.handle_control_action(BotControlAction::Pause).await;
+        assert_eq!(*state.status.read().await, BotStatus::Paused);
+        assert!(state.active_orders.read().await.is_empty());
     }
 
     #[test]
     fn exchange_fills_include_losses_and_fees() {
         let fills = vec![
-            BinanceUserTrade { realized_pnl: dec!(1.20), commission: dec!(0.03), commission_asset: "USDC".into(), maker: true },
-            BinanceUserTrade { realized_pnl: dec!(-2.00), commission: dec!(0.04), commission_asset: "USDC".into(), maker: false },
+            BinanceUserTrade {
+                realized_pnl: dec!(1.20),
+                commission: dec!(0.03),
+                commission_asset: "USDC".into(),
+                maker: true,
+            },
+            BinanceUserTrade {
+                realized_pnl: dec!(-2.00),
+                commission: dec!(0.04),
+                commission_asset: "USDC".into(),
+                maker: false,
+            },
         ];
-        assert_eq!(aggregate_execution_pnl("SOLUSDC", &fills).unwrap(), (dec!(-0.80), dec!(0.07), false));
+        assert_eq!(
+            aggregate_execution_pnl("SOLUSDC", &fills).unwrap(),
+            (dec!(-0.80), dec!(0.07), false)
+        );
         let mut wrong_asset = fills;
         wrong_asset[0].commission_asset = "BNB".into();
         assert!(aggregate_execution_pnl("SOLUSDC", &wrong_asset).is_err());
@@ -1202,7 +2007,11 @@ mod tests {
             paired_client_order_id: None,
             is_take_profit: false,
         };
-        state.active_orders.write().await.insert(order.client_order_id.clone(), order.clone());
+        state
+            .active_orders
+            .write()
+            .await
+            .insert(order.client_order_id.clone(), order.clone());
 
         engine.on_order_filled(&mut order).await;
         let stats = state.stats.read().await;
@@ -1233,7 +2042,10 @@ mod tests {
         engine.maintain_grid_window().await;
         let orders: Vec<_> = state.active_orders.read().await.values().cloned().collect();
         assert_eq!(reserved_sell_quantity(&orders), dec!(0));
-        assert_eq!(orders.iter().filter(|o| o.side == OrderSide::Sell).count(), 0);
+        assert_eq!(
+            orders.iter().filter(|o| o.side == OrderSide::Sell).count(),
+            0
+        );
 
         state.position.write().await.size = dec!(19.67);
         engine.maintain_grid_window().await;
@@ -1246,18 +2058,28 @@ mod tests {
             .calculate_quantity(sell.price, dec!(2000))
             .unwrap();
         assert_eq!(sell.quantity, expected_qty);
-        assert_eq!(orders.iter().filter(|o| o.side == OrderSide::Sell).count(), 1);
+        assert_eq!(
+            orders.iter().filter(|o| o.side == OrderSide::Sell).count(),
+            1
+        );
         assert!(sell_quantity_available(dec!(19.67), &orders) < expected_qty);
 
         let mut oversized = sell.clone();
         oversized.quantity = dec!(20);
         oversized.amount_usdc = oversized.price * oversized.quantity;
-        state.active_orders.write().await.insert(oversized.client_order_id.clone(), oversized);
+        state
+            .active_orders
+            .write()
+            .await
+            .insert(oversized.client_order_id.clone(), oversized);
 
         engine.maintain_grid_window().await;
         let orders: Vec<_> = state.active_orders.read().await.values().cloned().collect();
         assert_eq!(reserved_sell_quantity(&orders), expected_qty);
-        assert_eq!(orders.iter().filter(|o| o.side == OrderSide::Sell).count(), 1);
+        assert_eq!(
+            orders.iter().filter(|o| o.side == OrderSide::Sell).count(),
+            1
+        );
 
         state.position.write().await.size = dec!(-1);
         engine.trim_sell_orders_to_position().await;
@@ -1366,11 +2188,13 @@ mod tests {
             ticker.mark_update_time = mark_updated_at;
         }
 
-        engine.handle_ticker_update(TickerInfo {
-            symbol: config.exchange.symbol,
-            last_price: dec!(114.5),
-            ..Default::default()
-        }).await;
+        engine
+            .handle_ticker_update(TickerInfo {
+                symbol: config.exchange.symbol,
+                last_price: dec!(114.5),
+                ..Default::default()
+            })
+            .await;
 
         let ticker = state.ticker.read().await;
         assert_eq!(ticker.last_price, dec!(114.5));

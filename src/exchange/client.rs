@@ -25,6 +25,16 @@ pub enum ExchangeError {
     Other(String),
 }
 
+pub struct NewOrderRequest<'a> {
+    pub symbol: &'a str,
+    pub side: &'a str,
+    pub price: &'a str,
+    pub quantity: &'a str,
+    pub client_order_id: &'a str,
+    pub post_only: bool,
+    pub reduce_only: bool,
+}
+
 pub struct BinanceFuturesClient {
     base_url: String,
     pub _api_key: String,
@@ -64,6 +74,13 @@ impl BinanceFuturesClient {
             recv_window: config.recv_window,
             time_offset_ms: AtomicI64::new(0),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_base_url(config: &ExchangeConfig, base_url: String) -> Self {
+        let mut client = Self::new(config);
+        client.base_url = base_url;
+        client
     }
 
     /// Synchronize local timestamp with Binance Futures server time
@@ -169,35 +186,62 @@ impl BinanceFuturesClient {
     }
 
     /// Resolve a persisted client order ID after a restart.
-    pub async fn get_order_by_client_id(&self, symbol: &str, client_order_id: &str) -> Result<BinanceOrderResponse> {
+    pub async fn get_order_by_client_id(
+        &self,
+        symbol: &str,
+        client_order_id: &str,
+    ) -> Result<BinanceOrderResponse> {
         let ts = self.current_timestamp();
         let query = format!(
             "symbol={}&origClientOrderId={}&recvWindow={}&timestamp={}",
             symbol, client_order_id, self.recv_window, ts
         );
-        let url = format!("{}/fapi/v1/order?{}", self.base_url, self.sign_params(&query));
+        let url = format!(
+            "{}/fapi/v1/order?{}",
+            self.base_url,
+            self.sign_params(&query)
+        );
         let resp = self.client.get(&url).send().await?;
         if !resp.status().is_success() {
-            return Err(anyhow!("Failed to resolve order {}: {}", client_order_id, resp.status()));
+            return Err(anyhow!(
+                "Failed to resolve order {}: {}",
+                client_order_id,
+                resp.status()
+            ));
         }
         Ok(resp.json().await?)
     }
 
     /// Binance execution records contain the exchange-calculated realized PnL and fee.
-    pub async fn get_user_trades(&self, symbol: &str, order_id: i64) -> Result<Vec<BinanceUserTrade>> {
+    pub async fn get_user_trades(
+        &self,
+        symbol: &str,
+        order_id: i64,
+    ) -> Result<Vec<BinanceUserTrade>> {
         let ts = self.current_timestamp();
         let query = format!(
             "symbol={}&orderId={}&limit=1000&recvWindow={}&timestamp={}",
             symbol, order_id, self.recv_window, ts
         );
-        let url = format!("{}/fapi/v1/userTrades?{}", self.base_url, self.sign_params(&query));
+        let url = format!(
+            "{}/fapi/v1/userTrades?{}",
+            self.base_url,
+            self.sign_params(&query)
+        );
         let resp = self.client.get(&url).send().await?;
         if !resp.status().is_success() {
-            return Err(anyhow!("Failed to fetch trades for order {}: {}", order_id, resp.status()));
+            return Err(anyhow!(
+                "Failed to fetch trades for order {}: {}",
+                order_id,
+                resp.status()
+            ));
         }
         let fills: Vec<BinanceUserTrade> = resp.json().await?;
         if fills.len() == 1000 {
-            return Err(anyhow!("Order {} has at least 1000 fills; PnL requires pagination", order_id));
+            return Err(anyhow!(
+                "Order {} has at least 1000 fills; PnL requires pagination",
+                order_id
+            ));
         }
         Ok(fills)
     }
@@ -206,26 +250,27 @@ impl BinanceFuturesClient {
     /// reduce_only prevents a sell from opening a short when the position changes on Binance.
     pub async fn place_order(
         &self,
-        symbol: &str,
-        side: &str,
-        price: &str,
-        quantity: &str,
-        client_order_id: &str,
-        post_only: bool,
-        reduce_only: bool,
+        order: NewOrderRequest<'_>,
     ) -> std::result::Result<BinanceOrderResponse, ExchangeError> {
         let ts = self.current_timestamp();
-        let tif = if post_only { "GTX" } else { "GTC" };
+        let tif = if order.post_only { "GTX" } else { "GTC" };
 
-        let reduce_only_param = if reduce_only { "&reduceOnly=true" } else { "" };
+        let reduce_only_param = if order.reduce_only {
+            "&reduceOnly=true"
+        } else {
+            ""
+        };
         let query = format!(
             "symbol={}&side={}&type=LIMIT&timeInForce={}&price={}&quantity={}&newClientOrderId={}{}&recvWindow={}&timestamp={}",
-            symbol, side, tif, price, quantity, client_order_id, reduce_only_param, self.recv_window, ts
+            order.symbol, order.side, tif, order.price, order.quantity, order.client_order_id, reduce_only_param, self.recv_window, ts
         );
         let signed_query = self.sign_params(&query);
         let url = format!("{}/fapi/v1/order?{}", self.base_url, signed_query);
 
-        debug!("Sending Binance order request: side={}, price={}, qty={}, tif={}", side, price, quantity, tif);
+        debug!(
+            "Sending Binance order request: side={}, price={}, qty={}, tif={}",
+            order.side, order.price, order.quantity, tif
+        );
         let resp = self.client.post(&url).send().await?;
 
         if !resp.status().is_success() {
@@ -246,9 +291,10 @@ impl BinanceFuturesClient {
             )));
         }
 
-        let order: BinanceOrderResponse = resp.json().await.map_err(|e| {
-            ExchangeError::Other(format!("Failed to parse order response: {}", e))
-        })?;
+        let order: BinanceOrderResponse = resp
+            .json()
+            .await
+            .map_err(|e| ExchangeError::Other(format!("Failed to parse order response: {}", e)))?;
         Ok(order)
     }
 
@@ -260,7 +306,10 @@ impl BinanceFuturesClient {
         client_order_id: Option<&str>,
     ) -> Result<()> {
         let ts = self.current_timestamp();
-        let mut query = format!("symbol={}&recvWindow={}&timestamp={}", symbol, self.recv_window, ts);
+        let mut query = format!(
+            "symbol={}&recvWindow={}&timestamp={}",
+            symbol, self.recv_window, ts
+        );
         if let Some(id) = order_id {
             query.push_str(&format!("&orderId={}", id));
         } else if let Some(cid) = client_order_id {
@@ -313,7 +362,9 @@ impl BinanceFuturesClient {
         }
 
         let positions: Vec<BinancePositionRisk> = resp.json().await?;
-        let pos = positions.into_iter().find(|p| p.symbol.eq_ignore_ascii_case(symbol));
+        let pos = positions
+            .into_iter()
+            .find(|p| p.symbol.eq_ignore_ascii_case(symbol));
         Ok(pos)
     }
 

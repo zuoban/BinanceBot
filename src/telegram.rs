@@ -37,8 +37,16 @@ pub fn format_trade_message(trade: &TradeRecord, is_dry_run: bool, is_testnet: b
         let net = trade.realized_pnl - trade.commission;
         format!(
             "\n已实现盈亏：{}{pnl} {quote}\n手续费：{fee} {quote}\n扣费后：{}{net} {quote}",
-            if trade.realized_pnl >= rust_decimal::Decimal::ZERO { "+" } else { "" },
-            if net >= rust_decimal::Decimal::ZERO { "+" } else { "" },
+            if trade.realized_pnl >= rust_decimal::Decimal::ZERO {
+                "+"
+            } else {
+                ""
+            },
+            if net >= rust_decimal::Decimal::ZERO {
+                "+"
+            } else {
+                ""
+            },
             pnl = trade.realized_pnl,
             fee = trade.commission,
         )
@@ -142,8 +150,6 @@ mod tests {
         let message = format_trade_message(&trade, false, false);
         assert!(message.contains("已实现盈亏：-3.25 USDC"));
         assert!(message.contains("扣费后：-4.05 USDC"));
-        assert!(
-            message.starts_with("<b>🔴 卖出成交｜123.45</b>")
-        );
+        assert!(message.starts_with("<b>🔴 卖出成交｜123.45</b>"));
     }
 }

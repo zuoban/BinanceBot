@@ -4,8 +4,8 @@ use sha2::Sha256;
 type HmacSha256 = Hmac<Sha256>;
 
 pub fn sign_query(secret: &str, query: &str) -> String {
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
-        .expect("HMAC can take key of any size");
+    let mut mac =
+        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC can take key of any size");
     mac.update(query.as_bytes());
     hex::encode(mac.finalize().into_bytes())
 }

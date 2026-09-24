@@ -12,7 +12,23 @@ env:
   REGISTRY: ghcr.io
 
 jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Check code quality
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Run tests
+        run: cargo test --locked
+
   build:
+    needs: checks
     strategy:
       matrix:
         include:

@@ -163,11 +163,56 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let symbol = &self.exchange.symbol;
+        anyhow::ensure!(
+            symbol.len() >= 3
+                && symbol.len() <= 32
+                && symbol
+                    .bytes()
+                    .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit()),
+            "交易对只能包含 3-32 位大写字母和数字"
+        );
+        anyhow::ensure!(
+            self.grid.grid_interval > Decimal::ZERO,
+            "网格间距必须大于 0"
+        );
+        anyhow::ensure!(
+            self.grid.order_amount_usdc > Decimal::ZERO,
+            "每格金额必须大于 0"
+        );
+        anyhow::ensure!(
+            (1..=50).contains(&self.grid.buy_window) && (1..=50).contains(&self.grid.sell_window),
+            "买入和卖出窗口必须在 1-50 之间"
+        );
+        if let Some(minimum) = self.grid.min_price {
+            anyhow::ensure!(minimum > Decimal::ZERO, "价格下限必须大于 0");
+        }
+        if let Some(maximum) = self.grid.max_price {
+            anyhow::ensure!(maximum > Decimal::ZERO, "价格上限必须大于 0");
+        }
+        if let (Some(minimum), Some(maximum)) = (self.grid.min_price, self.grid.max_price) {
+            anyhow::ensure!(minimum < maximum, "价格下限必须小于上限");
+        }
+        if let Some(limit) = self.grid.max_position_usdc {
+            anyhow::ensure!(limit > Decimal::ZERO, "最大持仓金额必须大于 0");
+        }
+        anyhow::ensure!(self.exchange.sync_interval_secs > 0, "同步间隔必须大于 0");
+        if !self.exchange.dry_run {
+            anyhow::ensure!(
+                !self.exchange.api_key.trim().is_empty()
+                    && !self.exchange.api_secret.trim().is_empty(),
+                "实盘或测试网需要配置 API Key 和 Secret"
+            );
+        }
+        Ok(())
+    }
+
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path.as_ref())
             .with_context(|| format!("Failed to read config file: {:?}", path.as_ref()))?;
-        let config: AppConfig = toml::from_str(&content)
-            .with_context(|| "Failed to parse config TOML format")?;
+        let config: AppConfig =
+            toml::from_str(&content).with_context(|| "Failed to parse config TOML format")?;
         Ok(config)
     }
 

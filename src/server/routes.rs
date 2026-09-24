@@ -1,12 +1,11 @@
 use crate::server::state::AppState;
 use crate::server::ui::INDEX_HTML;
 use crate::types::{
-    AuthLoginPayload, AuthSetupPayload, AuthStatusResponse, AuthTokenResponse,
-    BotControlAction, ChangePasswordPayload, GridOrder, LogEntry, TradeRecord,
-    UpdateConfigPayload, WebConfigView,
+    AuthLoginPayload, AuthSetupPayload, AuthStatusResponse, AuthTokenResponse, BotControlAction,
+    ChangePasswordPayload, GridOrder, LogEntry, TradeRecord, UpdateConfigPayload, WebConfigView,
 };
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
@@ -15,7 +14,6 @@ use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use std::sync::Arc;
-use tower_http::cors::CorsLayer;
 use tracing::{error, info, warn};
 
 #[derive(Debug, Deserialize)]
@@ -30,12 +28,7 @@ pub struct ApiResponse<T> {
     pub message: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct WsQuery {
-    pub token: Option<String>,
-}
-
-fn extract_token(headers: &HeaderMap, query_token: Option<&str>) -> Option<String> {
+fn extract_token(headers: &HeaderMap) -> Option<String> {
     if let Some(auth_val) = headers.get(axum::http::header::AUTHORIZATION) {
         if let Ok(auth_str) = auth_val.to_str() {
             if let Some(token) = auth_str
@@ -59,13 +52,6 @@ fn extract_token(headers: &HeaderMap, query_token: Option<&str>) -> Option<Strin
         }
     }
 
-    if let Some(token) = query_token {
-        let t = token.trim();
-        if !t.is_empty() {
-            return Some(t.to_string());
-        }
-    }
-
     None
 }
 
@@ -74,18 +60,7 @@ async fn require_auth_middleware(
     req: axum::extract::Request,
     next: Next,
 ) -> Result<Response, (StatusCode, Json<ApiResponse<()>>)> {
-    let query_token = req.uri().query().and_then(|q| {
-        q.split('&').find_map(|pair| {
-            let mut parts = pair.split('=');
-            if parts.next()? == "token" {
-                parts.next().map(|v| v.to_string())
-            } else {
-                None
-            }
-        })
-    });
-
-    let token_opt = extract_token(req.headers(), query_token.as_deref());
+    let token_opt = extract_token(req.headers());
     let is_valid = match token_opt {
         Some(ref t) => state.is_token_valid(t).await,
         None => false,
@@ -111,9 +86,15 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/orders", get(get_orders_handler))
         .route("/api/trades", get(get_trades_handler))
         .route("/api/logs", get(get_logs_handler))
-        .route("/api/config", get(get_config_handler).post(post_config_handler))
+        .route(
+            "/api/config",
+            get(get_config_handler).post(post_config_handler),
+        )
         .route("/api/control", post(post_control_handler))
-        .route("/api/auth/change_password", post(post_change_password_handler))
+        .route(
+            "/api/auth/change_password",
+            post(post_change_password_handler),
+        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_auth_middleware,
@@ -127,7 +108,6 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/auth/logout", post(post_auth_logout_handler))
         .route("/ws", get(ws_handler))
         .merge(api_protected)
-        .layer(CorsLayer::permissive())
         .with_state(state)
 }
 
@@ -140,7 +120,7 @@ async fn get_auth_status_handler(
     headers: HeaderMap,
 ) -> Json<ApiResponse<AuthStatusResponse>> {
     let initialized = state.db.is_admin_password_set().unwrap_or(false);
-    let token = extract_token(&headers, None);
+    let token = extract_token(&headers);
     let authenticated = match token {
         Some(ref t) => state.is_token_valid(t).await,
         None => false,
@@ -167,7 +147,9 @@ async fn post_auth_setup_handler(
             Json(ApiResponse {
                 success: false,
                 data: None,
-                message: Some("管理员密码已初始化，不能重复设置。如需修改请在登录后操作。".to_string()),
+                message: Some(
+                    "管理员密码已初始化，不能重复设置。如需修改请在登录后操作。".to_string(),
+                ),
             }),
         );
     }
@@ -184,19 +166,54 @@ async fn post_auth_setup_handler(
         );
     }
 
-    if let Err(e) = state.db.set_admin_password(password) {
-        error!("Failed to set admin password: {}", e);
+    if !state.begin_login_attempt().await {
         return (
-            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::TOO_MANY_REQUESTS,
             Json(ApiResponse {
                 success: false,
                 data: None,
-                message: Some(format!("保存管理员密码失败: {}", e)),
+                message: Some("初始化尝试过于频繁，请一分钟后重试".to_string()),
+            }),
+        );
+    }
+    if !state.verify_setup_code(&payload.setup_code) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some("初始化码不正确，请从当前应用日志中获取".to_string()),
             }),
         );
     }
 
+    match state.db.initialize_admin_password(password) {
+        Ok(true) => {}
+        Ok(false) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    message: Some("管理员密码已由其他请求初始化".to_string()),
+                }),
+            )
+        }
+        Err(e) => {
+            error!("Failed to set admin password: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    message: Some(format!("保存管理员密码失败: {}", e)),
+                }),
+            );
+        }
+    }
+
     let token = crate::auth::generate_session_token();
+    state.clear_login_attempts().await;
     let _ = state.create_session(&token).await;
     info!("Admin password successfully initialized and initial session created");
 
@@ -214,6 +231,16 @@ async fn post_auth_login_handler(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<AuthLoginPayload>,
 ) -> (StatusCode, Json<ApiResponse<AuthTokenResponse>>) {
+    if !state.begin_login_attempt().await {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some("登录尝试过于频繁，请一分钟后重试".to_string()),
+            }),
+        );
+    }
     let is_set = state.db.is_admin_password_set().unwrap_or(false);
     if !is_set {
         return (
@@ -228,6 +255,7 @@ async fn post_auth_login_handler(
 
     match state.db.verify_admin_password(&payload.password) {
         Ok(true) => {
+            state.clear_login_attempts().await;
             let token = crate::auth::generate_session_token();
             let _ = state.create_session(&token).await;
             info!("Admin authentication successful");
@@ -269,7 +297,7 @@ async fn post_auth_logout_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Json<ApiResponse<()>> {
-    if let Some(token) = extract_token(&headers, None) {
+    if let Some(token) = extract_token(&headers) {
         let _ = state.delete_session(&token).await;
     }
     Json(ApiResponse {
@@ -386,7 +414,9 @@ async fn get_logs_handler(State(state): State<Arc<AppState>>) -> Json<ApiRespons
     })
 }
 
-async fn get_config_handler(State(state): State<Arc<AppState>>) -> Json<ApiResponse<WebConfigView>> {
+async fn get_config_handler(
+    State(state): State<Arc<AppState>>,
+) -> Json<ApiResponse<WebConfigView>> {
     let config = state.config.read().await;
     let has_key = !config.exchange.api_key.trim().is_empty();
     let has_secret = !config.exchange.api_secret.trim().is_empty();
@@ -473,9 +503,15 @@ async fn post_config_handler(
     current_config.grid.order_amount_usdc = payload.order_amount_usdc;
     current_config.grid.buy_window = payload.buy_window;
     current_config.grid.sell_window = payload.sell_window;
-    current_config.grid.post_only = payload.post_only;
-    current_config.exchange.dry_run = payload.dry_run;
-    current_config.exchange.is_testnet = payload.is_testnet;
+    if let Some(post_only) = payload.post_only {
+        current_config.grid.post_only = post_only;
+    }
+    if let Some(dry_run) = payload.dry_run {
+        current_config.exchange.dry_run = dry_run;
+    }
+    if let Some(is_testnet) = payload.is_testnet {
+        current_config.exchange.is_testnet = is_testnet;
+    }
     current_config.grid.min_price = payload.min_price;
     current_config.grid.max_price = payload.max_price;
     current_config.grid.max_position_usdc = payload.max_position_usdc;
@@ -519,28 +555,23 @@ async fn post_config_handler(
             message: Some("启用 Telegram 通知前请填写 Bot Token 和 Chat ID".to_string()),
         });
     }
-
-    // Persist to SQLite database
-    if let Err(e) = state.db.save_config(&current_config) {
-        error!("Failed to save configuration to SQLite database: {}", e);
+    if let Err(error) = current_config.validate() {
         return Json(ApiResponse {
             success: false,
             data: None,
-            message: Some(format!("保存到 SQLite 数据库失败: {}", e)),
+            message: Some(error.to_string()),
         });
-    } else {
-        info!(
-            "Configuration successfully saved to SQLite database ({})",
-            state.db.path()
-        );
     }
 
-    // Notify strategy engine
+    // The engine applies the change and persists it only after the exchange
+    // transition succeeds. Wait for its result before reporting success.
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     if let Err(e) = state
         .action_tx
-        .send(BotControlAction::UpdateConfig(Box::new(
-            current_config.clone(),
-        )))
+        .send(BotControlAction::UpdateConfig {
+            config: Box::new(current_config.clone()),
+            reply: reply_tx,
+        })
         .await
     {
         error!("Failed to notify strategy engine of config update: {}", e);
@@ -549,6 +580,23 @@ async fn post_config_handler(
             data: None,
             message: Some(format!("策略更新通知失败: {}", e)),
         });
+    }
+    match reply_rx.await {
+        Ok(Ok(())) => info!("Configuration applied and saved to {}", state.db.path()),
+        Ok(Err(error)) => {
+            return Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some(error),
+            })
+        }
+        Err(error) => {
+            return Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some(format!("策略未确认配置变更: {}", error)),
+            })
+        }
     }
 
     let has_key = !current_config.exchange.api_key.trim().is_empty();
@@ -629,10 +677,18 @@ async fn post_control_handler(
 
 async fn ws_handler(
     ws: WebSocketUpgrade,
-    Query(query): Query<WsQuery>,
+    headers: HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> Response {
-    let token = query.token.as_deref().unwrap_or_default();
+    let token = headers
+        .get(axum::http::header::SEC_WEBSOCKET_PROTOCOL)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|protocols| {
+            protocols
+                .split(',')
+                .find_map(|protocol| protocol.trim().strip_prefix("token."))
+        })
+        .unwrap_or_default();
     if !state.is_token_valid(token).await {
         return (
             StatusCode::UNAUTHORIZED,
@@ -641,10 +697,12 @@ async fn ws_handler(
             .into_response();
     }
 
-    ws.on_upgrade(|socket| handle_socket(socket, state))
+    let token = token.to_string();
+    ws.protocols(["auth"])
+        .on_upgrade(move |socket| handle_socket(socket, state, token))
 }
 
-async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
+async fn handle_socket(socket: WebSocket, state: Arc<AppState>, token: String) {
     let (mut sender, mut receiver) = socket.split();
     let mut rx = state.ws_broadcast_tx.subscribe();
 
@@ -657,10 +715,23 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         let _ = sender.send(Message::Text(json)).await;
     }
 
+    let send_state = state.clone();
+    let send_token = token.clone();
     let mut send_task = tokio::spawn(async move {
-        while let Ok(msg) = rx.recv().await {
-            if sender.send(Message::Text(msg)).await.is_err() {
-                break;
+        let mut check_auth = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            tokio::select! {
+                _ = check_auth.tick() => {
+                    if !send_state.is_token_valid(&send_token).await { break; }
+                }
+                message = rx.recv() => {
+                    match message {
+                        Ok(msg) => {
+                            if sender.send(Message::Text(msg)).await.is_err() { break; }
+                        }
+                        Err(_) => break,
+                    }
+                }
             }
         }
     });
@@ -670,6 +741,9 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         while let Some(Ok(msg)) = receiver.next().await {
             if let Message::Text(text) = msg {
                 if let Ok(req) = serde_json::from_str::<ControlRequest>(&text) {
+                    if !state_clone.is_token_valid(&token).await {
+                        break;
+                    }
                     let action = match req.action.to_lowercase().as_str() {
                         "pause" => Some(BotControlAction::Pause),
                         "resume" => Some(BotControlAction::Resume),

@@ -3,13 +3,13 @@ use binance_grid_bot::db::Database;
 use binance_grid_bot::exchange::{BinanceFuturesClient, BinanceWsStream};
 use binance_grid_bot::server::{create_router, AppState};
 use binance_grid_bot::strategy::GridTradingEngine;
-use binance_grid_bot::types::TickerInfo;
+use binance_grid_bot::types::{BotStatus, TickerInfo};
 use clap::Parser;
 use rust_decimal::Decimal;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -144,7 +144,9 @@ async fn main() -> anyhow::Result<()> {
         overridden = true;
     } else if config.server.host == "127.0.0.1" {
         // Automatically upgrade legacy loopback binding to 0.0.0.0 so server and docker deployments can be accessed externally
-        info!("Updating server host binding from 127.0.0.1 to 0.0.0.0 for remote/external web access");
+        info!(
+            "Updating server host binding from 127.0.0.1 to 0.0.0.0 for remote/external web access"
+        );
         config.server.host = "0.0.0.0".to_string();
         overridden = true;
     }
@@ -161,7 +163,9 @@ async fn main() -> anyhow::Result<()> {
         overridden = true;
     }
 
+    let startup_config_error = config.validate().err();
     if overridden {
+        config.validate()?;
         db.save_config(&config)?;
     }
 
@@ -178,48 +182,109 @@ async fn main() -> anyhow::Result<()> {
 
     info!("============================================================");
     info!("🚀 Binance Futures Grid Trading Robot (Rust Engine)");
-    info!("• Persistence:      SQLite ({:?}) - Zero config files required!", args.db);
-    info!("• Admin Auth:       {}", if has_admin_pwd { "PROTECTED (Password Set)" } else { "PENDING SETUP (Visit Web to initialize)" });
+    info!(
+        "• Persistence:      SQLite ({:?}) - Zero config files required!",
+        args.db
+    );
+    info!(
+        "• Admin Auth:       {}",
+        if has_admin_pwd {
+            "PROTECTED (Password Set)"
+        } else {
+            "PENDING SETUP (Visit Web to initialize)"
+        }
+    );
     info!("• Symbol:           {}", config.exchange.symbol);
     info!("• Grid Interval:    {} USDC", config.grid.grid_interval);
-    info!("• Order Size:       {} USDC per grid", config.grid.order_amount_usdc);
-    info!("• Window Orders:    {} Buy / {} Sell", config.grid.buy_window, config.grid.sell_window);
+    info!(
+        "• Order Size:       {} USDC per grid",
+        config.grid.order_amount_usdc
+    );
+    info!(
+        "• Window Orders:    {} Buy / {} Sell",
+        config.grid.buy_window, config.grid.sell_window
+    );
     info!("• Order Type:       Post-Only Maker (GTX)");
-    info!("• Trading Mode:     {}", if config.exchange.dry_run { "PAPER TRADING (Simulation)" } else if config.exchange.is_testnet { "TESTNET" } else { "LIVE REAL" });
+    info!(
+        "• Trading Mode:     {}",
+        if config.exchange.dry_run {
+            "PAPER TRADING (Simulation)"
+        } else if config.exchange.is_testnet {
+            "TESTNET"
+        } else {
+            "LIVE REAL"
+        }
+    );
     if config.server.host == "0.0.0.0" {
-        info!("• Dashboard Web:    http://<服务器公网IP>:{} (本地: http://127.0.0.1:{})", config.server.port, config.server.port);
+        info!(
+            "• Dashboard Web:    http://<服务器公网IP>:{} (本地: http://127.0.0.1:{})",
+            config.server.port, config.server.port
+        );
     } else {
-        info!("• Dashboard Web:    http://{}:{}", config.server.host, config.server.port);
+        info!(
+            "• Dashboard Web:    http://{}:{}",
+            config.server.host, config.server.port
+        );
     }
     info!("============================================================");
 
     // Channels
     let (action_tx, action_rx) = mpsc::channel(32);
     let (ticker_tx, ticker_rx) = broadcast::channel::<TickerInfo>(64);
+    let (market_stream_tx, market_stream_rx) =
+        watch::channel((config.exchange.symbol.clone(), config.exchange.is_testnet));
 
     let client = Arc::new(BinanceFuturesClient::new(&config.exchange));
     let state = AppState::new(config.clone(), db.clone(), action_tx.clone());
+    if let Some(code) = state.setup_code() {
+        info!(
+            "首次设置管理员密码需要初始化码: {}（可在应用日志中查看）",
+            code
+        );
+    }
+    if let Some(error) = startup_config_error {
+        state.pause_trading().await?;
+        state
+            .add_log(
+                "ERROR",
+                format!("Saved configuration is invalid; trading paused: {}", error),
+            )
+            .await;
+    }
+    if !has_admin_pwd && !config.exchange.dry_run {
+        state.pause_trading().await?;
+        state
+            .add_log(
+                "WARN",
+                "Live trading paused until administrator setup is complete",
+            )
+            .await;
+    }
 
     // Spawn Binance WebSocket market data stream
-    let ws_stream = BinanceWsStream::new(
-        config.exchange.symbol.clone(),
-        config.exchange.is_testnet,
-        ticker_tx.clone(),
-    );
+    let ws_stream = BinanceWsStream::new(market_stream_rx, ticker_tx.clone());
     tokio::spawn(async move {
         ws_stream.run().await;
     });
 
     // Initialize and spawn Grid Trading Engine
-    let mut engine = GridTradingEngine::new(
-        state.clone(),
-        client.clone(),
-        action_rx,
-        ticker_rx,
-    );
+    let mut engine = GridTradingEngine::new(state.clone(), client.clone(), action_rx, ticker_rx);
+    engine.set_market_stream_tx(market_stream_tx);
 
     if let Err(e) = engine.initialize().await {
-        error!("Engine initialization warning: {}", e);
+        error!("Engine initialization failed; trading paused: {}", e);
+        state.pause_trading().await?;
+        state
+            .add_log(
+                "ERROR",
+                format!("Startup reconciliation failed; trading paused: {}", e),
+            )
+            .await;
+    }
+    if !config.exchange.dry_run && *state.status.read().await == BotStatus::Paused {
+        action_tx
+            .send(binance_grid_bot::types::BotControlAction::Pause)
+            .await?;
     }
 
     tokio::spawn(state.clone().run_cny_rate_refresh());
@@ -238,7 +303,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    
+
     // Run web server with graceful shutdown
     tokio::select! {
         res = axum::serve(listener, app) => {

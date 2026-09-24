@@ -8,8 +8,8 @@ use chrono::Utc;
 use rust_decimal::Decimal;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::{broadcast, mpsc, RwLock};
+use std::time::{Duration, Instant};
+use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 use tracing::{error, warn};
 
 pub struct AppState {
@@ -25,6 +25,8 @@ pub struct AppState {
     pub active_orders: RwLock<HashMap<String, GridOrder>>,
     pub recent_trades: RwLock<VecDeque<TradeRecord>>,
     pub recent_logs: RwLock<VecDeque<LogEntry>>,
+    login_failures: Mutex<VecDeque<Instant>>,
+    setup_code: Option<String>,
 
     pub action_tx: mpsc::Sender<BotControlAction>,
     pub ws_broadcast_tx: broadcast::Sender<String>,
@@ -39,10 +41,32 @@ impl AppState {
     ) -> Arc<Self> {
         let (ws_broadcast_tx, _) = broadcast::channel(100);
         let symbol = config.exchange.symbol.clone();
+        let initial_status = match db.load_bot_status() {
+            Ok(Some(status)) => status,
+            Ok(None) if config.exchange.dry_run => BotStatus::Running,
+            Ok(None) => BotStatus::Paused,
+            Err(error) => {
+                warn!(
+                    "Could not load saved bot status; starting paused: {}",
+                    error
+                );
+                BotStatus::Paused
+            }
+        };
+        let setup_code = if db.is_admin_password_set().unwrap_or(false) {
+            None
+        } else {
+            Some(crate::auth::generate_setup_code())
+        };
 
         let initial_account = if config.exchange.dry_run {
             AccountInfo {
-                asset: if symbol.ends_with("USDT") { "USDT" } else { "USDC" }.to_string(),
+                asset: if symbol.ends_with("USDT") {
+                    "USDT"
+                } else {
+                    "USDC"
+                }
+                .to_string(),
                 total_wallet_balance: rust_decimal_macros::dec!(10000.0),
                 available_balance: rust_decimal_macros::dec!(10000.0),
                 margin_balance: rust_decimal_macros::dec!(10000.0),
@@ -81,7 +105,7 @@ impl AppState {
             db,
             config: RwLock::new(config),
             rules: RwLock::new(SymbolRules::default()),
-            status: RwLock::new(BotStatus::Running),
+            status: RwLock::new(initial_status),
             ticker: RwLock::new(TickerInfo {
                 symbol,
                 ..Default::default()
@@ -93,6 +117,8 @@ impl AppState {
             active_orders: RwLock::new(HashMap::new()),
             recent_trades: RwLock::new(recent_trades),
             recent_logs: RwLock::new(VecDeque::with_capacity(300)),
+            login_failures: Mutex::new(VecDeque::new()),
+            setup_code,
             action_tx,
             ws_broadcast_tx,
             telegram_client: reqwest::Client::builder()
@@ -102,33 +128,40 @@ impl AppState {
         })
     }
 
-    pub async fn record_trade(self: &Arc<Self>, trade: TradeRecord, cycle_profit: Option<Decimal>) {
-        // Persist trade into SQLite
-        if let Err(e) = self.db.insert_trade(&trade) {
-            error!("Failed to persist trade to SQLite database: {}", e);
-            return;
-        }
-
-        // Update grid performance statistics
+    pub async fn record_trade(
+        self: &Arc<Self>,
+        trade: TradeRecord,
+        cycle_profit: Option<Decimal>,
+    ) -> bool {
+        // Persist the trade and its cumulative statistics together.
         let current_symbol = self.config.read().await.exchange.symbol.clone();
         {
             let mut stats = self.stats.write().await;
-            stats.total_trades += 1;
-            stats.total_volume_usdc += trade.amount_usdc;
+            let mut updated = stats.clone();
+            updated.total_trades += 1;
+            updated.total_volume_usdc += trade.amount_usdc;
             if let Some(profit) = cycle_profit {
-                stats.completed_cycles += 1;
-                stats.total_realized_profit += profit;
+                updated.completed_cycles += 1;
+                updated.total_realized_profit += profit;
             }
             if trade.symbol == current_symbol {
                 if trade.pnl_verified {
-                    stats.total_realized_pnl += trade.realized_pnl;
-                    stats.total_commission += trade.commission;
+                    updated.total_realized_pnl += trade.realized_pnl;
+                    updated.total_commission += trade.commission;
                 } else {
-                    stats.pending_pnl_trades += 1;
+                    updated.pending_pnl_trades += 1;
                 }
             }
-            if let Err(e) = self.db.save_stats(&stats) {
-                error!("Failed to persist grid stats to SQLite database: {}", e);
+            match self.db.insert_trade_with_stats(&trade, &updated) {
+                Ok(true) => *stats = updated,
+                Ok(false) => return true,
+                Err(e) => {
+                    error!(
+                        "Failed to persist trade and grid stats to SQLite database: {}",
+                        e
+                    );
+                    return false;
+                }
             }
         }
 
@@ -157,14 +190,18 @@ impl AppState {
             let client = self.telegram_client.clone();
             let state = Arc::clone(self);
             tokio::spawn(async move {
-                if let Err(err) = send_trade_notification(
-                    &client, &telegram, &trade, is_dry_run, is_testnet,
-                ).await {
+                if let Err(err) =
+                    send_trade_notification(&client, &telegram, &trade, is_dry_run, is_testnet)
+                        .await
+                {
                     warn!("Failed to send Telegram trade notification: {}", err);
-                    state.add_log("WARN", format!("Telegram 成交通知发送失败: {}", err)).await;
+                    state
+                        .add_log("WARN", format!("Telegram 成交通知发送失败: {}", err))
+                        .await;
                 }
             });
         }
+        true
     }
 
     pub async fn verify_trade_pnl(&self, trade: TradeRecord) -> anyhow::Result<()> {
@@ -178,7 +215,10 @@ impl AppState {
             stats.pending_pnl_trades = stats.pending_pnl_trades.saturating_sub(1);
         }
         let mut recent = self.recent_trades.write().await;
-        if let Some(existing) = recent.iter_mut().find(|item| item.trade_id == trade.trade_id) {
+        if let Some(existing) = recent
+            .iter_mut()
+            .find(|item| item.trade_id == trade.trade_id)
+        {
             *existing = trade;
         }
         Ok(())
@@ -236,14 +276,36 @@ impl AppState {
         let orders_map = self.active_orders.read().await;
         let mut active_orders: Vec<GridOrder> = orders_map.values().cloned().collect();
         // Sort orders by price descending
-        active_orders.sort_by(|a, b| b.price.cmp(&a.price));
+        active_orders.sort_by_key(|order| std::cmp::Reverse(order.price));
 
-        stats.active_buy_orders = active_orders.iter().filter(|o| o.side == OrderSide::Buy).count();
-        stats.active_sell_orders = active_orders.iter().filter(|o| o.side == OrderSide::Sell).count();
+        stats.active_buy_orders = active_orders
+            .iter()
+            .filter(|o| o.side == OrderSide::Buy)
+            .count();
+        stats.active_sell_orders = active_orders
+            .iter()
+            .filter(|o| o.side == OrderSide::Sell)
+            .count();
         stats.uptime_secs = (Utc::now() - stats.start_time).num_seconds().max(0) as u64;
 
-        let recent_trades: Vec<TradeRecord> = self.recent_trades.read().await.iter().cloned().rev().take(50).collect();
-        let recent_logs: Vec<LogEntry> = self.recent_logs.read().await.iter().cloned().rev().take(50).collect();
+        let recent_trades: Vec<TradeRecord> = self
+            .recent_trades
+            .read()
+            .await
+            .iter()
+            .cloned()
+            .rev()
+            .take(50)
+            .collect();
+        let recent_logs: Vec<LogEntry> = self
+            .recent_logs
+            .read()
+            .await
+            .iter()
+            .cloned()
+            .rev()
+            .take(50)
+            .collect();
 
         BotSnapshot {
             status,
@@ -291,5 +353,40 @@ impl AppState {
 
     pub async fn clear_all_sessions(&self) -> anyhow::Result<()> {
         self.db.clear_all_sessions()
+    }
+
+    pub async fn begin_login_attempt(&self) -> bool {
+        let mut failures = self.login_failures.lock().await;
+        failures.retain(|time| time.elapsed() < Duration::from_secs(60));
+        if failures.len() >= 10 {
+            return false;
+        }
+        failures.push_back(Instant::now());
+        true
+    }
+
+    pub async fn clear_login_attempts(&self) {
+        self.login_failures.lock().await.clear();
+    }
+
+    pub async fn pause_trading(&self) -> anyhow::Result<()> {
+        *self.status.write().await = BotStatus::Paused;
+        self.db.save_bot_status(BotStatus::Paused)
+    }
+
+    pub async fn resume_trading(&self) -> anyhow::Result<()> {
+        self.db.save_bot_status(BotStatus::Running)?;
+        *self.status.write().await = BotStatus::Running;
+        Ok(())
+    }
+
+    pub fn setup_code(&self) -> Option<&str> {
+        self.setup_code.as_deref()
+    }
+
+    pub fn verify_setup_code(&self, code: &str) -> bool {
+        self.setup_code
+            .as_deref()
+            .is_some_and(|expected| expected == code)
     }
 }

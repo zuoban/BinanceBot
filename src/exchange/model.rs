@@ -211,14 +211,16 @@ mod tests {
 
     #[test]
     fn premium_index_uses_mark_price_field() {
-        let response = r#"{"symbol":"SOLUSDC","markPrice":"114.56873000","indexPrice":"114.57000000"}"#;
+        let response =
+            r#"{"symbol":"SOLUSDC","markPrice":"114.56873000","indexPrice":"114.57000000"}"#;
         let mark: BinanceMarkPrice = serde_json::from_str(response).unwrap();
         assert_eq!(mark.mark_price, dec!(114.56873000));
     }
 
     #[test]
     fn user_trade_reads_exchange_realized_pnl_and_fee() {
-        let response = r#"{"realizedPnl":"-3.25","commission":"0.80","commissionAsset":"USDC","maker":true}"#;
+        let response =
+            r#"{"realizedPnl":"-3.25","commission":"0.80","commissionAsset":"USDC","maker":true}"#;
         let trade: BinanceUserTrade = serde_json::from_str(response).unwrap();
         assert_eq!(trade.realized_pnl, dec!(-3.25));
         assert_eq!(trade.commission, dec!(0.80));

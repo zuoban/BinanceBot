@@ -3,7 +3,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Binance Futures Grid Bot | SOLUSDC</title>
+  <title>-- | SOLUSDC</title>
   <style>
     :root {
       --bg: #090d16;
@@ -872,6 +872,10 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       </div>
       <form id="form-auth-setup" onsubmit="event.preventDefault(); submitAuthSetup();">
         <div class="form-group" style="margin-bottom: 14px;">
+          <label style="font-size: 12px; color: var(--text-dim); margin-bottom: 6px; display: block;">初始化码（在应用日志中查看）</label>
+          <input type="text" id="setup-code" required autocomplete="off" placeholder="输入当前启动日志中的初始化码" style="width: 100%; box-sizing: border-box;" />
+        </div>
+        <div class="form-group" style="margin-bottom: 14px;">
           <label style="font-size: 12px; color: var(--text-dim); margin-bottom: 6px; display: block;">设置管理员密码 (至少 6 位)</label>
           <input type="password" id="setup-pwd" required minlength="6" placeholder="输入管理员密码" style="width: 100%; box-sizing: border-box;" autofocus />
         </div>
@@ -944,15 +948,21 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
 
     const AUTH_TOKEN_KEY = "binance_bot_auth_token";
 
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>"']/g, char => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+      })[char]);
+    }
+
     function getAuthToken() {
-      return localStorage.getItem(AUTH_TOKEN_KEY) || "";
+      return sessionStorage.getItem(AUTH_TOKEN_KEY) || "";
     }
 
     function setAuthToken(token) {
       if (token) {
-        localStorage.setItem(AUTH_TOKEN_KEY, token);
+        sessionStorage.setItem(AUTH_TOKEN_KEY, token);
       } else {
-        localStorage.removeItem(AUTH_TOKEN_KEY);
+        sessionStorage.removeItem(AUTH_TOKEN_KEY);
       }
     }
 
@@ -1033,6 +1043,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
     }
 
     async function submitAuthSetup() {
+      const setupCode = document.getElementById("setup-code").value.trim();
       const pwd = document.getElementById("setup-pwd").value;
       const pwdConfirm = document.getElementById("setup-pwd-confirm").value;
       const alertBox = document.getElementById("setup-alert");
@@ -1064,7 +1075,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
         const res = await fetch("/api/auth/setup", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ password: pwd })
+          body: JSON.stringify({ password: pwd, setup_code: setupCode })
         });
         const json = await res.json();
         if (json.success && json.data && json.data.token) {
@@ -1232,9 +1243,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
         && Date.now() - latestMarkUpdatedAt < 15000;
       document.getElementById('card-price').textContent = fresh ? `$${latestMarkPrice.toFixed(4)}` : '--';
       document.getElementById('card-price-status').textContent = fresh ? '' : '标记价格行情暂未更新';
-      document.title = fresh
-        ? `$${latestMarkPrice.toFixed(4)} | ${latestSymbol} 标记价格 | Binance Grid Bot`
-        : `${latestSymbol} 标记价格 | Binance Grid Bot`;
+      document.title = `${fresh ? `$${latestMarkPrice.toFixed(4)}` : '--'} | ${latestSymbol}`;
     }
 
     setInterval(renderMarkPrice, 1000);
@@ -1249,9 +1258,9 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
 
       const loc = window.location;
       const wsProto = loc.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${wsProto}//${loc.host}/ws?token=${encodeURIComponent(token)}`;
+      const wsUrl = `${wsProto}//${loc.host}/ws`;
 
-      ws = new WebSocket(wsUrl);
+      ws = new WebSocket(wsUrl, ['auth', `token.${token}`]);
 
       ws.onopen = () => {
         console.log('Connected to WebSocket server');
@@ -1488,7 +1497,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
             <td>${parseFloat(o.amount_usdc).toFixed(2)} USDC</td>
             <td><span style="color: var(--text-muted);">${diff > 0 ? '+' : ''}${diff}%</span></td>
             <td>${o.status === 'PARTIALLYFILLED' ? '<span class="badge">部分成交 · 剩余</span>' : o.is_take_profit ? '<span class="badge badge-purple">止盈单</span>' : '<span class="badge" style="background: rgba(255,255,255,0.08);">Maker GTX</span>'}</td>
-            <td style="font-family: monospace; font-size: 11px; color: var(--text-dim);">${o.client_order_id}</td>
+            <td style="font-family: monospace; font-size: 11px; color: var(--text-dim);">${escapeHtml(o.client_order_id)}</td>
             <td style="color: var(--text-dim);">${timeStr}</td>
           </tr>
         `;
@@ -1525,7 +1534,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
             <td>${verified ? `${fee.toFixed(4)} ${pnlAsset}` : '--'}</td>
             <td>${verified ? `<strong class="${net >= 0 ? 'text-green' : 'text-red'}">${net >= 0 ? '+' : ''}${net.toFixed(4)} ${pnlAsset}</strong>` : '--'}</td>
             <td><span class="badge badge-purple">${t.is_maker ? 'Maker' : 'Taker'}</span></td>
-            <td style="color: var(--text-muted);">${t.note}</td>
+            <td style="color: var(--text-muted);">${escapeHtml(t.note)}</td>
           </tr>
         `;
       });
@@ -1543,8 +1552,8 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
         html += `
           <div class="log-line">
             <span class="log-time">[${timeStr}]</span>
-            <span class="log-badge ${log.level}">${log.level}</span>
-            <span class="log-msg">${log.message}</span>
+            <span class="log-badge ${escapeHtml(log.level)}">${escapeHtml(log.level)}</span>
+            <span class="log-msg">${escapeHtml(log.message)}</span>
           </div>
         `;
       });
@@ -1558,8 +1567,8 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       line.className = 'log-line';
       line.innerHTML = `
         <span class="log-time">[${timeStr}]</span>
-        <span class="log-badge ${log.level}">${log.level}</span>
-        <span class="log-msg">${log.message}</span>
+        <span class="log-badge ${escapeHtml(log.level)}">${escapeHtml(log.level)}</span>
+        <span class="log-msg">${escapeHtml(log.message)}</span>
       `;
       consoleEl.insertBefore(line, consoleEl.firstChild);
     }

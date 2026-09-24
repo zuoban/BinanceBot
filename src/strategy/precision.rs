@@ -38,7 +38,10 @@ impl Default for SymbolRules {
 
 impl SymbolRules {
     pub fn from_exchange_info(info: &BinanceExchangeInfo, symbol_name: &str) -> Option<Self> {
-        let sym = info.symbols.iter().find(|s| s.symbol.eq_ignore_ascii_case(symbol_name))?;
+        let sym = info
+            .symbols
+            .iter()
+            .find(|s| s.symbol.eq_ignore_ascii_case(symbol_name))?;
 
         let mut tick_size = dec!(0.01);
         let mut min_price = dec!(0.0001);
@@ -70,11 +73,7 @@ impl SymbolRules {
                     min_qty = *min_q;
                     max_qty = *max_q;
                 }
-                BinanceFilter::MinNotional { notional } => {
-                    if let Some(n) = notional {
-                        min_notional = *n;
-                    }
-                }
+                BinanceFilter::MinNotional { notional: Some(n) } => min_notional = *n,
                 _ => {}
             }
         }
@@ -160,7 +159,11 @@ impl SymbolRules {
     }
 
     pub fn format_quantity(&self, qty: Decimal) -> String {
-        format!("{:.*}", self.quantity_scale as usize, self.round_quantity(qty))
+        format!(
+            "{:.*}",
+            self.quantity_scale as usize,
+            self.round_quantity(qty)
+        )
     }
 }
 
@@ -218,8 +221,26 @@ mod tests {
             .map(|i| rules.round_price(current_price + interval * Decimal::from(i)))
             .collect();
 
-        assert_eq!(buy_prices, vec![dec!(115.38), dec!(115.28), dec!(115.18), dec!(115.08), dec!(114.98)]);
-        assert_eq!(sell_prices, vec![dec!(115.58), dec!(115.68), dec!(115.78), dec!(115.88), dec!(115.98)]);
+        assert_eq!(
+            buy_prices,
+            vec![
+                dec!(115.38),
+                dec!(115.28),
+                dec!(115.18),
+                dec!(115.08),
+                dec!(114.98)
+            ]
+        );
+        assert_eq!(
+            sell_prices,
+            vec![
+                dec!(115.58),
+                dec!(115.68),
+                dec!(115.78),
+                dec!(115.88),
+                dec!(115.98)
+            ]
+        );
 
         for bp in &buy_prices {
             assert!(*bp < current_price);

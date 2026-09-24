@@ -3,52 +3,63 @@ use crate::types::TickerInfo;
 use chrono::Utc;
 use futures_util::StreamExt;
 use std::time::Duration;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use tokio::time::sleep;
 use tokio_tungstenite::connect_async;
 use tracing::{error, info, warn};
 
 pub struct BinanceWsStream {
-    symbol: String,
-    is_testnet: bool,
+    config_rx: watch::Receiver<(String, bool)>,
     ticker_tx: broadcast::Sender<TickerInfo>,
 }
 
 impl BinanceWsStream {
     pub fn new(
-        symbol: String,
-        is_testnet: bool,
+        config_rx: watch::Receiver<(String, bool)>,
         ticker_tx: broadcast::Sender<TickerInfo>,
     ) -> Self {
         Self {
-            symbol,
-            is_testnet,
+            config_rx,
             ticker_tx,
         }
     }
 
-    pub async fn run(self) {
-        let stream_name = format!("{}@ticker", self.symbol.to_lowercase());
-        let base_ws_url = if self.is_testnet {
-            "wss://fstream.binancefuture.com/ws"
-        } else {
-            "wss://fstream.binance.com/ws"
-        };
-        let ws_url = format!("{}/{}", base_ws_url, stream_name);
-
-        info!("Starting Binance WebSocket stream for {}", ws_url);
-
+    pub async fn run(mut self) {
         let mut backoff_secs = 1u64;
+        'connect: loop {
+            let (symbol, is_testnet) = self.config_rx.borrow_and_update().clone();
+            let stream_name = format!("{}@ticker", symbol.to_lowercase());
+            let base_ws_url = if is_testnet {
+                "wss://fstream.binancefuture.com/ws"
+            } else {
+                "wss://fstream.binance.com/ws"
+            };
+            let ws_url = format!("{}/{}", base_ws_url, stream_name);
+            info!("Starting Binance WebSocket stream for {}", ws_url);
 
-        loop {
-            match connect_async(&ws_url).await {
+            let connection = tokio::select! {
+                result = connect_async(&ws_url) => result,
+                changed = self.config_rx.changed() => {
+                    if changed.is_err() { return; }
+                    continue 'connect;
+                }
+            };
+            match connection {
                 Ok((ws_stream, _)) => {
                     info!("Connected to Binance WebSocket: {}", ws_url);
                     backoff_secs = 1;
 
                     let (_, mut read) = ws_stream.split();
 
-                    while let Some(msg_res) = read.next().await {
+                    loop {
+                        let msg_res = tokio::select! {
+                            msg = read.next() => msg,
+                            changed = self.config_rx.changed() => {
+                                if changed.is_err() { return; }
+                                continue 'connect;
+                            }
+                        };
+                        let Some(msg_res) = msg_res else { break };
                         match msg_res {
                             Ok(msg) => {
                                 if msg.is_text() {
@@ -56,9 +67,11 @@ impl BinanceWsStream {
                                         if let Ok(ticker_msg) =
                                             serde_json::from_str::<BinanceWs24hrTicker>(text)
                                         {
-                                            let change = ticker_msg.close_price - ticker_msg.open_price;
+                                            let change =
+                                                ticker_msg.close_price - ticker_msg.open_price;
                                             let change_pct = if !ticker_msg.open_price.is_zero() {
-                                                (change / ticker_msg.open_price) * rust_decimal_macros::dec!(100.0)
+                                                (change / ticker_msg.open_price)
+                                                    * rust_decimal_macros::dec!(100.0)
                                             } else {
                                                 rust_decimal::Decimal::ZERO
                                             };
@@ -68,7 +81,8 @@ impl BinanceWsStream {
                                                 last_price: ticker_msg.close_price,
                                                 // The 24h ticker stream does not include a mark price.
                                                 mark_price: rust_decimal::Decimal::ZERO,
-                                                mark_update_time: chrono::DateTime::<Utc>::default(),
+                                                mark_update_time: chrono::DateTime::<Utc>::default(
+                                                ),
                                                 high_24h: ticker_msg.high_price,
                                                 low_24h: ticker_msg.low_price,
                                                 change_24h: change,
@@ -100,7 +114,13 @@ impl BinanceWsStream {
                 "WebSocket disconnected. Reconnecting in {} seconds...",
                 backoff_secs
             );
-            sleep(Duration::from_secs(backoff_secs)).await;
+            tokio::select! {
+                _ = sleep(Duration::from_secs(backoff_secs)) => {},
+                changed = self.config_rx.changed() => {
+                    if changed.is_err() { return; }
+                    continue 'connect;
+                }
+            }
             backoff_secs = (backoff_secs * 2).min(30);
         }
     }
