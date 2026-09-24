@@ -168,7 +168,8 @@ impl BinanceFuturesClient {
         Ok(resp.json().await?)
     }
 
-    /// Place an order. If post_only is true, timeInForce is set to GTX (Maker Only)
+    /// Place an order. If post_only is true, timeInForce is set to GTX (Maker Only).
+    /// reduce_only prevents a sell from opening a short when the position changes on Binance.
     pub async fn place_order(
         &self,
         symbol: &str,
@@ -177,13 +178,15 @@ impl BinanceFuturesClient {
         quantity: &str,
         client_order_id: &str,
         post_only: bool,
+        reduce_only: bool,
     ) -> std::result::Result<BinanceOrderResponse, ExchangeError> {
         let ts = self.current_timestamp();
         let tif = if post_only { "GTX" } else { "GTC" };
 
+        let reduce_only_param = if reduce_only { "&reduceOnly=true" } else { "" };
         let query = format!(
-            "symbol={}&side={}&type=LIMIT&timeInForce={}&price={}&quantity={}&newClientOrderId={}&recvWindow={}&timestamp={}",
-            symbol, side, tif, price, quantity, client_order_id, self.recv_window, ts
+            "symbol={}&side={}&type=LIMIT&timeInForce={}&price={}&quantity={}&newClientOrderId={}{}&recvWindow={}&timestamp={}",
+            symbol, side, tif, price, quantity, client_order_id, reduce_only_param, self.recv_window, ts
         );
         let signed_query = self.sign_params(&query);
         let url = format!("{}/fapi/v1/order?{}", self.base_url, signed_query);

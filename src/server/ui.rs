@@ -619,6 +619,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
         <div class="metric-sub">
           <span>未结盈亏: <span id="card-unrealized">0.00 USDC</span></span>
           <span style="color: var(--text-dim);">开仓均价: <span id="card-entry">--</span></span>
+          <span style="color: var(--text-dim);">已挂卖: <span id="card-sell-reserved">0.00 SOL</span></span>
         </div>
       </div>
 
@@ -1332,6 +1333,12 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       const posEl = document.getElementById('card-position');
       posEl.textContent = `${posSize > 0 ? '+' : ''}${posSize.toFixed(2)} SOL`;
       posEl.className = posSize > 0 ? 'metric-value text-green' : (posSize < 0 ? 'metric-value text-red' : 'metric-value');
+      const sellReserved = data.active_orders
+        .filter(o => o.side === 'SELL')
+        .reduce((total, o) => total + parseFloat(o.quantity || 0), 0);
+      const sellReservedEl = document.getElementById('card-sell-reserved');
+      sellReservedEl.textContent = `${sellReserved.toFixed(2)} SOL`;
+      sellReservedEl.className = sellReserved > Math.max(posSize, 0) + 0.000001 ? 'text-red' : '';
 
       const unPnl = parseFloat(data.position.unrealized_pnl || 0);
       const unPnlEl = document.getElementById('card-unrealized');
