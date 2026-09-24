@@ -630,6 +630,8 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
         <div class="metric-title">账户权益 / 可用保证金</div>
         <div class="metric-value" id="card-balance">-- USDC</div>
         <div class="metric-sub">
+          <span>折合人民币: <strong id="card-balance-cny">--</strong></span>
+          <span id="card-cny-rate" style="color: var(--text-dim);"></span>
           <span>可用: <span id="card-available">-- USDC</span></span>
           <span id="card-account-status" style="color: var(--text-dim);"></span>
         </div>
@@ -1377,6 +1379,15 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       const accountFresh = data.dry_run || (Number.isFinite(accountUpdatedAt) && Date.now() - accountUpdatedAt < 30000);
       const equity = data.dry_run ? walletBal + unPnl : marginBal;
       document.getElementById('card-balance').textContent = accountFresh ? `${equity.toFixed(2)} ${accountAsset}` : `-- ${accountAsset}`;
+      const cnyRate = data.account_cny_rate;
+      const hasCnyRate = cnyRate && cnyRate.asset === accountAsset && Number(cnyRate.cny_per_unit) > 0;
+      const cnyValue = accountFresh && hasCnyRate ? equity * Number(cnyRate.cny_per_unit) : null;
+      document.getElementById('card-balance-cny').textContent = cnyValue !== null
+        ? `≈ ¥${cnyValue.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+        : '--';
+      document.getElementById('card-cny-rate').textContent = accountFresh && hasCnyRate
+        ? `1 ${accountAsset} ≈ ¥${Number(cnyRate.cny_per_unit).toFixed(4)}（${new Date(cnyRate.updated_at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })} 更新）`
+        : '';
       document.getElementById('card-available').textContent = accountFresh ? `${availBal.toFixed(2)} ${accountAsset}` : `-- ${accountAsset}`;
       document.getElementById('card-account-status').textContent = accountFresh ? '' : '账户数据暂未更新';
 

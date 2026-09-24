@@ -1,5 +1,6 @@
 use crate::config::AppConfig;
 use crate::db::Database;
+use crate::fx::CnyRateCache;
 use crate::strategy::precision::SymbolRules;
 use crate::telegram::send_trade_notification;
 use crate::types::*;
@@ -7,6 +8,7 @@ use chrono::Utc;
 use rust_decimal::Decimal;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, RwLock};
 use tracing::{error, warn};
 
@@ -19,6 +21,7 @@ pub struct AppState {
     pub stats: RwLock<GridStats>,
     pub position: RwLock<PositionInfo>,
     pub account: RwLock<AccountInfo>,
+    pub cny_rates: CnyRateCache,
     pub active_orders: RwLock<HashMap<String, GridOrder>>,
     pub recent_trades: RwLock<VecDeque<TradeRecord>>,
     pub recent_logs: RwLock<VecDeque<LogEntry>>,
@@ -86,6 +89,7 @@ impl AppState {
             stats: RwLock::new(initial_stats),
             position: RwLock::new(PositionInfo::default()),
             account: RwLock::new(initial_account),
+            cny_rates: CnyRateCache::new(),
             active_orders: RwLock::new(HashMap::new()),
             recent_trades: RwLock::new(recent_trades),
             recent_logs: RwLock::new(VecDeque::with_capacity(300)),
@@ -227,6 +231,7 @@ impl AppState {
         let mut stats = self.stats.read().await.clone();
         let position = self.position.read().await.clone();
         let account = self.account.read().await.clone();
+        let account_cny_rate = self.cny_rates.get(&account.asset).await;
 
         let orders_map = self.active_orders.read().await;
         let mut active_orders: Vec<GridOrder> = orders_map.values().cloned().collect();
@@ -248,10 +253,22 @@ impl AppState {
             stats,
             position,
             account,
+            account_cny_rate,
             grid_config: summary,
             active_orders,
             recent_trades,
             recent_logs,
+        }
+    }
+
+    pub async fn run_cny_rate_refresh(self: Arc<Self>) {
+        let mut timer = tokio::time::interval(Duration::from_secs(10));
+        loop {
+            timer.tick().await;
+            let asset = self.account.read().await.asset.clone();
+            if let Err(err) = self.cny_rates.refresh_if_due(&asset).await {
+                warn!("Could not refresh {}/CNY exchange rate: {}", asset, err);
+            }
         }
     }
 }

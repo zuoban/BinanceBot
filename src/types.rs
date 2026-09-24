@@ -180,6 +180,7 @@ pub struct BotSnapshot {
     pub stats: GridStats,
     pub position: PositionInfo,
     pub account: AccountInfo,
+    pub account_cny_rate: Option<crate::fx::CnyRate>,
     pub grid_config: crate::config::GridConfigSummary,
     pub active_orders: Vec<GridOrder>,
     pub recent_trades: Vec<TradeRecord>,

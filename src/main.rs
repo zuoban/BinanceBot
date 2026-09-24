@@ -222,6 +222,8 @@ async fn main() -> anyhow::Result<()> {
         error!("Engine initialization warning: {}", e);
     }
 
+    tokio::spawn(state.clone().run_cny_rate_refresh());
+
     tokio::spawn(async move {
         engine.run().await;
     });

@@ -2,6 +2,7 @@ pub mod auth;
 pub mod config;
 pub mod db;
 pub mod exchange;
+pub mod fx;
 pub mod server;
 pub mod strategy;
 pub mod telegram;
