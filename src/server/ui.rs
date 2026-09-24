@@ -648,7 +648,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
     <div class="ladder-section">
       <div class="section-title">
         <span>实时网格盘口深度分布 (Post-Only Maker 挂单窗口)</span>
-        <span style="font-size: 12px; font-weight: normal; color: var(--text-dim);">每格间隔: <span id="ladder-step">0.1</span> USDC | 每单金额: <span id="ladder-amount">100</span> USDC</span>
+        <span style="font-size: 12px; font-weight: normal; color: var(--text-dim);">每格间隔: <span id="ladder-step">0.1</span> USDC | 每单目标金额: <span id="ladder-amount">100</span> USDC</span>
       </div>
       <div class="ladder-container" id="ladder-container">
         <!-- Rendered dynamically -->
@@ -1419,7 +1419,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
             <span>${parseFloat(o.quantity).toFixed(2)} SOL</span>
             <span style="color: var(--text-muted);">${parseFloat(o.amount_usdc).toFixed(2)} USDC</span>
             <span style="color: var(--text-dim); font-size: 11px;">+${diff}%</span>
-            <span style="text-align: right; color: var(--text-dim); font-size: 11px;">${o.is_take_profit ? '🎯 止盈单' : '挂单 Maker'}</span>
+            <span style="text-align: right; color: var(--text-dim); font-size: 11px;">${o.status === 'PARTIALLYFILLED' ? '部分成交 · 剩余' : o.is_take_profit ? '🎯 止盈单' : '挂单 Maker'}</span>
             <div class="depth-bar sell" style="width: 45%;"></div>
           </div>
         `;
@@ -1445,7 +1445,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
             <span>${parseFloat(o.quantity).toFixed(2)} SOL</span>
             <span style="color: var(--text-muted);">${parseFloat(o.amount_usdc).toFixed(2)} USDC</span>
             <span style="color: var(--text-dim); font-size: 11px;">-${diff}%</span>
-            <span style="text-align: right; color: var(--text-dim); font-size: 11px;">挂单 Maker</span>
+            <span style="text-align: right; color: var(--text-dim); font-size: 11px;">${o.status === 'PARTIALLYFILLED' ? '部分成交 · 剩余' : '挂单 Maker'}</span>
             <div class="depth-bar buy" style="width: 45%;"></div>
           </div>
         `;
@@ -1476,7 +1476,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
             <td>${parseFloat(o.quantity).toFixed(2)} SOL</td>
             <td>${parseFloat(o.amount_usdc).toFixed(2)} USDC</td>
             <td><span style="color: var(--text-muted);">${diff > 0 ? '+' : ''}${diff}%</span></td>
-            <td>${o.is_take_profit ? '<span class="badge badge-purple">止盈单</span>' : '<span class="badge" style="background: rgba(255,255,255,0.08);">Maker GTX</span>'}</td>
+            <td>${o.status === 'PARTIALLYFILLED' ? '<span class="badge">部分成交 · 剩余</span>' : o.is_take_profit ? '<span class="badge badge-purple">止盈单</span>' : '<span class="badge" style="background: rgba(255,255,255,0.08);">Maker GTX</span>'}</td>
             <td style="font-family: monospace; font-size: 11px; color: var(--text-dim);">${o.client_order_id}</td>
             <td style="color: var(--text-dim);">${timeStr}</td>
           </tr>
