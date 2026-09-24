@@ -2,7 +2,7 @@ use crate::auth;
 use crate::config::AppConfig;
 use crate::types::{GridStats, OrderSide, TradeRecord};
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use rusqlite::{params, Connection};
 use rust_decimal::Decimal;
 use std::path::Path;
@@ -69,6 +69,7 @@ impl Database {
                 amount_usdc TEXT NOT NULL,
                 realized_pnl TEXT NOT NULL,
                 commission TEXT NOT NULL,
+                pnl_verified INTEGER NOT NULL DEFAULT 0,
                 is_maker INTEGER NOT NULL,
                 timestamp TEXT NOT NULL,
                 note TEXT NOT NULL
@@ -100,6 +101,15 @@ impl Database {
             "#,
         )
         .context("Failed to initialize SQLite tables")?;
+
+        let has_pnl_verified: i64 = conn.query_row(
+            "SELECT count(*) FROM pragma_table_info('trades') WHERE name = 'pnl_verified';",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_pnl_verified == 0 {
+            conn.execute("ALTER TABLE trades ADD COLUMN pnl_verified INTEGER NOT NULL DEFAULT 0;", [])?;
+        }
 
         info!("SQLite schema verified for database: {}", self.path);
         Ok(())
@@ -227,8 +237,8 @@ impl Database {
             r#"
             INSERT OR REPLACE INTO trades (
                 trade_id, client_order_id, symbol, side, price, quantity,
-                amount_usdc, realized_pnl, commission, is_maker, timestamp, note
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12);
+                amount_usdc, realized_pnl, commission, pnl_verified, is_maker, timestamp, note
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13);
             "#,
             params![
                 trade.trade_id,
@@ -240,6 +250,7 @@ impl Database {
                 trade.amount_usdc.to_string(),
                 trade.realized_pnl.to_string(),
                 trade.commission.to_string(),
+                if trade.pnl_verified { 1 } else { 0 },
                 if trade.is_maker { 1 } else { 0 },
                 trade.timestamp,
                 trade.note,
@@ -250,63 +261,68 @@ impl Database {
         Ok(())
     }
 
+    /// Return true only for the first successful PnL verification of a saved trade.
+    pub fn verify_trade_pnl(&self, trade: &TradeRecord) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let updated = conn.execute(
+            "UPDATE trades SET realized_pnl = ?1, commission = ?2, is_maker = ?3, pnl_verified = 1 WHERE trade_id = ?4 AND pnl_verified = 0;",
+            params![
+                trade.realized_pnl.to_string(),
+                trade.commission.to_string(),
+                if trade.is_maker { 1 } else { 0 },
+                trade.trade_id,
+            ],
+        )?;
+        Ok(updated == 1)
+    }
+
     pub fn get_recent_trades(&self, limit: usize) -> Result<Vec<TradeRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             r#"
             SELECT trade_id, client_order_id, symbol, side, price, quantity,
-                   amount_usdc, realized_pnl, commission, is_maker, timestamp, note
+                   amount_usdc, realized_pnl, commission, pnl_verified, is_maker, timestamp, note
             FROM trades
             ORDER BY timestamp DESC
             LIMIT ?1;
             "#,
         )?;
 
-        let rows = stmt.query_map(params![limit as i64], |row| {
-            let trade_id: String = row.get(0)?;
-            let client_order_id: String = row.get(1)?;
-            let symbol: String = row.get(2)?;
-            let side_str: String = row.get(3)?;
-            let price_str: String = row.get(4)?;
-            let qty_str: String = row.get(5)?;
-            let amount_str: String = row.get(6)?;
-            let pnl_str: String = row.get(7)?;
-            let comm_str: String = row.get(8)?;
-            let is_maker_int: i32 = row.get(9)?;
-            let timestamp: DateTime<Utc> = row.get(10)?;
-            let note: String = row.get(11)?;
-
-            let side = match side_str.as_str() {
-                "BUY" => OrderSide::Buy,
-                _ => OrderSide::Sell,
-            };
-            let price = Decimal::from_str(&price_str).unwrap_or(Decimal::ZERO);
-            let quantity = Decimal::from_str(&qty_str).unwrap_or(Decimal::ZERO);
-            let amount_usdc = Decimal::from_str(&amount_str).unwrap_or(Decimal::ZERO);
-            let realized_pnl = Decimal::from_str(&pnl_str).unwrap_or(Decimal::ZERO);
-            let commission = Decimal::from_str(&comm_str).unwrap_or(Decimal::ZERO);
-
-            Ok(TradeRecord {
-                trade_id,
-                client_order_id,
-                symbol,
-                side,
-                price,
-                quantity,
-                amount_usdc,
-                realized_pnl,
-                commission,
-                is_maker: is_maker_int != 0,
-                timestamp,
-                note,
-            })
-        })?;
+        let rows = stmt.query_map(params![limit as i64], trade_from_row)?;
 
         let mut list = Vec::new();
         for item in rows {
             list.push(item?);
         }
         Ok(list)
+    }
+
+    pub fn get_unverified_trades(&self, symbol: &str, limit: usize, offset: usize) -> Result<Vec<TradeRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT trade_id, client_order_id, symbol, side, price, quantity, amount_usdc, realized_pnl, commission, pnl_verified, is_maker, timestamp, note FROM trades WHERE symbol = ?1 AND pnl_verified = 0 ORDER BY timestamp DESC LIMIT ?2 OFFSET ?3;",
+        )?;
+        let rows = stmt.query_map(params![symbol, limit as i64, offset as i64], trade_from_row)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
+    pub fn get_pnl_totals(&self, symbol: &str) -> Result<(Decimal, Decimal, usize)> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT realized_pnl, commission, pnl_verified FROM trades WHERE symbol = ?1;")?;
+        let rows = stmt.query_map(params![symbol], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i32>(2)?))
+        })?;
+        let (mut pnl, mut fees, mut pending) = (Decimal::ZERO, Decimal::ZERO, 0);
+        for row in rows {
+            let (gross, commission, verified) = row?;
+            if verified != 0 {
+                pnl += Decimal::from_str(&gross)?;
+                fees += Decimal::from_str(&commission)?;
+            } else {
+                pending += 1;
+            }
+        }
+        Ok((pnl, fees, pending))
     }
 
     pub fn load_stats(&self) -> Result<Option<(usize, usize, Decimal, Decimal)>> {
@@ -360,6 +376,30 @@ impl Database {
     }
 }
 
+fn trade_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TradeRecord> {
+    let side: String = row.get(3)?;
+    let price: String = row.get(4)?;
+    let quantity: String = row.get(5)?;
+    let amount: String = row.get(6)?;
+    let pnl: String = row.get(7)?;
+    let commission: String = row.get(8)?;
+    Ok(TradeRecord {
+        trade_id: row.get(0)?,
+        client_order_id: row.get(1)?,
+        symbol: row.get(2)?,
+        side: if side == "BUY" { OrderSide::Buy } else { OrderSide::Sell },
+        price: Decimal::from_str(&price).unwrap_or(Decimal::ZERO),
+        quantity: Decimal::from_str(&quantity).unwrap_or(Decimal::ZERO),
+        amount_usdc: Decimal::from_str(&amount).unwrap_or(Decimal::ZERO),
+        realized_pnl: Decimal::from_str(&pnl).unwrap_or(Decimal::ZERO),
+        commission: Decimal::from_str(&commission).unwrap_or(Decimal::ZERO),
+        pnl_verified: row.get::<_, i32>(9)? != 0,
+        is_maker: row.get::<_, i32>(10)? != 0,
+        timestamp: row.get(11)?,
+        note: row.get(12)?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -393,6 +433,7 @@ mod tests {
             amount_usdc: dec!(99.132),
             realized_pnl: dec!(0.0),
             commission: dec!(0.0),
+            pnl_verified: true,
             is_maker: true,
             timestamp: Utc::now(),
             note: "Test trade".to_string(),
@@ -405,6 +446,34 @@ mod tests {
         assert_eq!(trades[0].symbol, "SOLUSDC");
         assert_eq!(trades[0].price, dec!(150.2));
         assert!(trades[0].is_maker);
+    }
+
+    #[test]
+    fn legacy_trades_can_be_backfilled_without_double_counting() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE trades (trade_id TEXT PRIMARY KEY, client_order_id TEXT NOT NULL, symbol TEXT NOT NULL, side TEXT NOT NULL, price TEXT NOT NULL, quantity TEXT NOT NULL, amount_usdc TEXT NOT NULL, realized_pnl TEXT NOT NULL, commission TEXT NOT NULL, is_maker INTEGER NOT NULL, timestamp TEXT NOT NULL, note TEXT NOT NULL);",
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO trades VALUES ('t1', 'gb_s_1', 'SOLUSDC', 'SELL', '115.1', '17.37', '1999.29', '0', '0', 1, ?1, 'old trade');",
+            params![Utc::now().to_rfc3339()],
+        ).unwrap();
+        let db = Database { conn: Mutex::new(conn), path: ":memory:".into() };
+        db.init_tables().unwrap();
+
+        let mut pending = db.get_unverified_trades("SOLUSDC", 10, 0).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(db.get_pnl_totals("SOLUSDC").unwrap(), (dec!(0), dec!(0), 1));
+
+        let mut trade = pending.pop().unwrap();
+        trade.realized_pnl = dec!(-3.25);
+        trade.commission = dec!(0.80);
+        trade.pnl_verified = true;
+        assert!(db.verify_trade_pnl(&trade).unwrap());
+        assert!(!db.verify_trade_pnl(&trade).unwrap());
+        assert!(db.get_unverified_trades("SOLUSDC", 10, 0).unwrap().is_empty());
+        assert_eq!(db.get_pnl_totals("SOLUSDC").unwrap(), (dec!(-3.25), dec!(0.80), 0));
+        assert_eq!(db.get_recent_trades(10).unwrap().len(), 1);
     }
 
     #[test]

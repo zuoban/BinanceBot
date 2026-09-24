@@ -64,6 +64,8 @@ pub struct TradeRecord {
     pub amount_usdc: Decimal,
     pub realized_pnl: Decimal,
     pub commission: Decimal,
+    #[serde(default)]
+    pub pnl_verified: bool,
     pub is_maker: bool,
     pub timestamp: DateTime<Utc>,
     pub note: String,
@@ -116,7 +118,13 @@ pub enum BotStatus {
 pub struct GridStats {
     pub total_trades: usize,
     pub completed_cycles: usize,
+    /// Legacy paired grid spread estimate, separate from exchange realized PnL.
     pub total_realized_profit: Decimal,
+    /// Gross realized PnL reported by Binance for this symbol's saved trades.
+    pub total_realized_pnl: Decimal,
+    /// Commission charged in the symbol's quote asset.
+    pub total_commission: Decimal,
+    pub pending_pnl_trades: usize,
     pub total_volume_usdc: Decimal,
     pub start_time: DateTime<Utc>,
     pub uptime_secs: u64,
@@ -130,6 +138,9 @@ impl Default for GridStats {
             total_trades: 0,
             completed_cycles: 0,
             total_realized_profit: Decimal::ZERO,
+            total_realized_pnl: Decimal::ZERO,
+            total_commission: Decimal::ZERO,
+            pending_pnl_trades: 0,
             total_volume_usdc: Decimal::ZERO,
             start_time: Utc::now(),
             uptime_secs: 0,

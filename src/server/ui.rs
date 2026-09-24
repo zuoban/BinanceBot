@@ -606,10 +606,13 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       </div>
 
       <div class="metric-card">
-        <div class="metric-title">网格已实现套利总利润</div>
+        <div class="metric-title">网格成交累计已实现盈亏</div>
         <div class="metric-value text-green" id="card-profit">+0.00 USDC</div>
         <div class="metric-sub">
-          <span>完成套利循环: <strong id="card-cycles">0</strong> 次</span>
+          <span>扣手续费后: <strong id="card-net-profit">+0.00 USDC</strong></span>
+          <span>手续费: <span id="card-commission">0.00 USDC</span></span>
+          <span>配对价差估算: <span id="card-grid-profit">+0.00 USDC</span> / <strong id="card-cycles">0</strong> 次</span>
+          <span id="card-pnl-pending" style="color: var(--amber); display: none;"></span>
         </div>
       </div>
 
@@ -696,13 +699,15 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
               <th>成交均价 (USDC)</th>
               <th>数量 (SOL)</th>
               <th>成交金额 (USDC)</th>
-              <th>网格周期利润</th>
+              <th>已实现盈亏</th>
+              <th>手续费</th>
+              <th>扣费后</th>
               <th>角色</th>
               <th>说明</th>
             </tr>
           </thead>
           <tbody id="trades-tbody">
-            <tr><td colspan="8" style="text-align: center; color: var(--text-dim); padding: 30px;">暂无成交记录</td></tr>
+            <tr><td colspan="10" style="text-align: center; color: var(--text-dim); padding: 30px;">暂无成交记录</td></tr>
           </tbody>
         </table>
         </div>
@@ -1324,8 +1329,23 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       document.getElementById('card-low').textContent = parseFloat(data.ticker.low_24h || 0).toFixed(2);
 
       // Profit Card
-      const profit = parseFloat(data.stats.total_realized_profit || 0);
-      document.getElementById('card-profit').textContent = `${profit >= 0 ? '+' : ''}${profit.toFixed(4)} USDC`;
+      const pnlAsset = ['USDC', 'USDT', 'FDUSD', 'BUSD'].find(asset => data.symbol.endsWith(asset)) || 'USDC';
+      const profit = parseFloat(data.stats.total_realized_pnl || 0);
+      const commission = parseFloat(data.stats.total_commission || 0);
+      const netProfit = profit - commission;
+      const profitEl = document.getElementById('card-profit');
+      profitEl.textContent = `${profit >= 0 ? '+' : ''}${profit.toFixed(4)} ${pnlAsset}`;
+      profitEl.className = `metric-value ${profit >= 0 ? 'text-green' : 'text-red'}`;
+      const netEl = document.getElementById('card-net-profit');
+      netEl.textContent = `${netProfit >= 0 ? '+' : ''}${netProfit.toFixed(4)} ${pnlAsset}`;
+      netEl.className = netProfit >= 0 ? 'text-green' : 'text-red';
+      document.getElementById('card-commission').textContent = `${commission.toFixed(4)} ${pnlAsset}`;
+      const gridProfit = parseFloat(data.stats.total_realized_profit || 0);
+      document.getElementById('card-grid-profit').textContent = `${gridProfit >= 0 ? '+' : ''}${gridProfit.toFixed(4)} ${pnlAsset}`;
+      const pendingEl = document.getElementById('card-pnl-pending');
+      const pendingCount = data.stats.pending_pnl_trades || 0;
+      pendingEl.textContent = `${pendingCount} 笔成交盈亏待同步`;
+      pendingEl.style.display = pendingCount > 0 ? '' : 'none';
       document.getElementById('card-cycles').textContent = data.stats.completed_cycles;
 
       // Position Card
@@ -1469,7 +1489,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
     function renderTradesTable(trades) {
       const tbody = document.getElementById('trades-tbody');
       if (!trades || trades.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; color: var(--text-dim); padding: 30px;">暂无成交记录</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="10" style="text-align: center; color: var(--text-dim); padding: 30px;">暂无成交记录</td></tr>';
         return;
       }
 
@@ -1477,6 +1497,10 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       trades.forEach(t => {
         const isBuy = t.side === 'BUY';
         const pnl = parseFloat(t.realized_pnl || 0);
+        const fee = parseFloat(t.commission || 0);
+        const net = pnl - fee;
+        const verified = t.pnl_verified === true;
+        const pnlAsset = ['USDC', 'USDT', 'FDUSD', 'BUSD'].find(asset => t.symbol.endsWith(asset)) || 'USDC';
         const timeStr = new Date(t.timestamp).toLocaleTimeString();
 
         html += `
@@ -1486,9 +1510,9 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
             <td><strong>$${parseFloat(t.price).toFixed(4)}</strong></td>
             <td>${parseFloat(t.quantity).toFixed(2)} SOL</td>
             <td>${parseFloat(t.amount_usdc).toFixed(2)} USDC</td>
-            <td>
-              ${pnl > 0 ? `<strong class="text-green">+${pnl.toFixed(4)} USDC</strong>` : '<span style="color: var(--text-dim);">--</span>'}
-            </td>
+            <td>${verified ? `<strong class="${pnl >= 0 ? 'text-green' : 'text-red'}">${pnl >= 0 ? '+' : ''}${pnl.toFixed(4)} ${pnlAsset}</strong>` : '<span style="color: var(--text-dim);">待同步</span>'}</td>
+            <td>${verified ? `${fee.toFixed(4)} ${pnlAsset}` : '--'}</td>
+            <td>${verified ? `<strong class="${net >= 0 ? 'text-green' : 'text-red'}">${net >= 0 ? '+' : ''}${net.toFixed(4)} ${pnlAsset}</strong>` : '--'}</td>
             <td><span class="badge badge-purple">${t.is_maker ? 'Maker' : 'Taker'}</span></td>
             <td style="color: var(--text-muted);">${t.note}</td>
           </tr>

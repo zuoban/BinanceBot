@@ -168,6 +168,40 @@ impl BinanceFuturesClient {
         Ok(resp.json().await?)
     }
 
+    /// Resolve a persisted client order ID after a restart.
+    pub async fn get_order_by_client_id(&self, symbol: &str, client_order_id: &str) -> Result<BinanceOrderResponse> {
+        let ts = self.current_timestamp();
+        let query = format!(
+            "symbol={}&origClientOrderId={}&recvWindow={}&timestamp={}",
+            symbol, client_order_id, self.recv_window, ts
+        );
+        let url = format!("{}/fapi/v1/order?{}", self.base_url, self.sign_params(&query));
+        let resp = self.client.get(&url).send().await?;
+        if !resp.status().is_success() {
+            return Err(anyhow!("Failed to resolve order {}: {}", client_order_id, resp.status()));
+        }
+        Ok(resp.json().await?)
+    }
+
+    /// Binance execution records contain the exchange-calculated realized PnL and fee.
+    pub async fn get_user_trades(&self, symbol: &str, order_id: i64) -> Result<Vec<BinanceUserTrade>> {
+        let ts = self.current_timestamp();
+        let query = format!(
+            "symbol={}&orderId={}&limit=1000&recvWindow={}&timestamp={}",
+            symbol, order_id, self.recv_window, ts
+        );
+        let url = format!("{}/fapi/v1/userTrades?{}", self.base_url, self.sign_params(&query));
+        let resp = self.client.get(&url).send().await?;
+        if !resp.status().is_success() {
+            return Err(anyhow!("Failed to fetch trades for order {}: {}", order_id, resp.status()));
+        }
+        let fills: Vec<BinanceUserTrade> = resp.json().await?;
+        if fills.len() == 1000 {
+            return Err(anyhow!("Order {} has at least 1000 fills; PnL requires pagination", order_id));
+        }
+        Ok(fills)
+    }
+
     /// Place an order. If post_only is true, timeInForce is set to GTX (Maker Only).
     /// reduce_only prevents a sell from opening a short when the position changes on Binance.
     pub async fn place_order(

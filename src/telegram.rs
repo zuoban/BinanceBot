@@ -33,8 +33,20 @@ pub fn format_trade_message(trade: &TradeRecord, is_dry_run: bool, is_testnet: b
         .into_iter()
         .find(|asset| trade.symbol.ends_with(asset))
         .unwrap_or("计价资产");
+    let pnl_line = if trade.pnl_verified {
+        let net = trade.realized_pnl - trade.commission;
+        format!(
+            "\n已实现盈亏：{}{pnl} {quote}\n手续费：{fee} {quote}\n扣费后：{}{net} {quote}",
+            if trade.realized_pnl >= rust_decimal::Decimal::ZERO { "+" } else { "" },
+            if net >= rust_decimal::Decimal::ZERO { "+" } else { "" },
+            pnl = trade.realized_pnl,
+            fee = trade.commission,
+        )
+    } else {
+        "\n已实现盈亏：待同步".to_string()
+    };
     format!(
-        "<b>{icon} {direction}成交｜{price}</b>\n交易对：{symbol}\n数量：{quantity}\n成交金额：{amount} {quote}\n模式：{mode}",
+        "<b>{icon} {direction}成交｜{price}</b>\n交易对：{symbol}\n数量：{quantity}\n成交金额：{amount} {quote}{pnl_line}\n模式：{mode}",
         price = trade.price,
         symbol = escape_html(&trade.symbol),
         quantity = trade.quantity,
@@ -118,14 +130,20 @@ mod tests {
             amount_usdc: dec!(246.90),
             realized_pnl: dec!(0),
             commission: dec!(0),
+            pnl_verified: true,
             is_maker: true,
             timestamp: Utc::now(),
             note: String::new(),
         };
         assert!(format_trade_message(&trade, true, false).starts_with("<b>🟢 买入成交｜123.45</b>"));
         trade.side = OrderSide::Sell;
+        trade.realized_pnl = dec!(-3.25);
+        trade.commission = dec!(0.80);
+        let message = format_trade_message(&trade, false, false);
+        assert!(message.contains("已实现盈亏：-3.25 USDC"));
+        assert!(message.contains("扣费后：-4.05 USDC"));
         assert!(
-            format_trade_message(&trade, false, false).starts_with("<b>🔴 卖出成交｜123.45</b>")
+            message.starts_with("<b>🔴 卖出成交｜123.45</b>")
         );
     }
 }

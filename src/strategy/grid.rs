@@ -1,16 +1,16 @@
 use crate::exchange::client::{BinanceFuturesClient, ExchangeError};
-use crate::exchange::BinanceOrderResponse;
+use crate::exchange::{BinanceOrderResponse, BinanceUserTrade};
 use crate::server::state::AppState;
 use crate::strategy::precision::SymbolRules;
 use crate::types::*;
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use chrono::Utc;
 use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
+use tokio::task::JoinHandle;
 use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -43,6 +43,23 @@ fn sell_quantity_available(position_size: Decimal, orders: &[GridOrder]) -> Deci
     (position_size.max(Decimal::ZERO) - reserved_sell_quantity(orders)).max(Decimal::ZERO)
 }
 
+fn aggregate_execution_pnl(symbol: &str, fills: &[BinanceUserTrade]) -> Result<(Decimal, Decimal, bool)> {
+    let quote = ["USDC", "USDT", "FDUSD", "BUSD"]
+        .into_iter().find(|asset| symbol.ends_with(asset))
+        .ok_or_else(|| anyhow!("Unsupported quote asset for {}", symbol))?;
+    if fills.is_empty() {
+        return Err(anyhow!("No exchange fills found for {}", symbol));
+    }
+    if fills.iter().any(|fill| !fill.commission_asset.eq_ignore_ascii_case(quote)) {
+        return Err(anyhow!("Execution commission is not denominated in {}", quote));
+    }
+    Ok((
+        fills.iter().map(|fill| fill.realized_pnl).sum(),
+        fills.iter().map(|fill| fill.commission).sum(),
+        fills.iter().all(|fill| fill.maker),
+    ))
+}
+
 pub struct GridTradingEngine {
     state: Arc<AppState>,
     client: Arc<BinanceFuturesClient>,
@@ -50,6 +67,8 @@ pub struct GridTradingEngine {
     ticker_rx: broadcast::Receiver<TickerInfo>,
     // Map of client_order_id -> purchase price for calculating paired grid cycle profit
     paired_buy_prices: HashMap<String, (Decimal, Decimal)>,
+    pnl_reconcile_offset: usize,
+    pnl_reconcile_task: Option<JoinHandle<()>>,
 }
 
 impl GridTradingEngine {
@@ -65,6 +84,8 @@ impl GridTradingEngine {
             action_rx,
             ticker_rx,
             paired_buy_prices: HashMap::new(),
+            pnl_reconcile_offset: 0,
+            pnl_reconcile_task: None,
         }
     }
 
@@ -188,6 +209,7 @@ impl GridTradingEngine {
     pub async fn run(&mut self) {
         let mut sync_timer = interval(Duration::from_secs(3));
         let mut snapshot_timer = interval(Duration::from_millis(800));
+        let mut pnl_timer = interval(Duration::from_secs(60));
 
         // Initial grid placement
         self.rebalance_grid().await;
@@ -212,6 +234,10 @@ impl GridTradingEngine {
                 // WebSocket broadcast timer for frontend dashboard
                 _ = snapshot_timer.tick() => {
                     self.broadcast_snapshot().await;
+                }
+
+                _ = pnl_timer.tick() => {
+                    self.reconcile_unverified_trades().await;
                 }
             }
         }
@@ -264,6 +290,7 @@ impl GridTradingEngine {
                 }
 
                 if symbol_changed {
+                    self.state.refresh_pnl_stats().await;
                     self.cancel_all_orders().await;
                     *self.state.ticker.write().await = TickerInfo {
                         symbol: new_config.exchange.symbol.clone(),
@@ -524,6 +551,59 @@ impl GridTradingEngine {
         }
     }
 
+    async fn fetch_execution_pnl(&self, symbol: &str, order_id: i64) -> Result<(Decimal, Decimal, bool)> {
+        let fills = self.client.get_user_trades(symbol, order_id).await?;
+        aggregate_execution_pnl(symbol, &fills)
+    }
+
+    /// Fill the exchange PnL and fees for rows saved before this version or during API outages.
+    async fn reconcile_unverified_trades(&mut self) {
+        if self.pnl_reconcile_task.as_ref().is_some_and(|task| !task.is_finished()) {
+            return;
+        }
+        let config = self.state.config.read().await.clone();
+        if config.exchange.dry_run {
+            return;
+        }
+        let pending_count = self.state.stats.read().await.pending_pnl_trades;
+        if pending_count == 0 {
+            self.pnl_reconcile_offset = 0;
+            return;
+        }
+        let offset = self.pnl_reconcile_offset % pending_count;
+        let pending = match self.state.db.get_unverified_trades(&config.exchange.symbol, 3, offset) {
+            Ok(trades) => trades,
+            Err(e) => {
+                warn!("Could not load trades awaiting PnL verification: {}", e);
+                return;
+            }
+        };
+        self.pnl_reconcile_offset = (offset + pending.len()) % pending_count;
+        let client = Arc::clone(&self.client);
+        let state = Arc::clone(&self.state);
+        self.pnl_reconcile_task = Some(tokio::spawn(async move {
+            for mut trade in pending {
+                let result = async {
+                    let order = client.get_order_by_client_id(&trade.symbol, &trade.client_order_id).await?;
+                    let fills = client.get_user_trades(&trade.symbol, order.order_id).await?;
+                    aggregate_execution_pnl(&trade.symbol, &fills)
+                }.await;
+                match result {
+                    Ok((pnl, commission, maker)) => {
+                        trade.realized_pnl = pnl;
+                        trade.commission = commission;
+                        trade.is_maker = maker;
+                        trade.pnl_verified = true;
+                        if let Err(e) = state.verify_trade_pnl(trade).await {
+                            warn!("Could not save verified trade PnL: {}", e);
+                        }
+                    }
+                    Err(e) => debug!("PnL verification deferred for {}: {}", trade.client_order_id, e),
+                }
+            }
+        }));
+    }
+
     /// Fetch position and account balances from Binance in Live mode
     async fn sync_account_and_position(&mut self) {
         let symbol = self.state.config.read().await.exchange.symbol.clone();
@@ -569,7 +649,8 @@ impl GridTradingEngine {
         let rules = self.state.rules.read().await.clone();
         let grid_interval = config.grid.grid_interval;
 
-        let mut realized_pnl = Decimal::ZERO;
+        let mut cycle_profit = Decimal::ZERO;
+        let mut simulated_pnl = Decimal::ZERO;
         let mut is_completed_cycle = false;
         let note;
 
@@ -627,22 +708,22 @@ impl GridTradingEngine {
                 if let Some(paired_id) = &order.paired_client_order_id {
                     if let Some((buy_price, buy_qty)) = self.paired_buy_prices.remove(paired_id) {
                         let exec_qty = order.quantity.min(buy_qty);
-                        realized_pnl = (order.price - buy_price) * exec_qty;
+                        cycle_profit = (order.price - buy_price) * exec_qty;
                         is_completed_cycle = true;
                     }
                 }
 
                 if is_completed_cycle {
                     note = format!(
-                        "Completed Grid Cycle! Sold at {} (Paired Buy: {}, Profit: +{} USDC)",
-                        order.price, order.price - grid_interval, realized_pnl
+                        "Completed Grid Cycle! Sold at {} (Paired Buy: {}, Spread Estimate: +{} USDC)",
+                        order.price, order.price - grid_interval, cycle_profit
                     );
                     self.state
                         .add_log(
                             "SUCCESS",
                             format!(
-                                "🎉 Grid Cycle Completed! Sold at {}, Realized Profit: +{} USDC",
-                                order.price, realized_pnl
+                                "🎉 Grid Cycle Completed! Sold at {}, Spread Estimate: +{} USDC",
+                                order.price, cycle_profit
                             ),
                         )
                         .await;
@@ -660,12 +741,14 @@ impl GridTradingEngine {
                 if config.exchange.dry_run {
                     let mut pos = self.state.position.write().await;
                     let prev_size = pos.size;
+                    let closed_qty = order.quantity.min(prev_size.max(Decimal::ZERO));
+                    simulated_pnl = (order.price - pos.entry_price) * closed_qty;
                     let new_size = prev_size - order.quantity;
                     pos.size = new_size;
 
                     let mut acc = self.state.account.write().await;
-                    acc.total_wallet_balance += realized_pnl;
-                    acc.available_balance += realized_pnl;
+                    acc.total_wallet_balance += simulated_pnl;
+                    acc.available_balance += simulated_pnl;
                 }
 
                 // Place paired BUY order at (sell_price - grid_interval)
@@ -685,6 +768,20 @@ impl GridTradingEngine {
             }
         }
 
+        let (realized_pnl, commission, is_maker, pnl_verified) = if config.exchange.dry_run {
+            (simulated_pnl, Decimal::ZERO, true, true)
+        } else if let Some(order_id) = order.order_id {
+            match self.fetch_execution_pnl(&order.symbol, order_id).await {
+                Ok((pnl, fee, maker)) => (pnl, fee, maker, true),
+                Err(e) => {
+                    warn!("Exchange PnL unavailable for {}: {}", order.client_order_id, e);
+                    (Decimal::ZERO, Decimal::ZERO, true, false)
+                }
+            }
+        } else {
+            (Decimal::ZERO, Decimal::ZERO, true, false)
+        };
+
         // Record trade in history
         let trade = TradeRecord {
             trade_id: Uuid::new_v4().to_string(),
@@ -695,14 +792,15 @@ impl GridTradingEngine {
             quantity: order.quantity,
             amount_usdc: order.price * order.quantity,
             realized_pnl,
-            commission: dec!(0.0), // Maker fee is 0 or minimal
-           is_maker: true,
+            commission,
+           pnl_verified,
+           is_maker,
            timestamp: Utc::now(),
            note,
        };
 
         // Persist trade to SQLite and update runtime stats
-        self.state.record_trade(trade, is_completed_cycle).await;
+        self.state.record_trade(trade, is_completed_cycle.then_some(cycle_profit)).await;
     }
 
     /// Ensure the active pre-placed order window matches buy_window and sell_window
@@ -1044,12 +1142,13 @@ impl GridTradingEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::{has_nearby_grid_order, new_grid_client_order_id, reserved_sell_quantity, sell_quantity_available, GridTradingEngine};
+    use super::{aggregate_execution_pnl, has_nearby_grid_order, new_grid_client_order_id, reserved_sell_quantity, sell_quantity_available, GridTradingEngine};
     use crate::config::AppConfig;
     use crate::db::Database;
     use crate::exchange::client::BinanceFuturesClient;
+    use crate::exchange::BinanceUserTrade;
     use crate::server::state::AppState;
-    use crate::types::{OrderSide, TickerInfo};
+    use crate::types::{GridOrder, OrderSide, OrderStatus, TickerInfo};
     use chrono::Utc;
     use rust_decimal_macros::dec;
     use std::sync::Arc;
@@ -1061,6 +1160,58 @@ mod tests {
         assert!(has_nearby_grid_order(&existing, dec!(113.15), dec!(1), dec!(0.01)));
         assert!(has_nearby_grid_order(&existing, dec!(112.15), dec!(1), dec!(0.01)));
         assert!(!has_nearby_grid_order(&existing, dec!(114.15), dec!(1), dec!(0.01)));
+    }
+
+    #[test]
+    fn exchange_fills_include_losses_and_fees() {
+        let fills = vec![
+            BinanceUserTrade { realized_pnl: dec!(1.20), commission: dec!(0.03), commission_asset: "USDC".into(), maker: true },
+            BinanceUserTrade { realized_pnl: dec!(-2.00), commission: dec!(0.04), commission_asset: "USDC".into(), maker: false },
+        ];
+        assert_eq!(aggregate_execution_pnl("SOLUSDC", &fills).unwrap(), (dec!(-0.80), dec!(0.07), false));
+        let mut wrong_asset = fills;
+        wrong_asset[0].commission_asset = "BNB".into();
+        assert!(aggregate_execution_pnl("SOLUSDC", &wrong_asset).is_err());
+        assert!(aggregate_execution_pnl("SOLUSDC", &[]).is_err());
+    }
+
+    #[tokio::test]
+    async fn unpaired_paper_sell_records_realized_pnl() {
+        let config = AppConfig::default();
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let (action_tx, action_rx) = mpsc::channel(1);
+        let (_ticker_tx, ticker_rx) = broadcast::channel(1);
+        let state = AppState::new(config.clone(), db, action_tx);
+        let client = Arc::new(BinanceFuturesClient::new(&config.exchange));
+        let mut engine = GridTradingEngine::new(state.clone(), client, action_rx, ticker_rx);
+        state.position.write().await.size = dec!(2.63);
+        state.position.write().await.entry_price = dec!(114);
+        state.ticker.write().await.last_price = dec!(115);
+        let mut order = GridOrder {
+            client_order_id: "paper-sell".into(),
+            order_id: None,
+            symbol: "SOLUSDC".into(),
+            side: OrderSide::Sell,
+            price: dec!(115.1),
+            quantity: dec!(1),
+            amount_usdc: dec!(115.1),
+            status: OrderStatus::New,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            grid_level: 1,
+            paired_client_order_id: None,
+            is_take_profit: false,
+        };
+        state.active_orders.write().await.insert(order.client_order_id.clone(), order.clone());
+
+        engine.on_order_filled(&mut order).await;
+        let stats = state.stats.read().await;
+        assert_eq!(stats.total_realized_pnl, dec!(1.1));
+        assert_eq!(stats.completed_cycles, 0);
+        drop(stats);
+        let trades = state.db.get_recent_trades(10).unwrap();
+        assert_eq!(trades[0].realized_pnl, dec!(1.1));
+        assert!(trades[0].pnl_verified);
     }
 
     #[tokio::test]

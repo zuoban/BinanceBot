@@ -65,6 +65,14 @@ impl AppState {
             initial_stats.total_realized_profit = profit;
             initial_stats.total_volume_usdc = volume;
         }
+        match db.get_pnl_totals(&symbol) {
+            Ok((pnl, commission, pending)) => {
+                initial_stats.total_realized_pnl = pnl;
+                initial_stats.total_commission = commission;
+                initial_stats.pending_pnl_trades = pending;
+            }
+            Err(e) => warn!("Failed to load realized PnL totals: {}", e),
+        }
 
         Arc::new(Self {
             db,
@@ -90,20 +98,30 @@ impl AppState {
         })
     }
 
-    pub async fn record_trade(self: &Arc<Self>, trade: TradeRecord, is_completed_cycle: bool) {
+    pub async fn record_trade(self: &Arc<Self>, trade: TradeRecord, cycle_profit: Option<Decimal>) {
         // Persist trade into SQLite
         if let Err(e) = self.db.insert_trade(&trade) {
             error!("Failed to persist trade to SQLite database: {}", e);
+            return;
         }
 
         // Update grid performance statistics
+        let current_symbol = self.config.read().await.exchange.symbol.clone();
         {
             let mut stats = self.stats.write().await;
             stats.total_trades += 1;
             stats.total_volume_usdc += trade.amount_usdc;
-            if is_completed_cycle {
+            if let Some(profit) = cycle_profit {
                 stats.completed_cycles += 1;
-                stats.total_realized_profit += trade.realized_pnl;
+                stats.total_realized_profit += profit;
+            }
+            if trade.symbol == current_symbol {
+                if trade.pnl_verified {
+                    stats.total_realized_pnl += trade.realized_pnl;
+                    stats.total_commission += trade.commission;
+                } else {
+                    stats.pending_pnl_trades += 1;
+                }
             }
             if let Err(e) = self.db.save_stats(&stats) {
                 error!("Failed to persist grid stats to SQLite database: {}", e);
@@ -142,6 +160,36 @@ impl AppState {
                     state.add_log("WARN", format!("Telegram 成交通知发送失败: {}", err)).await;
                 }
             });
+        }
+    }
+
+    pub async fn verify_trade_pnl(&self, trade: TradeRecord) -> anyhow::Result<()> {
+        if !self.db.verify_trade_pnl(&trade)? {
+            return Ok(());
+        }
+        if trade.symbol == self.config.read().await.exchange.symbol {
+            let mut stats = self.stats.write().await;
+            stats.total_realized_pnl += trade.realized_pnl;
+            stats.total_commission += trade.commission;
+            stats.pending_pnl_trades = stats.pending_pnl_trades.saturating_sub(1);
+        }
+        let mut recent = self.recent_trades.write().await;
+        if let Some(existing) = recent.iter_mut().find(|item| item.trade_id == trade.trade_id) {
+            *existing = trade;
+        }
+        Ok(())
+    }
+
+    pub async fn refresh_pnl_stats(&self) {
+        let symbol = self.config.read().await.exchange.symbol.clone();
+        match self.db.get_pnl_totals(&symbol) {
+            Ok((pnl, commission, pending)) => {
+                let mut stats = self.stats.write().await;
+                stats.total_realized_pnl = pnl;
+                stats.total_commission = commission;
+                stats.pending_pnl_trades = pending;
+            }
+            Err(e) => error!("Failed to load realized PnL totals: {}", e),
         }
     }
 
