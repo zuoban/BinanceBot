@@ -103,6 +103,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 
     Router::new()
         .route("/", get(dashboard_handler))
+        .route("/dashboard.css", get(dashboard_css_handler))
         .route("/api/auth/status", get(get_auth_status_handler))
         .route("/api/auth/setup", post(post_auth_setup_handler))
         .route("/api/auth/login", post(post_auth_login_handler))
@@ -114,6 +115,16 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 
 async fn dashboard_handler() -> Html<&'static str> {
     Html(INDEX_HTML)
+}
+
+async fn dashboard_css_handler() -> (
+    [(axum::http::header::HeaderName, &'static str); 1],
+    &'static str,
+) {
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        include_str!("dashboard.css"),
+    )
 }
 
 async fn get_auth_status_handler(
