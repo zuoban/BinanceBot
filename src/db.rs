@@ -125,6 +125,15 @@ impl Database {
             );
             CREATE INDEX IF NOT EXISTS idx_managed_orders_symbol ON managed_orders (symbol);
 
+            CREATE TABLE IF NOT EXISTS pair_intents (
+                parent_client_order_id TEXT PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                order_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_pair_intents_scope ON pair_intents (symbol, mode);
+
             CREATE TABLE IF NOT EXISTS bot_runtime (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 status TEXT NOT NULL,
@@ -349,14 +358,75 @@ impl Database {
     }
 
     pub fn insert_trade_with_stats(&self, trade: &TradeRecord, stats: &GridStats) -> Result<bool> {
+        self.insert_trade_with_recovery(trade, stats, None, None)
+    }
+
+    pub fn insert_trade_with_recovery(
+        &self,
+        trade: &TradeRecord,
+        stats: &GridStats,
+        pair_intent: Option<&GridOrder>,
+        consumed_pair_source: Option<&str>,
+    ) -> Result<bool> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         let inserted = insert_trade_on(&tx, trade)?;
         if inserted {
             save_scoped_stats_on(&tx, &trade.symbol, trade.mode, stats)?;
+            if let Some(intent) = pair_intent {
+                let parent = intent
+                    .paired_client_order_id
+                    .as_deref()
+                    .context("Pair intent is missing its source order")?;
+                tx.execute(
+                    "INSERT INTO pair_intents (parent_client_order_id, symbol, mode, order_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5);",
+                    params![parent, trade.symbol, trade.mode.as_str(), serde_json::to_string(intent)?, Utc::now().to_rfc3339()],
+                )?;
+            }
+        }
+        if trade.mode != TradingMode::Paper {
+            tx.execute(
+                "DELETE FROM managed_orders WHERE client_order_id = ?1;",
+                params![trade.client_order_id],
+            )?;
+        }
+        if let Some(parent) = consumed_pair_source {
+            tx.execute(
+                "DELETE FROM pair_intents WHERE parent_client_order_id = ?1;",
+                params![parent],
+            )?;
         }
         tx.commit()?;
         Ok(inserted)
+    }
+
+    pub fn load_pair_intents(&self, symbol: &str, mode: TradingMode) -> Result<Vec<GridOrder>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT order_json FROM pair_intents WHERE symbol = ?1 AND mode = ?2 ORDER BY created_at;",
+        )?;
+        let rows = stmt.query_map(params![symbol, mode.as_str()], |row| {
+            row.get::<_, String>(0)
+        })?;
+        rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+    }
+
+    pub fn delete_pair_intent(&self, parent_client_order_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM pair_intents WHERE parent_client_order_id = ?1;",
+            params![parent_client_order_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_pair_intents(&self, symbol: &str, mode: TradingMode) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM pair_intents WHERE symbol = ?1 AND mode = ?2;",
+            params![symbol, mode.as_str()],
+        )?;
+        Ok(())
     }
 
     pub fn save_managed_order(&self, order: &GridOrder) -> Result<()> {
@@ -885,6 +955,101 @@ mod tests {
                 .unwrap()
                 .3,
             dec!(100)
+        );
+    }
+
+    #[test]
+    fn pair_intent_and_fill_commit_atomically() {
+        let db = Database::open(":memory:").unwrap();
+        let parent = GridOrder {
+            client_order_id: "gb_b_parent".into(),
+            order_id: Some(41),
+            symbol: "SOLUSDC".into(),
+            side: OrderSide::Buy,
+            price: dec!(100),
+            quantity: dec!(1),
+            amount_usdc: dec!(100),
+            status: crate::types::OrderStatus::New,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            grid_level: -1,
+            paired_client_order_id: None,
+            is_take_profit: false,
+        };
+        let child = GridOrder {
+            client_order_id: "gb_s_child".into(),
+            order_id: None,
+            symbol: "SOLUSDC".into(),
+            side: OrderSide::Sell,
+            price: dec!(101),
+            quantity: dec!(1),
+            amount_usdc: dec!(101),
+            status: crate::types::OrderStatus::New,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            grid_level: 0,
+            paired_client_order_id: Some(parent.client_order_id.clone()),
+            is_take_profit: true,
+        };
+        let trade = TradeRecord {
+            trade_id: "grid:gb_b_parent".into(),
+            client_order_id: parent.client_order_id.clone(),
+            symbol: "SOLUSDC".into(),
+            mode: TradingMode::Live,
+            side: OrderSide::Buy,
+            price: parent.price,
+            quantity: parent.quantity,
+            amount_usdc: parent.amount_usdc,
+            realized_pnl: Decimal::ZERO,
+            commission: Decimal::ZERO,
+            pnl_verified: false,
+            is_maker: true,
+            timestamp: Utc::now(),
+            note: "fill".into(),
+        };
+        let stats = GridStats {
+            total_trades: 1,
+            ..GridStats::default()
+        };
+        db.save_managed_order(&parent).unwrap();
+        db.conn.lock().unwrap().execute_batch(
+            "CREATE TRIGGER reject_pair BEFORE INSERT ON pair_intents BEGIN SELECT RAISE(ABORT, 'reject pair'); END;",
+        ).unwrap();
+        assert!(db
+            .insert_trade_with_recovery(&trade, &stats, Some(&child), None)
+            .is_err());
+        assert!(db.get_recent_trades(10).unwrap().is_empty());
+        assert_eq!(db.load_managed_orders("SOLUSDC").unwrap().len(), 1);
+        assert!(db
+            .load_scoped_stats("SOLUSDC", TradingMode::Live)
+            .unwrap()
+            .is_none());
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER reject_pair;")
+            .unwrap();
+
+        assert!(db
+            .insert_trade_with_recovery(&trade, &stats, Some(&child), None)
+            .unwrap());
+        assert!(!db
+            .insert_trade_with_recovery(&trade, &stats, Some(&child), None)
+            .unwrap());
+        assert!(db.load_managed_orders("SOLUSDC").unwrap().is_empty());
+        let intents = db.load_pair_intents("SOLUSDC", TradingMode::Live).unwrap();
+        assert_eq!(intents.len(), 1);
+        assert_eq!(intents[0].client_order_id, child.client_order_id);
+        assert_eq!(
+            intents[0].paired_client_order_id,
+            child.paired_client_order_id
+        );
+        assert_eq!(
+            db.load_scoped_stats("SOLUSDC", TradingMode::Live)
+                .unwrap()
+                .unwrap()
+                .0,
+            1
         );
     }
 

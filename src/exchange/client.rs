@@ -191,6 +191,17 @@ impl BinanceFuturesClient {
         symbol: &str,
         client_order_id: &str,
     ) -> Result<BinanceOrderResponse> {
+        self.lookup_order_by_client_id(symbol, client_order_id)
+            .await?
+            .ok_or_else(|| anyhow!("Order {} was not found on Binance", client_order_id))
+    }
+
+    /// Only Binance's explicit unknown-order code means it is safe to submit this ID.
+    pub async fn lookup_order_by_client_id(
+        &self,
+        symbol: &str,
+        client_order_id: &str,
+    ) -> Result<Option<BinanceOrderResponse>> {
         let ts = self.current_timestamp();
         let query = format!(
             "symbol={}&origClientOrderId={}&recvWindow={}&timestamp={}",
@@ -203,13 +214,22 @@ impl BinanceFuturesClient {
         );
         let resp = self.client.get(&url).send().await?;
         if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            if status == reqwest::StatusCode::BAD_REQUEST
+                && serde_json::from_str::<BinanceApiError>(&body)
+                    .is_ok_and(|error| error.code == -2013)
+            {
+                return Ok(None);
+            }
             return Err(anyhow!(
-                "Failed to resolve order {}: {}",
+                "Failed to resolve order {}: {} - {}",
                 client_order_id,
-                resp.status()
+                status,
+                body
             ));
         }
-        Ok(resp.json().await?)
+        Ok(Some(resp.json().await?))
     }
 
     /// Binance execution records contain the exchange-calculated realized PnL and fee.

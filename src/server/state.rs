@@ -144,6 +144,8 @@ impl AppState {
         self: &Arc<Self>,
         trade: TradeRecord,
         cycle_profit: Option<Decimal>,
+        pair_intent: Option<GridOrder>,
+        consumed_pair_source: Option<String>,
     ) -> bool {
         // Persist the trade and its cumulative statistics together.
         let current_config = self.config.read().await;
@@ -179,7 +181,14 @@ impl AppState {
             let stored_stats = updated.clone();
             match self
                 .db
-                .run_blocking(move |db| db.insert_trade_with_stats(&stored_trade, &stored_stats))
+                .run_blocking(move |db| {
+                    db.insert_trade_with_recovery(
+                        &stored_trade,
+                        &stored_stats,
+                        pair_intent.as_ref(),
+                        consumed_pair_source.as_deref(),
+                    )
+                })
                 .await
             {
                 Ok(true) => *self.stats.write().await = updated,
