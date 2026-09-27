@@ -2,7 +2,8 @@ use crate::server::state::AppState;
 use crate::server::ui::INDEX_HTML;
 use crate::types::{
     AuthLoginPayload, AuthSetupPayload, AuthStatusResponse, AuthTokenResponse, BotControlAction,
-    ChangePasswordPayload, GridOrder, LogEntry, TradeRecord, UpdateConfigPayload, WebConfigView,
+    ChangePasswordPayload, GridOrder, LogEntry, TradeRecord, TradingMode, UpdateConfigPayload,
+    WebConfigView,
 };
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -119,7 +120,11 @@ async fn get_auth_status_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Json<ApiResponse<AuthStatusResponse>> {
-    let initialized = state.db.is_admin_password_set().unwrap_or(false);
+    let initialized = state
+        .db
+        .run_blocking(|db| db.is_admin_password_set())
+        .await
+        .unwrap_or(false);
     let token = extract_token(&headers);
     let authenticated = match token {
         Some(ref t) => state.is_token_valid(t).await,
@@ -140,7 +145,11 @@ async fn post_auth_setup_handler(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<AuthSetupPayload>,
 ) -> (StatusCode, Json<ApiResponse<AuthTokenResponse>>) {
-    let is_set = state.db.is_admin_password_set().unwrap_or(false);
+    let is_set = state
+        .db
+        .run_blocking(|db| db.is_admin_password_set())
+        .await
+        .unwrap_or(false);
     if is_set {
         return (
             StatusCode::BAD_REQUEST,
@@ -187,7 +196,12 @@ async fn post_auth_setup_handler(
         );
     }
 
-    match state.db.initialize_admin_password(password) {
+    let password = password.to_string();
+    match state
+        .db
+        .run_blocking(move |db| db.initialize_admin_password(&password))
+        .await
+    {
         Ok(true) => {}
         Ok(false) => {
             return (
@@ -241,7 +255,11 @@ async fn post_auth_login_handler(
             }),
         );
     }
-    let is_set = state.db.is_admin_password_set().unwrap_or(false);
+    let is_set = state
+        .db
+        .run_blocking(|db| db.is_admin_password_set())
+        .await
+        .unwrap_or(false);
     if !is_set {
         return (
             StatusCode::BAD_REQUEST,
@@ -253,7 +271,12 @@ async fn post_auth_login_handler(
         );
     }
 
-    match state.db.verify_admin_password(&payload.password) {
+    let password = payload.password;
+    match state
+        .db
+        .run_blocking(move |db| db.verify_admin_password(&password))
+        .await
+    {
         Ok(true) => {
             state.clear_login_attempts().await;
             let token = crate::auth::generate_session_token();
@@ -323,9 +346,19 @@ async fn post_change_password_handler(
         );
     }
 
-    match state.db.verify_admin_password(&payload.old_password) {
+    let old_password = payload.old_password;
+    match state
+        .db
+        .run_blocking(move |db| db.verify_admin_password(&old_password))
+        .await
+    {
         Ok(true) => {
-            if let Err(e) = state.db.set_admin_password(new_password) {
+            let new_password = new_password.to_string();
+            if let Err(e) = state
+                .db
+                .run_blocking(move |db| db.set_admin_password(&new_password))
+                .await
+            {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(ApiResponse {
@@ -391,7 +424,15 @@ async fn get_orders_handler(
 async fn get_trades_handler(
     State(state): State<Arc<AppState>>,
 ) -> Json<ApiResponse<Vec<TradeRecord>>> {
-    let trades = match state.db.get_recent_trades(100) {
+    let config = state.config.read().await;
+    let symbol = config.exchange.symbol.clone();
+    let mode = TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
+    drop(config);
+    let trades = match state
+        .db
+        .run_blocking(move |db| db.get_recent_trades_for(&symbol, mode, 100))
+        .await
+    {
         Ok(t) => t,
         Err(e) => {
             error!("Failed to fetch trades from SQLite: {}", e);
@@ -659,6 +700,19 @@ async fn post_control_handler(
     };
 
     let action_name = format!("{:?}", action);
+    if matches!(
+        action,
+        BotControlAction::Pause | BotControlAction::CancelAll
+    ) {
+        if let Err(error) = state.pause_trading().await {
+            error!("Failed to persist immediate pause: {}", error);
+            return Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some(format!("暂停交易失败: {}", error)),
+            });
+        }
+    }
     if let Err(e) = state.action_tx.send(action).await {
         error!("Failed to dispatch action: {}", e);
         return Json(ApiResponse {
@@ -752,6 +806,11 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, token: String) {
                         _ => None,
                     };
                     if let Some(act) = action {
+                        if matches!(act, BotControlAction::Pause | BotControlAction::CancelAll)
+                            && state_clone.pause_trading().await.is_err()
+                        {
+                            break;
+                        }
                         let _ = state_clone.action_tx.send(act).await;
                     }
                 }
@@ -764,4 +823,48 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, token: String) {
         _ = (&mut send_task) => recv_task.abort(),
         _ = (&mut recv_task) => send_task.abort(),
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AppConfig;
+    use crate::db::Database;
+    use crate::types::BotStatus;
+
+    #[tokio::test]
+    async fn pause_updates_status_before_engine_accepts_action() {
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let (action_tx, action_rx) = tokio::sync::mpsc::channel(1);
+        action_tx.send(BotControlAction::Rebalance).await.unwrap();
+        let state = AppState::new(AppConfig::default(), db.clone(), action_tx);
+        let request_state = state.clone();
+        let request = tokio::spawn(async move {
+            post_control_handler(
+                State(request_state),
+                Json(ControlRequest {
+                    action: "pause".into(),
+                }),
+            )
+            .await
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while *state.status.read().await != BotStatus::Paused {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while db.load_bot_status().unwrap() != Some(BotStatus::Paused) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!request.is_finished());
+        drop(action_rx);
+        assert!(!request.await.unwrap().0.success);
+    }
 }

@@ -122,7 +122,7 @@ pub async fn send_trade_notification(
 #[cfg(test)]
 mod tests {
     use super::format_trade_message;
-    use crate::types::{OrderSide, TradeRecord};
+    use crate::types::{OrderSide, TradeRecord, TradingMode};
     use chrono::Utc;
     use rust_decimal_macros::dec;
 
@@ -132,6 +132,7 @@ mod tests {
             trade_id: "1".into(),
             client_order_id: "order-1".into(),
             symbol: "SOLUSDC".into(),
+            mode: TradingMode::Paper,
             side: OrderSide::Buy,
             price: dec!(123.45),
             quantity: dec!(2),

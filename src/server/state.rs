@@ -7,6 +7,7 @@ use crate::types::*;
 use chrono::Utc;
 use rust_decimal::Decimal;
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
@@ -25,6 +26,9 @@ pub struct AppState {
     pub active_orders: RwLock<HashMap<String, GridOrder>>,
     pub recent_trades: RwLock<VecDeque<TradeRecord>>,
     pub recent_logs: RwLock<VecDeque<LogEntry>>,
+    pause_epoch: AtomicU64,
+    status_update_lock: Mutex<()>,
+    trade_commit_lock: Mutex<()>,
     login_failures: Mutex<VecDeque<Instant>>,
     setup_code: Option<String>,
 
@@ -41,6 +45,7 @@ impl AppState {
     ) -> Arc<Self> {
         let (ws_broadcast_tx, _) = broadcast::channel(100);
         let symbol = config.exchange.symbol.clone();
+        let mode = TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
         let initial_status = match db.load_bot_status() {
             Ok(Some(status)) => status,
             Ok(None) if config.exchange.dry_run => BotStatus::Running,
@@ -78,7 +83,9 @@ impl AppState {
         };
 
         // Preload recent trades from SQLite database
-        let saved_trades = db.get_recent_trades(100).unwrap_or_default();
+        let saved_trades = db
+            .get_recent_trades_for(&symbol, mode, 100)
+            .unwrap_or_default();
         let mut recent_trades = VecDeque::with_capacity(200);
         for trade in saved_trades.into_iter().rev() {
             recent_trades.push_back(trade);
@@ -86,13 +93,15 @@ impl AppState {
 
         // Restore cumulative grid stats from SQLite database if available
         let mut initial_stats = GridStats::default();
-        if let Ok(Some((total_trades, cycles, profit, volume))) = db.load_stats() {
+        if let Ok(Some((total_trades, cycles, profit, volume))) =
+            db.load_scoped_stats(&symbol, mode)
+        {
             initial_stats.total_trades = total_trades;
             initial_stats.completed_cycles = cycles;
             initial_stats.total_realized_profit = profit;
             initial_stats.total_volume_usdc = volume;
         }
-        match db.get_pnl_totals(&symbol) {
+        match db.get_pnl_totals(&symbol, mode) {
             Ok((pnl, commission, pending)) => {
                 initial_stats.total_realized_pnl = pnl;
                 initial_stats.total_commission = commission;
@@ -117,6 +126,9 @@ impl AppState {
             active_orders: RwLock::new(HashMap::new()),
             recent_trades: RwLock::new(recent_trades),
             recent_logs: RwLock::new(VecDeque::with_capacity(300)),
+            pause_epoch: AtomicU64::new(0),
+            status_update_lock: Mutex::new(()),
+            trade_commit_lock: Mutex::new(()),
             login_failures: Mutex::new(VecDeque::new()),
             setup_code,
             action_tx,
@@ -134,26 +146,43 @@ impl AppState {
         cycle_profit: Option<Decimal>,
     ) -> bool {
         // Persist the trade and its cumulative statistics together.
-        let current_symbol = self.config.read().await.exchange.symbol.clone();
+        let current_config = self.config.read().await;
+        let current_symbol = current_config.exchange.symbol.clone();
+        let current_mode = TradingMode::from_exchange(
+            current_config.exchange.dry_run,
+            current_config.exchange.is_testnet,
+        );
+        drop(current_config);
+        if trade.symbol != current_symbol || trade.mode != current_mode {
+            error!(
+                "Trade scope differs from the active strategy: {}",
+                trade.trade_id
+            );
+            return false;
+        }
         {
-            let mut stats = self.stats.write().await;
-            let mut updated = stats.clone();
+            let _commit = self.trade_commit_lock.lock().await;
+            let mut updated = self.stats.read().await.clone();
             updated.total_trades += 1;
             updated.total_volume_usdc += trade.amount_usdc;
             if let Some(profit) = cycle_profit {
                 updated.completed_cycles += 1;
                 updated.total_realized_profit += profit;
             }
-            if trade.symbol == current_symbol {
-                if trade.pnl_verified {
-                    updated.total_realized_pnl += trade.realized_pnl;
-                    updated.total_commission += trade.commission;
-                } else {
-                    updated.pending_pnl_trades += 1;
-                }
+            if trade.pnl_verified {
+                updated.total_realized_pnl += trade.realized_pnl;
+                updated.total_commission += trade.commission;
+            } else {
+                updated.pending_pnl_trades += 1;
             }
-            match self.db.insert_trade_with_stats(&trade, &updated) {
-                Ok(true) => *stats = updated,
+            let stored_trade = trade.clone();
+            let stored_stats = updated.clone();
+            match self
+                .db
+                .run_blocking(move |db| db.insert_trade_with_stats(&stored_trade, &stored_stats))
+                .await
+            {
+                Ok(true) => *self.stats.write().await = updated,
                 Ok(false) => return true,
                 Err(e) => {
                     error!(
@@ -205,10 +234,21 @@ impl AppState {
     }
 
     pub async fn verify_trade_pnl(&self, trade: TradeRecord) -> anyhow::Result<()> {
-        if !self.db.verify_trade_pnl(&trade)? {
+        let _commit = self.trade_commit_lock.lock().await;
+        let stored_trade = trade.clone();
+        if !self
+            .db
+            .run_blocking(move |db| db.verify_trade_pnl(&stored_trade))
+            .await?
+        {
             return Ok(());
         }
-        if trade.symbol == self.config.read().await.exchange.symbol {
+        let config = self.config.read().await;
+        let current_mode =
+            TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
+        let current_symbol = config.exchange.symbol.clone();
+        drop(config);
+        if trade.symbol == current_symbol && trade.mode == current_mode {
             let mut stats = self.stats.write().await;
             stats.total_realized_pnl += trade.realized_pnl;
             stats.total_commission += trade.commission;
@@ -224,17 +264,42 @@ impl AppState {
         Ok(())
     }
 
-    pub async fn refresh_pnl_stats(&self) {
-        let symbol = self.config.read().await.exchange.symbol.clone();
-        match self.db.get_pnl_totals(&symbol) {
-            Ok((pnl, commission, pending)) => {
-                let mut stats = self.stats.write().await;
-                stats.total_realized_pnl = pnl;
-                stats.total_commission = commission;
-                stats.pending_pnl_trades = pending;
+    pub async fn refresh_current_scope(&self) {
+        let _commit = self.trade_commit_lock.lock().await;
+        let config = self.config.read().await;
+        let symbol = config.exchange.symbol.clone();
+        let mode = TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
+        drop(config);
+        let query_symbol = symbol.clone();
+        let result = self
+            .db
+            .run_blocking(move |db| {
+                Ok((
+                    db.load_scoped_stats(&query_symbol, mode)?,
+                    db.get_pnl_totals(&query_symbol, mode)?,
+                    db.get_recent_trades_for(&query_symbol, mode, 100)?,
+                ))
+            })
+            .await;
+        let (saved_stats, (pnl, commission, pending), trades) = match result {
+            Ok(result) => result,
+            Err(e) => {
+                error!("Failed to load scoped statistics: {}", e);
+                return;
             }
-            Err(e) => error!("Failed to load realized PnL totals: {}", e),
+        };
+        let mut updated = GridStats::default();
+        if let Some((trades, cycles, profit, volume)) = saved_stats {
+            updated.total_trades = trades;
+            updated.completed_cycles = cycles;
+            updated.total_realized_profit = profit;
+            updated.total_volume_usdc = volume;
         }
+        updated.total_realized_pnl = pnl;
+        updated.total_commission = commission;
+        updated.pending_pnl_trades = pending;
+        *self.stats.write().await = updated;
+        *self.recent_trades.write().await = trades.into_iter().rev().collect();
     }
 
     pub async fn add_log(&self, level: &str, message: impl Into<String>) {
@@ -340,19 +405,29 @@ impl AppState {
         if token.is_empty() {
             return false;
         }
-        self.db.is_session_valid(token).unwrap_or(false)
+        let token = token.to_string();
+        self.db
+            .run_blocking(move |db| db.is_session_valid(&token))
+            .await
+            .unwrap_or(false)
     }
 
     pub async fn create_session(&self, token: &str) -> anyhow::Result<()> {
-        self.db.create_session(token)
+        let token = token.to_string();
+        self.db
+            .run_blocking(move |db| db.create_session(&token))
+            .await
     }
 
     pub async fn delete_session(&self, token: &str) -> anyhow::Result<()> {
-        self.db.delete_session(token)
+        let token = token.to_string();
+        self.db
+            .run_blocking(move |db| db.delete_session(&token))
+            .await
     }
 
     pub async fn clear_all_sessions(&self) -> anyhow::Result<()> {
-        self.db.clear_all_sessions()
+        self.db.run_blocking(Database::clear_all_sessions).await
     }
 
     pub async fn begin_login_attempt(&self) -> bool {
@@ -370,14 +445,25 @@ impl AppState {
     }
 
     pub async fn pause_trading(&self) -> anyhow::Result<()> {
+        self.pause_epoch.fetch_add(1, Ordering::SeqCst);
+        let _update = self.status_update_lock.lock().await;
         *self.status.write().await = BotStatus::Paused;
-        self.db.save_bot_status(BotStatus::Paused)
+        self.db
+            .run_blocking(|db| db.save_bot_status(BotStatus::Paused))
+            .await
     }
 
     pub async fn resume_trading(&self) -> anyhow::Result<()> {
-        self.db.save_bot_status(BotStatus::Running)?;
+        let _update = self.status_update_lock.lock().await;
+        self.db
+            .run_blocking(|db| db.save_bot_status(BotStatus::Running))
+            .await?;
         *self.status.write().await = BotStatus::Running;
         Ok(())
+    }
+
+    pub fn pause_epoch(&self) -> u64 {
+        self.pause_epoch.load(Ordering::SeqCst)
     }
 
     pub fn setup_code(&self) -> Option<&str> {
@@ -388,5 +474,49 @@ impl AppState {
         self.setup_code
             .as_deref()
             .is_some_and(|expected| expected == code)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+
+    #[tokio::test]
+    async fn switching_mode_reloads_only_that_modes_trades() {
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        for (id, mode, pnl) in [
+            ("paper", TradingMode::Paper, dec!(10)),
+            ("live", TradingMode::Live, dec!(-2)),
+        ] {
+            db.insert_trade(&TradeRecord {
+                trade_id: id.into(),
+                client_order_id: format!("gb_b_{id}"),
+                symbol: "SOLUSDC".into(),
+                mode,
+                side: OrderSide::Buy,
+                price: dec!(100),
+                quantity: dec!(1),
+                amount_usdc: dec!(100),
+                realized_pnl: pnl,
+                commission: Decimal::ZERO,
+                pnl_verified: true,
+                is_maker: true,
+                timestamp: Utc::now(),
+                note: String::new(),
+            })
+            .unwrap();
+        }
+        let (action_tx, _) = mpsc::channel(1);
+        let state = AppState::new(AppConfig::default(), db, action_tx);
+        assert_eq!(state.stats.read().await.total_realized_pnl, dec!(10));
+        assert_eq!(state.recent_trades.read().await.len(), 1);
+
+        state.config.write().await.exchange.dry_run = false;
+        state.refresh_current_scope().await;
+        assert_eq!(state.stats.read().await.total_realized_pnl, dec!(-2));
+        let trades = state.recent_trades.read().await;
+        assert_eq!(trades.len(), 1);
+        assert_eq!(trades[0].mode, TradingMode::Live);
     }
 }

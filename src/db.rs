@@ -1,6 +1,6 @@
 use crate::auth;
 use crate::config::AppConfig;
-use crate::types::{BotStatus, GridOrder, GridStats, OrderSide, TradeRecord};
+use crate::types::{BotStatus, GridOrder, GridStats, OrderSide, TradeRecord, TradingMode};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -16,6 +16,17 @@ pub struct Database {
 }
 
 impl Database {
+    pub async fn run_blocking<T, F>(self: &std::sync::Arc<Self>, operation: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Database) -> Result<T> + Send + 'static,
+    {
+        let db = std::sync::Arc::clone(self);
+        tokio::task::spawn_blocking(move || operation(&db))
+            .await
+            .context("Database worker stopped")?
+    }
+
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path_ref = path.as_ref();
         let path_str = path_ref.to_string_lossy().to_string();
@@ -89,6 +100,7 @@ impl Database {
                 trade_id TEXT PRIMARY KEY,
                 client_order_id TEXT NOT NULL,
                 symbol TEXT NOT NULL,
+                mode TEXT NOT NULL DEFAULT 'UNKNOWN',
                 side TEXT NOT NULL,
                 price TEXT NOT NULL,
                 quantity TEXT NOT NULL,
@@ -128,6 +140,17 @@ impl Database {
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS scoped_grid_stats (
+                symbol TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                total_trades INTEGER NOT NULL,
+                completed_cycles INTEGER NOT NULL,
+                total_realized_profit TEXT NOT NULL,
+                total_volume_usdc TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (symbol, mode)
+            );
+
             CREATE TABLE IF NOT EXISTS admin_auth (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 password_hash TEXT NOT NULL,
@@ -154,6 +177,22 @@ impl Database {
                 [],
             )?;
         }
+
+        let has_mode: i64 = conn.query_row(
+            "SELECT count(*) FROM pragma_table_info('trades') WHERE name = 'mode';",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_mode == 0 {
+            conn.execute(
+                "ALTER TABLE trades ADD COLUMN mode TEXT NOT NULL DEFAULT 'UNKNOWN';",
+                [],
+            )?;
+        }
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_trades_scope ON trades (symbol, mode, timestamp DESC);",
+            [],
+        )?;
 
         info!("SQLite schema verified for database: {}", self.path);
         Ok(())
@@ -314,7 +353,7 @@ impl Database {
         let tx = conn.transaction()?;
         let inserted = insert_trade_on(&tx, trade)?;
         if inserted {
-            save_stats_on(&tx, stats)?;
+            save_scoped_stats_on(&tx, &trade.symbol, trade.mode, stats)?;
         }
         tx.commit()?;
         Ok(inserted)
@@ -327,6 +366,26 @@ impl Database {
             "INSERT INTO managed_orders (client_order_id, symbol, order_json, updated_at) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(client_order_id) DO UPDATE SET symbol = excluded.symbol, order_json = excluded.order_json, updated_at = excluded.updated_at;",
             params![order.client_order_id, order.symbol, json, Utc::now().to_rfc3339()],
         )?;
+        Ok(())
+    }
+
+    pub fn save_managed_orders(&self, orders: &[GridOrder]) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        {
+            let mut statement = tx.prepare(
+                "INSERT INTO managed_orders (client_order_id, symbol, order_json, updated_at) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(client_order_id) DO UPDATE SET symbol = excluded.symbol, order_json = excluded.order_json, updated_at = excluded.updated_at;",
+            )?;
+            for order in orders {
+                statement.execute(params![
+                    order.client_order_id,
+                    order.symbol,
+                    serde_json::to_string(order)?,
+                    Utc::now().to_rfc3339(),
+                ])?;
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -359,12 +418,16 @@ impl Database {
         Ok(())
     }
 
-    pub fn get_trade_by_client_id(&self, client_order_id: &str) -> Result<Option<TradeRecord>> {
+    pub fn get_trade_by_client_id(
+        &self,
+        client_order_id: &str,
+        mode: TradingMode,
+    ) -> Result<Option<TradeRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT trade_id, client_order_id, symbol, side, price, quantity, amount_usdc, realized_pnl, commission, pnl_verified, is_maker, timestamp, note FROM trades WHERE client_order_id = ?1 ORDER BY timestamp DESC LIMIT 1;",
+            "SELECT trade_id, client_order_id, symbol, side, price, quantity, amount_usdc, realized_pnl, commission, pnl_verified, is_maker, timestamp, note, mode FROM trades WHERE client_order_id = ?1 AND mode = ?2 ORDER BY timestamp DESC LIMIT 1;",
         )?;
-        let mut rows = stmt.query(params![client_order_id])?;
+        let mut rows = stmt.query(params![client_order_id, mode.as_str()])?;
         rows.next()?
             .map(trade_from_row)
             .transpose()
@@ -375,12 +438,13 @@ impl Database {
     pub fn verify_trade_pnl(&self, trade: &TradeRecord) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
         let updated = conn.execute(
-            "UPDATE trades SET realized_pnl = ?1, commission = ?2, is_maker = ?3, pnl_verified = 1 WHERE trade_id = ?4 AND pnl_verified = 0;",
+            "UPDATE trades SET realized_pnl = ?1, commission = ?2, is_maker = ?3, pnl_verified = 1 WHERE trade_id = ?4 AND mode = ?5 AND pnl_verified = 0;",
             params![
                 trade.realized_pnl.to_string(),
                 trade.commission.to_string(),
                 if trade.is_maker { 1 } else { 0 },
                 trade.trade_id,
+                trade.mode.as_str(),
             ],
         )?;
         Ok(updated == 1)
@@ -391,7 +455,7 @@ impl Database {
         let mut stmt = conn.prepare(
             r#"
             SELECT trade_id, client_order_id, symbol, side, price, quantity,
-                   amount_usdc, realized_pnl, commission, pnl_verified, is_maker, timestamp, note
+                   amount_usdc, realized_pnl, commission, pnl_verified, is_maker, timestamp, note, mode
             FROM trades
             ORDER BY timestamp DESC
             LIMIT ?1;
@@ -407,27 +471,50 @@ impl Database {
         Ok(list)
     }
 
+    pub fn get_recent_trades_for(
+        &self,
+        symbol: &str,
+        mode: TradingMode,
+        limit: usize,
+    ) -> Result<Vec<TradeRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT trade_id, client_order_id, symbol, side, price, quantity, amount_usdc, realized_pnl, commission, pnl_verified, is_maker, timestamp, note, mode FROM trades WHERE symbol = ?1 AND mode = ?2 ORDER BY timestamp DESC LIMIT ?3;",
+        )?;
+        let rows = stmt.query_map(params![symbol, mode.as_str(), limit as i64], trade_from_row)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
     pub fn get_unverified_trades(
         &self,
         symbol: &str,
+        mode: TradingMode,
         limit: usize,
         offset: usize,
     ) -> Result<Vec<TradeRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT trade_id, client_order_id, symbol, side, price, quantity, amount_usdc, realized_pnl, commission, pnl_verified, is_maker, timestamp, note FROM trades WHERE symbol = ?1 AND pnl_verified = 0 ORDER BY timestamp DESC LIMIT ?2 OFFSET ?3;",
+            "SELECT trade_id, client_order_id, symbol, side, price, quantity, amount_usdc, realized_pnl, commission, pnl_verified, is_maker, timestamp, note, mode FROM trades WHERE symbol = ?1 AND mode = ?2 AND pnl_verified = 0 ORDER BY timestamp DESC LIMIT ?3 OFFSET ?4;",
         )?;
-        let rows = stmt.query_map(params![symbol, limit as i64, offset as i64], trade_from_row)?;
+        let rows = stmt.query_map(
+            params![symbol, mode.as_str(), limit as i64, offset as i64],
+            trade_from_row,
+        )?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }
 
-    pub fn get_pnl_totals(&self, symbol: &str) -> Result<(Decimal, Decimal, usize)> {
+    pub fn get_pnl_totals(
+        &self,
+        symbol: &str,
+        mode: TradingMode,
+    ) -> Result<(Decimal, Decimal, usize)> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT realized_pnl, commission, pnl_verified FROM trades WHERE symbol = ?1;",
+            "SELECT realized_pnl, commission, pnl_verified FROM trades WHERE symbol = ?1 AND mode = ?2;",
         )?;
-        let rows = stmt.query_map(params![symbol], |row| {
+        let rows = stmt.query_map(params![symbol, mode.as_str()], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -445,6 +532,30 @@ impl Database {
             }
         }
         Ok((pnl, fees, pending))
+    }
+
+    pub fn load_scoped_stats(
+        &self,
+        symbol: &str,
+        mode: TradingMode,
+    ) -> Result<Option<(usize, usize, Decimal, Decimal)>> {
+        let conn = self.conn.lock().unwrap();
+        let row: Option<(i64, i64, String, String)> = conn
+            .query_row(
+                "SELECT total_trades, completed_cycles, total_realized_profit, total_volume_usdc FROM scoped_grid_stats WHERE symbol = ?1 AND mode = ?2;",
+                params![symbol, mode.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        row.map(|(trades, cycles, profit, volume)| {
+            Ok((
+                trades as usize,
+                cycles as usize,
+                Decimal::from_str(&profit)?,
+                Decimal::from_str(&volume)?,
+            ))
+        })
+        .transpose()
     }
 
     pub fn load_stats(&self) -> Result<Option<(usize, usize, Decimal, Decimal)>> {
@@ -486,14 +597,15 @@ fn insert_trade_on(conn: &Connection, trade: &TradeRecord) -> Result<bool> {
         .execute(
             r#"
             INSERT OR IGNORE INTO trades (
-                trade_id, client_order_id, symbol, side, price, quantity,
+                trade_id, client_order_id, symbol, mode, side, price, quantity,
                 amount_usdc, realized_pnl, commission, pnl_verified, is_maker, timestamp, note
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13);
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14);
             "#,
             params![
                 trade.trade_id,
                 trade.client_order_id,
                 trade.symbol,
+                trade.mode.as_str(),
                 side_str,
                 trade.price.to_string(),
                 trade.quantity.to_string(),
@@ -508,6 +620,19 @@ fn insert_trade_on(conn: &Connection, trade: &TradeRecord) -> Result<bool> {
         )
         .context("Failed to insert trade into SQLite database")?;
     Ok(inserted == 1)
+}
+
+fn save_scoped_stats_on(
+    conn: &Connection,
+    symbol: &str,
+    mode: TradingMode,
+    stats: &GridStats,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO scoped_grid_stats (symbol, mode, total_trades, completed_cycles, total_realized_profit, total_volume_usdc, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT(symbol, mode) DO UPDATE SET total_trades = excluded.total_trades, completed_cycles = excluded.completed_cycles, total_realized_profit = excluded.total_realized_profit, total_volume_usdc = excluded.total_volume_usdc, updated_at = excluded.updated_at;",
+        params![symbol, mode.as_str(), stats.total_trades as i64, stats.completed_cycles as i64, stats.total_realized_profit.to_string(), stats.total_volume_usdc.to_string(), Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
 }
 
 fn save_stats_on(conn: &Connection, stats: &GridStats) -> Result<()> {
@@ -545,6 +670,7 @@ fn trade_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TradeRecord> {
         trade_id: row.get(0)?,
         client_order_id: row.get(1)?,
         symbol: row.get(2)?,
+        mode: TradingMode::from_db(&row.get::<_, String>(13)?),
         side: if side == "BUY" {
             OrderSide::Buy
         } else {
@@ -677,6 +803,7 @@ mod tests {
             trade_id: "trade_1".to_string(),
             client_order_id: "order_1".to_string(),
             symbol: "SOLUSDC".to_string(),
+            mode: TradingMode::Paper,
             side: OrderSide::Buy,
             price: dec!(150.2),
             quantity: dec!(0.66),
@@ -705,6 +832,7 @@ mod tests {
             trade_id: "atomic_trade".into(),
             client_order_id: "gb_b_atomic".into(),
             symbol: "SOLUSDC".into(),
+            mode: TradingMode::Paper,
             side: OrderSide::Buy,
             price: dec!(100),
             quantity: dec!(1),
@@ -722,11 +850,14 @@ mod tests {
             ..GridStats::default()
         };
         db.conn.lock().unwrap().execute_batch(
-            "CREATE TRIGGER reject_stats BEFORE INSERT ON grid_stats BEGIN SELECT RAISE(ABORT, 'reject stats'); END;",
+            "CREATE TRIGGER reject_stats BEFORE INSERT ON scoped_grid_stats BEGIN SELECT RAISE(ABORT, 'reject stats'); END;",
         ).unwrap();
         assert!(db.insert_trade_with_stats(&trade, &stats).is_err());
         assert!(db.get_recent_trades(10).unwrap().is_empty());
-        assert!(db.load_stats().unwrap().is_none());
+        assert!(db
+            .load_scoped_stats("SOLUSDC", TradingMode::Paper)
+            .unwrap()
+            .is_none());
 
         db.conn
             .lock()
@@ -741,8 +872,75 @@ mod tests {
         };
         assert!(!db.insert_trade_with_stats(&trade, &double_stats).unwrap());
         assert_eq!(db.get_recent_trades(10).unwrap().len(), 1);
-        assert_eq!(db.load_stats().unwrap().unwrap().0, 1);
-        assert_eq!(db.load_stats().unwrap().unwrap().3, dec!(100));
+        assert_eq!(
+            db.load_scoped_stats("SOLUSDC", TradingMode::Paper)
+                .unwrap()
+                .unwrap()
+                .0,
+            1
+        );
+        assert_eq!(
+            db.load_scoped_stats("SOLUSDC", TradingMode::Paper)
+                .unwrap()
+                .unwrap()
+                .3,
+            dec!(100)
+        );
+    }
+
+    #[test]
+    fn trading_modes_have_separate_history_and_totals() {
+        let db = Database::open(":memory:").unwrap();
+        for (id, mode, pnl) in [
+            ("paper", TradingMode::Paper, dec!(12)),
+            ("testnet", TradingMode::Testnet, dec!(3)),
+            ("live", TradingMode::Live, dec!(-4)),
+        ] {
+            let trade = TradeRecord {
+                trade_id: id.into(),
+                client_order_id: format!("gb_b_{id}"),
+                symbol: "SOLUSDC".into(),
+                mode,
+                side: OrderSide::Buy,
+                price: dec!(100),
+                quantity: dec!(1),
+                amount_usdc: dec!(100),
+                realized_pnl: pnl,
+                commission: dec!(0.1),
+                pnl_verified: true,
+                is_maker: true,
+                timestamp: Utc::now(),
+                note: String::new(),
+            };
+            let stats = GridStats {
+                total_trades: 1,
+                total_volume_usdc: dec!(100),
+                ..GridStats::default()
+            };
+            assert!(db.insert_trade_with_stats(&trade, &stats).unwrap());
+        }
+
+        assert_eq!(
+            db.get_pnl_totals("SOLUSDC", TradingMode::Live).unwrap(),
+            (dec!(-4), dec!(0.1), 0)
+        );
+        assert_eq!(
+            db.get_pnl_totals("SOLUSDC", TradingMode::Paper).unwrap(),
+            (dec!(12), dec!(0.1), 0)
+        );
+        assert_eq!(
+            db.get_recent_trades_for("SOLUSDC", TradingMode::Live, 10)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            db.load_scoped_stats("SOLUSDC", TradingMode::Testnet)
+                .unwrap()
+                .unwrap()
+                .0,
+            1
+        );
     }
 
     #[test]
@@ -761,9 +959,18 @@ mod tests {
         };
         db.init_tables().unwrap();
 
-        let mut pending = db.get_unverified_trades("SOLUSDC", 10, 0).unwrap();
+        let mut pending = db
+            .get_unverified_trades("SOLUSDC", TradingMode::Unknown, 10, 0)
+            .unwrap();
         assert_eq!(pending.len(), 1);
-        assert_eq!(db.get_pnl_totals("SOLUSDC").unwrap(), (dec!(0), dec!(0), 1));
+        assert_eq!(
+            db.get_pnl_totals("SOLUSDC", TradingMode::Unknown).unwrap(),
+            (dec!(0), dec!(0), 1)
+        );
+        assert_eq!(
+            db.get_pnl_totals("SOLUSDC", TradingMode::Live).unwrap(),
+            (dec!(0), dec!(0), 0)
+        );
 
         let mut trade = pending.pop().unwrap();
         trade.realized_pnl = dec!(-3.25);
@@ -772,11 +979,11 @@ mod tests {
         assert!(db.verify_trade_pnl(&trade).unwrap());
         assert!(!db.verify_trade_pnl(&trade).unwrap());
         assert!(db
-            .get_unverified_trades("SOLUSDC", 10, 0)
+            .get_unverified_trades("SOLUSDC", TradingMode::Unknown, 10, 0)
             .unwrap()
             .is_empty());
         assert_eq!(
-            db.get_pnl_totals("SOLUSDC").unwrap(),
+            db.get_pnl_totals("SOLUSDC", TradingMode::Unknown).unwrap(),
             (dec!(-3.25), dec!(0.80), 0)
         );
         assert_eq!(db.get_recent_trades(10).unwrap().len(), 1);

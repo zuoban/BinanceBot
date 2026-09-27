@@ -25,6 +25,46 @@ impl OrderSide {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum TradingMode {
+    #[default]
+    Unknown,
+    Paper,
+    Testnet,
+    Live,
+}
+
+impl TradingMode {
+    pub fn from_exchange(dry_run: bool, is_testnet: bool) -> Self {
+        if dry_run {
+            Self::Paper
+        } else if is_testnet {
+            Self::Testnet
+        } else {
+            Self::Live
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "UNKNOWN",
+            Self::Paper => "PAPER",
+            Self::Testnet => "TESTNET",
+            Self::Live => "LIVE",
+        }
+    }
+
+    pub fn from_db(value: &str) -> Self {
+        match value {
+            "PAPER" => Self::Paper,
+            "TESTNET" => Self::Testnet,
+            "LIVE" => Self::Live,
+            _ => Self::Unknown,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum OrderStatus {
@@ -58,6 +98,8 @@ pub struct TradeRecord {
     pub trade_id: String,
     pub client_order_id: String,
     pub symbol: String,
+    #[serde(default)]
+    pub mode: TradingMode,
     pub side: OrderSide,
     pub price: Decimal,
     pub quantity: Decimal,
