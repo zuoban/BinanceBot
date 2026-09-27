@@ -1418,7 +1418,15 @@ impl GridTradingEngine {
             if !already_exists && target_price > current_price {
                 let client_id = new_grid_client_order_id(OrderSide::Sell);
                 if self
-                    .place_grid_order(OrderSide::Sell, target_price, client_id, 1, None, false)
+                    .place_grid_order_with_remainder(
+                        OrderSide::Sell,
+                        target_price,
+                        client_id,
+                        1,
+                        None,
+                        false,
+                        true,
+                    )
                     .await
                 {
                     active_sell_prices.push(target_price);
@@ -1490,13 +1498,36 @@ impl GridTradingEngine {
         paired_client_order_id: Option<String>,
         is_take_profit: bool,
     ) -> bool {
+        self.place_grid_order_with_remainder(
+            side,
+            price,
+            client_order_id,
+            grid_level,
+            paired_client_order_id,
+            is_take_profit,
+            false,
+        )
+        .await
+    }
+
+    async fn place_grid_order_with_remainder(
+        &mut self,
+        side: OrderSide,
+        price: Decimal,
+        client_order_id: String,
+        grid_level: i32,
+        paired_client_order_id: Option<String>,
+        is_take_profit: bool,
+        allow_partial_sell: bool,
+    ) -> bool {
         if *self.state.status.read().await != BotStatus::Running {
             return false;
         }
         let config = self.state.config.read().await.clone();
         let rules = self.state.rules.read().await.clone();
         let symbol = config.exchange.symbol.clone();
-        let Some(quantity) = rules.calculate_quantity(price, config.grid.order_amount_usdc) else {
+        let Some(full_quantity) = rules.calculate_quantity(price, config.grid.order_amount_usdc)
+        else {
             return false;
         };
 
@@ -1544,12 +1575,12 @@ impl GridTradingEngine {
             .values()
             .cloned()
             .collect();
-        if side == OrderSide::Buy {
+        let quantity = if side == OrderSide::Buy {
             if let Some(limit) = config.grid.max_position_usdc {
                 let position_size = self.state.position.read().await.size;
                 let valuation_price = current_market_price.max(price);
-                let exposure =
-                    buy_exposure_usdc(position_size, valuation_price, &orders) + price * quantity;
+                let exposure = buy_exposure_usdc(position_size, valuation_price, &orders)
+                    + price * full_quantity;
                 if exposure > limit {
                     debug!(
                         "Skipping BUY at {}: projected exposure {} exceeds limit {}",
@@ -1558,18 +1589,29 @@ impl GridTradingEngine {
                     return false;
                 }
             }
+            full_quantity
         } else {
             let available = sell_quantity_available(self.state.position.read().await.size, &orders);
-            // A reduce-only sell must be funded by a full grid unit. Never turn
-            // the leftover position into a smaller order.
-            if available < quantity {
+            if available >= full_quantity {
+                full_quantity
+            } else if allow_partial_sell {
+                let remainder = rules.round_quantity(available);
+                if remainder < rules.min_qty || remainder * price < rules.min_notional {
+                    debug!(
+                        "Skipping SELL at {}: remaining quantity {} is below exchange minimum",
+                        price, remainder
+                    );
+                    return false;
+                }
+                remainder
+            } else {
                 debug!(
                     "Skipping SELL at {}: available {} < full grid quantity {}",
-                    price, available, quantity
+                    price, available, full_quantity
                 );
                 return false;
             }
-        }
+        };
 
         let formatted_price = rules.format_price(price);
         let formatted_qty = rules.format_quantity(quantity);
@@ -2278,7 +2320,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sell_window_skips_unfunded_orders_and_replaces_oversized_orders() {
+    async fn sell_window_places_one_remainder_and_replaces_oversized_orders() {
         let mut config = AppConfig::default();
         config.grid.grid_interval = dec!(1);
         config.grid.order_amount_usdc = dec!(2000);
@@ -2291,20 +2333,14 @@ mod tests {
         let client = Arc::new(BinanceFuturesClient::new(&config.exchange));
         let mut engine = GridTradingEngine::new(state.clone(), client, action_rx, ticker_rx);
         state.ticker.write().await.last_price = dec!(115);
-        state.position.write().await.size = dec!(2.63);
-
-        engine.maintain_grid_window().await;
-        let orders: Vec<_> = state.active_orders.read().await.values().cloned().collect();
-        assert_eq!(reserved_sell_quantity(&orders), dec!(0));
-        assert_eq!(
-            orders.iter().filter(|o| o.side == OrderSide::Sell).count(),
-            0
-        );
-
         state.position.write().await.size = dec!(19.67);
         engine.maintain_grid_window().await;
         let orders: Vec<_> = state.active_orders.read().await.values().cloned().collect();
-        let sell = orders.iter().find(|o| o.side == OrderSide::Sell).unwrap();
+        let sell = orders
+            .iter()
+            .filter(|o| o.side == OrderSide::Sell)
+            .min_by_key(|o| o.price)
+            .unwrap();
         let expected_qty = state
             .rules
             .read()
@@ -2314,9 +2350,13 @@ mod tests {
         assert_eq!(sell.quantity, expected_qty);
         assert_eq!(
             orders.iter().filter(|o| o.side == OrderSide::Sell).count(),
-            1
+            2
         );
-        assert!(sell_quantity_available(dec!(19.67), &orders) < expected_qty);
+        assert_eq!(reserved_sell_quantity(&orders), dec!(19.67));
+        assert_eq!(sell_quantity_available(dec!(19.67), &orders), dec!(0));
+
+        engine.maintain_grid_window().await;
+        assert_eq!(state.active_orders.read().await.len(), orders.len());
 
         let mut oversized = sell.clone();
         oversized.quantity = dec!(20);
@@ -2329,16 +2369,100 @@ mod tests {
 
         engine.maintain_grid_window().await;
         let orders: Vec<_> = state.active_orders.read().await.values().cloned().collect();
-        assert_eq!(reserved_sell_quantity(&orders), expected_qty);
+        assert_eq!(reserved_sell_quantity(&orders), dec!(19.67));
         assert_eq!(
             orders.iter().filter(|o| o.side == OrderSide::Sell).count(),
-            1
+            2
         );
 
         state.position.write().await.size = dec!(-1);
         engine.trim_sell_orders_to_position().await;
         let orders: Vec<_> = state.active_orders.read().await.values().cloned().collect();
         assert_eq!(reserved_sell_quantity(&orders), dec!(0));
+    }
+
+    #[tokio::test]
+    async fn sell_remainder_respects_symbol_minimum_after_step_rounding() {
+        let mut config = AppConfig::default();
+        config.grid.grid_interval = dec!(1);
+        config.grid.order_amount_usdc = dec!(2000);
+        config.grid.buy_window = 0;
+        config.grid.sell_window = 3;
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let (action_tx, action_rx) = mpsc::channel(1);
+        let (_ticker_tx, ticker_rx) = broadcast::channel(1);
+        let state = AppState::new(config.clone(), db, action_tx);
+        let client = Arc::new(BinanceFuturesClient::new(&config.exchange));
+        let mut engine = GridTradingEngine::new(state.clone(), client, action_rx, ticker_rx);
+        state.ticker.write().await.last_price = dec!(115);
+        state.rules.write().await.min_notional = dec!(50);
+        state.position.write().await.size = dec!(0.429);
+
+        engine.maintain_grid_window().await;
+        assert!(state.active_orders.read().await.is_empty());
+
+        state.position.write().await.size = dec!(0.449);
+        engine.maintain_grid_window().await;
+        let orders: Vec<_> = state.active_orders.read().await.values().cloned().collect();
+        assert_eq!(orders.len(), 1);
+        assert_eq!(orders[0].side, OrderSide::Sell);
+        assert_eq!(orders[0].quantity, dec!(0.44));
+        assert_eq!(orders[0].amount_usdc, dec!(51.04));
+
+        engine.maintain_grid_window().await;
+        assert_eq!(state.active_orders.read().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn sell_window_adds_remainder_after_existing_full_orders() {
+        let mut config = AppConfig::default();
+        config.grid.grid_interval = dec!(1.2);
+        config.grid.order_amount_usdc = dec!(3000);
+        config.grid.buy_window = 0;
+        config.grid.sell_window = 3;
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let (action_tx, action_rx) = mpsc::channel(1);
+        let (_ticker_tx, ticker_rx) = broadcast::channel(1);
+        let state = AppState::new(config.clone(), db, action_tx);
+        let client = Arc::new(BinanceFuturesClient::new(&config.exchange));
+        let mut engine = GridTradingEngine::new(state.clone(), client, action_rx, ticker_rx);
+        state.ticker.write().await.last_price = dec!(122.15);
+        state.position.write().await.size = dec!(50.45);
+
+        let first = GridOrder {
+            client_order_id: "gb_s_existing_1".into(),
+            order_id: None,
+            symbol: "SOLUSDC".into(),
+            side: OrderSide::Sell,
+            price: dec!(122.9),
+            quantity: dec!(24.41),
+            amount_usdc: dec!(2999.989),
+            status: OrderStatus::New,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            grid_level: 1,
+            paired_client_order_id: None,
+            is_take_profit: false,
+        };
+        let second = GridOrder {
+            client_order_id: "gb_s_existing_2".into(),
+            price: dec!(124.1),
+            quantity: dec!(24.17),
+            amount_usdc: dec!(2999.497),
+            ..first.clone()
+        };
+        let mut active = state.active_orders.write().await;
+        active.insert(first.client_order_id.clone(), first);
+        active.insert(second.client_order_id.clone(), second);
+        drop(active);
+
+        engine.maintain_grid_window().await;
+        let orders: Vec<_> = state.active_orders.read().await.values().cloned().collect();
+        assert_eq!(orders.len(), 3);
+        assert_eq!(reserved_sell_quantity(&orders), dec!(50.45));
+        let remainder = orders.iter().find(|o| o.price == dec!(125.75)).unwrap();
+        assert_eq!(remainder.quantity, dec!(1.87));
+        assert_eq!(remainder.amount_usdc, dec!(235.1525));
     }
 
     #[tokio::test]
