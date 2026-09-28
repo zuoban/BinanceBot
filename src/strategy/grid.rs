@@ -52,6 +52,12 @@ fn new_pair_intent(
         grid_level: parent.grid_level + if side == OrderSide::Sell { 1 } else { -1 },
         paired_client_order_id: Some(parent.client_order_id.clone()),
         is_take_profit: side == OrderSide::Sell,
+        purpose: if side == OrderSide::Sell {
+            OrderPurpose::TakeProfit
+        } else {
+            OrderPurpose::Grid
+        },
+        merge_sources: Vec::new(),
     }
 }
 
@@ -60,6 +66,9 @@ enum PairPlacementDecision {
     Wait,
     Skip,
 }
+
+#[path = "remainder.rs"]
+mod remainder;
 
 const GRID_ORDER_PREFIX: &str = "gb_";
 
@@ -137,6 +146,7 @@ pub struct GridTradingEngine {
     last_account_sync: Option<Instant>,
     last_orders_sync: Option<Instant>,
     reconciliation_blocked: bool,
+    last_remainder_change: Option<Instant>,
     market_stream_tx: Option<watch::Sender<(String, bool)>>,
 }
 
@@ -158,6 +168,7 @@ impl GridTradingEngine {
             last_account_sync: None,
             last_orders_sync: None,
             reconciliation_blocked: false,
+            last_remainder_change: None,
             market_stream_tx: None,
         }
     }
@@ -810,6 +821,14 @@ impl GridTradingEngine {
                 return false;
             }
         };
+        let mut remainder_plan = match self.load_remainder_plan().await {
+            Ok(plan) => plan,
+            Err(e) => {
+                error!("Could not load remainder recovery metadata: {}", e);
+                self.last_orders_sync = None;
+                return false;
+            }
+        };
         match self.client.get_open_orders(&symbol).await {
             Ok(live_orders) => {
                 self.last_orders_sync = None;
@@ -829,6 +848,16 @@ impl GridTradingEngine {
                 {
                     let mut active = self.state.active_orders.write().await;
                     for (client_id, live_order) in &live_ids {
+                        if let Some(plan) = &remainder_plan {
+                            if let Some(metadata) = plan
+                                .sources
+                                .iter()
+                                .chain(std::iter::once(&plan.target))
+                                .find(|order| &order.client_order_id == client_id)
+                            {
+                                active.insert(client_id.clone(), metadata.clone());
+                            }
+                        }
                         if let Some(intent) = pair_intents.get(client_id) {
                             active.insert(client_id.clone(), intent.clone());
                         }
@@ -869,6 +898,8 @@ impl GridTradingEngine {
                                 grid_level: 0,
                                 paired_client_order_id: None,
                                 is_take_profit: false,
+                                purpose: crate::types::OrderPurpose::Legacy,
+                                merge_sources: Vec::new(),
                             };
                             orders_to_persist.push(order.clone());
                             active.insert(client_id.clone(), order);
@@ -975,6 +1006,16 @@ impl GridTradingEngine {
                             "Order {} closed without a fill ({})",
                             order.client_order_id, exchange_order.status
                         );
+                    }
+                }
+                if persistence_ok {
+                    if let Some(plan) = &mut remainder_plan {
+                        if plan.phase == RemainderPhase::Submitting {
+                            if let Err(e) = self.adopt_remainder_target(plan).await {
+                                warn!("Remainder submission remains unresolved: {}", e);
+                                persistence_ok = false;
+                            }
+                        }
                     }
                 }
                 if !persistence_ok {
@@ -1438,8 +1479,9 @@ impl GridTradingEngine {
         let grid_interval = config.grid.grid_interval;
         // An old or partially executed small order must not trigger a much
         // larger paired trade. The regular grid window can place full units.
-        let full_grid_fill = rules.calculate_quantity(order.price, config.grid.order_amount_usdc)
-            == Some(order.quantity);
+        let full_grid_fill = order.purpose != OrderPurpose::Remainder
+            && rules.calculate_quantity(order.price, config.grid.order_amount_usdc)
+                == Some(order.quantity);
         let trading_enabled = *self.state.status.read().await == BotStatus::Running;
 
         let mut cycle_profit = Decimal::ZERO;
@@ -1697,6 +1739,19 @@ impl GridTradingEngine {
     /// Ensure the active pre-placed order window matches buy_window and sell_window
     async fn maintain_grid_window(&mut self) {
         let config = self.state.config.read().await.clone();
+        if *self.state.status.read().await != BotStatus::Running {
+            return;
+        }
+        match self.recover_remainder_plan().await {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(e) => {
+                self.state
+                    .add_log("WARN", format!("Remainder recovery pending: {}", e))
+                    .await;
+                return;
+            }
+        }
         if !config.exchange.dry_run {
             let symbol = config.exchange.symbol.clone();
             let mode = TradingMode::from_exchange(false, config.exchange.is_testnet);
@@ -1815,7 +1870,7 @@ impl GridTradingEngine {
             desired_sell_prices.push(target_price);
         }
 
-        for target_price in desired_sell_prices {
+        for &target_price in &desired_sell_prices {
             let already_exists = has_nearby_grid_order(
                 &active_sell_prices,
                 target_price,
@@ -1826,19 +1881,19 @@ impl GridTradingEngine {
             if !already_exists && target_price > current_price {
                 let client_id = new_grid_client_order_id(OrderSide::Sell);
                 if self
-                    .place_grid_order_with_remainder(
-                        OrderSide::Sell,
-                        target_price,
-                        client_id,
-                        1,
-                        None,
-                        true,
-                    )
+                    .place_grid_order(OrderSide::Sell, target_price, client_id, 1, None)
                     .await
                 {
                     active_sell_prices.push(target_price);
                 }
             }
+        }
+
+        if let Err(e) = self.reconcile_remainder(&desired_sell_prices).await {
+            self.state
+                .add_log("WARN", format!("Remainder reconciliation pending: {}", e))
+                .await;
+            return;
         }
 
         // 3. Prune orders that drifted too far outside the active window buffer to conserve margin
@@ -1849,6 +1904,7 @@ impl GridTradingEngine {
         for order in active_orders {
             // Keep take-profit orders alive, but prune background grid orders that are too far away
             if !order.is_take_profit
+                && order.purpose != OrderPurpose::Remainder
                 && ((order.side == OrderSide::Buy && order.price < max_drift_buy)
                     || (order.side == OrderSide::Sell && order.price > max_drift_sell))
             {
@@ -1903,26 +1959,6 @@ impl GridTradingEngine {
         client_order_id: String,
         grid_level: i32,
         paired_client_order_id: Option<String>,
-    ) -> bool {
-        self.place_grid_order_with_remainder(
-            side,
-            price,
-            client_order_id,
-            grid_level,
-            paired_client_order_id,
-            false,
-        )
-        .await
-    }
-
-    async fn place_grid_order_with_remainder(
-        &mut self,
-        side: OrderSide,
-        price: Decimal,
-        client_order_id: String,
-        grid_level: i32,
-        paired_client_order_id: Option<String>,
-        allow_partial_sell: bool,
     ) -> bool {
         if *self.state.status.read().await != BotStatus::Running {
             return false;
@@ -1998,16 +2034,6 @@ impl GridTradingEngine {
             let available = sell_quantity_available(self.state.position.read().await.size, &orders);
             if available >= full_quantity {
                 full_quantity
-            } else if allow_partial_sell {
-                let remainder = rules.round_quantity(available);
-                if remainder < rules.min_qty || remainder * price < rules.min_notional {
-                    debug!(
-                        "Skipping SELL at {}: remaining quantity {} is below exchange minimum",
-                        price, remainder
-                    );
-                    return false;
-                }
-                remainder
             } else {
                 debug!(
                     "Skipping SELL at {}: available {} < full grid quantity {}",
@@ -2034,6 +2060,12 @@ impl GridTradingEngine {
             grid_level,
             paired_client_order_id,
             is_take_profit,
+            purpose: if is_take_profit {
+                OrderPurpose::TakeProfit
+            } else {
+                OrderPurpose::Grid
+            },
+            merge_sources: Vec::new(),
         };
 
         if config.exchange.dry_run {
@@ -2252,6 +2284,14 @@ impl GridTradingEngine {
             return false;
         }
 
+        if let Err(e) = self.cancel_remainder_plan().await {
+            error!(
+                "Could not resolve pending remainder plan during cancellation: {}",
+                e
+            );
+            return false;
+        }
+
         if !is_dry_run {
             let live_orders = match self.client.get_open_orders(&symbol).await {
                 Ok(orders) => orders,
@@ -2455,6 +2495,8 @@ mod tests {
             grid_level: -1,
             paired_client_order_id: None,
             is_take_profit: false,
+            purpose: crate::types::OrderPurpose::Legacy,
+            merge_sources: Vec::new(),
         };
         let intent = new_pair_intent(&parent, OrderSide::Sell, dec!(101), dec!(1));
         let trade = TradeRecord {
@@ -2721,6 +2763,8 @@ mod tests {
             grid_level: 1,
             paired_client_order_id: None,
             is_take_profit: false,
+            purpose: crate::types::OrderPurpose::Legacy,
+            merge_sources: Vec::new(),
         };
         assert!(engine.on_order_filled(&mut order).await);
         assert!(engine.on_order_filled(&mut order).await);
@@ -2808,6 +2852,8 @@ mod tests {
             grid_level: -1,
             paired_client_order_id: None,
             is_take_profit: false,
+            purpose: crate::types::OrderPurpose::Legacy,
+            merge_sources: Vec::new(),
         };
         let mut filled = order.clone();
         filled.client_order_id = "gb_b_filled".into();
@@ -3058,6 +3104,8 @@ mod tests {
             grid_level: 1,
             paired_client_order_id: None,
             is_take_profit: false,
+            purpose: crate::types::OrderPurpose::Legacy,
+            merge_sources: Vec::new(),
         };
         state
             .active_orders
@@ -3199,6 +3247,8 @@ mod tests {
             grid_level: 1,
             paired_client_order_id: None,
             is_take_profit: false,
+            purpose: crate::types::OrderPurpose::Legacy,
+            merge_sources: Vec::new(),
         };
         let second = GridOrder {
             client_order_id: "gb_s_existing_2".into(),
@@ -3248,6 +3298,8 @@ mod tests {
             grid_level: -1,
             paired_client_order_id: None,
             is_take_profit: false,
+            purpose: crate::types::OrderPurpose::Legacy,
+            merge_sources: Vec::new(),
         };
         engine.on_order_filled(&mut buy).await;
         let orders: Vec<_> = state.active_orders.read().await.values().cloned().collect();

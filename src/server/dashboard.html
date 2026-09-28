@@ -890,6 +890,24 @@
       renderLogs(data.recent_logs);
     }
 
+    function orderPurposeLabel(order) {
+      let label = order.is_take_profit || order.purpose === 'TAKE_PROFIT' ? '止盈单' : '挂单 Maker';
+      if (order.purpose === 'REMAINDER') {
+        const count = (order.merge_sources || []).length;
+        label = count > 1 ? `余量合并 · ${count} 笔` : '余量单';
+      }
+      return order.status === 'PARTIALLYFILLED' ? `${label} · 部分成交` : label;
+    }
+
+    function orderSourceDetails(order) {
+      const sources = order.merge_sources || [];
+      if (!sources.length) return '';
+      return `<details style="margin-top: 5px; font-size: 11px; color: var(--text-muted);">
+        <summary style="cursor: pointer;">合并前快照 · ${sources.length} 笔</summary>
+        ${sources.map(source => `<div style="margin-top: 4px;">$${Number(source.price).toFixed(4)} × ${Number(source.quantity)}<br>${escapeHtml(source.client_order_id)}</div>`).join('')}
+      </details>`;
+    }
+
     function renderLadder(orders, currentPrice) {
       const container = document.getElementById('ladder-container');
       const sellOrders = orders.filter(o => o.side === 'SELL').sort((a, b) => parseFloat(b.price) - parseFloat(a.price));
@@ -908,7 +926,7 @@
             <span>${parseFloat(o.quantity).toFixed(2)} SOL</span>
             <span style="color: var(--text-muted);">${parseFloat(o.amount_usdc).toFixed(2)} USDC</span>
             <span style="color: var(--text-dim); font-size: 11px;">+${diff}%</span>
-            <span style="text-align: right; color: var(--text-dim); font-size: 11px;">${o.status === 'PARTIALLYFILLED' ? '部分成交 · 剩余' : o.is_take_profit ? '止盈单' : '挂单 Maker'}</span>
+            <span style="text-align: right; color: var(--text-dim); font-size: 11px;">${orderPurposeLabel(o)}</span>
             <div class="depth-bar sell" style="width: 45%;"></div>
           </div>
         `;
@@ -934,7 +952,7 @@
             <span>${parseFloat(o.quantity).toFixed(2)} SOL</span>
             <span style="color: var(--text-muted);">${parseFloat(o.amount_usdc).toFixed(2)} USDC</span>
             <span style="color: var(--text-dim); font-size: 11px;">-${diff}%</span>
-            <span style="text-align: right; color: var(--text-dim); font-size: 11px;">${o.status === 'PARTIALLYFILLED' ? '部分成交 · 剩余' : '挂单 Maker'}</span>
+            <span style="text-align: right; color: var(--text-dim); font-size: 11px;">${orderPurposeLabel(o)}</span>
             <div class="depth-bar buy" style="width: 45%;"></div>
           </div>
         `;
@@ -965,7 +983,7 @@
             <td>${parseFloat(o.quantity).toFixed(2)} SOL</td>
             <td>${parseFloat(o.amount_usdc).toFixed(2)} USDC</td>
             <td><span style="color: var(--text-muted);">${diff > 0 ? '+' : ''}${diff}%</span></td>
-            <td>${o.status === 'PARTIALLYFILLED' ? '<span class="badge">部分成交 · 剩余</span>' : o.is_take_profit ? '<span class="badge badge-purple">止盈单</span>' : '<span class="badge" style="background: rgba(255,255,255,0.08);">Maker GTX</span>'}</td>
+            <td><span class="badge ${o.is_take_profit ? 'badge-purple' : ''}">${orderPurposeLabel(o)}</span>${orderSourceDetails(o)}</td>
             <td style="font-family: monospace; font-size: 11px; color: var(--text-dim);">${escapeHtml(o.client_order_id)}</td>
             <td style="color: var(--text-dim);">${timeStr}</td>
           </tr>

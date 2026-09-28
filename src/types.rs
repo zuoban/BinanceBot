@@ -91,6 +91,45 @@ pub struct GridOrder {
     pub grid_level: i32,
     pub paired_client_order_id: Option<String>,
     pub is_take_profit: bool,
+    /// Legacy orders retain unknown provenance; size alone must not classify them.
+    #[serde(default)]
+    pub purpose: OrderPurpose,
+    #[serde(default)]
+    pub merge_sources: Vec<OrderSource>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum OrderPurpose {
+    #[default]
+    Legacy,
+    Grid,
+    TakeProfit,
+    Remainder,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrderSource {
+    pub client_order_id: String,
+    pub price: Decimal,
+    pub quantity: Decimal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RemainderPhase {
+    Canceling,
+    Submitting,
+    Complete,
+    Abandoned,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemainderPlan {
+    pub symbol: String,
+    pub mode: TradingMode,
+    pub sources: Vec<GridOrder>,
+    pub target: GridOrder,
+    pub phase: RemainderPhase,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

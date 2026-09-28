@@ -1,6 +1,8 @@
 use crate::auth;
 use crate::config::AppConfig;
-use crate::types::{BotStatus, GridOrder, GridStats, OrderSide, TradeRecord, TradingMode};
+use crate::types::{
+    BotStatus, GridOrder, GridStats, OrderSide, RemainderPlan, TradeRecord, TradingMode,
+};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -133,6 +135,17 @@ impl Database {
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_pair_intents_scope ON pair_intents (symbol, mode);
+
+            CREATE TABLE IF NOT EXISTS remainder_plans (
+                target_client_order_id TEXT PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                active INTEGER NOT NULL,
+                plan_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_active_remainder_plan
+                ON remainder_plans (symbol, mode) WHERE active = 1;
 
             CREATE TABLE IF NOT EXISTS bot_runtime (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -427,6 +440,33 @@ impl Database {
             params![symbol, mode.as_str()],
         )?;
         Ok(())
+    }
+
+    pub fn save_remainder_plan(&self, plan: &RemainderPlan) -> Result<()> {
+        let active = matches!(
+            plan.phase,
+            crate::types::RemainderPhase::Canceling | crate::types::RemainderPhase::Submitting
+        );
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO remainder_plans (target_client_order_id, symbol, mode, active, plan_json, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(target_client_order_id) DO UPDATE SET active = excluded.active, plan_json = excluded.plan_json, updated_at = excluded.updated_at;",
+            params![plan.target.client_order_id, plan.symbol, plan.mode.as_str(), active, serde_json::to_string(plan)?, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_remainder_plan(
+        &self,
+        symbol: &str,
+        mode: TradingMode,
+    ) -> Result<Option<RemainderPlan>> {
+        let conn = self.conn.lock().unwrap();
+        let json: Option<String> = conn.query_row(
+            "SELECT plan_json FROM remainder_plans WHERE symbol = ?1 AND mode = ?2 AND active = 1;",
+            params![symbol, mode.as_str()], |row| row.get(0),
+        ).optional()?;
+        json.map(|json| serde_json::from_str(&json).map_err(Into::into))
+            .transpose()
     }
 
     pub fn save_managed_order(&self, order: &GridOrder) -> Result<()> {
@@ -780,6 +820,8 @@ mod tests {
             grid_level: 1,
             paired_client_order_id: Some("gb_b_purchase".into()),
             is_take_profit: true,
+            purpose: crate::types::OrderPurpose::Legacy,
+            merge_sources: Vec::new(),
         };
         db.save_managed_order(&order).unwrap();
         let loaded = db.load_managed_orders("SOLUSDC").unwrap();
@@ -975,6 +1017,8 @@ mod tests {
             grid_level: -1,
             paired_client_order_id: None,
             is_take_profit: false,
+            purpose: crate::types::OrderPurpose::Legacy,
+            merge_sources: Vec::new(),
         };
         let child = GridOrder {
             client_order_id: "gb_s_child".into(),
@@ -990,6 +1034,8 @@ mod tests {
             grid_level: 0,
             paired_client_order_id: Some(parent.client_order_id.clone()),
             is_take_profit: true,
+            purpose: crate::types::OrderPurpose::Legacy,
+            merge_sources: Vec::new(),
         };
         let trade = TradeRecord {
             trade_id: "grid:gb_b_parent".into(),
