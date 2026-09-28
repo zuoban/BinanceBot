@@ -1,7 +1,8 @@
 use crate::auth;
 use crate::config::AppConfig;
 use crate::types::{
-    BotStatus, GridOrder, GridStats, OrderSide, RemainderPlan, TradeRecord, TradingMode,
+    BotStatus, GridOrder, GridStats, HourlyTradeCount, HourlyTradeStats, OrderSide, RemainderPlan,
+    TradeRecord, TradingMode,
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
@@ -596,6 +597,60 @@ impl Database {
             .map_err(Into::into)
     }
 
+    /// Count all persisted orders in the rolling 24-hour window, including empty hours.
+    pub fn get_hourly_trade_stats(
+        &self,
+        symbol: &str,
+        mode: TradingMode,
+        now: DateTime<Utc>,
+    ) -> Result<HourlyTradeStats> {
+        let window_start = now - ChronoDuration::hours(24);
+        let first_hour = window_start.timestamp().div_euclid(3600) * 3600;
+        let last_hour = now.timestamp().div_euclid(3600) * 3600;
+        let mut buckets: Vec<_> = (first_hour..=last_hour)
+            .step_by(3600)
+            .map(|timestamp| HourlyTradeCount {
+                hour_start: DateTime::from_timestamp(timestamp, 0).unwrap(),
+                buy_count: 0,
+                sell_count: 0,
+            })
+            .collect();
+
+        let conn = self.conn.lock().unwrap();
+        // Stored timestamps are UTC RFC3339. Coarse day bounds use the scope index;
+        // parse before the exact comparison to preserve fractional-second precision.
+        let mut stmt = conn.prepare(
+            "SELECT timestamp, side FROM trades
+             WHERE symbol = ?1 AND mode = ?2 AND timestamp >= ?3 AND timestamp < ?4;",
+        )?;
+        let rows = stmt.query_map(
+            params![
+                symbol,
+                mode.as_str(),
+                window_start.date_naive().to_string(),
+                (now + ChronoDuration::days(1)).date_naive().to_string(),
+            ],
+            |row| Ok((row.get::<_, DateTime<Utc>>(0)?, row.get::<_, String>(1)?)),
+        )?;
+        for row in rows {
+            let (timestamp, side) = row?;
+            if timestamp < window_start || timestamp > now {
+                continue;
+            }
+            let index = ((timestamp.timestamp() - first_hour) / 3600) as usize;
+            match side.as_str() {
+                "BUY" => buckets[index].buy_count += 1,
+                "SELL" => buckets[index].sell_count += 1,
+                _ => {}
+            }
+        }
+        Ok(HourlyTradeStats {
+            window_start,
+            window_end: now,
+            buckets,
+        })
+    }
+
     pub fn get_unverified_trades(
         &self,
         symbol: &str,
@@ -906,6 +961,119 @@ mod tests {
         let loaded = db.load_config().unwrap().expect("config should exist");
         assert_eq!(loaded.exchange.symbol, "BTCUSDC");
         assert_eq!(loaded.grid.grid_interval, dec!(50.0));
+    }
+
+    #[test]
+    fn hourly_trade_stats_cover_full_window_and_isolate_scope() {
+        let db = Database::open(":memory:").unwrap();
+        let now = DateTime::parse_from_rfc3339("2026-09-28T10:30:00.123456789Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let start = now - ChronoDuration::hours(24);
+        let empty = db
+            .get_hourly_trade_stats("SOLUSDC", TradingMode::Paper, now)
+            .unwrap();
+        assert_eq!(empty.buckets.len(), 25);
+        assert!(empty
+            .buckets
+            .iter()
+            .all(|b| b.buy_count == 0 && b.sell_count == 0));
+
+        let mut trade = TradeRecord {
+            trade_id: String::new(),
+            client_order_id: String::new(),
+            symbol: "SOLUSDC".into(),
+            mode: TradingMode::Paper,
+            side: OrderSide::Buy,
+            price: dec!(100),
+            quantity: dec!(1),
+            amount_usdc: dec!(100),
+            realized_pnl: Decimal::ZERO,
+            commission: Decimal::ZERO,
+            pnl_verified: false,
+            is_maker: true,
+            timestamp: start,
+            note: String::new(),
+        };
+        // More than both the snapshot (50) and in-memory (200) history limits.
+        for index in 0..250 {
+            trade.trade_id = format!("buy-{index}");
+            trade.client_order_id = format!("order-{index}");
+            assert!(db.insert_trade(&trade).unwrap());
+        }
+        assert!(!db.insert_trade(&trade).unwrap());
+        for (id, timestamp, side, symbol, mode) in [
+            ("last", now, OrderSide::Sell, "SOLUSDC", TradingMode::Paper),
+            (
+                "midnight",
+                DateTime::parse_from_rfc3339("2026-09-28T00:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                OrderSide::Sell,
+                "SOLUSDC",
+                TradingMode::Paper,
+            ),
+            (
+                "old",
+                start - ChronoDuration::nanoseconds(1),
+                OrderSide::Buy,
+                "SOLUSDC",
+                TradingMode::Paper,
+            ),
+            (
+                "future",
+                now + ChronoDuration::nanoseconds(1),
+                OrderSide::Sell,
+                "SOLUSDC",
+                TradingMode::Paper,
+            ),
+            ("symbol", now, OrderSide::Buy, "BTCUSDC", TradingMode::Paper),
+            ("live", now, OrderSide::Buy, "SOLUSDC", TradingMode::Live),
+            (
+                "testnet",
+                now,
+                OrderSide::Buy,
+                "SOLUSDC",
+                TradingMode::Testnet,
+            ),
+        ] {
+            trade.trade_id = id.into();
+            trade.client_order_id = id.into();
+            trade.timestamp = timestamp;
+            trade.side = side;
+            trade.symbol = symbol.into();
+            trade.mode = mode;
+            assert!(db.insert_trade(&trade).unwrap());
+        }
+        let stats = db
+            .get_hourly_trade_stats("SOLUSDC", TradingMode::Paper, now)
+            .unwrap();
+        assert_eq!(stats.window_start, start);
+        assert_eq!(stats.window_end, now);
+        assert_eq!(stats.buckets[0].buy_count, 250);
+        assert_eq!(stats.buckets[14].sell_count, 1);
+        assert_eq!(stats.buckets[24].sell_count, 1);
+        assert_eq!(
+            stats
+                .buckets
+                .iter()
+                .map(|b| b.buy_count + b.sell_count)
+                .sum::<u64>(),
+            252
+        );
+        assert!(stats
+            .buckets
+            .windows(2)
+            .all(|b| b[1].hour_start - b[0].hour_start == ChronoDuration::hours(1)));
+        let later = db
+            .get_hourly_trade_stats(
+                "SOLUSDC",
+                TradingMode::Paper,
+                now + ChronoDuration::hours(1),
+            )
+            .unwrap();
+        assert_eq!(later.buckets.iter().map(|b| b.buy_count).sum::<u64>(), 0);
+        assert_eq!(later.buckets.iter().map(|b| b.sell_count).sum::<u64>(), 3);
     }
 
     #[test]

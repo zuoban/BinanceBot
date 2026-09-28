@@ -361,6 +361,21 @@ impl AppState {
             .filter(|o| o.side == OrderSide::Sell)
             .count();
         stats.uptime_secs = (Utc::now() - stats.start_time).num_seconds().max(0) as u64;
+        drop(orders_map);
+
+        let trade_symbol = symbol.clone();
+        let mode = TradingMode::from_exchange(dry_run, summary.is_testnet);
+        let hourly_trade_stats = match self
+            .db
+            .run_blocking(move |db| db.get_hourly_trade_stats(&trade_symbol, mode, Utc::now()))
+            .await
+        {
+            Ok(stats) => Some(stats),
+            Err(error) => {
+                warn!("Failed to load hourly trade counts: {}", error);
+                None
+            }
+        };
 
         let recent_trades: Vec<TradeRecord> = self
             .recent_trades
@@ -393,6 +408,7 @@ impl AppState {
             grid_config: summary,
             active_orders,
             recent_trades,
+            hourly_trade_stats,
             recent_logs,
         }
     }
@@ -520,6 +536,9 @@ mod tests {
         let state = AppState::new(AppConfig::default(), db, action_tx);
         assert_eq!(state.stats.read().await.total_realized_pnl, dec!(10));
         assert_eq!(state.recent_trades.read().await.len(), 1);
+        let snapshot = state.snapshot().await;
+        let hourly = snapshot.hourly_trade_stats.unwrap();
+        assert_eq!(hourly.buckets.iter().map(|b| b.buy_count).sum::<u64>(), 1);
 
         state.config.write().await.exchange.dry_run = false;
         state.refresh_current_scope().await;
@@ -527,5 +546,9 @@ mod tests {
         let trades = state.recent_trades.read().await;
         assert_eq!(trades.len(), 1);
         assert_eq!(trades[0].mode, TradingMode::Live);
+        drop(trades);
+        let snapshot = state.snapshot().await;
+        let hourly = snapshot.hourly_trade_stats.unwrap();
+        assert_eq!(hourly.buckets.iter().map(|b| b.buy_count).sum::<u64>(), 1);
     }
 }

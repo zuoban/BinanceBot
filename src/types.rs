@@ -253,6 +253,20 @@ pub struct LogEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HourlyTradeCount {
+    pub hour_start: DateTime<Utc>,
+    pub buy_count: u64,
+    pub sell_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HourlyTradeStats {
+    pub window_start: DateTime<Utc>,
+    pub window_end: DateTime<Utc>,
+    pub buckets: Vec<HourlyTradeCount>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BotSnapshot {
     pub status: BotStatus,
     pub dry_run: bool,
@@ -265,6 +279,7 @@ pub struct BotSnapshot {
     pub grid_config: crate::config::GridConfigSummary,
     pub active_orders: Vec<GridOrder>,
     pub recent_trades: Vec<TradeRecord>,
+    pub hourly_trade_stats: Option<HourlyTradeStats>,
     pub recent_logs: Vec<LogEntry>,
 }
 

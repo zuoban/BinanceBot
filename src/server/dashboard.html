@@ -106,6 +106,23 @@
       </div>
     </section>
 
+    <section class="trade-chart-section" aria-labelledby="trade-chart-title">
+      <div class="section-title">
+        <div><span class="section-kicker">HOURLY FILLS / 24H</span><h2 id="trade-chart-title">近 24 小时成交订单</h2></div>
+        <div class="trade-chart-summary" aria-label="近24小时成交合计">
+          <span class="trade-chart-legend"><i class="buy-swatch" aria-hidden="true"></i>买单 <strong id="hourly-buy-total">--</strong> 笔</span>
+          <span class="trade-chart-legend"><i class="sell-swatch" aria-hidden="true"></i>卖单 <strong id="hourly-sell-total">--</strong> 笔</span>
+          <span>合计 <strong id="hourly-trade-total">--</strong> 笔</span>
+        </div>
+      </div>
+      <p class="trade-chart-note" id="trade-chart-range">统计当前交易对与运行模式的成交订单</p>
+      <p class="trade-chart-status" id="trade-chart-status" role="status">正在加载成交统计…</p>
+      <div class="trade-chart-scroll" tabindex="0" role="region" aria-label="每小时买卖成交笔数，可横向滚动">
+        <div class="trade-chart" id="hourly-trade-chart"></div>
+      </div>
+      <p class="trade-chart-note" id="trade-chart-detail">按整点分组，首尾小时仅统计近 24 小时范围内的成交；绿色为买单，红色为卖单。悬停或聚焦小时柱可查看详情。</p>
+    </section>
+
     <!-- Visual Grid Ladder Depth -->
     <section class="ladder-section" aria-labelledby="ladder-title">
       <div class="section-title">
@@ -885,6 +902,7 @@
       // Render Trades Table
       renderTradesTable(data.recent_trades);
       document.getElementById('count-trades').textContent = data.recent_trades.length;
+      renderHourlyTradeChart(data.hourly_trade_stats);
 
       // Render Logs
       renderLogs(data.recent_logs);
@@ -991,6 +1009,64 @@
       });
 
       tbody.innerHTML = html;
+    }
+
+    function renderHourlyTradeChart(stats) {
+      const chart = document.getElementById('hourly-trade-chart');
+      const status = document.getElementById('trade-chart-status');
+      if (!stats || !Array.isArray(stats.buckets) || stats.buckets.length === 0) {
+        status.textContent = '成交统计暂不可用，正在等待更新';
+        chart.replaceChildren();
+        delete chart.dataset.signature;
+        document.getElementById('trade-chart-range').textContent = '统计当前交易对与运行模式的成交订单';
+        ['hourly-buy-total', 'hourly-sell-total', 'hourly-trade-total'].forEach(id => document.getElementById(id).textContent = '--');
+        return;
+      }
+
+      const start = new Date(stats.window_start);
+      const end = new Date(stats.window_end);
+      // Match the UTC-aligned buckets even in time zones with fractional-hour offsets.
+      const timeOptions = { timeZone: 'Asia/Shanghai', hour12: false, hourCycle: 'h23' };
+      const formatTime = date => date.toLocaleString('zh-CN', {
+        ...timeOptions, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'
+      });
+      document.getElementById('trade-chart-range').textContent = `${formatTime(start)} — ${formatTime(end)} · 北京时间 (UTC+8) · 当前交易对 / 当前模式`;
+      const buys = stats.buckets.reduce((sum, bucket) => sum + bucket.buy_count, 0);
+      const sells = stats.buckets.reduce((sum, bucket) => sum + bucket.sell_count, 0);
+      document.getElementById('hourly-buy-total').textContent = buys;
+      document.getElementById('hourly-sell-total').textContent = sells;
+      document.getElementById('hourly-trade-total').textContent = buys + sells;
+      status.textContent = buys + sells === 0 ? '近 24 小时暂无成交' : '';
+
+      // Preserve focus and scroll position between unchanged realtime snapshots.
+      const signature = JSON.stringify([stats.buckets, formatTime(start), formatTime(end)]);
+      if (chart.dataset.signature === signature) return;
+      chart.dataset.signature = signature;
+      const peak = Math.max(1, ...stats.buckets.flatMap(bucket => [bucket.buy_count, bucket.sell_count]));
+      const step = Math.max(1, Math.ceil(peak / 4));
+      const ceiling = step * 4;
+      const ticks = Array.from({ length: 5 }, (_, index) => `<span style="top:${index * 25}%">${ceiling - index * step}</span>`).join('');
+      const columns = stats.buckets.map((bucket, index) => {
+        const hour = new Date(bucket.hour_start);
+        const hourEnd = new Date(hour.getTime() + 3600000);
+        const actualStart = new Date(Math.max(hour.getTime(), start.getTime()));
+        const actualEnd = new Date(Math.min(hourEnd.getTime(), end.getTime()));
+        const partial = actualStart > hour || actualEnd < hourEnd;
+        const label = hour.toLocaleTimeString('zh-CN', { ...timeOptions, hour: '2-digit', minute: '2-digit' });
+        const date = hour.toLocaleDateString('zh-CN', { ...timeOptions, month: '2-digit', day: '2-digit' });
+        const detail = `${formatTime(actualStart)} — ${formatTime(actualEnd)}${partial ? '（部分小时）' : ''}：买单 ${bucket.buy_count} 笔，卖单 ${bucket.sell_count} 笔`;
+        const bars = [['buy', bucket.buy_count], ['sell', bucket.sell_count]].map(([side, count]) =>
+          `<div class="trade-chart-bar ${side}" style="height:${count / ceiling * 100}%"><span class="trade-chart-value${count === 0 ? ' is-zero' : ''}">${count}</span></div>`
+        ).join('');
+        return `<div class="trade-chart-column${partial ? ' is-partial' : ''}" tabindex="0" role="img" aria-label="${escapeHtml(detail)}" title="${escapeHtml(detail)}" data-hour="${index}">
+          <div class="trade-chart-bars">${bars}</div>
+          <div class="trade-chart-hour">${label}${partial ? '*' : ''}</div>
+          <div class="trade-chart-date">${index === 0 || label === '00:00' ? date : ''}</div>
+        </div>`;
+      }).join('');
+      const focusedHour = chart.contains(document.activeElement) ? document.activeElement.dataset.hour : null;
+      chart.innerHTML = `<div class="trade-chart-axis" aria-hidden="true"><span class="trade-chart-unit">笔</span>${ticks}</div><div class="trade-chart-plot"><div class="trade-chart-grid" aria-hidden="true"></div><div class="trade-chart-columns">${columns}</div></div>`;
+      if (focusedHour !== null) chart.querySelector(`[data-hour="${focusedHour}"]`)?.focus({ preventScroll: true });
     }
 
     function renderTradesTable(trades) {
@@ -1238,6 +1314,16 @@
     }
 
     window.addEventListener('DOMContentLoaded', () => {
+      const tradeChart = document.getElementById('hourly-trade-chart');
+      const tradeDetail = document.getElementById('trade-chart-detail');
+      const tradeHint = tradeDetail.textContent;
+      ['pointerover', 'focusin'].forEach(type => tradeChart.addEventListener(type, event => {
+        const column = event.target.closest('.trade-chart-column');
+        if (column) tradeDetail.textContent = column.title;
+      }));
+      ['pointerleave', 'focusout'].forEach(type => tradeChart.addEventListener(type, () => {
+        tradeDetail.textContent = tradeHint;
+      }));
       document.getElementById('header-actions').addEventListener('click', (event) => {
         if (event.target.closest('button')) closeMobileActions();
       });
