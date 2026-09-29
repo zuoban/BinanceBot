@@ -25,7 +25,9 @@ impl GridTradingEngine {
             return Ok(false);
         };
         self.execute_remainder_plan(&mut plan).await?;
-        Ok(true)
+        // A stale, confirmed-unsubmitted target has no inventory reservation.
+        // Let the ordinary window replenish immediately after retiring it.
+        Ok(plan.phase != RemainderPhase::Abandoned)
     }
 
     pub(super) async fn reconcile_remainder(&mut self, desired_prices: &[Decimal]) -> Result<()> {
@@ -253,14 +255,27 @@ impl GridTradingEngine {
         let rules = self.state.rules.read().await.clone();
         let market = self.state.ticker.read().await.last_price;
         let price = plan.target.price;
-        if market <= Decimal::ZERO
-            || price <= market
+        if market <= Decimal::ZERO {
+            return Ok(());
+        }
+        if price <= market
             || rules.round_price(price) != price
             || price < rules.min_price
             || price > rules.max_price
             || config.grid.max_price.is_some_and(|max| price > max)
         {
-            return Ok(()); // Keep the agreed limit price; never fall back to taking liquidity.
+            // Sources are terminal and the target lookup above confirmed that
+            // no order was accepted. Keeping this plan active would freeze both
+            // windows indefinitely after a GTX rejection followed by a price rise.
+            // Retire it durably; ordinary orders use fresh prices and new IDs.
+            // Unknown lookups and accepted targets never reach this branch.
+            plan.phase = RemainderPhase::Abandoned;
+            self.persist_remainder_plan(plan).await?;
+            self.state.add_log("WARN", format!(
+                "Stale unsubmitted remainder plan {} retired (target {}, market {}); normal grid replenishment resumed",
+                plan.target.client_order_id, price, market,
+            )).await;
+            return Ok(());
         }
         let orders: Vec<_> = self
             .state

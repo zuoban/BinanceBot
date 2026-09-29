@@ -586,3 +586,96 @@ fn plans_survive_database_reopen_and_are_scoped_and_unique() {
     }
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+#[tokio::test]
+async fn crossed_gtx_rejected_plan_recovers_after_restart_and_replenishes_sells() {
+    let (mut first, fake, url, server) = live_fixture().await;
+    fake.reject_post.store(1, Ordering::SeqCst);
+    first.maintain_grid_window().await;
+    let plan = first.load_remainder_plan().await.unwrap().unwrap();
+    assert_eq!(plan.phase, RemainderPhase::Submitting);
+    assert!(!fake
+        .orders
+        .lock()
+        .unwrap()
+        .contains_key(&plan.target.client_order_id));
+    let db = first.state.db.clone();
+    drop(first);
+
+    let mut restarted = engine(db.clone(), Some(url)).await;
+    {
+        let mut config = restarted.state.config.write().await;
+        config.grid.grid_interval = dec!(0.1);
+        config.grid.order_amount_usdc = dec!(200);
+        config.grid.sell_window = 3;
+    }
+    *fake.position.lock().unwrap() = dec!(107.33);
+    restarted.state.ticker.write().await.last_price = dec!(127.35);
+    assert!(restarted.sync_live_orders().await);
+    assert!(restarted.sync_account_and_position().await);
+    restarted.maintain_grid_window().await;
+
+    assert!(restarted.load_remainder_plan().await.unwrap().is_none());
+    let active: Vec<_> = restarted
+        .state
+        .active_orders
+        .read()
+        .await
+        .values()
+        .cloned()
+        .collect();
+    let mut sells: Vec<_> = active
+        .iter()
+        .filter(|o| o.side == OrderSide::Sell)
+        .map(|o| o.price)
+        .collect();
+    sells.sort();
+    assert_eq!(sells, vec![dec!(127.4), dec!(127.5), dec!(127.6)]);
+    assert_eq!(reserved_sell_quantity(&active), dec!(4.68));
+    {
+        let posts = fake.posts.lock().unwrap();
+        assert_eq!(posts.len(), 4); // One rejected old target, then three current grid sells.
+        assert!(posts[1..]
+            .iter()
+            .all(|p| p["newClientOrderId"] != plan.target.client_order_id));
+        assert!(posts
+            .iter()
+            .all(|p| p["timeInForce"] == "GTX" && p["reduceOnly"] == "true"));
+    }
+    // Once retired, the old target cannot reappear or be resubmitted on another cycle.
+    restarted.maintain_grid_window().await;
+    assert_eq!(fake.posts.lock().unwrap().len(), 4);
+    assert!(restarted
+        .state
+        .recent_logs
+        .read()
+        .await
+        .iter()
+        .any(|log| log.message.contains("normal grid replenishment resumed")));
+    server.abort();
+}
+
+#[tokio::test]
+async fn crossed_target_with_uncertain_lookup_stays_reserved_until_adopted() {
+    let (mut engine, fake, _, server) = live_fixture().await;
+    fake.lose_post.store(1, Ordering::SeqCst);
+    engine.maintain_grid_window().await;
+    let plan = engine.load_remainder_plan().await.unwrap().unwrap();
+    engine.state.ticker.write().await.last_price = dec!(127.35);
+    fake.fail_lookup.store(1, Ordering::SeqCst);
+    engine.maintain_grid_window().await;
+    assert!(engine.load_remainder_plan().await.unwrap().is_some());
+    assert_eq!(fake.posts.lock().unwrap().len(), 1);
+
+    engine.maintain_grid_window().await;
+    assert!(engine.load_remainder_plan().await.unwrap().is_none());
+    let active = engine.state.active_orders.read().await;
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[&plan.target.client_order_id].quantity, dec!(0.48));
+    assert_eq!(
+        active[&plan.target.client_order_id].price,
+        plan.target.price
+    );
+    assert_eq!(fake.posts.lock().unwrap().len(), 1);
+    server.abort();
+}

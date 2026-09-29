@@ -355,3 +355,62 @@ async fn migration_requires_terminal_cancellation_and_recovers_racing_buy_fill()
         server.abort();
     }
 }
+
+#[tokio::test]
+async fn crossed_unsubmitted_remainder_does_not_starve_sells_with_large_position() {
+    let mut engine = paper_engine().await;
+    engine.state.ticker.write().await.last_price = dec!(119.35);
+    engine.state.position.write().await.size = dec!(107.33);
+    for price in [
+        dec!(119.0),
+        dec!(118.9),
+        dec!(118.8),
+        dec!(118.7),
+        dec!(118.6),
+        dec!(118.5),
+    ] {
+        let buy = order(&format!("b_{price}"), OrderSide::Buy, price, dec!(1.68));
+        engine
+            .state
+            .active_orders
+            .write()
+            .await
+            .insert(buy.client_order_id.clone(), buy);
+    }
+    let mut target = order(
+        "s_stale_remainder",
+        OrderSide::Sell,
+        dec!(119.1),
+        dec!(0.24),
+    );
+    target.purpose = OrderPurpose::Remainder;
+    engine
+        .state
+        .db
+        .save_remainder_plan(&RemainderPlan {
+            symbol: "SOLUSDC".into(),
+            mode: TradingMode::Paper,
+            sources: vec![],
+            target,
+            phase: RemainderPhase::Submitting,
+        })
+        .unwrap();
+
+    engine.maintain_grid_window().await;
+    assert!(
+        engine.load_remainder_plan().await.unwrap().is_none(),
+        "crossed unsubmitted target must not block the whole grid forever"
+    );
+    let active = orders(&engine).await;
+    let mut sells: Vec<_> = active
+        .iter()
+        .filter(|o| o.side == OrderSide::Sell)
+        .collect();
+    sells.sort_by_key(|o| o.price);
+    assert_eq!(
+        sells.iter().map(|o| o.price).collect::<Vec<_>>(),
+        vec![dec!(119.4), dec!(119.5), dec!(119.6)]
+    );
+    assert_eq!(reserved_sell_quantity(&active), dec!(5.01));
+    assert!(sells.iter().all(|o| o.quantity == dec!(1.67)));
+}
