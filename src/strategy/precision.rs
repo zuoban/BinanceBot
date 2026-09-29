@@ -100,6 +100,41 @@ impl SymbolRules {
         })
     }
 
+    /// A fixed lattice must be exactly representable by the exchange price filter.
+    pub fn validate_grid_interval(&self, interval: Decimal) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.tick_size > Decimal::ZERO
+                && interval >= self.tick_size
+                && interval % self.tick_size == Decimal::ZERO,
+            "网格间距 {} 必须是价格步长 {} 的正整数倍",
+            interval,
+            self.tick_size
+        );
+        Ok(())
+    }
+
+    /// Zero-anchored levels stay identical across market moves and process restarts.
+    /// At an exact level, neither side places an order at the current market price.
+    pub fn grid_window_prices(
+        &self,
+        market: Decimal,
+        interval: Decimal,
+        buy_window: usize,
+        sell_window: usize,
+    ) -> (Vec<Decimal>, Vec<Decimal>) {
+        let below = (market / interval).ceil() - Decimal::ONE;
+        let above = (market / interval).floor() + Decimal::ONE;
+        let buys = (0..buy_window)
+            .map(|i| (below - Decimal::from(i)) * interval)
+            .filter(|p| *p > Decimal::ZERO && *p >= self.min_price && *p <= self.max_price)
+            .collect();
+        let sells = (0..sell_window)
+            .map(|i| (above + Decimal::from(i)) * interval)
+            .filter(|p| *p > Decimal::ZERO && *p >= self.min_price && *p <= self.max_price)
+            .collect();
+        (buys, sells)
+    }
+
     /// Round price to the nearest tick size
     pub fn round_price(&self, price: Decimal) -> Decimal {
         if self.tick_size.is_zero() {
@@ -206,47 +241,32 @@ mod tests {
     }
 
     #[test]
-    fn test_grid_window_pricing() {
+    fn grid_window_uses_fixed_levels_and_excludes_market_price() {
         let rules = SymbolRules::default();
-        let current_price = dec!(115.48);
-        let interval = dec!(0.1);
-        let buy_window = 5;
-        let sell_window = 5;
-
-        let buy_prices: Vec<Decimal> = (1..=buy_window)
-            .map(|i| rules.round_price(current_price - interval * Decimal::from(i)))
-            .collect();
-
-        let sell_prices: Vec<Decimal> = (1..=sell_window)
-            .map(|i| rules.round_price(current_price + interval * Decimal::from(i)))
-            .collect();
-
-        assert_eq!(
-            buy_prices,
-            vec![
-                dec!(115.38),
-                dec!(115.28),
-                dec!(115.18),
-                dec!(115.08),
-                dec!(114.98)
-            ]
-        );
-        assert_eq!(
-            sell_prices,
-            vec![
-                dec!(115.58),
-                dec!(115.68),
-                dec!(115.78),
-                dec!(115.88),
-                dec!(115.98)
-            ]
-        );
-
-        for bp in &buy_prices {
-            assert!(*bp < current_price);
+        for market in [dec!(118.81), dec!(118.84), dec!(118.89)] {
+            let (buys, sells) = rules.grid_window_prices(market, dec!(0.1), 3, 3);
+            assert_eq!(buys, vec![dec!(118.8), dec!(118.7), dec!(118.6)]);
+            assert_eq!(sells, vec![dec!(118.9), dec!(119.0), dec!(119.1)]);
         }
-        for sp in &sell_prices {
-            assert!(*sp > current_price);
-        }
+        let (buys, sells) = rules.grid_window_prices(dec!(118.9), dec!(0.1), 2, 2);
+        assert_eq!(buys, vec![dec!(118.8), dec!(118.7)]);
+        assert_eq!(sells, vec![dec!(119.0), dec!(119.1)]);
+        let (buys, sells) = rules.grid_window_prices(dec!(118.91), dec!(0.1), 2, 2);
+        assert_eq!(buys, vec![dec!(118.9), dec!(118.8)]);
+        assert_eq!(sells, vec![dec!(119.0), dec!(119.1)]);
+        let (buys, _) = rules.grid_window_prices(dec!(0.11), dec!(0.1), 5, 0);
+        assert_eq!(buys, vec![dec!(0.1)]);
+    }
+
+    #[test]
+    fn fixed_spacing_must_be_representable_by_price_ticks() {
+        let mut rules = SymbolRules::default();
+        assert!(rules.validate_grid_interval(dec!(0.1)).is_ok());
+        assert!(rules.validate_grid_interval(dec!(0.015)).is_err());
+        assert!(rules.validate_grid_interval(dec!(0.001)).is_err());
+        assert!(rules.validate_grid_interval(dec!(0)).is_err());
+        rules.tick_size = dec!(0.05);
+        assert!(rules.validate_grid_interval(dec!(0.1)).is_ok());
+        assert!(rules.validate_grid_interval(dec!(0.12)).is_err());
     }
 }

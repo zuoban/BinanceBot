@@ -127,7 +127,7 @@
     <section class="ladder-section" aria-labelledby="ladder-title">
       <div class="section-title">
         <div><span class="section-kicker">ORDER LADDER</span><h2 id="ladder-title">实时网格深度</h2></div>
-        <div class="section-meta"><span>每格间隔 <strong><span id="ladder-step">0.1</span> USDC</strong></span><span>每单目标 <strong><span id="ladder-amount">100</span> USDC</strong></span><span>Post-Only Maker</span></div>
+        <div class="section-meta"><span>每格间隔 <strong><span id="ladder-step">0.1</span> USDC</strong></span><span>普通单目标 <strong><span id="ladder-amount">100</span> USDC</strong></span><span>Post-Only Maker</span></div>
       </div>
       <div class="ladder-container" id="ladder-container">
         <!-- Rendered dynamically -->
@@ -213,21 +213,21 @@
               <div class="form-group">
                 <label for="cfg-interval">网格间距 (Grid Interval, USDC)</label>
                 <input type="number" id="cfg-interval" step="any" min="0.0001" required placeholder="0.1" />
-                <span class="form-hint">每上涨该金额卖出，每下跌该金额买入</span>
+                <span class="form-hint">固定档位间隔；挂单窗口随行情移动，间隔须为交易所价格步长的整数倍</span>
               </div>
 
               <!-- 单格金额 -->
               <div class="form-group">
                 <label for="cfg-amount">单格下单金额 (Order Amount, USDC)</label>
                 <input type="number" id="cfg-amount" step="any" min="1" required placeholder="100.0" />
-                <span class="form-hint">每次买入或卖出的名义金额 (U)</span>
+                <span class="form-hint">普通单按目标金额计算并向下取整；配对止盈卖出对应买入数量，金额随卖价变化</span>
               </div>
 
               <!-- 买单窗口 -->
               <div class="form-group">
                 <label for="cfg-buy-window">买单挂单窗口数量 (Buy Window)</label>
                 <input type="number" id="cfg-buy-window" min="1" max="25" required placeholder="5" />
-                <span class="form-hint">当前市价下方保持的预挂买单笔数</span>
+                <span class="form-hint">市价下方覆盖的网格档数；待止盈档位不重复买入</span>
               </div>
 
               <!-- 卖单窗口 -->

@@ -95,6 +95,27 @@ fn has_nearby_grid_order(
     prices.iter().any(|&price| (price - target).abs() < spacing)
 }
 
+fn buy_level_occupied(
+    orders: &[GridOrder],
+    price: Decimal,
+    interval: Decimal,
+    tick_size: Decimal,
+) -> bool {
+    let occupied: Vec<_> = orders
+        .iter()
+        .filter_map(|order| {
+            if order.side == OrderSide::Buy {
+                Some(order.price)
+            } else if order.is_take_profit || order.purpose == OrderPurpose::TakeProfit {
+                Some(order.price - interval)
+            } else {
+                None
+            }
+        })
+        .collect();
+    has_nearby_grid_order(&occupied, price, interval, tick_size)
+}
+
 fn reserved_sell_quantity(orders: &[GridOrder]) -> Decimal {
     orders
         .iter()
@@ -274,6 +295,12 @@ impl GridTradingEngine {
                 }
             }
         }
+
+        self.state
+            .rules
+            .read()
+            .await
+            .validate_grid_interval(config.grid.grid_interval)?;
 
         // Fetch initial market price
         match self.client.get_ticker_price(&symbol).await {
@@ -521,6 +548,7 @@ impl GridTradingEngine {
         } else {
             self.state.rules.read().await.clone()
         };
+        new_rules.validate_grid_interval(new_config.grid.grid_interval)?;
         let new_price = if market_changed || mode_changed {
             let price = new_client
                 .get_ticker_price(&new_config.exchange.symbol)
@@ -1051,6 +1079,13 @@ impl GridTradingEngine {
         let rules = self.state.rules.read().await.clone();
         if intent.symbol != config.exchange.symbol
             || rules.round_price(intent.price) != intent.price
+            || intent.price <= Decimal::ZERO
+            || intent.price < rules.min_price
+            || intent.price > rules.max_price
+            || (intent.side == OrderSide::Buy
+                && (intent.price % config.grid.grid_interval != Decimal::ZERO
+                    || config.grid.min_price.is_some_and(|min| intent.price < min)
+                    || config.grid.max_price.is_some_and(|max| intent.price > max)))
             || rules.round_quantity(intent.quantity) != intent.quantity
             || intent.quantity < rules.min_qty
             || intent.quantity > rules.max_qty
@@ -1076,6 +1111,16 @@ impl GridTradingEngine {
             .filter(|order| order.client_order_id != intent.client_order_id)
             .cloned()
             .collect();
+        if intent.side == OrderSide::Buy
+            && buy_level_occupied(
+                &orders,
+                intent.price,
+                config.grid.grid_interval,
+                rules.tick_size,
+            )
+        {
+            return PairPlacementDecision::Skip;
+        }
         let position_size = self.state.position.read().await.size;
         let allowed = if intent.side == OrderSide::Sell {
             sell_quantity_available(position_size, &orders) >= intent.quantity
@@ -1487,6 +1532,8 @@ impl GridTradingEngine {
         let mut cycle_profit = Decimal::ZERO;
         let mut simulated_pnl = Decimal::ZERO;
         let mut is_completed_cycle = false;
+        let mut completed_buy_price = None;
+        let mut full_paired_close = false;
         let mut pair_intent = None;
         let note;
 
@@ -1516,7 +1563,8 @@ impl GridTradingEngine {
                 }
 
                 // Place paired SELL order at (buy_price + grid_interval) to lock in profit!
-                let paired_sell_price = rules.round_price(order.price + grid_interval);
+                let paired_sell_price =
+                    ((order.price + grid_interval) / rules.tick_size).ceil() * rules.tick_size;
                 let paired_client_id =
                     paired_grid_client_order_id(&order.client_order_id, OrderSide::Sell);
                 let paired_exists =
@@ -1531,22 +1579,27 @@ impl GridTradingEngine {
                                     == Some(order.client_order_id.as_str())
                         });
 
-                let placed = if full_grid_fill && trading_enabled && !paired_exists {
+                let placed = if order.purpose != OrderPurpose::Remainder
+                    && trading_enabled
+                    && !paired_exists
+                {
                     if config.exchange.dry_run {
-                        self.place_grid_order(
+                        self.place_grid_order_with_quantity(
                             OrderSide::Sell,
                             paired_sell_price,
                             paired_client_id,
                             order.grid_level + 1,
                             Some(order.client_order_id.clone()),
+                            Some(order.quantity),
                         )
                         .await
                     } else {
-                        pair_intent = rules
-                            .calculate_quantity(paired_sell_price, config.grid.order_amount_usdc)
-                            .map(|quantity| {
-                                new_pair_intent(order, OrderSide::Sell, paired_sell_price, quantity)
-                            });
+                        pair_intent = Some(new_pair_intent(
+                            order,
+                            OrderSide::Sell,
+                            paired_sell_price,
+                            order.quantity,
+                        ));
                         false
                     }
                 } else {
@@ -1592,6 +1645,10 @@ impl GridTradingEngine {
                     if let Some((buy_price, buy_qty)) = purchase {
                         let exec_qty = order.quantity.min(buy_qty);
                         cycle_profit = (order.price - buy_price) * exec_qty;
+                        completed_buy_price = Some(buy_price);
+                        full_paired_close = order.quantity == buy_qty
+                            && rules.calculate_quantity(buy_price, config.grid.order_amount_usdc)
+                                == Some(buy_qty);
                         is_completed_cycle = true;
                     }
                 }
@@ -1599,7 +1656,7 @@ impl GridTradingEngine {
                 if is_completed_cycle {
                     note = format!(
                         "Completed Grid Cycle! Sold at {} (Paired Buy: {}, Spread Estimate: +{} USDC)",
-                        order.price, order.price - grid_interval, cycle_profit
+                        order.price, completed_buy_price.unwrap(), cycle_profit
                     );
                     self.state
                         .add_log(
@@ -1643,7 +1700,11 @@ impl GridTradingEngine {
                 }
 
                 // Place paired BUY order at (sell_price - grid_interval)
-                let paired_buy_price = rules.round_price(order.price - grid_interval);
+                // Re-enter on the fixed lattice, including exits inherited from older grids.
+                let paired_buy_price =
+                    ((completed_buy_price.unwrap_or(order.price - grid_interval)) / grid_interval)
+                        .floor()
+                        * grid_interval;
                 let paired_client_id =
                     paired_grid_client_order_id(&order.client_order_id, OrderSide::Buy);
                 let paired_exists =
@@ -1658,7 +1719,12 @@ impl GridTradingEngine {
                                     == Some(order.client_order_id.as_str())
                         });
 
-                if full_grid_fill && trading_enabled && !paired_exists {
+                let may_rebuy = if completed_buy_price.is_some() {
+                    full_paired_close
+                } else {
+                    full_grid_fill
+                };
+                if may_rebuy && trading_enabled && !paired_exists {
                     if config.exchange.dry_run {
                         self.place_grid_order(
                             OrderSide::Buy,
@@ -1797,8 +1863,66 @@ impl GridTradingEngine {
         let rules = self.state.rules.read().await.clone();
 
         let grid_interval = config.grid.grid_interval;
+        if let Err(error) = rules.validate_grid_interval(grid_interval) {
+            self.state.add_log("ERROR", error.to_string()).await;
+            self.pause_trading().await;
+            return;
+        }
         let buy_window = config.grid.buy_window;
         let sell_window = config.grid.sell_window;
+
+        // Migrate only idle ordinary managed orders. Existing exits, partial fills
+        // and consolidated remainders retain their price and provenance.
+        let existing: Vec<_> = self
+            .state
+            .active_orders
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect();
+        let exit_prices: Vec<_> = existing
+            .iter()
+            .filter(|o| {
+                o.side == OrderSide::Sell
+                    && (o.is_take_profit || o.purpose == OrderPurpose::TakeProfit)
+            })
+            .map(|o| o.price)
+            .collect();
+        let reserved_buy_prices: Vec<_> = exit_prices.iter().map(|p| *p - grid_interval).collect();
+        let misaligned: Vec<_> = existing
+            .into_iter()
+            .filter(|o| {
+                is_grid_order(&o.client_order_id)
+                    && !o.is_take_profit
+                    && matches!(o.purpose, OrderPurpose::Grid | OrderPurpose::Legacy)
+                    && o.status == OrderStatus::New
+                    && o.merge_sources.is_empty()
+                    && (o.price % grid_interval != Decimal::ZERO
+                        || has_nearby_grid_order(
+                            if o.side == OrderSide::Buy {
+                                &reserved_buy_prices
+                            } else {
+                                &exit_prices
+                            },
+                            o.price,
+                            grid_interval,
+                            rules.tick_size,
+                        ))
+            })
+            .collect();
+        if !misaligned.is_empty() {
+            for order in misaligned {
+                if *self.state.status.read().await != BotStatus::Running
+                    || !self.cancel_single_order(&order).await
+                {
+                    return;
+                }
+            }
+            // Cancellation can reveal a fill and enqueue a durable paired exit.
+            // Reconcile on the next cycle before allocating any released funds.
+            return;
+        }
         // Collect current active order prices
         let active_orders: Vec<GridOrder> = self
             .state
@@ -1810,8 +1934,15 @@ impl GridTradingEngine {
             .collect();
         let mut active_buy_prices: Vec<Decimal> = active_orders
             .iter()
-            .filter(|o| o.side == OrderSide::Buy)
-            .map(|o| o.price)
+            .filter_map(|o| {
+                if o.side == OrderSide::Buy {
+                    Some(o.price)
+                } else if o.is_take_profit || o.purpose == OrderPurpose::TakeProfit {
+                    Some(o.price - grid_interval)
+                } else {
+                    None
+                }
+            })
             .collect();
         let mut active_sell_prices: Vec<Decimal> = active_orders
             .iter()
@@ -1822,23 +1953,18 @@ impl GridTradingEngine {
         active_buy_prices.sort();
         active_sell_prices.sort();
 
-        // 1. Maintain Buy Window:
-        // We want buy orders at: P_curr - 1*step, P_curr - 2*step, ... up to buy_window
-        let mut desired_buy_prices = Vec::new();
-        for i in 1..=buy_window {
-            let target_price = rules.round_price(current_price - grid_interval * Decimal::from(i));
-            if target_price > Decimal::ZERO {
-                if let Some(min_p) = config.grid.min_price {
-                    if target_price < min_p {
-                        continue;
-                    }
-                }
-                desired_buy_prices.push(target_price);
-            }
-        }
+        // Move the active window over a fixed zero-anchored lattice.
+        let (mut desired_buy_prices, mut desired_sell_prices) =
+            rules.grid_window_prices(current_price, grid_interval, buy_window, sell_window);
+        let in_bounds = |price: &Decimal| {
+            config.grid.min_price.is_none_or(|min| *price >= min)
+                && config.grid.max_price.is_none_or(|max| *price <= max)
+        };
+        desired_buy_prices.retain(in_bounds);
+        desired_sell_prices.retain(in_bounds);
 
         for target_price in desired_buy_prices {
-            // Keep the existing grid anchor while the market moves within one grid interval.
+            // Retain queue priority and reserve levels whose buy is awaiting its exit.
             let already_exists = has_nearby_grid_order(
                 &active_buy_prices,
                 target_price,
@@ -1857,19 +1983,7 @@ impl GridTradingEngine {
             }
         }
 
-        // 2. Maintain Sell Window:
-        // We want sell orders at: P_curr + 1*step, P_curr + 2*step, ... up to sell_window
-        let mut desired_sell_prices = Vec::new();
-        for i in 1..=sell_window {
-            let target_price = rules.round_price(current_price + grid_interval * Decimal::from(i));
-            if let Some(max_p) = config.grid.max_price {
-                if target_price > max_p {
-                    continue;
-                }
-            }
-            desired_sell_prices.push(target_price);
-        }
-
+        // Ordinary sells use the same lattice as buys.
         for &target_price in &desired_sell_prices {
             let already_exists = has_nearby_grid_order(
                 &active_sell_prices,
@@ -1904,7 +2018,9 @@ impl GridTradingEngine {
         for order in active_orders {
             // Keep take-profit orders alive, but prune background grid orders that are too far away
             if !order.is_take_profit
+                && order.purpose != OrderPurpose::TakeProfit
                 && order.purpose != OrderPurpose::Remainder
+                && order.status == OrderStatus::New
                 && ((order.side == OrderSide::Buy && order.price < max_drift_buy)
                     || (order.side == OrderSide::Sell && order.price > max_drift_sell))
             {
@@ -1960,16 +2076,53 @@ impl GridTradingEngine {
         grid_level: i32,
         paired_client_order_id: Option<String>,
     ) -> bool {
+        self.place_grid_order_with_quantity(
+            side,
+            price,
+            client_order_id,
+            grid_level,
+            paired_client_order_id,
+            None,
+        )
+        .await
+    }
+
+    async fn place_grid_order_with_quantity(
+        &mut self,
+        side: OrderSide,
+        price: Decimal,
+        client_order_id: String,
+        grid_level: i32,
+        paired_client_order_id: Option<String>,
+        exit_quantity: Option<Decimal>,
+    ) -> bool {
         if *self.state.status.read().await != BotStatus::Running {
             return false;
         }
         let config = self.state.config.read().await.clone();
         let rules = self.state.rules.read().await.clone();
         let symbol = config.exchange.symbol.clone();
-        let Some(full_quantity) = rules.calculate_quantity(price, config.grid.order_amount_usdc)
+        let Some(full_quantity) = exit_quantity
+            .or_else(|| rules.calculate_quantity(price, config.grid.order_amount_usdc))
         else {
             return false;
         };
+        if price <= Decimal::ZERO
+            || price < rules.min_price
+            || price > rules.max_price
+            || rules.round_price(price) != price
+            || full_quantity < rules.min_qty
+            || full_quantity > rules.max_qty
+            || rules.round_quantity(full_quantity) != full_quantity
+            || price * full_quantity < rules.min_notional
+            || (exit_quantity.is_some() && side != OrderSide::Sell)
+            || (side == OrderSide::Buy
+                && (price % config.grid.grid_interval != Decimal::ZERO
+                    || config.grid.min_price.is_some_and(|min| price < min)
+                    || config.grid.max_price.is_some_and(|max| price > max)))
+        {
+            return false;
+        }
 
         if !config.exchange.dry_run
             && !self
@@ -2016,6 +2169,9 @@ impl GridTradingEngine {
             .cloned()
             .collect();
         let quantity = if side == OrderSide::Buy {
+            if buy_level_occupied(&orders, price, config.grid.grid_interval, rules.tick_size) {
+                return false;
+            }
             if let Some(limit) = config.grid.max_position_usdc {
                 let position_size = self.state.position.read().await.size;
                 let valuation_price = current_market_price.max(price);
@@ -2234,6 +2390,16 @@ impl GridTradingEngine {
                 }
             };
             match exchange_order {
+                Ok(exchange_order)
+                    if !matches!(
+                        exchange_order.status.as_str(),
+                        "FILLED" | "CANCELED" | "EXPIRED" | "REJECTED"
+                    ) =>
+                {
+                    self.last_orders_sync = None;
+                    warn!("Cancellation is not terminal for {}", order.client_order_id);
+                    return false;
+                }
                 Ok(exchange_order) if exchange_order.executed_qty > Decimal::ZERO => {
                     let mut filled = order.clone();
                     filled.quantity = exchange_order.executed_qty;
@@ -2731,6 +2897,63 @@ mod tests {
                 .1,
             1
         );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn live_buy_exit_retains_exact_quantity_through_restart_and_submission() {
+        let (mut config, db, _) = pending_pair_fixture();
+        db.clear_pair_intents("SOLUSDC", TradingMode::Live).unwrap();
+        config.grid.grid_interval = dec!(1);
+        config.grid.order_amount_usdc = dec!(2000);
+        let fake = PairExchange::default();
+        let (url, server) = pair_exchange_server(fake.clone()).await;
+        let mut engine = pair_recovery_engine(&config, db.clone(), url.clone()).await;
+        let mut buy = GridOrder {
+            client_order_id: "gb_b_equal_exit".into(),
+            order_id: None,
+            symbol: "SOLUSDC".into(),
+            side: OrderSide::Buy,
+            price: dec!(114),
+            quantity: dec!(17.54),
+            amount_usdc: dec!(1999.56),
+            status: OrderStatus::New,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            grid_level: -1,
+            paired_client_order_id: None,
+            is_take_profit: false,
+            purpose: crate::types::OrderPurpose::Grid,
+            merge_sources: vec![],
+        };
+        assert!(engine.on_order_filled(&mut buy).await);
+        let intents = db.load_pair_intents("SOLUSDC", TradingMode::Live).unwrap();
+        assert_eq!(intents.len(), 1);
+        assert_eq!(intents[0].quantity, buy.quantity);
+        assert_eq!(intents[0].price, dec!(115));
+        drop(engine);
+        let mut restarted = pair_recovery_engine(&config, db.clone(), url).await;
+        restarted.state.ticker.write().await.last_price = dec!(114.5);
+        restarted.state.position.write().await.size = buy.quantity;
+        assert!(
+            restarted
+                .drain_pair_intents("SOLUSDC", TradingMode::Live)
+                .await
+        );
+        let id = &intents[0].client_order_id;
+        assert_eq!(
+            fake.posts.lock().unwrap().as_slice(),
+            std::slice::from_ref(id)
+        );
+        assert_eq!(fake.orders.lock().unwrap()[id].orig_qty, buy.quantity);
+        assert_eq!(
+            restarted.state.active_orders.read().await[id].quantity,
+            buy.quantity
+        );
+        assert!(db
+            .load_pair_intents("SOLUSDC", TradingMode::Live)
+            .unwrap()
+            .is_empty());
         server.abort();
     }
 
@@ -3238,9 +3461,9 @@ mod tests {
             order_id: None,
             symbol: "SOLUSDC".into(),
             side: OrderSide::Sell,
-            price: dec!(122.9),
-            quantity: dec!(24.41),
-            amount_usdc: dec!(2999.989),
+            price: dec!(122.4),
+            quantity: dec!(24.50),
+            amount_usdc: dec!(2998.800),
             status: OrderStatus::New,
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -3252,9 +3475,9 @@ mod tests {
         };
         let second = GridOrder {
             client_order_id: "gb_s_existing_2".into(),
-            price: dec!(124.1),
-            quantity: dec!(24.17),
-            amount_usdc: dec!(2999.497),
+            price: dec!(123.6),
+            quantity: dec!(24.27),
+            amount_usdc: dec!(2999.772),
             ..first.clone()
         };
         let mut active = state.active_orders.write().await;
@@ -3266,13 +3489,13 @@ mod tests {
         let orders: Vec<_> = state.active_orders.read().await.values().cloned().collect();
         assert_eq!(orders.len(), 3);
         assert_eq!(reserved_sell_quantity(&orders), dec!(50.45));
-        let remainder = orders.iter().find(|o| o.price == dec!(125.75)).unwrap();
-        assert_eq!(remainder.quantity, dec!(1.87));
-        assert_eq!(remainder.amount_usdc, dec!(235.1525));
+        let remainder = orders.iter().find(|o| o.price == dec!(124.8)).unwrap();
+        assert_eq!(remainder.quantity, dec!(1.68));
+        assert_eq!(remainder.amount_usdc, dec!(209.664));
     }
 
     #[tokio::test]
-    async fn paired_orders_use_configured_notional_and_skip_small_fills() {
+    async fn paired_sells_preserve_buy_quantity_and_small_sells_do_not_expand() {
         let mut config = AppConfig::default();
         config.grid.grid_interval = dec!(1);
         config.grid.order_amount_usdc = dec!(2000);
@@ -3305,15 +3528,8 @@ mod tests {
         let orders: Vec<_> = state.active_orders.read().await.values().cloned().collect();
         let sell = orders.iter().find(|o| o.side == OrderSide::Sell).unwrap();
         assert_eq!(sell.price, dec!(115.24));
-        assert_eq!(
-            sell.quantity,
-            state
-                .rules
-                .read()
-                .await
-                .calculate_quantity(sell.price, dec!(2000))
-                .unwrap()
-        );
+        assert_eq!(sell.quantity, buy.quantity);
+        assert_eq!(sell.amount_usdc, dec!(2016.7));
 
         engine.cancel_all_orders().await;
         state.position.write().await.size = dec!(0.46);
@@ -3346,7 +3562,7 @@ mod tests {
         engine.on_order_filled(&mut full_sell).await;
         let orders: Vec<_> = state.active_orders.read().await.values().cloned().collect();
         let paired_buy = orders.iter().find(|o| o.side == OrderSide::Buy).unwrap();
-        assert_eq!(paired_buy.price, dec!(114.24));
+        assert_eq!(paired_buy.price, dec!(114));
         assert_eq!(
             paired_buy.quantity,
             state
@@ -3403,3 +3619,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "fixed_grid_tests.rs"]
+mod fixed_grid_tests;
