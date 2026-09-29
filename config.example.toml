@@ -35,11 +35,12 @@ grid_interval = 0.1
 # 实际名义金额受数量步长影响，可能略低于目标
 order_amount_usdc = 100.0
 
-# 买单预先挂单窗口数量 (当前市价下方挂 N 笔买单)
+# 买单目标数量：跳过待止盈档位向下补足，受价格范围和仓位上限限制
 buy_window = 5
 
-# 卖单预先挂单窗口数量 (当前市价上方挂 N 笔卖单)
+# 卖单目标数量（含止盈单）：跳过等待买回档位向上补足，受持仓和价格范围限制
 sell_window = 5
+# 总挂单数达到 2 × (buy_window + sell_window) 时，集中清理窗口外普通单；止盈单保留
 
 # 挂单类型：只做 Maker 单 (Post-Only, timeInForce=GTX)，防止吃单，节省手续费
 post_only = true

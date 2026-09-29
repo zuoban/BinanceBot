@@ -50,6 +50,243 @@ async fn orders(engine: &GridTradingEngine) -> Vec<GridOrder> {
 }
 
 #[tokio::test]
+async fn eligible_window_skips_sold_levels_counts_exit_and_prunes_old_buys() {
+    let mut engine = paper_engine().await;
+    engine.state.config.write().await.grid.order_amount_usdc = dec!(300);
+    engine.state.config.write().await.grid.max_position_usdc = None;
+    engine.state.ticker.write().await.last_price = dec!(119.21);
+    engine.state.position.write().await.size = dec!(20);
+    for (id, price) in [dec!(119.3), dec!(119.5)].into_iter().enumerate() {
+        engine
+            .state
+            .db
+            .insert_trade(&journal_trade(id, OrderSide::Sell, price, dec!(2.51)))
+            .unwrap();
+    }
+    let parent = order("b_parent", OrderSide::Buy, dec!(119.3), dec!(2.51));
+    let exit = new_pair_intent(&parent, OrderSide::Sell, dec!(119.4), parent.quantity);
+    engine
+        .state
+        .active_orders
+        .write()
+        .await
+        .insert(exit.client_order_id.clone(), exit.clone());
+    for price in [
+        dec!(119.2),
+        dec!(119.1),
+        dec!(119),
+        dec!(118.9),
+        dec!(118.8),
+        dec!(118.7),
+        dec!(118.6),
+        dec!(118.5),
+        dec!(118.4),
+        dec!(118.3),
+        dec!(118.2),
+    ] {
+        let buy = order(&format!("b_{price}"), OrderSide::Buy, price, dec!(2.51));
+        engine
+            .state
+            .active_orders
+            .write()
+            .await
+            .insert(buy.client_order_id.clone(), buy);
+    }
+    let retained = orders(&engine).await;
+    assert_eq!(retained.len(), 12);
+    // Pruning is followed by a separate reconciliation/placement cycle.
+    engine.maintain_grid_window().await;
+    engine.maintain_grid_window().await;
+    let active = orders(&engine).await;
+    for (side, expected) in [
+        (OrderSide::Buy, vec![dec!(119), dec!(119.1), dec!(119.2)]),
+        (OrderSide::Sell, vec![dec!(119.4), dec!(119.6), dec!(119.7)]),
+    ] {
+        let mut prices: Vec<_> = active
+            .iter()
+            .filter(|o| o.side == side)
+            .map(|o| o.price)
+            .collect();
+        prices.sort();
+        assert_eq!(prices, expected);
+    }
+    assert!(active
+        .iter()
+        .any(|o| o.client_order_id == exit.client_order_id));
+    for buy in retained
+        .iter()
+        .filter(|o| o.side == OrderSide::Buy && o.price >= dec!(119))
+    {
+        assert!(active
+            .iter()
+            .any(|o| o.client_order_id == buy.client_order_id));
+    }
+    engine.maintain_grid_window().await;
+    let stable = orders(&engine).await;
+    assert_eq!(stable.len(), active.len());
+    assert!(active.iter().all(|o| stable
+        .iter()
+        .any(|s| s.client_order_id == o.client_order_id)));
+    assert!(reserved_sell_quantity(&active) <= engine.state.position.read().await.size);
+}
+
+#[tokio::test]
+async fn window_cleanup_keeps_old_orders_below_threshold_and_prunes_at_threshold() {
+    for (buy_window, sell_window) in [(3, 3), (2, 1)] {
+        let mut engine = paper_engine().await;
+        {
+            let mut config = engine.state.config.write().await;
+            config.grid.buy_window = buy_window;
+            config.grid.sell_window = sell_window;
+            config.grid.max_position_usdc = None;
+        }
+        engine.state.position.write().await.size = dec!(100);
+        let threshold = (buy_window + sell_window) * 2;
+        for i in 0..(threshold - sell_window - 1) {
+            let price = dec!(118.8) - dec!(0.1) * Decimal::from(i);
+            let buy = order(&format!("b_{i}"), OrderSide::Buy, price, dec!(1.68));
+            engine
+                .state
+                .active_orders
+                .write()
+                .await
+                .insert(buy.client_order_id.clone(), buy);
+        }
+        for i in 0..sell_window {
+            let price = dec!(118.9) + dec!(0.1) * Decimal::from(i);
+            let sell = order(&format!("s_{i}"), OrderSide::Sell, price, dec!(1.68));
+            engine
+                .state
+                .active_orders
+                .write()
+                .await
+                .insert(sell.client_order_id.clone(), sell);
+        }
+        let original = orders(&engine).await;
+        assert_eq!(original.len(), threshold - 1);
+        engine.maintain_grid_window().await;
+        let unchanged = orders(&engine).await;
+        assert_eq!(unchanged.len(), original.len());
+        assert!(original.iter().all(|o| unchanged
+            .iter()
+            .any(|a| a.client_order_id == o.client_order_id)));
+        let extra = order("s_extra", OrderSide::Sell, dec!(120), dec!(1.68));
+        engine
+            .state
+            .active_orders
+            .write()
+            .await
+            .insert(extra.client_order_id.clone(), extra);
+        assert_eq!(orders(&engine).await.len(), threshold);
+        engine.maintain_grid_window().await;
+        let active = orders(&engine).await;
+        assert_eq!(
+            active.iter().filter(|o| o.side == OrderSide::Buy).count(),
+            buy_window
+        );
+        assert_eq!(
+            active.iter().filter(|o| o.side == OrderSide::Sell).count(),
+            sell_window
+        );
+        for o in &active {
+            assert!(original
+                .iter()
+                .any(|old| old.client_order_id == o.client_order_id));
+        }
+    }
+}
+
+#[tokio::test]
+async fn replenishment_triggers_cleanup_as_soon_as_total_reaches_twelve() {
+    let mut engine = paper_engine().await;
+    engine.state.config.write().await.grid.max_position_usdc = None;
+    engine.state.position.write().await.size = dec!(100);
+    // All nearest sell levels exist; adding the missing 118.6 buy is order 12.
+    for (side, prices) in [
+        (
+            OrderSide::Buy,
+            vec![
+                dec!(118.8),
+                dec!(118.7),
+                dec!(118.5),
+                dec!(118.4),
+                dec!(118.3),
+                dec!(118.2),
+                dec!(118.1),
+                dec!(118),
+            ],
+        ),
+        (OrderSide::Sell, vec![dec!(118.9), dec!(119), dec!(119.1)]),
+    ] {
+        for price in prices {
+            let o = order(
+                &format!("{}_{}", side.as_str(), price),
+                side,
+                price,
+                dec!(1.68),
+            );
+            engine
+                .state
+                .active_orders
+                .write()
+                .await
+                .insert(o.client_order_id.clone(), o);
+        }
+    }
+    assert_eq!(orders(&engine).await.len(), 11);
+    engine.maintain_grid_window().await;
+    let active = orders(&engine).await;
+    assert_eq!(active.len(), 6);
+    assert_eq!(
+        active.iter().filter(|o| o.side == OrderSide::Buy).count(),
+        3
+    );
+    assert_eq!(
+        active.iter().filter(|o| o.side == OrderSide::Sell).count(),
+        3
+    );
+    assert!(active
+        .iter()
+        .any(|o| o.side == OrderSide::Buy && o.price == dec!(118.6)));
+}
+
+#[tokio::test]
+async fn eligible_buy_window_skips_reserved_level_and_respects_price_bounds() {
+    let mut engine = paper_engine().await;
+    {
+        let mut config = engine.state.config.write().await;
+        config.grid.min_price = Some(dec!(118.5));
+        config.grid.max_price = Some(dec!(119));
+        config.grid.max_position_usdc = None;
+    }
+    engine.state.position.write().await.size = dec!(20);
+    let parent = order("b_parent", OrderSide::Buy, dec!(118.8), dec!(1.68));
+    let exit = new_pair_intent(&parent, OrderSide::Sell, dec!(118.9), parent.quantity);
+    engine
+        .state
+        .active_orders
+        .write()
+        .await
+        .insert(exit.client_order_id.clone(), exit);
+    engine.maintain_grid_window().await;
+    let active = orders(&engine).await;
+    let mut buys: Vec<_> = active
+        .iter()
+        .filter(|o| o.side == OrderSide::Buy)
+        .map(|o| o.price)
+        .collect();
+    buys.sort();
+    assert_eq!(buys, vec![dec!(118.5), dec!(118.6), dec!(118.7)]);
+    assert_eq!(
+        active.iter().filter(|o| o.side == OrderSide::Sell).count(),
+        2
+    );
+    assert!(active
+        .iter()
+        .all(|o| o.price >= dec!(118.5) && o.price <= dec!(119)));
+}
+
+#[tokio::test]
 async fn price_jitter_and_engine_restart_preserve_grid_and_queue_priority() {
     let mut engine = paper_engine().await;
     engine.state.position.write().await.size = dec!(5.04);
@@ -82,6 +319,79 @@ async fn price_jitter_and_engine_restart_preserve_grid_and_queue_priority() {
     assert!(original.iter().all(|o| active
         .iter()
         .any(|a| a.client_order_id == o.client_order_id)));
+}
+
+#[tokio::test]
+async fn resizing_window_preserves_exits_and_partial_fills_and_releases_inventory() {
+    let mut engine = paper_engine().await;
+    engine.state.config.write().await.grid.max_position_usdc = None;
+    engine.state.position.write().await.size = dec!(20);
+    engine.maintain_grid_window().await;
+    let parent = order("b_high", OrderSide::Buy, dec!(120), dec!(1.66));
+    let exit = new_pair_intent(&parent, OrderSide::Sell, dec!(120.1), parent.quantity);
+    let mut partial = order("b_partial_far", OrderSide::Buy, dec!(118), dec!(0.4));
+    partial.status = OrderStatus::PartiallyFilled;
+    for protected in [&exit, &partial] {
+        engine
+            .state
+            .active_orders
+            .write()
+            .await
+            .insert(protected.client_order_id.clone(), protected.clone());
+    }
+    let mut config = engine.state.config.read().await.clone();
+    config.grid.buy_window = 1;
+    config.grid.sell_window = 1;
+    engine.apply_config(config).await.unwrap();
+    engine.maintain_grid_window().await;
+    let active = orders(&engine).await;
+    assert_eq!(active.len(), 2);
+    for protected in [&exit, &partial] {
+        assert!(active
+            .iter()
+            .any(|o| o.client_order_id == protected.client_order_id));
+    }
+    // A larger window reuses the freed inventory at the nearest eligible prices.
+    let mut config = engine.state.config.read().await.clone();
+    config.grid.sell_window = 3;
+    engine.apply_config(config).await.unwrap();
+    let active = orders(&engine).await;
+    let mut sells: Vec<_> = active
+        .iter()
+        .filter(|o| o.side == OrderSide::Sell)
+        .map(|o| o.price)
+        .collect();
+    sells.sort();
+    assert_eq!(sells, vec![dec!(118.9), dec!(119), dec!(120.1)]);
+    assert!(active
+        .iter()
+        .any(|o| o.client_order_id == exit.client_order_id));
+}
+
+#[tokio::test]
+async fn paired_exits_above_window_limit_are_preserved_without_extra_sells() {
+    let mut engine = paper_engine().await;
+    engine.state.config.write().await.grid.sell_window = 1;
+    engine.state.config.write().await.grid.max_position_usdc = None;
+    engine.state.position.write().await.size = dec!(20);
+    for price in [dec!(119), dec!(120), dec!(121)] {
+        let parent = order(&format!("b_{price}"), OrderSide::Buy, price, dec!(1.6));
+        let exit = new_pair_intent(&parent, OrderSide::Sell, price + dec!(0.1), parent.quantity);
+        engine
+            .state
+            .active_orders
+            .write()
+            .await
+            .insert(exit.client_order_id.clone(), exit);
+    }
+    engine.maintain_grid_window().await;
+    let active = orders(&engine).await;
+    let sells: Vec<_> = active
+        .iter()
+        .filter(|o| o.side == OrderSide::Sell)
+        .collect();
+    assert_eq!(sells.len(), 3);
+    assert!(sells.iter().all(|o| o.is_take_profit));
 }
 
 #[tokio::test]
@@ -295,16 +605,21 @@ async fn paired_exit_takes_priority_over_existing_ordinary_sell_at_same_level() 
 }
 
 #[tokio::test]
-async fn migration_requires_terminal_cancellation_and_recovers_racing_buy_fill() {
+async fn migration_and_window_pruning_require_terminal_cancellation_and_recover_racing_fill() {
     use axum::{routing::get, Json, Router};
-    for terminal in [false, true] {
+    for (price, terminal) in [
+        (dec!(118.81), false),
+        (dec!(118.81), true),
+        (dec!(118.4), false),
+        (dec!(118.4), true),
+    ] {
         let mut engine = paper_engine().await;
         engine.state.config.write().await.exchange.dry_run = false;
-        let old = order("b_migration", OrderSide::Buy, dec!(118.81), dec!(1.68));
+        let old = order("b_migration", OrderSide::Buy, price, dec!(1.68));
         let response = serde_json::json!({
             "orderId": 42, "clientOrderId": old.client_order_id,
             "symbol": "SOLUSDC", "status": if terminal { "CANCELED" } else { "PARTIALLY_FILLED" },
-            "price": "118.81", "avgPrice": "118.81", "origQty": "1.68", "executedQty": "0.46",
+            "price": price.to_string(), "avgPrice": price.to_string(), "origQty": "1.68", "executedQty": "0.46",
             "side": "BUY", "type": "LIMIT", "timeInForce": "GTX"
         });
         let app = Router::new().route(
@@ -331,7 +646,16 @@ async fn migration_requires_terminal_cancellation_and_recovers_racing_buy_fill()
             .write()
             .await
             .insert(old.client_order_id.clone(), old);
-        engine.maintain_grid_window().await;
+        if price == dec!(118.4) {
+            // Exercise the threshold cleanup path with a pending cancellation.
+            assert!(
+                engine
+                    .prune_grid_window(1, &[dec!(118.8), dec!(118.7), dec!(118.6)], &[])
+                    .await
+            );
+        } else {
+            engine.maintain_grid_window().await;
+        }
         let intents = engine
             .state
             .db
@@ -344,7 +668,7 @@ async fn migration_requires_terminal_cancellation_and_recovers_racing_buy_fill()
             );
             assert_eq!(intents.len(), 1);
             assert_eq!(intents[0].quantity, dec!(0.46));
-            assert_eq!(intents[0].price, dec!(118.91));
+            assert_eq!(intents[0].price, price + dec!(0.1));
             assert_eq!(engine.state.db.get_recent_trades(10).unwrap().len(), 1);
         } else {
             assert_eq!(orders(&engine).await.len(), 1);
@@ -354,6 +678,63 @@ async fn migration_requires_terminal_cancellation_and_recovers_racing_buy_fill()
         }
         server.abort();
     }
+}
+
+#[tokio::test]
+async fn interrupted_window_cleanup_continues_below_trigger_after_partial_success() {
+    use axum::{extract::Query, routing::get, Json, Router};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let mut engine = paper_engine().await;
+    engine.state.config.write().await.exchange.dry_run = false;
+    let allow_second_cancel = Arc::new(AtomicBool::new(false));
+    let gate = allow_second_cancel.clone();
+    let app = Router::new().route(
+        "/fapi/v1/order",
+        get(move |Query(query): Query<HashMap<String, String>>| {
+            let gate = gate.clone();
+            async move {
+                let id = &query["origClientOrderId"];
+                Json(serde_json::json!({
+                    "orderId": 42, "clientOrderId": id, "symbol": "SOLUSDC",
+                    "status": if id == "gb_a" || gate.load(Ordering::SeqCst) { "CANCELED" } else { "NEW" },
+                    "price": "118.4", "origQty": "1.68", "executedQty": "0",
+                    "side": "BUY", "type": "LIMIT", "timeInForce": "GTX"
+                }))
+            }
+        }).delete(|| async { Json(serde_json::json!({})) }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    engine.client = Arc::new(BinanceFuturesClient::with_base_url(
+        &engine.state.config.read().await.exchange,
+        url,
+    ));
+    for (id, price) in [("a", dec!(118.4)), ("b", dec!(118.3))] {
+        let o = order(id, OrderSide::Buy, price, dec!(1.68));
+        engine.state.db.save_managed_order(&o).unwrap();
+        engine
+            .state
+            .active_orders
+            .write()
+            .await
+            .insert(o.client_order_id.clone(), o);
+    }
+    assert!(engine.prune_grid_window(2, &[dec!(118.8)], &[]).await);
+    assert_eq!(orders(&engine).await.len(), 1);
+    assert!(engine.window_cleanup_pending);
+    allow_second_cancel.store(true, Ordering::SeqCst);
+    assert!(engine.prune_grid_window(2, &[dec!(118.8)], &[]).await);
+    assert!(orders(&engine).await.is_empty());
+    assert!(!engine.window_cleanup_pending);
+    assert!(engine
+        .state
+        .db
+        .load_managed_orders("SOLUSDC")
+        .unwrap()
+        .is_empty());
+    server.abort();
 }
 
 #[tokio::test]

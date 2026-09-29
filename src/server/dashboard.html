@@ -227,14 +227,15 @@
               <div class="form-group">
                 <label for="cfg-buy-window">买单挂单窗口数量 (Buy Window)</label>
                 <input type="number" id="cfg-buy-window" min="1" max="25" required placeholder="5" />
-                <span class="form-hint">市价下方覆盖的网格档数；待止盈档位不重复买入</span>
+                <span class="form-hint">市价下方目标挂单数；跳过待止盈档位继续向下补单，受价格范围和仓位上限限制</span>
               </div>
 
               <!-- 卖单窗口 -->
               <div class="form-group">
                 <label for="cfg-sell-window">卖单挂单窗口数量 (Sell Window)</label>
                 <input type="number" id="cfg-sell-window" min="1" max="25" required placeholder="5" />
-                <span class="form-hint">市价上方覆盖的网格档数；已卖出的档位等待低一格买回</span>
+                <span class="form-hint">目标卖单数（含已有止盈单）；跳过等待买回的档位向上补足，受可用持仓和价格范围限制；已有止盈单超额也保留</span>
+                <span class="form-hint">总挂单达到买卖窗口总数的 2 倍时，清理窗口外普通单；例如 3 买 / 3 卖在 12 单时触发，止盈单保留</span>
               </div>
 
               <!-- 运行模式 -->

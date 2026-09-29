@@ -1,4 +1,5 @@
 use crate::exchange::model::{BinanceExchangeInfo, BinanceFilter};
+use crate::types::OrderSide;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use tracing::{debug, warn};
@@ -114,25 +115,43 @@ impl SymbolRules {
     }
 
     /// Zero-anchored levels stay identical across market moves and process restarts.
+    /// Count eligible levels, skipping reservations without consuming window slots.
     /// At an exact level, neither side places an order at the current market price.
     pub fn grid_window_prices(
         &self,
         market: Decimal,
         interval: Decimal,
-        buy_window: usize,
-        sell_window: usize,
+        windows: (usize, usize),
+        bounds: (Option<Decimal>, Option<Decimal>),
+        eligible: impl Fn(OrderSide, Decimal) -> bool,
     ) -> (Vec<Decimal>, Vec<Decimal>) {
-        let below = (market / interval).ceil() - Decimal::ONE;
-        let above = (market / interval).floor() + Decimal::ONE;
-        let buys = (0..buy_window)
-            .map(|i| (below - Decimal::from(i)) * interval)
-            .filter(|p| *p > Decimal::ZERO && *p >= self.min_price && *p <= self.max_price)
-            .collect();
-        let sells = (0..sell_window)
-            .map(|i| (above + Decimal::from(i)) * interval)
-            .filter(|p| *p > Decimal::ZERO && *p >= self.min_price && *p <= self.max_price)
-            .collect();
-        (buys, sells)
+        let min = bounds
+            .0
+            .unwrap_or(self.min_price)
+            .max(self.min_price)
+            .max(interval);
+        let max = bounds.1.unwrap_or(self.max_price).min(self.max_price);
+        let below =
+            ((market / interval).ceil() - Decimal::ONE).min((max / interval).floor()) * interval;
+        let above =
+            ((market / interval).floor() + Decimal::ONE).max((min / interval).ceil()) * interval;
+        let collect = |side, mut price, count, step| {
+            let mut prices = Vec::new();
+            while prices.len() < count && price >= min && price <= max {
+                if eligible(side, price) {
+                    prices.push(price);
+                }
+                let Some(next) = price.checked_add(step) else {
+                    break;
+                };
+                price = next;
+            }
+            prices
+        };
+        (
+            collect(OrderSide::Buy, below, windows.0, -interval),
+            collect(OrderSide::Sell, above, windows.1, interval),
+        )
     }
 
     /// Round price to the nearest tick size
@@ -244,18 +263,41 @@ mod tests {
     fn grid_window_uses_fixed_levels_and_excludes_market_price() {
         let rules = SymbolRules::default();
         for market in [dec!(118.81), dec!(118.84), dec!(118.89)] {
-            let (buys, sells) = rules.grid_window_prices(market, dec!(0.1), 3, 3);
+            let (buys, sells) =
+                rules.grid_window_prices(market, dec!(0.1), (3, 3), (None, None), |_, _| true);
             assert_eq!(buys, vec![dec!(118.8), dec!(118.7), dec!(118.6)]);
             assert_eq!(sells, vec![dec!(118.9), dec!(119.0), dec!(119.1)]);
         }
-        let (buys, sells) = rules.grid_window_prices(dec!(118.9), dec!(0.1), 2, 2);
+        let (buys, sells) =
+            rules.grid_window_prices(dec!(118.9), dec!(0.1), (2, 2), (None, None), |_, _| true);
         assert_eq!(buys, vec![dec!(118.8), dec!(118.7)]);
         assert_eq!(sells, vec![dec!(119.0), dec!(119.1)]);
-        let (buys, sells) = rules.grid_window_prices(dec!(118.91), dec!(0.1), 2, 2);
+        let (buys, sells) =
+            rules.grid_window_prices(dec!(118.91), dec!(0.1), (2, 2), (None, None), |_, _| true);
         assert_eq!(buys, vec![dec!(118.9), dec!(118.8)]);
         assert_eq!(sells, vec![dec!(119.0), dec!(119.1)]);
-        let (buys, _) = rules.grid_window_prices(dec!(0.11), dec!(0.1), 5, 0);
+        let (buys, _) =
+            rules.grid_window_prices(dec!(0.11), dec!(0.1), (5, 0), (None, None), |_, _| true);
         assert_eq!(buys, vec![dec!(0.1)]);
+    }
+
+    #[test]
+    fn eligible_window_stops_at_bounds_and_jumps_to_allowed_range() {
+        let rules = SymbolRules::default();
+        let bounds = (Some(dec!(119.3)), Some(dec!(119.75)));
+        let (buys, sells) =
+            rules.grid_window_prices(dec!(119.21), dec!(0.1), (3, 3), bounds, |side, price| {
+                side != OrderSide::Sell || price == dec!(119.6)
+            });
+        assert!(buys.is_empty());
+        assert_eq!(sells, vec![dec!(119.6)]);
+        let (buys, sells) =
+            rules.grid_window_prices(dec!(200), dec!(0.1), (3, 3), bounds, |_, _| true);
+        assert_eq!(buys, vec![dec!(119.7), dec!(119.6), dec!(119.5)]);
+        assert!(sells.is_empty());
+        let (buys, sells) =
+            rules.grid_window_prices(dec!(100), dec!(0.1), (3, 3), bounds, |_, _| false);
+        assert!(buys.is_empty() && sells.is_empty());
     }
 
     #[test]
