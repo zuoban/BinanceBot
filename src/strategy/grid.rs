@@ -64,11 +64,15 @@ fn new_pair_intent(
 enum PairPlacementDecision {
     Ready,
     Wait,
-    Skip,
+    Skip(&'static str),
 }
 
 #[path = "remainder.rs"]
 mod remainder;
+
+#[path = "sell_levels.rs"]
+mod sell_levels;
+use sell_levels::SellLevelLedger;
 
 const GRID_ORDER_PREFIX: &str = "gb_";
 
@@ -162,6 +166,7 @@ pub struct GridTradingEngine {
     ticker_rx: broadcast::Receiver<TickerInfo>,
     // Map of client_order_id -> purchase price for calculating paired grid cycle profit
     paired_buy_prices: HashMap<String, (Decimal, Decimal)>,
+    sell_levels: Option<SellLevelLedger>,
     pnl_reconcile_offset: usize,
     pnl_reconcile_task: Option<JoinHandle<()>>,
     last_account_sync: Option<Instant>,
@@ -184,6 +189,7 @@ impl GridTradingEngine {
             action_rx,
             ticker_rx,
             paired_buy_prices: HashMap::new(),
+            sell_levels: None,
             pnl_reconcile_offset: 0,
             pnl_reconcile_task: None,
             last_account_sync: None,
@@ -1091,7 +1097,7 @@ impl GridTradingEngine {
             || intent.quantity > rules.max_qty
             || intent.price * intent.quantity < rules.min_notional
         {
-            return PairPlacementDecision::Skip;
+            return PairPlacementDecision::Skip("price, quantity or configured bounds are invalid");
         }
         let market_price = self.state.ticker.read().await.last_price;
         if market_price <= Decimal::ZERO {
@@ -1100,7 +1106,7 @@ impl GridTradingEngine {
         if (intent.side == OrderSide::Buy && intent.price >= market_price)
             || (intent.side == OrderSide::Sell && intent.price <= market_price)
         {
-            return PairPlacementDecision::Skip;
+            return PairPlacementDecision::Skip("price would cross the current market");
         }
         let orders: Vec<_> = self
             .state
@@ -1119,7 +1125,9 @@ impl GridTradingEngine {
                 rules.tick_size,
             )
         {
-            return PairPlacementDecision::Skip;
+            return PairPlacementDecision::Skip(
+                "BUY level already has an order or a pending take-profit exit",
+            );
         }
         let position_size = self.state.position.read().await.size;
         let allowed = if intent.side == OrderSide::Sell {
@@ -1134,7 +1142,11 @@ impl GridTradingEngine {
         if allowed {
             PairPlacementDecision::Ready
         } else {
-            PairPlacementDecision::Skip
+            PairPlacementDecision::Skip(if intent.side == OrderSide::Sell {
+                "insufficient unreserved long position"
+            } else {
+                "configured position limit would be exceeded"
+            })
         }
     }
 
@@ -1238,7 +1250,7 @@ impl GridTradingEngine {
                 match self.pair_submission_decision(&intent).await {
                     PairPlacementDecision::Ready => {}
                     PairPlacementDecision::Wait => return false,
-                    PairPlacementDecision::Skip => {
+                    PairPlacementDecision::Skip(reason) => {
                         if let Err(e) = self.delete_managed_order(&intent.client_order_id).await {
                             error!("Could not clear skipped pair order: {}", e);
                             return false;
@@ -1261,8 +1273,8 @@ impl GridTradingEngine {
                             .add_log(
                                 "WARN",
                                 format!(
-                                    "Pair order {} skipped by current placement limits",
-                                    intent.client_order_id
+                                    "Pair order {} skipped: {}",
+                                    intent.client_order_id, reason
                                 ),
                             )
                             .await;
@@ -1870,6 +1882,16 @@ impl GridTradingEngine {
         }
         let buy_window = config.grid.buy_window;
         let sell_window = config.grid.sell_window;
+        let waiting_for_buy = match self.waiting_sell_levels().await {
+            Ok(levels) => levels,
+            Err(error) => {
+                self.state
+                    .add_log("ERROR", format!("Could not restore sell levels: {}", error))
+                    .await;
+                self.pause_trading().await;
+                return;
+            }
+        };
 
         // Migrate only idle ordinary managed orders. Existing exits, partial fills
         // and consolidated remainders retain their price and provenance.
@@ -1895,20 +1917,22 @@ impl GridTradingEngine {
             .filter(|o| {
                 is_grid_order(&o.client_order_id)
                     && !o.is_take_profit
-                    && matches!(o.purpose, OrderPurpose::Grid | OrderPurpose::Legacy)
+                    && o.purpose != OrderPurpose::TakeProfit
                     && o.status == OrderStatus::New
-                    && o.merge_sources.is_empty()
-                    && (o.price % grid_interval != Decimal::ZERO
-                        || has_nearby_grid_order(
-                            if o.side == OrderSide::Buy {
-                                &reserved_buy_prices
-                            } else {
-                                &exit_prices
-                            },
-                            o.price,
-                            grid_interval,
-                            rules.tick_size,
-                        ))
+                    && ((o.side == OrderSide::Sell && waiting_for_buy.contains(&o.price))
+                        || (matches!(o.purpose, OrderPurpose::Grid | OrderPurpose::Legacy)
+                            && o.merge_sources.is_empty()
+                            && (o.price % grid_interval != Decimal::ZERO
+                                || has_nearby_grid_order(
+                                    if o.side == OrderSide::Buy {
+                                        &reserved_buy_prices
+                                    } else {
+                                        &exit_prices
+                                    },
+                                    o.price,
+                                    grid_interval,
+                                    rules.tick_size,
+                                ))))
             })
             .collect();
         if !misaligned.is_empty() {
@@ -1961,7 +1985,7 @@ impl GridTradingEngine {
                 && config.grid.max_price.is_none_or(|max| *price <= max)
         };
         desired_buy_prices.retain(in_bounds);
-        desired_sell_prices.retain(in_bounds);
+        desired_sell_prices.retain(|price| in_bounds(price) && !waiting_for_buy.contains(price));
 
         for target_price in desired_buy_prices {
             // Retain queue priority and reserve levels whose buy is awaiting its exit.
@@ -2102,6 +2126,19 @@ impl GridTradingEngine {
         let config = self.state.config.read().await.clone();
         let rules = self.state.rules.read().await.clone();
         let symbol = config.exchange.symbol.clone();
+        if side == OrderSide::Sell && paired_client_order_id.is_none() {
+            match self.waiting_sell_levels().await {
+                Ok(levels) if levels.contains(&price) => return false,
+                Ok(_) => {}
+                Err(error) => {
+                    self.state
+                        .add_log("ERROR", format!("Could not restore sell levels: {}", error))
+                        .await;
+                    self.pause_trading().await;
+                    return false;
+                }
+            }
+        }
         let Some(full_quantity) = exit_quantity
             .or_else(|| rules.calculate_quantity(price, config.grid.order_amount_usdc))
         else {
