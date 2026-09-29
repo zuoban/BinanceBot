@@ -1087,7 +1087,7 @@ impl GridTradingEngine {
         }
     }
 
-    async fn pair_submission_decision(&self, intent: &GridOrder) -> PairPlacementDecision {
+    async fn pair_submission_decision(&mut self, intent: &GridOrder) -> PairPlacementDecision {
         if *self.state.status.read().await != BotStatus::Running
             || !self
                 .last_account_sync
@@ -1145,6 +1145,43 @@ impl GridTradingEngine {
             return PairPlacementDecision::Skip(
                 "BUY level already has an order or a pending take-profit exit",
             );
+        }
+        if intent.side == OrderSide::Buy {
+            match self.waiting_buy_levels().await {
+                Ok(levels)
+                    if has_nearby_grid_order(
+                        &levels,
+                        intent.price,
+                        config.grid.grid_interval,
+                        rules.tick_size,
+                    ) =>
+                {
+                    return PairPlacementDecision::Skip("BUY level is awaiting its SELL fill")
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    error!("Could not restore buy levels: {}", error);
+                    return PairPlacementDecision::Wait;
+                }
+            }
+        } else {
+            let prices: Vec<_> = orders
+                .iter()
+                .filter(|o| {
+                    o.side == OrderSide::Sell
+                        && (o.is_take_profit || o.purpose == OrderPurpose::TakeProfit)
+                })
+                .map(|o| o.price)
+                .collect();
+            if has_nearby_grid_order(
+                &prices,
+                intent.price,
+                config.grid.grid_interval,
+                rules.tick_size,
+            ) {
+                // Preserve this exit intent while another paired exit owns the level.
+                return PairPlacementDecision::Wait;
+            }
         }
         let position_size = self.state.position.read().await.size;
         let allowed = if intent.side == OrderSide::Sell {
@@ -1564,6 +1601,7 @@ impl GridTradingEngine {
         let mut completed_buy_price = None;
         let mut full_paired_close = false;
         let mut pair_intent = None;
+        let mut paper_rebuy = None;
         let note;
 
         match order.side {
@@ -1755,14 +1793,8 @@ impl GridTradingEngine {
                 };
                 if may_rebuy && trading_enabled && !paired_exists {
                     if config.exchange.dry_run {
-                        self.place_grid_order(
-                            OrderSide::Buy,
-                            paired_buy_price,
-                            paired_client_id,
-                            order.grid_level - 1,
-                            Some(order.client_order_id.clone()),
-                        )
-                        .await;
+                        // Record the sell before checking durable buy-level ownership.
+                        paper_rebuy = Some((paired_buy_price, paired_client_id));
                     } else {
                         pair_intent = rules
                             .calculate_quantity(paired_buy_price, config.grid.order_amount_usdc)
@@ -1827,6 +1859,16 @@ impl GridTradingEngine {
                 .await
                 .insert(order.client_order_id.clone(), order.clone());
             return false;
+        }
+        if let Some((price, client_id)) = paper_rebuy {
+            self.place_grid_order(
+                OrderSide::Buy,
+                price,
+                client_id,
+                order.grid_level - 1,
+                Some(order.client_order_id.clone()),
+            )
+            .await;
         }
         true
     }
@@ -1910,6 +1952,17 @@ impl GridTradingEngine {
             }
         };
 
+        let waiting_for_sell = match self.waiting_buy_levels().await {
+            Ok(levels) => levels,
+            Err(error) => {
+                self.state
+                    .add_log("ERROR", format!("Could not restore buy levels: {}", error))
+                    .await;
+                self.pause_trading().await;
+                return;
+            }
+        };
+
         // Migrate only idle ordinary managed orders. Existing exits, partial fills
         // and consolidated remainders retain their price and provenance.
         let existing: Vec<_> = self
@@ -1936,7 +1989,14 @@ impl GridTradingEngine {
                     && !o.is_take_profit
                     && o.purpose != OrderPurpose::TakeProfit
                     && o.status == OrderStatus::New
-                    && ((o.side == OrderSide::Sell && waiting_for_buy.contains(&o.price))
+                    && ((o.side == OrderSide::Buy
+                        && has_nearby_grid_order(
+                            &waiting_for_sell,
+                            o.price,
+                            grid_interval,
+                            rules.tick_size,
+                        ))
+                        || (o.side == OrderSide::Sell && waiting_for_buy.contains(&o.price))
                         || (matches!(o.purpose, OrderPurpose::Grid | OrderPurpose::Legacy)
                             && o.merge_sources.is_empty()
                             && (o.price % grid_interval != Decimal::ZERO
@@ -2009,6 +2069,7 @@ impl GridTradingEngine {
             .filter(|o| o.side == OrderSide::Sell)
             .count();
         let mut reserved_buys = reserved_buy_prices;
+        reserved_buys.extend(waiting_for_sell);
         reserved_buys.extend(
             preserved
                 .iter()
@@ -2229,6 +2290,28 @@ impl GridTradingEngine {
         let config = self.state.config.read().await.clone();
         let rules = self.state.rules.read().await.clone();
         let symbol = config.exchange.symbol.clone();
+        if side == OrderSide::Buy {
+            match self.waiting_buy_levels().await {
+                Ok(levels)
+                    if has_nearby_grid_order(
+                        &levels,
+                        price,
+                        config.grid.grid_interval,
+                        rules.tick_size,
+                    ) =>
+                {
+                    return false
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    self.state
+                        .add_log("ERROR", format!("Could not restore buy levels: {}", error))
+                        .await;
+                    self.pause_trading().await;
+                    return false;
+                }
+            }
+        }
         if side == OrderSide::Sell && paired_client_order_id.is_none() {
             match self.waiting_sell_levels().await {
                 Ok(levels) if levels.contains(&price) => return false,
@@ -2327,6 +2410,19 @@ impl GridTradingEngine {
             }
             full_quantity
         } else {
+            let prices: Vec<_> = orders
+                .iter()
+                .filter(|o| {
+                    o.side == OrderSide::Sell
+                        && (paired_client_order_id.is_none()
+                            || o.is_take_profit
+                            || o.purpose == OrderPurpose::TakeProfit)
+                })
+                .map(|o| o.price)
+                .collect();
+            if has_nearby_grid_order(&prices, price, config.grid.grid_interval, rules.tick_size) {
+                return false;
+            }
             let available = sell_quantity_available(self.state.position.read().await.size, &orders);
             if available >= full_quantity {
                 full_quantity
@@ -2959,10 +3055,11 @@ mod tests {
 
     #[tokio::test]
     async fn confirmed_absent_pair_with_crossed_price_does_not_block_grid() {
-        let (config, db, _) = pending_pair_fixture();
+        let (mut config, db, intent) = pending_pair_fixture();
+        config.grid.grid_interval = dec!(1);
         let fake = PairExchange::default();
         let (url, server) = pair_exchange_server(fake.clone()).await;
-        let mut engine = pair_recovery_engine(&config, db.clone(), url).await;
+        let mut engine = pair_recovery_engine(&config, db.clone(), url.clone()).await;
         engine.state.ticker.write().await.last_price = dec!(102);
         assert!(
             engine
@@ -2974,6 +3071,76 @@ mod tests {
             .unwrap()
             .is_empty());
         assert!(fake.posts.lock().unwrap().is_empty());
+        assert!(
+            !engine
+                .place_grid_order(OrderSide::Buy, dec!(100), "gb_b_duplicate".into(), -1, None)
+                .await
+        );
+        drop(engine);
+        let mut restarted = pair_recovery_engine(&config, db.clone(), url).await;
+        restarted.state.ticker.write().await.last_price = dec!(100.5);
+        assert!(
+            !restarted
+                .place_grid_order(
+                    OrderSide::Buy,
+                    dec!(100),
+                    "gb_b_after_restart".into(),
+                    -1,
+                    None
+                )
+                .await
+        );
+        let mut rebuy = new_pair_intent(&intent, OrderSide::Buy, dec!(100), dec!(1));
+        rebuy.symbol = "SOLUSDC".into();
+        assert!(matches!(
+            restarted.pair_submission_decision(&rebuy).await,
+            super::PairPlacementDecision::Skip(_)
+        ));
+        assert!(fake.posts.lock().unwrap().is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn paired_sell_waits_while_another_exit_owns_the_price() {
+        let (config, db, intent) = pending_pair_fixture();
+        let fake = PairExchange::default();
+        let (url, server) = pair_exchange_server(fake.clone()).await;
+        let mut engine = pair_recovery_engine(&config, db.clone(), url).await;
+        engine.state.position.write().await.size = dec!(10);
+        let mut existing = intent.clone();
+        existing.client_order_id = "gb_s_existing_exit".into();
+        existing.paired_client_order_id = Some("gb_b_existing_parent".into());
+        engine
+            .state
+            .active_orders
+            .write()
+            .await
+            .insert(existing.client_order_id.clone(), existing.clone());
+        assert!(
+            !engine
+                .drain_pair_intents("SOLUSDC", TradingMode::Live)
+                .await
+        );
+        assert!(fake.posts.lock().unwrap().is_empty());
+        assert_eq!(
+            db.load_pair_intents("SOLUSDC", TradingMode::Live)
+                .unwrap()
+                .len(),
+            1
+        );
+        // Once the competing reservation is canceled, the original durable intent can submit.
+        engine
+            .state
+            .active_orders
+            .write()
+            .await
+            .remove(&existing.client_order_id);
+        assert!(
+            engine
+                .drain_pair_intents("SOLUSDC", TradingMode::Live)
+                .await
+        );
+        assert_eq!(*fake.posts.lock().unwrap(), vec![intent.client_order_id]);
         server.abort();
     }
 

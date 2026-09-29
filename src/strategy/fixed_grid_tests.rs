@@ -1016,3 +1016,120 @@ async fn ledger_reads_full_history_incrementally_and_isolates_mode_and_symbol() 
         .unwrap()
         .contains(&dec!(119.5)));
 }
+
+#[tokio::test]
+async fn skipped_exit_does_not_reopen_bought_level_and_restart_cancels_stale_buy() {
+    let mut engine = paper_engine().await;
+    engine.state.config.write().await.grid.order_amount_usdc = dec!(300);
+    engine.state.config.write().await.grid.max_position_usdc = None;
+    engine.state.ticker.write().await.last_price = dec!(120.61);
+    let mut buy = order("b_skipped_exit", OrderSide::Buy, dec!(120.5), dec!(2.48));
+    assert!(engine.on_order_filled(&mut buy).await);
+    assert!(
+        orders(&engine).await.is_empty(),
+        "120.6 exit crosses market"
+    );
+    for market in [dec!(120.55), dec!(120.61), dec!(120.51)] {
+        engine.state.ticker.write().await.last_price = market;
+        engine.maintain_grid_window().await;
+        assert!(orders(&engine)
+            .await
+            .iter()
+            .all(|o| o.side != OrderSide::Buy || o.price != dec!(120.5)));
+        assert!(
+            !engine
+                .place_grid_order(
+                    OrderSide::Buy,
+                    dec!(120.5),
+                    "gb_b_duplicate".into(),
+                    -1,
+                    None
+                )
+                .await
+        );
+    }
+    let stale = order("b_stale_duplicate", OrderSide::Buy, dec!(120.5), dec!(2.48));
+    engine
+        .state
+        .active_orders
+        .write()
+        .await
+        .insert(stale.client_order_id.clone(), stale);
+    let (_, rx) = mpsc::channel(1);
+    let (_, ticker_rx) = broadcast::channel(1);
+    let mut restarted =
+        GridTradingEngine::new(engine.state.clone(), engine.client.clone(), rx, ticker_rx);
+    restarted.maintain_grid_window().await;
+    assert!(orders(&restarted)
+        .await
+        .iter()
+        .all(|o| o.side != OrderSide::Buy || o.price != dec!(120.5)));
+    // A confirmed full exit releases this level for the next cycle.
+    let mut exit = order("s_recovered_exit", OrderSide::Sell, dec!(120.6), dec!(2.48));
+    assert!(restarted.on_order_filled(&mut exit).await);
+    assert!(!restarted
+        .waiting_buy_levels()
+        .await
+        .unwrap()
+        .contains(&dec!(120.5)));
+    assert!(orders(&restarted)
+        .await
+        .iter()
+        .any(|o| o.side == OrderSide::Buy && o.price == dec!(120.5)));
+}
+
+#[tokio::test]
+async fn bought_level_tracks_duplicate_inventory_and_partial_exits() {
+    let mut engine = paper_engine().await;
+    for (id, side, price, qty) in [
+        (0, OrderSide::Buy, dec!(120.5), dec!(2.48)),
+        (1, OrderSide::Buy, dec!(120.500000), dec!(2.48)),
+        (2, OrderSide::Sell, dec!(120.6), dec!(2.48)),
+        (3, OrderSide::Sell, dec!(120.6), dec!(0.48)),
+        (4, OrderSide::Sell, dec!(120.7), dec!(20)),
+    ] {
+        engine
+            .state
+            .db
+            .insert_trade(&journal_trade(id, side, price, qty))
+            .unwrap();
+        assert!(engine
+            .waiting_buy_levels()
+            .await
+            .unwrap()
+            .contains(&dec!(120.5)));
+    }
+    engine
+        .state
+        .db
+        .insert_trade(&journal_trade(5, OrderSide::Sell, dec!(120.6), dec!(2)))
+        .unwrap();
+    assert!(!engine
+        .waiting_buy_levels()
+        .await
+        .unwrap()
+        .contains(&dec!(120.5)));
+}
+
+#[tokio::test]
+async fn ordinary_sell_placement_cannot_duplicate_an_active_sell() {
+    let mut engine = paper_engine().await;
+    engine.state.position.write().await.size = dec!(100);
+    assert!(
+        engine
+            .place_grid_order(OrderSide::Sell, dec!(119), "gb_s_first".into(), 1, None)
+            .await
+    );
+    assert!(
+        !engine
+            .place_grid_order(
+                OrderSide::Sell,
+                dec!(119.0000),
+                "gb_s_second".into(),
+                1,
+                None
+            )
+            .await
+    );
+    assert_eq!(orders(&engine).await.len(), 1);
+}

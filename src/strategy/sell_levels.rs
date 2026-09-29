@@ -11,10 +11,28 @@ pub(super) struct SellLevelLedger {
     rules: SymbolRules,
     cursor: i64,
     waiting: HashSet<Decimal>,
+    bought: HashMap<Decimal, Decimal>,
 }
 
 impl GridTradingEngine {
     pub(super) async fn waiting_sell_levels(&mut self) -> Result<HashSet<Decimal>> {
+        self.refresh_level_ledger().await?;
+        Ok(self.sell_levels.as_ref().unwrap().waiting.clone())
+    }
+
+    pub(super) async fn waiting_buy_levels(&mut self) -> Result<Vec<Decimal>> {
+        self.refresh_level_ledger().await?;
+        Ok(self
+            .sell_levels
+            .as_ref()
+            .unwrap()
+            .bought
+            .keys()
+            .copied()
+            .collect())
+    }
+
+    async fn refresh_level_ledger(&mut self) -> Result<()> {
         let config = self.state.config.read().await.clone();
         let mode = TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
         let rules = self.state.rules.read().await.clone();
@@ -35,6 +53,7 @@ impl GridTradingEngine {
                 rules: rules.clone(),
                 cursor: 0,
                 waiting: HashSet::new(),
+                bought: HashMap::new(),
             });
         }
         let ledger = self.sell_levels.as_mut().unwrap();
@@ -52,8 +71,34 @@ impl GridTradingEngine {
                     match fill.side {
                         OrderSide::Sell => {
                             ledger.waiting.insert(fill.price.normalize());
+                            // Keep bought levels reserved independently of open exits.
+                            // A skipped/canceled exit cannot erase the acquired inventory,
+                            // and a partial sell cannot release an entire bought level.
+                            let mut remaining = fill.quantity;
+                            let mut levels: Vec<_> = ledger
+                                .bought
+                                .keys()
+                                .copied()
+                                .filter(|buy| {
+                                    ((*buy + ledger.interval) / rules.tick_size).ceil()
+                                        * rules.tick_size
+                                        == fill.price
+                                })
+                                .collect();
+                            levels.sort();
+                            for buy in levels {
+                                let quantity = ledger.bought.get_mut(&buy).unwrap();
+                                let closed = remaining.min(*quantity);
+                                *quantity -= closed;
+                                remaining -= closed;
+                            }
+                            ledger
+                                .bought
+                                .retain(|_, quantity| *quantity > Decimal::ZERO);
                         }
                         OrderSide::Buy => {
+                            *ledger.bought.entry(fill.price.normalize()).or_default() +=
+                                fill.quantity;
                             // Tiny/canceled partial buys must not reopen a full-size
                             // inventory sell. Their own equal-quantity exits remain allowed.
                             if rules
@@ -74,6 +119,6 @@ impl GridTradingEngine {
                 break;
             }
         }
-        Ok(ledger.waiting.clone())
+        Ok(())
     }
 }
