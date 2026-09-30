@@ -87,6 +87,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/orders", get(get_orders_handler))
         .route("/api/trades", get(get_trades_handler))
         .route("/api/logs", get(get_logs_handler))
+        .route("/api/database/export", get(export_database_handler))
         .route(
             "/api/config",
             get(get_config_handler).post(post_config_handler),
@@ -114,7 +115,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 }
 
 async fn dashboard_handler() -> Html<&'static str> {
-    Html(INDEX_HTML)
+    Html(INDEX_HTML.as_str())
 }
 
 async fn dashboard_css_handler() -> (
@@ -464,6 +465,54 @@ async fn get_logs_handler(State(state): State<Arc<AppState>>) -> Json<ApiRespons
         data: Some(logs),
         message: None,
     })
+}
+
+async fn export_database_handler(State(state): State<Arc<AppState>>) -> Response {
+    match state
+        .db
+        .run_blocking(|db| db.export_analysis_snapshot())
+        .await
+    {
+        Ok(bytes) => {
+            let filename = format!(
+                "binancebot-analysis-{}.db",
+                chrono::Utc::now()
+                    .with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap())
+                    .format("%Y%m%d-%H%M%S")
+            );
+            (
+                [
+                    (
+                        axum::http::header::CONTENT_TYPE,
+                        "application/vnd.sqlite3".to_string(),
+                    ),
+                    (
+                        axum::http::header::CONTENT_DISPOSITION,
+                        format!("attachment; filename=\"{}\"", filename),
+                    ),
+                    (axum::http::header::CACHE_CONTROL, "no-store".to_string()),
+                    (
+                        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+                        "nosniff".to_string(),
+                    ),
+                ],
+                bytes,
+            )
+                .into_response()
+        }
+        Err(error) => {
+            error!("Database analysis export failed: {}", error);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::<()> {
+                    success: false,
+                    data: None,
+                    message: Some("数据库导出失败，请稍后重试或查看服务器日志".into()),
+                }),
+            )
+                .into_response()
+        }
+    }
 }
 
 async fn get_config_handler(

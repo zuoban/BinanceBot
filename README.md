@@ -150,6 +150,14 @@ cargo run --release -- --symbol SOLUSDC --interval 0.1 --amount 100 --buy-window
 
 任何 SQLite 客户端（如 `sqlite3`, DBeaver, TablePlus）均可直接打开 `data/bot.db` 查阅和导出交易数据。
 
+### 在线导出分析数据库
+
+登录控制台后，打开「成交与套利历史」，点击「导出数据库」，下载带北京时间戳的 `binancebot-analysis-YYYYMMDD-HHMMSS.db` 文件。导出覆盖全部交易对与运行模式的完整成交记录、策略配置、机器人订单、配对补单意图、余量合并计划和统计，不受页面最近 50 条成交的限制。
+
+导出使用 SQLite 一致性快照，包含已提交的 WAL 数据，无需暂停策略或手工复制 `.db-wal`。副本中的 Binance API Key / Secret、Telegram Bot Token / Chat ID、管理员密码哈希和登录会话均被移除，原数据库保持不变。文件用于离线分析，不是包含凭证的恢复备份；系统运行日志仅保存在内存中，不包含在数据库导出里。
+
+接口为 `GET /api/database/export`，须携带有效的管理员 `Authorization: Bearer <token>`；成功返回 SQLite 附件，失败返回 JSON 错误。
+
 ---
 
 ## 🌐 远程服务器访问排查指南

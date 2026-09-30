@@ -25,7 +25,7 @@
       <div class="brand-icon" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
       <div class="brand-lockup">
         <span class="brand-name">Binance Grid Bot</span>
-        <span class="brand-caption">GRID TRADING CONSOLE</span>
+        <span class="brand-caption">GRID TRADING CONSOLE <span class="brand-version" id="app-version" title="当前运行版本">v{{APP_VERSION}}</span></span>
       </div>
     </div>
     <div class="brand-meta" aria-label="当前策略状态">
@@ -169,6 +169,11 @@
 
       <!-- Tab: Trade History -->
       <div class="tab-content" id="tab-trades" role="tabpanel" aria-labelledby="tab-btn-trades">
+        <div class="section-title">
+          <p class="trade-chart-note">导出全部交易对和模式的成交、订单及策略数据；文件已移除密钥和登录信息。</p>
+          <button type="button" id="btn-export-database" onclick="exportDatabase()">导出数据库</button>
+        </div>
+        <p class="trade-chart-note" id="database-export-status" role="status" aria-live="polite"></p>
         <div class="table-scroll" role="region" aria-label="成交与套利历史，可横向滚动" tabindex="0">
         <table>
           <thead>
@@ -461,6 +466,42 @@
         throw new Error("未授权或登录已过期");
       }
       return res;
+    }
+
+    async function exportDatabase() {
+      const button = document.getElementById("btn-export-database");
+      const status = document.getElementById("database-export-status");
+      if (button.disabled) return;
+      button.disabled = true;
+      button.textContent = "导出中…";
+      status.textContent = "正在生成数据库快照…";
+      try {
+        const response = await authFetch("/api/database/export", { cache: "no-store" });
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({}));
+          throw new Error(error.message || "数据库导出失败，请稍后重试");
+        }
+        const blob = await response.blob();
+        const disposition = response.headers.get("Content-Disposition") || "";
+        const match = disposition.match(/filename="([^"]+)"/);
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = match ? match[1] : "binancebot-analysis.db";
+        document.body.appendChild(link);
+        try {
+          link.click();
+        } finally {
+          link.remove();
+          setTimeout(() => URL.revokeObjectURL(url), 60000);
+        }
+        status.textContent = "数据库已生成并开始下载，可将 .db 文件用于分析。";
+      } catch (error) {
+        status.textContent = error.message || "数据库导出失败，请稍后重试";
+      } finally {
+        button.disabled = false;
+        button.textContent = "导出数据库";
+      }
     }
 
     async function checkAuthAndInit() {

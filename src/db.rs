@@ -71,6 +71,43 @@ impl Database {
         &self.path
     }
 
+    /// A consistent analysis snapshot, including committed WAL transactions.
+    /// Redaction happens only on the copy; never expose a raw live database file.
+    pub fn export_analysis_snapshot(&self) -> Result<Vec<u8>> {
+        let mut snapshot = Connection::open_in_memory()?;
+        {
+            let source = self.conn.lock().unwrap();
+            let backup = rusqlite::backup::Backup::new(&source, &mut snapshot)?;
+            anyhow::ensure!(
+                backup.step(-1)? == rusqlite::backup::StepResult::Done,
+                "Database is busy; retry the export"
+            );
+        }
+
+        let config_json: Option<String> = snapshot
+            .query_row(
+                "SELECT config_json FROM app_config WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(json) = config_json {
+            // Typed serialization also drops unrecognized config fields.
+            let mut config: AppConfig = serde_json::from_str(&json)?;
+            config.exchange.api_key.clear();
+            config.exchange.api_secret.clear();
+            config.telegram.bot_token.clear();
+            config.telegram.chat_id.clear();
+            snapshot.execute(
+                "UPDATE app_config SET config_json = ?1 WHERE id = 1",
+                params![serde_json::to_string(&config)?],
+            )?;
+        }
+        snapshot.execute_batch("DELETE FROM admin_auth; DELETE FROM auth_sessions; VACUUM;")?;
+        // VACUUM removes credentials from freed pages and old config payloads too.
+        Ok(snapshot.serialize(rusqlite::DatabaseName::Main)?.to_vec())
+    }
+
     pub fn load_bot_status(&self) -> Result<Option<BotStatus>> {
         let conn = self.conn.lock().unwrap();
         let value: Option<String> = conn
@@ -899,6 +936,171 @@ fn trade_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TradeRecord> {
 mod tests {
     use super::*;
     use rust_decimal_macros::dec;
+
+    #[test]
+    fn analysis_export_captures_wal_and_preserves_records_without_credentials() {
+        let directory =
+            std::env::temp_dir().join(format!("binancebot-export-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let source_path = directory.join("source.db");
+        let export_path = directory.join("analysis.db");
+        let db = Database::open(&source_path).unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch("PRAGMA wal_autocheckpoint = 0")
+            .unwrap();
+        let mut config = AppConfig::default();
+        config.exchange.api_key = "export-test-api-key".into();
+        config.exchange.api_secret = "historical-secret-marker".repeat(500);
+        db.save_config(&config).unwrap();
+        config.exchange.api_secret = "export-test-api-secret".into();
+        config.telegram.bot_token = "export-test-telegram-token".into();
+        config.telegram.chat_id = "export-test-chat-id".into();
+        db.save_config(&config).unwrap();
+        db.initialize_admin_password("export-test-password")
+            .unwrap();
+        db.create_session("export-test-session-token").unwrap();
+        db.save_bot_status(BotStatus::Running).unwrap();
+        let password_hash: String;
+        {
+            let conn = db.conn.lock().unwrap();
+            password_hash = conn
+                .query_row("SELECT password_hash FROM admin_auth", [], |r| r.get(0))
+                .unwrap();
+            for index in 0..65 {
+                conn.execute(
+                    "INSERT INTO trades (rowid, trade_id, client_order_id, symbol, mode, side, price, quantity, amount_usdc, realized_pnl, commission, is_maker, timestamp, note) VALUES (?1, ?2, ?2, ?3, ?4, 'BUY', '118.3', '2.53', '299.299', '0', '0', 1, '2026-09-30T00:00:00Z', 'export test')",
+                    params![10 + index * 2, format!("gb_b_export_{index}"), if index % 2 == 0 { "SOLUSDC" } else { "UNIUSDC" }, if index % 2 == 0 { "LIVE" } else { "PAPER" }],
+                ).unwrap();
+            }
+            conn.execute_batch(
+                r#"INSERT INTO managed_orders VALUES ('gb_s_exit', 'SOLUSDC', '{"paired_client_order_id":"gb_b_export_0"}', '2026-09-30');
+                INSERT INTO pair_intents VALUES ('gb_b_export_0', 'SOLUSDC', 'LIVE', '{"price":"118.4"}', '2026-09-30');
+                INSERT INTO remainder_plans VALUES ('gb_s_remainder', 'SOLUSDC', 'LIVE', 1, '{"sources":[]}', '2026-09-30');
+                INSERT INTO scoped_grid_stats VALUES ('SOLUSDC', 'LIVE', 65, 0, '0', '19454.435', '2026-09-30');"#,
+            ).unwrap();
+        }
+        assert!(
+            std::fs::metadata(directory.join("source.db-wal"))
+                .unwrap()
+                .len()
+                > 0
+        );
+        let bytes = db.export_analysis_snapshot().unwrap();
+        assert!(bytes.starts_with(b"SQLite format 3\0"));
+        let raw = String::from_utf8_lossy(&bytes);
+        for secret in [
+            "export-test-api-key",
+            "export-test-api-secret",
+            "historical-secret-marker",
+            "export-test-telegram-token",
+            "export-test-chat-id",
+            "export-test-session-token",
+            &password_hash,
+        ] {
+            assert!(!raw.contains(secret), "Credential bytes leaked: {secret}");
+        }
+        std::fs::write(&export_path, bytes).unwrap();
+        let snapshot =
+            Connection::open_with_flags(&export_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .unwrap();
+        let integrity: String = snapshot
+            .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(integrity, "ok");
+        for (table, expected) in [
+            ("trades", 65),
+            ("managed_orders", 1),
+            ("pair_intents", 1),
+            ("remainder_plans", 1),
+            ("scoped_grid_stats", 1),
+            ("app_config", 1),
+            ("bot_runtime", 1),
+            ("admin_auth", 0),
+            ("auth_sessions", 0),
+        ] {
+            let count: i64 = snapshot
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count, expected, "Incorrect exported count for {table}");
+        }
+        let rows: Vec<(i64, String)> = snapshot
+            .prepare("SELECT rowid, client_order_id FROM trades ORDER BY rowid")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        for (index, (rowid, id)) in rows.iter().enumerate() {
+            assert_eq!(
+                *rowid,
+                10 + index as i64 * 2,
+                "Fill journal cursors must be preserved"
+            );
+            assert_eq!(id, &format!("gb_b_export_{index}"));
+        }
+        // Preserve all analysis fields, especially paired IDs and numeric strings.
+        for table in [
+            "trades",
+            "managed_orders",
+            "pair_intents",
+            "remainder_plans",
+            "grid_stats",
+            "scoped_grid_stats",
+            "bot_runtime",
+        ] {
+            let read_rows = |connection: &Connection| {
+                let mut statement = connection
+                    .prepare(&format!("SELECT rowid, * FROM {table} ORDER BY rowid"))
+                    .unwrap();
+                let columns = statement.column_count();
+                statement
+                    .query_map([], |row| {
+                        (0..columns)
+                            .map(|column| row.get::<_, rusqlite::types::Value>(column))
+                            .collect::<rusqlite::Result<Vec<_>>>()
+                    })
+                    .unwrap()
+                    .map(Result::unwrap)
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                read_rows(&snapshot),
+                read_rows(&db.conn.lock().unwrap()),
+                "Changed analysis data in {table}"
+            );
+        }
+        let json: String = snapshot
+            .query_row("SELECT config_json FROM app_config", [], |r| r.get(0))
+            .unwrap();
+        let exported: AppConfig = serde_json::from_str(&json).unwrap();
+        assert!(exported.exchange.api_key.is_empty());
+        assert!(exported.exchange.api_secret.is_empty());
+        assert!(exported.telegram.bot_token.is_empty());
+        assert!(exported.telegram.chat_id.is_empty());
+        assert_eq!(exported.grid, config.grid);
+        assert_eq!(db.load_config().unwrap().unwrap().exchange, config.exchange);
+        assert_eq!(
+            db.load_config().unwrap().unwrap().telegram.bot_token,
+            config.telegram.bot_token
+        );
+        assert!(db.is_session_valid("export-test-session-token").unwrap());
+        assert!(db.verify_admin_password("export-test-password").unwrap());
+        assert_eq!(db.load_bot_status().unwrap(), Some(BotStatus::Running));
+        drop(snapshot);
+        drop(db);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn analysis_export_rejects_unreadable_config_instead_of_exporting_secrets() {
+        let db = Database::open(":memory:").unwrap();
+        db.conn.lock().unwrap().execute(
+            "INSERT INTO app_config VALUES (1, 'SOLUSDC', 'invalid-secret-config', '2026-09-30')", [],
+        ).unwrap();
+        assert!(db.export_analysis_snapshot().is_err());
+    }
 
     #[test]
     fn managed_order_metadata_survives_reload() {
