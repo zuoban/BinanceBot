@@ -73,9 +73,6 @@ impl GridTradingEngine {
             })
         });
         let Some(price) = price else { return Ok(()) };
-        if self.waiting_sell_levels().await?.contains(&price) {
-            return Ok(());
-        }
         let market = self.state.ticker.read().await.last_price;
         if market <= Decimal::ZERO
             || price <= market
@@ -258,22 +255,6 @@ impl GridTradingEngine {
         let rules = self.state.rules.read().await.clone();
         let market = self.state.ticker.read().await.last_price;
         let price = plan.target.price;
-        // Never let a recovered remainder plan refill a sold level whose buy leg
-        // has not completed. The exchange lookup above still takes priority.
-        if self.waiting_sell_levels().await?.contains(&price) {
-            plan.phase = RemainderPhase::Abandoned;
-            self.persist_remainder_plan(plan).await?;
-            self.state
-                .add_log(
-                    "INFO",
-                    format!(
-                        "Remainder plan {} retired: SELL {} is waiting for its lower-grid BUY",
-                        plan.target.client_order_id, price,
-                    ),
-                )
-                .await;
-            return Ok(());
-        }
         if market <= Decimal::ZERO {
             return Ok(());
         }

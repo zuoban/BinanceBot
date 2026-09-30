@@ -1941,17 +1941,6 @@ impl GridTradingEngine {
         }
         let buy_window = config.grid.buy_window;
         let sell_window = config.grid.sell_window;
-        let waiting_for_buy = match self.waiting_sell_levels().await {
-            Ok(levels) => levels,
-            Err(error) => {
-                self.state
-                    .add_log("ERROR", format!("Could not restore sell levels: {}", error))
-                    .await;
-                self.pause_trading().await;
-                return;
-            }
-        };
-
         let waiting_for_sell = match self.waiting_buy_levels().await {
             Ok(levels) => levels,
             Err(error) => {
@@ -1996,7 +1985,6 @@ impl GridTradingEngine {
                             grid_interval,
                             rules.tick_size,
                         ))
-                        || (o.side == OrderSide::Sell && waiting_for_buy.contains(&o.price))
                         || (matches!(o.purpose, OrderPurpose::Grid | OrderPurpose::Legacy)
                             && o.merge_sources.is_empty()
                             && (o.price % grid_interval != Decimal::ZERO
@@ -2054,8 +2042,8 @@ impl GridTradingEngine {
         active_buy_prices.sort();
         active_sell_prices.sort();
 
-        // Preserved orders occupy slots even outside the current price window.
-        // In particular, never cancel a paired exit just to enforce a count limit.
+        // Preserve exits and executions. Far-away exits still reserve inventory,
+        // but must not displace the nearest inventory sell levels.
         let preserved: Vec<_> = active_orders
             .iter()
             .filter(|o| !is_window_order(o))
@@ -2063,10 +2051,6 @@ impl GridTradingEngine {
         let preserved_buys = preserved
             .iter()
             .filter(|o| o.side == OrderSide::Buy)
-            .count();
-        let preserved_sells = preserved
-            .iter()
-            .filter(|o| o.side == OrderSide::Sell)
             .count();
         let mut reserved_buys = reserved_buy_prices;
         reserved_buys.extend(waiting_for_sell);
@@ -2081,24 +2065,21 @@ impl GridTradingEngine {
             .filter(|o| o.side == OrderSide::Sell)
             .map(|o| o.price)
             .collect();
-        let (desired_buy_prices, desired_sell_prices) = rules.grid_window_prices(
+        let (desired_buy_prices, mut desired_sell_prices) = rules.grid_window_prices(
             current_price,
             grid_interval,
-            (
-                buy_window.saturating_sub(preserved_buys),
-                sell_window.saturating_sub(preserved_sells),
-            ),
+            (buy_window.saturating_sub(preserved_buys), sell_window),
             (config.grid.min_price, config.grid.max_price),
             |side, price| {
-                let reserved = if side == OrderSide::Buy {
-                    &reserved_buys
-                } else {
-                    &reserved_sells
-                };
-                !(side == OrderSide::Sell && waiting_for_buy.contains(&price))
-                    && !has_nearby_grid_order(reserved, price, grid_interval, rules.tick_size)
+                side == OrderSide::Sell
+                    || !has_nearby_grid_order(&reserved_buys, price, grid_interval, rules.tick_size)
             },
         );
+        // An exit inside the nearest sell band occupies its level; do not extend
+        // the band to compensate for an exit outside it.
+        desired_sell_prices.retain(|price| {
+            !has_nearby_grid_order(&reserved_sells, *price, grid_interval, rules.tick_size)
+        });
 
         let cleanup_threshold = (buy_window + sell_window) * 2;
         if self
@@ -2179,8 +2160,8 @@ impl GridTradingEngine {
     }
 
     /// Return true after attempting cleanup: fills discovered during cancellation
-    /// must be reconciled before placing more orders. Retry an interrupted cleanup
-    /// even when successful cancellations have brought the total below the trigger.
+    /// must be reconciled before placing more orders. Stale sells are always
+    /// cleaned; interrupted threshold-based buy cleanup continues below its trigger.
     async fn prune_grid_window(
         &mut self,
         threshold: usize,
@@ -2188,7 +2169,13 @@ impl GridTradingEngine {
         desired_sells: &[Decimal],
     ) -> bool {
         let active = self.state.active_orders.read().await;
-        if !self.window_cleanup_pending && active.len() < threshold {
+        let stale_sells = active.values().any(|order| {
+            order.side == OrderSide::Sell
+                && is_window_order(order)
+                && !desired_sells.contains(&order.price)
+        });
+        let clean_buys = self.window_cleanup_pending || active.len() >= threshold;
+        if !clean_buys && !stale_sells {
             return false;
         }
         let total = active.len();
@@ -2200,7 +2187,9 @@ impl GridTradingEngine {
                 } else {
                     desired_sells
                 };
-                is_window_order(order) && !desired.contains(&order.price)
+                is_window_order(order)
+                    && (order.side == OrderSide::Sell || clean_buys)
+                    && !desired.contains(&order.price)
             })
             .cloned()
             .collect();
@@ -2211,11 +2200,11 @@ impl GridTradingEngine {
         }
         if !self.window_cleanup_pending {
             self.state.add_log("INFO", format!(
-                "Grid window cleanup triggered: {} orders (threshold {}), canceling {} out-of-window orders",
+                "Grid window cleanup: {} orders (buy cleanup threshold {}), canceling {} out-of-window orders",
                 total, threshold, obsolete.len()
             )).await;
         }
-        self.window_cleanup_pending = true;
+        self.window_cleanup_pending = clean_buys;
         obsolete.sort_by(|a, b| a.client_order_id.cmp(&b.client_order_id));
         for order in obsolete {
             if *self.state.status.read().await != BotStatus::Running
@@ -2306,19 +2295,6 @@ impl GridTradingEngine {
                 Err(error) => {
                     self.state
                         .add_log("ERROR", format!("Could not restore buy levels: {}", error))
-                        .await;
-                    self.pause_trading().await;
-                    return false;
-                }
-            }
-        }
-        if side == OrderSide::Sell && paired_client_order_id.is_none() {
-            match self.waiting_sell_levels().await {
-                Ok(levels) if levels.contains(&price) => return false,
-                Ok(_) => {}
-                Err(error) => {
-                    self.state
-                        .add_log("ERROR", format!("Could not restore sell levels: {}", error))
                         .await;
                     self.pause_trading().await;
                     return false;

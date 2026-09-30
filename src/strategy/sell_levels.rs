@@ -1,25 +1,17 @@
-//! Restore per-level sell/buy alternation from the durable fill journal.
-//! No extra write can be lost between recording a fill and reserving its level.
+//! Restore bought-level reservations from the durable fill journal.
+//! Historical sells do not restrict the current inventory sell window.
 use super::*;
-use std::collections::HashSet;
 
 pub(super) struct SellLevelLedger {
     symbol: String,
     mode: TradingMode,
     interval: Decimal,
-    amount: Decimal,
     rules: SymbolRules,
     cursor: i64,
-    waiting: HashSet<Decimal>,
     bought: HashMap<Decimal, Decimal>,
 }
 
 impl GridTradingEngine {
-    pub(super) async fn waiting_sell_levels(&mut self) -> Result<HashSet<Decimal>> {
-        self.refresh_level_ledger().await?;
-        Ok(self.sell_levels.as_ref().unwrap().waiting.clone())
-    }
-
     pub(super) async fn waiting_buy_levels(&mut self) -> Result<Vec<Decimal>> {
         self.refresh_level_ledger().await?;
         Ok(self
@@ -40,7 +32,6 @@ impl GridTradingEngine {
             ledger.symbol != config.exchange.symbol
                 || ledger.mode != mode
                 || ledger.interval != config.grid.grid_interval
-                || ledger.amount != config.grid.order_amount_usdc
                 || ledger.rules.step_size != rules.step_size
                 || ledger.rules.tick_size != rules.tick_size
         });
@@ -49,10 +40,8 @@ impl GridTradingEngine {
                 symbol: config.exchange.symbol.clone(),
                 mode,
                 interval: config.grid.grid_interval,
-                amount: config.grid.order_amount_usdc,
                 rules: rules.clone(),
                 cursor: 0,
-                waiting: HashSet::new(),
                 bought: HashMap::new(),
             });
         }
@@ -70,7 +59,6 @@ impl GridTradingEngine {
                 if fill.quantity > Decimal::ZERO {
                     match fill.side {
                         OrderSide::Sell => {
-                            ledger.waiting.insert(fill.price.normalize());
                             // Keep bought levels reserved independently of open exits.
                             // A skipped/canceled exit cannot erase the acquired inventory,
                             // and a partial sell cannot release an entire bought level.
@@ -99,17 +87,6 @@ impl GridTradingEngine {
                         OrderSide::Buy => {
                             *ledger.bought.entry(fill.price.normalize()).or_default() +=
                                 fill.quantity;
-                            // Tiny/canceled partial buys must not reopen a full-size
-                            // inventory sell. Their own equal-quantity exits remain allowed.
-                            if rules
-                                .calculate_quantity(fill.price, ledger.amount)
-                                .is_some_and(|full| fill.quantity >= full)
-                            {
-                                let exit = ((fill.price + ledger.interval) / rules.tick_size)
-                                    .ceil()
-                                    * rules.tick_size;
-                                ledger.waiting.remove(&exit);
-                            }
                         }
                     }
                 }
