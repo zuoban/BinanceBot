@@ -70,6 +70,10 @@ enum PairPlacementDecision {
 #[path = "remainder.rs"]
 mod remainder;
 
+#[path = "grid_levels.rs"]
+mod grid_levels;
+use grid_levels::GridLevelLedger;
+
 const GRID_ORDER_PREFIX: &str = "gb_";
 
 fn is_grid_order(client_order_id: &str) -> bool {
@@ -165,6 +169,7 @@ pub struct GridTradingEngine {
     ticker_rx: broadcast::Receiver<TickerInfo>,
     // Map of client_order_id -> purchase price for calculating paired grid cycle profit
     paired_buy_prices: HashMap<String, (Decimal, Decimal)>,
+    grid_levels: Option<GridLevelLedger>,
     pnl_reconcile_offset: usize,
     pnl_reconcile_task: Option<JoinHandle<()>>,
     last_account_sync: Option<Instant>,
@@ -187,6 +192,7 @@ impl GridTradingEngine {
             action_rx,
             ticker_rx,
             paired_buy_prices: HashMap::new(),
+            grid_levels: None,
             pnl_reconcile_offset: 0,
             pnl_reconcile_task: None,
             last_account_sync: None,
@@ -1130,6 +1136,16 @@ impl GridTradingEngine {
             return PairPlacementDecision::Skip("BUY level already has an active order");
         }
         if intent.side == OrderSide::Buy {
+            match self.level_is_waiting(OrderSide::Buy, intent.price).await {
+                Ok(true) => {
+                    return PairPlacementDecision::Skip("BUY level is awaiting its SELL fill")
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    error!("Could not restore grid levels: {}", error);
+                    return PairPlacementDecision::Wait;
+                }
+            }
             let (nearest_buys, _) = rules.grid_window_prices(
                 market_price,
                 config.grid.grid_interval,
@@ -1905,6 +1921,16 @@ impl GridTradingEngine {
         }
         let buy_window = config.grid.buy_window;
         let sell_window = config.grid.sell_window;
+        let (waiting_buys, waiting_sells) = match self.waiting_grid_levels().await {
+            Ok(levels) => levels,
+            Err(error) => {
+                self.state
+                    .add_log("ERROR", format!("Could not restore grid levels: {}", error))
+                    .await;
+                self.pause_trading().await;
+                return;
+            }
+        };
         // Migrate only idle ordinary managed orders. Existing exits, partial fills
         // and consolidated remainders retain their price and provenance.
         let existing: Vec<_> = self
@@ -2004,9 +2030,11 @@ impl GridTradingEngine {
         // extending the band to compensate for far-away protected orders.
         desired_buy_prices.retain(|price| {
             !has_nearby_grid_order(&reserved_buys, *price, grid_interval, rules.tick_size)
+                && !has_nearby_grid_order(&waiting_buys, *price, grid_interval, rules.tick_size)
         });
         desired_sell_prices.retain(|price| {
             !has_nearby_grid_order(&reserved_sells, *price, grid_interval, rules.tick_size)
+                && !waiting_sells.contains(price)
         });
 
         if self
@@ -2186,6 +2214,19 @@ impl GridTradingEngine {
         let config = self.state.config.read().await.clone();
         let rules = self.state.rules.read().await.clone();
         let symbol = config.exchange.symbol.clone();
+        if side == OrderSide::Buy || paired_client_order_id.is_none() {
+            match self.level_is_waiting(side, price).await {
+                Ok(true) => return false,
+                Ok(false) => {}
+                Err(error) => {
+                    self.state
+                        .add_log("ERROR", format!("Could not restore grid levels: {}", error))
+                        .await;
+                    self.pause_trading().await;
+                    return false;
+                }
+            }
+        }
         let Some(full_quantity) = exit_quantity
             .or_else(|| rules.calculate_quantity(price, config.grid.order_amount_usdc))
         else {
@@ -2931,7 +2972,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn confirmed_absent_pair_with_crossed_price_does_not_block_grid() {
+    async fn skipped_exit_does_not_release_bought_level_even_after_restart() {
         let (mut config, db, intent) = pending_pair_fixture();
         config.grid.grid_interval = dec!(1);
         let fake = PairExchange::default();
@@ -2949,7 +2990,7 @@ mod tests {
             .is_empty());
         assert!(fake.posts.lock().unwrap().is_empty());
         assert!(
-            engine
+            !engine
                 .place_grid_order(OrderSide::Buy, dec!(100), "gb_b_duplicate".into(), -1, None)
                 .await
         );
@@ -2957,7 +2998,7 @@ mod tests {
         let mut restarted = pair_recovery_engine(&config, db.clone(), url).await;
         restarted.state.ticker.write().await.last_price = dec!(100.5);
         assert!(
-            restarted
+            !restarted
                 .place_grid_order(
                     OrderSide::Buy,
                     dec!(100),
@@ -2973,13 +3014,7 @@ mod tests {
             restarted.pair_submission_decision(&rebuy).await,
             super::PairPlacementDecision::Skip(_)
         ));
-        assert_eq!(
-            *fake.posts.lock().unwrap(),
-            vec![
-                "gb_b_duplicate".to_string(),
-                "gb_b_after_restart".to_string()
-            ]
-        );
+        assert!(fake.posts.lock().unwrap().is_empty());
         server.abort();
     }
 

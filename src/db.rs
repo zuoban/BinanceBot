@@ -13,6 +13,14 @@ use std::str::FromStr;
 use std::sync::Mutex;
 use tracing::info;
 
+/// Compact, append-ordered execution events used to rebuild grid level ownership.
+pub(crate) struct GridFillEvent {
+    pub cursor: i64,
+    pub side: OrderSide,
+    pub price: Decimal,
+    pub quantity: Decimal,
+}
+
 pub struct Database {
     conn: Mutex<Connection>,
     path: String,
@@ -617,6 +625,40 @@ impl Database {
             list.push(item?);
         }
         Ok(list)
+    }
+
+    pub(crate) fn grid_fills_after(
+        &self,
+        symbol: &str,
+        mode: TradingMode,
+        cursor: i64,
+    ) -> Result<Vec<GridFillEvent>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT rowid, side, price, quantity FROM trades WHERE rowid > ?1 AND symbol = ?2 AND mode = ?3 ORDER BY rowid LIMIT 1000;",
+        )?;
+        let rows = stmt.query_map(params![cursor, symbol, mode.as_str()], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (cursor, side, price, quantity) = row?;
+            Ok(GridFillEvent {
+                cursor,
+                side: match side.as_str() {
+                    "BUY" => OrderSide::Buy,
+                    "SELL" => OrderSide::Sell,
+                    _ => anyhow::bail!("Unknown grid fill side {}", side),
+                },
+                price: Decimal::from_str(&price)?,
+                quantity: Decimal::from_str(&quantity)?,
+            })
+        })
+        .collect()
     }
 
     pub fn get_recent_trades_for(

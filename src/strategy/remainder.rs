@@ -73,6 +73,10 @@ impl GridTradingEngine {
             })
         });
         let Some(price) = price else { return Ok(()) };
+        // A remainder must not refill an ordinary level that has just sold.
+        if self.level_is_waiting(OrderSide::Sell, price).await? {
+            return Ok(());
+        }
         let market = self.state.ticker.read().await.last_price;
         if market <= Decimal::ZERO
             || price <= market
@@ -255,6 +259,13 @@ impl GridTradingEngine {
         let rules = self.state.rules.read().await.clone();
         let market = self.state.ticker.read().await.last_price;
         let price = plan.target.price;
+        // Accepted targets are adopted above; only confirmed-unsubmitted targets
+        // can be retired when their level is awaiting its lower-grid buy.
+        if self.level_is_waiting(OrderSide::Sell, price).await? {
+            plan.phase = RemainderPhase::Abandoned;
+            self.persist_remainder_plan(plan).await?;
+            return Ok(());
+        }
         if market <= Decimal::ZERO {
             return Ok(());
         }
