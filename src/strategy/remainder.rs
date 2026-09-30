@@ -50,7 +50,6 @@ impl GridTradingEngine {
                 o.symbol == config.exchange.symbol
                     && o.side == OrderSide::Sell
                     && o.purpose == OrderPurpose::Remainder
-                    && !o.is_take_profit
                     && o.paired_client_order_id.is_none()
                     && is_grid_order(&o.client_order_id)
             })
@@ -73,10 +72,6 @@ impl GridTradingEngine {
             })
         });
         let Some(price) = price else { return Ok(()) };
-        // A remainder must not refill an ordinary level that has just sold.
-        if self.level_is_waiting(OrderSide::Sell, price).await? {
-            return Ok(());
-        }
         let market = self.state.ticker.read().await.last_price;
         if market <= Decimal::ZERO
             || price <= market
@@ -259,13 +254,6 @@ impl GridTradingEngine {
         let rules = self.state.rules.read().await.clone();
         let market = self.state.ticker.read().await.last_price;
         let price = plan.target.price;
-        // Accepted targets are adopted above; only confirmed-unsubmitted targets
-        // can be retired when their level is awaiting its lower-grid buy.
-        if self.level_is_waiting(OrderSide::Sell, price).await? {
-            plan.phase = RemainderPhase::Abandoned;
-            self.persist_remainder_plan(plan).await?;
-            return Ok(());
-        }
         if market <= Decimal::ZERO {
             return Ok(());
         }
@@ -400,7 +388,7 @@ impl GridTradingEngine {
                     .filter(|p| *p > Decimal::ZERO)
                     .unwrap_or(found.price);
                 order.amount_usdc = order.price * order.quantity;
-                if !self.on_order_filled(&mut order).await {
+                if !self.on_order_filled_at_level(&mut order, found.price).await {
                     return Err(anyhow!("Could not record remainder fill"));
                 }
             } else {

@@ -225,22 +225,22 @@
               <div class="form-group">
                 <label for="cfg-amount">单格下单金额 (Order Amount, USDC)</label>
                 <input type="number" id="cfg-amount" step="any" min="1" required placeholder="100.0" />
-                <span class="form-hint">普通单按目标金额计算并向下取整；配对止盈卖出对应买入数量，金额随卖价变化</span>
+                <span class="form-hint">初始挂单按目标金额向下取整；成交后在相邻反方向档位补单，沿用实际成交数量</span>
               </div>
 
               <!-- 买单窗口 -->
               <div class="form-group">
                 <label for="cfg-buy-window">买单挂单窗口数量 (Buy Window)</label>
                 <input type="number" id="cfg-buy-window" min="1" max="25" required placeholder="5" />
-                <span class="form-hint">市价下方目标挂单数；跳过待止盈档位继续向下补单，受价格范围和仓位上限限制</span>
+                <span class="form-hint">市价下方的网格窗口深度；成交后向上一格补卖单，同价不重复，受价格范围和持仓上限限制</span>
               </div>
 
               <!-- 卖单窗口 -->
               <div class="form-group">
                 <label for="cfg-sell-window">卖单挂单窗口数量 (Sell Window)</label>
                 <input type="number" id="cfg-sell-window" min="1" max="25" required placeholder="5" />
-                <span class="form-hint">目标卖单数（含已有止盈单）；跳过等待买回的档位向上补足，受可用持仓和价格范围限制；已有止盈单超额也保留</span>
-                <span class="form-hint">总挂单达到买卖窗口总数的 2 倍时，清理窗口外普通单；例如 3 买 / 3 卖在 12 单时触发，止盈单保留</span>
+                <span class="form-hint">市价上方的网格窗口深度；成交后向下一格补买单，同价不重复，卖单受可用多头持仓限制</span>
+                <span class="form-hint">每轮撤销窗口外未成交单和同价重复单；确认撤单后补齐当前窗口，历史成交不锁档</span>
               </div>
 
               <!-- 运行模式 -->
@@ -951,7 +951,7 @@
     }
 
     function orderPurposeLabel(order) {
-      let label = order.is_take_profit || order.purpose === 'TAKE_PROFIT' ? '止盈单' : '挂单 Maker';
+      let label = '网格单';
       if (order.purpose === 'REMAINDER') {
         const count = (order.merge_sources || []).length;
         label = count > 1 ? `余量合并 · ${count} 笔` : '余量单';
@@ -1043,7 +1043,7 @@
             <td>${parseFloat(o.quantity).toFixed(2)} SOL</td>
             <td>${parseFloat(o.amount_usdc).toFixed(2)} USDC</td>
             <td><span style="color: var(--text-muted);">${diff > 0 ? '+' : ''}${diff}%</span></td>
-            <td><span class="badge ${o.is_take_profit ? 'badge-purple' : ''}">${orderPurposeLabel(o)}</span>${orderSourceDetails(o)}</td>
+            <td><span class="badge ">${orderPurposeLabel(o)}</span>${orderSourceDetails(o)}</td>
             <td style="font-family: monospace; font-size: 11px; color: var(--text-dim);">${escapeHtml(o.client_order_id)}</td>
             <td style="color: var(--text-dim);">${timeStr}</td>
           </tr>
