@@ -582,6 +582,35 @@ impl Database {
             .map_err(Into::into)
     }
 
+    /// Restore the execution frontier for this symbol and mode.
+    pub fn last_fill_for(
+        &self,
+        symbol: &str,
+        mode: TradingMode,
+    ) -> Result<Option<(OrderSide, Decimal)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT side, price FROM trades WHERE symbol = ?1 AND mode = ?2 ORDER BY timestamp DESC, rowid DESC LIMIT 1;",
+        )?;
+        let value: Option<(String, String)> = stmt
+            .query_row(params![symbol, mode.as_str()], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .optional()?;
+        value
+            .map(|(side, price)| {
+                let side = match side.as_str() {
+                    "BUY" => OrderSide::Buy,
+                    "SELL" => OrderSide::Sell,
+                    _ => anyhow::bail!("invalid saved fill side: {}", side),
+                };
+                let price = Decimal::from_str(&price)?;
+                anyhow::ensure!(price > Decimal::ZERO, "invalid saved fill price: {}", price);
+                Ok((side, price))
+            })
+            .transpose()
+    }
+
     /// Return true only for the first successful PnL verification of a saved trade.
     pub fn verify_trade_pnl(&self, trade: &TradeRecord) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
@@ -605,7 +634,7 @@ impl Database {
             SELECT trade_id, client_order_id, symbol, side, price, quantity,
                    amount_usdc, realized_pnl, commission, pnl_verified, is_maker, timestamp, note, mode
             FROM trades
-            ORDER BY timestamp DESC
+            ORDER BY timestamp DESC, rowid DESC
             LIMIT ?1;
             "#,
         )?;
@@ -627,7 +656,7 @@ impl Database {
     ) -> Result<Vec<TradeRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT trade_id, client_order_id, symbol, side, price, quantity, amount_usdc, realized_pnl, commission, pnl_verified, is_maker, timestamp, note, mode FROM trades WHERE symbol = ?1 AND mode = ?2 ORDER BY timestamp DESC LIMIT ?3;",
+            "SELECT trade_id, client_order_id, symbol, side, price, quantity, amount_usdc, realized_pnl, commission, pnl_verified, is_maker, timestamp, note, mode FROM trades WHERE symbol = ?1 AND mode = ?2 ORDER BY timestamp DESC, rowid DESC LIMIT ?3;",
         )?;
         let rows = stmt.query_map(params![symbol, mode.as_str(), limit as i64], trade_from_row)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -1276,6 +1305,75 @@ mod tests {
             .unwrap();
         assert_eq!(later.buckets.iter().map(|b| b.buy_count).sum::<u64>(), 0);
         assert_eq!(later.buckets.iter().map(|b| b.sell_count).sum::<u64>(), 3);
+    }
+
+    #[test]
+    fn last_fill_uses_execution_time_scope_and_stable_ties() {
+        let db = Database::open(":memory:").unwrap();
+        let now = Utc::now();
+        let mut trade = TradeRecord {
+            trade_id: "latest-buy".into(),
+            client_order_id: "gb_latest_buy".into(),
+            symbol: "SOLUSDC".into(),
+            mode: TradingMode::Paper,
+            side: OrderSide::Buy,
+            price: dec!(118.8),
+            quantity: dec!(1),
+            amount_usdc: dec!(118.8),
+            realized_pnl: Decimal::ZERO,
+            commission: Decimal::ZERO,
+            pnl_verified: false,
+            is_maker: true,
+            timestamp: now,
+            note: String::new(),
+        };
+        db.insert_trade(&trade).unwrap();
+        // An older execution discovered later must not overwrite the latest price.
+        trade.trade_id = "late-old-buy".into();
+        trade.price = dec!(118.6);
+        trade.timestamp = now - chrono::Duration::seconds(10);
+        db.insert_trade(&trade).unwrap();
+        trade.side = OrderSide::Sell;
+        trade.timestamp = now;
+        for (id, price) in [("sell-a", dec!(118.9)), ("sell-b", dec!(119.1))] {
+            trade.trade_id = id.into();
+            trade.price = price;
+            db.insert_trade(&trade).unwrap();
+        }
+        trade.trade_id = "other-mode".into();
+        trade.mode = TradingMode::Live;
+        trade.price = dec!(119.3);
+        db.insert_trade(&trade).unwrap();
+        trade.trade_id = "other-symbol".into();
+        trade.symbol = "ETHUSDC".into();
+        db.insert_trade(&trade).unwrap();
+        assert_eq!(
+            db.last_fill_for("SOLUSDC", TradingMode::Paper).unwrap(),
+            Some((OrderSide::Sell, dec!(119.1)))
+        );
+        assert_eq!(
+            db.last_fill_for("SOLUSDC", TradingMode::Live).unwrap(),
+            Some((OrderSide::Sell, dec!(119.3)))
+        );
+        assert_eq!(
+            db.last_fill_for("SOLUSDC", TradingMode::Testnet).unwrap(),
+            None
+        );
+        assert_eq!(
+            db.get_recent_trades_for("SOLUSDC", TradingMode::Paper, 10)
+                .unwrap()[0]
+                .trade_id,
+            "sell-b"
+        );
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE trades SET price = 'invalid' WHERE trade_id = 'sell-b'",
+                [],
+            )
+            .unwrap();
+        assert!(db.last_fill_for("SOLUSDC", TradingMode::Paper).is_err());
     }
 
     #[test]

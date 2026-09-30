@@ -71,7 +71,7 @@
         <div class="metric-sub">
           <span>扣手续费后: <strong id="card-net-profit">+0.00 USDC</strong></span>
           <span>手续费: <span id="card-commission">0.00 USDC</span></span>
-          <span>配对价差估算: <span id="card-grid-profit">+0.00 USDC</span> / <strong id="card-cycles">0</strong> 次</span>
+          <span>历史配对价差估算: <span id="card-grid-profit">+0.00 USDC</span> / <strong id="card-cycles">0</strong> 次</span>
           <span id="card-pnl-pending" style="color: var(--amber); display: none;"></span>
         </div>
       </div>
@@ -218,29 +218,29 @@
               <div class="form-group">
                 <label for="cfg-interval">网格间距 (Grid Interval, USDC)</label>
                 <input type="number" id="cfg-interval" step="any" min="0.0001" required placeholder="0.1" />
-                <span class="form-hint">固定档位间隔；挂单窗口随行情移动，间隔须为交易所价格步长的整数倍</span>
+                <span class="form-hint">买卖共用相邻网格；间隔须兼容交易所价格步长</span>
               </div>
 
               <!-- 单格金额 -->
               <div class="form-group">
                 <label for="cfg-amount">单格下单金额 (Order Amount, USDC)</label>
                 <input type="number" id="cfg-amount" step="any" min="1" required placeholder="100.0" />
-                <span class="form-hint">初始挂单按目标金额向下取整；成交后在相邻反方向档位补单，沿用实际成交数量</span>
+                <span class="form-hint">普通单按目标金额向下取整；成交后统一补窗口，余量卖单使用剩余可卖数量</span>
               </div>
 
               <!-- 买单窗口 -->
               <div class="form-group">
                 <label for="cfg-buy-window">买单挂单窗口数量 (Buy Window)</label>
                 <input type="number" id="cfg-buy-window" min="1" max="25" required placeholder="5" />
-                <span class="form-hint">市价下方的网格窗口深度；成交后向上一格补卖单，同价不重复，受价格范围和持仓上限限制</span>
+                <span class="form-hint">连续买入时向下一格；卖出后，上一个买入档位可以再次使用</span>
               </div>
 
               <!-- 卖单窗口 -->
               <div class="form-group">
                 <label for="cfg-sell-window">卖单挂单窗口数量 (Sell Window)</label>
                 <input type="number" id="cfg-sell-window" min="1" max="25" required placeholder="5" />
-                <span class="form-hint">市价上方的网格窗口深度；成交后向下一格补买单，同价不重复，卖单受可用多头持仓限制</span>
-                <span class="form-hint">每轮撤销窗口外未成交单和同价重复单；确认撤单后补齐当前窗口，历史成交不锁档</span>
+                <span class="form-hint">连续卖出时向上一格；买入后，上一个卖出档位可以再次使用</span>
+                <span class="form-hint">窗口随行情移动；最近成交进度在暂停或重启后继续保留</span>
               </div>
 
               <!-- 运行模式 -->
@@ -257,10 +257,10 @@
               <!-- 只做 Maker -->
               <div class="form-group" style="justify-content: center;">
                 <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
-                  <input type="checkbox" id="cfg-post-only" checked style="width: 17px; height: 17px; accent-color: var(--accent);" />
+                  <input type="checkbox" id="cfg-post-only" checked disabled style="width: 17px; height: 17px; accent-color: var(--accent);" />
                   <span>只做 Maker 挂单 (Post-Only GTX)</span>
                 </label>
-                <span class="form-hint">保证享受 Maker 费率且绝不吃单，节省手续费</span>
+                <span class="form-hint">此策略固定使用 Maker 挂单，拒单后重试，不切换为吃单</span>
               </div>
 
               <!-- 最大持仓 -->
@@ -1223,7 +1223,7 @@
           document.getElementById('cfg-amount').value = c.order_amount_usdc;
           document.getElementById('cfg-buy-window').value = c.buy_window;
           document.getElementById('cfg-sell-window').value = c.sell_window;
-          document.getElementById('cfg-post-only').checked = c.post_only;
+          document.getElementById('cfg-post-only').checked = true;
 
           if (c.dry_run) {
             document.getElementById('cfg-mode').value = 'dry_run';

@@ -84,13 +84,13 @@ async fn seed(engine: &GridTradingEngine, orders: &[GridOrder]) {
 
 fn two_sources() -> Vec<GridOrder> {
     vec![
-        source("a", dec!(125.66), dec!(0.24)),
-        source("b", dec!(126.87), dec!(0.24)),
+        source("a", dec!(123.6), dec!(0.24)),
+        source("b", dec!(126), dec!(0.24)),
     ]
 }
 
 #[tokio::test]
-async fn merges_screenshot_remainders_at_highest_price_and_is_idempotent() {
+async fn merges_remainders_at_nearest_available_sell_level_and_is_idempotent() {
     let mut engine = engine(database(), None).await;
     seed(&engine, &two_sources()).await;
     engine.maintain_grid_window().await;
@@ -104,9 +104,9 @@ async fn merges_screenshot_remainders_at_highest_price_and_is_idempotent() {
         .unwrap()
         .clone();
     assert_eq!(engine.state.active_orders.read().await.len(), 1);
-    assert_eq!(merged.price, dec!(126.87));
+    assert_eq!(merged.price, dec!(122.4));
     assert_eq!(merged.quantity, dec!(0.48));
-    assert_eq!(merged.amount_usdc, dec!(60.8976));
+    assert_eq!(merged.amount_usdc, dec!(58.752));
     assert_eq!(merged.purpose, OrderPurpose::Remainder);
     assert_eq!(merged.merge_sources.len(), 2);
     for _ in 0..3 {
@@ -124,9 +124,9 @@ async fn merges_screenshot_remainders_at_highest_price_and_is_idempotent() {
 #[tokio::test]
 async fn legacy_partial_grid_and_take_profit_orders_are_not_merge_candidates() {
     let mut engine = engine(database(), None).await;
-    let mut legacy = source("legacy", dec!(125.66), dec!(0.24));
+    let mut legacy = source("legacy", dec!(123.6), dec!(0.24));
     legacy.purpose = OrderPurpose::Legacy;
-    let mut partial = source("partial", dec!(126.87), dec!(0.24));
+    let mut partial = source("partial", dec!(123.6), dec!(0.24));
     partial.purpose = OrderPurpose::Grid;
     partial.status = OrderStatus::PartiallyFilled;
     let mut tp = source("tp", dec!(124.38), dec!(24.11));
@@ -137,7 +137,10 @@ async fn legacy_partial_grid_and_take_profit_orders_are_not_merge_candidates() {
     let mut orders = two_sources();
     orders.extend([legacy.clone(), partial.clone(), tp.clone()]);
     seed(&engine, &orders).await;
-    engine.reconcile_remainder(&[]).await.unwrap();
+    engine
+        .reconcile_remainder(&[dec!(122.4), dec!(123.6), dec!(124.8), dec!(126)])
+        .await
+        .unwrap();
     let active = engine.state.active_orders.read().await;
     assert_eq!(active.len(), 4);
     for preserved in [legacy, partial, tp] {
@@ -181,14 +184,14 @@ async fn tops_up_one_remainder_after_coalescing_delay_without_creating_another()
     let orders = engine.state.active_orders.read().await;
     assert_eq!(orders.len(), 1);
     assert_eq!(orders.values().next().unwrap().quantity, dec!(0.72));
-    assert_eq!(orders.values().next().unwrap().price, dec!(126.87));
+    assert_eq!(orders.values().next().unwrap().price, dec!(122.4));
 }
 
 #[tokio::test]
 async fn remainder_fill_never_places_full_buy_even_when_configured_amount_matches() {
     let mut engine = engine(database(), None).await;
-    let mut order = source("filled", dec!(126.87), dec!(0.48));
-    engine.state.config.write().await.grid.order_amount_usdc = dec!(60.8976);
+    let mut order = source("filled", dec!(123.6), dec!(0.48));
+    engine.state.config.write().await.grid.order_amount_usdc = dec!(59.328);
     seed(&engine, &[order.clone()]).await;
     assert!(engine.on_order_filled(&mut order).await);
     assert!(engine.state.active_orders.read().await.is_empty());
@@ -205,9 +208,10 @@ async fn remainder_fill_never_places_full_buy_even_when_configured_amount_matche
 async fn promotes_whole_grid_then_allocates_only_one_final_remainder() {
     let mut engine = engine(database(), None).await;
     let sources = vec![
-        source("a", dec!(125.66), dec!(12)),
-        source("b", dec!(126.87), dec!(12)),
+        source("a", dec!(123.6), dec!(12)),
+        source("b", dec!(126), dec!(12)),
     ];
+    engine.state.config.write().await.grid.order_amount_usdc = dec!(2000);
     engine.state.position.write().await.size = dec!(24);
     seed(&engine, &sources).await;
     engine.maintain_grid_window().await;
@@ -221,8 +225,8 @@ async fn promotes_whole_grid_then_allocates_only_one_final_remainder() {
         .unwrap()
         .clone();
     assert_eq!(promoted.purpose, OrderPurpose::Grid);
-    assert_eq!(promoted.price, dec!(126.87));
-    assert_eq!(promoted.quantity, dec!(23.64));
+    assert_eq!(promoted.price, dec!(122.4));
+    assert_eq!(promoted.quantity, dec!(16.33));
     engine.maintain_grid_window().await;
     let orders: Vec<_> = engine
         .state
@@ -497,7 +501,7 @@ async fn post_only_rejection_keeps_intent_and_never_changes_price_or_order_type(
     assert_eq!(posts.len(), 2);
     for post in posts.iter() {
         assert_eq!(post["newClientOrderId"], plan.target.client_order_id);
-        assert_eq!(post["price"], "126.87");
+        assert_eq!(post["price"], "122.40");
         assert_eq!(post["timeInForce"], "GTX");
     }
     server.abort();
@@ -550,7 +554,7 @@ fn plans_survive_database_reopen_and_are_scoped_and_unique() {
         symbol: "SOLUSDC".into(),
         mode: TradingMode::Live,
         sources: two_sources(),
-        target: source("target", dec!(126.87), dec!(0.48)),
+        target: source("target", dec!(123.6), dec!(0.48)),
         phase: RemainderPhase::Canceling,
     };
     {
@@ -667,7 +671,7 @@ async fn crossed_target_with_uncertain_lookup_stays_reserved_until_adopted() {
     assert!(engine.load_remainder_plan().await.unwrap().is_some());
     assert_eq!(fake.posts.lock().unwrap().len(), 1);
 
-    engine.maintain_grid_window().await;
+    assert!(engine.recover_remainder_plan().await.unwrap());
     assert!(engine.load_remainder_plan().await.unwrap().is_none());
     let active = engine.state.active_orders.read().await;
     assert_eq!(active.len(), 1);

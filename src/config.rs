@@ -182,6 +182,10 @@ impl AppConfig {
             "每格金额必须大于 0"
         );
         anyhow::ensure!(
+            self.grid.post_only,
+            "滑动网格策略必须开启 Post-Only Maker 挂单"
+        );
+        anyhow::ensure!(
             (1..=50).contains(&self.grid.buy_window) && (1..=50).contains(&self.grid.sell_window),
             "买入和卖出窗口必须在 1-50 之间"
         );

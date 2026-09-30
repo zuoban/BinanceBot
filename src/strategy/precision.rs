@@ -114,7 +114,12 @@ impl SymbolRules {
         Ok(())
     }
 
-    /// Zero-anchored levels stay identical across market moves and process restarts.
+    /// Both directions share the same zero-anchored price lattice.
+    pub fn is_grid_price(&self, price: Decimal, interval: Decimal) -> bool {
+        interval > Decimal::ZERO && price > Decimal::ZERO && price % interval == Decimal::ZERO
+    }
+
+    /// Zero-anchored levels survive market moves and restarts.
     /// Count eligible levels, skipping reservations without consuming window slots.
     /// At an exact level, neither side places an order at the current market price.
     pub fn grid_window_prices(
@@ -125,6 +130,9 @@ impl SymbolRules {
         bounds: (Option<Decimal>, Option<Decimal>),
         eligible: impl Fn(OrderSide, Decimal) -> bool,
     ) -> (Vec<Decimal>, Vec<Decimal>) {
+        if market <= Decimal::ZERO || interval <= Decimal::ZERO {
+            return (Vec::new(), Vec::new());
+        }
         let min = bounds
             .0
             .unwrap_or(self.min_price)
@@ -138,7 +146,7 @@ impl SymbolRules {
         let collect = |side, mut price, count, step| {
             let mut prices = Vec::new();
             while prices.len() < count && price >= min && price <= max {
-                if eligible(side, price) {
+                if self.is_grid_price(price, interval) && eligible(side, price) {
                     prices.push(price);
                 }
                 let Some(next) = price.checked_add(step) else {
@@ -287,10 +295,10 @@ mod tests {
         let bounds = (Some(dec!(119.3)), Some(dec!(119.75)));
         let (buys, sells) =
             rules.grid_window_prices(dec!(119.21), dec!(0.1), (3, 3), bounds, |side, price| {
-                side != OrderSide::Sell || price == dec!(119.6)
+                side != OrderSide::Sell || price == dec!(119.5)
             });
         assert!(buys.is_empty());
-        assert_eq!(sells, vec![dec!(119.6)]);
+        assert_eq!(sells, vec![dec!(119.5)]);
         let (buys, sells) =
             rules.grid_window_prices(dec!(200), dec!(0.1), (3, 3), bounds, |_, _| true);
         assert_eq!(buys, vec![dec!(119.7), dec!(119.6), dec!(119.5)]);

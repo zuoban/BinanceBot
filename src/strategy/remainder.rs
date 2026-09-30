@@ -58,18 +58,21 @@ impl GridTradingEngine {
         sources.sort_by(|a, b| a.client_order_id.cmp(&b.client_order_id));
         let occupied: Vec<_> = orders
             .iter()
-            .filter(|o| o.side == OrderSide::Sell)
+            .filter(|o| {
+                o.side == OrderSide::Sell
+                    && !sources
+                        .iter()
+                        .any(|s| s.client_order_id == o.client_order_id)
+            })
             .map(|o| o.price)
             .collect();
-        let price = sources.iter().map(|o| o.price).max().or_else(|| {
-            desired_prices.iter().copied().find(|price| {
-                !has_nearby_grid_order(
-                    &occupied,
-                    *price,
-                    config.grid.grid_interval,
-                    rules.tick_size,
-                )
-            })
+        let price = desired_prices.iter().copied().find(|price| {
+            !has_nearby_grid_order(
+                &occupied,
+                *price,
+                config.grid.grid_interval,
+                rules.tick_size,
+            )
         });
         let Some(price) = price else { return Ok(()) };
         let market = self.state.ticker.read().await.last_price;
@@ -257,7 +260,10 @@ impl GridTradingEngine {
         if market <= Decimal::ZERO {
             return Ok(());
         }
-        if price <= market
+        let (_, sells) = self.window_prices(&config, &rules, market).await?;
+        if !sells.contains(&price)
+            || !rules.is_grid_price(price, config.grid.grid_interval)
+            || price <= market
             || rules.round_price(price) != price
             || price < rules.min_price
             || price > rules.max_price
@@ -284,6 +290,13 @@ impl GridTradingEngine {
             .values()
             .cloned()
             .collect();
+        if orders
+            .iter()
+            .any(|o| o.side == OrderSide::Sell && o.price == price)
+        {
+            plan.phase = RemainderPhase::Abandoned;
+            return self.persist_remainder_plan(plan).await;
+        }
         let available = sell_quantity_available(self.state.position.read().await.size, &orders);
         // Never grow beyond the planned allocation when fills arrive during cancellation.
         let quantity = rules
@@ -322,7 +335,7 @@ impl GridTradingEngine {
                     price: &price,
                     quantity: &quantity,
                     client_order_id: &plan.target.client_order_id,
-                    post_only: config.grid.post_only,
+                    post_only: true,
                     reduce_only: true,
                 })
                 .await?;
@@ -382,13 +395,14 @@ impl GridTradingEngine {
         order.order_id = Some(found.order_id);
         if terminal(&found.status) {
             if found.executed_qty > Decimal::ZERO {
+                order.updated_at = exchange_fill_time(&found);
                 order.quantity = found.executed_qty;
                 order.price = found
                     .avg_price
                     .filter(|p| *p > Decimal::ZERO)
                     .unwrap_or(found.price);
                 order.amount_usdc = order.price * order.quantity;
-                if !self.on_order_filled_at_level(&mut order, found.price).await {
+                if !self.on_order_filled(&mut order).await {
                     return Err(anyhow!("Could not record remainder fill"));
                 }
             } else {

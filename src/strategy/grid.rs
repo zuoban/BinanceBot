@@ -6,6 +6,7 @@ use crate::types::*;
 use anyhow::{anyhow, Result};
 use chrono::Utc;
 use rust_decimal::Decimal;
+#[cfg(test)]
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -26,12 +27,14 @@ fn new_grid_client_order_id(side: OrderSide) -> String {
     format!("gb_{}_{}", side_code, &uuid[..30])
 }
 
+#[cfg(test)]
 fn paired_grid_client_order_id(parent_id: &str, side: OrderSide) -> String {
     let digest = Sha256::digest(format!("{}:{}", parent_id, side.as_str()).as_bytes());
     let side_code = if side == OrderSide::Buy { "b" } else { "s" };
     format!("gb_{}_{}", side_code, &hex::encode(digest)[..30])
 }
 
+#[cfg(test)]
 fn new_pair_intent(
     parent: &GridOrder,
     side: OrderSide,
@@ -58,7 +61,6 @@ fn new_pair_intent(
 }
 
 enum PairPlacementDecision {
-    Ready,
     Wait,
     Skip(&'static str),
 }
@@ -72,13 +74,9 @@ fn is_grid_order(client_order_id: &str) -> bool {
     client_order_id.starts_with(GRID_ORDER_PREFIX)
 }
 
-/// Every idle grid order follows the same window, including legacy exits.
-/// Partial executions and consolidated inventory require confirmed reconciliation.
+/// All idle orders follow the window. Partial executions finish on their existing order.
 fn is_window_order(order: &GridOrder) -> bool {
-    is_grid_order(&order.client_order_id)
-        && order.status == OrderStatus::New
-        && order.purpose != OrderPurpose::Remainder
-        && order.merge_sources.is_empty()
+    is_grid_order(&order.client_order_id) && order.status == OrderStatus::New
 }
 
 fn buy_exposure_usdc(position_size: Decimal, mark_price: Decimal, orders: &[GridOrder]) -> Decimal {
@@ -100,8 +98,7 @@ fn has_nearby_grid_order(
     prices.iter().any(|&price| (price - target).abs() < spacing)
 }
 
-/// Only current orders reserve a level; historical fills never lock the grid.
-/// A pending counter-order also reserves its originating leg until it fills.
+/// Same-side active orders reserve their current price level.
 fn grid_level_occupied(
     orders: &[GridOrder],
     side: OrderSide,
@@ -111,22 +108,8 @@ fn grid_level_occupied(
 ) -> bool {
     let occupied: Vec<_> = orders
         .iter()
-        .filter_map(|order| {
-            if order.side == side {
-                Some(order.price)
-            } else if order.paired_client_order_id.is_some() {
-                Some(
-                    order.price
-                        + if side == OrderSide::Sell {
-                            interval
-                        } else {
-                            -interval
-                        },
-                )
-            } else {
-                None
-            }
-        })
+        .filter(|order| order.side == side)
+        .map(|order| order.price)
         .collect();
     has_nearby_grid_order(&occupied, price, interval, tick_size)
 }
@@ -170,13 +153,19 @@ fn aggregate_execution_pnl(
     ))
 }
 
+fn exchange_fill_time(order: &BinanceOrderResponse) -> chrono::DateTime<Utc> {
+    order
+        .update_time
+        .filter(|time| *time > 0)
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .unwrap_or_else(Utc::now)
+}
+
 pub struct GridTradingEngine {
     state: Arc<AppState>,
     client: Arc<BinanceFuturesClient>,
     action_rx: mpsc::Receiver<BotControlAction>,
     ticker_rx: broadcast::Receiver<TickerInfo>,
-    // Map of client_order_id -> purchase price for calculating paired grid cycle profit
-    paired_buy_prices: HashMap<String, (Decimal, Decimal)>,
     pnl_reconcile_offset: usize,
     pnl_reconcile_task: Option<JoinHandle<()>>,
     last_account_sync: Option<Instant>,
@@ -198,7 +187,6 @@ impl GridTradingEngine {
             client,
             action_rx,
             ticker_rx,
-            paired_buy_prices: HashMap::new(),
             pnl_reconcile_offset: 0,
             pnl_reconcile_task: None,
             last_account_sync: None,
@@ -233,6 +221,45 @@ impl GridTradingEngine {
             .db
             .run_blocking(move |db| db.delete_managed_order(&client_order_id))
             .await
+    }
+
+    async fn window_prices(
+        &self,
+        config: &crate::config::AppConfig,
+        rules: &SymbolRules,
+        market: Decimal,
+    ) -> Result<(Vec<Decimal>, Vec<Decimal>)> {
+        let symbol = config.exchange.symbol.clone();
+        let mode = TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
+        let last_fill = self
+            .state
+            .db
+            .run_blocking(move |db| db.last_fill_for(&symbol, mode))
+            .await?;
+        let interval = config.grid.grid_interval;
+        // The most recent execution moves the frontier. An opposite fill
+        // automatically makes the previous level available again.
+        let buy_max = last_fill.map(|(_, price)| {
+            (price - interval).min(config.grid.max_price.unwrap_or(rules.max_price))
+        });
+        let sell_min = last_fill.map(|(_, price)| {
+            (price + interval).max(config.grid.min_price.unwrap_or(rules.min_price))
+        });
+        let (buys, _) = rules.grid_window_prices(
+            market,
+            interval,
+            (config.grid.buy_window, 0),
+            (config.grid.min_price, buy_max.or(config.grid.max_price)),
+            |_, _| true,
+        );
+        let (_, sells) = rules.grid_window_prices(
+            market,
+            interval,
+            (0, config.grid.sell_window),
+            (sell_min.or(config.grid.min_price), config.grid.max_price),
+            |_, _| true,
+        );
+        Ok((buys, sells))
     }
 
     async fn report_reconciliation_state(&mut self, blocked: bool) {
@@ -739,6 +766,19 @@ impl GridTradingEngine {
             }
         }
 
+        filled_orders.sort_by(|a, b| {
+            a.side
+                .as_str()
+                .cmp(b.side.as_str())
+                .then_with(|| {
+                    if a.side == OrderSide::Buy {
+                        b.price.cmp(&a.price)
+                    } else {
+                        a.price.cmp(&b.price)
+                    }
+                })
+                .then_with(|| a.client_order_id.cmp(&b.client_order_id))
+        });
         for mut order in filled_orders {
             self.on_order_filled(&mut order).await;
         }
@@ -1023,8 +1063,11 @@ impl GridTradingEngine {
                     return false;
                 }
                 self.last_orders_sync = Some(Instant::now());
+                terminal_orders
+                    .sort_by_key(|(_, response)| (response.update_time, response.order_id));
                 for (mut order, exchange_order) in terminal_orders {
                     if exchange_order.executed_qty > Decimal::ZERO {
+                        order.updated_at = exchange_fill_time(&exchange_order);
                         order.quantity = exchange_order.executed_qty;
                         if let Some(avg_price) = exchange_order
                             .avg_price
@@ -1033,10 +1076,7 @@ impl GridTradingEngine {
                             order.price = avg_price;
                         }
                         order.amount_usdc = order.price * order.quantity;
-                        if !self
-                            .on_order_filled_at_level(&mut order, exchange_order.price)
-                            .await
-                        {
+                        if !self.on_order_filled(&mut order).await {
                             persistence_ok = false;
                         }
                     } else {
@@ -1087,97 +1127,19 @@ impl GridTradingEngine {
         }
     }
 
-    async fn pair_submission_decision(&mut self, intent: &GridOrder) -> PairPlacementDecision {
-        if *self.state.status.read().await != BotStatus::Running
-            || !self
-                .last_account_sync
-                .is_some_and(|at| at.elapsed() < Duration::from_secs(10))
+    // Compatibility recovery only: adopted exchange orders are reconciled, but
+    // an absent legacy counter-order is retired instead of creating a new pair.
+    async fn pair_submission_decision(&mut self, _intent: &GridOrder) -> PairPlacementDecision {
+        if !self
+            .last_account_sync
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(10))
             || !self
                 .last_orders_sync
                 .is_some_and(|at| at.elapsed() < Duration::from_secs(10))
         {
             return PairPlacementDecision::Wait;
         }
-        let config = self.state.config.read().await.clone();
-        let rules = self.state.rules.read().await.clone();
-        if intent.symbol != config.exchange.symbol
-            || rules.round_price(intent.price) != intent.price
-            || intent.price <= Decimal::ZERO
-            || intent.price < rules.min_price
-            || intent.price > rules.max_price
-            || intent.price % config.grid.grid_interval != Decimal::ZERO
-            || config.grid.min_price.is_some_and(|min| intent.price < min)
-            || config.grid.max_price.is_some_and(|max| intent.price > max)
-            || rules.round_quantity(intent.quantity) != intent.quantity
-            || intent.quantity < rules.min_qty
-            || intent.quantity > rules.max_qty
-            || intent.price * intent.quantity < rules.min_notional
-        {
-            return PairPlacementDecision::Skip("price, quantity or configured bounds are invalid");
-        }
-        let market_price = self.state.ticker.read().await.last_price;
-        if market_price <= Decimal::ZERO {
-            return PairPlacementDecision::Wait;
-        }
-        if (intent.side == OrderSide::Buy && intent.price >= market_price)
-            || (intent.side == OrderSide::Sell && intent.price <= market_price)
-        {
-            return PairPlacementDecision::Skip("price would cross the current market");
-        }
-        let orders: Vec<_> = self
-            .state
-            .active_orders
-            .read()
-            .await
-            .values()
-            .filter(|order| order.client_order_id != intent.client_order_id)
-            .cloned()
-            .collect();
-        if grid_level_occupied(
-            &orders,
-            intent.side,
-            intent.price,
-            config.grid.grid_interval,
-            rules.tick_size,
-        ) {
-            return PairPlacementDecision::Skip(
-                "grid level already has an active order or its counter-order",
-            );
-        }
-        let (buys, sells) = rules.grid_window_prices(
-            market_price,
-            config.grid.grid_interval,
-            (config.grid.buy_window, config.grid.sell_window),
-            (config.grid.min_price, config.grid.max_price),
-            |_, _| true,
-        );
-        let window = if intent.side == OrderSide::Buy {
-            buys
-        } else {
-            sells
-        };
-        if !window.contains(&intent.price) {
-            return PairPlacementDecision::Skip("price is outside the current grid window");
-        }
-        let position_size = self.state.position.read().await.size;
-        let allowed = if intent.side == OrderSide::Sell {
-            sell_quantity_available(position_size, &orders) >= intent.quantity
-        } else if let Some(limit) = config.grid.max_position_usdc {
-            buy_exposure_usdc(position_size, market_price.max(intent.price), &orders)
-                + intent.amount_usdc
-                <= limit
-        } else {
-            true
-        };
-        if allowed {
-            PairPlacementDecision::Ready
-        } else {
-            PairPlacementDecision::Skip(if intent.side == OrderSide::Sell {
-                "insufficient unreserved long position"
-            } else {
-                "configured position limit would be exceeded"
-            })
-        }
+        PairPlacementDecision::Skip("paired replenishment retired; sliding window owns new orders")
     }
 
     async fn drain_pair_intents(&mut self, symbol: &str, mode: TradingMode) -> bool {
@@ -1234,16 +1196,14 @@ impl GridTradingEngine {
                     "FILLED" | "CANCELED" | "EXPIRED" | "REJECTED"
                 ) {
                     if found.executed_qty > Decimal::ZERO {
+                        intent.updated_at = exchange_fill_time(&found);
                         intent.quantity = found.executed_qty;
                         if let Some(price) = found.avg_price.filter(|price| *price > Decimal::ZERO)
                         {
                             intent.price = price;
                         }
                         intent.amount_usdc = intent.price * intent.quantity;
-                        if !self
-                            .on_order_filled_at_level(&mut intent, found.price)
-                            .await
-                        {
+                        if !self.on_order_filled(&mut intent).await {
                             return false;
                         }
                         // A reused destination may have been journaled by normal
@@ -1294,7 +1254,6 @@ impl GridTradingEngine {
                     continue;
                 }
                 match self.pair_submission_decision(&intent).await {
-                    PairPlacementDecision::Ready => {}
                     PairPlacementDecision::Wait => return false,
                     PairPlacementDecision::Skip(reason) => {
                         if let Err(e) = self.delete_managed_order(&intent.client_order_id).await {
@@ -1325,34 +1284,6 @@ impl GridTradingEngine {
                             )
                             .await;
                         continue;
-                    }
-                }
-                let rules = self.state.rules.read().await.clone();
-                let config = self.state.config.read().await.clone();
-                let price = rules.format_price(intent.price);
-                let quantity = rules.format_quantity(intent.quantity);
-                match self
-                    .client
-                    .place_order(NewOrderRequest {
-                        symbol: &intent.symbol,
-                        side: intent.side.as_str(),
-                        price: &price,
-                        quantity: &quantity,
-                        client_order_id: &intent.client_order_id,
-                        post_only: config.grid.post_only,
-                        reduce_only: intent.side == OrderSide::Sell,
-                    })
-                    .await
-                {
-                    Ok(found) => {
-                        intent.order_id = Some(found.order_id);
-                    }
-                    Err(e) => {
-                        warn!(
-                            "Pair order {} was not confirmed: {}",
-                            intent.client_order_id, e
-                        );
-                        return false;
                     }
                 }
             }
@@ -1535,19 +1466,11 @@ impl GridTradingEngine {
 
     /// Executed when an order is confirmed filled
     async fn on_order_filled(&mut self, order: &mut GridOrder) -> bool {
-        let grid_price = order.price;
-        self.on_order_filled_at_level(order, grid_price).await
-    }
-
-    async fn on_order_filled_at_level(
-        &mut self,
-        order: &mut GridOrder,
-        grid_price: Decimal,
-    ) -> bool {
         order.status = OrderStatus::Filled;
-        order.updated_at = Utc::now();
-
         let config = self.state.config.read().await.clone();
+        if config.exchange.dry_run {
+            order.updated_at = Utc::now();
+        }
         let mode = TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
         let recorded_id = order.client_order_id.clone();
         match self
@@ -1587,15 +1510,11 @@ impl GridTradingEngine {
             .write()
             .await
             .remove(&order.client_order_id);
-        let grid_interval = config.grid.grid_interval;
-        let trading_enabled = *self.state.status.read().await == BotStatus::Running;
 
         let mut cycle_profit = Decimal::ZERO;
         let mut simulated_pnl = Decimal::ZERO;
         let mut is_completed_cycle = false;
         let mut completed_buy_price = None;
-        let mut pair_intent = None;
-        let mut paper_pair = None;
         let note;
 
         match order.side {
@@ -1626,24 +1545,17 @@ impl GridTradingEngine {
             OrderSide::Sell => {
                 // Check if this sell closed a previously tracked buy order
                 if let Some(paired_id) = &order.paired_client_order_id {
-                    let purchase = if let Some(purchase) = self.paired_buy_prices.remove(paired_id)
-                    {
-                        Some(purchase)
-                    } else {
-                        let paired_id = paired_id.clone();
-                        let mode = TradingMode::from_exchange(
-                            config.exchange.dry_run,
-                            config.exchange.is_testnet,
-                        );
-                        self.state
-                            .db
-                            .run_blocking(move |db| db.get_trade_by_client_id(&paired_id, mode))
-                            .await
-                            .ok()
-                            .flatten()
-                            .filter(|trade| trade.side == OrderSide::Buy)
-                            .map(|trade| (trade.price, trade.quantity))
-                    };
+                    // Legacy pairs keep their historical accounting only.
+                    let paired_id = paired_id.clone();
+                    let purchase = self
+                        .state
+                        .db
+                        .run_blocking(move |db| db.get_trade_by_client_id(&paired_id, mode))
+                        .await
+                        .ok()
+                        .flatten()
+                        .filter(|trade| trade.side == OrderSide::Buy)
+                        .map(|trade| (trade.price, trade.quantity));
                     if let Some((buy_price, buy_qty)) = purchase {
                         let exec_qty = order.quantity.min(buy_qty);
                         cycle_profit = (order.price - buy_price) * exec_qty;
@@ -1700,72 +1612,6 @@ impl GridTradingEngine {
             }
         }
 
-        if trading_enabled && grid_interval > Decimal::ZERO {
-            let side = order.side.opposite();
-            let price = match side {
-                OrderSide::Sell => {
-                    ((grid_price / grid_interval).floor() + Decimal::ONE) * grid_interval
-                }
-                OrderSide::Buy => {
-                    ((grid_price / grid_interval).ceil() - Decimal::ONE) * grid_interval
-                }
-            };
-            let rules = self.state.rules.read().await.clone();
-            let market = self.state.ticker.read().await.last_price;
-            let (buys, sells) = rules.grid_window_prices(
-                market,
-                grid_interval,
-                (config.grid.buy_window, config.grid.sell_window),
-                (config.grid.min_price, config.grid.max_price),
-                |_, _| true,
-            );
-            let in_window = if side == OrderSide::Buy {
-                buys.contains(&price)
-            } else {
-                sells.contains(&price)
-            };
-            let maker_price = market > Decimal::ZERO
-                && if side == OrderSide::Buy {
-                    price < market
-                } else {
-                    price > market
-                };
-            let valid_quantity = order.quantity >= rules.min_qty
-                && order.quantity <= rules.max_qty
-                && rules.round_quantity(order.quantity) == order.quantity
-                && price * order.quantity >= rules.min_notional;
-            if in_window && maker_price && valid_quantity {
-                let mut intent = new_pair_intent(order, side, price, order.quantity);
-                // Reuse an order already at the destination, and link the active
-                // counter-leg so the originating side cannot be replenished twice.
-                if let Some(mut existing) = self
-                    .state
-                    .active_orders
-                    .read()
-                    .await
-                    .values()
-                    .find(|candidate| candidate.side == side && candidate.price == price)
-                    .cloned()
-                {
-                    existing.paired_client_order_id = Some(order.client_order_id.clone());
-                    existing.is_take_profit = false;
-                    if existing.purpose != OrderPurpose::Remainder {
-                        existing.purpose = OrderPurpose::Grid;
-                    }
-                    intent = existing;
-                }
-                if config.exchange.dry_run {
-                    paper_pair = Some(intent);
-                } else {
-                    pair_intent = Some(intent);
-                }
-                if order.side == OrderSide::Buy {
-                    self.paired_buy_prices
-                        .insert(order.client_order_id.clone(), (order.price, order.quantity));
-                }
-            }
-        }
-
         let (realized_pnl, commission, is_maker, pnl_verified) = if config.exchange.dry_run {
             (simulated_pnl, Decimal::ZERO, true, true)
         } else if let Some(order_id) = order.order_id {
@@ -1797,7 +1643,7 @@ impl GridTradingEngine {
             commission,
             pnl_verified,
             is_maker,
-            timestamp: Utc::now(),
+            timestamp: order.updated_at,
             note,
         };
 
@@ -1807,7 +1653,7 @@ impl GridTradingEngine {
             .record_trade(
                 trade,
                 is_completed_cycle.then_some(cycle_profit),
-                pair_intent,
+                None,
                 order.paired_client_order_id.clone(),
             )
             .await;
@@ -1819,31 +1665,6 @@ impl GridTradingEngine {
                 .await
                 .insert(order.client_order_id.clone(), order.clone());
             return false;
-        }
-        if let Some(intent) = paper_pair {
-            if self
-                .state
-                .active_orders
-                .read()
-                .await
-                .contains_key(&intent.client_order_id)
-            {
-                self.state
-                    .active_orders
-                    .write()
-                    .await
-                    .insert(intent.client_order_id.clone(), intent);
-                return true;
-            }
-            self.place_grid_order_with_quantity(
-                intent.side,
-                intent.price,
-                intent.client_order_id,
-                intent.grid_level,
-                intent.paired_client_order_id,
-                Some(intent.quantity),
-            )
-            .await;
         }
         true
     }
@@ -1914,8 +1735,6 @@ impl GridTradingEngine {
             self.pause_trading().await;
             return;
         }
-        let buy_window = config.grid.buy_window;
-        let sell_window = config.grid.sell_window;
         let existing: Vec<_> = self
             .state
             .active_orders
@@ -1926,7 +1745,7 @@ impl GridTradingEngine {
             .collect();
         let misaligned: Vec<_> = existing
             .into_iter()
-            .filter(|o| is_window_order(o) && o.price % grid_interval != Decimal::ZERO)
+            .filter(|o| is_window_order(o) && !rules.is_grid_price(o.price, grid_interval))
             .collect();
         if !misaligned.is_empty() {
             for order in misaligned {
@@ -1936,7 +1755,7 @@ impl GridTradingEngine {
                     return;
                 }
             }
-            // Cancellation can reveal a fill and enqueue a durable paired exit.
+            // Cancellation can reveal a fill and move the execution frontier.
             // Reconcile on the next cycle before allocating any released funds.
             return;
         }
@@ -1963,41 +1782,33 @@ impl GridTradingEngine {
         active_buy_prices.sort();
         active_sell_prices.sort();
 
-        // Preserve exits and executions. Far-away exits still reserve inventory,
-        // but must not displace the nearest ordinary window on either side.
+        // Preserve partial executions. Their remaining quantity still reserves
+        // funds or inventory without displacing the nearest window.
         let preserved: Vec<_> = active_orders
             .iter()
             .filter(|o| !is_window_order(o))
             .collect();
-        let mut reserved_buys: Vec<_> = preserved
+        let reserved_buys: Vec<_> = preserved
             .iter()
             .filter(|o| o.side == OrderSide::Buy)
             .map(|o| o.price)
             .collect();
-        let mut reserved_sells: Vec<_> = preserved
+        let reserved_sells: Vec<_> = preserved
             .iter()
             .filter(|o| o.side == OrderSide::Sell)
             .map(|o| o.price)
             .collect();
-        reserved_buys.extend(
-            active_orders
-                .iter()
-                .filter(|o| o.side == OrderSide::Sell && o.paired_client_order_id.is_some())
-                .map(|o| o.price - grid_interval),
-        );
-        reserved_sells.extend(
-            active_orders
-                .iter()
-                .filter(|o| o.side == OrderSide::Buy && o.paired_client_order_id.is_some())
-                .map(|o| o.price + grid_interval),
-        );
-        let (mut desired_buy_prices, mut desired_sell_prices) = rules.grid_window_prices(
-            current_price,
-            grid_interval,
-            (buy_window, sell_window),
-            (config.grid.min_price, config.grid.max_price),
-            |_, _| true,
-        );
+        let (mut desired_buy_prices, mut desired_sell_prices) =
+            match self.window_prices(&config, &rules, current_price).await {
+                Ok(prices) => prices,
+                Err(error) => {
+                    self.state
+                        .add_log("ERROR", format!("Could not load last fills: {}", error))
+                        .await;
+                    self.pause_trading().await;
+                    return;
+                }
+            };
         // Protected orders inside either nearest band occupy their level without
         // extending the band to compensate for far-away protected orders.
         desired_buy_prices.retain(|price| {
@@ -2077,7 +1888,7 @@ impl GridTradingEngine {
     }
 
     /// Confirm stale ordinary orders before reusing their funds or inventory.
-    /// Return after cancellation so racing fills and paired exits reconcile first.
+    /// Return after cancellation so racing fills reconcile before replenishment.
     async fn prune_grid_window(
         &mut self,
         desired_buys: &[Decimal],
@@ -2215,7 +2026,7 @@ impl GridTradingEngine {
             || full_quantity > rules.max_qty
             || rules.round_quantity(full_quantity) != full_quantity
             || price * full_quantity < rules.min_notional
-            || price % config.grid.grid_interval != Decimal::ZERO
+            || !rules.is_grid_price(price, config.grid.grid_interval)
             || config.grid.min_price.is_some_and(|min| price < min)
             || config.grid.max_price.is_some_and(|max| price > max)
         {
@@ -2256,13 +2067,19 @@ impl GridTradingEngine {
                 );
                 return false;
             }
-            let (buys, sells) = rules.grid_window_prices(
-                current_market_price,
-                config.grid.grid_interval,
-                (config.grid.buy_window, config.grid.sell_window),
-                (config.grid.min_price, config.grid.max_price),
-                |_, _| true,
-            );
+            let (buys, sells) = match self
+                .window_prices(&config, &rules, current_market_price)
+                .await
+            {
+                Ok(prices) => prices,
+                Err(error) => {
+                    self.state
+                        .add_log("ERROR", format!("Could not load last fills: {}", error))
+                        .await;
+                    self.pause_trading().await;
+                    return false;
+                }
+            };
             let window = if side == OrderSide::Buy { buys } else { sells };
             if !window.contains(&price) {
                 return false;
@@ -2375,7 +2192,7 @@ impl GridTradingEngine {
                     price: &formatted_price,
                     quantity: &formatted_qty,
                     client_order_id: &client_order_id,
-                    post_only: config.grid.post_only,
+                    post_only: true,
                     reduce_only: side == OrderSide::Sell,
                 })
                 .await
@@ -2512,6 +2329,7 @@ impl GridTradingEngine {
                 }
                 Ok(exchange_order) if exchange_order.executed_qty > Decimal::ZERO => {
                     let mut filled = order.clone();
+                    filled.updated_at = exchange_fill_time(&exchange_order);
                     filled.quantity = exchange_order.executed_qty;
                     if let Some(price) = exchange_order
                         .avg_price
@@ -2519,9 +2337,7 @@ impl GridTradingEngine {
                     {
                         filled.price = price;
                     }
-                    return self
-                        .on_order_filled_at_level(&mut filled, exchange_order.price)
-                        .await;
+                    return self.on_order_filled(&mut filled).await;
                 }
                 Ok(_) => {}
                 Err(e) => {
@@ -2604,7 +2420,6 @@ impl GridTradingEngine {
         }
 
         self.state.active_orders.write().await.clear();
-        self.paired_buy_prices.clear();
         if !is_dry_run {
             if let Err(e) = self
                 .state
@@ -2672,6 +2487,7 @@ mod tests {
     use crate::exchange::client::BinanceFuturesClient;
     use crate::exchange::{BinanceOrderResponse, BinanceUserTrade};
     use crate::server::state::AppState;
+    use crate::types::OrderPurpose;
     use crate::types::{
         BotControlAction, BotStatus, GridOrder, GridStats, OrderSide, OrderStatus, TickerInfo,
         TradeRecord, TradingMode,
@@ -2682,6 +2498,7 @@ mod tests {
         Json, Router,
     };
     use chrono::Utc;
+    use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
     use std::collections::HashMap;
     use std::sync::{
@@ -2863,27 +2680,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lost_pair_response_is_adopted_after_restart() {
+    async fn accepted_legacy_pair_is_adopted_after_restart_without_resubmission() {
         let (config, db, intent) = pending_pair_fixture();
         let fake = PairExchange::default();
-        fake.lose_response.store(1, Ordering::SeqCst);
-        let (url, server) = pair_exchange_server(fake.clone()).await;
-        let mut first = pair_recovery_engine(&config, db.clone(), url.clone()).await;
-        assert!(!first.drain_pair_intents("SOLUSDC", TradingMode::Live).await);
-        assert_eq!(
-            db.load_pair_intents("SOLUSDC", TradingMode::Live)
-                .unwrap()
-                .len(),
-            1
+        fake.orders.lock().unwrap().insert(
+            intent.client_order_id.clone(),
+            BinanceOrderResponse {
+                order_id: 501,
+                client_order_id: intent.client_order_id.clone(),
+                symbol: intent.symbol.clone(),
+                status: "NEW".into(),
+                price: intent.price,
+                avg_price: None,
+                orig_qty: intent.quantity,
+                executed_qty: Decimal::ZERO,
+                side: "SELL".into(),
+                order_type: "LIMIT".into(),
+                time_in_force: "GTX".into(),
+                update_time: None,
+            },
         );
-        drop(first);
-
+        let (url, server) = pair_exchange_server(fake.clone()).await;
         let mut restarted = pair_recovery_engine(&config, db.clone(), url).await;
         assert!(restarted.sync_live_orders().await);
-        assert_eq!(
-            *fake.posts.lock().unwrap(),
-            vec![intent.client_order_id.clone()]
-        );
+        assert!(fake.posts.lock().unwrap().is_empty());
         assert!(db
             .load_pair_intents("SOLUSDC", TradingMode::Live)
             .unwrap()
@@ -2894,14 +2714,12 @@ mod tests {
             stored[0].paired_client_order_id,
             intent.paired_client_order_id
         );
-        assert_eq!(stored[0].grid_level, intent.grid_level);
-        assert!(!stored[0].is_take_profit);
         server.abort();
     }
 
     #[tokio::test]
     async fn uncertain_pair_lookup_blocks_other_orders_until_resolved() {
-        let (config, db, intent) = pending_pair_fixture();
+        let (config, db, _intent) = pending_pair_fixture();
         let fake = PairExchange::default();
         fake.fail_lookup.store(1, Ordering::SeqCst);
         let (url, server) = pair_exchange_server(fake.clone()).await;
@@ -2925,7 +2743,11 @@ mod tests {
                 .drain_pair_intents("SOLUSDC", TradingMode::Live)
                 .await
         );
-        assert_eq!(*fake.posts.lock().unwrap(), vec![intent.client_order_id]);
+        assert!(fake.posts.lock().unwrap().is_empty());
+        assert!(db
+            .load_pair_intents("SOLUSDC", TradingMode::Live)
+            .unwrap()
+            .is_empty());
         server.abort();
     }
 
@@ -2949,7 +2771,7 @@ mod tests {
         assert!(fake.posts.lock().unwrap().is_empty());
         assert!(
             engine
-                .place_grid_order(OrderSide::Buy, dec!(100), "gb_b_duplicate".into(), -1, None)
+                .place_grid_order(OrderSide::Buy, dec!(98), "gb_b_duplicate".into(), -1, None)
                 .await
         );
         drop(engine);
@@ -3084,65 +2906,63 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_buy_exit_retains_exact_quantity_through_restart_and_submission() {
+    async fn live_buy_restarts_with_last_price_blocked_and_only_ordinary_window_orders() {
         let (mut config, db, _) = pending_pair_fixture();
         db.clear_pair_intents("SOLUSDC", TradingMode::Live).unwrap();
-        config.grid.grid_interval = dec!(1);
         config.grid.order_amount_usdc = dec!(2000);
         let fake = PairExchange::default();
         let (url, server) = pair_exchange_server(fake.clone()).await;
         let mut engine = pair_recovery_engine(&config, db.clone(), url.clone()).await;
         engine.state.ticker.write().await.last_price = dec!(114.5);
-        let mut buy = GridOrder {
-            client_order_id: "gb_b_equal_exit".into(),
-            order_id: None,
-            symbol: "SOLUSDC".into(),
-            side: OrderSide::Buy,
-            price: dec!(114),
-            quantity: dec!(17.54),
-            amount_usdc: dec!(1999.56),
-            status: OrderStatus::New,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            grid_level: -1,
-            paired_client_order_id: None,
-            is_take_profit: false,
-            purpose: crate::types::OrderPurpose::Grid,
-            merge_sources: vec![],
-        };
+        let mut buy = new_pair_intent(
+            &GridOrder {
+                client_order_id: "gb_b_parent".into(),
+                order_id: None,
+                symbol: "SOLUSDC".into(),
+                side: OrderSide::Buy,
+                price: dec!(114),
+                quantity: dec!(17.54),
+                amount_usdc: dec!(1999.56),
+                status: OrderStatus::New,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                grid_level: -1,
+                paired_client_order_id: None,
+                is_take_profit: false,
+                purpose: OrderPurpose::Grid,
+                merge_sources: vec![],
+            },
+            OrderSide::Buy,
+            dec!(114),
+            dec!(17.54),
+        );
+        buy.paired_client_order_id = None;
         assert!(engine.on_order_filled(&mut buy).await);
-        let intents = db.load_pair_intents("SOLUSDC", TradingMode::Live).unwrap();
-        assert_eq!(intents.len(), 1);
-        assert_eq!(intents[0].quantity, buy.quantity);
-        assert_eq!(intents[0].price, dec!(115));
+        assert!(db
+            .load_pair_intents("SOLUSDC", TradingMode::Live)
+            .unwrap()
+            .is_empty());
+        assert!(fake.posts.lock().unwrap().is_empty());
         drop(engine);
         let mut restarted = pair_recovery_engine(&config, db.clone(), url).await;
         restarted.state.ticker.write().await.last_price = dec!(114.5);
         restarted.state.position.write().await.size = buy.quantity;
         assert!(
-            restarted
-                .drain_pair_intents("SOLUSDC", TradingMode::Live)
+            !restarted
+                .place_grid_order(OrderSide::Buy, dec!(114), "gb_b_repeat".into(), -1, None)
                 .await
         );
-        let id = &intents[0].client_order_id;
-        assert_eq!(
-            fake.posts.lock().unwrap().as_slice(),
-            std::slice::from_ref(id)
-        );
-        assert_eq!(fake.orders.lock().unwrap()[id].orig_qty, buy.quantity);
-        assert_eq!(
-            restarted.state.active_orders.read().await[id].quantity,
-            buy.quantity
-        );
-        assert!(db
-            .load_pair_intents("SOLUSDC", TradingMode::Live)
-            .unwrap()
-            .is_empty());
+        restarted.maintain_grid_window().await;
+        let active = restarted.state.active_orders.read().await;
+        let sell = active.values().find(|o| o.side == OrderSide::Sell).unwrap();
+        assert_eq!(sell.price, dec!(115));
+        assert_eq!(sell.quantity, dec!(17.39));
+        assert!(sell.paired_client_order_id.is_none());
         server.abort();
     }
 
     #[tokio::test]
-    async fn existing_destination_order_is_linked_and_recovered_without_new_submission() {
+    async fn existing_destination_order_keeps_its_identity_without_pairing() {
         let (config, db, mut existing) = pending_pair_fixture();
         db.clear_pair_intents("SOLUSDC", TradingMode::Live).unwrap();
         existing.client_order_id = "gb_s_existing_destination".into();
@@ -3185,9 +3005,7 @@ mod tests {
         buy.amount_usdc = buy.price * buy.quantity;
         assert!(engine.on_order_filled(&mut buy).await);
         let intents = db.load_pair_intents("SOLUSDC", TradingMode::Live).unwrap();
-        assert_eq!(intents.len(), 1);
-        assert_eq!(intents[0].client_order_id, existing.client_order_id);
-        assert_eq!(intents[0].quantity, existing.quantity);
+        assert!(intents.is_empty());
         drop(engine);
         let mut restarted = pair_recovery_engine(&config, db.clone(), url).await;
         restarted.state.ticker.write().await.last_price = dec!(100.5);
@@ -3199,10 +3017,7 @@ mod tests {
             .is_empty());
         let managed = db.load_managed_orders("SOLUSDC").unwrap();
         assert_eq!(managed.len(), 1);
-        assert_eq!(
-            managed[0].paired_client_order_id.as_deref(),
-            Some(buy.client_order_id.as_str())
-        );
+        assert_eq!(managed[0].paired_client_order_id.as_deref(), None);
         assert!(
             !restarted
                 .place_grid_order(OrderSide::Buy, dec!(100), "gb_b_repeat".into(), -1, None)
@@ -3266,7 +3081,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repeated_live_fill_records_one_trade_and_one_pair_intent() {
+    async fn repeated_live_fill_records_one_trade_without_a_pair_intent() {
         let (config, db, _) = pending_pair_fixture();
         db.clear_pair_intents("SOLUSDC", TradingMode::Live).unwrap();
         let fake = PairExchange::default();
@@ -3315,11 +3130,7 @@ mod tests {
             2
         );
         let intents = db.load_pair_intents("SOLUSDC", TradingMode::Live).unwrap();
-        assert_eq!(intents.len(), 1);
-        assert_eq!(
-            intents[0].paired_client_order_id.as_deref(),
-            Some("gb_s_replayed")
-        );
+        assert!(intents.is_empty());
         server.abort();
     }
 
@@ -3772,7 +3583,7 @@ mod tests {
             side: OrderSide::Sell,
             price: dec!(122.4),
             quantity: dec!(24.50),
-            amount_usdc: dec!(2998.800),
+            amount_usdc: dec!(2998.8),
             status: OrderStatus::New,
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -3804,81 +3615,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn counter_orders_preserve_fill_quantity_for_both_sides() {
-        let mut config = AppConfig::default();
-        config.grid.grid_interval = dec!(1);
-        config.grid.order_amount_usdc = dec!(2000);
+    async fn fills_record_actual_quantities_without_creating_counter_orders() {
+        let config = AppConfig::default();
         let db = Arc::new(Database::open(":memory:").unwrap());
-        let (action_tx, action_rx) = mpsc::channel(1);
-        let (_ticker_tx, ticker_rx) = broadcast::channel(1);
-        let state = AppState::new(config.clone(), db, action_tx);
+        let (tx, rx) = mpsc::channel(1);
+        let (_, ticker_rx) = broadcast::channel(1);
+        let state = AppState::new(config.clone(), db.clone(), tx);
         let client = Arc::new(BinanceFuturesClient::new(&config.exchange));
-        let mut engine = GridTradingEngine::new(state.clone(), client, action_rx, ticker_rx);
-        state.ticker.write().await.last_price = dec!(114.5);
-
-        let mut buy = GridOrder {
-            client_order_id: "filled-buy".into(),
-            order_id: None,
-            symbol: "SOLUSDC".into(),
-            side: OrderSide::Buy,
-            price: dec!(114.24),
-            quantity: dec!(17.50),
-            amount_usdc: dec!(1999.20),
-            status: OrderStatus::New,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            grid_level: -1,
-            paired_client_order_id: None,
-            is_take_profit: false,
-            purpose: crate::types::OrderPurpose::Legacy,
-            merge_sources: Vec::new(),
-        };
-        engine.on_order_filled(&mut buy).await;
-        let orders: Vec<_> = state.active_orders.read().await.values().cloned().collect();
-        let sell = orders.iter().find(|o| o.side == OrderSide::Sell).unwrap();
-        assert_eq!(sell.price, dec!(115));
-        assert_eq!(sell.quantity, buy.quantity);
-        assert_eq!(sell.amount_usdc, dec!(2012.50));
-
-        engine.cancel_all_orders().await;
-        state.ticker.write().await.last_price = dec!(115.3);
-        state.position.write().await.size = dec!(0.46);
-        let mut small_sell = GridOrder {
-            client_order_id: "filled-small-sell".into(),
-            side: OrderSide::Sell,
-            price: dec!(115.24),
-            quantity: dec!(0.46),
-            amount_usdc: dec!(53.0104),
-            ..buy.clone()
-        };
-        engine.on_order_filled(&mut small_sell).await;
-        let orders: Vec<_> = state.active_orders.read().await.values().cloned().collect();
-        assert_eq!(orders.len(), 1);
-        assert_eq!(orders[0].side, OrderSide::Buy);
-        assert_eq!(orders[0].price, dec!(115));
-        assert_eq!(orders[0].quantity, dec!(0.46));
-        engine.cancel_all_orders().await;
-
-        let full_sell_qty = state
-            .rules
-            .read()
-            .await
-            .calculate_quantity(dec!(115.24), dec!(2000))
-            .unwrap();
-        state.position.write().await.size = full_sell_qty;
-        let mut full_sell = GridOrder {
-            client_order_id: "filled-full-sell".into(),
-            side: OrderSide::Sell,
-            price: dec!(115.24),
-            quantity: full_sell_qty,
-            amount_usdc: dec!(115.24) * full_sell_qty,
-            ..buy
-        };
-        engine.on_order_filled(&mut full_sell).await;
-        let orders: Vec<_> = state.active_orders.read().await.values().cloned().collect();
-        let paired_buy = orders.iter().find(|o| o.side == OrderSide::Buy).unwrap();
-        assert_eq!(paired_buy.price, dec!(115));
-        assert_eq!(paired_buy.quantity, full_sell_qty);
+        let mut engine = GridTradingEngine::new(state.clone(), client, rx, ticker_rx);
+        state.position.write().await.size = dec!(20);
+        for (id, side, price, quantity) in [
+            ("gb_b_actual", OrderSide::Buy, dec!(114.24), dec!(17.50)),
+            ("gb_s_actual", OrderSide::Sell, dec!(115.24), dec!(0.46)),
+        ] {
+            let mut order = GridOrder {
+                client_order_id: id.into(),
+                order_id: None,
+                symbol: "SOLUSDC".into(),
+                side,
+                price,
+                quantity,
+                amount_usdc: price * quantity,
+                status: OrderStatus::New,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                grid_level: 0,
+                paired_client_order_id: None,
+                is_take_profit: false,
+                purpose: OrderPurpose::Grid,
+                merge_sources: vec![],
+            };
+            assert!(engine.on_order_filled(&mut order).await);
+            assert_eq!(
+                db.get_trade_by_client_id(id, TradingMode::Paper)
+                    .unwrap()
+                    .unwrap()
+                    .quantity,
+                quantity
+            );
+            assert!(state.active_orders.read().await.is_empty());
+        }
+        assert_eq!(state.position.read().await.size, dec!(37.04));
+        assert!(db
+            .load_pair_intents("SOLUSDC", TradingMode::Paper)
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
