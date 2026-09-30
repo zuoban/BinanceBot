@@ -70,10 +70,6 @@ enum PairPlacementDecision {
 #[path = "remainder.rs"]
 mod remainder;
 
-#[path = "sell_levels.rs"]
-mod sell_levels;
-use sell_levels::SellLevelLedger;
-
 const GRID_ORDER_PREFIX: &str = "gb_";
 
 fn is_grid_order(client_order_id: &str) -> bool {
@@ -117,15 +113,8 @@ fn buy_level_occupied(
 ) -> bool {
     let occupied: Vec<_> = orders
         .iter()
-        .filter_map(|order| {
-            if order.side == OrderSide::Buy {
-                Some(order.price)
-            } else if order.is_take_profit || order.purpose == OrderPurpose::TakeProfit {
-                Some(order.price - interval)
-            } else {
-                None
-            }
-        })
+        .filter(|order| order.side == OrderSide::Buy)
+        .map(|order| order.price)
         .collect();
     has_nearby_grid_order(&occupied, price, interval, tick_size)
 }
@@ -176,14 +165,12 @@ pub struct GridTradingEngine {
     ticker_rx: broadcast::Receiver<TickerInfo>,
     // Map of client_order_id -> purchase price for calculating paired grid cycle profit
     paired_buy_prices: HashMap<String, (Decimal, Decimal)>,
-    sell_levels: Option<SellLevelLedger>,
     pnl_reconcile_offset: usize,
     pnl_reconcile_task: Option<JoinHandle<()>>,
     last_account_sync: Option<Instant>,
     last_orders_sync: Option<Instant>,
     reconciliation_blocked: bool,
     last_remainder_change: Option<Instant>,
-    window_cleanup_pending: bool,
     market_stream_tx: Option<watch::Sender<(String, bool)>>,
 }
 
@@ -200,14 +187,12 @@ impl GridTradingEngine {
             action_rx,
             ticker_rx,
             paired_buy_prices: HashMap::new(),
-            sell_levels: None,
             pnl_reconcile_offset: 0,
             pnl_reconcile_task: None,
             last_account_sync: None,
             last_orders_sync: None,
             reconciliation_blocked: false,
             last_remainder_change: None,
-            window_cleanup_pending: false,
             market_stream_tx: None,
         }
     }
@@ -1142,46 +1127,25 @@ impl GridTradingEngine {
                 rules.tick_size,
             )
         {
-            return PairPlacementDecision::Skip(
-                "BUY level already has an order or a pending take-profit exit",
-            );
+            return PairPlacementDecision::Skip("BUY level already has an active order");
         }
         if intent.side == OrderSide::Buy {
-            match self.waiting_buy_levels().await {
-                Ok(levels)
-                    if has_nearby_grid_order(
-                        &levels,
-                        intent.price,
-                        config.grid.grid_interval,
-                        rules.tick_size,
-                    ) =>
-                {
-                    return PairPlacementDecision::Skip("BUY level is awaiting its SELL fill")
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    error!("Could not restore buy levels: {}", error);
-                    return PairPlacementDecision::Wait;
-                }
-            }
-        } else {
-            let prices: Vec<_> = orders
-                .iter()
-                .filter(|o| {
-                    o.side == OrderSide::Sell
-                        && (o.is_take_profit || o.purpose == OrderPurpose::TakeProfit)
-                })
-                .map(|o| o.price)
-                .collect();
-            if has_nearby_grid_order(
-                &prices,
-                intent.price,
+            let (nearest_buys, _) = rules.grid_window_prices(
+                market_price,
                 config.grid.grid_interval,
-                rules.tick_size,
-            ) {
-                // Preserve this exit intent while another paired exit owns the level.
-                return PairPlacementDecision::Wait;
+                (config.grid.buy_window, 0),
+                (config.grid.min_price, config.grid.max_price),
+                |_, _| true,
+            );
+            if !nearest_buys.contains(&intent.price) {
+                return PairPlacementDecision::Skip("BUY price is outside the current window");
             }
+        } else if orders.iter().any(|order| {
+            order.side == OrderSide::Sell
+                && intent.paired_client_order_id.is_some()
+                && order.paired_client_order_id == intent.paired_client_order_id
+        }) {
+            return PairPlacementDecision::Skip("paired exit already exists for this buy");
         }
         let position_size = self.state.position.read().await.size;
         let allowed = if intent.side == OrderSide::Sell {
@@ -1793,7 +1757,7 @@ impl GridTradingEngine {
                 };
                 if may_rebuy && trading_enabled && !paired_exists {
                     if config.exchange.dry_run {
-                        // Record the sell before checking durable buy-level ownership.
+                        // Record the sell before evaluating the new buy's position exposure.
                         paper_rebuy = Some((paired_buy_price, paired_client_id));
                     } else {
                         pair_intent = rules
@@ -1941,17 +1905,6 @@ impl GridTradingEngine {
         }
         let buy_window = config.grid.buy_window;
         let sell_window = config.grid.sell_window;
-        let waiting_for_sell = match self.waiting_buy_levels().await {
-            Ok(levels) => levels,
-            Err(error) => {
-                self.state
-                    .add_log("ERROR", format!("Could not restore buy levels: {}", error))
-                    .await;
-                self.pause_trading().await;
-                return;
-            }
-        };
-
         // Migrate only idle ordinary managed orders. Existing exits, partial fills
         // and consolidated remainders retain their price and provenance.
         let existing: Vec<_> = self
@@ -1970,7 +1923,6 @@ impl GridTradingEngine {
             })
             .map(|o| o.price)
             .collect();
-        let reserved_buy_prices: Vec<_> = exit_prices.iter().map(|p| *p - grid_interval).collect();
         let misaligned: Vec<_> = existing
             .into_iter()
             .filter(|o| {
@@ -1978,26 +1930,16 @@ impl GridTradingEngine {
                     && !o.is_take_profit
                     && o.purpose != OrderPurpose::TakeProfit
                     && o.status == OrderStatus::New
-                    && ((o.side == OrderSide::Buy
-                        && has_nearby_grid_order(
-                            &waiting_for_sell,
-                            o.price,
-                            grid_interval,
-                            rules.tick_size,
-                        ))
-                        || (matches!(o.purpose, OrderPurpose::Grid | OrderPurpose::Legacy)
-                            && o.merge_sources.is_empty()
-                            && (o.price % grid_interval != Decimal::ZERO
-                                || has_nearby_grid_order(
-                                    if o.side == OrderSide::Buy {
-                                        &reserved_buy_prices
-                                    } else {
-                                        &exit_prices
-                                    },
-                                    o.price,
-                                    grid_interval,
-                                    rules.tick_size,
-                                ))))
+                    && matches!(o.purpose, OrderPurpose::Grid | OrderPurpose::Legacy)
+                    && o.merge_sources.is_empty()
+                    && (o.price % grid_interval != Decimal::ZERO
+                        || (o.side == OrderSide::Sell
+                            && has_nearby_grid_order(
+                                &exit_prices,
+                                o.price,
+                                grid_interval,
+                                rules.tick_size,
+                            )))
             })
             .collect();
         if !misaligned.is_empty() {
@@ -2023,15 +1965,8 @@ impl GridTradingEngine {
             .collect();
         let mut active_buy_prices: Vec<Decimal> = active_orders
             .iter()
-            .filter_map(|o| {
-                if o.side == OrderSide::Buy {
-                    Some(o.price)
-                } else if o.is_take_profit || o.purpose == OrderPurpose::TakeProfit {
-                    Some(o.price - grid_interval)
-                } else {
-                    None
-                }
-            })
+            .filter(|o| o.side == OrderSide::Buy)
+            .map(|o| o.price)
             .collect();
         let mut active_sell_prices: Vec<Decimal> = active_orders
             .iter()
@@ -2043,54 +1978,46 @@ impl GridTradingEngine {
         active_sell_prices.sort();
 
         // Preserve exits and executions. Far-away exits still reserve inventory,
-        // but must not displace the nearest inventory sell levels.
+        // but must not displace the nearest ordinary window on either side.
         let preserved: Vec<_> = active_orders
             .iter()
             .filter(|o| !is_window_order(o))
             .collect();
-        let preserved_buys = preserved
+        let reserved_buys: Vec<_> = preserved
             .iter()
             .filter(|o| o.side == OrderSide::Buy)
-            .count();
-        let mut reserved_buys = reserved_buy_prices;
-        reserved_buys.extend(waiting_for_sell);
-        reserved_buys.extend(
-            preserved
-                .iter()
-                .filter(|o| o.side == OrderSide::Buy)
-                .map(|o| o.price),
-        );
+            .map(|o| o.price)
+            .collect();
         let reserved_sells: Vec<_> = preserved
             .iter()
             .filter(|o| o.side == OrderSide::Sell)
             .map(|o| o.price)
             .collect();
-        let (desired_buy_prices, mut desired_sell_prices) = rules.grid_window_prices(
+        let (mut desired_buy_prices, mut desired_sell_prices) = rules.grid_window_prices(
             current_price,
             grid_interval,
-            (buy_window.saturating_sub(preserved_buys), sell_window),
+            (buy_window, sell_window),
             (config.grid.min_price, config.grid.max_price),
-            |side, price| {
-                side == OrderSide::Sell
-                    || !has_nearby_grid_order(&reserved_buys, price, grid_interval, rules.tick_size)
-            },
+            |_, _| true,
         );
-        // An exit inside the nearest sell band occupies its level; do not extend
-        // the band to compensate for an exit outside it.
+        // Protected orders inside either nearest band occupy their level without
+        // extending the band to compensate for far-away protected orders.
+        desired_buy_prices.retain(|price| {
+            !has_nearby_grid_order(&reserved_buys, *price, grid_interval, rules.tick_size)
+        });
         desired_sell_prices.retain(|price| {
             !has_nearby_grid_order(&reserved_sells, *price, grid_interval, rules.tick_size)
         });
 
-        let cleanup_threshold = (buy_window + sell_window) * 2;
         if self
-            .prune_grid_window(cleanup_threshold, &desired_buy_prices, &desired_sell_prices)
+            .prune_grid_window(&desired_buy_prices, &desired_sell_prices)
             .await
         {
             return;
         }
 
         for &target_price in &desired_buy_prices {
-            // Retain queue priority and reserve levels whose buy is awaiting its exit.
+            // Retain queue priority for active buys still inside the nearest band.
             let already_exists = has_nearby_grid_order(
                 &active_buy_prices,
                 target_price,
@@ -2106,11 +2033,7 @@ impl GridTradingEngine {
                 {
                     active_buy_prices.push(target_price);
                     if self
-                        .prune_grid_window(
-                            cleanup_threshold,
-                            &desired_buy_prices,
-                            &desired_sell_prices,
-                        )
+                        .prune_grid_window(&desired_buy_prices, &desired_sell_prices)
                         .await
                     {
                         return;
@@ -2136,11 +2059,7 @@ impl GridTradingEngine {
                 {
                     active_sell_prices.push(target_price);
                     if self
-                        .prune_grid_window(
-                            cleanup_threshold,
-                            &desired_buy_prices,
-                            &desired_sell_prices,
-                        )
+                        .prune_grid_window(&desired_buy_prices, &desired_sell_prices)
                         .await
                     {
                         return;
@@ -2155,29 +2074,18 @@ impl GridTradingEngine {
                 .await;
             return;
         }
-        self.prune_grid_window(cleanup_threshold, &desired_buy_prices, &desired_sell_prices)
+        self.prune_grid_window(&desired_buy_prices, &desired_sell_prices)
             .await;
     }
 
-    /// Return true after attempting cleanup: fills discovered during cancellation
-    /// must be reconciled before placing more orders. Stale sells are always
-    /// cleaned; interrupted threshold-based buy cleanup continues below its trigger.
+    /// Confirm stale ordinary orders before reusing their funds or inventory.
+    /// Return after cancellation so racing fills and paired exits reconcile first.
     async fn prune_grid_window(
         &mut self,
-        threshold: usize,
         desired_buys: &[Decimal],
         desired_sells: &[Decimal],
     ) -> bool {
         let active = self.state.active_orders.read().await;
-        let stale_sells = active.values().any(|order| {
-            order.side == OrderSide::Sell
-                && is_window_order(order)
-                && !desired_sells.contains(&order.price)
-        });
-        let clean_buys = self.window_cleanup_pending || active.len() >= threshold;
-        if !clean_buys && !stale_sells {
-            return false;
-        }
         let total = active.len();
         let mut obsolete: Vec<_> = active
             .values()
@@ -2187,24 +2095,24 @@ impl GridTradingEngine {
                 } else {
                     desired_sells
                 };
-                is_window_order(order)
-                    && (order.side == OrderSide::Sell || clean_buys)
-                    && !desired.contains(&order.price)
+                is_window_order(order) && !desired.contains(&order.price)
             })
             .cloned()
             .collect();
         drop(active);
         if obsolete.is_empty() {
-            self.window_cleanup_pending = false;
             return false;
         }
-        if !self.window_cleanup_pending {
-            self.state.add_log("INFO", format!(
-                "Grid window cleanup: {} orders (buy cleanup threshold {}), canceling {} out-of-window orders",
-                total, threshold, obsolete.len()
-            )).await;
-        }
-        self.window_cleanup_pending = clean_buys;
+        self.state
+            .add_log(
+                "INFO",
+                format!(
+                    "Grid window cleanup: {} orders, canceling {} out-of-window orders",
+                    total,
+                    obsolete.len()
+                ),
+            )
+            .await;
         obsolete.sort_by(|a, b| a.client_order_id.cmp(&b.client_order_id));
         for order in obsolete {
             if *self.state.status.read().await != BotStatus::Running
@@ -2213,7 +2121,6 @@ impl GridTradingEngine {
                 return true;
             }
         }
-        self.window_cleanup_pending = false;
         true
     }
 
@@ -2279,28 +2186,6 @@ impl GridTradingEngine {
         let config = self.state.config.read().await.clone();
         let rules = self.state.rules.read().await.clone();
         let symbol = config.exchange.symbol.clone();
-        if side == OrderSide::Buy {
-            match self.waiting_buy_levels().await {
-                Ok(levels)
-                    if has_nearby_grid_order(
-                        &levels,
-                        price,
-                        config.grid.grid_interval,
-                        rules.tick_size,
-                    ) =>
-                {
-                    return false
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    self.state
-                        .add_log("ERROR", format!("Could not restore buy levels: {}", error))
-                        .await;
-                    self.pause_trading().await;
-                    return false;
-                }
-            }
-        }
         let Some(full_quantity) = exit_quantity
             .or_else(|| rules.calculate_quantity(price, config.grid.order_amount_usdc))
         else {
@@ -2357,6 +2242,18 @@ impl GridTradingEngine {
                 );
                 return false;
             }
+            if side == OrderSide::Buy {
+                let (nearest_buys, _) = rules.grid_window_prices(
+                    current_market_price,
+                    config.grid.grid_interval,
+                    (config.grid.buy_window, 0),
+                    (config.grid.min_price, config.grid.max_price),
+                    |_, _| true,
+                );
+                if !nearest_buys.contains(&price) {
+                    return false;
+                }
+            }
         }
 
         let orders: Vec<GridOrder> = self
@@ -2386,17 +2283,22 @@ impl GridTradingEngine {
             }
             full_quantity
         } else {
+            if paired_client_order_id.is_some()
+                && orders.iter().any(|order| {
+                    order.side == OrderSide::Sell
+                        && order.paired_client_order_id == paired_client_order_id
+                })
+            {
+                return false;
+            }
             let prices: Vec<_> = orders
                 .iter()
-                .filter(|o| {
-                    o.side == OrderSide::Sell
-                        && (paired_client_order_id.is_none()
-                            || o.is_take_profit
-                            || o.purpose == OrderPurpose::TakeProfit)
-                })
+                .filter(|o| o.side == OrderSide::Sell)
                 .map(|o| o.price)
                 .collect();
-            if has_nearby_grid_order(&prices, price, config.grid.grid_interval, rules.tick_size) {
+            if paired_client_order_id.is_none()
+                && has_nearby_grid_order(&prices, price, config.grid.grid_interval, rules.tick_size)
+            {
                 return false;
             }
             let available = sell_quantity_available(self.state.position.read().await.size, &orders);
@@ -2705,7 +2607,6 @@ impl GridTradingEngine {
 
         self.state.active_orders.write().await.clear();
         self.paired_buy_prices.clear();
-        self.window_cleanup_pending = false;
         if !is_dry_run {
             if let Err(e) = self
                 .state
@@ -3048,7 +2949,7 @@ mod tests {
             .is_empty());
         assert!(fake.posts.lock().unwrap().is_empty());
         assert!(
-            !engine
+            engine
                 .place_grid_order(OrderSide::Buy, dec!(100), "gb_b_duplicate".into(), -1, None)
                 .await
         );
@@ -3056,7 +2957,7 @@ mod tests {
         let mut restarted = pair_recovery_engine(&config, db.clone(), url).await;
         restarted.state.ticker.write().await.last_price = dec!(100.5);
         assert!(
-            !restarted
+            restarted
                 .place_grid_order(
                     OrderSide::Buy,
                     dec!(100),
@@ -3072,12 +2973,18 @@ mod tests {
             restarted.pair_submission_decision(&rebuy).await,
             super::PairPlacementDecision::Skip(_)
         ));
-        assert!(fake.posts.lock().unwrap().is_empty());
+        assert_eq!(
+            *fake.posts.lock().unwrap(),
+            vec![
+                "gb_b_duplicate".to_string(),
+                "gb_b_after_restart".to_string()
+            ]
+        );
         server.abort();
     }
 
     #[tokio::test]
-    async fn paired_sell_waits_while_another_exit_owns_the_price() {
+    async fn paired_sells_for_different_buys_share_price_without_blocking_grid() {
         let (config, db, intent) = pending_pair_fixture();
         let fake = PairExchange::default();
         let (url, server) = pair_exchange_server(fake.clone()).await;
@@ -3093,24 +3000,22 @@ mod tests {
             .await
             .insert(existing.client_order_id.clone(), existing.clone());
         assert!(
-            !engine
+            engine
                 .drain_pair_intents("SOLUSDC", TradingMode::Live)
                 .await
         );
-        assert!(fake.posts.lock().unwrap().is_empty());
-        assert_eq!(
-            db.load_pair_intents("SOLUSDC", TradingMode::Live)
-                .unwrap()
-                .len(),
-            1
-        );
-        // Once the competing reservation is canceled, the original durable intent can submit.
-        engine
-            .state
-            .active_orders
-            .write()
-            .await
-            .remove(&existing.client_order_id);
+        assert!(db
+            .load_pair_intents("SOLUSDC", TradingMode::Live)
+            .unwrap()
+            .is_empty());
+        let active = engine.state.active_orders.read().await;
+        assert_eq!(active.len(), 2);
+        assert!(active
+            .values()
+            .all(|o| o.price == intent.price && o.is_take_profit));
+        assert!(reserved_sell_quantity(&active.values().cloned().collect::<Vec<_>>()) <= dec!(10));
+        drop(active);
+        // Draining the same journal again must not submit either exit twice.
         assert!(
             engine
                 .drain_pair_intents("SOLUSDC", TradingMode::Live)
