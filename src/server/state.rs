@@ -2,7 +2,7 @@ use crate::config::AppConfig;
 use crate::db::Database;
 use crate::fx::CnyRateCache;
 use crate::strategy::precision::SymbolRules;
-use crate::telegram::send_trade_notification;
+use crate::telegram::{send_trade_notification, TradeNotificationContext};
 use crate::types::*;
 use chrono::Utc;
 use rust_decimal::Decimal;
@@ -154,6 +154,7 @@ impl AppState {
             current_config.exchange.dry_run,
             current_config.exchange.is_testnet,
         );
+        let telegram = current_config.telegram.clone();
         drop(current_config);
         if trade.symbol != current_symbol || trade.mode != current_mode {
             error!(
@@ -162,6 +163,7 @@ impl AppState {
             );
             return false;
         }
+        let mut notification_stats = None;
         {
             let _commit = self.trade_commit_lock.lock().await;
             let mut updated = self.stats.read().await.clone();
@@ -201,6 +203,20 @@ impl AppState {
                     return false;
                 }
             }
+            if telegram.enabled {
+                let symbol = trade.symbol.clone();
+                let mode = trade.mode;
+                let timestamp = trade.timestamp;
+                // Capture counts while commits are serialized, before another fill can advance them.
+                match self
+                    .db
+                    .run_blocking(move |db| db.get_hourly_trade_stats(&symbol, mode, timestamp))
+                    .await
+                {
+                    Ok(stats) => notification_stats = Some(stats),
+                    Err(error) => warn!("Could not load Telegram trade counts: {}", error),
+                }
+            }
         }
 
         // Add to in-memory recent trades
@@ -220,17 +236,23 @@ impl AppState {
             let _ = self.ws_broadcast_tx.send(json);
         }
 
-        let config = self.config.read().await;
-        if config.telegram.enabled {
-            let telegram = config.telegram.clone();
-            let is_dry_run = config.exchange.dry_run;
-            let is_testnet = config.exchange.is_testnet;
+        if telegram.enabled {
+            let account = self.account.read().await.clone();
+            let unrealized_pnl = self.position.read().await.unrealized_pnl;
+            let cny_rate = self.cny_rates.get(&account.asset).await;
+            let context = TradeNotificationContext::for_trade(
+                &trade,
+                notification_stats.as_ref(),
+                &account,
+                unrealized_pnl,
+                cny_rate.as_ref(),
+                Utc::now(),
+            );
             let client = self.telegram_client.clone();
             let state = Arc::clone(self);
             tokio::spawn(async move {
                 if let Err(err) =
-                    send_trade_notification(&client, &telegram, &trade, is_dry_run, is_testnet)
-                        .await
+                    send_trade_notification(&client, &telegram, &trade, &context).await
                 {
                     warn!("Failed to send Telegram trade notification: {}", err);
                     state

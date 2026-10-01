@@ -5,7 +5,7 @@ use crate::types::{
     TradeRecord, TradingMode,
 };
 use anyhow::{Context, Result};
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, FixedOffset, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use rust_decimal::Decimal;
 use std::path::Path;
@@ -663,15 +663,24 @@ impl Database {
             .map_err(Into::into)
     }
 
-    /// Count all persisted orders in the rolling 24-hour window, including empty hours.
+    /// Count today's persisted orders from Beijing midnight to now, including empty hours.
     pub fn get_hourly_trade_stats(
         &self,
         symbol: &str,
         mode: TradingMode,
         now: DateTime<Utc>,
     ) -> Result<HourlyTradeStats> {
-        let window_start = now - ChronoDuration::hours(24);
-        let first_hour = window_start.timestamp().div_euclid(3600) * 3600;
+        let beijing = FixedOffset::east_opt(8 * 3600).unwrap();
+        let window_start = now
+            .with_timezone(&beijing)
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_local_timezone(beijing)
+            .single()
+            .unwrap()
+            .with_timezone(&Utc);
+        let first_hour = window_start.timestamp();
         let last_hour = now.timestamp().div_euclid(3600) * 3600;
         let mut buckets: Vec<_> = (first_hour..=last_hour)
             .step_by(3600)
@@ -1195,16 +1204,18 @@ mod tests {
     }
 
     #[test]
-    fn hourly_trade_stats_cover_full_window_and_isolate_scope() {
+    fn hourly_trade_stats_cover_beijing_today_and_isolate_scope() {
         let db = Database::open(":memory:").unwrap();
         let now = DateTime::parse_from_rfc3339("2026-09-28T10:30:00.123456789Z")
             .unwrap()
             .with_timezone(&Utc);
-        let start = now - ChronoDuration::hours(24);
+        let start = DateTime::parse_from_rfc3339("2026-09-27T16:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
         let empty = db
             .get_hourly_trade_stats("SOLUSDC", TradingMode::Paper, now)
             .unwrap();
-        assert_eq!(empty.buckets.len(), 25);
+        assert_eq!(empty.buckets.len(), 19);
         assert!(empty
             .buckets
             .iter()
@@ -1236,7 +1247,7 @@ mod tests {
         for (id, timestamp, side, symbol, mode) in [
             ("last", now, OrderSide::Sell, "SOLUSDC", TradingMode::Paper),
             (
-                "midnight",
+                "utc-midnight",
                 DateTime::parse_from_rfc3339("2026-09-28T00:00:00Z")
                     .unwrap()
                     .with_timezone(&Utc),
@@ -1282,8 +1293,8 @@ mod tests {
         assert_eq!(stats.window_start, start);
         assert_eq!(stats.window_end, now);
         assert_eq!(stats.buckets[0].buy_count, 250);
-        assert_eq!(stats.buckets[14].sell_count, 1);
-        assert_eq!(stats.buckets[24].sell_count, 1);
+        assert_eq!(stats.buckets[8].sell_count, 1);
+        assert_eq!(stats.buckets[18].sell_count, 1);
         assert_eq!(
             stats
                 .buckets
@@ -1303,8 +1314,47 @@ mod tests {
                 now + ChronoDuration::hours(1),
             )
             .unwrap();
-        assert_eq!(later.buckets.iter().map(|b| b.buy_count).sum::<u64>(), 0);
+        assert_eq!(later.buckets.len(), 20);
+        assert_eq!(later.window_start, start);
+        assert_eq!(later.buckets.iter().map(|b| b.buy_count).sum::<u64>(), 250);
         assert_eq!(later.buckets.iter().map(|b| b.sell_count).sum::<u64>(), 3);
+
+        // Beijing's next day begins at 16:00 UTC, before the UTC date changes.
+        let next_midnight = start + ChronoDuration::days(1);
+        trade.trade_id = "next-day".into();
+        trade.client_order_id = "next-day".into();
+        trade.symbol = "SOLUSDC".into();
+        trade.mode = TradingMode::Paper;
+        trade.side = OrderSide::Buy;
+        trade.timestamp = next_midnight;
+        assert!(db.insert_trade(&trade).unwrap());
+        let next_day = db
+            .get_hourly_trade_stats("SOLUSDC", TradingMode::Paper, next_midnight)
+            .unwrap();
+        assert_eq!(next_day.window_start, next_midnight);
+        assert_eq!(next_day.window_end, next_midnight);
+        assert_eq!(next_day.buckets.len(), 1);
+        assert_eq!(next_day.buckets[0].hour_start, next_midnight);
+        assert_eq!(next_day.buckets[0].buy_count, 1);
+        assert_eq!(next_day.buckets[0].sell_count, 0);
+
+        let before_midnight = db
+            .get_hourly_trade_stats(
+                "SOLUSDC",
+                TradingMode::Paper,
+                next_midnight - ChronoDuration::nanoseconds(1),
+            )
+            .unwrap();
+        assert_eq!(before_midnight.window_start, start);
+        assert_eq!(before_midnight.buckets.len(), 24);
+        assert_eq!(
+            before_midnight
+                .buckets
+                .iter()
+                .map(|b| b.buy_count + b.sell_count)
+                .sum::<u64>(),
+            253
+        );
     }
 
     #[test]
