@@ -59,7 +59,9 @@
         <div class="metric-title" id="card-price-title">SOLUSDC 标记价格</div>
         <div class="metric-value" id="card-price">--</div>
         <div class="metric-sub">
-          <span id="card-price-change">--</span>
+          <span id="card-price-change">今日涨跌 --</span>
+          <span style="color: var(--text-dim);">00:00 快照: <span id="card-price-midnight">--</span></span>
+          <span id="card-price-24h-change" style="color: var(--text-dim);">近 24h 涨跌 --</span>
           <span style="color: var(--text-dim);">| 24h 高: <span id="card-high">--</span> 低: <span id="card-low">--</span></span>
           <span id="card-price-status" style="color: var(--text-dim);"></span>
         </div>
@@ -104,6 +106,20 @@
           <span>窗口: <strong id="card-window-info">5 买 / 5 卖</strong> (Maker GTX)</span>
         </div>
       </div>
+    </section>
+
+    <section class="price-history-section" aria-labelledby="price-history-title">
+      <div class="section-title">
+        <div><span class="section-kicker">MARK PRICE / 7D</span><h2 id="price-history-title">最近 7 天价格曲线</h2></div>
+        <div class="price-history-summary">
+          <span>今日 00:00 <strong id="price-history-midnight">--</strong></span>
+          <span>今日涨跌 <strong id="price-history-change">--</strong></span>
+        </div>
+      </div>
+      <p class="trade-chart-note" id="price-history-range">北京时间 (UTC+8) · 最近 7 个自然日（含今天）· 每小时标记价格</p>
+      <p class="trade-chart-status" id="price-history-status" role="status">正在加载价格历史…</p>
+      <div class="price-history-chart" id="price-history-chart"></div>
+      <p class="trade-chart-note price-history-detail" id="price-history-detail" aria-live="polite">悬停曲线或聚焦后使用左右方向键查看价格；虚线为今日 00:00 基准。</p>
     </section>
 
     <section class="trade-chart-section" aria-labelledby="trade-chart-title">
@@ -756,16 +772,143 @@
     let latestSymbol = 'SOLUSDC';
     let latestMarkPrice = 0;
     let latestMarkUpdatedAt = NaN;
+    let latestPriceHistory = null;
+    let latestPriceTestnet = false;
+    let priceHistoryPlotPoints = [];
+    let priceHistorySelectedAt = null;
+    let priceHistoryRenderKey = '';
+
+    function beijingDayStart(timestamp = Date.now()) {
+      return Math.floor((timestamp + 8 * 3600000) / 86400000) * 86400000 - 8 * 3600000;
+    }
+
+    function midnightPrice() {
+      const price = parseFloat(latestPriceHistory?.midnight_price);
+      return Date.parse(latestPriceHistory?.day_start) === beijingDayStart()
+        && Number.isFinite(price) && price > 0 ? price : null;
+    }
 
     function renderMarkPrice() {
       const fresh = latestMarkPrice > 0 && Number.isFinite(latestMarkUpdatedAt)
         && Date.now() - latestMarkUpdatedAt < 15000;
       document.getElementById('card-price').textContent = fresh ? `$${latestMarkPrice.toFixed(4)}` : '--';
       document.getElementById('card-price-status').textContent = fresh ? '' : '标记价格行情暂未更新';
+      const baseline = midnightPrice();
+      const change = fresh && baseline !== null ? latestMarkPrice - baseline : null;
+      const asset = ['USDC', 'USDT', 'FDUSD', 'BUSD'].find(asset => latestSymbol.endsWith(asset)) || 'USDC';
+      const changeText = change === null ? '--'
+        : `${change >= 0 ? '+' : ''}${(change / baseline * 100).toFixed(2)}% (${change >= 0 ? '+' : ''}${change.toFixed(4)} ${asset})`;
+      const changeClass = change === null ? '' : change >= 0 ? 'text-green' : 'text-red';
+      document.getElementById('card-price-change').textContent = `今日涨跌 ${changeText}`;
+      document.getElementById('card-price-change').className = changeClass;
+      document.getElementById('card-price-midnight').textContent = baseline === null ? '--' : `$${baseline.toFixed(4)}`;
+      document.getElementById('price-history-midnight').textContent = baseline === null ? '--' : `$${baseline.toFixed(4)}`;
+      document.getElementById('price-history-change').textContent = changeText;
+      document.getElementById('price-history-change').className = changeClass;
       document.title = `${fresh ? `$${latestMarkPrice.toFixed(4)}` : '--'} | ${latestSymbol}`;
+      renderPriceHistory(fresh);
     }
 
     setInterval(renderMarkPrice, 1000);
+
+    function priceHistoryTime(timestamp, withTime = true) {
+      const date = new Date(timestamp + 8 * 3600000);
+      const pad = value => String(value).padStart(2, '0');
+      return `${pad(date.getUTCMonth() + 1)}/${pad(date.getUTCDate())}`
+        + (withTime ? ` ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}` : '');
+    }
+
+    function showPriceHistoryPoint(index) {
+      const point = priceHistoryPlotPoints[index];
+      const hover = document.querySelector('#price-history-chart .price-history-hover');
+      if (!point || !hover) return;
+      priceHistorySelectedAt = point.time;
+      hover.classList.add('is-active');
+      const line = hover.querySelector('line');
+      line.setAttribute('x1', point.x);
+      line.setAttribute('x2', point.x);
+      const dot = hover.querySelector('circle');
+      dot.setAttribute('cx', point.x);
+      dot.setAttribute('cy', point.y);
+      document.getElementById('price-history-detail').textContent = `${priceHistoryTime(point.time)} 北京时间 · 标记价格 $${point.price.toFixed(4)}${point.live ? ' · 实时' : ''}`;
+    }
+
+    function renderPriceHistory(fresh) {
+      const chart = document.getElementById('price-history-chart');
+      const now = Date.now();
+      const start = beijingDayStart(now) - 6 * 86400000;
+      const width = Math.max(280, chart.clientWidth);
+      const baseline = midnightPrice();
+      const points = (latestPriceHistory?.points || []).map(point => ({
+        time: Date.parse(point.timestamp), price: parseFloat(point.price), live: false
+      })).filter(point => Number.isFinite(point.time) && point.time >= start && point.time <= now
+        && Number.isFinite(point.price) && point.price > 0).sort((a, b) => a.time - b.time);
+      if (fresh && latestMarkUpdatedAt <= now && latestMarkUpdatedAt >= start) {
+        const last = points[points.length - 1];
+        const current = { time: latestMarkUpdatedAt, price: latestMarkPrice, live: true };
+        if (last?.time === current.time) points[points.length - 1] = current;
+        else if (!last || last.time < current.time) points.push(current);
+      }
+      document.getElementById('price-history-range').textContent = `${priceHistoryTime(start)} — ${priceHistoryTime(now)} · 北京时间 (UTC+8) · ${latestSymbol} / ${latestPriceTestnet ? '测试网' : '正式网'} · 每小时快照及实时价格`;
+      const status = document.getElementById('price-history-status');
+      const historyCount = points.filter(point => !point.live).length;
+      status.textContent = !historyCount ? '正在同步历史价格…' : baseline === null
+        ? '今日 00:00 快照暂未就绪，今日涨跌将在同步后显示。' : !fresh ? '实时行情暂未更新，曲线保留已保存的快照。' : '';
+      const key = JSON.stringify([latestSymbol, latestPriceTestnet, width, start, Math.floor(now / 60000), baseline, points]);
+      if (key === priceHistoryRenderKey) return;
+      priceHistoryRenderKey = key;
+      const focused = chart.contains(document.activeElement);
+      const selectedAt = priceHistorySelectedAt;
+      if (!points.length) {
+        chart.replaceChildren();
+        priceHistoryPlotPoints = [];
+        priceHistorySelectedAt = null;
+        document.getElementById('price-history-detail').textContent = '历史价格同步后自动显示曲线。';
+        return;
+      }
+      const left = 72, right = width - 14, top = 18, bottom = 220;
+      const values = points.map(point => point.price);
+      if (baseline !== null) values.push(baseline);
+      const min = Math.min(...values), max = Math.max(...values);
+      const padding = Math.max((max - min) * .12, max * .0005, .0001);
+      const low = min - padding, high = max + padding;
+      const x = time => left + (time - start) / (now - start) * (right - left);
+      const y = price => bottom - (price - low) / (high - low) * (bottom - top);
+      priceHistoryPlotPoints = points.map(point => ({ ...point, x: x(point.time), y: y(point.price) }));
+      const segments = [];
+      priceHistoryPlotPoints.forEach((point, index) => {
+        if (!index || point.time - points[index - 1].time > 3600000) segments.push([]);
+        segments[segments.length - 1].push(point);
+      });
+      const lines = segments.map(segment => segment.map((point, index) => `${index ? 'L' : 'M'}${point.x.toFixed(2)},${point.y.toFixed(2)}`).join(' '));
+      const areas = segments.map((segment, index) => `${lines[index]} L${segment[segment.length - 1].x.toFixed(2)},${bottom} L${segment[0].x.toFixed(2)},${bottom} Z`).join(' ');
+      const grid = Array.from({ length: 5 }, (_, index) => {
+        const value = high - (high - low) * index / 4;
+        const height = y(value);
+        return `<line class="price-history-grid" x1="${left}" x2="${right}" y1="${height}" y2="${height}"/><text class="price-history-axis" x="${left - 10}" y="${height + 4}" text-anchor="end">${value.toFixed(4)}</text>`;
+      }).join('');
+      const dates = Array.from({ length: 7 }, (_, index) => index).filter(index => width >= 520 || index % 2 === 0).map(index => {
+        const time = start + index * 86400000;
+        return `<text class="price-history-axis" x="${x(time)}" y="246" text-anchor="middle">${priceHistoryTime(time, false)}</text>`;
+      }).join('');
+      const last = priceHistoryPlotPoints[priceHistoryPlotPoints.length - 1];
+      chart.innerHTML = `<svg viewBox="0 0 ${width} 260" tabindex="0" role="img" aria-labelledby="price-history-title price-history-range" aria-describedby="price-history-detail">
+        <defs><linearGradient id="price-history-fill" x1="0" x2="0" y1="0" y2="1"><stop stop-color="var(--accent)" stop-opacity=".16"/><stop offset="1" stop-color="var(--accent)" stop-opacity="0"/></linearGradient></defs>
+        ${grid}${dates}<path d="${areas}" fill="url(#price-history-fill)"/>
+        ${baseline === null ? '' : `<line class="price-history-baseline" x1="${left}" x2="${right}" y1="${y(baseline)}" y2="${y(baseline)}"/>`}
+        <path class="price-history-line" d="${lines.join(' ')}"/>
+        <circle cx="${last.x}" cy="${last.y}" r="3.5" fill="var(--accent)"/>
+        <g class="price-history-hover"><line y1="${top}" y2="${bottom}"/><circle r="4"/></g>
+      </svg>`;
+      if (focused) chart.querySelector('svg').focus({ preventScroll: true });
+      const selected = priceHistoryPlotPoints.findIndex(point => point.time === selectedAt);
+      if (selected >= 0) showPriceHistoryPoint(selected);
+      else if (focused) showPriceHistoryPoint(priceHistoryPlotPoints.length - 1);
+      else {
+        priceHistorySelectedAt = null;
+        document.getElementById('price-history-detail').textContent = '悬停曲线或聚焦后使用左右方向键查看价格；虚线为今日 00:00 基准。';
+      }
+    }
 
     function initWebSocket() {
       const token = getAuthToken();
@@ -853,16 +996,17 @@
       // Ticker & Price Card
       const price = parseFloat(data.ticker.last_price || 0);
       latestSymbol = data.symbol;
-      latestMarkPrice = parseFloat(data.ticker.mark_price || 0);
+      latestMarkPrice = data.ticker.symbol === data.symbol ? parseFloat(data.ticker.mark_price || 0) : 0;
       latestMarkUpdatedAt = Date.parse(data.ticker.mark_update_time || '');
+      latestPriceHistory = data.price_history || null;
+      latestPriceTestnet = data.grid_config.is_testnet;
       document.getElementById('card-price-title').textContent = `${data.symbol} 标记价格`;
       renderMarkPrice();
 
       const chgPct = parseFloat(data.ticker.change_percent_24h || 0);
       const chgVal = parseFloat(data.ticker.change_24h || 0);
-      const chgEl = document.getElementById('card-price-change');
-      chgEl.textContent = `${chgPct >= 0 ? '+' : ''}${chgPct.toFixed(2)}% (${chgVal >= 0 ? '+' : ''}${chgVal.toFixed(2)} USDC)`;
-      chgEl.className = chgPct >= 0 ? 'text-green' : 'text-red';
+      const chgEl = document.getElementById('card-price-24h-change');
+      chgEl.textContent = `近 24h 涨跌 ${chgPct >= 0 ? '+' : ''}${chgPct.toFixed(2)}% (${chgVal >= 0 ? '+' : ''}${chgVal.toFixed(2)} USDC)`;
 
       document.getElementById('card-high').textContent = parseFloat(data.ticker.high_24h || 0).toFixed(2);
       document.getElementById('card-low').textContent = parseFloat(data.ticker.low_24h || 0).toFixed(2);
@@ -1360,6 +1504,34 @@
     }
 
     window.addEventListener('DOMContentLoaded', () => {
+      const priceChart = document.getElementById('price-history-chart');
+      priceChart.addEventListener('pointermove', event => {
+        const svg = priceChart.querySelector('svg');
+        if (!svg || !priceHistoryPlotPoints.length) return;
+        const rect = svg.getBoundingClientRect();
+        const pointerX = (event.clientX - rect.left) * svg.viewBox.baseVal.width / rect.width;
+        const nearest = priceHistoryPlotPoints.reduce((best, point, index) =>
+          Math.abs(point.x - pointerX) < Math.abs(priceHistoryPlotPoints[best].x - pointerX) ? index : best, 0);
+        showPriceHistoryPoint(nearest);
+      });
+      priceChart.addEventListener('focusin', () => showPriceHistoryPoint(priceHistoryPlotPoints.length - 1));
+      priceChart.addEventListener('keydown', event => {
+        if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key) || !priceHistoryPlotPoints.length) return;
+        event.preventDefault();
+        const index = priceHistoryPlotPoints.findIndex(point => point.time === priceHistorySelectedAt);
+        const next = event.key === 'Home' ? 0 : event.key === 'End' ? priceHistoryPlotPoints.length - 1
+          : Math.max(0, Math.min(priceHistoryPlotPoints.length - 1, index + (event.key === 'ArrowLeft' ? -1 : 1)));
+        showPriceHistoryPoint(next);
+      });
+      const clearPriceSelection = () => {
+        if (priceChart.contains(document.activeElement)) return;
+        priceHistorySelectedAt = null;
+        priceChart.querySelector('.price-history-hover')?.classList.remove('is-active');
+        document.getElementById('price-history-detail').textContent = '悬停曲线或聚焦后使用左右方向键查看价格；虚线为今日 00:00 基准。';
+      };
+      priceChart.addEventListener('pointerleave', clearPriceSelection);
+      priceChart.addEventListener('focusout', clearPriceSelection);
+      window.addEventListener('resize', renderMarkPrice);
       const tradeChart = document.getElementById('hourly-trade-chart');
       const tradeDetail = document.getElementById('trade-chart-detail');
       const tradeHint = tradeDetail.textContent;

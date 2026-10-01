@@ -389,14 +389,29 @@ impl AppState {
 
         let trade_symbol = symbol.clone();
         let mode = TradingMode::from_exchange(dry_run, summary.is_testnet);
+        let snapshot_time = Utc::now();
         let hourly_trade_stats = match self
             .db
-            .run_blocking(move |db| db.get_hourly_trade_stats(&trade_symbol, mode, Utc::now()))
+            .run_blocking(move |db| db.get_hourly_trade_stats(&trade_symbol, mode, snapshot_time))
             .await
         {
             Ok(stats) => Some(stats),
             Err(error) => {
                 warn!("Failed to load hourly trade counts: {}", error);
+                None
+            }
+        };
+
+        let price_symbol = symbol.clone();
+        let is_testnet = summary.is_testnet;
+        let price_history = match self
+            .db
+            .run_blocking(move |db| db.get_price_history(&price_symbol, is_testnet, snapshot_time))
+            .await
+        {
+            Ok(history) => Some(history),
+            Err(error) => {
+                warn!("Failed to load price history: {}", error);
                 None
             }
         };
@@ -433,6 +448,7 @@ impl AppState {
             active_orders,
             recent_trades,
             hourly_trade_stats,
+            price_history,
             recent_logs,
         }
     }

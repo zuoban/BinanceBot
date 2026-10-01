@@ -267,6 +267,21 @@ pub struct HourlyTradeStats {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PricePoint {
+    pub timestamp: DateTime<Utc>,
+    pub price: Decimal,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PriceHistory {
+    pub window_start: DateTime<Utc>,
+    pub window_end: DateTime<Utc>,
+    pub day_start: DateTime<Utc>,
+    pub midnight_price: Option<Decimal>,
+    pub points: Vec<PricePoint>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BotSnapshot {
     pub status: BotStatus,
     pub dry_run: bool,
@@ -280,6 +295,7 @@ pub struct BotSnapshot {
     pub active_orders: Vec<GridOrder>,
     pub recent_trades: Vec<TradeRecord>,
     pub hourly_trade_stats: Option<HourlyTradeStats>,
+    pub price_history: Option<PriceHistory>,
     pub recent_logs: Vec<LogEntry>,
 }
 

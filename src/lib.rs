@@ -3,6 +3,7 @@ pub mod config;
 pub mod db;
 pub mod exchange;
 pub mod fx;
+pub mod price_history;
 pub mod server;
 pub mod strategy;
 pub mod telegram;

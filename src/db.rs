@@ -1,11 +1,11 @@
 use crate::auth;
 use crate::config::AppConfig;
 use crate::types::{
-    BotStatus, GridOrder, GridStats, HourlyTradeCount, HourlyTradeStats, OrderSide, RemainderPlan,
-    TradeRecord, TradingMode,
+    BotStatus, GridOrder, GridStats, HourlyTradeCount, HourlyTradeStats, OrderSide, PriceHistory,
+    PricePoint, RemainderPlan, TradeRecord, TradingMode,
 };
 use anyhow::{Context, Result};
-use chrono::{DateTime, Duration as ChronoDuration, FixedOffset, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use rust_decimal::Decimal;
 use std::path::Path;
@@ -156,6 +156,14 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades (timestamp DESC);
             CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades (symbol);
             CREATE INDEX IF NOT EXISTS idx_trades_client_order_id ON trades (client_order_id);
+
+            CREATE TABLE IF NOT EXISTS price_snapshots (
+                symbol TEXT NOT NULL,
+                is_testnet INTEGER NOT NULL,
+                timestamp INTEGER NOT NULL,
+                price TEXT NOT NULL,
+                PRIMARY KEY (symbol, is_testnet, timestamp)
+            );
 
             CREATE TABLE IF NOT EXISTS managed_orders (
                 client_order_id TEXT PRIMARY KEY,
@@ -670,16 +678,7 @@ impl Database {
         mode: TradingMode,
         now: DateTime<Utc>,
     ) -> Result<HourlyTradeStats> {
-        let beijing = FixedOffset::east_opt(8 * 3600).unwrap();
-        let window_start = now
-            .with_timezone(&beijing)
-            .date_naive()
-            .and_hms_opt(0, 0, 0)
-            .unwrap()
-            .and_local_timezone(beijing)
-            .single()
-            .unwrap()
-            .with_timezone(&Utc);
+        let window_start = crate::price_history::beijing_midnight(now);
         let first_hour = window_start.timestamp();
         let last_hour = now.timestamp().div_euclid(3600) * 3600;
         let mut buckets: Vec<_> = (first_hour..=last_hour)
@@ -723,6 +722,81 @@ impl Database {
             window_start,
             window_end: now,
             buckets,
+        })
+    }
+
+    /// Store exchange hourly opens once; a midnight snapshot must not change later.
+    pub fn save_price_points(
+        &self,
+        symbol: &str,
+        is_testnet: bool,
+        points: &[PricePoint],
+    ) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT OR IGNORE INTO price_snapshots (symbol, is_testnet, timestamp, price) VALUES (?1, ?2, ?3, ?4);",
+            )?;
+            for point in points {
+                anyhow::ensure!(point.price > Decimal::ZERO, "Invalid snapshot price");
+                anyhow::ensure!(
+                    point.timestamp.timestamp().rem_euclid(3600) == 0
+                        && point.timestamp.timestamp_subsec_nanos() == 0,
+                    "Snapshot time must be an exact hour"
+                );
+                stmt.execute(params![
+                    symbol,
+                    is_testnet,
+                    point.timestamp.timestamp_millis(),
+                    point.price.to_string(),
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn get_price_history(
+        &self,
+        symbol: &str,
+        is_testnet: bool,
+        now: DateTime<Utc>,
+    ) -> Result<PriceHistory> {
+        let day_start = crate::price_history::beijing_midnight(now);
+        let window_start = day_start - ChronoDuration::days(6);
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT timestamp, price FROM price_snapshots WHERE symbol = ?1 AND is_testnet = ?2 AND timestamp >= ?3 AND timestamp <= ?4 ORDER BY timestamp;",
+        )?;
+        let rows = stmt.query_map(
+            params![
+                symbol,
+                is_testnet,
+                window_start.timestamp_millis(),
+                now.timestamp_millis()
+            ],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )?;
+        let mut points = Vec::new();
+        for row in rows {
+            let (timestamp, price) = row?;
+            points.push(PricePoint {
+                timestamp: DateTime::from_timestamp_millis(timestamp)
+                    .context("Invalid saved snapshot timestamp")?,
+                price: Decimal::from_str(&price).context("Invalid saved snapshot price")?,
+            });
+        }
+        let midnight_price = points
+            .iter()
+            .find(|point| point.timestamp == day_start)
+            .map(|point| point.price);
+        Ok(PriceHistory {
+            window_start,
+            window_end: now,
+            day_start,
+            midnight_price,
+            points,
         })
     }
 

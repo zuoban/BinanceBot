@@ -288,6 +288,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     tokio::spawn(state.clone().run_cny_rate_refresh());
+    tokio::spawn(state.clone().run_price_history_refresh());
 
     tokio::spawn(async move {
         engine.run().await;

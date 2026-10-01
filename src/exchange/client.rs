@@ -1,11 +1,13 @@
 use crate::config::ExchangeConfig;
 use crate::exchange::model::*;
 use crate::exchange::signature::sign_query;
-use anyhow::{anyhow, Result};
-use chrono::Utc;
+use crate::types::PricePoint;
+use anyhow::{anyhow, Context, Result};
+use chrono::{DateTime, Utc};
 use reqwest::header::{HeaderMap, HeaderValue};
 use reqwest::Client;
 use rust_decimal::Decimal;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 use tracing::{debug, info};
@@ -136,6 +138,57 @@ impl BinanceFuturesClient {
         let resp = self.client.get(&url).send().await?.error_for_status()?;
         let mark: BinanceMarkPrice = resp.json().await?;
         Ok(mark.mark_price)
+    }
+
+    /// Fetch hourly opening mark prices, including the current hour's open.
+    pub async fn get_hourly_mark_prices(
+        &self,
+        symbol: &str,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<Vec<PricePoint>> {
+        let url = format!("{}/fapi/v1/markPriceKlines", self.base_url);
+        let rows: Vec<Vec<serde_json::Value>> = self
+            .client
+            .get(url)
+            .query(&[
+                ("symbol", symbol.to_string()),
+                ("interval", "1h".to_string()),
+                ("startTime", start.timestamp_millis().to_string()),
+                ("endTime", end.timestamp_millis().to_string()),
+                ("limit", "200".to_string()),
+            ])
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        let mut points = Vec::with_capacity(rows.len());
+        for row in rows {
+            let timestamp = row
+                .first()
+                .and_then(|value| value.as_i64())
+                .and_then(DateTime::from_timestamp_millis)
+                .context("Mark-price kline has an invalid open time")?;
+            let price = Decimal::from_str(
+                row.get(1)
+                    .and_then(|value| value.as_str())
+                    .context("Mark-price kline has no opening price")?,
+            )?;
+            anyhow::ensure!(
+                price > Decimal::ZERO,
+                "Invalid mark-price kline opening price"
+            );
+            anyhow::ensure!(
+                timestamp.timestamp_millis().rem_euclid(3_600_000) == 0,
+                "Mark-price kline is not hourly"
+            );
+            if timestamp >= start && timestamp <= end {
+                points.push(PricePoint { timestamp, price });
+            }
+        }
+        points.sort_by_key(|point| point.timestamp);
+        Ok(points)
     }
 
     /// Fetch 24-hour ticker statistics
