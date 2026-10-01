@@ -1,8 +1,6 @@
 use crate::config::TelegramConfig;
 use crate::fx::CnyRate;
-use crate::types::{
-    AccountInfo, HourlyTradeStats, OrderSide, TickerInfo, TradeRecord, TradingMode,
-};
+use crate::types::{AccountInfo, HourlyTradeStats, OrderSide, TradeRecord, TradingMode};
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Duration, Utc};
 use reqwest::Client;
@@ -24,7 +22,6 @@ struct TelegramResponse {
 
 #[derive(Debug, Default)]
 pub struct TradeNotificationContext {
-    pub mark_price: Option<Decimal>,
     pub today_count: Option<u64>,
     pub hour_count: Option<u64>,
     pub account_equity: Option<Decimal>,
@@ -36,7 +33,6 @@ impl TradeNotificationContext {
     pub fn for_trade(
         trade: &TradeRecord,
         hourly_stats: Option<&HourlyTradeStats>,
-        ticker: &TickerInfo,
         account: &AccountInfo,
         unrealized_pnl: Decimal,
         cny_rate: Option<&CnyRate>,
@@ -48,12 +44,6 @@ impl TradeNotificationContext {
         };
         let today_count = hourly_stats.map(|stats| stats.buckets.iter().map(side_count).sum());
         let hour_count = hourly_stats.and_then(|stats| stats.buckets.last().map(side_count));
-        let mark_age = now - ticker.mark_update_time;
-        let mark_price = (ticker.symbol == trade.symbol
-            && ticker.mark_price > Decimal::ZERO
-            && mark_age >= Duration::zero()
-            && mark_age < Duration::seconds(15))
-        .then_some(ticker.mark_price);
         let age = now - account.update_time;
         let fresh = trade.mode == TradingMode::Paper
             || (age >= Duration::zero() && age < Duration::seconds(30));
@@ -73,7 +63,6 @@ impl TradeNotificationContext {
             })
             .map(|rate| rate.cny_per_unit);
         Self {
-            mark_price,
             today_count,
             hour_count,
             account_equity,
@@ -97,10 +86,7 @@ pub fn format_trade_message(trade: &TradeRecord, context: &TradeNotificationCont
     };
     let quote = quote_asset(&trade.symbol);
     let base = trade.symbol.strip_suffix(quote).unwrap_or("");
-    let mark_price = context.mark_price.map_or_else(
-        || "--".to_string(),
-        |price| format!("{:.4}", price.round_dp(4)),
-    );
+    let average_price = trade.price.round_dp(4);
     let count = |value: Option<u64>| value.map_or_else(|| "--".to_string(), |n| n.to_string());
     let money = |value: Option<Decimal>| {
         value.map_or_else(
@@ -139,7 +125,7 @@ pub fn format_trade_message(trade: &TradeRecord, context: &TradeNotificationCont
         String::new()
     };
     format!(
-        "<b>{icon} {direction}｜{mark_price}｜{quantity} {base}｜{amount:.2} {quote}｜{today}｜{hour}</b>\n<b>账户权益：{equity}｜</b>{cny}\n可用保证金：{available}｜{ratio}{pnl_line}",
+        "<b>{icon} {direction}｜{average_price:.4}｜{quantity} {base}｜{amount:.2} {quote}｜{today}｜{hour}</b>\n<b>账户权益：{equity}｜</b>{cny}\n可用保证金：{available}｜{ratio}{pnl_line}",
         direction = trade.side.as_str(),
         quantity = trade.quantity.normalize(),
         base = escape_html(base),
@@ -245,16 +231,6 @@ mod tests {
         }
     }
 
-    fn ticker(trade: &TradeRecord) -> TickerInfo {
-        TickerInfo {
-            symbol: trade.symbol.clone(),
-            last_price: dec!(999),
-            mark_price: dec!(123.456789),
-            mark_update_time: trade.timestamp,
-            ..Default::default()
-        }
-    }
-
     fn context(trade: &TradeRecord) -> TradeNotificationContext {
         let start = trade.timestamp - Duration::minutes(26) - Duration::hours(20);
         let stats = HourlyTradeStats {
@@ -281,7 +257,6 @@ mod tests {
         TradeNotificationContext::for_trade(
             trade,
             Some(&stats),
-            &ticker(trade),
             &account(trade.timestamp),
             dec!(1254.48),
             Some(&rate),
@@ -294,7 +269,7 @@ mod tests {
         let trade = trade(OrderSide::Buy);
         assert_eq!(
             format_trade_message(&trade, &context(&trade)),
-            "<b>🟢 BUY｜123.4568｜2 SOL｜246.90 USDC｜7｜2</b>\n<b>账户权益：11254.48 USDC｜</b>≈ ¥75453.41\n可用保证金：3878.03 USDC｜34.46%"
+            "<b>🟢 BUY｜123.4500｜2 SOL｜246.90 USDC｜7｜2</b>\n<b>账户权益：11254.48 USDC｜</b>≈ ¥75453.41\n可用保证金：3878.03 USDC｜34.46%"
         );
     }
 
@@ -305,7 +280,7 @@ mod tests {
         trade.commission = dec!(0.80);
         assert_eq!(
             format_trade_message(&trade, &context(&trade)),
-            "<b>🔴 SELL｜123.4568｜2 SOL｜246.90 USDC｜4｜1</b>\n<b>账户权益：11254.48 USDC｜</b>≈ ¥75453.41\n可用保证金：3878.03 USDC｜34.46%\n已实现盈亏：-3.2500 USDC"
+            "<b>🔴 SELL｜123.4500｜2 SOL｜246.90 USDC｜4｜1</b>\n<b>账户权益：11254.48 USDC｜</b>≈ ¥75453.41\n可用保证金：3878.03 USDC｜34.46%\n已实现盈亏：-3.2500 USDC"
         );
         trade.realized_pnl = dec!(1.25);
         assert!(
@@ -316,38 +291,25 @@ mod tests {
     }
 
     #[test]
-    fn missing_stale_or_mismatched_mark_price_is_unavailable() {
-        let trade = trade(OrderSide::Buy);
-        for ticker in [
-            TickerInfo::default(),
-            TickerInfo {
-                mark_update_time: trade.timestamp - Duration::seconds(15),
-                ..ticker(&trade)
-            },
-            TickerInfo {
-                symbol: "BTCUSDC".into(),
-                ..ticker(&trade)
-            },
-            TickerInfo {
-                mark_price: Decimal::ZERO,
-                ..ticker(&trade)
-            },
-            TickerInfo {
-                mark_update_time: trade.timestamp + Duration::nanoseconds(1),
-                ..ticker(&trade)
-            },
-        ] {
-            let context = TradeNotificationContext::for_trade(
-                &trade,
-                None,
-                &ticker,
-                &account(trade.timestamp),
-                Decimal::ZERO,
-                None,
-                trade.timestamp,
-            );
-            assert_eq!(context.mark_price, None);
-            assert!(format_trade_message(&trade, &context).starts_with("<b>🟢 BUY｜--｜"));
+    fn titles_use_execution_average_without_market_or_account_data() {
+        for mode in [TradingMode::Paper, TradingMode::Testnet, TradingMode::Live] {
+            for side in [OrderSide::Buy, OrderSide::Sell] {
+                let mut trade = trade(side);
+                trade.mode = mode;
+                trade.price = dec!(117.123456);
+                trade.quantity = dec!(4.27);
+                trade.amount_usdc = trade.price * trade.quantity;
+                let message = format_trade_message(&trade, &TradeNotificationContext::default());
+                let icon = if side == OrderSide::Buy {
+                    "🟢"
+                } else {
+                    "🔴"
+                };
+                assert!(message.starts_with(&format!(
+                    "<b>{icon} {}｜117.1235｜4.27 SOL｜500.12 USDC｜--｜--</b>",
+                    side.as_str()
+                )));
+            }
         }
     }
 
@@ -364,7 +326,6 @@ mod tests {
             let context = TradeNotificationContext::for_trade(
                 &trade,
                 None,
-                &ticker(&trade),
                 &account,
                 Decimal::ZERO,
                 None,
@@ -386,7 +347,6 @@ mod tests {
         let context = TradeNotificationContext::for_trade(
             &trade,
             None,
-            &ticker(&trade),
             &account(trade.timestamp - Duration::hours(1)),
             dec!(500),
             None,
@@ -427,7 +387,6 @@ mod tests {
             let context = TradeNotificationContext::for_trade(
                 &trade,
                 None,
-                &ticker(&trade),
                 &account(trade.timestamp),
                 Decimal::ZERO,
                 Some(&rate),
@@ -499,7 +458,6 @@ mod tests {
             let context = TradeNotificationContext::for_trade(
                 &fill,
                 Some(&stats),
-                &ticker(&fill),
                 &account(timestamp),
                 Decimal::ZERO,
                 None,
@@ -536,7 +494,6 @@ mod tests {
         let context = TradeNotificationContext::for_trade(
             &fill,
             Some(&stats),
-            &ticker(&fill),
             &account(fill.timestamp),
             Decimal::ZERO,
             None,

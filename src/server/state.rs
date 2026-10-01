@@ -237,14 +237,12 @@ impl AppState {
         }
 
         if telegram.enabled {
-            let ticker = self.ticker.read().await.clone();
             let account = self.account.read().await.clone();
             let unrealized_pnl = self.position.read().await.unrealized_pnl;
             let cny_rate = self.cny_rates.get(&account.asset).await;
             let context = TradeNotificationContext::for_trade(
                 &trade,
                 notification_stats.as_ref(),
-                &ticker,
                 &account,
                 unrealized_pnl,
                 cny_rate.as_ref(),
