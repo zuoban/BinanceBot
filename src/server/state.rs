@@ -217,10 +217,9 @@ impl AppState {
                     Err(error) => warn!("Could not load Telegram trade counts: {}", error),
                 }
             }
-        }
 
-        // Add to in-memory recent trades
-        {
+            // Keep the cache update in the same critical section as persistence
+            // so cleanup cannot be followed by an old trade reappearing here.
             let mut trades = self.recent_trades.write().await;
             if trades.len() >= 200 {
                 trades.pop_front();
@@ -331,6 +330,21 @@ impl AppState {
         updated.pending_pnl_trades = pending;
         *self.stats.write().await = updated;
         *self.recent_trades.write().await = trades.into_iter().rev().collect();
+    }
+
+    pub async fn clear_trade_history(&self) -> anyhow::Result<usize> {
+        let _commit = self.trade_commit_lock.lock().await;
+        let deleted = self.db.run_blocking(Database::clear_trade_history).await?;
+        let mut stats = self.stats.write().await;
+        *stats = GridStats {
+            start_time: stats.start_time,
+            uptime_secs: stats.uptime_secs,
+            active_buy_orders: stats.active_buy_orders,
+            active_sell_orders: stats.active_sell_orders,
+            ..GridStats::default()
+        };
+        self.recent_trades.write().await.clear();
+        Ok(deleted)
     }
 
     pub async fn add_log(&self, level: &str, message: impl Into<String>) {

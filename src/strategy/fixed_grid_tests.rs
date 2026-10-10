@@ -53,6 +53,77 @@ async fn orders(engine: &GridTradingEngine) -> Vec<GridOrder> {
 }
 
 #[tokio::test]
+async fn history_cleanup_keeps_the_window_boundary_and_does_not_reapply_fills() {
+    let mut engine = paper_engine().await;
+    engine.state.ticker.write().await.last_price = dec!(119.25);
+    let mut filled = order("b_cleanup_filled", OrderSide::Buy, dec!(119.2), dec!(1));
+    assert!(engine.on_order_filled(&mut filled).await);
+    let position = engine.state.position.read().await.size;
+    let balance = engine.state.account.read().await.total_wallet_balance;
+    let config = engine.state.config.read().await.clone();
+    let rules = engine.state.rules.read().await.clone();
+    let expected_window = engine
+        .window_prices(&config, &rules, dec!(119.25))
+        .await
+        .unwrap();
+    let pending = order("b_cleanup_pending", OrderSide::Buy, dec!(119.1), dec!(1));
+    engine
+        .state
+        .active_orders
+        .write()
+        .await
+        .insert(pending.client_order_id.clone(), pending.clone());
+    engine.state.db.save_managed_order(&pending).unwrap();
+    let pair = new_pair_intent(&filled, OrderSide::Sell, dec!(119.3), dec!(1));
+    let plan = RemainderPlan {
+        symbol: "SOLUSDC".into(),
+        mode: TradingMode::Paper,
+        sources: vec![pending],
+        target: pair,
+        phase: RemainderPhase::Canceling,
+    };
+    engine.state.db.save_remainder_plan(&plan).unwrap();
+
+    assert_eq!(engine.state.clear_trade_history().await.unwrap(), 1);
+    assert_eq!(
+        engine
+            .window_prices(&config, &rules, dec!(119.25))
+            .await
+            .unwrap(),
+        expected_window
+    );
+    assert_eq!(orders(&engine).await.len(), 1);
+    assert_eq!(
+        engine
+            .state
+            .db
+            .load_managed_orders("SOLUSDC")
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(engine
+        .state
+        .db
+        .load_remainder_plan("SOLUSDC", TradingMode::Paper)
+        .unwrap()
+        .is_some());
+    assert!(engine.on_order_filled(&mut filled).await);
+    assert_eq!(engine.state.position.read().await.size, position);
+    assert_eq!(
+        engine.state.account.read().await.total_wallet_balance,
+        balance
+    );
+    assert_eq!(engine.state.stats.read().await.total_trades, 0);
+    assert!(engine.state.db.get_recent_trades(10).unwrap().is_empty());
+
+    let mut next = order("b_cleanup_next", OrderSide::Buy, dec!(119.1), dec!(1));
+    assert!(engine.on_order_filled(&mut next).await);
+    assert_eq!(engine.state.stats.read().await.total_trades, 1);
+    assert_eq!(engine.state.position.read().await.size, position + dec!(1));
+}
+
+#[tokio::test]
 async fn sell_window_skips_last_sell_and_prunes_wrong_direction_and_stale_orders() {
     let mut engine = paper_engine().await;
     engine.state.config.write().await.grid.order_amount_usdc = dec!(300);

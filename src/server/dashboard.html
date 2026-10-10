@@ -186,10 +186,17 @@
       <!-- Tab: Trade History -->
       <div class="tab-content" id="tab-trades" role="tabpanel" aria-labelledby="tab-btn-trades">
         <div class="section-title">
-          <p class="trade-chart-note">导出全部交易对和模式的成交、订单及策略数据；文件已移除密钥和登录信息。</p>
-          <button type="button" id="btn-export-database" onclick="exportDatabase()">导出数据库</button>
+          <div class="history-notes">
+            <p class="trade-chart-note">导出全部交易对和模式的成交、订单及策略数据；文件已移除密钥和登录信息。</p>
+            <p class="trade-chart-note">清理将删除全部历史成交并重置累计统计，建议先导出保存。</p>
+          </div>
+          <div class="history-actions">
+            <button type="button" id="btn-export-database" onclick="exportDatabase()">导出数据库</button>
+            <button type="button" class="btn-danger" id="btn-clear-trades" onclick="clearTradeHistory()">清理历史记录</button>
+          </div>
         </div>
         <p class="trade-chart-note" id="database-export-status" role="status" aria-live="polite"></p>
+        <p class="trade-chart-note" id="trade-cleanup-status" role="status" aria-live="polite"></p>
         <div class="table-scroll" role="region" aria-label="成交与套利历史，可横向滚动" tabindex="0">
         <table>
           <thead>
@@ -517,6 +524,34 @@
       } finally {
         button.disabled = false;
         button.textContent = "导出数据库";
+      }
+    }
+
+    async function clearTradeHistory() {
+      const button = document.getElementById("btn-clear-trades");
+      const status = document.getElementById("trade-cleanup-status");
+      if (button.disabled) return;
+      if (!window.confirm("确认清理全部交易对及运行模式的历史成交记录？\n\n累计成交量、成交笔数、盈亏、手续费和历史循环统计也会重置。此操作无法撤销，建议先导出数据库。\n\n当前持仓、挂单、配置及网格最近成交边界会保留。")) return;
+      button.disabled = true;
+      button.textContent = "清理中…";
+      status.textContent = "正在清理历史成交记录…";
+      try {
+        const response = await authFetch("/api/trades/clear", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ confirm: true })
+        });
+        const result = await response.json();
+        if (!response.ok || !result.success) {
+          throw new Error(result.message || "历史记录清理失败，请稍后重试");
+        }
+        updateDashboard(result.data.snapshot);
+        status.textContent = result.message;
+      } catch (error) {
+        status.textContent = error.message || "历史记录清理失败，请稍后重试";
+      } finally {
+        button.disabled = false;
+        button.textContent = "清理历史记录";
       }
     }
 

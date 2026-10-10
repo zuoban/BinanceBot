@@ -1476,10 +1476,10 @@ impl GridTradingEngine {
         match self
             .state
             .db
-            .run_blocking(move |db| db.get_trade_by_client_id(&recorded_id, mode))
+            .run_blocking(move |db| db.has_recorded_order(&recorded_id, mode))
             .await
         {
-            Ok(Some(_)) => {
+            Ok(true) => {
                 self.state
                     .active_orders
                     .write()
@@ -1493,7 +1493,7 @@ impl GridTradingEngine {
                 }
                 return true;
             }
-            Ok(None) => {}
+            Ok(false) => {}
             Err(e) => {
                 error!(
                     "Could not check recorded fill {}: {}",

@@ -157,6 +157,24 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades (symbol);
             CREATE INDEX IF NOT EXISTS idx_trades_client_order_id ON trades (client_order_id);
 
+            -- Minimal recovery metadata survives history cleanup.
+            CREATE TABLE IF NOT EXISTS cleared_trade_ids (
+                trade_id TEXT PRIMARY KEY,
+                client_order_id TEXT NOT NULL,
+                mode TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_cleared_trade_order
+                ON cleared_trade_ids (client_order_id, mode);
+
+            CREATE TABLE IF NOT EXISTS execution_frontiers (
+                symbol TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                side TEXT NOT NULL,
+                price TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                PRIMARY KEY (symbol, mode)
+            );
+
             CREATE TABLE IF NOT EXISTS price_snapshots (
                 symbol TEXT NOT NULL,
                 is_testnet INTEGER NOT NULL,
@@ -416,6 +434,32 @@ impl Database {
         insert_trade_on(&conn, trade)
     }
 
+    /// Delete analysis history atomically while preserving order deduplication
+    /// and the execution frontier needed by a running or restarted strategy.
+    pub fn clear_trade_history(&self) -> Result<usize> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute_batch(
+            "INSERT INTO execution_frontiers (symbol, mode, side, price, timestamp)
+             SELECT symbol, mode, side, price, timestamp FROM (
+                 SELECT symbol, mode, side, price, timestamp,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY symbol, mode ORDER BY timestamp DESC, rowid DESC
+                        ) AS rank
+                 FROM trades
+             ) WHERE rank = 1
+             ON CONFLICT(symbol, mode) DO UPDATE SET
+                 side = excluded.side, price = excluded.price, timestamp = excluded.timestamp
+             WHERE excluded.timestamp >= execution_frontiers.timestamp;
+             INSERT OR IGNORE INTO cleared_trade_ids (trade_id, client_order_id, mode)
+                 SELECT trade_id, client_order_id, mode FROM trades;",
+        )?;
+        let deleted = tx.execute("DELETE FROM trades", [])?;
+        tx.execute_batch("DELETE FROM scoped_grid_stats; DELETE FROM grid_stats;")?;
+        tx.commit()?;
+        Ok(deleted)
+    }
+
     pub fn insert_trade_with_stats(&self, trade: &TradeRecord, stats: &GridStats) -> Result<bool> {
         self.insert_trade_with_recovery(trade, stats, None, None)
     }
@@ -590,6 +634,16 @@ impl Database {
             .map_err(Into::into)
     }
 
+    pub fn has_recorded_order(&self, client_order_id: &str, mode: TradingMode) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM trades WHERE client_order_id = ?1 AND mode = ?2)
+                 OR EXISTS(SELECT 1 FROM cleared_trade_ids WHERE client_order_id = ?1 AND mode = ?2);",
+            params![client_order_id, mode.as_str()],
+            |row| row.get(0),
+        )?)
+    }
+
     /// Restore the execution frontier for this symbol and mode.
     pub fn last_fill_for(
         &self,
@@ -598,7 +652,11 @@ impl Database {
     ) -> Result<Option<(OrderSide, Decimal)>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT side, price FROM trades WHERE symbol = ?1 AND mode = ?2 ORDER BY timestamp DESC, rowid DESC LIMIT 1;",
+            "SELECT side, price FROM (
+                 SELECT side, price, timestamp, rowid AS sequence FROM trades WHERE symbol = ?1 AND mode = ?2
+                 UNION ALL
+                 SELECT side, price, timestamp, 0 AS sequence FROM execution_frontiers WHERE symbol = ?1 AND mode = ?2
+             ) ORDER BY timestamp DESC, sequence DESC LIMIT 1;",
         )?;
         let value: Option<(String, String)> = stmt
             .query_row(params![symbol, mode.as_str()], |row| {
@@ -903,6 +961,15 @@ impl Database {
 }
 
 fn insert_trade_on(conn: &Connection, trade: &TradeRecord) -> Result<bool> {
+    let cleared: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM cleared_trade_ids WHERE trade_id = ?1)
+             OR EXISTS(SELECT 1 FROM cleared_trade_ids WHERE client_order_id = ?2 AND mode = ?3);",
+        params![trade.trade_id, trade.client_order_id, trade.mode.as_str()],
+        |row| row.get(0),
+    )?;
+    if cleared {
+        return Ok(false);
+    }
     let side_str = match trade.side {
         OrderSide::Buy => "BUY",
         OrderSide::Sell => "SELL",
@@ -1006,6 +1073,117 @@ fn trade_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TradeRecord> {
 mod tests {
     use super::*;
     use rust_decimal_macros::dec;
+
+    #[test]
+    fn cleanup_preserves_frontiers_and_deduplication_across_restarts() {
+        let path = std::env::temp_dir().join(format!("cleanup-{}.db", uuid::Uuid::new_v4()));
+        let db = Database::open(&path).unwrap();
+        let mut trade = TradeRecord {
+            trade_id: "cleanup-buy".into(),
+            client_order_id: "gb_b_cleanup".into(),
+            symbol: "SOLUSDC".into(),
+            mode: TradingMode::Live,
+            side: OrderSide::Buy,
+            price: dec!(119.2),
+            quantity: dec!(1),
+            amount_usdc: dec!(119.2),
+            realized_pnl: Decimal::ZERO,
+            commission: Decimal::ZERO,
+            pnl_verified: false,
+            is_maker: true,
+            timestamp: Utc::now(),
+            note: String::new(),
+        };
+        db.insert_trade(&trade).unwrap();
+        let mut latest = trade.clone();
+        latest.trade_id = "cleanup-sell".into();
+        latest.client_order_id = "gb_s_cleanup".into();
+        latest.side = OrderSide::Sell;
+        latest.price = dec!(119.3);
+        // Equal timestamps must retain the later inserted fill.
+        db.insert_trade(&latest).unwrap();
+        assert_eq!(db.clear_trade_history().unwrap(), 2);
+        drop(db);
+        let db = Database::open(&path).unwrap();
+        assert_eq!(
+            db.last_fill_for("SOLUSDC", TradingMode::Live).unwrap(),
+            Some((OrderSide::Sell, dec!(119.3)))
+        );
+        assert_eq!(
+            db.last_fill_for("SOLUSDC", TradingMode::Paper).unwrap(),
+            None
+        );
+        assert!(db
+            .has_recorded_order(&trade.client_order_id, TradingMode::Live)
+            .unwrap());
+        assert!(!db
+            .has_recorded_order(&trade.client_order_id, TradingMode::Paper)
+            .unwrap());
+        assert!(!db.insert_trade(&trade).unwrap());
+        trade.trade_id = "different-replayed-id".into();
+        assert!(!db.insert_trade(&trade).unwrap());
+        trade.trade_id = "cleanup-buy".into();
+        trade.pnl_verified = true;
+        assert!(!db.verify_trade_pnl(&trade).unwrap());
+        assert_eq!(db.clear_trade_history().unwrap(), 0);
+        assert_eq!(
+            db.last_fill_for("SOLUSDC", TradingMode::Live).unwrap(),
+            Some((OrderSide::Sell, dec!(119.3)))
+        );
+
+        trade.trade_id = "cleanup-new-buy".into();
+        trade.client_order_id = "gb_b_new_cleanup".into();
+        assert!(db.insert_trade(&trade).unwrap());
+        assert_eq!(
+            db.last_fill_for("SOLUSDC", TradingMode::Live).unwrap(),
+            Some((OrderSide::Buy, dec!(119.2)))
+        );
+        assert_eq!(db.clear_trade_history().unwrap(), 1);
+        // Late historical data must not move the saved frontier backwards.
+        trade.trade_id = "late-buy".into();
+        trade.client_order_id = "gb_b_late_cleanup".into();
+        trade.timestamp -= ChronoDuration::hours(1);
+        trade.price = dec!(90);
+        db.insert_trade(&trade).unwrap();
+        db.clear_trade_history().unwrap();
+        assert_eq!(
+            db.last_fill_for("SOLUSDC", TradingMode::Live).unwrap(),
+            Some((OrderSide::Buy, dec!(119.2)))
+        );
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn failed_cleanup_rolls_back_history_stats_and_recovery_metadata() {
+        let db = Database::open(":memory:").unwrap();
+        db.conn.lock().unwrap().execute_batch(
+            "INSERT INTO trades (trade_id, client_order_id, symbol, mode, side, price, quantity,
+                 amount_usdc, realized_pnl, commission, is_maker, timestamp, note)
+             VALUES ('t1', 'gb_b_1', 'SOLUSDC', 'LIVE', 'BUY', '100', '1', '100', '0', '0', 1, '2026-10-10T00:00:00Z', 'test');
+             INSERT INTO scoped_grid_stats VALUES ('SOLUSDC', 'LIVE', 1, 0, '0', '100', '2026-10-10');
+             CREATE TRIGGER reject_cleanup BEFORE DELETE ON trades
+                 BEGIN SELECT RAISE(ABORT, 'cleanup test failure'); END;"
+        ).unwrap();
+        assert!(db.clear_trade_history().is_err());
+        assert_eq!(db.get_recent_trades(10).unwrap().len(), 1);
+        assert_eq!(
+            db.load_scoped_stats("SOLUSDC", TradingMode::Live)
+                .unwrap()
+                .unwrap()
+                .0,
+            1
+        );
+        let conn = db.conn.lock().unwrap();
+        for table in ["cleared_trade_ids", "execution_frontiers"] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0);
+        }
+    }
 
     #[test]
     fn analysis_export_captures_wal_and_preserves_records_without_credentials() {

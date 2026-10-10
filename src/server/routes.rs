@@ -2,8 +2,8 @@ use crate::server::state::AppState;
 use crate::server::ui::INDEX_HTML;
 use crate::types::{
     AuthLoginPayload, AuthSetupPayload, AuthStatusResponse, AuthTokenResponse, BotControlAction,
-    ChangePasswordPayload, GridOrder, LogEntry, TradeRecord, TradingMode, UpdateConfigPayload,
-    WebConfigView,
+    BotSnapshot, ChangePasswordPayload, GridOrder, LogEntry, TradeRecord, TradingMode,
+    UpdateConfigPayload, WebConfigView,
 };
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -20,6 +20,18 @@ use tracing::{error, info, warn};
 #[derive(Debug, Deserialize)]
 pub struct ControlRequest {
     pub action: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ClearTradeHistoryRequest {
+    #[serde(default)]
+    pub confirm: bool,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ClearTradeHistoryResponse {
+    pub deleted_trades: usize,
+    pub snapshot: BotSnapshot,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -86,6 +98,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/status", get(get_status_handler))
         .route("/api/orders", get(get_orders_handler))
         .route("/api/trades", get(get_trades_handler))
+        .route("/api/trades/clear", post(clear_trade_history_handler))
         .route("/api/logs", get(get_logs_handler))
         .route("/api/database/export", get(export_database_handler))
         .route(
@@ -465,6 +478,66 @@ async fn get_logs_handler(State(state): State<Arc<AppState>>) -> Json<ApiRespons
         data: Some(logs),
         message: None,
     })
+}
+
+async fn clear_trade_history_handler(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<ClearTradeHistoryRequest>,
+) -> (StatusCode, Json<ApiResponse<ClearTradeHistoryResponse>>) {
+    if !payload.confirm {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some("请先确认清理全部交易对和运行模式的历史成交及累计统计".into()),
+            }),
+        );
+    }
+    match state.clear_trade_history().await {
+        Ok(deleted_trades) => {
+            state
+                .add_log(
+                    "WARN",
+                    format!(
+                        "已清理全部历史成交记录，共 {} 笔，累计统计已重置",
+                        deleted_trades
+                    ),
+                )
+                .await;
+            let snapshot = state.snapshot().await;
+            if let Ok(event) = serde_json::to_string(&serde_json::json!({
+                "type": "snapshot", "data": snapshot
+            })) {
+                let _ = state.ws_broadcast_tx.send(event);
+            }
+            (
+                StatusCode::OK,
+                Json(ApiResponse {
+                    success: true,
+                    data: Some(ClearTradeHistoryResponse {
+                        deleted_trades,
+                        snapshot,
+                    }),
+                    message: Some(format!(
+                        "已清理 {} 笔历史成交记录，累计统计已重置",
+                        deleted_trades
+                    )),
+                }),
+            )
+        }
+        Err(error) => {
+            error!("Trade history cleanup failed: {}", error);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    message: Some("历史记录清理失败，请稍后重试或查看服务器日志".into()),
+                }),
+            )
+        }
+    }
 }
 
 async fn export_database_handler(State(state): State<Arc<AppState>>) -> Response {

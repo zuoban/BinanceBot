@@ -227,9 +227,8 @@ impl GridTradingEngine {
         if self
             .state
             .db
-            .run_blocking(move |db| db.get_trade_by_client_id(&id, mode))
+            .run_blocking(move |db| db.has_recorded_order(&id, mode))
             .await?
-            .is_some()
         {
             plan.phase = RemainderPhase::Complete;
             return self.persist_remainder_plan(plan).await;
