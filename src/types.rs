@@ -245,6 +245,17 @@ pub struct TickerInfo {
     pub update_time: DateTime<Utc>,
 }
 
+impl TickerInfo {
+    /// Center the grid on the mark price; use the last price until a mark is available.
+    pub fn grid_reference_price(&self) -> Decimal {
+        if self.mark_price > Decimal::ZERO {
+            self.mark_price
+        } else {
+            self.last_price
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEntry {
     pub timestamp: DateTime<Utc>,

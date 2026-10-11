@@ -1029,9 +1029,9 @@
       }
 
       // Ticker & Price Card
-      const price = parseFloat(data.ticker.last_price || 0);
       latestSymbol = data.symbol;
       latestMarkPrice = data.ticker.symbol === data.symbol ? parseFloat(data.ticker.mark_price || 0) : 0;
+      const price = latestMarkPrice > 0 ? latestMarkPrice : parseFloat(data.ticker.last_price || 0);
       latestMarkUpdatedAt = Date.parse(data.ticker.mark_update_time || '');
       latestPriceHistory = data.price_history || null;
       latestPriceTestnet = data.grid_config.is_testnet;
@@ -1117,7 +1117,7 @@
       document.getElementById('ladder-amount').textContent = data.grid_config.order_amount_usdc;
 
       // Render Visual Ladder
-      renderLadder(data.active_orders, price);
+      renderLadder(data.active_orders, price, latestMarkPrice > 0);
 
       // Render Orders Table
       renderOrdersTable(data.active_orders, price);
@@ -1150,7 +1150,7 @@
       </details>`;
     }
 
-    function renderLadder(orders, currentPrice) {
+    function renderLadder(orders, currentPrice, hasMarkPrice) {
       const container = document.getElementById('ladder-container');
       const sellOrders = orders.filter(o => o.side === 'SELL').sort((a, b) => parseFloat(b.price) - parseFloat(a.price));
       const buyOrders = orders.filter(o => o.side === 'BUY').sort((a, b) => parseFloat(b.price) - parseFloat(a.price));
@@ -1177,7 +1177,7 @@
       // Current Price Row
       html += `
         <div class="ladder-current">
-          <span>● 币安合约现价</span>
+          <span>● ${hasMarkPrice ? '币安标记价格' : '币安合约现价（等待标记价格）'}</span>
           <span style="font-size: 17px; letter-spacing: 0.05em;">$${currentPrice.toFixed(4)} USDC</span>
           <span>中间基准线</span>
         </div>

@@ -254,12 +254,15 @@ impl GridTradingEngine {
             return Ok(());
         }
         let rules = self.state.rules.read().await.clone();
-        let market = self.state.ticker.read().await.last_price;
+        let ticker = self.state.ticker.read().await.clone();
+        let market = ticker.last_price;
         let price = plan.target.price;
         if market <= Decimal::ZERO {
             return Ok(());
         }
-        let (_, sells) = self.window_prices(&config, &rules, market).await?;
+        let (_, sells) = self
+            .window_prices(&config, &rules, ticker.grid_reference_price())
+            .await?;
         if !sells.contains(&price)
             || !rules.is_grid_price(price, config.grid.grid_interval)
             || price <= market

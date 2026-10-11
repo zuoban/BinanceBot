@@ -237,29 +237,17 @@ impl GridTradingEngine {
             .run_blocking(move |db| db.last_fill_for(&symbol, mode))
             .await?;
         let interval = config.grid.grid_interval;
-        // The most recent execution moves the frontier. An opposite fill
-        // automatically makes the previous level available again.
-        let buy_max = last_fill.map(|(_, price)| {
-            (price - interval).min(config.grid.max_price.unwrap_or(rules.max_price))
-        });
-        let sell_min = last_fill.map(|(_, price)| {
-            (price + interval).max(config.grid.min_price.unwrap_or(rules.min_price))
-        });
-        let (buys, _) = rules.grid_window_prices(
+        // A recent fill only reserves its immediate neighborhood. It must never
+        // pin either window to an old price while the mark price moves away.
+        Ok(rules.grid_window_prices(
             market,
             interval,
-            (config.grid.buy_window, 0),
-            (config.grid.min_price, buy_max.or(config.grid.max_price)),
-            |_, _| true,
-        );
-        let (_, sells) = rules.grid_window_prices(
-            market,
-            interval,
-            (0, config.grid.sell_window),
-            (sell_min.or(config.grid.min_price), config.grid.max_price),
-            |_, _| true,
-        );
-        Ok((buys, sells))
+            (config.grid.buy_window, config.grid.sell_window),
+            (config.grid.min_price, config.grid.max_price),
+            |_, price| {
+                last_fill.is_none_or(|(_, fill_price)| (price - fill_price).abs() >= interval)
+            },
+        ))
     }
 
     async fn report_reconciliation_state(&mut self, blocked: bool) {
@@ -1722,7 +1710,7 @@ impl GridTradingEngine {
                 }
             }
         }
-        let current_price = self.state.ticker.read().await.last_price;
+        let current_price = self.state.ticker.read().await.grid_reference_price();
         if current_price.is_zero() {
             return;
         }
@@ -1755,7 +1743,7 @@ impl GridTradingEngine {
                     return;
                 }
             }
-            // Cancellation can reveal a fill and move the execution frontier.
+            // Cancellation can reveal a fill and change reserved levels.
             // Reconcile on the next cycle before allocating any released funds.
             return;
         }
@@ -2051,7 +2039,9 @@ impl GridTradingEngine {
         }
 
         // Enforce Maker pricing check
-        let current_market_price = self.state.ticker.read().await.last_price;
+        let ticker = self.state.ticker.read().await.clone();
+        let current_market_price = ticker.last_price;
+        let reference_price = ticker.grid_reference_price();
         if !current_market_price.is_zero() {
             if side == OrderSide::Buy && price >= current_market_price {
                 warn!(
@@ -2067,10 +2057,9 @@ impl GridTradingEngine {
                 );
                 return false;
             }
-            let (buys, sells) = match self
-                .window_prices(&config, &rules, current_market_price)
-                .await
-            {
+        }
+        if reference_price > Decimal::ZERO {
+            let (buys, sells) = match self.window_prices(&config, &rules, reference_price).await {
                 Ok(prices) => prices,
                 Err(error) => {
                     self.state
@@ -2106,7 +2095,7 @@ impl GridTradingEngine {
         let quantity = if side == OrderSide::Buy {
             if let Some(limit) = config.grid.max_position_usdc {
                 let position_size = self.state.position.read().await.size;
-                let valuation_price = current_market_price.max(price);
+                let valuation_price = reference_price.max(current_market_price).max(price);
                 let exposure = buy_exposure_usdc(position_size, valuation_price, &orders)
                     + price * full_quantity;
                 if exposure > limit {
