@@ -277,6 +277,21 @@
                 <span class="form-hint">模拟盘零风险体验，实盘需填写有效 API 密钥</span>
               </div>
 
+              <!-- 最大持仓 -->
+              <div class="form-group">
+                <label for="cfg-max-position">最大持仓名义价值 (USDC, 可选)</label>
+                <input type="number" id="cfg-max-position" step="any" placeholder="例如 2000" />
+                <span class="form-hint">买入挂单受持仓与未成交买单合计敞口上限限制</span>
+              </div>
+
+              <div class="form-group" style="justify-content: center;">
+                <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                  <input type="checkbox" id="cfg-pause-on-max-position" aria-describedby="cfg-pause-on-max-position-hint" style="width: 17px; height: 17px; accent-color: var(--accent);" />
+                  <span>达到最大持仓名义价值时暂停策略</span>
+                </label>
+                <span class="form-hint" id="cfg-pause-on-max-position-hint">需设置上限。按持仓数量绝对值 × 标记价格判断；触发后撤销策略挂单，保留持仓，需手动恢复</span>
+              </div>
+
               <!-- 只做 Maker -->
               <div class="form-group" style="justify-content: center;">
                 <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
@@ -284,13 +299,6 @@
                   <span>只做 Maker 挂单 (Post-Only GTX)</span>
                 </label>
                 <span class="form-hint">此策略固定使用 Maker 挂单，拒单后重试，不切换为吃单</span>
-              </div>
-
-              <!-- 最大持仓 -->
-              <div class="form-group">
-                <label for="cfg-max-position">最大持仓名义价值 (USDC, 可选)</label>
-                <input type="number" id="cfg-max-position" step="any" placeholder="例如 2000" />
-                <span class="form-hint">持仓达到该名义价值后暂停同向开单</span>
               </div>
 
               <!-- 价格下限 -->
@@ -324,9 +332,9 @@
               <div class="form-group" style="justify-content: center;">
                 <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
                   <input type="checkbox" id="cfg-telegram-enabled" style="width: 17px; height: 17px; accent-color: var(--accent);" />
-                  <span>启用 Telegram 成交通知</span>
+                  <span>启用 Telegram 通知</span>
                 </label>
-                <span class="form-hint">每笔订单成交后发送消息，首行显示方向和成交价格</span>
+                <span class="form-hint">通知订单成交及策略启动、恢复和暂停；启停消息包含原因与北京时间</span>
               </div>
 
               <div class="form-group">
@@ -1419,6 +1427,7 @@
           document.getElementById('cfg-min-price').value = c.min_price || '';
           document.getElementById('cfg-max-price').value = c.max_price || '';
           document.getElementById('cfg-max-position').value = c.max_position_usdc || '';
+          document.getElementById('cfg-pause-on-max-position').checked = !!c.pause_on_max_position;
 
           document.getElementById('cfg-api-key').value = '';
           document.getElementById('cfg-api-secret').value = '';
@@ -1464,6 +1473,7 @@
         min_price: document.getElementById('cfg-min-price').value ? document.getElementById('cfg-min-price').value : null,
         max_price: document.getElementById('cfg-max-price').value ? document.getElementById('cfg-max-price').value : null,
         max_position_usdc: document.getElementById('cfg-max-position').value ? document.getElementById('cfg-max-position').value : null,
+        pause_on_max_position: document.getElementById('cfg-pause-on-max-position').checked,
         save_to_file: true
       };
 

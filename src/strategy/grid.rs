@@ -202,9 +202,70 @@ impl GridTradingEngine {
     }
 
     async fn pause_trading(&self) {
-        if let Err(error) = self.state.pause_trading().await {
+        self.pause_trading_with_reason("策略运行异常，已暂停，请查看系统运行日志")
+            .await;
+    }
+
+    async fn pause_trading_with_reason(&self, reason: &str) {
+        if let Err(error) = self.state.pause_trading_with_reason(reason).await {
             error!("Could not persist paused bot status: {}", error);
         }
+    }
+
+    /// Only filled position value triggers a full pause; open orders keep their existing cap.
+    async fn pause_if_position_limit_reached(&mut self) -> bool {
+        if *self.state.status.read().await != BotStatus::Running {
+            return false;
+        }
+        let config = self.state.config.read().await.clone();
+        if !config.grid.pause_on_max_position {
+            return false;
+        }
+        let Some(limit) = config
+            .grid
+            .max_position_usdc
+            .filter(|limit| *limit > Decimal::ZERO)
+        else {
+            return false;
+        };
+        let position = self.state.position.read().await.clone();
+        let ticker = self.state.ticker.read().await.clone();
+        let valuation_price = if ticker.mark_price > Decimal::ZERO {
+            ticker.mark_price
+        } else if position.mark_price > Decimal::ZERO {
+            position.mark_price
+        } else {
+            ticker.last_price
+        };
+        let position_value = position.size.abs() * valuation_price;
+        if valuation_price <= Decimal::ZERO || position_value < limit {
+            return false;
+        }
+
+        // Pause before canceling so cancellation cannot restore Running or replenish orders.
+        self.pause_trading_with_reason(&format!(
+            "持仓名义价值 {} 已达到最大持仓名义价值 {}，需手动恢复",
+            position_value, limit
+        ))
+        .await;
+        self.state
+            .add_log(
+                "WARN",
+                format!(
+                    "持仓名义价值 {} 已达到最大持仓名义价值 {}，策略已暂停，需手动恢复",
+                    position_value, limit
+                ),
+            )
+            .await;
+        if !self.cancel_all_orders().await {
+            self.state
+                .add_log(
+                    "ERROR",
+                    "策略已暂停，但部分策略挂单可能尚未撤销，请检查交易所挂单",
+                )
+                .await;
+        }
+        true
     }
 
     async fn save_managed_order(&self, order: &GridOrder) -> Result<()> {
@@ -413,6 +474,7 @@ impl GridTradingEngine {
         if *self.state.status.read().await == BotStatus::Running {
             self.maintain_grid_window().await;
         }
+        self.state.notify_strategy_started().await;
 
         loop {
             tokio::select! {
@@ -451,7 +513,7 @@ impl GridTradingEngine {
         match action {
             BotControlAction::Pause => {
                 info!("Bot paused by user command");
-                self.pause_trading().await;
+                self.pause_trading_with_reason("手动暂停策略").await;
                 if self.cancel_all_orders().await {
                     self.state
                         .add_log("WARN", "Trading bot paused and managed orders canceled")
@@ -476,7 +538,8 @@ impl GridTradingEngine {
             }
             BotControlAction::CancelAll => {
                 info!("Cancel all orders requested");
-                self.pause_trading().await;
+                self.pause_trading_with_reason("手动撤销全部策略挂单并暂停策略")
+                    .await;
                 if self.cancel_all_orders().await {
                     self.state
                         .add_log("WARN", "Managed grid orders canceled; bot paused")
@@ -722,6 +785,9 @@ impl GridTradingEngine {
             }
         }
 
+        if self.pause_if_position_limit_reached().await {
+            return;
+        }
         let is_running = *self.state.status.read().await == BotStatus::Running;
 
         // In Paper Trading / Dry Run mode, match simulated orders against live market price
@@ -768,7 +834,13 @@ impl GridTradingEngine {
                 .then_with(|| a.client_order_id.cmp(&b.client_order_id))
         });
         for mut order in filled_orders {
+            if *self.state.status.read().await != BotStatus::Running {
+                break;
+            }
             self.on_order_filled(&mut order).await;
+            if self.pause_if_position_limit_reached().await {
+                break;
+            }
         }
 
         if !self.state.active_orders.read().await.is_empty() {
@@ -810,6 +882,9 @@ impl GridTradingEngine {
             return;
         }
 
+        if self.pause_if_position_limit_reached().await {
+            return;
+        }
         self.trim_sell_orders_to_position().await;
 
         if *self.state.status.read().await == BotStatus::Running && account_ready {
@@ -1663,6 +1738,9 @@ impl GridTradingEngine {
         if *self.state.status.read().await != BotStatus::Running {
             return;
         }
+        if self.pause_if_position_limit_reached().await {
+            return;
+        }
         match self.recover_remainder_plan().await {
             Ok(true) => return,
             Ok(false) => {}
@@ -1996,6 +2074,9 @@ impl GridTradingEngine {
         order_quantity: Option<Decimal>,
     ) -> bool {
         if *self.state.status.read().await != BotStatus::Running {
+            return false;
+        }
+        if self.pause_if_position_limit_reached().await {
             return false;
         }
         let config = self.state.config.read().await.clone();
@@ -2362,8 +2443,10 @@ impl GridTradingEngine {
         let mode = TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
         let pause_epoch = self.state.pause_epoch();
         let was_running = *self.state.status.read().await == BotStatus::Running;
-        if let Err(e) = self.state.pause_trading().await {
+        if let Err(e) = self.state.pause_trading_silently().await {
             error!("Failed to persist paused status before cancellation: {}", e);
+            self.pause_trading_with_reason("撤单前保存策略状态失败")
+                .await;
             return false;
         }
 
@@ -2372,6 +2455,8 @@ impl GridTradingEngine {
                 "Could not resolve pending remainder plan during cancellation: {}",
                 e
             );
+            self.pause_trading_with_reason("未能确认余量挂单撤销，策略已暂停")
+                .await;
             return false;
         }
 
@@ -2425,8 +2510,10 @@ impl GridTradingEngine {
             }
         }
         if was_running && self.state.pause_epoch() == pause_epoch + 1 {
-            if let Err(e) = self.state.resume_trading().await {
+            if let Err(e) = self.state.resume_trading_silently().await {
                 error!("Failed to restore running status after cancellation: {}", e);
+                self.pause_trading_with_reason("撤单后恢复策略状态失败")
+                    .await;
                 return false;
             }
         }

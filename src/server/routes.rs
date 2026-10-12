@@ -624,6 +624,7 @@ async fn get_config_handler(
         min_price: config.grid.min_price,
         max_price: config.grid.max_price,
         max_position_usdc: config.grid.max_position_usdc,
+        pause_on_max_position: config.grid.pause_on_max_position,
     };
 
     Json(ApiResponse {
@@ -689,6 +690,9 @@ async fn post_config_handler(
     current_config.grid.min_price = payload.min_price;
     current_config.grid.max_price = payload.max_price;
     current_config.grid.max_position_usdc = payload.max_position_usdc;
+    if let Some(enabled) = payload.pause_on_max_position {
+        current_config.grid.pause_on_max_position = enabled;
+    }
 
     if let Some(key) = payload.api_key {
         let key_trimmed = key.trim().to_string();
@@ -804,6 +808,7 @@ async fn post_config_handler(
         min_price: current_config.grid.min_price,
         max_price: current_config.grid.max_price,
         max_position_usdc: current_config.grid.max_position_usdc,
+        pause_on_max_position: current_config.grid.pause_on_max_position,
     };
 
     Json(ApiResponse {
@@ -837,7 +842,12 @@ async fn post_control_handler(
         action,
         BotControlAction::Pause | BotControlAction::CancelAll
     ) {
-        if let Err(error) = state.pause_trading().await {
+        let reason = if matches!(action, BotControlAction::CancelAll) {
+            "手动撤销全部策略挂单并暂停策略"
+        } else {
+            "手动暂停策略"
+        };
+        if let Err(error) = state.pause_trading_with_reason(reason).await {
             error!("Failed to persist immediate pause: {}", error);
             return Json(ApiResponse {
                 success: false,
@@ -939,10 +949,15 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, token: String) {
                         _ => None,
                     };
                     if let Some(act) = action {
-                        if matches!(act, BotControlAction::Pause | BotControlAction::CancelAll)
-                            && state_clone.pause_trading().await.is_err()
-                        {
-                            break;
+                        if matches!(act, BotControlAction::Pause | BotControlAction::CancelAll) {
+                            let reason = if matches!(act, BotControlAction::CancelAll) {
+                                "手动撤销全部策略挂单并暂停策略"
+                            } else {
+                                "手动暂停策略"
+                            };
+                            if state_clone.pause_trading_with_reason(reason).await.is_err() {
+                                break;
+                            }
                         }
                         let _ = state_clone.action_tx.send(act).await;
                     }
@@ -964,6 +979,68 @@ mod tests {
     use crate::config::AppConfig;
     use crate::db::Database;
     use crate::types::BotStatus;
+
+    #[tokio::test]
+    async fn max_position_pause_is_saved_returned_and_preserved_for_legacy_clients() {
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let (action_tx, mut action_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::new(AppConfig::default(), db.clone(), action_tx);
+        let engine_state = state.clone();
+        let engine = tokio::spawn(async move {
+            while let Some(BotControlAction::UpdateConfig { config, reply }) =
+                action_rx.recv().await
+            {
+                engine_state.db.save_config(&config).unwrap();
+                *engine_state.config.write().await = *config;
+                reply.send(Ok(())).unwrap();
+            }
+        });
+        let mut payload = serde_json::json!({
+            "symbol": "SOLUSDC",
+            "grid_interval": "0.1",
+            "order_amount_usdc": "100",
+            "buy_window": 5,
+            "sell_window": 5,
+            "pause_on_max_position": true
+        });
+        let response = post_config_handler(
+            State(state.clone()),
+            Json(serde_json::from_value(payload.clone()).unwrap()),
+        )
+        .await;
+        assert!(!response.0.success);
+        assert!(db.load_config().unwrap().is_none());
+
+        payload["max_position_usdc"] = serde_json::json!("1000");
+        for (field, expected) in [(Some(true), true), (None, true), (Some(false), false)] {
+            if let Some(enabled) = field {
+                payload["pause_on_max_position"] = serde_json::json!(enabled);
+            } else {
+                payload
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("pause_on_max_position");
+            }
+            let response = post_config_handler(
+                State(state.clone()),
+                Json(serde_json::from_value(payload.clone()).unwrap()),
+            )
+            .await;
+            assert!(response.0.success);
+            assert_eq!(response.0.data.unwrap().pause_on_max_position, expected);
+            let response = get_config_handler(State(state.clone())).await;
+            assert_eq!(response.0.data.unwrap().pause_on_max_position, expected);
+            assert_eq!(
+                db.load_config()
+                    .unwrap()
+                    .unwrap()
+                    .grid
+                    .pause_on_max_position,
+                expected
+            );
+        }
+        engine.abort();
+    }
 
     #[tokio::test]
     async fn pause_updates_status_before_engine_accepts_action() {

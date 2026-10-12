@@ -243,7 +243,9 @@ async fn main() -> anyhow::Result<()> {
         );
     }
     if let Some(error) = startup_config_error {
-        state.pause_trading().await?;
+        state
+            .pause_trading_with_reason("启动时发现策略配置无效，请检查系统运行日志")
+            .await?;
         state
             .add_log(
                 "ERROR",
@@ -252,7 +254,9 @@ async fn main() -> anyhow::Result<()> {
             .await;
     }
     if !has_admin_pwd && !config.exchange.dry_run {
-        state.pause_trading().await?;
+        state
+            .pause_trading_with_reason("实盘策略等待管理员完成初始化")
+            .await?;
         state
             .add_log(
                 "WARN",
@@ -273,7 +277,9 @@ async fn main() -> anyhow::Result<()> {
 
     if let Err(e) = engine.initialize().await {
         error!("Engine initialization failed; trading paused: {}", e);
-        state.pause_trading().await?;
+        state
+            .pause_trading_with_reason("策略启动时账户或挂单对账失败，请检查系统运行日志")
+            .await?;
         state
             .add_log(
                 "ERROR",

@@ -70,6 +70,10 @@ pub struct GridConfig {
 
     /// Maximum position limit in USDC value
     pub max_position_usdc: Option<Decimal>,
+
+    /// Pause the strategy and cancel managed orders when position value reaches the limit.
+    #[serde(default)]
+    pub pause_on_max_position: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,6 +95,7 @@ pub struct GridConfigSummary {
     pub min_price: Option<Decimal>,
     pub max_price: Option<Decimal>,
     pub max_position_usdc: Option<Decimal>,
+    pub pause_on_max_position: bool,
     pub is_testnet: bool,
     pub dry_run: bool,
 }
@@ -152,6 +157,7 @@ impl Default for AppConfig {
                 min_price: None,
                 max_price: None,
                 max_position_usdc: Some(dec!(2000.0)),
+                pause_on_max_position: false,
             },
             server: ServerConfig {
                 host: "0.0.0.0".to_string(),
@@ -201,6 +207,10 @@ impl AppConfig {
         if let Some(limit) = self.grid.max_position_usdc {
             anyhow::ensure!(limit > Decimal::ZERO, "最大持仓金额必须大于 0");
         }
+        anyhow::ensure!(
+            !self.grid.pause_on_max_position || self.grid.max_position_usdc.is_some(),
+            "启用达到上限时暂停策略前，请设置最大持仓名义价值"
+        );
         anyhow::ensure!(self.exchange.sync_interval_secs > 0, "同步间隔必须大于 0");
         if !self.exchange.dry_run {
             anyhow::ensure!(
@@ -239,6 +249,7 @@ impl AppConfig {
             min_price: self.grid.min_price,
             max_price: self.grid.max_price,
             max_position_usdc: self.grid.max_position_usdc,
+            pause_on_max_position: self.grid.pause_on_max_position,
             is_testnet: self.exchange.is_testnet,
             dry_run: self.exchange.dry_run,
         }
@@ -248,6 +259,8 @@ impl AppConfig {
 #[cfg(test)]
 mod tests {
     use super::AppConfig;
+    use rust_decimal::Decimal;
+    use rust_decimal_macros::dec;
 
     #[test]
     fn existing_config_without_telegram_still_loads() {
@@ -257,5 +270,39 @@ mod tests {
         assert!(!config.telegram.enabled);
         assert!(config.telegram.bot_token.is_empty());
         assert!(config.telegram.chat_id.is_empty());
+    }
+
+    #[test]
+    fn legacy_configs_keep_position_pause_disabled() {
+        let config = AppConfig::default();
+        assert!(!config.grid.pause_on_max_position);
+        let mut legacy = toml::Value::try_from(&config).unwrap();
+        legacy["grid"]
+            .as_table_mut()
+            .unwrap()
+            .remove("pause_on_max_position");
+        let restored: AppConfig = toml::from_str(&toml::to_string(&legacy).unwrap()).unwrap();
+        assert!(!restored.grid.pause_on_max_position);
+
+        let mut legacy = serde_json::to_value(config).unwrap();
+        legacy["grid"]
+            .as_object_mut()
+            .unwrap()
+            .remove("pause_on_max_position");
+        let restored: AppConfig = serde_json::from_value(legacy).unwrap();
+        assert!(!restored.grid.pause_on_max_position);
+    }
+
+    #[test]
+    fn position_pause_requires_a_valid_limit() {
+        let mut config = AppConfig::default();
+        config.grid.pause_on_max_position = true;
+        config.grid.max_position_usdc = None;
+        assert!(config.validate().is_err());
+        config.grid.max_position_usdc = Some(Decimal::ZERO);
+        assert!(config.validate().is_err());
+        config.grid.max_position_usdc = Some(dec!(1000));
+        config.validate().unwrap();
+        assert!(config.summary().pause_on_max_position);
     }
 }

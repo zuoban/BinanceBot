@@ -1,8 +1,10 @@
 use crate::config::TelegramConfig;
 use crate::fx::CnyRate;
-use crate::types::{AccountInfo, HourlyTradeStats, OrderSide, TradeRecord, TradingMode};
+use crate::types::{
+    AccountInfo, HourlyTradeStats, OrderSide, PositionInfo, TickerInfo, TradeRecord, TradingMode,
+};
 use anyhow::{anyhow, Result};
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, FixedOffset, Utc};
 use reqwest::Client;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -20,12 +22,134 @@ struct TelegramResponse {
     description: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum StrategyEvent {
+    Started,
+    Resumed,
+    Paused,
+}
+
+pub struct StrategyNotification {
+    pub event: StrategyEvent,
+    pub symbol: String,
+    pub mode: TradingMode,
+    pub reason: String,
+    pub timestamp: DateTime<Utc>,
+}
+
+pub fn format_strategy_message(notification: &StrategyNotification) -> String {
+    let title = match notification.event {
+        StrategyEvent::Started => "🟢 策略已启动",
+        StrategyEvent::Resumed => "🟢 策略已恢复",
+        StrategyEvent::Paused => "⏸ 策略已暂停",
+    };
+    let mode = match notification.mode {
+        TradingMode::Paper => "模拟盘",
+        TradingMode::Testnet => "测试网",
+        TradingMode::Live => "实盘",
+        TradingMode::Unknown => "未知",
+    };
+    let time = notification
+        .timestamp
+        .with_timezone(&FixedOffset::east_opt(8 * 3600).unwrap())
+        .format("%Y-%m-%d %H:%M:%S");
+    format!(
+        "<b>{title}</b>\n交易对：{}\n运行模式：{mode}\n原因：{}\n时间：{time}（北京时间）",
+        escape_html(&notification.symbol),
+        escape_html(&notification.reason),
+    )
+}
+
+#[derive(Clone)]
+pub struct TelegramNotifier {
+    client: Client,
+    api_base_url: String,
+}
+
+impl TelegramNotifier {
+    pub fn new(client: Client) -> Self {
+        Self {
+            client,
+            api_base_url: "https://api.telegram.org".into(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_base_url(client: Client, api_base_url: String) -> Self {
+        Self {
+            client,
+            api_base_url,
+        }
+    }
+
+    pub async fn send_trade_notification(
+        &self,
+        config: &TelegramConfig,
+        trade: &TradeRecord,
+        context: &TradeNotificationContext,
+    ) -> Result<()> {
+        self.send_message(config, format_trade_message(trade, context))
+            .await
+    }
+
+    pub async fn send_strategy_notification(
+        &self,
+        config: &TelegramConfig,
+        notification: &StrategyNotification,
+    ) -> Result<()> {
+        self.send_message(config, format_strategy_message(notification))
+            .await
+    }
+
+    async fn send_message(&self, config: &TelegramConfig, text: String) -> Result<()> {
+        if config.bot_token.trim().is_empty() || config.chat_id.trim().is_empty() {
+            return Err(anyhow!("Bot Token or Chat ID is empty"));
+        }
+        let endpoint = format!("{}/bot{}/sendMessage", self.api_base_url, config.bot_token);
+        let response = self
+            .client
+            .post(endpoint)
+            .json(&SendMessage {
+                chat_id: &config.chat_id,
+                text,
+                parse_mode: "HTML",
+            })
+            .send()
+            .await
+            .map_err(|err| {
+                anyhow!(
+                    "Telegram request failed ({})",
+                    if err.is_timeout() {
+                        "timeout"
+                    } else {
+                        "network error"
+                    }
+                )
+            })?;
+        let status = response.status();
+        let body: TelegramResponse = response
+            .json()
+            .await
+            .map_err(|_| anyhow!("Telegram returned an invalid response (HTTP {})", status))?;
+        if !status.is_success() || !body.ok {
+            return Err(anyhow!(
+                "Telegram rejected notification (HTTP {}): {}",
+                status,
+                body.description
+                    .unwrap_or_else(|| "unknown error".to_string())
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct TradeNotificationContext {
     pub today_count: Option<u64>,
     pub hour_count: Option<u64>,
     pub account_equity: Option<Decimal>,
     pub available_margin: Option<Decimal>,
+    pub position_amount: Option<Decimal>,
     pub cny_per_unit: Option<Decimal>,
 }
 
@@ -67,8 +191,41 @@ impl TradeNotificationContext {
             hour_count,
             account_equity,
             available_margin,
+            position_amount: None,
             cny_per_unit,
         }
+    }
+
+    pub fn with_position(
+        mut self,
+        trade: &TradeRecord,
+        position: &PositionInfo,
+        ticker: &TickerInfo,
+    ) -> Self {
+        self.position_amount = None;
+        let matching_position = position.symbol == trade.symbol
+            || (trade.mode == TradingMode::Paper && position.symbol.is_empty());
+        if !matching_position {
+            return self;
+        }
+        let matching_ticker = ticker.symbol == trade.symbol;
+        let valuation_price = if matching_ticker && ticker.mark_price > Decimal::ZERO {
+            ticker.mark_price
+        } else if position.mark_price > Decimal::ZERO {
+            position.mark_price
+        } else if matching_ticker {
+            ticker.last_price
+        } else {
+            Decimal::ZERO
+        };
+        self.position_amount = if position.size.is_zero() {
+            Some(Decimal::ZERO)
+        } else if valuation_price > Decimal::ZERO {
+            position.size.abs().checked_mul(valuation_price)
+        } else {
+            None
+        };
+        self
     }
 }
 
@@ -125,7 +282,7 @@ pub fn format_trade_message(trade: &TradeRecord, context: &TradeNotificationCont
         String::new()
     };
     format!(
-        "<b>{icon} {direction}｜{average_price:.4}｜{quantity} {base}｜{amount:.2} {quote}｜{today}｜{hour}</b>\n<b>账户权益：{equity}｜</b>{cny}\n可用保证金：{available}｜{ratio}{pnl_line}",
+        "<b>{icon} {direction}｜{average_price:.4}｜{quantity} {base}｜{amount:.2} {quote}｜{today}｜{hour}</b>\n<b>账户权益：{equity}｜</b>{cny}\n持仓金额：{position_amount}\n可用保证金：{available}｜{ratio}{pnl_line}",
         direction = trade.side.as_str(),
         quantity = trade.quantity.normalize(),
         base = escape_html(base),
@@ -134,6 +291,7 @@ pub fn format_trade_message(trade: &TradeRecord, context: &TradeNotificationCont
         hour = count(context.hour_count),
         equity = money(context.account_equity),
         available = money(context.available_margin),
+        position_amount = money(context.position_amount),
     )
 }
 
@@ -150,47 +308,9 @@ pub async fn send_trade_notification(
     trade: &TradeRecord,
     context: &TradeNotificationContext,
 ) -> Result<()> {
-    if config.bot_token.trim().is_empty() || config.chat_id.trim().is_empty() {
-        return Err(anyhow!("Bot Token or Chat ID is empty"));
-    }
-    let endpoint = format!(
-        "https://api.telegram.org/bot{}/sendMessage",
-        config.bot_token
-    );
-    let response = client
-        .post(endpoint)
-        .json(&SendMessage {
-            chat_id: &config.chat_id,
-            text: format_trade_message(trade, context),
-            parse_mode: "HTML",
-        })
-        .send()
+    TelegramNotifier::new(client.clone())
+        .send_trade_notification(config, trade, context)
         .await
-        .map_err(|err| {
-            anyhow!(
-                "Telegram request failed ({})",
-                if err.is_timeout() {
-                    "timeout"
-                } else {
-                    "network error"
-                }
-            )
-        })?;
-
-    let status = response.status();
-    let body: TelegramResponse = response
-        .json()
-        .await
-        .map_err(|_| anyhow!("Telegram returned an invalid response (HTTP {})", status))?;
-    if !status.is_success() || !body.ok {
-        return Err(anyhow!(
-            "Telegram rejected notification (HTTP {}): {}",
-            status,
-            body.description
-                .unwrap_or_else(|| "unknown error".to_string())
-        ));
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -198,6 +318,36 @@ mod tests {
     use super::*;
     use crate::types::HourlyTradeCount;
     use rust_decimal_macros::dec;
+
+    #[test]
+    fn strategy_messages_include_event_mode_reason_and_beijing_time() {
+        let mut notification = StrategyNotification {
+            event: StrategyEvent::Started,
+            symbol: "SOLUSDC".into(),
+            mode: TradingMode::Paper,
+            reason: "程序启动后开始运行策略".into(),
+            timestamp: DateTime::parse_from_rfc3339("2026-10-11T18:26:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        };
+        assert_eq!(
+            format_strategy_message(&notification),
+            "<b>🟢 策略已启动</b>\n交易对：SOLUSDC\n运行模式：模拟盘\n原因：程序启动后开始运行策略\n时间：2026-10-12 02:26:00（北京时间）"
+        );
+        notification.event = StrategyEvent::Resumed;
+        notification.mode = TradingMode::Testnet;
+        assert!(format_strategy_message(&notification).contains("策略已恢复</b>"));
+        assert!(format_strategy_message(&notification).contains("运行模式：测试网"));
+        notification.event = StrategyEvent::Paused;
+        notification.mode = TradingMode::Live;
+        notification.symbol = "<SOL>&USDC".into();
+        notification.reason = "持仓价值 < 2000 & 检查".into();
+        let message = format_strategy_message(&notification);
+        assert!(message.contains("策略已暂停</b>"));
+        assert!(message.contains("运行模式：实盘"));
+        assert!(message.contains("交易对：&lt;SOL&gt;&amp;USDC"));
+        assert!(message.contains("原因：持仓价值 &lt; 2000 &amp; 检查"));
+    }
 
     fn trade(side: OrderSide) -> TradeRecord {
         TradeRecord {
@@ -262,6 +412,16 @@ mod tests {
             Some(&rate),
             trade.timestamp,
         )
+        .with_position(
+            trade,
+            &PositionInfo {
+                symbol: trade.symbol.clone(),
+                size: dec!(20),
+                mark_price: dec!(123.45),
+                ..Default::default()
+            },
+            &TickerInfo::default(),
+        )
     }
 
     #[test]
@@ -269,8 +429,100 @@ mod tests {
         let trade = trade(OrderSide::Buy);
         assert_eq!(
             format_trade_message(&trade, &context(&trade)),
-            "<b>🟢 BUY｜123.4500｜2 SOL｜246.90 USDC｜7｜2</b>\n<b>账户权益：11254.48 USDC｜</b>≈ ¥75453.41\n可用保证金：3878.03 USDC｜34.46%"
+            "<b>🟢 BUY｜123.4500｜2 SOL｜246.90 USDC｜7｜2</b>\n<b>账户权益：11254.48 USDC｜</b>≈ ¥75453.41\n持仓金额：2469.00 USDC\n可用保证金：3878.03 USDC｜34.46%"
         );
+    }
+
+    #[test]
+    fn position_amount_uses_total_position_at_mark_price_in_all_modes() {
+        for mode in [TradingMode::Paper, TradingMode::Testnet, TradingMode::Live] {
+            for side in [OrderSide::Buy, OrderSide::Sell] {
+                let mut trade = trade(side);
+                trade.mode = mode;
+                trade.symbol = "SOLUSDT".into();
+                let position = PositionInfo {
+                    symbol: trade.symbol.clone(),
+                    size: dec!(20),
+                    entry_price: dec!(50),
+                    mark_price: dec!(99),
+                    ..Default::default()
+                };
+                let ticker = TickerInfo {
+                    symbol: trade.symbol.clone(),
+                    mark_price: dec!(100),
+                    last_price: dec!(150),
+                    ..Default::default()
+                };
+                let context =
+                    TradeNotificationContext::default().with_position(&trade, &position, &ticker);
+                assert_eq!(context.position_amount, Some(dec!(2000)));
+                let message = format_trade_message(&trade, &context);
+                assert!(message.contains("\n持仓金额：2000.00 USDT\n"));
+                assert!(message.contains("246.90 USDT"));
+            }
+        }
+    }
+
+    #[test]
+    fn position_amount_handles_shorts_zero_and_missing_or_mismatched_data() {
+        let mut trade = trade(OrderSide::Sell);
+        let position = PositionInfo {
+            symbol: trade.symbol.clone(),
+            size: dec!(-2.29),
+            mark_price: dec!(108.7654321),
+            ..Default::default()
+        };
+        let context = TradeNotificationContext::default().with_position(
+            &trade,
+            &position,
+            &TickerInfo::default(),
+        );
+        assert!(format_trade_message(&trade, &context).contains("持仓金额：249.07 USDC"));
+        let flat = PositionInfo {
+            size: Decimal::ZERO,
+            mark_price: Decimal::ZERO,
+            ..position.clone()
+        };
+        let context = TradeNotificationContext::default().with_position(
+            &trade,
+            &flat,
+            &TickerInfo::default(),
+        );
+        assert!(format_trade_message(&trade, &context).contains("持仓金额：0.00 USDC"));
+
+        for unavailable in [
+            PositionInfo::default(),
+            PositionInfo {
+                symbol: "BTCUSDC".into(),
+                ..position.clone()
+            },
+            PositionInfo {
+                mark_price: Decimal::ZERO,
+                ..position.clone()
+            },
+        ] {
+            let context = TradeNotificationContext::default().with_position(
+                &trade,
+                &unavailable,
+                &TickerInfo::default(),
+            );
+            assert_eq!(context.position_amount, None);
+            assert!(format_trade_message(&trade, &context).contains("持仓金额：-- USDC"));
+        }
+        trade.mode = TradingMode::Paper;
+        let paper = PositionInfo {
+            symbol: String::new(),
+            mark_price: Decimal::ZERO,
+            size: dec!(2),
+            ..Default::default()
+        };
+        let ticker = TickerInfo {
+            symbol: trade.symbol.clone(),
+            last_price: dec!(100),
+            ..Default::default()
+        };
+        let context = TradeNotificationContext::default().with_position(&trade, &paper, &ticker);
+        assert_eq!(context.position_amount, Some(dec!(200)));
     }
 
     #[test]
@@ -280,8 +532,8 @@ mod tests {
         trade.commission = dec!(0.80);
         assert_eq!(
             format_trade_message(&trade, &context(&trade)),
-            "<b>🔴 SELL｜123.4500｜2 SOL｜246.90 USDC｜4｜1</b>\n<b>账户权益：11254.48 USDC｜</b>≈ ¥75453.41\n可用保证金：3878.03 USDC｜34.46%\n已实现盈亏：-3.2500 USDC"
-        );
+            "<b>🔴 SELL｜123.4500｜2 SOL｜246.90 USDC｜4｜1</b>\n<b>账户权益：11254.48 USDC｜</b>≈ ¥75453.41\n持仓金额：2469.00 USDC\n可用保证金：3878.03 USDC｜34.46%\n已实现盈亏：-3.2500 USDC"
+    );
         trade.realized_pnl = dec!(1.25);
         assert!(
             format_trade_message(&trade, &context(&trade)).ends_with("已实现盈亏：+1.2500 USDC")

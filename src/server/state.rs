@@ -2,7 +2,9 @@ use crate::config::AppConfig;
 use crate::db::Database;
 use crate::fx::CnyRateCache;
 use crate::strategy::precision::SymbolRules;
-use crate::telegram::{send_trade_notification, TradeNotificationContext};
+use crate::telegram::{
+    StrategyEvent, StrategyNotification, TelegramNotifier, TradeNotificationContext,
+};
 use crate::types::*;
 use chrono::Utc;
 use rust_decimal::Decimal;
@@ -27,14 +29,15 @@ pub struct AppState {
     pub recent_trades: RwLock<VecDeque<TradeRecord>>,
     pub recent_logs: RwLock<VecDeque<LogEntry>>,
     pause_epoch: AtomicU64,
-    status_update_lock: Mutex<()>,
+    // Tracks the last non-maintenance status so internal cancellation does not send alerts.
+    status_update_lock: Mutex<BotStatus>,
     trade_commit_lock: Mutex<()>,
     login_failures: Mutex<VecDeque<Instant>>,
     setup_code: Option<String>,
 
     pub action_tx: mpsc::Sender<BotControlAction>,
     pub ws_broadcast_tx: broadcast::Sender<String>,
-    telegram_client: reqwest::Client,
+    telegram_notifier: TelegramNotifier,
 }
 
 impl AppState {
@@ -127,16 +130,18 @@ impl AppState {
             recent_trades: RwLock::new(recent_trades),
             recent_logs: RwLock::new(VecDeque::with_capacity(300)),
             pause_epoch: AtomicU64::new(0),
-            status_update_lock: Mutex::new(()),
+            status_update_lock: Mutex::new(initial_status),
             trade_commit_lock: Mutex::new(()),
             login_failures: Mutex::new(VecDeque::new()),
             setup_code,
             action_tx,
             ws_broadcast_tx,
-            telegram_client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(10))
-                .build()
-                .expect("Failed to build Telegram HTTP client"),
+            telegram_notifier: TelegramNotifier::new(
+                reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(10))
+                    .build()
+                    .expect("Failed to build Telegram HTTP client"),
+            ),
         })
     }
 
@@ -237,21 +242,24 @@ impl AppState {
 
         if telegram.enabled {
             let account = self.account.read().await.clone();
-            let unrealized_pnl = self.position.read().await.unrealized_pnl;
+            let position = self.position.read().await.clone();
+            let ticker = self.ticker.read().await.clone();
             let cny_rate = self.cny_rates.get(&account.asset).await;
             let context = TradeNotificationContext::for_trade(
                 &trade,
                 notification_stats.as_ref(),
                 &account,
-                unrealized_pnl,
+                position.unrealized_pnl,
                 cny_rate.as_ref(),
                 Utc::now(),
-            );
-            let client = self.telegram_client.clone();
+            )
+            .with_position(&trade, &position, &ticker);
+            let notifier = self.telegram_notifier.clone();
             let state = Arc::clone(self);
             tokio::spawn(async move {
-                if let Err(err) =
-                    send_trade_notification(&client, &telegram, &trade, &context).await
+                if let Err(err) = notifier
+                    .send_trade_notification(&telegram, &trade, &context)
+                    .await
                 {
                     warn!("Failed to send Telegram trade notification: {}", err);
                     state
@@ -521,22 +529,100 @@ impl AppState {
         self.login_failures.lock().await.clear();
     }
 
-    pub async fn pause_trading(&self) -> anyhow::Result<()> {
-        self.pause_epoch.fetch_add(1, Ordering::SeqCst);
-        let _update = self.status_update_lock.lock().await;
-        *self.status.write().await = BotStatus::Paused;
-        self.db
-            .run_blocking(|db| db.save_bot_status(BotStatus::Paused))
+    pub async fn pause_trading(self: &Arc<Self>) -> anyhow::Result<()> {
+        self.pause_trading_with_reason("策略运行异常，已暂停，请查看系统运行日志")
             .await
     }
 
-    pub async fn resume_trading(&self) -> anyhow::Result<()> {
+    pub async fn pause_trading_with_reason(self: &Arc<Self>, reason: &str) -> anyhow::Result<()> {
+        self.set_trading_status(BotStatus::Paused, Some(reason))
+            .await
+    }
+
+    pub async fn resume_trading(self: &Arc<Self>) -> anyhow::Result<()> {
+        self.set_trading_status(BotStatus::Running, Some("手动恢复策略"))
+            .await
+    }
+
+    pub(crate) async fn pause_trading_silently(self: &Arc<Self>) -> anyhow::Result<()> {
+        self.set_trading_status(BotStatus::Paused, None).await
+    }
+
+    pub(crate) async fn resume_trading_silently(self: &Arc<Self>) -> anyhow::Result<()> {
+        self.set_trading_status(BotStatus::Running, None).await
+    }
+
+    async fn set_trading_status(
+        self: &Arc<Self>,
+        status: BotStatus,
+        reason: Option<&str>,
+    ) -> anyhow::Result<()> {
+        if status == BotStatus::Paused {
+            self.pause_epoch.fetch_add(1, Ordering::SeqCst);
+        }
+        let mut notification_status = self.status_update_lock.lock().await;
+        let saved = if status == BotStatus::Paused {
+            // An unsafe strategy must stop even if persistence fails.
+            *self.status.write().await = status;
+            self.db
+                .run_blocking(move |db| db.save_bot_status(status))
+                .await
+        } else {
+            self.db
+                .run_blocking(move |db| db.save_bot_status(status))
+                .await?;
+            *self.status.write().await = status;
+            Ok(())
+        };
+        if let Some(reason) = reason {
+            if *notification_status != status {
+                *notification_status = status;
+                let event = if status == BotStatus::Paused {
+                    StrategyEvent::Paused
+                } else {
+                    StrategyEvent::Resumed
+                };
+                self.notify_strategy_event(event, reason).await;
+            }
+        }
+        saved
+    }
+
+    pub async fn notify_strategy_started(self: &Arc<Self>) {
         let _update = self.status_update_lock.lock().await;
-        self.db
-            .run_blocking(|db| db.save_bot_status(BotStatus::Running))
-            .await?;
-        *self.status.write().await = BotStatus::Running;
-        Ok(())
+        if *self.status.read().await == BotStatus::Running {
+            self.notify_strategy_event(StrategyEvent::Started, "程序启动后开始运行策略")
+                .await;
+        }
+    }
+
+    async fn notify_strategy_event(self: &Arc<Self>, event: StrategyEvent, reason: &str) {
+        let config = self.config.read().await;
+        let telegram = config.telegram.clone();
+        if !telegram.enabled {
+            return;
+        }
+        let notification = StrategyNotification {
+            event,
+            symbol: config.exchange.symbol.clone(),
+            mode: TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet),
+            reason: reason.to_string(),
+            timestamp: Utc::now(),
+        };
+        drop(config);
+        let notifier = self.telegram_notifier.clone();
+        let state = Arc::clone(self);
+        tokio::spawn(async move {
+            if let Err(err) = notifier
+                .send_strategy_notification(&telegram, &notification)
+                .await
+            {
+                warn!("Failed to send Telegram strategy notification: {}", err);
+                state
+                    .add_log("WARN", format!("Telegram 策略启停通知发送失败: {}", err))
+                    .await;
+            }
+        });
     }
 
     pub fn pause_epoch(&self) -> u64 {
@@ -558,6 +644,275 @@ impl AppState {
 mod tests {
     use super::*;
     use rust_decimal_macros::dec;
+
+    struct NotificationFixture {
+        state: Arc<AppState>,
+        requests: mpsc::UnboundedReceiver<serde_json::Value>,
+        actions: mpsc::Receiver<BotControlAction>,
+        url: String,
+        server: tokio::task::JoinHandle<()>,
+    }
+
+    async fn notification_fixture(enabled: bool, reject: bool) -> NotificationFixture {
+        use axum::{routing::post, Json, Router};
+        let (request_tx, requests) = mpsc::unbounded_channel();
+        let app = Router::new().route(
+            "/botTEST/sendMessage",
+            post(move |Json(payload): Json<serde_json::Value>| {
+                let tx = request_tx.clone();
+                async move {
+                    tx.send(payload).unwrap();
+                    Json(serde_json::json!({"ok": !reject, "description": "test rejection"}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut config = AppConfig::default();
+        config.telegram = crate::config::TelegramConfig {
+            enabled,
+            bot_token: "TEST".into(),
+            chat_id: "12345".into(),
+        };
+        let (action_tx, actions) = mpsc::channel(8);
+        let mut state = AppState::new(
+            config,
+            Arc::new(Database::open(":memory:").unwrap()),
+            action_tx,
+        );
+        Arc::get_mut(&mut state).unwrap().telegram_notifier =
+            TelegramNotifier::with_base_url(reqwest::Client::new(), url.clone());
+        NotificationFixture {
+            state,
+            requests,
+            actions,
+            url,
+            server,
+        }
+    }
+
+    async fn next_notification(fixture: &mut NotificationFixture) -> serde_json::Value {
+        let request = tokio::time::timeout(Duration::from_secs(1), fixture.requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(request["chat_id"], "12345");
+        assert_eq!(request["parse_mode"], "HTML");
+        request
+    }
+
+    async fn no_more_notifications(fixture: &mut NotificationFixture) {
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), fixture.requests.recv())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn strategy_notifications_cover_start_pause_resume_without_duplicates() {
+        let mut fixture = notification_fixture(true, false).await;
+        fixture.state.notify_strategy_started().await;
+        assert!(next_notification(&mut fixture).await["text"]
+            .as_str()
+            .unwrap()
+            .contains("策略已启动"));
+        fixture
+            .state
+            .pause_trading_with_reason("手动暂停策略")
+            .await
+            .unwrap();
+        fixture
+            .state
+            .pause_trading_with_reason("手动暂停策略")
+            .await
+            .unwrap();
+        let message = next_notification(&mut fixture).await;
+        assert!(message["text"]
+            .as_str()
+            .unwrap()
+            .contains("原因：手动暂停策略"));
+        assert_eq!(
+            fixture.state.db.load_bot_status().unwrap(),
+            Some(BotStatus::Paused)
+        );
+        fixture.state.resume_trading().await.unwrap();
+        fixture.state.resume_trading().await.unwrap();
+        assert!(next_notification(&mut fixture).await["text"]
+            .as_str()
+            .unwrap()
+            .contains("策略已恢复"));
+        no_more_notifications(&mut fixture).await;
+        fixture.server.abort();
+    }
+
+    #[tokio::test]
+    async fn maintenance_is_silent_but_an_actual_pause_during_maintenance_notifies() {
+        let mut fixture = notification_fixture(true, false).await;
+        fixture.state.pause_trading_silently().await.unwrap();
+        fixture.state.resume_trading_silently().await.unwrap();
+        no_more_notifications(&mut fixture).await;
+        fixture.state.pause_trading_silently().await.unwrap();
+        fixture
+            .state
+            .pause_trading_with_reason("撤单失败")
+            .await
+            .unwrap();
+        let message = next_notification(&mut fixture).await;
+        assert!(message["text"].as_str().unwrap().contains("原因：撤单失败"));
+        fixture
+            .state
+            .pause_trading_with_reason("重复暂停")
+            .await
+            .unwrap();
+        no_more_notifications(&mut fixture).await;
+        fixture.server.abort();
+    }
+
+    #[tokio::test]
+    async fn disabled_telegram_does_not_send_strategy_notifications() {
+        let mut fixture = notification_fixture(false, false).await;
+        fixture.state.notify_strategy_started().await;
+        fixture
+            .state
+            .pause_trading_with_reason("手动暂停策略")
+            .await
+            .unwrap();
+        fixture.state.resume_trading().await.unwrap();
+        assert_eq!(*fixture.state.status.read().await, BotStatus::Running);
+        no_more_notifications(&mut fixture).await;
+        fixture.server.abort();
+    }
+
+    #[tokio::test]
+    async fn rejected_telegram_notification_logs_warning_without_changing_pause() {
+        let mut fixture = notification_fixture(true, true).await;
+        let mut logs = fixture.state.ws_broadcast_tx.subscribe();
+        fixture
+            .state
+            .pause_trading_with_reason("手动暂停策略")
+            .await
+            .unwrap();
+        next_notification(&mut fixture).await;
+        let log = tokio::time::timeout(Duration::from_secs(1), logs.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let log: serde_json::Value = serde_json::from_str(&log).unwrap();
+        assert_eq!(log["data"]["level"], "WARN");
+        assert!(log["data"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Telegram 策略启停通知发送失败"));
+        assert_eq!(*fixture.state.status.read().await, BotStatus::Paused);
+        assert_eq!(
+            fixture.state.db.load_bot_status().unwrap(),
+            Some(BotStatus::Paused)
+        );
+        fixture.server.abort();
+    }
+
+    #[tokio::test]
+    async fn engine_start_notifies_or_reports_position_limit_pause() {
+        for at_limit in [false, true] {
+            let mut fixture = notification_fixture(true, false).await;
+            {
+                let mut config = fixture.state.config.write().await;
+                config.grid.pause_on_max_position = at_limit;
+                config.grid.max_position_usdc = Some(dec!(1000));
+            }
+            fixture.state.position.write().await.size = dec!(10);
+            {
+                let mut ticker = fixture.state.ticker.write().await;
+                ticker.last_price = dec!(100);
+                ticker.mark_price = dec!(100);
+            }
+            let config = fixture.state.config.read().await.clone();
+            let client = Arc::new(
+                crate::exchange::client::BinanceFuturesClient::with_base_url(
+                    &config.exchange,
+                    fixture.url.clone(),
+                ),
+            );
+            let (_, ticker_rx) = broadcast::channel(1);
+            // Keep the fixture usable while moving the real action receiver into the engine.
+            let (_, unused_actions) = mpsc::channel(1);
+            let action_rx = std::mem::replace(&mut fixture.actions, unused_actions);
+            let mut engine = crate::strategy::grid::GridTradingEngine::new(
+                fixture.state.clone(),
+                client,
+                action_rx,
+                ticker_rx,
+            );
+            let task = tokio::spawn(async move { engine.run().await });
+            let message = next_notification(&mut fixture).await;
+            let text = message["text"].as_str().unwrap();
+            if at_limit {
+                assert!(text.contains("策略已暂停"));
+                assert!(text.contains("持仓名义价值 1000 已达到最大持仓名义价值 1000"));
+                assert_eq!(*fixture.state.status.read().await, BotStatus::Paused);
+            } else {
+                assert!(text.contains("策略已启动"));
+                assert_eq!(*fixture.state.status.read().await, BotStatus::Running);
+            }
+            task.abort();
+            no_more_notifications(&mut fixture).await;
+            fixture.server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn trade_notifications_capture_position_amount_after_buy_and_sell_fills() {
+        let mut fixture = notification_fixture(true, false).await;
+        fixture.state.position.write().await.size = dec!(9.5);
+        {
+            let mut ticker = fixture.state.ticker.write().await;
+            ticker.last_price = dec!(100);
+            ticker.mark_price = dec!(100);
+            ticker.update_time = Utc::now();
+        }
+        let config = fixture.state.config.read().await.clone();
+        let client = Arc::new(
+            crate::exchange::client::BinanceFuturesClient::with_base_url(
+                &config.exchange,
+                fixture.url.clone(),
+            ),
+        );
+        let (ticker_tx, ticker_rx) = broadcast::channel(4);
+        let (_, unused_actions) = mpsc::channel(1);
+        let action_rx = std::mem::replace(&mut fixture.actions, unused_actions);
+        let mut engine = crate::strategy::GridTradingEngine::new(
+            fixture.state.clone(),
+            client,
+            action_rx,
+            ticker_rx,
+        );
+        let task = tokio::spawn(async move { engine.run().await });
+        let start = next_notification(&mut fixture).await;
+        assert!(start["text"].as_str().unwrap().contains("策略已启动"));
+        for (price, side, size, amount) in [
+            (dec!(99.9), "BUY", dec!(10.5), "1050.00"),
+            (dec!(100.1), "SELL", dec!(9.51), "951.00"),
+        ] {
+            ticker_tx
+                .send(TickerInfo {
+                    symbol: config.exchange.symbol.clone(),
+                    last_price: price,
+                    mark_price: dec!(100),
+                    mark_update_time: Utc::now(),
+                    ..Default::default()
+                })
+                .unwrap();
+            let message = next_notification(&mut fixture).await;
+            let text = message["text"].as_str().unwrap();
+            assert!(text.contains(side));
+            assert!(text.contains(&format!("持仓金额：{amount} USDC")));
+            assert_eq!(fixture.state.position.read().await.size, size);
+        }
+        task.abort();
+        fixture.server.abort();
+    }
 
     #[tokio::test]
     async fn switching_mode_reloads_only_that_modes_trades() {

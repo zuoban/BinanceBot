@@ -344,6 +344,8 @@ pub struct UpdateConfigPayload {
     pub min_price: Option<Decimal>,
     pub max_price: Option<Decimal>,
     pub max_position_usdc: Option<Decimal>,
+    #[serde(default)]
+    pub pause_on_max_position: Option<bool>,
     #[serde(default = "default_true")]
     pub save_to_file: bool,
 }
@@ -367,6 +369,7 @@ pub struct WebConfigView {
     pub min_price: Option<Decimal>,
     pub max_price: Option<Decimal>,
     pub max_position_usdc: Option<Decimal>,
+    pub pause_on_max_position: bool,
 }
 
 fn default_true() -> bool {

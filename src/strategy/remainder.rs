@@ -217,6 +217,9 @@ impl GridTradingEngine {
         {
             return Ok(());
         }
+        if self.pause_if_position_limit_reached().await {
+            return Ok(());
+        }
 
         // Check the stable target identity before ever attempting a (re)submission.
         if !paper && self.adopt_remainder_target(plan).await? {

@@ -53,6 +53,294 @@ async fn orders(engine: &GridTradingEngine) -> Vec<GridOrder> {
 }
 
 #[tokio::test]
+async fn max_position_pause_cancels_both_sides_and_survives_restart() {
+    let mut engine = paper_engine().await;
+    {
+        let mut config = engine.state.config.write().await;
+        config.grid.max_position_usdc = Some(dec!(1000));
+        config.grid.pause_on_max_position = true;
+    }
+    {
+        let mut ticker = engine.state.ticker.write().await;
+        ticker.last_price = dec!(95);
+        ticker.mark_price = dec!(100);
+    }
+    engine.state.position.write().await.size = dec!(10);
+    for pending in [
+        order("limit_buy", OrderSide::Buy, dec!(94.9), dec!(1)),
+        order("limit_sell", OrderSide::Sell, dec!(100.1), dec!(1)),
+    ] {
+        engine
+            .state
+            .active_orders
+            .write()
+            .await
+            .insert(pending.client_order_id.clone(), pending);
+    }
+
+    engine.maintain_grid_window().await;
+    assert_eq!(*engine.state.status.read().await, BotStatus::Paused);
+    assert!(orders(&engine).await.is_empty());
+    assert_eq!(engine.state.position.read().await.size, dec!(10));
+    assert_eq!(
+        engine.state.db.load_bot_status().unwrap(),
+        Some(BotStatus::Paused)
+    );
+    let logs = engine.state.recent_logs.read().await.len();
+    engine.maintain_grid_window().await;
+    assert_eq!(engine.state.recent_logs.read().await.len(), logs);
+
+    let restored = paper_engine_with_db(engine.state.db.clone()).await;
+    assert_eq!(*restored.state.status.read().await, BotStatus::Paused);
+}
+
+#[tokio::test]
+async fn max_position_pause_ignores_pending_exposure_and_uses_mark_price() {
+    let mut engine = paper_engine().await;
+    {
+        let mut config = engine.state.config.write().await;
+        config.grid.max_position_usdc = Some(dec!(1000));
+        config.grid.pause_on_max_position = true;
+    }
+    engine.state.position.write().await.size = dec!(9);
+    {
+        let mut ticker = engine.state.ticker.write().await;
+        ticker.last_price = dec!(120);
+        ticker.mark_price = dec!(100);
+    }
+    let pending = order("pending_limit", OrderSide::Buy, dec!(99.9), dec!(2));
+    engine
+        .state
+        .active_orders
+        .write()
+        .await
+        .insert(pending.client_order_id.clone(), pending);
+    assert!(!engine.pause_if_position_limit_reached().await);
+    assert_eq!(*engine.state.status.read().await, BotStatus::Running);
+    assert_eq!(orders(&engine).await.len(), 1);
+
+    engine.state.ticker.write().await.mark_price = dec!(112);
+    engine.state.config.write().await.grid.pause_on_max_position = false;
+    assert!(!engine.pause_if_position_limit_reached().await);
+    assert_eq!(*engine.state.status.read().await, BotStatus::Running);
+}
+
+#[tokio::test]
+async fn max_position_pause_stops_paper_fill_batch_at_the_limit() {
+    let mut engine = paper_engine().await;
+    {
+        let mut config = engine.state.config.write().await;
+        config.grid.max_position_usdc = Some(dec!(1000));
+        config.grid.pause_on_max_position = true;
+    }
+    engine.state.position.write().await.size = dec!(9);
+    for pending in [
+        order("limit_first", OrderSide::Buy, dec!(99), dec!(1)),
+        order("limit_second", OrderSide::Buy, dec!(98), dec!(1)),
+    ] {
+        engine
+            .state
+            .active_orders
+            .write()
+            .await
+            .insert(pending.client_order_id.clone(), pending);
+    }
+    engine
+        .handle_ticker_update(TickerInfo {
+            symbol: "SOLUSDC".into(),
+            last_price: dec!(95),
+            mark_price: dec!(100),
+            ..Default::default()
+        })
+        .await;
+    assert_eq!(*engine.state.status.read().await, BotStatus::Paused);
+    assert_eq!(engine.state.position.read().await.size, dec!(10));
+    assert!(orders(&engine).await.is_empty());
+    let trades = engine.state.db.get_recent_trades(10).unwrap();
+    assert_eq!(trades.len(), 1);
+    assert_eq!(trades[0].client_order_id, "gb_limit_first");
+
+    engine
+        .handle_ticker_update(TickerInfo {
+            symbol: "SOLUSDC".into(),
+            last_price: dec!(90),
+            mark_price: dec!(90),
+            ..Default::default()
+        })
+        .await;
+    assert_eq!(*engine.state.status.read().await, BotStatus::Paused);
+    assert!(orders(&engine).await.is_empty());
+}
+
+#[tokio::test]
+async fn max_position_pause_handles_short_positions_and_price_fallbacks() {
+    for (mark_price, position_mark_price, last_price) in [
+        (dec!(101), dec!(90), dec!(90)),
+        (dec!(0), dec!(101), dec!(90)),
+        (dec!(0), dec!(0), dec!(101)),
+    ] {
+        let mut engine = paper_engine().await;
+        {
+            let mut config = engine.state.config.write().await;
+            config.grid.max_position_usdc = Some(dec!(1000));
+            config.grid.pause_on_max_position = true;
+        }
+        {
+            let mut position = engine.state.position.write().await;
+            position.size = dec!(-10);
+            position.mark_price = position_mark_price;
+        }
+        {
+            let mut ticker = engine.state.ticker.write().await;
+            ticker.mark_price = mark_price;
+            ticker.last_price = last_price;
+        }
+        engine.maintain_grid_window().await;
+        assert_eq!(*engine.state.status.read().await, BotStatus::Paused);
+        assert_eq!(engine.state.position.read().await.size, dec!(-10));
+    }
+}
+
+#[tokio::test]
+async fn enabling_max_position_pause_applies_immediately_and_is_saved() {
+    let mut engine = paper_engine().await;
+    engine.state.position.write().await.size = dec!(10);
+    engine.state.ticker.write().await.mark_price = dec!(100);
+    let mut config = engine.state.config.read().await.clone();
+    config.grid.max_position_usdc = Some(dec!(1000));
+    config.grid.pause_on_max_position = true;
+
+    engine.apply_config(config).await.unwrap();
+    assert_eq!(*engine.state.status.read().await, BotStatus::Paused);
+    assert!(
+        engine
+            .state
+            .db
+            .load_config()
+            .unwrap()
+            .unwrap()
+            .grid
+            .pause_on_max_position
+    );
+    assert!(
+        engine
+            .state
+            .config
+            .read()
+            .await
+            .summary()
+            .pause_on_max_position
+    );
+}
+
+#[tokio::test]
+async fn max_position_pause_triggers_from_price_updates_before_paper_sells() {
+    let mut engine = paper_engine().await;
+    {
+        let mut config = engine.state.config.write().await;
+        config.grid.max_position_usdc = Some(dec!(1000));
+        config.grid.pause_on_max_position = true;
+    }
+    engine.state.position.write().await.size = dec!(10);
+    engine.state.ticker.write().await.mark_price = dec!(99);
+    let pending = order("sell_price_rise", OrderSide::Sell, dec!(100), dec!(1));
+    engine
+        .state
+        .active_orders
+        .write()
+        .await
+        .insert(pending.client_order_id.clone(), pending);
+    engine
+        .handle_ticker_update(TickerInfo {
+            symbol: "SOLUSDC".into(),
+            last_price: dec!(101),
+            mark_price: dec!(101),
+            ..Default::default()
+        })
+        .await;
+    assert_eq!(*engine.state.status.read().await, BotStatus::Paused);
+    assert_eq!(engine.state.position.read().await.size, dec!(10));
+    assert!(orders(&engine).await.is_empty());
+    assert!(engine.state.db.get_recent_trades(10).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn max_position_pause_on_live_sync_stays_paused_when_cancellation_fails() {
+    use axum::{http::StatusCode, routing::get, Json, Router};
+
+    let pending = crate::exchange::BinanceOrderResponse {
+        order_id: 42,
+        client_order_id: "gb_live_position_limit".into(),
+        symbol: "SOLUSDC".into(),
+        status: "PARTIALLY_FILLED".into(),
+        price: dec!(99),
+        avg_price: Some(dec!(99)),
+        orig_qty: dec!(2),
+        executed_qty: dec!(1),
+        side: "BUY".into(),
+        order_type: "LIMIT".into(),
+        time_in_force: "GTX".into(),
+        update_time: None,
+    };
+    let app = Router::new()
+        .route(
+            "/fapi/v1/premiumIndex",
+            get(|| async { Json(serde_json::json!({"symbol": "SOLUSDC", "markPrice": "100"})) }),
+        )
+        .route(
+            "/fapi/v1/openOrders",
+            get(move || {
+                let pending = pending.clone();
+                async move { Json(vec![pending]) }
+            }),
+        )
+        .route(
+            "/fapi/v2/positionRisk",
+            get(|| async {
+                Json(serde_json::json!([{
+                    "symbol": "SOLUSDC", "positionAmt": "10", "entryPrice": "99",
+                    "markPrice": "100", "unRealizedProfit": "10",
+                    "liquidationPrice": "0", "leverage": "20"
+                }]))
+            }),
+        )
+        // Position synchronization alone must trigger the pause, even if balances fail.
+        .route(
+            "/fapi/v2/account",
+            get(|| async { StatusCode::SERVICE_UNAVAILABLE }),
+        )
+        .route(
+            "/fapi/v1/order",
+            axum::routing::delete(|| async { StatusCode::SERVICE_UNAVAILABLE }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let mut engine = paper_engine().await;
+    {
+        let mut config = engine.state.config.write().await;
+        config.exchange.dry_run = false;
+        config.grid.max_position_usdc = Some(dec!(1000));
+        config.grid.pause_on_max_position = true;
+        engine.client = Arc::new(BinanceFuturesClient::with_base_url(&config.exchange, url));
+    }
+    engine.state.position.write().await.size = dec!(9);
+    engine.sync_cycle().await;
+    assert_eq!(*engine.state.status.read().await, BotStatus::Paused);
+    assert_eq!(engine.state.position.read().await.size, dec!(10));
+    assert_eq!(
+        engine.state.db.load_bot_status().unwrap(),
+        Some(BotStatus::Paused)
+    );
+    assert_eq!(orders(&engine).await.len(), 1);
+    assert!(engine.state.recent_logs.read().await.iter().any(|entry| {
+        entry.level == "ERROR" && entry.message.contains("部分策略挂单可能尚未撤销")
+    }));
+    server.abort();
+}
+
+#[tokio::test]
 async fn history_cleanup_keeps_the_window_boundary_and_does_not_reapply_fills() {
     let mut engine = paper_engine().await;
     engine.state.ticker.write().await.last_price = dec!(119.25);
