@@ -10,12 +10,19 @@ use rusqlite::{params, Connection, OptionalExtension};
 use rust_decimal::Decimal;
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use tracing::info;
 
 pub struct Database {
     conn: Mutex<Connection>,
     path: String,
+    trade_revision: AtomicU64,
+    price_revision: AtomicU64,
+    #[cfg(test)]
+    hourly_stats_queries: AtomicU64,
+    #[cfg(test)]
+    price_history_queries: AtomicU64,
 }
 
 impl Database {
@@ -53,6 +60,12 @@ impl Database {
         let db = Self {
             conn: Mutex::new(conn),
             path: path_str,
+            trade_revision: AtomicU64::new(0),
+            price_revision: AtomicU64::new(0),
+            #[cfg(test)]
+            hourly_stats_queries: AtomicU64::new(0),
+            #[cfg(test)]
+            price_history_queries: AtomicU64::new(0),
         };
 
         db.init_tables()?;
@@ -61,6 +74,21 @@ impl Database {
 
     pub fn path(&self) -> &str {
         &self.path
+    }
+
+    pub(crate) fn snapshot_data_revisions(&self) -> (u64, u64) {
+        (
+            self.trade_revision.load(Ordering::Acquire),
+            self.price_revision.load(Ordering::Acquire),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn chart_query_counts(&self) -> (u64, u64) {
+        (
+            self.hourly_stats_queries.load(Ordering::Relaxed),
+            self.price_history_queries.load(Ordering::Relaxed),
+        )
     }
 
     /// A consistent analysis snapshot, including committed WAL transactions.
@@ -431,7 +459,11 @@ impl Database {
 
     pub fn insert_trade(&self, trade: &TradeRecord) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
-        insert_trade_on(&conn, trade)
+        let inserted = insert_trade_on(&conn, trade)?;
+        if inserted {
+            self.trade_revision.fetch_add(1, Ordering::Release);
+        }
+        Ok(inserted)
     }
 
     /// Delete analysis history atomically while preserving order deduplication
@@ -457,6 +489,7 @@ impl Database {
         let deleted = tx.execute("DELETE FROM trades", [])?;
         tx.execute_batch("DELETE FROM scoped_grid_stats; DELETE FROM grid_stats;")?;
         tx.commit()?;
+        self.trade_revision.fetch_add(1, Ordering::Release);
         Ok(deleted)
     }
 
@@ -500,6 +533,9 @@ impl Database {
             )?;
         }
         tx.commit()?;
+        if inserted {
+            self.trade_revision.fetch_add(1, Ordering::Release);
+        }
         Ok(inserted)
     }
 
@@ -736,6 +772,8 @@ impl Database {
         mode: TradingMode,
         now: DateTime<Utc>,
     ) -> Result<HourlyTradeStats> {
+        #[cfg(test)]
+        self.hourly_stats_queries.fetch_add(1, Ordering::Relaxed);
         let window_start = crate::price_history::beijing_midnight(now);
         let first_hour = window_start.timestamp();
         let last_hour = now.timestamp().div_euclid(3600) * 3600;
@@ -792,6 +830,7 @@ impl Database {
     ) -> Result<()> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
+        let mut inserted = 0;
         {
             let mut stmt = tx.prepare(
                 "INSERT OR IGNORE INTO price_snapshots (symbol, is_testnet, timestamp, price) VALUES (?1, ?2, ?3, ?4);",
@@ -803,7 +842,7 @@ impl Database {
                         && point.timestamp.timestamp_subsec_nanos() == 0,
                     "Snapshot time must be an exact hour"
                 );
-                stmt.execute(params![
+                inserted += stmt.execute(params![
                     symbol,
                     is_testnet,
                     point.timestamp.timestamp_millis(),
@@ -812,6 +851,9 @@ impl Database {
             }
         }
         tx.commit()?;
+        if inserted > 0 {
+            self.price_revision.fetch_add(1, Ordering::Release);
+        }
         Ok(())
     }
 
@@ -821,6 +863,8 @@ impl Database {
         is_testnet: bool,
         now: DateTime<Utc>,
     ) -> Result<PriceHistory> {
+        #[cfg(test)]
+        self.price_history_queries.fetch_add(1, Ordering::Relaxed);
         let day_start = crate::price_history::beijing_midnight(now);
         let window_start = day_start - ChronoDuration::days(6);
         let conn = self.conn.lock().unwrap();
@@ -1937,6 +1981,10 @@ mod tests {
         let db = Database {
             conn: Mutex::new(conn),
             path: ":memory:".into(),
+            trade_revision: AtomicU64::new(0),
+            price_revision: AtomicU64::new(0),
+            hourly_stats_queries: AtomicU64::new(0),
+            price_history_queries: AtomicU64::new(0),
         };
         db.init_tables().unwrap();
 

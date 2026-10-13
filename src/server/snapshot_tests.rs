@@ -1,0 +1,486 @@
+use super::*;
+use crate::types::{BotStatus, GridStats, OrderSide, PricePoint, TradeRecord};
+use rust_decimal_macros::dec;
+use tokio::sync::{broadcast, mpsc};
+
+fn test_time() -> DateTime<Utc> {
+    "2026-10-14T03:20:00Z".parse().unwrap()
+}
+
+fn state_with_db(db: Arc<Database>) -> Arc<AppState> {
+    let (tx, _) = mpsc::channel(1);
+    AppState::new(AppConfig::default(), db, tx)
+}
+
+fn fixture() -> Arc<AppState> {
+    state_with_db(Arc::new(Database::open(":memory:").unwrap()))
+}
+
+fn trade(id: &str, symbol: &str, mode: TradingMode, time: DateTime<Utc>) -> TradeRecord {
+    TradeRecord {
+        trade_id: id.into(),
+        client_order_id: format!("gb_b_{id}"),
+        symbol: symbol.into(),
+        mode,
+        side: OrderSide::Buy,
+        price: dec!(100),
+        quantity: dec!(1),
+        amount_usdc: dec!(100),
+        realized_pnl: dec!(0),
+        commission: dec!(0),
+        pnl_verified: true,
+        is_maker: true,
+        timestamp: time,
+        note: String::new(),
+    }
+}
+
+fn total(snapshot: &BotSnapshot) -> u64 {
+    snapshot
+        .hourly_trade_stats
+        .as_ref()
+        .unwrap()
+        .buckets
+        .iter()
+        .map(|bucket| bucket.buy_count + bucket.sell_count)
+        .sum()
+}
+
+#[tokio::test]
+async fn repeated_snapshots_reuse_charts_but_keep_live_fields_current() {
+    let state = fixture();
+    let now = test_time();
+    state.snapshot_at(now).await;
+    assert_eq!(state.db.chart_query_counts(), (1, 1));
+    *state.status.write().await = BotStatus::Paused;
+    state.ticker.write().await.last_price = dec!(123);
+    state.add_log("INFO", "live snapshot update").await;
+    for offset in [800, 1600, 2400, 3200, 4000] {
+        let snapshot = state
+            .snapshot_at(now + chrono::Duration::milliseconds(offset))
+            .await;
+        assert_eq!(snapshot.status, BotStatus::Paused);
+        assert_eq!(snapshot.ticker.last_price, dec!(123));
+        assert_eq!(snapshot.recent_logs[0].message, "live snapshot update");
+        assert_eq!(state.db.chart_query_counts(), (1, 1));
+    }
+    state.snapshot_at(now + chrono::Duration::seconds(5)).await;
+    assert_eq!(state.db.chart_query_counts(), (2, 1));
+    state.snapshot_at(now + chrono::Duration::seconds(60)).await;
+    assert_eq!(state.db.chart_query_counts(), (3, 2));
+}
+
+#[tokio::test]
+async fn concurrent_snapshot_requests_share_the_same_chart_queries() {
+    let state = fixture();
+    let now = test_time();
+    let mut requests = Vec::new();
+    for _ in 0..16 {
+        let state = state.clone();
+        requests.push(tokio::spawn(async move { state.snapshot_at(now).await }));
+    }
+    for request in requests {
+        assert_eq!(total(&request.await.unwrap()), 0);
+    }
+    assert_eq!(state.db.chart_query_counts(), (1, 1));
+}
+
+#[tokio::test]
+async fn moving_the_clock_back_does_not_reuse_counts_from_the_future() {
+    let state = fixture();
+    let now = test_time();
+    state
+        .db
+        .insert_trade(&trade("future", "SOLUSDC", TradingMode::Paper, now))
+        .unwrap();
+    assert_eq!(total(&state.snapshot_at(now).await), 1);
+    assert_eq!(
+        total(&state.snapshot_at(now - chrono::Duration::seconds(1)).await),
+        0
+    );
+    assert_eq!(state.db.chart_query_counts(), (2, 2));
+}
+
+#[tokio::test]
+async fn failed_chart_reads_back_off_and_recover_without_caching_the_error_forever() {
+    let directory = std::env::temp_dir().join(format!("snapshot-cache-{}", uuid::Uuid::new_v4()));
+    let path = directory.join("test.db");
+    let db = Arc::new(Database::open(&path).unwrap());
+    let state = state_with_db(db.clone());
+    let now = test_time();
+    db.save_price_points(
+        "SOLUSDC",
+        false,
+        &[PricePoint {
+            timestamp: crate::price_history::beijing_midnight(now),
+            price: dec!(120),
+        }],
+    )
+    .unwrap();
+    let editor = rusqlite::Connection::open(&path).unwrap();
+    editor
+        .execute("UPDATE price_snapshots SET price = 'invalid'", [])
+        .unwrap();
+    assert!(state.snapshot_at(now).await.price_history.is_none());
+    editor
+        .execute("UPDATE price_snapshots SET price = '120'", [])
+        .unwrap();
+    for offset in [800, 1600, 2400, 3200, 4000] {
+        assert!(state
+            .snapshot_at(now + chrono::Duration::milliseconds(offset))
+            .await
+            .price_history
+            .is_none());
+        assert_eq!(db.chart_query_counts(), (1, 1));
+    }
+    let recovered = state.snapshot_at(now + chrono::Duration::seconds(5)).await;
+    assert_eq!(
+        recovered.price_history.unwrap().midnight_price,
+        Some(dec!(120))
+    );
+    assert_eq!(db.chart_query_counts(), (2, 2));
+    drop(editor);
+    drop(state);
+    drop(db);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn confirmed_trades_and_cleanup_invalidate_only_trade_counts() {
+    let state = fixture();
+    let now = test_time();
+    assert_eq!(total(&state.snapshot_at(now).await), 0);
+    let fill = trade("new", "SOLUSDC", TradingMode::Paper, now);
+    assert!(state.record_trade(fill.clone(), None, None, None).await);
+    let snapshot = state.snapshot_at(now).await;
+    assert_eq!(total(&snapshot), 1);
+    assert_eq!(snapshot.stats.total_trades, 1);
+    assert_eq!(state.db.chart_query_counts(), (2, 1));
+    assert!(state.record_trade(fill, None, None, None).await);
+    state.snapshot_at(now).await;
+    assert_eq!(state.db.chart_query_counts(), (2, 1));
+    assert_eq!(state.clear_trade_history().await.unwrap(), 1);
+    let cleared = state.snapshot_at(now).await;
+    assert_eq!(total(&cleared), 0);
+    assert_eq!(cleared.stats.total_trades, 0);
+    assert!(cleared.recent_trades.is_empty());
+    assert_eq!(state.db.chart_query_counts(), (3, 1));
+}
+
+#[tokio::test]
+async fn price_backfill_invalidates_only_price_cache_and_ignores_duplicate_writes() {
+    let state = fixture();
+    let now = test_time();
+    assert!(state
+        .snapshot_at(now)
+        .await
+        .price_history
+        .unwrap()
+        .midnight_price
+        .is_none());
+    let point = PricePoint {
+        timestamp: crate::price_history::beijing_midnight(now),
+        price: dec!(120),
+    };
+    state
+        .db
+        .save_price_points("SOLUSDC", false, std::slice::from_ref(&point))
+        .unwrap();
+    assert_eq!(
+        state
+            .snapshot_at(now)
+            .await
+            .price_history
+            .unwrap()
+            .midnight_price,
+        Some(dec!(120))
+    );
+    assert_eq!(state.db.chart_query_counts(), (1, 2));
+    state
+        .db
+        .save_price_points("SOLUSDC", false, std::slice::from_ref(&point))
+        .unwrap();
+    state.snapshot_at(now).await;
+    assert_eq!(state.db.chart_query_counts(), (1, 2));
+    let invalid_batch = [
+        PricePoint {
+            timestamp: point.timestamp + chrono::Duration::hours(1),
+            price: dec!(125),
+        },
+        PricePoint {
+            timestamp: point.timestamp + chrono::Duration::hours(2),
+            price: dec!(0),
+        },
+    ];
+    assert!(state
+        .db
+        .save_price_points("SOLUSDC", false, &invalid_batch)
+        .is_err());
+    state.snapshot_at(now).await;
+    assert_eq!(state.db.chart_query_counts(), (1, 2));
+}
+
+#[tokio::test]
+async fn caches_follow_hour_and_beijing_midnight_boundaries() {
+    for time in ["2026-10-14T03:59:59Z", "2026-10-14T15:59:59Z"] {
+        let now: DateTime<Utc> = time.parse().unwrap();
+        let next_hour = now + chrono::Duration::seconds(1);
+        let state = fixture();
+        state
+            .db
+            .insert_trade(&trade("before", "SOLUSDC", TradingMode::Paper, now))
+            .unwrap();
+        state
+            .db
+            .insert_trade(&trade("after", "SOLUSDC", TradingMode::Paper, next_hour))
+            .unwrap();
+        state
+            .db
+            .save_price_points(
+                "SOLUSDC",
+                false,
+                &[
+                    PricePoint {
+                        timestamp: next_hour - chrono::Duration::hours(1),
+                        price: dec!(120),
+                    },
+                    PricePoint {
+                        timestamp: next_hour,
+                        price: dec!(121),
+                    },
+                ],
+            )
+            .unwrap();
+        let before = state.snapshot_at(now).await;
+        assert_eq!(total(&before), 1);
+        assert_eq!(before.price_history.unwrap().points.len(), 1);
+        let after = state.snapshot_at(next_hour).await;
+        let rolled_day = crate::price_history::beijing_midnight(now)
+            != crate::price_history::beijing_midnight(next_hour);
+        assert_eq!(total(&after), if rolled_day { 1 } else { 2 });
+        assert_eq!(
+            after.hourly_trade_stats.as_ref().unwrap().buckets.len(),
+            if rolled_day { 1 } else { 13 }
+        );
+        let history = after.price_history.unwrap();
+        assert_eq!(history.points.len(), 2);
+        if rolled_day {
+            assert_eq!(history.midnight_price, Some(dec!(121)));
+        }
+        assert_eq!(state.db.chart_query_counts(), (2, 2));
+    }
+}
+
+#[tokio::test]
+async fn scope_changes_isolate_trade_modes_symbols_and_price_environments() {
+    let state = fixture();
+    let now = test_time();
+    for (id, symbol, mode) in [
+        ("paper", "SOLUSDC", TradingMode::Paper),
+        ("live1", "SOLUSDC", TradingMode::Live),
+        ("live2", "SOLUSDC", TradingMode::Live),
+        ("btc", "BTCUSDT", TradingMode::Paper),
+    ] {
+        state
+            .db
+            .insert_trade(&trade(id, symbol, mode, now))
+            .unwrap();
+    }
+    for (symbol, is_testnet, price) in [
+        ("SOLUSDC", false, dec!(120)),
+        ("BTCUSDT", true, dec!(60000)),
+    ] {
+        state
+            .db
+            .save_price_points(
+                symbol,
+                is_testnet,
+                &[PricePoint {
+                    timestamp: crate::price_history::beijing_midnight(now),
+                    price,
+                }],
+            )
+            .unwrap();
+    }
+    assert_eq!(total(&state.snapshot_at(now).await), 1);
+    state.config.write().await.exchange.dry_run = false;
+    state.refresh_current_scope().await;
+    let live = state.snapshot_at(now).await;
+    assert_eq!(total(&live), 2);
+    assert_eq!(live.price_history.unwrap().midnight_price, Some(dec!(120)));
+    assert_eq!(state.db.chart_query_counts(), (2, 1));
+    {
+        let mut config = state.config.write().await;
+        config.exchange.symbol = "BTCUSDT".into();
+        config.exchange.dry_run = true;
+        config.exchange.is_testnet = true;
+    }
+    state.refresh_current_scope().await;
+    let btc = state.snapshot_at(now).await;
+    assert_eq!(btc.symbol, "BTCUSDT");
+    assert_eq!(total(&btc), 1);
+    assert_eq!(btc.price_history.unwrap().midnight_price, Some(dec!(60000)));
+    assert_eq!(state.db.chart_query_counts(), (3, 2));
+}
+
+#[tokio::test]
+async fn stale_chart_read_cannot_be_combined_with_a_later_trade_commit() {
+    let state = fixture();
+    let now = test_time();
+    let charts = state
+        .snapshot_cache
+        .get(
+            &state.db,
+            SnapshotScope::from_config(&AppConfig::default()),
+            now,
+        )
+        .await;
+    assert!(
+        state
+            .record_trade(
+                trade("racing", "SOLUSDC", TradingMode::Paper, now),
+                None,
+                None,
+                None
+            )
+            .await
+    );
+    assert!(state.collect_snapshot(Some(charts), now).await.is_none());
+    let fresh = state.snapshot_at(now).await;
+    assert_eq!(total(&fresh), 1);
+    assert_eq!(fresh.stats.total_trades, 1);
+}
+
+#[tokio::test]
+async fn snapshot_waits_for_scope_transition_and_retries_the_new_scope() {
+    let state = fixture();
+    let now = test_time();
+    state
+        .db
+        .insert_trade_with_stats(
+            &trade("btc", "BTCUSDT", TradingMode::Paper, now),
+            &GridStats {
+                total_trades: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let transition = state.snapshot_scope_lock.write().await;
+    let reading = state.clone();
+    let task = tokio::spawn(async move { reading.snapshot_at(now).await });
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while state.db.chart_query_counts().0 == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!task.is_finished());
+    state.config.write().await.exchange.symbol = "BTCUSDT".into();
+    state.refresh_current_scope().await;
+    drop(transition);
+    let snapshot = tokio::time::timeout(Duration::from_secs(3), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(snapshot.symbol, "BTCUSDT");
+    assert_eq!(total(&snapshot), 1);
+    assert_eq!(snapshot.stats.total_trades, 1);
+    assert_eq!(snapshot.recent_trades[0].symbol, "BTCUSDT");
+}
+
+#[tokio::test]
+async fn publisher_skips_database_work_without_subscribers() {
+    let state = fixture();
+    let task = tokio::spawn(state.clone().run_snapshot_broadcast());
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    assert_eq!(state.db.chart_query_counts(), (0, 0));
+    let mut updates = state.ws_broadcast_tx.subscribe();
+    let json = tokio::time::timeout(Duration::from_secs(2), updates.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let frame: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(frame["type"], "snapshot");
+    assert_eq!(state.db.chart_query_counts(), (1, 1));
+    task.abort();
+    let _ = task.await;
+}
+
+#[tokio::test]
+async fn snapshot_push_continues_while_the_trading_engine_waits_for_rest() {
+    use crate::exchange::client::BinanceFuturesClient;
+    use crate::strategy::GridTradingEngine;
+    use axum::{routing::get, Json, Router};
+    use tokio::sync::Notify;
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let handler_entered = entered.clone();
+    let handler_release = release.clone();
+    let app = Router::new().route(
+        "/fapi/v1/premiumIndex",
+        get(move || {
+            let entered = handler_entered.clone();
+            let release = handler_release.clone();
+            async move {
+                entered.notify_one();
+                release.notified().await;
+                Json(serde_json::json!({"markPrice":"100"}))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    db.save_bot_status(BotStatus::Paused).unwrap();
+    let mut config = AppConfig::default();
+    config.exchange.dry_run = false;
+    let (tx, rx) = mpsc::channel(1);
+    let (_ticks, ticker_rx) = broadcast::channel(1);
+    let state = AppState::new(config.clone(), db.clone(), tx);
+    let mut engine = GridTradingEngine::new(
+        state.clone(),
+        Arc::new(BinanceFuturesClient::with_base_url(&config.exchange, url)),
+        rx,
+        ticker_rx,
+    );
+    let trading = tokio::spawn(async move { engine.run().await });
+    tokio::time::timeout(Duration::from_secs(3), entered.notified())
+        .await
+        .unwrap();
+    let mut updates = state.ws_broadcast_tx.subscribe();
+    let snapshots = tokio::spawn(state.clone().run_snapshot_broadcast());
+    let first = tokio::time::timeout(Duration::from_secs(2), updates.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&first).unwrap()["type"],
+        "snapshot"
+    );
+    state.add_log("INFO", "updated while REST is blocked").await;
+    let second = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let frame: serde_json::Value =
+                serde_json::from_str(&updates.recv().await.unwrap()).unwrap();
+            if frame["type"] == "snapshot" {
+                break frame;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        second["data"]["recent_logs"][0]["message"],
+        "updated while REST is blocked"
+    );
+    assert_eq!(db.chart_query_counts(), (1, 1));
+    trading.abort();
+    snapshots.abort();
+    release.notify_waiters();
+    server.abort();
+    let _ = trading.await;
+    let _ = snapshots.await;
+    let _ = server.await;
+}

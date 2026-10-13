@@ -505,12 +505,7 @@ async fn clear_trade_history_handler(
                     ),
                 )
                 .await;
-            let snapshot = state.snapshot().await;
-            if let Ok(event) = serde_json::to_string(&serde_json::json!({
-                "type": "snapshot", "data": snapshot
-            })) {
-                let _ = state.ws_broadcast_tx.send(event);
-            }
+            let snapshot = state.broadcast_snapshot().await;
             (
                 StatusCode::OK,
                 Json(ApiResponse {

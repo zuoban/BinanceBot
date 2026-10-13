@@ -61,6 +61,8 @@ async fn cleanup_requires_auth_and_confirmation_then_clears_every_scope() {
     let account_before = serde_json::to_value(state.account.read().await.clone()).unwrap();
     let start_time = state.stats.read().await.start_time;
     let app = create_router(state.clone());
+    // Warm the dashboard cache before cleanup; its response must invalidate it.
+    assert_eq!(state.snapshot().await.stats.total_trades, 65);
 
     for (token, payload, expected) in [
         (None, json!({"confirm": true}), StatusCode::UNAUTHORIZED),
@@ -119,6 +121,11 @@ async fn cleanup_requires_auth_and_confirmation_then_clears_every_scope() {
     assert_eq!(result["data"]["deleted_trades"], 69);
     assert_eq!(result["data"]["snapshot"]["recent_trades"], json!([]));
     assert_eq!(result["data"]["snapshot"]["stats"]["total_trades"], 0);
+    assert!(result["data"]["snapshot"]["hourly_trade_stats"]["buckets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|bucket| bucket["buy_count"] == 0 && bucket["sell_count"] == 0));
     assert_eq!(state.position.read().await.size, dec!(3));
     assert_eq!(*state.status.read().await, status_before);
     assert_eq!(

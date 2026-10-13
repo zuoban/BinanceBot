@@ -498,7 +498,6 @@ impl GridTradingEngine {
             .sync_interval_secs
             .max(1);
         let mut sync_timer = interval(Duration::from_secs(sync_secs));
-        let mut snapshot_timer = interval(Duration::from_millis(800));
         let mut pnl_timer = interval(Duration::from_secs(60));
 
         // Preserve recovered orders. Reconciliation and the regular window
@@ -531,11 +530,6 @@ impl GridTradingEngine {
                 // Regular synchronization timer
                 _ = sync_timer.tick() => {
                     self.sync_cycle().await;
-                }
-
-                // WebSocket broadcast timer for frontend dashboard
-                _ = snapshot_timer.tick() => {
-                    self.broadcast_snapshot().await;
                 }
 
                 _ = pnl_timer.tick() => {
@@ -769,6 +763,11 @@ impl GridTradingEngine {
         }
 
         self.client = new_client;
+        // Only protect the state transition. Snapshot database reads happen
+        // outside this lock, so a slow dashboard query cannot delay applying
+        // configuration or hold the trading state while waiting for SQLite.
+        let transition_state = Arc::clone(&self.state);
+        let scope_transition = transition_state.snapshot_scope_lock.write().await;
         *self.state.config.write().await = new_config.clone();
         if market_changed || mode_changed {
             *self.state.rules.write().await = new_rules;
@@ -809,6 +808,7 @@ impl GridTradingEngine {
             }
             self.state.refresh_current_scope().await;
         }
+        drop(scope_transition);
 
         let ready = if new_config.exchange.dry_run {
             true
@@ -2720,17 +2720,6 @@ impl GridTradingEngine {
         self.state
             .add_log("INFO", "Grid window refreshed and rebalanced")
             .await;
-    }
-
-    /// Broadcast latest snapshot to WebSocket clients
-    async fn broadcast_snapshot(&self) {
-        let snapshot = self.state.snapshot().await;
-        if let Ok(json) = serde_json::to_string(&serde_json::json!({
-            "type": "snapshot",
-            "data": snapshot
-        })) {
-            let _ = self.state.ws_broadcast_tx.send(json);
-        }
     }
 }
 

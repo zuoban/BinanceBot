@@ -310,6 +310,7 @@ async fn main() -> anyhow::Result<()> {
 
     let cny_task = tokio::spawn(state.clone().run_cny_rate_refresh());
     let history_task = tokio::spawn(state.clone().run_price_history_refresh());
+    let snapshot_task = tokio::spawn(state.clone().run_snapshot_broadcast());
 
     let (engine_start, started) = oneshot::channel();
     let mut engine_task = tokio::spawn(async move {
@@ -322,7 +323,7 @@ async fn main() -> anyhow::Result<()> {
         info!("Received {} during initialization; stopping bot...", reason);
         let _ = engine_start.send(());
         let result = stop_engine(&state, &mut engine_task, Duration::from_secs(30)).await;
-        for task in [ws_task, cny_task, history_task] {
+        for task in [ws_task, cny_task, history_task, snapshot_task] {
             task.abort();
             let _ = task.await;
         }
@@ -345,7 +346,7 @@ async fn main() -> anyhow::Result<()> {
             state.request_shutdown();
             let _ = engine_start.send(());
             let _ = stop_engine(&state, &mut engine_task, Duration::from_secs(30)).await;
-            for task in [ws_task, cny_task, history_task] {
+            for task in [ws_task, cny_task, history_task, snapshot_task] {
                 task.abort();
                 let _ = task.await;
             }
@@ -397,7 +398,7 @@ async fn main() -> anyhow::Result<()> {
         web_task.abort();
         let _ = web_task.await;
     }
-    for task in [ws_task, cny_task, history_task] {
+    for task in [ws_task, cny_task, history_task, snapshot_task] {
         task.abort();
         let _ = task.await;
     }

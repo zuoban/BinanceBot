@@ -15,6 +15,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 use tracing::{error, warn};
 
+#[path = "snapshot.rs"]
+mod snapshot;
+
 pub struct AppState {
     pub db: Arc<Database>,
     pub config: RwLock<AppConfig>,
@@ -33,6 +36,9 @@ pub struct AppState {
     // Tracks the last non-maintenance status so internal cancellation does not send alerts.
     status_update_lock: Mutex<BotStatus>,
     trade_commit_lock: Mutex<()>,
+    pub(crate) snapshot_scope_lock: RwLock<()>,
+    snapshot_publish_lock: Mutex<()>,
+    snapshot_cache: snapshot::SnapshotCache,
     login_failures: Mutex<VecDeque<Instant>>,
     setup_code: Option<String>,
 
@@ -134,6 +140,9 @@ impl AppState {
             shutdown_requested: AtomicBool::new(false),
             status_update_lock: Mutex::new(initial_status),
             trade_commit_lock: Mutex::new(()),
+            snapshot_scope_lock: RwLock::new(()),
+            snapshot_publish_lock: Mutex::new(()),
+            snapshot_cache: snapshot::SnapshotCache::default(),
             login_failures: Mutex::new(VecDeque::new()),
             setup_code,
             action_tx,
@@ -376,102 +385,6 @@ impl AppState {
             "data": entry
         })) {
             let _ = self.ws_broadcast_tx.send(json);
-        }
-    }
-
-    pub async fn snapshot(&self) -> BotSnapshot {
-        let config = self.config.read().await;
-        let summary = config.summary();
-        let dry_run = config.exchange.dry_run;
-        let symbol = config.exchange.symbol.clone();
-        drop(config);
-
-        let status = *self.status.read().await;
-        let ticker = self.ticker.read().await.clone();
-        let mut stats = self.stats.read().await.clone();
-        let position = self.position.read().await.clone();
-        let account = self.account.read().await.clone();
-        let account_cny_rate = self.cny_rates.get(&account.asset).await;
-
-        let orders_map = self.active_orders.read().await;
-        let mut active_orders: Vec<GridOrder> = orders_map.values().cloned().collect();
-        // Sort orders by price descending
-        active_orders.sort_by_key(|order| std::cmp::Reverse(order.price));
-
-        stats.active_buy_orders = active_orders
-            .iter()
-            .filter(|o| o.side == OrderSide::Buy)
-            .count();
-        stats.active_sell_orders = active_orders
-            .iter()
-            .filter(|o| o.side == OrderSide::Sell)
-            .count();
-        stats.uptime_secs = (Utc::now() - stats.start_time).num_seconds().max(0) as u64;
-        drop(orders_map);
-
-        let trade_symbol = symbol.clone();
-        let mode = TradingMode::from_exchange(dry_run, summary.is_testnet);
-        let snapshot_time = Utc::now();
-        let hourly_trade_stats = match self
-            .db
-            .run_blocking(move |db| db.get_hourly_trade_stats(&trade_symbol, mode, snapshot_time))
-            .await
-        {
-            Ok(stats) => Some(stats),
-            Err(error) => {
-                warn!("Failed to load hourly trade counts: {}", error);
-                None
-            }
-        };
-
-        let price_symbol = symbol.clone();
-        let is_testnet = summary.is_testnet;
-        let price_history = match self
-            .db
-            .run_blocking(move |db| db.get_price_history(&price_symbol, is_testnet, snapshot_time))
-            .await
-        {
-            Ok(history) => Some(history),
-            Err(error) => {
-                warn!("Failed to load price history: {}", error);
-                None
-            }
-        };
-
-        let recent_trades: Vec<TradeRecord> = self
-            .recent_trades
-            .read()
-            .await
-            .iter()
-            .cloned()
-            .rev()
-            .take(50)
-            .collect();
-        let recent_logs: Vec<LogEntry> = self
-            .recent_logs
-            .read()
-            .await
-            .iter()
-            .cloned()
-            .rev()
-            .take(50)
-            .collect();
-
-        BotSnapshot {
-            status,
-            dry_run,
-            symbol,
-            ticker,
-            stats,
-            position,
-            account,
-            account_cny_rate,
-            grid_config: summary,
-            active_orders,
-            recent_trades,
-            hourly_trade_stats,
-            price_history,
-            recent_logs,
         }
     }
 
