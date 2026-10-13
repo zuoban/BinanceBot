@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>-- | SOLUSDC</title>
+  <title>-- | -- | --</title>
   <link rel="stylesheet" href="/dashboard.css">
 </head>
 <body>
@@ -29,7 +29,7 @@
       </div>
     </div>
     <div class="brand-meta" aria-label="当前策略状态">
-      <span class="badge badge-purple" id="symbol-badge">SOLUSDC PERP</span>
+      <span class="badge badge-purple" id="symbol-badge">-- PERP</span>
       <span class="badge badge-green" id="status-badge"><span class="pulse-dot"></span> RUNNING</span>
       <span class="badge badge-amber" id="mode-badge">PAPER TRADING</span>
     </div>
@@ -56,7 +56,7 @@
     <!-- Top Metric Cards -->
     <section class="metrics-grid" aria-label="策略关键指标">
       <div class="metric-card">
-        <div class="metric-title" id="card-price-title">SOLUSDC 标记价格</div>
+        <div class="metric-title" id="card-price-title">标记价格</div>
         <div class="metric-value" id="card-price">--</div>
         <div class="metric-sub">
           <span id="card-price-change">今日涨跌 --</span>
@@ -69,39 +69,39 @@
 
       <div class="metric-card">
         <div class="metric-title">网格成交累计已实现盈亏</div>
-        <div class="metric-value text-green" id="card-profit">+0.00 USDC</div>
+        <div class="metric-value text-green" id="card-profit">--</div>
         <div class="metric-sub">
-          <span>扣手续费后: <strong id="card-net-profit">+0.00 USDC</strong></span>
-          <span>手续费: <span id="card-commission">0.00 USDC</span></span>
-          <span>历史配对价差估算: <span id="card-grid-profit">+0.00 USDC</span> / <strong id="card-cycles">0</strong> 次</span>
+          <span>扣手续费后: <strong id="card-net-profit">--</strong></span>
+          <span>手续费: <span id="card-commission">--</span></span>
+          <span>历史配对价差估算: <span id="card-grid-profit">--</span> / <strong id="card-cycles">0</strong> 次</span>
           <span id="card-pnl-pending" style="color: var(--amber); display: none;"></span>
         </div>
       </div>
 
       <div class="metric-card">
         <div class="metric-title">当前持仓与未实现盈亏</div>
-        <div class="metric-value" id="card-position">0.00 SOL</div>
+        <div class="metric-value" id="card-position">--</div>
         <div class="metric-sub">
-          <span>未结盈亏: <span id="card-unrealized">0.00 USDC</span></span>
+          <span>未结盈亏: <span id="card-unrealized">--</span></span>
           <span style="color: var(--text-dim);">开仓均价: <span id="card-entry">--</span></span>
-          <span style="color: var(--text-dim);">已挂卖: <span id="card-sell-reserved">0.00 SOL</span></span>
+          <span style="color: var(--text-dim);">已挂卖: <span id="card-sell-reserved">--</span></span>
         </div>
       </div>
 
       <div class="metric-card">
         <div class="metric-title">账户权益 / 可用保证金</div>
-        <div class="metric-value" id="card-balance">-- USDC</div>
+        <div class="metric-value" id="card-balance">--</div>
         <div class="metric-sub">
           <span>折合人民币: <strong id="card-balance-cny">--</strong></span>
           <span id="card-cny-rate" style="color: var(--text-dim);"></span>
-          <span>可用: <span id="card-available">-- USDC</span> · 占比 <strong id="card-available-ratio" title="可用保证金 ÷ 账户权益 × 100%">--</strong></span>
+          <span>可用: <span id="card-available">--</span> · 占比 <strong id="card-available-ratio" title="可用保证金 ÷ 账户权益 × 100%">--</strong></span>
           <span id="card-account-status" style="color: var(--text-dim);"></span>
         </div>
       </div>
 
       <div class="metric-card">
         <div class="metric-title">网格配置摘要</div>
-        <div class="metric-value" id="card-grid-info">0.1 USDC / 100 U</div>
+        <div class="metric-value" id="card-grid-info">--</div>
         <div class="metric-sub">
           <span>窗口: <strong id="card-window-info">5 买 / 5 卖</strong> (Maker GTX)</span>
         </div>
@@ -143,7 +143,7 @@
     <section class="ladder-section" aria-labelledby="ladder-title">
       <div class="section-title">
         <div><span class="section-kicker">ORDER LADDER</span><h2 id="ladder-title">实时网格深度</h2></div>
-        <div class="section-meta"><span>每格间隔 <strong><span id="ladder-step">0.1</span> USDC</strong></span><span>普通单目标 <strong><span id="ladder-amount">100</span> USDC</strong></span><span>Post-Only Maker</span></div>
+        <div class="section-meta"><span>每格间隔 <strong><span id="ladder-step">--</span> <span data-quote-asset>--</span></strong></span><span>普通单目标 <strong><span id="ladder-amount">--</span> <span data-quote-asset>--</span></strong></span><span>Post-Only Maker</span></div>
       </div>
       <div class="ladder-container" id="ladder-container">
         <!-- Rendered dynamically -->
@@ -167,9 +167,9 @@
             <tr>
               <th>方向</th>
               <th>网格档位</th>
-              <th>挂单价格 (USDC)</th>
-              <th>数量 (SOL)</th>
-              <th>订单金额 (USDC)</th>
+              <th>挂单价格 (<span data-quote-asset>--</span>)</th>
+              <th>数量 (<span data-base-asset>--</span>)</th>
+              <th>订单金额 (<span data-quote-asset>--</span>)</th>
               <th>与现价偏离</th>
               <th>订单性质</th>
               <th>客户端订单ID</th>
@@ -203,9 +203,9 @@
             <tr>
               <th>时间</th>
               <th>方向</th>
-              <th>成交均价 (USDC)</th>
-              <th>数量 (SOL)</th>
-              <th>成交金额 (USDC)</th>
+              <th>成交均价 (<span data-quote-asset>--</span>)</th>
+              <th>数量 (<span data-base-asset>--</span>)</th>
+              <th>成交金额 (<span data-quote-asset>--</span>)</th>
               <th>已实现盈亏</th>
               <th>手续费</th>
               <th>扣费后</th>
@@ -233,20 +233,20 @@
               <!-- 交易对 -->
               <div class="form-group">
                 <label for="cfg-symbol">交易合约币种 (Symbol)</label>
-                <input type="text" id="cfg-symbol" required placeholder="如 SOLUSDC, BTCUSDT" />
+                <input type="text" id="cfg-symbol" required placeholder="如 TIAUSDC, BTCUSDT" />
                 <span class="form-hint">币安合约交易对代码</span>
               </div>
 
               <!-- 网格间距 -->
               <div class="form-group">
-                <label for="cfg-interval">网格间距 (Grid Interval, USDC)</label>
+                <label for="cfg-interval">网格间距 (Grid Interval, 计价资产)</label>
                 <input type="number" id="cfg-interval" step="any" min="0.0001" required placeholder="0.1" />
                 <span class="form-hint">买卖共用相邻网格；间隔须兼容交易所价格步长</span>
               </div>
 
               <!-- 单格金额 -->
               <div class="form-group">
-                <label for="cfg-amount">单格下单金额 (Order Amount, USDC)</label>
+                <label for="cfg-amount">单格下单金额 (Order Amount, 计价资产)</label>
                 <input type="number" id="cfg-amount" step="any" min="1" required placeholder="100.0" />
                 <span class="form-hint">普通单按目标金额向下取整；成交后统一补窗口，余量卖单使用剩余可卖数量</span>
               </div>
@@ -279,7 +279,7 @@
 
               <!-- 最大持仓 -->
               <div class="form-group">
-                <label for="cfg-max-position">最大持仓名义价值 (USDC, 可选)</label>
+                <label for="cfg-max-position">最大持仓名义价值 (计价资产, 可选)</label>
                 <input type="number" id="cfg-max-position" step="any" placeholder="例如 2000" />
                 <span class="form-hint">买入挂单受持仓与未成交买单合计敞口上限限制</span>
               </div>
@@ -812,7 +812,7 @@
 
     let ws = null;
     let currentBotStatus = 'RUNNING';
-    let latestSymbol = 'SOLUSDC';
+    let latestSymbol = '';
     let latestMarkPrice = 0;
     let latestMarkUpdatedAt = NaN;
     let latestPriceHistory = null;
@@ -820,6 +820,15 @@
     let priceHistoryPlotPoints = [];
     let priceHistorySelectedAt = null;
     let priceHistoryRenderKey = '';
+
+    function symbolAssets(symbol = latestSymbol) {
+      const normalized = String(symbol || '').trim().toUpperCase();
+      const quote = ['USDC', 'USDT', 'FDUSD', 'BUSD'].find(asset => normalized.endsWith(asset));
+      return {
+        base: (quote ? normalized.slice(0, -quote.length) : normalized) || '--',
+        quote: quote || '--'
+      };
+    }
 
     function beijingDayStart(timestamp = Date.now()) {
       return Math.floor((timestamp + 8 * 3600000) / 86400000) * 86400000 - 8 * 3600000;
@@ -831,6 +840,11 @@
         && Number.isFinite(price) && price > 0 ? price : null;
     }
 
+    function renderPageTitle() {
+      document.title = ['card-price', 'hourly-buy-total', 'hourly-sell-total']
+        .map(id => document.getElementById(id).textContent).join(' | ');
+    }
+
     function renderMarkPrice() {
       const fresh = latestMarkPrice > 0 && Number.isFinite(latestMarkUpdatedAt)
         && Date.now() - latestMarkUpdatedAt < 15000;
@@ -838,7 +852,7 @@
       document.getElementById('card-price-status').textContent = fresh ? '' : '标记价格行情暂未更新';
       const baseline = midnightPrice();
       const change = fresh && baseline !== null ? latestMarkPrice - baseline : null;
-      const asset = ['USDC', 'USDT', 'FDUSD', 'BUSD'].find(asset => latestSymbol.endsWith(asset)) || 'USDC';
+      const asset = symbolAssets().quote;
       const changeText = change === null ? '--'
         : `${change >= 0 ? '+' : ''}${(change / baseline * 100).toFixed(2)}% (${change >= 0 ? '+' : ''}${change.toFixed(4)} ${asset})`;
       const changeClass = change === null ? '' : change >= 0 ? 'text-green' : 'text-red';
@@ -848,7 +862,7 @@
       document.getElementById('price-history-midnight').textContent = baseline === null ? '--' : `$${baseline.toFixed(4)}`;
       document.getElementById('price-history-change').textContent = changeText;
       document.getElementById('price-history-change').className = changeClass;
-      document.title = `${fresh ? `$${latestMarkPrice.toFixed(4)}` : '--'} | ${latestSymbol}`;
+      renderPageTitle();
       renderPriceHistory(fresh);
     }
 
@@ -1003,6 +1017,9 @@
 
     function updateDashboard(data) {
       currentBotStatus = data.status;
+      const { base: baseAsset, quote: pnlAsset } = symbolAssets(data.symbol);
+      document.querySelectorAll('[data-base-asset]').forEach(el => el.textContent = baseAsset);
+      document.querySelectorAll('[data-quote-asset]').forEach(el => el.textContent = pnlAsset);
 
       // Badges
       document.getElementById('symbol-badge').textContent = `${data.symbol} PERP`;
@@ -1049,13 +1066,12 @@
       const chgPct = parseFloat(data.ticker.change_percent_24h || 0);
       const chgVal = parseFloat(data.ticker.change_24h || 0);
       const chgEl = document.getElementById('card-price-24h-change');
-      chgEl.textContent = `近 24h 涨跌 ${chgPct >= 0 ? '+' : ''}${chgPct.toFixed(2)}% (${chgVal >= 0 ? '+' : ''}${chgVal.toFixed(2)} USDC)`;
+      chgEl.textContent = `近 24h 涨跌 ${chgPct >= 0 ? '+' : ''}${chgPct.toFixed(2)}% (${chgVal >= 0 ? '+' : ''}${chgVal.toFixed(2)} ${pnlAsset})`;
 
       document.getElementById('card-high').textContent = parseFloat(data.ticker.high_24h || 0).toFixed(2);
       document.getElementById('card-low').textContent = parseFloat(data.ticker.low_24h || 0).toFixed(2);
 
       // Profit Card
-      const pnlAsset = ['USDC', 'USDT', 'FDUSD', 'BUSD'].find(asset => data.symbol.endsWith(asset)) || 'USDC';
       const profit = parseFloat(data.stats.total_realized_pnl || 0);
       const commission = parseFloat(data.stats.total_commission || 0);
       const netProfit = profit - commission;
@@ -1077,25 +1093,25 @@
       // Position Card
       const posSize = parseFloat(data.position.size || 0);
       const posEl = document.getElementById('card-position');
-      posEl.textContent = `${posSize > 0 ? '+' : ''}${posSize.toFixed(2)} SOL`;
+      posEl.textContent = `${posSize > 0 ? '+' : ''}${posSize.toFixed(2)} ${baseAsset}`;
       posEl.className = posSize > 0 ? 'metric-value text-green' : (posSize < 0 ? 'metric-value text-red' : 'metric-value');
       const sellReserved = data.active_orders
         .filter(o => o.side === 'SELL')
         .reduce((total, o) => total + parseFloat(o.quantity || 0), 0);
       const sellReservedEl = document.getElementById('card-sell-reserved');
-      sellReservedEl.textContent = `${sellReserved.toFixed(2)} SOL`;
+      sellReservedEl.textContent = `${sellReserved.toFixed(2)} ${baseAsset}`;
       sellReservedEl.className = sellReserved > Math.max(posSize, 0) + 0.000001 ? 'text-red' : '';
 
       const unPnl = parseFloat(data.position.unrealized_pnl || 0);
       const unPnlEl = document.getElementById('card-unrealized');
-      unPnlEl.textContent = `${unPnl >= 0 ? '+' : ''}${unPnl.toFixed(4)} USDC`;
+      unPnlEl.textContent = `${unPnl >= 0 ? '+' : ''}${unPnl.toFixed(4)} ${pnlAsset}`;
       unPnlEl.className = unPnl >= 0 ? 'text-green' : 'text-red';
 
       const entryPrice = parseFloat(data.position.entry_price || 0);
       document.getElementById('card-entry').textContent = entryPrice > 0 ? `$${entryPrice.toFixed(2)}` : '--';
 
       // Account Card
-      const accountAsset = data.account.asset || (data.symbol.endsWith('USDT') ? 'USDT' : 'USDC');
+      const accountAsset = data.account.asset || pnlAsset;
       const walletBal = parseFloat(data.account.total_wallet_balance || 0);
       const marginBal = parseFloat(data.account.margin_balance || 0);
       const availBal = parseFloat(data.account.available_balance || 0);
@@ -1119,7 +1135,7 @@
       document.getElementById('card-account-status').textContent = accountFresh ? '' : '账户数据暂未更新';
 
       // Grid Info Card
-      document.getElementById('card-grid-info').textContent = `${data.grid_config.grid_interval} USDC / ${data.grid_config.order_amount_usdc} U`;
+      document.getElementById('card-grid-info').textContent = `${data.grid_config.grid_interval} ${pnlAsset} / ${data.grid_config.order_amount_usdc} ${pnlAsset}`;
       document.getElementById('card-window-info').textContent = `${data.grid_config.buy_window} 买 / ${data.grid_config.sell_window} 卖`;
       document.getElementById('ladder-step').textContent = data.grid_config.grid_interval;
       document.getElementById('ladder-amount').textContent = data.grid_config.order_amount_usdc;
@@ -1167,14 +1183,15 @@
 
       // Sell ladder rows
       sellOrders.forEach(o => {
+        const { base, quote } = symbolAssets(o.symbol || latestSymbol);
         const p = parseFloat(o.price);
         const diff = currentPrice > 0 ? (((p - currentPrice) / currentPrice) * 100).toFixed(2) : '0.00';
         html += `
           <div class="ladder-row sell">
             <span class="badge badge-red">SELL</span>
             <strong class="text-red">$${p.toFixed(4)}</strong>
-            <span>${parseFloat(o.quantity).toFixed(2)} SOL</span>
-            <span style="color: var(--text-muted);">${parseFloat(o.amount_usdc).toFixed(2)} USDC</span>
+            <span>${parseFloat(o.quantity).toFixed(2)} ${escapeHtml(base)}</span>
+            <span style="color: var(--text-muted);">${parseFloat(o.amount_usdc).toFixed(2)} ${escapeHtml(quote)}</span>
             <span style="color: var(--text-dim); font-size: 11px;">+${diff}%</span>
             <span style="text-align: right; color: var(--text-dim); font-size: 11px;">${orderPurposeLabel(o)}</span>
             <div class="depth-bar sell" style="width: 45%;"></div>
@@ -1186,21 +1203,22 @@
       html += `
         <div class="ladder-current">
           <span>● ${hasMarkPrice ? '币安标记价格' : '币安合约现价（等待标记价格）'}</span>
-          <span style="font-size: 17px; letter-spacing: 0.05em;">$${currentPrice.toFixed(4)} USDC</span>
+          <span style="font-size: 17px; letter-spacing: 0.05em;">$${currentPrice.toFixed(4)} ${escapeHtml(symbolAssets().quote)}</span>
           <span>中间基准线</span>
         </div>
       `;
 
       // Buy ladder rows
       buyOrders.forEach(o => {
+        const { base, quote } = symbolAssets(o.symbol || latestSymbol);
         const p = parseFloat(o.price);
         const diff = currentPrice > 0 ? (((currentPrice - p) / currentPrice) * 100).toFixed(2) : '0.00';
         html += `
           <div class="ladder-row buy">
             <span class="badge badge-green">BUY</span>
             <strong class="text-green">$${p.toFixed(4)}</strong>
-            <span>${parseFloat(o.quantity).toFixed(2)} SOL</span>
-            <span style="color: var(--text-muted);">${parseFloat(o.amount_usdc).toFixed(2)} USDC</span>
+            <span>${parseFloat(o.quantity).toFixed(2)} ${escapeHtml(base)}</span>
+            <span style="color: var(--text-muted);">${parseFloat(o.amount_usdc).toFixed(2)} ${escapeHtml(quote)}</span>
             <span style="color: var(--text-dim); font-size: 11px;">-${diff}%</span>
             <span style="text-align: right; color: var(--text-dim); font-size: 11px;">${orderPurposeLabel(o)}</span>
             <div class="depth-bar buy" style="width: 45%;"></div>
@@ -1220,6 +1238,7 @@
 
       let html = '';
       orders.forEach(o => {
+        const { base, quote } = symbolAssets(o.symbol || latestSymbol);
         const p = parseFloat(o.price);
         const diff = currentPrice > 0 ? (((p - currentPrice) / currentPrice) * 100).toFixed(2) : '0.00';
         const isBuy = o.side === 'BUY';
@@ -1230,8 +1249,8 @@
             <td><span class="badge ${isBuy ? 'badge-green' : 'badge-red'}">${o.side}</span></td>
             <td>${o.grid_level}</td>
             <td><strong class="${isBuy ? 'text-green' : 'text-red'}">$${p.toFixed(4)}</strong></td>
-            <td>${parseFloat(o.quantity).toFixed(2)} SOL</td>
-            <td>${parseFloat(o.amount_usdc).toFixed(2)} USDC</td>
+            <td>${parseFloat(o.quantity).toFixed(2)} ${escapeHtml(base)}</td>
+            <td>${parseFloat(o.amount_usdc).toFixed(2)} ${escapeHtml(quote)}</td>
             <td><span style="color: var(--text-muted);">${diff > 0 ? '+' : ''}${diff}%</span></td>
             <td><span class="badge ">${orderPurposeLabel(o)}</span>${orderSourceDetails(o)}</td>
             <td style="font-family: monospace; font-size: 11px; color: var(--text-dim);">${escapeHtml(o.client_order_id)}</td>
@@ -1252,6 +1271,7 @@
         delete chart.dataset.signature;
         document.getElementById('trade-chart-range').textContent = '统计当前交易对与运行模式的成交订单';
         ['hourly-buy-total', 'hourly-sell-total', 'hourly-trade-total'].forEach(id => document.getElementById(id).textContent = '--');
+        renderPageTitle();
         return;
       }
 
@@ -1268,6 +1288,7 @@
       document.getElementById('hourly-buy-total').textContent = buys;
       document.getElementById('hourly-sell-total').textContent = sells;
       document.getElementById('hourly-trade-total').textContent = buys + sells;
+      renderPageTitle();
       status.textContent = buys + sells === 0 ? '今日暂无成交' : '';
 
       // Preserve focus and scroll position between unchanged realtime snapshots.
@@ -1311,12 +1332,13 @@
 
       let html = '';
       trades.forEach(t => {
+        const { base, quote } = symbolAssets(t.symbol || latestSymbol);
+        const pnlAsset = escapeHtml(quote);
         const isBuy = t.side === 'BUY';
         const pnl = parseFloat(t.realized_pnl || 0);
         const fee = parseFloat(t.commission || 0);
         const net = pnl - fee;
         const verified = t.pnl_verified === true;
-        const pnlAsset = ['USDC', 'USDT', 'FDUSD', 'BUSD'].find(asset => t.symbol.endsWith(asset)) || 'USDC';
         const timeStr = new Date(t.timestamp).toLocaleTimeString();
 
         html += `
@@ -1324,8 +1346,8 @@
             <td style="color: var(--text-dim);">${timeStr}</td>
             <td><span class="badge ${isBuy ? 'badge-green' : 'badge-red'}">${t.side}</span></td>
             <td><strong>$${parseFloat(t.price).toFixed(4)}</strong></td>
-            <td>${parseFloat(t.quantity).toFixed(2)} SOL</td>
-            <td>${parseFloat(t.amount_usdc).toFixed(2)} USDC</td>
+            <td>${parseFloat(t.quantity).toFixed(2)} ${escapeHtml(base)}</td>
+            <td>${parseFloat(t.amount_usdc).toFixed(2)} ${pnlAsset}</td>
             <td>${verified ? `<strong class="${pnl >= 0 ? 'text-green' : 'text-red'}">${pnl >= 0 ? '+' : ''}${pnl.toFixed(4)} ${pnlAsset}</strong>` : '<span style="color: var(--text-dim);">待同步</span>'}</td>
             <td>${verified ? `${fee.toFixed(4)} ${pnlAsset}` : '--'}</td>
             <td>${verified ? `<strong class="${net >= 0 ? 'text-green' : 'text-red'}">${net >= 0 ? '+' : ''}${net.toFixed(4)} ${pnlAsset}</strong>` : '--'}</td>
