@@ -9,7 +9,7 @@ use crate::types::*;
 use chrono::Utc;
 use rust_decimal::Decimal;
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
@@ -29,6 +29,7 @@ pub struct AppState {
     pub recent_trades: RwLock<VecDeque<TradeRecord>>,
     pub recent_logs: RwLock<VecDeque<LogEntry>>,
     pause_epoch: AtomicU64,
+    shutdown_requested: AtomicBool,
     // Tracks the last non-maintenance status so internal cancellation does not send alerts.
     status_update_lock: Mutex<BotStatus>,
     trade_commit_lock: Mutex<()>,
@@ -130,6 +131,7 @@ impl AppState {
             recent_trades: RwLock::new(recent_trades),
             recent_logs: RwLock::new(VecDeque::with_capacity(300)),
             pause_epoch: AtomicU64::new(0),
+            shutdown_requested: AtomicBool::new(false),
             status_update_lock: Mutex::new(initial_status),
             trade_commit_lock: Mutex::new(()),
             login_failures: Mutex::new(VecDeque::new()),
@@ -561,6 +563,10 @@ impl AppState {
             self.pause_epoch.fetch_add(1, Ordering::SeqCst);
         }
         let mut notification_status = self.status_update_lock.lock().await;
+        anyhow::ensure!(
+            status != BotStatus::Running || !self.is_shutting_down(),
+            "程序正在退出，不能恢复策略"
+        );
         let saved = if status == BotStatus::Paused {
             // An unsafe strategy must stop even if persistence fails.
             *self.status.write().await = status;
@@ -590,7 +596,7 @@ impl AppState {
 
     pub async fn notify_strategy_started(self: &Arc<Self>) {
         let _update = self.status_update_lock.lock().await;
-        if *self.status.read().await == BotStatus::Running {
+        if !self.is_shutting_down() && *self.status.read().await == BotStatus::Running {
             self.notify_strategy_event(StrategyEvent::Started, "程序启动后开始运行策略")
                 .await;
         }
@@ -627,6 +633,15 @@ impl AppState {
 
     pub fn pause_epoch(&self) -> u64 {
         self.pause_epoch.load(Ordering::SeqCst)
+    }
+
+    pub fn request_shutdown(&self) {
+        self.shutdown_requested.store(true, Ordering::SeqCst);
+        self.pause_epoch.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub fn is_shutting_down(&self) -> bool {
+        self.shutdown_requested.load(Ordering::SeqCst)
     }
 
     pub fn setup_code(&self) -> Option<&str> {
@@ -827,6 +842,8 @@ mod tests {
                 let mut ticker = fixture.state.ticker.write().await;
                 ticker.last_price = dec!(100);
                 ticker.mark_price = dec!(100);
+                ticker.mark_update_time = Utc::now();
+                ticker.update_time = Utc::now();
             }
             let config = fixture.state.config.read().await.clone();
             let client = Arc::new(
@@ -870,6 +887,7 @@ mod tests {
             let mut ticker = fixture.state.ticker.write().await;
             ticker.last_price = dec!(100);
             ticker.mark_price = dec!(100);
+            ticker.mark_update_time = Utc::now();
             ticker.update_time = Utc::now();
         }
         let config = fixture.state.config.read().await.clone();
@@ -901,6 +919,7 @@ mod tests {
                     last_price: price,
                     mark_price: dec!(100),
                     mark_update_time: Utc::now(),
+                    update_time: Utc::now(),
                     ..Default::default()
                 })
                 .unwrap();

@@ -32,7 +32,11 @@ impl GridTradingEngine {
 
     pub(super) async fn reconcile_remainder(&mut self, desired_prices: &[Decimal]) -> Result<()> {
         let config = self.state.config.read().await.clone();
-        if config.grid.sell_window == 0 || *self.state.status.read().await != BotStatus::Running {
+        if self.state.is_shutting_down()
+            || config.grid.sell_window == 0
+            || *self.state.status.read().await != BotStatus::Running
+            || !self.state.ticker.read().await.prices_are_fresh(Utc::now())
+        {
             return Ok(());
         }
         let rules = self.state.rules.read().await.clone();
@@ -165,7 +169,7 @@ impl GridTradingEngine {
     }
 
     async fn execute_remainder_plan(&mut self, plan: &mut RemainderPlan) -> Result<()> {
-        if *self.state.status.read().await != BotStatus::Running {
+        if self.state.is_shutting_down() || *self.state.status.read().await != BotStatus::Running {
             return Ok(());
         }
         let config = self.state.config.read().await.clone();
@@ -258,6 +262,9 @@ impl GridTradingEngine {
         }
         let rules = self.state.rules.read().await.clone();
         let ticker = self.state.ticker.read().await.clone();
+        if !ticker.prices_are_fresh(Utc::now()) {
+            return Ok(());
+        }
         let market = ticker.last_price;
         let price = plan.target.price;
         if market <= Decimal::ZERO {
@@ -317,7 +324,9 @@ impl GridTradingEngine {
             plan.target.purpose = OrderPurpose::Remainder;
         }
         self.persist_remainder_plan(plan).await?;
-        if self.state.pause_epoch() != pause_epoch
+        if self.state.is_shutting_down()
+            || !self.state.ticker.read().await.prices_are_fresh(Utc::now())
+            || self.state.pause_epoch() != pause_epoch
             || *self.state.status.read().await != BotStatus::Running
         {
             return Ok(());

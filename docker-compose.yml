@@ -6,6 +6,7 @@ services:
     image: ghcr.io/zuoban/binancebot:latest
     container_name: binance-grid-bot
     restart: unless-stopped
+    stop_grace_period: 45s
     ports:
       - "8080:8080"
     volumes:

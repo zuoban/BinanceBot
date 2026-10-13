@@ -20,11 +20,62 @@ pub enum ExchangeError {
     #[error("Binance API error (code: {code}): {msg}")]
     ApiError { code: i64, msg: String },
 
+    #[error("Order execution status is unknown (code: {code:?}): {msg}")]
+    ExecutionUnknown { code: Option<i64>, msg: String },
+
+    #[error("Order request was rejected: {0}")]
+    RequestRejected(String),
+
     #[error("Network or HTTP error: {0}")]
     HttpError(#[from] reqwest::Error),
 
     #[error("General error: {0}")]
     Other(String),
+}
+
+impl ExchangeError {
+    pub fn execution_status_unknown(&self) -> bool {
+        matches!(
+            self,
+            Self::ExecutionUnknown { .. } | Self::HttpError(_) | Self::Other(_)
+        )
+    }
+}
+
+fn order_response_error(status: reqwest::StatusCode, body: String) -> ExchangeError {
+    let api_error = serde_json::from_str::<BinanceApiError>(&body).ok();
+    let code = api_error.as_ref().map(|error| error.code);
+    let msg = api_error
+        .as_ref()
+        .map(|error| error.msg.as_str())
+        .unwrap_or(&body);
+    // These overload responses explicitly mean the submission failed. Other
+    // server errors and backend timeouts may have accepted an order already.
+    let known_failure = status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+        && (code == Some(-1008)
+            || msg == "Service Unavailable."
+            || msg == "Internal error; unable to process your request. Please try again.");
+    if !known_failure
+        && (matches!(code, Some(-1000 | -1001 | -1006 | -1007))
+            || status == reqwest::StatusCode::REQUEST_TIMEOUT
+            || status.is_server_error())
+    {
+        return ExchangeError::ExecutionUnknown {
+            code,
+            msg: msg.to_string(),
+        };
+    }
+    match api_error {
+        Some(error) if error.code == -5022 => ExchangeError::PostOnlyRejected(error.msg),
+        Some(error) => ExchangeError::ApiError {
+            code: error.code,
+            msg: error.msg,
+        },
+        None if known_failure => {
+            ExchangeError::RequestRejected(format!("HTTP {}: {}", status, body))
+        }
+        None => ExchangeError::Other(format!("HTTP error {}: {}", status, body)),
+    }
 }
 
 pub struct NewOrderRequest<'a> {
@@ -349,19 +400,7 @@ impl BinanceFuturesClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            if let Ok(err) = serde_json::from_str::<BinanceApiError>(&body) {
-                if err.code == -5022 {
-                    return Err(ExchangeError::PostOnlyRejected(err.msg));
-                }
-                return Err(ExchangeError::ApiError {
-                    code: err.code,
-                    msg: err.msg,
-                });
-            }
-            return Err(ExchangeError::Other(format!(
-                "HTTP error {}: {}",
-                status, body
-            )));
+            return Err(order_response_error(status, body));
         }
 
         let order: BinanceOrderResponse = resp
@@ -479,5 +518,56 @@ impl BinanceFuturesClient {
             return Err(anyhow!("Failed to keepalive listenKey: {}", body));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn order_errors_distinguish_uncertain_execution_from_explicit_rejection() {
+        let cases = [
+            (
+                400,
+                r#"{"code":-1006,"msg":"Execution status unknown."}"#,
+                true,
+            ),
+            (400, r#"{"code":-1007,"msg":"Backend timeout."}"#, true),
+            (
+                503,
+                r#"{"code":-1000,"msg":"Unknown error, please check your request or try again later."}"#,
+                true,
+            ),
+            (
+                500,
+                r#"{"code":-1100,"msg":"unexpected server error"}"#,
+                true,
+            ),
+            (408, "timeout", true),
+            (
+                503,
+                r#"{"code":-1008,"msg":"Request throttled by system-level protection."}"#,
+                false,
+            ),
+            (503, r#"{"code":-1000,"msg":"Service Unavailable."}"#, false),
+            (503, "Service Unavailable.", false),
+            (
+                503,
+                r#"{"code":-1000,"msg":"Internal error; unable to process your request. Please try again."}"#,
+                false,
+            ),
+            (400, r#"{"code":-5022,"msg":"GTX rejected"}"#, false),
+            (429, r#"{"code":-1003,"msg":"Too many requests"}"#, false),
+        ];
+        for (status, body, uncertain) in cases {
+            let error =
+                order_response_error(reqwest::StatusCode::from_u16(status).unwrap(), body.into());
+            assert_eq!(
+                error.execution_status_unknown(),
+                uncertain,
+                "{status}: {body}"
+            );
+        }
     }
 }

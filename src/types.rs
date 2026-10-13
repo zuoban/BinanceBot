@@ -246,6 +246,18 @@ pub struct TickerInfo {
 }
 
 impl TickerInfo {
+    /// A positive cached mark must be fresh too; do not silently change the
+    /// strategy reference to the last price when a previously available mark expires.
+    pub fn prices_are_fresh(&self, now: DateTime<Utc>) -> bool {
+        let fresh = |updated_at: DateTime<Utc>| {
+            let age = now.signed_duration_since(updated_at);
+            age >= chrono::Duration::zero() && age < chrono::Duration::seconds(15)
+        };
+        self.last_price > Decimal::ZERO
+            && fresh(self.update_time)
+            && (self.mark_price <= Decimal::ZERO || fresh(self.mark_update_time))
+    }
+
     /// Center the grid on the mark price; use the last price until a mark is available.
     pub fn grid_reference_price(&self) -> Decimal {
         if self.mark_price > Decimal::ZERO {
@@ -316,6 +328,9 @@ pub enum BotControlAction {
     Resume,
     CancelAll,
     Rebalance,
+    Shutdown {
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
     UpdateConfig {
         config: Box<crate::config::AppConfig>,
         reply: tokio::sync::oneshot::Sender<Result<(), String>>,
@@ -403,4 +418,33 @@ pub struct ChangePasswordPayload {
 #[derive(Debug, Serialize)]
 pub struct AuthTokenResponse {
     pub token: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+
+    #[test]
+    fn price_freshness_checks_both_clocks_and_keeps_the_startup_fallback() {
+        let now = Utc::now();
+        let mut ticker = TickerInfo {
+            last_price: dec!(100),
+            update_time: now,
+            ..Default::default()
+        };
+        assert!(ticker.prices_are_fresh(now));
+        ticker.mark_price = dec!(101);
+        assert!(!ticker.prices_are_fresh(now));
+        ticker.mark_update_time = now - chrono::Duration::milliseconds(14_999);
+        assert!(ticker.prices_are_fresh(now));
+        ticker.mark_update_time = now - chrono::Duration::seconds(15);
+        assert!(!ticker.prices_are_fresh(now));
+        ticker.mark_update_time = now;
+        ticker.update_time = now + chrono::Duration::milliseconds(1);
+        assert!(!ticker.prices_are_fresh(now));
+        ticker.update_time = now;
+        ticker.last_price = Decimal::ZERO;
+        assert!(!ticker.prices_are_fresh(now));
+    }
 }

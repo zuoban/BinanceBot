@@ -1,6 +1,7 @@
 use binance_grid_bot::config::AppConfig;
 use binance_grid_bot::db::Database;
 use binance_grid_bot::exchange::{BinanceFuturesClient, BinanceWsStream};
+use binance_grid_bot::lifecycle::{shutdown_signal, stop_engine};
 use binance_grid_bot::server::{create_router, AppState};
 use binance_grid_bot::strategy::GridTradingEngine;
 use binance_grid_bot::types::{BotStatus, TickerInfo};
@@ -9,7 +10,8 @@ use rust_decimal::Decimal;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc, watch};
+use std::time::Duration;
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -228,6 +230,8 @@ async fn main() -> anyhow::Result<()> {
     }
     info!("============================================================");
 
+    let addr: SocketAddr = format!("{}:{}", config.server.host, config.server.port).parse()?;
+
     // Channels
     let (action_tx, action_rx) = mpsc::channel(32);
     let (ticker_tx, ticker_rx) = broadcast::channel::<TickerInfo>(64);
@@ -267,7 +271,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Spawn Binance WebSocket market data stream
     let ws_stream = BinanceWsStream::new(market_stream_rx, ticker_tx.clone());
-    tokio::spawn(async move {
+    let ws_task = tokio::spawn(async move {
         ws_stream.run().await;
     });
 
@@ -275,7 +279,18 @@ async fn main() -> anyhow::Result<()> {
     let mut engine = GridTradingEngine::new(state.clone(), client.clone(), action_rx, ticker_rx);
     engine.set_market_stream_tx(market_stream_tx);
 
-    if let Err(e) = engine.initialize().await {
+    let signal = shutdown_signal();
+    tokio::pin!(signal);
+    let mut early_shutdown = None;
+    let initialized = tokio::select! {
+        result = engine.initialize() => result,
+        reason = &mut signal => {
+            early_shutdown = Some(reason?);
+            state.request_shutdown();
+            Ok(())
+        }
+    };
+    if let Err(e) = initialized {
         error!("Engine initialization failed; trading paused: {}", e);
         state
             .pause_trading_with_reason("策略启动时账户或挂单对账失败，请检查系统运行日志")
@@ -293,35 +308,100 @@ async fn main() -> anyhow::Result<()> {
             .await?;
     }
 
-    tokio::spawn(state.clone().run_cny_rate_refresh());
-    tokio::spawn(state.clone().run_price_history_refresh());
+    let cny_task = tokio::spawn(state.clone().run_cny_rate_refresh());
+    let history_task = tokio::spawn(state.clone().run_price_history_refresh());
 
-    tokio::spawn(async move {
-        engine.run().await;
+    let (engine_start, started) = oneshot::channel();
+    let mut engine_task = tokio::spawn(async move {
+        if started.await.is_ok() {
+            engine.run().await;
+        }
     });
+
+    if let Some(reason) = early_shutdown {
+        info!("Received {} during initialization; stopping bot...", reason);
+        let _ = engine_start.send(());
+        let result = stop_engine(&state, &mut engine_task, Duration::from_secs(30)).await;
+        for task in [ws_task, cny_task, history_task] {
+            task.abort();
+            let _ = task.await;
+        }
+        return result;
+    }
 
     // Start Web Server
     let app = create_router(state.clone());
-    let addr: SocketAddr = format!("{}:{}", config.server.host, config.server.port).parse()?;
     if config.server.host == "0.0.0.0" {
         info!("🌐 Web Dashboard 运行中: 远程访问 http://<服务器公网IP>:{} | 本地访问 http://127.0.0.1:{}", config.server.port, config.server.port);
     } else {
         info!("🌐 Web Dashboard running at http://{}", addr);
     }
 
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-
-    // Run web server with graceful shutdown
-    tokio::select! {
-        res = axum::serve(listener, app) => {
-            if let Err(e) = res {
-                error!("Web server error: {}", e);
+    // Bind before starting the engine loop so a port conflict cannot leave a
+    // trading task running without its control server.
+    let listener = match tokio::net::TcpListener::bind(&addr).await {
+        Ok(listener) => listener,
+        Err(error) => {
+            state.request_shutdown();
+            let _ = engine_start.send(());
+            let _ = stop_engine(&state, &mut engine_task, Duration::from_secs(30)).await;
+            for task in [ws_task, cny_task, history_task] {
+                task.abort();
+                let _ = task.await;
             }
+            return Err(error.into());
         }
-        _ = tokio::signal::ctrl_c() => {
-            info!("Received shutdown signal (Ctrl+C). Stopping bot gracefully...");
+    };
+    let _ = engine_start.send(());
+    let (web_stop, mut web_stop_rx) = watch::channel(false);
+    let mut web_task = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                while !*web_stop_rx.borrow_and_update() {
+                    if web_stop_rx.changed().await.is_err() {
+                        break;
+                    }
+                }
+            })
+            .await
+    });
+    let reason = tokio::select! {
+        reason = &mut signal => reason.map(str::to_string),
+        result = &mut web_task => {
+            Err(anyhow::anyhow!("Web server stopped: {:?}", result))
         }
+        result = &mut engine_task => {
+            Err(anyhow::anyhow!("Strategy engine stopped: {:?}", result))
+        }
+    };
+    info!("Stopping bot: {:?}", reason);
+    // If the engine already exited, pause persistently without polling its
+    // completed JoinHandle a second time.
+    let cleanup = if engine_task.is_finished() {
+        state.request_shutdown();
+        state
+            .pause_trading_with_reason("策略引擎退出，请核实交易所挂单")
+            .await
+    } else {
+        stop_engine(&state, &mut engine_task, Duration::from_secs(30)).await
+    };
+    if let Err(error) = &cleanup {
+        error!("Shutdown cleanup incomplete: {}", error);
     }
-
+    let _ = web_stop.send(true);
+    if !web_task.is_finished()
+        && tokio::time::timeout(Duration::from_secs(5), &mut web_task)
+            .await
+            .is_err()
+    {
+        web_task.abort();
+        let _ = web_task.await;
+    }
+    for task in [ws_task, cny_task, history_task] {
+        task.abort();
+        let _ = task.await;
+    }
+    cleanup?;
+    reason?;
     Ok(())
 }

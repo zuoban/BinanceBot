@@ -43,7 +43,12 @@ async fn engine(db: Arc<Database>, url: Option<String>) -> GridTradingEngine {
     let (action_tx, action_rx) = mpsc::channel(1);
     let (_, ticker_rx) = broadcast::channel(1);
     let state = AppState::new(config.clone(), db.clone(), action_tx);
-    state.ticker.write().await.last_price = dec!(122.31);
+    {
+        let mut ticker = state.ticker.write().await;
+        ticker.last_price = dec!(122.31);
+        ticker.update_time = Utc::now();
+        ticker.mark_update_time = Utc::now();
+    }
     state.position.write().await.size = dec!(0.48);
     if url.is_some() {
         for order in db.load_managed_orders("SOLUSDC").unwrap() {
@@ -270,9 +275,14 @@ struct Exchange {
 }
 
 fn consume(counter: &AtomicUsize) -> bool {
-    counter
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-        .is_ok()
+    let mut count = counter.load(Ordering::SeqCst);
+    while let Some(next) = count.checked_sub(1) {
+        match counter.compare_exchange(count, next, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return true,
+            Err(actual) => count = actual,
+        }
+    }
+    false
 }
 
 fn response(order: &GridOrder, id: i64) -> BinanceOrderResponse {

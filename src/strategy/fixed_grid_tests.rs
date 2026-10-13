@@ -16,7 +16,12 @@ async fn paper_engine_with_db(db: Arc<Database>) -> GridTradingEngine {
     let (tx, rx) = mpsc::channel(1);
     let (_, ticker_rx) = broadcast::channel(1);
     let state = AppState::new(config.clone(), db, tx);
-    state.ticker.write().await.last_price = dec!(118.84);
+    {
+        let mut ticker = state.ticker.write().await;
+        ticker.last_price = dec!(118.84);
+        ticker.update_time = Utc::now();
+        ticker.mark_update_time = Utc::now();
+    }
     let client = Arc::new(BinanceFuturesClient::new(&config.exchange));
     GridTradingEngine::new(state, client, rx, ticker_rx)
 }
@@ -203,6 +208,8 @@ async fn next_buy_exactly_at_limit_is_allowed_and_pauses_after_fill() {
             symbol: "SOLUSDC".into(),
             last_price: dec!(99.9),
             mark_price: dec!(100),
+            update_time: Utc::now(),
+            mark_update_time: Utc::now(),
             ..Default::default()
         })
         .await;
@@ -341,6 +348,8 @@ async fn max_position_pause_stops_paper_fill_batch_at_the_limit() {
             symbol: "SOLUSDC".into(),
             last_price: dec!(95),
             mark_price: dec!(100),
+            update_time: Utc::now(),
+            mark_update_time: Utc::now(),
             ..Default::default()
         })
         .await;
@@ -356,6 +365,8 @@ async fn max_position_pause_stops_paper_fill_batch_at_the_limit() {
             symbol: "SOLUSDC".into(),
             last_price: dec!(90),
             mark_price: dec!(90),
+            update_time: Utc::now(),
+            mark_update_time: Utc::now(),
             ..Default::default()
         })
         .await;
@@ -446,6 +457,8 @@ async fn max_position_pause_triggers_from_price_updates_before_paper_sells() {
             symbol: "SOLUSDC".into(),
             last_price: dec!(101),
             mark_price: dec!(101),
+            update_time: Utc::now(),
+            mark_update_time: Utc::now(),
             ..Default::default()
         })
         .await;
@@ -1194,6 +1207,7 @@ async fn moving_window_keeps_fixed_levels_through_multiple_fills() {
             .handle_ticker_update(TickerInfo {
                 symbol: "SOLUSDC".into(),
                 last_price: price,
+                update_time: Utc::now(),
                 ..Default::default()
             })
             .await;
@@ -1953,6 +1967,7 @@ async fn exact_market_window_skips_current_price_and_reuses_levels_after_opposit
             .handle_ticker_update(TickerInfo {
                 symbol: "SOLUSDC".into(),
                 last_price: price,
+                update_time: Utc::now(),
                 ..Default::default()
             })
             .await;
@@ -2212,6 +2227,7 @@ async fn multiple_crossed_levels_have_deterministic_fill_order_and_no_same_side_
             .handle_ticker_update(TickerInfo {
                 symbol: "SOLUSDC".into(),
                 last_price: price,
+                update_time: Utc::now(),
                 ..Default::default()
             })
             .await;
@@ -2454,6 +2470,7 @@ async fn repeated_buy_sell_cycles_reuse_the_same_two_levels() {
             .handle_ticker_update(TickerInfo {
                 symbol: "SOLUSDC".into(),
                 last_price: price,
+                update_time: Utc::now(),
                 ..Default::default()
             })
             .await;

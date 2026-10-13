@@ -17,6 +17,10 @@ use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
+// An unknown submission can take time to become queryable. Never release its
+// reservation on an initial negative lookup, or for an already accepted order.
+const UNKNOWN_SUBMISSION_GRACE_SECS: i64 = 30;
+
 /// Binance Futures allows at most 36 characters for newClientOrderId.
 fn new_grid_client_order_id(side: OrderSide) -> String {
     let uuid = Uuid::new_v4().simple().to_string();
@@ -181,8 +185,17 @@ pub struct GridTradingEngine {
     last_account_sync: Option<Instant>,
     last_orders_sync: Option<Instant>,
     reconciliation_blocked: bool,
+    market_data_blocked: bool,
     last_remainder_change: Option<Instant>,
     market_stream_tx: Option<watch::Sender<(String, bool)>>,
+}
+
+impl Drop for GridTradingEngine {
+    fn drop(&mut self) {
+        if let Some(task) = &self.pnl_reconcile_task {
+            task.abort();
+        }
+    }
 }
 
 impl GridTradingEngine {
@@ -202,6 +215,7 @@ impl GridTradingEngine {
             last_account_sync: None,
             last_orders_sync: None,
             reconciliation_blocked: false,
+            market_data_blocked: false,
             last_remainder_change: None,
             market_stream_tx: None,
         }
@@ -331,6 +345,21 @@ impl GridTradingEngine {
             )
         };
         self.state.add_log(level, message).await;
+    }
+
+    async fn market_data_ready(&mut self) -> bool {
+        let ready = self.state.ticker.read().await.prices_are_fresh(Utc::now());
+        let blocked = !ready;
+        if self.market_data_blocked != blocked {
+            self.market_data_blocked = blocked;
+            let (level, message) = if blocked {
+                ("WARN", "行情缺失或超过 15 秒未更新，暂停新增订单和窗口调整")
+            } else {
+                ("INFO", "行情已恢复，账户及订单对账有效后继续维护窗口")
+            };
+            self.state.add_log(level, message).await;
+        }
+        ready
     }
 
     /// Initialize exchange connection, sync server time, and load symbol rules
@@ -485,7 +514,11 @@ impl GridTradingEngine {
                 // UI control actions (Pause, Resume, CancelAll, Rebalance, UpdateConfig)
                 action = self.action_rx.recv() => {
                     match action {
-                        Some(action) => self.handle_control_action(action).await,
+                        Some(action) => {
+                            let stopping = matches!(action, BotControlAction::Shutdown { .. });
+                            self.handle_control_action(action).await;
+                            if stopping { break; }
+                        },
                         None => break,
                     }
                 }
@@ -513,7 +546,17 @@ impl GridTradingEngine {
     }
 
     async fn handle_control_action(&mut self, action: BotControlAction) {
+        if self.state.is_shutting_down() && !matches!(action, BotControlAction::Shutdown { .. }) {
+            if let BotControlAction::UpdateConfig { reply, .. } = action {
+                let _ = reply.send(Err("程序正在退出，配置未应用".into()));
+            }
+            return;
+        }
         match action {
+            BotControlAction::Shutdown { reply } => {
+                let result = self.shutdown().await.map_err(|error| error.to_string());
+                let _ = reply.send(result);
+            }
             BotControlAction::Pause => {
                 info!("Bot paused by user command");
                 self.pause_trading_with_reason("手动暂停策略").await;
@@ -572,6 +615,48 @@ impl GridTradingEngine {
                 let _ = reply.send(result.map_err(|error| error.to_string()));
             }
         }
+    }
+
+    pub async fn shutdown(&mut self) -> Result<()> {
+        self.state.request_shutdown();
+        let paused = self
+            .state
+            .pause_trading_with_reason("程序退出，暂停策略并撤销机器人挂单")
+            .await;
+        // Shutdown can interrupt initialization before durable orders have been
+        // installed in memory. Restore them before canceling so racing fills
+        // are recorded rather than discarded with the recovery metadata.
+        let config = self.state.config.read().await.clone();
+        if !config.exchange.dry_run {
+            let restored = self
+                .state
+                .db
+                .run_blocking(move |db| db.load_managed_orders(&config.exchange.symbol))
+                .await?;
+            let mut active = self.state.active_orders.write().await;
+            for order in restored
+                .into_iter()
+                .filter(|order| is_grid_order(&order.client_order_id))
+            {
+                active.entry(order.client_order_id.clone()).or_insert(order);
+            }
+            drop(active);
+            // An interrupted initialization may have committed a fill before
+            // its runtime statistics were updated. Reload before recording
+            // additional cancellation-time executions.
+            self.state.refresh_current_scope().await;
+        }
+        let canceled = self.cancel_all_orders().await;
+        if let Some(task) = self.pnl_reconcile_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        paused?;
+        anyhow::ensure!(
+            canceled,
+            "停机撤单未完成，恢复元数据已保留；请核实交易所挂单"
+        );
+        Ok(())
     }
 
     async fn apply_config(&mut self, new_config: crate::config::AppConfig) -> Result<()> {
@@ -769,7 +854,7 @@ impl GridTradingEngine {
             ticker.change_24h = ticker_update.change_24h;
             ticker.change_percent_24h = ticker_update.change_percent_24h;
             ticker.volume_24h = ticker_update.volume_24h;
-            ticker.update_time = Utc::now();
+            ticker.update_time = ticker_update.update_time;
         }
 
         // Update unrealized PnL for current position
@@ -794,7 +879,8 @@ impl GridTradingEngine {
         let is_running = *self.state.status.read().await == BotStatus::Running;
 
         // In Paper Trading / Dry Run mode, match simulated orders against live market price
-        if is_running && is_dry_run {
+        let prices_fresh = self.state.ticker.read().await.prices_are_fresh(Utc::now());
+        if is_running && is_dry_run && prices_fresh {
             self.simulate_order_fills(ticker_update.last_price).await;
         }
     }
@@ -1087,15 +1173,19 @@ impl GridTradingEngine {
 
                 let mut terminal_orders = Vec::new();
                 let mut unresolved_orders = false;
-                for order in filled_or_closed {
+                for mut order in filled_or_closed {
                     if self.state.pause_epoch() != pause_epoch {
                         return false;
                     }
                     let exchange_result = match order.order_id {
-                        Some(order_id) => self.client.get_order(&order.symbol, order_id).await,
+                        Some(order_id) => self
+                            .client
+                            .get_order(&order.symbol, order_id)
+                            .await
+                            .map(Some),
                         None => {
                             self.client
-                                .get_order_by_client_id(&order.symbol, &order.client_order_id)
+                                .lookup_order_by_client_id(&order.symbol, &order.client_order_id)
                                 .await
                         }
                     };
@@ -1103,10 +1193,51 @@ impl GridTradingEngine {
                         return false;
                     }
                     match exchange_result {
-                        Ok(exchange_order) => {
+                        Ok(None)
+                            if (Utc::now() - order.created_at).num_seconds()
+                                >= UNKNOWN_SUBMISSION_GRACE_SECS =>
+                        {
+                            if let Err(error) =
+                                self.delete_managed_order(&order.client_order_id).await
+                            {
+                                error!(
+                                    "Could not retire absent order intent {}: {}",
+                                    order.client_order_id, error
+                                );
+                                persistence_ok = false;
+                            } else {
+                                self.state
+                                    .active_orders
+                                    .write()
+                                    .await
+                                    .remove(&order.client_order_id);
+                                self.state.add_log("WARN", format!("Unaccepted order intent {} retired after confirmed absence", order.client_order_id)).await;
+                            }
+                        }
+                        Ok(None) => unresolved_orders = true,
+                        Ok(Some(exchange_order)) => {
+                            // A query may confirm acceptance before the open-
+                            // orders snapshot catches up. Persist it before a
+                            // later lookup or restart can lose that distinction.
+                            if order.order_id.is_none() {
+                                order.order_id = Some(exchange_order.order_id);
+                                if let Err(error) = self.save_managed_order(&order).await {
+                                    error!(
+                                        "Could not persist confirmed order {}: {}",
+                                        order.client_order_id, error
+                                    );
+                                    persistence_ok = false;
+                                    continue;
+                                }
+                                self.state
+                                    .active_orders
+                                    .write()
+                                    .await
+                                    .insert(order.client_order_id.clone(), order.clone());
+                            }
                             let terminal = matches!(
                                 exchange_order.status.as_str(),
-                                "FILLED" | "CANCELED" | "EXPIRED" | "REJECTED"
+                                "FILLED" | "CANCELED" | "EXPIRED" | "EXPIRED_IN_MATCH" | "REJECTED"
                             );
                             if !terminal {
                                 unresolved_orders = true;
@@ -1259,7 +1390,7 @@ impl GridTradingEngine {
                 intent.order_id = Some(found.order_id);
                 if matches!(
                     found.status.as_str(),
-                    "FILLED" | "CANCELED" | "EXPIRED" | "REJECTED"
+                    "FILLED" | "CANCELED" | "EXPIRED" | "EXPIRED_IN_MATCH" | "REJECTED"
                 ) {
                     if found.executed_qty > Decimal::ZERO {
                         intent.updated_at = exchange_fill_time(&found);
@@ -1738,10 +1869,13 @@ impl GridTradingEngine {
     /// Ensure the active pre-placed order window matches buy_window and sell_window
     async fn maintain_grid_window(&mut self) {
         let config = self.state.config.read().await.clone();
-        if *self.state.status.read().await != BotStatus::Running {
+        if self.state.is_shutting_down() || *self.state.status.read().await != BotStatus::Running {
             return;
         }
         if self.pause_if_position_limit_reached().await {
+            return;
+        }
+        if !self.market_data_ready().await {
             return;
         }
         match self.recover_remainder_plan().await {
@@ -2076,7 +2210,7 @@ impl GridTradingEngine {
         paired_client_order_id: Option<String>,
         order_quantity: Option<Decimal>,
     ) -> bool {
-        if *self.state.status.read().await != BotStatus::Running {
+        if self.state.is_shutting_down() || *self.state.status.read().await != BotStatus::Running {
             return false;
         }
         if self.pause_if_position_limit_reached().await {
@@ -2124,6 +2258,9 @@ impl GridTradingEngine {
 
         // Enforce Maker pricing check
         let ticker = self.state.ticker.read().await.clone();
+        if !self.market_data_ready().await {
+            return false;
+        }
         let current_market_price = ticker.last_price;
         let reference_price = ticker.grid_reference_price();
         if !current_market_price.is_zero() {
@@ -2265,7 +2402,10 @@ impl GridTradingEngine {
                 self.pause_trading().await;
                 return false;
             }
-            if *self.state.status.read().await != BotStatus::Running {
+            if self.state.is_shutting_down()
+                || *self.state.status.read().await != BotStatus::Running
+                || !self.state.ticker.read().await.prices_are_fresh(Utc::now())
+            {
                 if let Err(e) = self.delete_managed_order(&client_order_id).await {
                     error!(
                         "Could not clear paused order intent {}: {}",
@@ -2347,7 +2487,8 @@ impl GridTradingEngine {
                         .await;
                     // A timed-out request may already have reached Binance. Reserve
                     // its grid level until exchange reconciliation resolves this ID.
-                    if matches!(e, ExchangeError::HttpError(_) | ExchangeError::Other(_)) {
+                    if e.execution_status_unknown() {
+                        self.last_orders_sync = None;
                         match self
                             .client
                             .get_order_by_client_id(&symbol, &client_order_id)
@@ -2360,6 +2501,13 @@ impl GridTradingEngine {
                                 } else {
                                     OrderStatus::New
                                 };
+                                if let Err(error) = self.save_managed_order(&order).await {
+                                    error!(
+                                        "Could not persist accepted order {}: {}",
+                                        client_order_id, error
+                                    );
+                                    self.pause_trading().await;
+                                }
                             }
                             Err(query_error) => warn!(
                                 "Order {} remains unresolved after placement error: {}",
@@ -2396,7 +2544,8 @@ impl GridTradingEngine {
                 .await
             {
                 warn!("Failed to cancel order {}: {}", order.client_order_id, e);
-                return false;
+                // A lost response or a fill preceding cancellation can still
+                // leave a terminal order. Confirm it through the query below.
             }
             let exchange_order = match order.order_id {
                 Some(id) => self.client.get_order(&order.symbol, id).await,
@@ -2410,7 +2559,7 @@ impl GridTradingEngine {
                 Ok(exchange_order)
                     if !matches!(
                         exchange_order.status.as_str(),
-                        "FILLED" | "CANCELED" | "EXPIRED" | "REJECTED"
+                        "FILLED" | "CANCELED" | "EXPIRED" | "EXPIRED_IN_MATCH" | "REJECTED"
                     ) =>
                 {
                     self.last_orders_sync = None;
@@ -2498,6 +2647,20 @@ impl GridTradingEngine {
                     .cancel_order(&symbol, Some(order.order_id), None)
                     .await
                 {
+                    if self
+                        .client
+                        .get_order(&symbol, order.order_id)
+                        .await
+                        .is_ok_and(|confirmed| {
+                            matches!(
+                                confirmed.status.as_str(),
+                                "FILLED" | "CANCELED" | "EXPIRED" | "EXPIRED_IN_MATCH" | "REJECTED"
+                            )
+                        })
+                    {
+                        warn!("Cancellation response failed for {}, but its terminal state was confirmed", order.client_order_id);
+                        continue;
+                    }
                     error!(
                         "Failed to cancel managed order {}: {}",
                         order.client_order_id, e
@@ -2572,6 +2735,10 @@ impl GridTradingEngine {
 }
 
 #[cfg(test)]
+#[path = "reliability_tests.rs"]
+mod reliability_tests;
+
+#[cfg(test)]
 mod tests {
     use super::{
         aggregate_execution_pnl, buy_exposure_usdc, has_nearby_grid_order, is_grid_order,
@@ -2612,6 +2779,17 @@ mod tests {
         lose_response: Arc<AtomicUsize>,
     }
 
+    fn consume_failure(counter: &AtomicUsize) -> bool {
+        let mut count = counter.load(Ordering::SeqCst);
+        while let Some(next) = count.checked_sub(1) {
+            match counter.compare_exchange(count, next, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => return true,
+                Err(actual) => count = actual,
+            }
+        }
+        false
+    }
+
     async fn pair_exchange_server(fake: PairExchange) -> (String, tokio::task::JoinHandle<()>) {
         let app = Router::new()
             .route(
@@ -2627,7 +2805,7 @@ mod tests {
             .route(
                 "/fapi/v1/order",
                 get(|State(fake): State<PairExchange>, Query(query): Query<HashMap<String, String>>| async move {
-                    if fake.fail_lookup.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1)).is_ok() {
+                    if consume_failure(&fake.fail_lookup) {
                         return (axum::http::StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"code": -1000})));
                     }
                     match fake.orders.lock().unwrap().get(&query["origClientOrderId"]).cloned() {
@@ -2653,7 +2831,7 @@ mod tests {
                         update_time: None,
                     };
                     fake.orders.lock().unwrap().insert(id, order.clone());
-                    if fake.lose_response.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1)).is_ok() {
+                    if consume_failure(&fake.lose_response) {
                         (axum::http::StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"code": -1000})))
                     } else {
                         (axum::http::StatusCode::OK, Json(serde_json::to_value(order).unwrap()))
@@ -2728,7 +2906,12 @@ mod tests {
         let (action_tx, action_rx) = mpsc::channel(1);
         let (_ticker_tx, ticker_rx) = broadcast::channel(1);
         let state = AppState::new(config.clone(), db, action_tx);
-        state.ticker.write().await.last_price = dec!(100);
+        {
+            let mut ticker = state.ticker.write().await;
+            ticker.last_price = dec!(100);
+            ticker.update_time = Utc::now();
+            ticker.mark_update_time = Utc::now();
+        }
         state.position.write().await.size = dec!(1);
         let client = Arc::new(BinanceFuturesClient::with_base_url(&config.exchange, url));
         let mut engine = GridTradingEngine::new(state, client, action_rx, ticker_rx);
@@ -3472,7 +3655,12 @@ mod tests {
         let state = AppState::new(config.clone(), db, action_tx);
         let client = Arc::new(BinanceFuturesClient::new(&config.exchange));
         let mut engine = GridTradingEngine::new(state.clone(), client, action_rx, ticker_rx);
-        state.ticker.write().await.last_price = dec!(100);
+        {
+            let mut ticker = state.ticker.write().await;
+            ticker.last_price = dec!(100);
+            ticker.update_time = Utc::now();
+            ticker.mark_update_time = Utc::now();
+        }
         state.position.write().await.size = dec!(0.5);
 
         engine.maintain_grid_window().await;
@@ -3528,7 +3716,12 @@ mod tests {
         let mut engine = GridTradingEngine::new(state.clone(), client, action_rx, ticker_rx);
         state.position.write().await.size = dec!(2.63);
         state.position.write().await.entry_price = dec!(114);
-        state.ticker.write().await.last_price = dec!(115);
+        {
+            let mut ticker = state.ticker.write().await;
+            ticker.last_price = dec!(115);
+            ticker.update_time = Utc::now();
+            ticker.mark_update_time = Utc::now();
+        }
         let mut order = GridOrder {
             client_order_id: "paper-sell".into(),
             order_id: None,
@@ -3575,7 +3768,12 @@ mod tests {
         let state = AppState::new(config.clone(), db, action_tx);
         let client = Arc::new(BinanceFuturesClient::new(&config.exchange));
         let mut engine = GridTradingEngine::new(state.clone(), client, action_rx, ticker_rx);
-        state.ticker.write().await.last_price = dec!(115);
+        {
+            let mut ticker = state.ticker.write().await;
+            ticker.last_price = dec!(115);
+            ticker.update_time = Utc::now();
+            ticker.mark_update_time = Utc::now();
+        }
         state.position.write().await.size = dec!(19.67);
         engine.maintain_grid_window().await;
         let orders: Vec<_> = state.active_orders.read().await.values().cloned().collect();
@@ -3637,7 +3835,12 @@ mod tests {
         let state = AppState::new(config.clone(), db, action_tx);
         let client = Arc::new(BinanceFuturesClient::new(&config.exchange));
         let mut engine = GridTradingEngine::new(state.clone(), client, action_rx, ticker_rx);
-        state.ticker.write().await.last_price = dec!(115);
+        {
+            let mut ticker = state.ticker.write().await;
+            ticker.last_price = dec!(115);
+            ticker.update_time = Utc::now();
+            ticker.mark_update_time = Utc::now();
+        }
         state.rules.write().await.min_notional = dec!(50);
         state.position.write().await.size = dec!(0.429);
 
@@ -3669,7 +3872,12 @@ mod tests {
         let state = AppState::new(config.clone(), db, action_tx);
         let client = Arc::new(BinanceFuturesClient::new(&config.exchange));
         let mut engine = GridTradingEngine::new(state.clone(), client, action_rx, ticker_rx);
-        state.ticker.write().await.last_price = dec!(122.15);
+        {
+            let mut ticker = state.ticker.write().await;
+            ticker.last_price = dec!(122.15);
+            ticker.update_time = Utc::now();
+            ticker.mark_update_time = Utc::now();
+        }
         state.position.write().await.size = dec!(50.45);
 
         let first = GridOrder {
@@ -3778,6 +3986,7 @@ mod tests {
             .handle_ticker_update(TickerInfo {
                 symbol: config.exchange.symbol,
                 last_price: dec!(114.5),
+                update_time: Utc::now(),
                 ..Default::default()
             })
             .await;
