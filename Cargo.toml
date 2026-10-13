@@ -1,6 +1,6 @@
 [package]
 name = "binance-grid-bot"
-version = "0.9.16"
+version = "0.9.17"
 edition = "2021"
 
 [dependencies]
