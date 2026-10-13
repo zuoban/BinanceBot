@@ -88,6 +88,16 @@ fn buy_exposure_usdc(position_size: Decimal, mark_price: Decimal, orders: &[Grid
             .sum::<Decimal>()
 }
 
+fn position_valuation_price(position: &PositionInfo, ticker: &TickerInfo) -> Decimal {
+    if ticker.mark_price > Decimal::ZERO {
+        ticker.mark_price
+    } else if position.mark_price > Decimal::ZERO {
+        position.mark_price
+    } else {
+        ticker.last_price
+    }
+}
+
 fn has_nearby_grid_order(
     prices: &[Decimal],
     target: Decimal,
@@ -212,7 +222,7 @@ impl GridTradingEngine {
         }
     }
 
-    /// Only filled position value triggers a full pause; open orders keep their existing cap.
+    /// Check filled position value independently of buy-order placement and reservations.
     async fn pause_if_position_limit_reached(&mut self) -> bool {
         if *self.state.status.read().await != BotStatus::Running {
             return false;
@@ -230,32 +240,26 @@ impl GridTradingEngine {
         };
         let position = self.state.position.read().await.clone();
         let ticker = self.state.ticker.read().await.clone();
-        let valuation_price = if ticker.mark_price > Decimal::ZERO {
-            ticker.mark_price
-        } else if position.mark_price > Decimal::ZERO {
-            position.mark_price
-        } else {
-            ticker.last_price
-        };
+        let valuation_price = position_valuation_price(&position, &ticker);
         let position_value = position.size.abs() * valuation_price;
         if valuation_price <= Decimal::ZERO || position_value < limit {
             return false;
         }
 
-        // Pause before canceling so cancellation cannot restore Running or replenish orders.
-        self.pause_trading_with_reason(&format!(
-            "持仓名义价值 {} 已达到最大持仓名义价值 {}，需手动恢复",
+        self.pause_for_position_limit(format!(
+            "持仓名义价值 {} 已达到最大持仓名义价值 {}",
             position_value, limit
         ))
         .await;
+        true
+    }
+
+    async fn pause_for_position_limit(&mut self, reason: String) {
+        // Pause before canceling so cancellation cannot restore Running or replenish orders.
+        self.pause_trading_with_reason(&format!("{}，需手动恢复", reason))
+            .await;
         self.state
-            .add_log(
-                "WARN",
-                format!(
-                    "持仓名义价值 {} 已达到最大持仓名义价值 {}，策略已暂停，需手动恢复",
-                    position_value, limit
-                ),
-            )
+            .add_log("WARN", format!("{}，策略已暂停，需手动恢复", reason))
             .await;
         if !self.cancel_all_orders().await {
             self.state
@@ -265,7 +269,6 @@ impl GridTradingEngine {
                 )
                 .await;
         }
-        true
     }
 
     async fn save_managed_order(&self, order: &GridOrder) -> Result<()> {
@@ -2175,9 +2178,26 @@ impl GridTradingEngine {
         }
         let quantity = if side == OrderSide::Buy {
             if let Some(limit) = config.grid.max_position_usdc {
-                let position_size = self.state.position.read().await.size;
+                let position = self.state.position.read().await.clone();
+                let mark_price = position_valuation_price(&position, &ticker);
+                let position_value = position.size.abs() * mark_price;
+                let projected_position_value = (position.size + full_quantity).abs() * mark_price;
+                // A full next buy must fit the filled position even when the position
+                // has not yet reached the cap. Pending orders alone still only reserve funds.
+                if config.grid.pause_on_max_position
+                    && mark_price > Decimal::ZERO
+                    && projected_position_value > limit
+                    && projected_position_value > position_value
+                {
+                    self.pause_for_position_limit(format!(
+                        "持仓名义价值 {}，下一笔买单（价格 {}，数量 {}）成交后预计持仓名义价值 {} 将超过最大持仓名义价值 {}",
+                        position_value, price, full_quantity, projected_position_value, limit
+                    ))
+                    .await;
+                    return false;
+                }
                 let valuation_price = reference_price.max(current_market_price).max(price);
-                let exposure = buy_exposure_usdc(position_size, valuation_price, &orders)
+                let exposure = buy_exposure_usdc(position.size, valuation_price, &orders)
                     + price * full_quantity;
                 if exposure > limit {
                     debug!(

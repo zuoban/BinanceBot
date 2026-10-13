@@ -71,7 +71,7 @@ pub struct GridConfig {
     /// Maximum position limit in USDC value
     pub max_position_usdc: Option<Decimal>,
 
-    /// Pause the strategy and cancel managed orders when position value reaches the limit.
+    /// Pause and cancel managed orders at the position limit or before a buy would exceed it.
     #[serde(default)]
     pub pause_on_max_position: bool,
 }

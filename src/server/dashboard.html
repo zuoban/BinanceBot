@@ -289,7 +289,7 @@
                   <input type="checkbox" id="cfg-pause-on-max-position" aria-describedby="cfg-pause-on-max-position-hint" style="width: 17px; height: 17px; accent-color: var(--accent);" />
                   <span>达到最大持仓名义价值时暂停策略</span>
                 </label>
-                <span class="form-hint" id="cfg-pause-on-max-position-hint">需设置上限。按持仓数量绝对值 × 标记价格判断；触发后撤销策略挂单，保留持仓，需手动恢复</span>
+                <span class="form-hint" id="cfg-pause-on-max-position-hint">需设置上限。按标记价格估值：持仓达到上限，或下一笔完整买单成交后将超限时暂停；撤销策略挂单，保留持仓，需手动恢复</span>
               </div>
 
               <!-- 只做 Maker -->
