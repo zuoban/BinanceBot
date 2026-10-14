@@ -3,7 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>-- | -- | --</title>
+  <meta name="theme-color" content="#f6f7f9">
+  <title>策略总览 · Grid Console</title>
   <link rel="stylesheet" href="/dashboard.css">
 </head>
 <body>
@@ -19,100 +20,92 @@
     <symbol id="icon-logout" viewBox="0 0 24 24"><path d="M10 4H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h5m5-4 4-4-4-4m4 4H9"/></symbol>
     <symbol id="icon-shield" viewBox="0 0 24 24"><path d="m12 2 8 4v5c0 5-3.4 8.6-8 11-4.6-2.4-8-6-8-11V6l8-4Z"/><path d="m9 12 2 2 4-4"/></symbol>
     <symbol id="icon-close" viewBox="0 0 24 24"><path d="M5 5 19 19M19 5 5 19"/></symbol>
+    <symbol id="icon-overview" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></symbol>
+    <symbol id="icon-orders" viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></symbol>
+    <symbol id="icon-history" viewBox="0 0 24 24"><path d="M3 10a9 9 0 1 1 2 8M3 4v6h6m3-3v5l3 2"/></symbol>
+    <symbol id="icon-logs" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3m6 0h4"/></symbol>
+    <symbol id="icon-chart" viewBox="0 0 24 24"><path d="M3 4v16h18M6 14l4-4 4 3 6-7"/></symbol>
+    <symbol id="icon-wallet" viewBox="0 0 24 24"><path d="M20 8V5a2 2 0 0 0-2-2L5 6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h15V8H5"/><path d="M20 12h-5v5h5m-3-2.5h.01"/></symbol>
+    <symbol id="icon-position" viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5 9-5Zm-9 9 9 5 9-5M3 16l9 5 9-5"/></symbol>
+    <symbol id="icon-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></symbol>
+    <symbol id="icon-arrow" viewBox="0 0 24 24"><path d="M5 12h14m-5-5 5 5-5 5"/></symbol>
   </svg>
-  <header>
-    <div class="brand">
+  <aside class="sidebar" aria-label="控制台导航">
+    <a class="brand" href="#overview" onclick="switchTab('tab-overview', document.getElementById('tab-btn-overview')); return false;" aria-label="Grid Console 策略总览">
       <div class="brand-icon" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
-      <div class="brand-lockup">
-        <span class="brand-name">Binance Grid Bot</span>
-        <span class="brand-caption">GRID TRADING CONSOLE <span class="brand-version" id="app-version" title="当前运行版本">v{{APP_VERSION}}</span></span>
+      <div class="brand-lockup"><span class="brand-name">Grid<span class="brand-name-light">Console</span></span><span class="brand-caption">BINANCE TRADING BOT</span></div>
+    </a>
+    <span class="nav-label">工作空间</span>
+    <nav class="tab-nav" role="tablist" aria-label="控制台页面" aria-orientation="vertical">
+      <button class="tab-button active" id="tab-btn-overview" role="tab" aria-label="策略总览" title="策略总览" aria-selected="true" aria-controls="tab-overview" onclick="switchTab('tab-overview', this)"><svg class="icon" aria-hidden="true"><use href="#icon-overview"/></svg><span>策略总览</span></button>
+      <button class="tab-button" id="tab-btn-orders" role="tab" aria-label="当前挂单" title="当前挂单" tabindex="-1" aria-selected="false" aria-controls="tab-orders" onclick="switchTab('tab-orders', this)"><svg class="icon" aria-hidden="true"><use href="#icon-orders"/></svg><span>当前挂单</span><span class="nav-count" id="count-orders">0</span></button>
+      <button class="tab-button" id="tab-btn-trades" role="tab" aria-label="成交历史" title="成交历史" tabindex="-1" aria-selected="false" aria-controls="tab-trades" onclick="switchTab('tab-trades', this)"><svg class="icon" aria-hidden="true"><use href="#icon-history"/></svg><span>成交历史</span><span class="nav-count" id="count-trades">0</span></button>
+      <button class="tab-button" id="tab-btn-config" role="tab" aria-label="策略设置" title="策略设置" tabindex="-1" aria-selected="false" aria-controls="tab-config" onclick="switchTab('tab-config', this)"><svg class="icon" aria-hidden="true"><use href="#icon-sliders"/></svg><span>策略设置</span></button>
+      <button class="tab-button" id="tab-btn-logs" role="tab" aria-label="运行日志" title="运行日志" tabindex="-1" aria-selected="false" aria-controls="tab-logs" onclick="switchTab('tab-logs', this)"><svg class="icon" aria-hidden="true"><use href="#icon-logs"/></svg><span>运行日志</span></button>
+    </nav>
+    <div class="sidebar-bottom">
+      <div class="sidebar-note"><svg class="icon" aria-hidden="true"><use href="#icon-shield"/></svg><div><strong>专注策略，掌握全局</strong><span>独立配置 · 实时同步</span></div></div>
+      <div class="sidebar-footer"><span>Grid Bot</span><span class="brand-version" id="app-version" title="当前运行版本">v{{APP_VERSION}}</span></div>
+    </div>
+  </aside>
+  <div class="app-shell">
+  <header class="topbar">
+    <div class="workspace-context"><span class="workspace-label">我的工作台</span><span class="context-divider">/</span><label class="pair-picker" for="pair-select"><span class="pair-dot" aria-hidden="true"></span><select id="pair-select" onchange="selectPair(this.value)" aria-label="选择要查看和控制的交易对"><option value="">加载交易对…</option></select></label><span class="badge badge-purple" id="symbol-badge">永续合约</span></div>
+    <div class="topbar-actions">
+      <span class="badge badge-amber" id="mode-badge">等待模式</span>
+      <button class="btn-quiet settings-shortcut" onclick="openConfigTab()"><svg class="icon" aria-hidden="true"><use href="#icon-sliders"/></svg>策略设置</button>
+      <button id="btn-pause-resume" disabled onclick="togglePauseResume()"><svg class="icon" aria-hidden="true"><use id="pause-icon-use" href="#icon-pause"/></svg><span id="pause-label">暂停策略</span></button>
+      <div class="actions-menu">
+        <button type="button" class="mobile-actions-toggle btn-quiet" aria-label="更多操作" aria-controls="header-actions" aria-expanded="false" onclick="toggleMobileActions()"><svg class="icon" aria-hidden="true"><use href="#icon-more"/></svg></button>
+        <div class="header-actions" id="header-actions" hidden>
+          <span class="menu-label">当前策略</span>
+          <button id="btn-rebalance" disabled onclick="rebalanceGrid()"><svg class="icon" aria-hidden="true"><use href="#icon-refresh"/></svg>刷新网格</button>
+          <button id="btn-cancel-orders" class="btn-danger" onclick="cancelAllOrders()"><svg class="icon" aria-hidden="true"><use href="#icon-cancel"/></svg>撤单并暂停策略</button>
+          <span class="menu-label menu-divider">账户管理</span>
+          <button onclick="openChangePasswordModal()"><svg class="icon" aria-hidden="true"><use href="#icon-lock"/></svg>修改密码</button>
+          <button onclick="logout()"><svg class="icon" aria-hidden="true"><use href="#icon-logout"/></svg>退出登录</button>
+        </div>
       </div>
-    </div>
-    <div class="brand-meta" aria-label="当前策略状态">
-      <label class="pair-picker" for="pair-select">交易对<select id="pair-select" onchange="selectPair(this.value)" aria-label="选择要查看和控制的交易对"></select></label>
-      <span class="badge badge-purple" id="symbol-badge">-- PERP</span>
-      <span class="badge badge-green" id="status-badge"><span class="pulse-dot"></span> RUNNING</span>
-      <span class="badge badge-amber" id="mode-badge">PAPER TRADING</span>
-    </div>
-    <button type="button" class="mobile-actions-toggle" aria-controls="header-actions" aria-expanded="false" onclick="toggleMobileActions()"><svg class="icon" aria-hidden="true"><use href="#icon-menu"/></svg>操作</button>
-    <div class="header-actions" id="header-actions">
-      <button class="btn-primary" onclick="openConfigTab()"><svg class="icon" aria-hidden="true"><use href="#icon-sliders"/></svg>策略设置</button>
-      <button id="btn-pause-resume" onclick="togglePauseResume()"><svg class="icon" aria-hidden="true"><use id="pause-icon-use" href="#icon-pause"/></svg><span id="pause-label">暂停策略</span></button>
-      <button id="btn-rebalance" onclick="rebalanceGrid()"><svg class="icon" aria-hidden="true"><use href="#icon-refresh"/></svg>刷新网格</button>
-      <button id="btn-cancel-orders" class="btn-danger" onclick="cancelAllOrders()"><svg class="icon" aria-hidden="true"><use href="#icon-cancel"/></svg>撤销全部挂单</button>
-      <button class="btn-quiet" onclick="openChangePasswordModal()" title="修改管理员密码"><svg class="icon" aria-hidden="true"><use href="#icon-lock"/></svg>修改密码</button>
-      <button class="btn-quiet" onclick="logout()" title="安全退出登录"><svg class="icon" aria-hidden="true"><use href="#icon-logout"/></svg>退出</button>
     </div>
   </header>
 
   <main id="main-content">
     <div class="page-heading">
-      <div>
-        <span class="eyebrow">MARKET / OVERVIEW</span>
-        <h1>策略总览</h1>
-        <p>监控价格、仓位与网格执行状态</p>
-      </div>
-      <span class="update-status" id="connection-status" role="status">正在连接实时数据</span>
+      <div><span class="eyebrow" id="page-eyebrow">YOUR STRATEGY, AT A GLANCE</span><h1 id="page-title">策略总览</h1><p id="page-description">每一格交易，都在掌握之中。</p></div>
+      <div class="heading-status"><span class="badge" id="status-badge">等待状态</span><span class="update-status" id="connection-status" role="status">正在连接实时数据</span></div>
     </div>
-    <!-- Top Metric Cards -->
+    <div class="tab-content active overview-panel" id="tab-overview" role="tabpanel" aria-labelledby="tab-btn-overview">
     <section class="metrics-grid" aria-label="策略关键指标">
-      <div class="metric-card">
-        <div class="metric-title" id="card-price-title">标记价格</div>
+      <article class="metric-card">
+        <div class="metric-title"><span id="card-price-title">标记价格</span><svg class="icon" aria-hidden="true"><use href="#icon-chart"/></svg></div>
         <div class="metric-value" id="card-price">--</div>
-        <div class="metric-sub">
-          <span id="card-price-change">今日涨跌 --</span>
-          <span style="color: var(--text-dim);">00:00 快照: <span id="card-price-midnight">--</span></span>
-          <span id="card-price-24h-change" style="color: var(--text-dim);">近 24h 涨跌 --</span>
-          <span style="color: var(--text-dim);">| 24h 高: <span id="card-high">--</span> 低: <span id="card-low">--</span></span>
-          <span id="card-price-status" style="color: var(--text-dim);"></span>
-        </div>
-      </div>
-
-      <div class="metric-card">
-        <div class="metric-title">网格成交累计已实现盈亏</div>
+        <div class="metric-sub"><span id="card-price-change">今日涨跌 --</span><span id="card-price-status" class="data-warning"></span></div>
+        <details class="metric-details"><summary>行情明细</summary><div><span>今日 00:00 <strong id="card-price-midnight">--</strong></span><span id="card-price-24h-change">近 24h 涨跌 --</span><span>24h 高 <strong id="card-high">--</strong> / 低 <strong id="card-low">--</strong></span></div></details>
+      </article>
+      <article class="metric-card">
+        <div class="metric-title"><span>累计已实现盈亏</span><svg class="icon" aria-hidden="true"><use href="#icon-chart"/></svg></div>
         <div class="metric-value text-green" id="card-profit">--</div>
-        <div class="metric-sub">
-          <span>扣手续费后: <strong id="card-net-profit">--</strong></span>
-          <span>手续费: <span id="card-commission">--</span></span>
-          <span>历史配对价差估算: <span id="card-grid-profit">--</span> / <strong id="card-cycles">0</strong> 次</span>
-          <span id="card-pnl-pending" style="color: var(--amber); display: none;"></span>
-        </div>
-      </div>
-
-      <div class="metric-card">
-        <div class="metric-title">当前持仓与未实现盈亏</div>
+        <div class="metric-sub"><span>扣费后 <strong id="card-net-profit">--</strong></span><span id="card-pnl-pending" class="data-warning" style="display:none"></span></div>
+        <details class="metric-details"><summary>收益明细</summary><div><span>手续费 <strong id="card-commission">--</strong></span><span>历史配对价差估算 <strong id="card-grid-profit">--</strong></span><span>历史配对循环 <strong id="card-cycles">0</strong> 次</span><span>仅统计本程序已确认的网格成交</span></div></details>
+      </article>
+      <article class="metric-card">
+        <div class="metric-title"><span>当前持仓</span><svg class="icon" aria-hidden="true"><use href="#icon-position"/></svg></div>
         <div class="metric-value" id="card-position">--</div>
-        <div class="metric-sub">
-          <span title="持仓数量绝对值 × 标记价格">持仓金额: <strong id="card-position-value">--</strong></span>
-          <span>未结盈亏: <span id="card-unrealized">--</span></span>
-          <span style="color: var(--text-dim);">开仓均价: <span id="card-entry">--</span></span>
-          <span style="color: var(--text-dim);"><span id="card-close-reserved-label">已挂卖平多</span>: <span id="card-sell-reserved">--</span></span>
-        </div>
-      </div>
-
-      <div class="metric-card">
-        <div class="metric-title">账户权益 / 可用保证金</div>
+        <div class="metric-sub"><span>未实现盈亏 <strong id="card-unrealized">--</strong></span></div>
+        <details class="metric-details"><summary>仓位明细</summary><div><span title="持仓数量绝对值 × 标记价格">持仓金额 <strong id="card-position-value">--</strong></span><span>开仓均价 <strong id="card-entry">--</strong></span><span><span id="card-close-reserved-label">已挂卖平多</span> <strong id="card-sell-reserved">--</strong></span></div></details>
+      </article>
+      <article class="metric-card">
+        <div class="metric-title"><span>账户权益</span><svg class="icon" aria-hidden="true"><use href="#icon-wallet"/></svg></div>
         <div class="metric-value" id="card-balance">--</div>
-        <div class="metric-sub">
-          <span>折合人民币: <strong id="card-balance-cny">--</strong></span>
-          <span id="card-cny-rate" style="color: var(--text-dim);"></span>
-          <span>可用: <span id="card-available">--</span> · 占比 <strong id="card-available-ratio" title="可用保证金 ÷ 账户权益 × 100%">--</strong></span>
-          <span id="card-account-status" style="color: var(--text-dim);"></span>
-        </div>
-      </div>
-
-      <div class="metric-card">
-        <div class="metric-title">网格配置摘要</div>
-        <div class="metric-value" id="card-grid-info">--</div>
-        <div class="metric-sub">
-          <span>窗口: <strong id="card-window-info">5 买 / 5 卖</strong> (Maker GTX)</span>
-        </div>
-      </div>
+        <div class="metric-sub"><span>可用 <strong id="card-available">--</strong></span><span class="ratio-pill" id="card-available-ratio" title="可用保证金 ÷ 账户权益 × 100%">--</span><span id="card-account-status" class="data-warning"></span></div>
+        <details class="metric-details"><summary>账户明细</summary><div><span>人民币估值 <strong id="card-balance-cny">--</strong></span><span id="card-cny-rate"></span><span>同一实盘账户的权益由各交易对共享</span></div></details>
+      </article>
+      <div class="strategy-strip"><span class="strategy-strip-icon"><svg class="icon" aria-hidden="true"><use href="#icon-position"/></svg></span><div><span class="strip-label">网格策略</span><strong id="card-grid-info">--</strong></div><span class="strip-divider"></span><span id="card-window-info">等待策略配置</span><span class="maker-label">Post-Only Maker</span><button class="btn-quiet strip-edit" onclick="openConfigTab()">调整参数<svg class="icon" aria-hidden="true"><use href="#icon-arrow"/></svg></button></div>
     </section>
-
+    <div class="overview-workspace">
     <section class="price-history-section" aria-labelledby="price-history-title">
       <div class="section-title">
-        <div><span class="section-kicker">MARK PRICE / 7D</span><h2 id="price-history-title">最近 7 天价格曲线</h2></div>
+        <div><span class="section-kicker">MARKET PERFORMANCE</span><h2 id="price-history-title">价格走势 <span class="period-label">近 7 天</span></h2></div>
         <div class="price-history-summary">
           <span>今日 00:00 <strong id="price-history-midnight">--</strong></span>
           <span>今日涨跌 <strong id="price-history-change">--</strong></span>
@@ -126,7 +119,7 @@
 
     <section class="trade-chart-section" aria-labelledby="trade-chart-title">
       <div class="section-title">
-        <div><span class="section-kicker">HOURLY FILLS / TODAY</span><h2 id="trade-chart-title">今日成交订单</h2></div>
+        <div><span class="section-kicker">TRADING ACTIVITY</span><h2 id="trade-chart-title">今日成交</h2></div>
         <div class="trade-chart-summary" aria-label="今日成交合计">
           <span class="trade-chart-legend"><i class="buy-swatch" aria-hidden="true"></i>买单 <strong id="hourly-buy-total">--</strong> 笔</span>
           <span class="trade-chart-legend"><i class="sell-swatch" aria-hidden="true"></i>卖单 <strong id="hourly-sell-total">--</strong> 笔</span>
@@ -138,31 +131,29 @@
       <div class="trade-chart-scroll" tabindex="0" role="region" aria-label="每小时买卖成交笔数，可横向滚动">
         <div class="trade-chart" id="hourly-trade-chart"></div>
       </div>
-      <p class="trade-chart-note" id="trade-chart-detail">统计北京时间今日 00:00 至当前时间的成交，按小时倒序排列，最新小时在最左侧；当前小时仅统计至当前时间。绿色为买单，红色为卖单，悬停或聚焦小时柱可查看详情。</p>
+      <p class="trade-chart-note" id="trade-chart-detail">北京时间 · 最新小时在左 · 绿买 / 红卖 · 悬停或聚焦查看详情</p>
     </section>
 
     <!-- Visual Grid Ladder Depth -->
     <section class="ladder-section" aria-labelledby="ladder-title">
       <div class="section-title">
-        <div><span class="section-kicker">ORDER LADDER</span><h2 id="ladder-title">实时网格深度</h2></div>
-        <div class="section-meta"><span>每格间隔 <strong><span id="ladder-step">--</span> <span data-quote-asset>--</span></strong></span><span>普通单目标 <strong><span id="ladder-amount">--</span> <span data-quote-asset>--</span></strong></span><span>Post-Only Maker</span></div>
+        <div><span class="section-kicker">LIVE ORDER BOOK</span><h2 id="ladder-title">网格深度</h2></div><span class="live-label"><span class="pulse-dot"></span>实时</span>
       </div>
-      <div class="ladder-container" id="ladder-container">
-        <!-- Rendered dynamically -->
+      <div class="section-meta ladder-meta"><span>网格间距 <strong><span id="ladder-step">--</span> <span data-quote-asset>--</span></strong></span><span>每格金额 <strong><span id="ladder-amount">--</span> <span data-quote-asset>--</span></strong></span></div>
+      <div class="ladder-labels" aria-hidden="true"><span>方向</span><span>价格</span><span>数量</span><span>金额</span></div>
+      <div class="ladder-container" id="ladder-container" role="region" tabindex="0" aria-label="实时网格挂单，可上下滚动">
+        <div class="empty-state"><svg class="icon" aria-hidden="true"><use href="#icon-position"/></svg><strong>等待网格数据</strong><span>连接策略后，挂单将实时显示在这里</span></div>
       </div>
+      <button class="ladder-all btn-quiet" onclick="switchTab('tab-orders', document.getElementById('tab-btn-orders'))">查看全部挂单<svg class="icon" aria-hidden="true"><use href="#icon-arrow"/></svg></button>
     </section>
+    </div>
+    <p class="overview-footnote">行情与成交统计均按北京时间 (UTC+8) 展示 · 盈亏仅覆盖本程序已确认成交</p>
+    </div>
 
-    <!-- Tabs Panel -->
-    <div class="tabs-card">
-      <div class="tab-nav" role="tablist" aria-label="策略明细">
-        <button class="tab-button active" id="tab-btn-orders" role="tab" aria-selected="true" aria-controls="tab-orders" onclick="switchTab('tab-orders', this)">当前有效挂单 (<span id="count-orders">0</span>)</button>
-        <button class="tab-button" id="tab-btn-trades" role="tab" aria-selected="false" aria-controls="tab-trades" onclick="switchTab('tab-trades', this)">成交与套利历史 (<span id="count-trades">0</span>)</button>
-        <button class="tab-button" id="tab-btn-config" role="tab" aria-selected="false" aria-controls="tab-config" onclick="switchTab('tab-config', this)">策略参数</button>
-        <button class="tab-button" id="tab-btn-logs" role="tab" aria-selected="false" aria-controls="tab-logs" onclick="switchTab('tab-logs', this)">系统运行日志</button>
-      </div>
-
+    <!-- Detail pages -->
+    <div class="tabs-card" id="detail-panel" hidden>
       <!-- Tab: Active Orders -->
-      <div class="tab-content active" id="tab-orders" role="tabpanel" aria-labelledby="tab-btn-orders">
+      <div class="tab-content" id="tab-orders" role="tabpanel" aria-labelledby="tab-btn-orders">
         <div class="table-scroll" role="region" aria-label="当前有效挂单，可横向滚动" tabindex="0">
         <table>
           <thead>
@@ -226,7 +217,7 @@
       <div class="tab-content" id="tab-config" role="tabpanel" aria-labelledby="tab-btn-config">
         <div class="config-container">
           <div class="config-header">
-            <h3 id="config-title">策略运行参数</h3>
+            <h3 id="config-title" tabindex="-1">策略运行参数</h3>
             <p style="color: var(--text-dim); font-size: 13px; margin-top: 4px;">当前交易对的参数保存后立即生效，重启自动保留。每个交易对独立配置和启停；策略参数变更时会重新对齐该交易对的网格挂单。</p>
           </div>
 
@@ -240,6 +231,7 @@
 
           <form id="config-form" onsubmit="event.preventDefault(); submitConfig();">
             <div class="config-form-grid">
+              <div class="form-section-label"><span>01</span> 基础参数<small>定义交易对与网格执行方式</small></div>
               <!-- 交易对 -->
               <div class="form-group">
                 <label for="cfg-symbol">交易合约币种 (Symbol)</label>
@@ -296,6 +288,7 @@
                 <span class="form-hint">模拟盘零风险体验，实盘需填写有效 API 密钥</span>
               </div>
 
+              <div class="form-section-label"><span>02</span> 仓位与价格边界<small>管理策略敞口与运行范围</small></div>
               <!-- 最大持仓 -->
               <div class="form-group">
                 <label for="cfg-max-position">最大持仓名义价值 (计价资产, 可选)</label>
@@ -334,7 +327,7 @@
                 <span class="form-hint">涨超该价格停止下单</span>
               </div>
 
-              <div class="form-section-label">连接与通知</div>
+              <div class="form-section-label"><span>03</span> 交易所连接<small>配置同步频率与 API 凭证</small></div>
               <div class="form-group">
                 <label for="cfg-recv-window">请求有效窗口 (毫秒)</label>
                 <input type="number" id="cfg-recv-window" min="1" max="60000" step="1" required />
@@ -365,6 +358,7 @@
                 <span class="form-hint">仅在模拟盘模式下允许清除；留空密钥输入框则保留已保存的值</span>
               </div>
 
+              <div class="form-section-label"><span>04</span> Telegram 通知<small>及时接收成交与策略状态</small></div>
               <div class="form-group" style="justify-content: center;">
                 <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
                   <input type="checkbox" id="cfg-telegram-enabled" style="width: 17px; height: 17px; accent-color: var(--accent);" />
@@ -393,7 +387,7 @@
             <!-- 底部保存栏 -->
             <div class="form-actions">
               <div style="display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-dim);">
-                <span style="color: var(--accent);">自动保存：</span>配置在重启后保留，下次启动继续使用页面设置
+                <svg class="icon" aria-hidden="true"><use href="#icon-shield"/></svg>点击保存后立即生效，重启后保留
               </div>
               <div style="display: flex; gap: 10px;">
                 <button type="button" id="btn-reset-cfg" onclick="loadConfigForm()">↺ 还原当前配置</button>
@@ -435,6 +429,7 @@
       </div>
     </div>
   </main>
+  </div>
 
   <!-- Modal: Initial Admin Password Setup -->
   <div id="modal-auth-setup" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="setup-title" style="display: none;">
@@ -453,11 +448,11 @@
         </div>
         <div class="form-group" style="margin-bottom: 14px;">
           <label for="setup-pwd" style="font-size: 12px; color: var(--text-dim); margin-bottom: 6px; display: block;">设置管理员密码 (至少 6 位)</label>
-          <input type="password" id="setup-pwd" required minlength="6" placeholder="输入管理员密码" style="width: 100%; box-sizing: border-box;" autofocus />
+          <input type="password" id="setup-pwd" autocomplete="new-password" required minlength="6" placeholder="输入管理员密码" style="width: 100%; box-sizing: border-box;" autofocus />
         </div>
         <div class="form-group" style="margin-bottom: 18px;">
           <label for="setup-pwd-confirm" style="font-size: 12px; color: var(--text-dim); margin-bottom: 6px; display: block;">确认管理员密码</label>
-          <input type="password" id="setup-pwd-confirm" required minlength="6" placeholder="再次输入密码进行确认" style="width: 100%; box-sizing: border-box;" />
+          <input type="password" id="setup-pwd-confirm" autocomplete="new-password" required minlength="6" placeholder="再次输入密码进行确认" style="width: 100%; box-sizing: border-box;" />
         </div>
         <div id="setup-alert" role="alert" style="display: none; padding: 10px 14px; border-radius: 6px; font-size: 13px; margin-bottom: 14px;"></div>
         <button type="submit" class="btn-primary" id="btn-submit-setup" style="width: 100%; padding: 12px; font-size: 14px; font-weight: 600;">
@@ -480,7 +475,7 @@
       <form id="form-auth-login" onsubmit="event.preventDefault(); submitAuthLogin();">
         <div class="form-group" style="margin-bottom: 18px;">
           <label for="login-pwd" style="font-size: 12px; color: var(--text-dim); margin-bottom: 6px; display: block;">管理员密码</label>
-          <input type="password" id="login-pwd" required placeholder="请输入管理员密码" style="width: 100%; box-sizing: border-box;" autofocus />
+          <input type="password" id="login-pwd" autocomplete="current-password" required placeholder="请输入管理员密码" style="width: 100%; box-sizing: border-box;" autofocus />
         </div>
         <div id="login-alert" role="alert" style="display: none; padding: 10px 14px; border-radius: 6px; font-size: 13px; margin-bottom: 14px;"></div>
         <button type="submit" class="btn-primary" id="btn-submit-login" style="width: 100%; padding: 12px; font-size: 14px; font-weight: 600;">
@@ -500,15 +495,15 @@
       <form id="form-change-pwd" onsubmit="event.preventDefault(); submitChangePassword();">
         <div class="form-group" style="margin-bottom: 12px;">
           <label for="chg-old-pwd" style="font-size: 12px; color: var(--text-dim); margin-bottom: 6px; display: block;">当前原密码</label>
-          <input type="password" id="chg-old-pwd" required placeholder="输入当前使用的密码" style="width: 100%; box-sizing: border-box;" />
+          <input type="password" id="chg-old-pwd" autocomplete="current-password" required placeholder="输入当前使用的密码" style="width: 100%; box-sizing: border-box;" />
         </div>
         <div class="form-group" style="margin-bottom: 12px;">
           <label for="chg-new-pwd" style="font-size: 12px; color: var(--text-dim); margin-bottom: 6px; display: block;">新管理员密码 (至少 6 位)</label>
-          <input type="password" id="chg-new-pwd" required minlength="6" placeholder="输入新密码" style="width: 100%; box-sizing: border-box;" />
+          <input type="password" id="chg-new-pwd" autocomplete="new-password" required minlength="6" placeholder="输入新密码" style="width: 100%; box-sizing: border-box;" />
         </div>
         <div class="form-group" style="margin-bottom: 18px;">
           <label for="chg-new-pwd-confirm" style="font-size: 12px; color: var(--text-dim); margin-bottom: 6px; display: block;">确认新密码</label>
-          <input type="password" id="chg-new-pwd-confirm" required minlength="6" placeholder="再次输入新密码" style="width: 100%; box-sizing: border-box;" />
+          <input type="password" id="chg-new-pwd-confirm" autocomplete="new-password" required minlength="6" placeholder="再次输入新密码" style="width: 100%; box-sizing: border-box;" />
         </div>
         <div id="chg-alert" role="alert" style="display: none; padding: 10px 14px; border-radius: 6px; font-size: 13px; margin-bottom: 14px;"></div>
         <div style="display: flex; gap: 10px; justify-content: flex-end;">
@@ -654,10 +649,18 @@
       }
     }
 
+    function syncModalAccessibility() {
+      const open = [...document.querySelectorAll('.modal-overlay')].some(modal => modal.style.display === 'flex');
+      document.querySelector('.app-shell').inert = open;
+      document.querySelector('.sidebar').inert = open;
+      document.body.style.overflow = open ? 'hidden' : '';
+    }
+
     function showSetupModal() {
       document.getElementById("modal-auth-setup").style.display = "flex";
       document.getElementById("modal-auth-login").style.display = "none";
-      document.getElementById("setup-pwd").focus();
+      syncModalAccessibility();
+      document.getElementById("setup-code").focus();
     }
 
     function showLoginModal(alertMsg = "") {
@@ -674,6 +677,8 @@
       } else {
         alertBox.style.display = "none";
       }
+      document.getElementById("modal-change-password").style.display = "none";
+      syncModalAccessibility();
       document.getElementById("login-pwd").focus();
     }
 
@@ -681,6 +686,7 @@
       document.getElementById("modal-auth-setup").style.display = "none";
       document.getElementById("modal-auth-login").style.display = "none";
       document.getElementById("modal-change-password").style.display = "none";
+      syncModalAccessibility();
     }
 
     async function submitAuthSetup() {
@@ -800,11 +806,14 @@
       document.getElementById("chg-new-pwd").value = "";
       document.getElementById("chg-new-pwd-confirm").value = "";
       document.getElementById("chg-alert").style.display = "none";
+      syncModalAccessibility();
       document.getElementById("chg-old-pwd").focus();
     }
 
     function closeChangePasswordModal() {
       document.getElementById("modal-change-password").style.display = "none";
+      syncModalAccessibility();
+      document.querySelector('.mobile-actions-toggle').focus();
     }
 
     async function submitChangePassword() {
@@ -1220,13 +1229,13 @@
 
       if (data.status === 'RUNNING') {
         statusBadge.className = 'badge badge-green';
-        statusBadge.innerHTML = '<span class="pulse-dot"></span> RUNNING';
+        statusBadge.innerHTML = '<span class="pulse-dot"></span> 策略运行中';
         document.getElementById('pause-label').textContent = '暂停策略';
         document.getElementById('pause-icon-use').setAttribute('href', '#icon-pause');
         pauseResumeBtn.className = '';
       } else {
         statusBadge.className = 'badge badge-amber';
-        statusBadge.textContent = 'PAUSED';
+        statusBadge.textContent = '策略已暂停';
         document.getElementById('pause-label').textContent = '恢复策略';
         document.getElementById('pause-icon-use').setAttribute('href', '#icon-play');
         pauseResumeBtn.className = 'btn-primary';
@@ -1235,13 +1244,13 @@
       const modeBadge = document.getElementById('mode-badge');
       if (data.dry_run) {
         modeBadge.className = 'badge badge-purple';
-        modeBadge.textContent = 'PAPER TRADING (模拟实盘)';
+        modeBadge.textContent = '模拟交易';
       } else if (data.grid_config.is_testnet) {
         modeBadge.className = 'badge badge-amber';
-        modeBadge.textContent = 'TESTNET (测试网)';
+        modeBadge.textContent = '测试网';
       } else {
-        modeBadge.className = 'badge badge-green';
-        modeBadge.textContent = 'REAL LIVE (实盘运行)';
+        modeBadge.className = 'badge badge-red';
+        modeBadge.textContent = '实盘交易';
       }
 
       // Ticker & Price Card
@@ -1331,7 +1340,7 @@
       document.getElementById('card-account-status').textContent = accountFresh ? '' : '账户数据暂未更新';
 
       // Grid Info Card
-      document.getElementById('card-grid-info').textContent = `${data.grid_config.grid_interval} ${pnlAsset} / ${data.grid_config.order_amount_usdc} ${pnlAsset}`;
+      document.getElementById('card-grid-info').textContent = `间距 ${data.grid_config.grid_interval} · 每格 ${data.grid_config.order_amount_usdc} ${pnlAsset}`;
       document.getElementById('card-window-info').textContent = `${shortGrid ? '做空' : '做多'} · ${data.grid_config.buy_window} 买 / ${data.grid_config.sell_window} 卖`;
       document.getElementById('ladder-step').textContent = data.grid_config.grid_interval;
       document.getElementById('ladder-amount').textContent = data.grid_config.order_amount_usdc;
@@ -1422,6 +1431,9 @@
         `;
       });
 
+      if (!orders.length) {
+        html += `<div class="empty-state"><svg class="icon" aria-hidden="true"><use href="#icon-orders"/></svg><strong>暂无有效挂单</strong><span>${currentBotStatus === 'RUNNING' ? '等待策略生成挂单，执行状态可在运行日志中查看' : '策略已暂停，可在顶部恢复运行'}</span></div>`;
+      }
       container.innerHTML = html;
     }
 
@@ -1587,38 +1599,57 @@
       consoleEl.insertBefore(line, consoleEl.firstChild);
     }
 
-    function switchTab(tabId, btn) {
-      document.querySelectorAll('.tab-button').forEach(b => {
-        b.classList.remove('active');
-        b.setAttribute('aria-selected', 'false');
-      });
-      document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-      btn.classList.add('active');
-      btn.setAttribute('aria-selected', 'true');
-      document.getElementById(tabId).classList.add('active');
+    const viewCopy = {
+      'tab-overview': ['YOUR STRATEGY, AT A GLANCE', '策略总览', '每一格交易，都在掌握之中。'],
+      'tab-orders': ['OPEN ORDERS', '当前挂单', '查看当前交易对的有效挂单与网格档位。'],
+      'tab-trades': ['TRADE HISTORY', '成交历史', '追踪每次成交、已实现盈亏与手续费。'],
+      'tab-config': ['STRATEGY SETTINGS', '策略设置', '配置网格、管理交易对，让策略按你的方式运行。'],
+      'tab-logs': ['SYSTEM ACTIVITY', '运行日志', '查看当前交易对的执行记录与系统状态。']
+    };
 
-      if (tabId === 'tab-config') {
-        loadConfigForm();
+    function switchTab(tabId, btn) {
+      if (!viewCopy[tabId] || !btn) return;
+      const wasActive = btn.classList.contains('active');
+      document.querySelectorAll('.tab-button').forEach(b => {
+        const active = b === btn;
+        b.classList.toggle('active', active);
+        b.setAttribute('aria-selected', String(active));
+        b.tabIndex = active ? 0 : -1;
+      });
+      document.querySelectorAll('.tab-content').forEach(c => c.classList.toggle('active', c.id === tabId));
+      document.getElementById('detail-panel').hidden = tabId === 'tab-overview';
+      const [eyebrow, title, description] = viewCopy[tabId];
+      document.getElementById('page-eyebrow').textContent = eyebrow;
+      document.getElementById('page-title').textContent = title;
+      document.getElementById('page-description').textContent = description;
+      closeMobileActions();
+      if (!wasActive) {
+        window.scrollTo({ top: 0, behavior: 'instant' });
+        if (tabId === 'tab-config') loadConfigForm();
       }
+      if (tabId === 'tab-overview') requestAnimationFrame(renderMarkPrice);
     }
 
     function toggleMobileActions() {
       const actions = document.getElementById('header-actions');
       const toggle = document.querySelector('.mobile-actions-toggle');
-      const isOpen = actions.classList.toggle('is-open');
-      toggle.setAttribute('aria-expanded', String(isOpen));
+      actions.hidden = !actions.hidden;
+      toggle.setAttribute('aria-expanded', String(!actions.hidden));
+      if (!actions.hidden) actions.querySelector('button:not(:disabled)')?.focus();
     }
 
     function closeMobileActions() {
-      document.getElementById('header-actions').classList.remove('is-open');
-      document.querySelector('.mobile-actions-toggle').setAttribute('aria-expanded', 'false');
+      const actions = document.getElementById('header-actions');
+      const toggle = document.querySelector('.mobile-actions-toggle');
+      const restoreFocus = actions.contains(document.activeElement);
+      actions.hidden = true;
+      toggle.setAttribute('aria-expanded', 'false');
+      if (restoreFocus) toggle.focus();
     }
 
     function openConfigTab() {
-      const cfgBtn = document.getElementById('tab-btn-config');
-      switchTab('tab-config', cfgBtn);
-      closeMobileActions();
-      requestAnimationFrame(() => cfgBtn.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start', inline: 'center' }));
+      switchTab('tab-config', document.getElementById('tab-btn-config'));
+      document.getElementById('config-title').focus({ preventScroll: true });
     }
 
     function renderPairManagement() {
@@ -1883,6 +1914,10 @@
     }
 
     window.addEventListener('DOMContentLoaded', () => {
+      const mobileNavigation = matchMedia('(max-width: 640px)');
+      const syncNavigation = () => document.querySelector('.tab-nav').setAttribute('aria-orientation', mobileNavigation.matches ? 'horizontal' : 'vertical');
+      syncNavigation();
+      mobileNavigation.addEventListener('change', syncNavigation);
       const priceChart = document.getElementById('price-history-chart');
       priceChart.addEventListener('pointermove', event => {
         const svg = priceChart.querySelector('svg');
@@ -1925,18 +1960,35 @@
         if (event.target.closest('button')) closeMobileActions();
       });
       document.querySelector('.tab-nav').addEventListener('keydown', (event) => {
-        if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft') return;
+        if (!['ArrowRight', 'ArrowLeft', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
         const tabs = [...document.querySelectorAll('.tab-button')];
         const index = tabs.indexOf(document.activeElement);
         if (index < 0) return;
         event.preventDefault();
-        const next = tabs[(index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length];
+        const next = tabs[event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1
+          : (index + (['ArrowRight', 'ArrowDown'].includes(event.key) ? 1 : -1) + tabs.length) % tabs.length];
         next.focus();
         switchTab(next.getAttribute('aria-controls'), next);
       });
+      document.addEventListener('click', event => {
+        if (!event.target.closest('.actions-menu')) closeMobileActions();
+      });
       document.addEventListener('keydown', (event) => {
+        if (event.key === 'Tab') {
+          const modal = [...document.querySelectorAll('.modal-overlay')].find(el => el.style.display === 'flex');
+          if (modal) {
+            const focusable = [...modal.querySelectorAll('button, input, select, a[href], [tabindex]')]
+              .filter(el => !el.disabled && el.tabIndex >= 0 && el.getClientRects().length);
+            const first = focusable[0], last = focusable[focusable.length - 1];
+            if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+            else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+          }
+        }
         if (event.key === 'Escape') {
-          closeMobileActions();
+          if (!document.getElementById('header-actions').hidden) {
+            closeMobileActions();
+            document.querySelector('.mobile-actions-toggle').focus();
+          }
           if (document.getElementById('modal-change-password').style.display === 'flex') closeChangePasswordModal();
         }
       });
