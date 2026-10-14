@@ -226,8 +226,16 @@
       <div class="tab-content" id="tab-config" role="tabpanel" aria-labelledby="tab-btn-config">
         <div class="config-container">
           <div class="config-header">
-            <h3>策略运行参数</h3>
+            <h3 id="config-title">策略运行参数</h3>
             <p style="color: var(--text-dim); font-size: 13px; margin-top: 4px;">当前交易对的参数保存后立即生效，重启自动保留。每个交易对独立配置和启停；策略参数变更时会重新对齐该交易对的网格挂单。</p>
+          </div>
+
+          <div class="config-toolbar" aria-label="交易对管理">
+            <div><strong id="config-pair-count">交易对管理</strong><p id="config-pair-hint">在这里添加交易对，每个策略独立配置。</p></div>
+            <div class="config-toolbar-actions">
+              <button type="button" id="btn-add-pair" onclick="startNewPair()">＋ 新增交易对</button>
+              <button type="button" id="btn-remove-pair" onclick="removeSelectedPair()" disabled>移除当前交易对</button>
+            </div>
           </div>
 
           <form id="config-form" onsubmit="event.preventDefault(); submitConfig();">
@@ -235,7 +243,7 @@
               <!-- 交易对 -->
               <div class="form-group">
                 <label for="cfg-symbol">交易合约币种 (Symbol)</label>
-                <input type="text" id="cfg-symbol" required placeholder="如 TIAUSDC, BTCUSDT" />
+                <input type="text" id="cfg-symbol" pattern="[A-Za-z0-9]{3,32}" maxlength="32" required placeholder="如 TIAUSDC, BTCUSDT" />
                 <span class="form-hint" id="cfg-symbol-hint">币安合约交易对代码</span>
               </div>
 
@@ -256,14 +264,14 @@
               <!-- 买单窗口 -->
               <div class="form-group">
                 <label for="cfg-buy-window">买单挂单窗口数量 (Buy Window)</label>
-                <input type="number" id="cfg-buy-window" min="1" max="25" required placeholder="5" />
+                <input type="number" id="cfg-buy-window" min="1" max="50" required placeholder="5" />
                 <span class="form-hint">连续买入时向下一格；卖出后，上一个买入档位可以再次使用</span>
               </div>
 
               <!-- 卖单窗口 -->
               <div class="form-group">
                 <label for="cfg-sell-window">卖单挂单窗口数量 (Sell Window)</label>
-                <input type="number" id="cfg-sell-window" min="1" max="25" required placeholder="5" />
+                <input type="number" id="cfg-sell-window" min="1" max="50" required placeholder="5" />
                 <span class="form-hint">连续卖出时向上一格；买入后，上一个卖出档位可以再次使用</span>
                 <span class="form-hint">窗口随行情移动；最近成交进度在暂停或重启后继续保留</span>
               </div>
@@ -317,6 +325,18 @@
                 <span class="form-hint">涨超该价格停止下单</span>
               </div>
 
+              <div class="form-section-label">连接与通知</div>
+              <div class="form-group">
+                <label for="cfg-recv-window">请求有效窗口 (毫秒)</label>
+                <input type="number" id="cfg-recv-window" min="1" max="60000" step="1" required />
+                <span class="form-hint">请求签名的有效时间，默认 5000 毫秒</span>
+              </div>
+              <div class="form-group">
+                <label for="cfg-sync-interval">账户与挂单同步间隔 (秒)</label>
+                <input type="number" id="cfg-sync-interval" min="1" step="1" required />
+                <span class="form-hint">默认每 3 秒同步一次</span>
+              </div>
+
               <!-- API Key -->
               <div class="form-group">
                 <label for="cfg-api-key">币安 API Key (实盘使用)</label>
@@ -329,6 +349,11 @@
                 <label for="cfg-api-secret">币安 API Secret (实盘使用)</label>
                 <input type="password" id="cfg-api-secret" placeholder="留空则保持当前配置不变" />
                 <span class="form-hint" id="cfg-api-secret-status">当前状态: 未配置</span>
+              </div>
+
+              <div class="form-group">
+                <label><input type="checkbox" id="cfg-clear-api" /> 清除已保存的 API Key 和 Secret</label>
+                <span class="form-hint">仅在模拟盘模式下允许清除；留空密钥输入框则保留已保存的值</span>
               </div>
 
               <div class="form-group" style="justify-content: center;">
@@ -350,19 +375,45 @@
                 <input type="text" id="cfg-telegram-chat-id" placeholder="如 123456789 或 -100..." />
                 <span class="form-hint">先给 Bot 发送消息，再从 getUpdates 查询 Chat ID；群组 ID 通常以 -100 开头</span>
               </div>
+              <div class="form-group">
+                <label><input type="checkbox" id="cfg-clear-telegram" /> 清除已保存的 Telegram 凭证</label>
+                <span class="form-hint">清除前请关闭通知；Bot Token 和 Chat ID 会一起清除</span>
+              </div>
             </div>
 
             <!-- 底部保存栏 -->
             <div class="form-actions">
               <div style="display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-dim);">
-                <span style="color: var(--accent);">数据持久化：</span>本地 SQLite 数据库 (<code>data/bot.db</code>，重启自动保留，无需配置文件)
+                <span style="color: var(--accent);">自动保存：</span>配置在重启后保留，下次启动继续使用页面设置
               </div>
               <div style="display: flex; gap: 10px;">
-                <button type="button" onclick="loadConfigForm()">↺ 还原当前配置</button>
+                <button type="button" id="btn-reset-cfg" onclick="loadConfigForm()">↺ 还原当前配置</button>
                 <button type="submit" class="btn-primary" id="btn-save-cfg">保存并立即生效</button>
               </div>
             </div>
             <div id="cfg-alert" role="status" aria-live="polite" style="display: none; margin-top: 14px; padding: 12px 16px; border-radius: 6px; font-size: 13px;"></div>
+          </form>
+
+          <form id="server-config-form" class="server-config" onsubmit="event.preventDefault(); submitServerConfig();">
+            <h4>服务设置</h4>
+            <p class="form-hint">监听地址和端口在重启程序后生效。Docker 部署时，容器监听端口需与端口映射对应。</p>
+            <div class="config-form-grid">
+              <div class="form-group">
+                <label for="cfg-server-host">监听地址</label>
+                <input type="text" id="cfg-server-host" required placeholder="0.0.0.0" />
+                <span class="form-hint">填写 IPv4 或 IPv6 地址，例如 0.0.0.0、127.0.0.1 或 ::</span>
+              </div>
+              <div class="form-group">
+                <label for="cfg-server-port">监听端口</label>
+                <input type="number" id="cfg-server-port" min="1" max="65535" step="1" required />
+                <span class="form-hint" id="server-active-address">正在读取当前监听地址…</span>
+              </div>
+            </div>
+            <div class="form-actions">
+              <div>策略参数即时生效；服务设置需要重启程序。</div>
+              <div><button type="submit" id="btn-save-server" disabled>保存服务设置</button></div>
+            </div>
+            <div id="server-cfg-alert" class="config-alert" role="status" aria-live="polite" style="display: none;"></div>
           </form>
         </div>
       </div>
@@ -812,6 +863,11 @@
     }
 
     let selectedPair = '';
+    let configuredPairs = [];
+    let editingNewPair = false;
+    let configRequestEpoch = 0;
+    let configurationLoaded = false;
+    let pairManagementBusy = false;
     let pairScoped = false;
     let pairSwitchEpoch = 0;
     let ws = null;
@@ -876,6 +932,7 @@
       const result = await response.json();
       if (!result.success || !result.data?.length) throw new Error('无法加载交易对列表');
       const pairs = result.data;
+      configuredPairs = pairs;
       const select = document.getElementById('pair-select');
       select.replaceChildren(...pairs.map(pair => {
         const option = document.createElement('option');
@@ -888,9 +945,16 @@
       pairScoped = active.scoped;
       select.disabled = !pairScoped || pairs.length < 2;
       await selectPair(active.symbol);
+      renderPairManagement();
+      await loadServerConfigForm();
     }
 
     async function selectPair(symbol) {
+      if (pairManagementBusy) {
+        document.getElementById('pair-select').value = selectedPair;
+        return;
+      }
+      editingNewPair = false;
       selectedPair = symbol;
       const epoch = ++pairSwitchEpoch;
       sessionStorage.setItem('binance_bot_selected_pair', symbol);
@@ -1134,6 +1198,7 @@
       syncSinglePairSymbol(data.symbol);
       setPairControlsPending(false);
       currentBotStatus = data.status;
+      renderPairManagement();
       const { base: baseAsset, quote: pnlAsset } = symbolAssets(data.symbol);
       document.querySelectorAll('[data-base-asset]').forEach(el => el.textContent = baseAsset);
       document.querySelectorAll('[data-quote-asset]').forEach(el => el.textContent = pnlAsset);
@@ -1545,22 +1610,33 @@
       requestAnimationFrame(() => cfgBtn.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start', inline: 'center' }));
     }
 
-    async function loadConfigForm() {
-      const epoch = pairSwitchEpoch;
-      const saveButton = document.getElementById('btn-save-cfg');
-      saveButton.disabled = true;
-      try {
-        const res = await authFetch(pairApi('/config'));
-        const json = await res.json();
-        if (epoch !== pairSwitchEpoch) return;
-        if (json.success && json.data) {
-          const c = json.data;
-          syncSinglePairSymbol(c.symbol);
-          document.getElementById('cfg-symbol').readOnly = pairScoped;
-          document.getElementById('cfg-symbol-hint').textContent = pairScoped
-            ? '使用顶部选择器切换交易对；增删或重命名需修改配置并重启'
-            : '币安合约交易对代码';
-          saveButton.disabled = false;
+    function renderPairManagement() {
+      document.getElementById('config-title').textContent = editingNewPair ? '新增交易对' : `${selectedPair || '当前交易对'} · 策略参数`;
+      document.getElementById('config-pair-count').textContent = `已配置 ${configuredPairs.length} 个交易对`;
+      document.getElementById('config-pair-hint').textContent = editingNewPair
+        ? '新增策略保存后保持暂停，检查参数后手动恢复。'
+        : '新增立即生效；移除前请暂停策略并等待挂单撤销，已有持仓会保留。';
+      document.getElementById('btn-add-pair').disabled = pairManagementBusy || editingNewPair;
+      document.getElementById('btn-remove-pair').disabled = pairManagementBusy || editingNewPair || configuredPairs.length < 2;
+      document.getElementById('btn-save-cfg').textContent = pairManagementBusy ? '保存中…' : editingNewPair ? '保存并添加交易对' : '保存并立即生效';
+      document.getElementById('btn-save-cfg').disabled = pairManagementBusy || !configurationLoaded;
+      document.getElementById('btn-reset-cfg').disabled = pairManagementBusy;
+      document.getElementById('btn-reset-cfg').textContent = editingNewPair ? '取消新增' : '↺ 还原当前配置';
+      document.getElementById('cfg-symbol').readOnly = !editingNewPair && pairScoped;
+      document.getElementById('cfg-symbol-hint').textContent = editingNewPair ? '填写币安合约交易对代码，例如 BTCUSDT'
+        : pairScoped ? '使用顶部选择器切换交易对，也可在本页新增或移除交易对' : '币安合约交易对代码';
+    }
+
+    function showConfigMessage(message, success = false, id = 'cfg-alert') {
+      const box = document.getElementById(id);
+      box.style.display = 'block';
+      box.style.background = success ? 'var(--green-bg)' : 'var(--red-bg)';
+      box.style.border = `1px solid ${success ? 'var(--green)' : 'var(--red)'}`;
+      box.style.color = success ? 'var(--green)' : 'var(--red)';
+      box.textContent = message;
+    }
+
+    function fillConfigForm(c) {
           document.getElementById('cfg-symbol').value = c.symbol;
           document.getElementById('cfg-interval').value = c.grid_interval;
           document.getElementById('cfg-amount').value = c.order_amount_usdc;
@@ -1590,13 +1666,107 @@
           document.getElementById('cfg-telegram-token').value = '';
           document.getElementById('cfg-telegram-token-status').textContent = c.has_telegram_bot_token ? '已配置 (已隐藏保护)' : '未配置';
           document.getElementById('cfg-telegram-chat-id').value = c.telegram_chat_id || '';
-        }
+      document.getElementById('cfg-recv-window').value = c.recv_window ?? 5000;
+      document.getElementById('cfg-sync-interval').value = c.sync_interval_secs ?? 3;
+      document.getElementById('cfg-clear-api').checked = false;
+      document.getElementById('cfg-clear-telegram').checked = false;
+    }
+
+    function startNewPair() {
+      if (pairManagementBusy) return;
+      ++configRequestEpoch;
+      editingNewPair = true;
+      configurationLoaded = true;
+      document.getElementById('cfg-alert').style.display = 'none';
+      fillConfigForm({ symbol: '', grid_interval: '0.1', order_amount_usdc: '100', buy_window: 5, sell_window: 5,
+        dry_run: true, max_position_usdc: '2000', recv_window: 5000, sync_interval_secs: 3 });
+      renderPairManagement();
+      document.getElementById('cfg-symbol').focus();
+    }
+
+    async function loadConfigForm() {
+      const epoch = pairSwitchEpoch;
+      const requestEpoch = ++configRequestEpoch;
+      editingNewPair = false;
+      configurationLoaded = false;
+      renderPairManagement();
+      try {
+        const res = await authFetch(pairApi('/config'));
+        const json = await res.json();
+        if (epoch !== pairSwitchEpoch || requestEpoch !== configRequestEpoch) return;
+        if (!res.ok || !json.success || !json.data) throw new Error(json.message || '无法读取配置');
+        syncSinglePairSymbol(json.data.symbol);
+        fillConfigForm(json.data);
+        configurationLoaded = true;
+        renderPairManagement();
       } catch (e) {
-        console.error('Failed to load configuration:', e);
+        if (epoch !== pairSwitchEpoch || requestEpoch !== configRequestEpoch) return;
+        showConfigMessage('配置读取失败：' + e.message);
       }
     }
 
+    async function removeSelectedPair() {
+      if (pairManagementBusy || editingNewPair) return;
+      if (!confirm(`确认移除 ${selectedPair}？请先暂停策略并等待撤单完成；已有持仓和成交历史会保留。`)) return;
+      pairManagementBusy = true;
+      renderPairManagement();
+      const select = document.getElementById('pair-select');
+      const wasDisabled = select.disabled;
+      select.disabled = true;
+      try {
+        const res = await authFetch(`/api/pairs/${encodeURIComponent(selectedPair)}`, {
+          method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ confirm: true })
+        });
+        const json = await res.json();
+        if (!res.ok || !json.success) throw new Error(json.message || '移除失败');
+        pairManagementBusy = false;
+        await initConsole();
+        showConfigMessage(json.message || '交易对已移除', true);
+      } catch (e) {
+        select.disabled = wasDisabled;
+        showConfigMessage('移除失败：' + e.message);
+      } finally {
+        pairManagementBusy = false;
+        renderPairManagement();
+      }
+    }
+
+    async function loadServerConfigForm() {
+      document.getElementById('btn-save-server').disabled = true;
+      try {
+        const res = await authFetch('/api/server/config');
+        const json = await res.json();
+        if (!res.ok || !json.success || !json.data) throw new Error(json.message || '无法读取服务设置');
+        document.getElementById('cfg-server-host').value = json.data.saved.host;
+        document.getElementById('cfg-server-port').value = json.data.saved.port;
+        document.getElementById('server-active-address').textContent = `当前监听：${json.data.active.host}:${json.data.active.port}`;
+        document.getElementById('btn-save-server').disabled = false;
+      } catch (e) {
+        showConfigMessage('服务设置读取失败：' + e.message, false, 'server-cfg-alert');
+      }
+    }
+
+    async function submitServerConfig() {
+      const btn = document.getElementById('btn-save-server');
+      btn.disabled = true;
+      try {
+        const res = await authFetch('/api/server/config', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+            host: document.getElementById('cfg-server-host').value.trim(), port: Number(document.getElementById('cfg-server-port').value)
+          })
+        });
+        const json = await res.json();
+        if (!res.ok || !json.success) throw new Error(json.message || '保存失败');
+        showConfigMessage(json.message, true, 'server-cfg-alert');
+      } catch (e) { showConfigMessage('服务设置保存失败：' + e.message, false, 'server-cfg-alert'); }
+      finally { btn.disabled = false; }
+    }
+
     async function submitConfig() {
+      if (pairManagementBusy || !configurationLoaded) return;
+      const adding = editingNewPair;
+      const epoch = pairSwitchEpoch;
+      const target = adding ? "/api/pairs" : pairApi("/config");
       const alertBox = document.getElementById('cfg-alert');
       alertBox.style.display = 'none';
 
@@ -1617,57 +1787,47 @@
         post_only: document.getElementById('cfg-post-only').checked,
         dry_run: dry_run,
         is_testnet: is_testnet,
+        recv_window: Number(document.getElementById('cfg-recv-window').value),
+        sync_interval_secs: Number(document.getElementById('cfg-sync-interval').value),
+        clear_api_credentials: document.getElementById('cfg-clear-api').checked,
+        clear_telegram_credentials: document.getElementById('cfg-clear-telegram').checked,
         api_key: apiKey ? apiKey : null,
         api_secret: apiSecret ? apiSecret : null,
         telegram_enabled: document.getElementById('cfg-telegram-enabled').checked,
         telegram_bot_token: telegramToken ? telegramToken : null,
-        telegram_chat_id: document.getElementById('cfg-telegram-chat-id').value.trim() || null,
+        telegram_chat_id: document.getElementById('cfg-telegram-chat-id').value.trim(),
         min_price: document.getElementById('cfg-min-price').value ? document.getElementById('cfg-min-price').value : null,
         max_price: document.getElementById('cfg-max-price').value ? document.getElementById('cfg-max-price').value : null,
         max_position_usdc: document.getElementById('cfg-max-position').value ? document.getElementById('cfg-max-position').value : null,
-        pause_on_max_position: document.getElementById('cfg-pause-on-max-position').checked,
-        save_to_file: true
+        pause_on_max_position: document.getElementById('cfg-pause-on-max-position').checked
       };
 
-      const btn = document.getElementById('btn-save-cfg');
-      btn.textContent = '保存中...';
-      btn.disabled = true;
+      pairManagementBusy = true;
+      renderPairManagement();
       const pairSelect = document.getElementById('pair-select');
       const wasDisabled = pairSelect.disabled;
       pairSelect.disabled = true;
-
       try {
-        const res = await authFetch(pairApi('/config'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        });
-        const resJson = await res.json();
-
-        alertBox.style.display = 'block';
-        if (resJson.success) {
-          if (resJson.data?.symbol) syncSinglePairSymbol(resJson.data.symbol);
-          alertBox.style.background = 'var(--green-bg)';
-          alertBox.style.border = '1px solid var(--green)';
-          alertBox.style.color = 'var(--green)';
-          alertBox.textContent = '保存成功：' + (resJson.message || '策略配置保存成功并已立即生效！');
-          await Promise.all([loadConfigForm(), loadPairSnapshot().catch(error => console.warn(error))]);
+        const res = await authFetch(target, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+        const json = await res.json();
+        if (epoch !== pairSwitchEpoch) return;
+        if (!res.ok || !json.success) throw new Error(json.message || '未知错误');
+        pairManagementBusy = false;
+        if (adding) {
+          sessionStorage.setItem('binance_bot_selected_pair', json.data);
+          await initConsole();
         } else {
-          alertBox.style.background = 'var(--red-bg)';
-          alertBox.style.border = '1px solid var(--red)';
-          alertBox.style.color = 'var(--red)';
-          alertBox.textContent = '配置保存失败：' + (resJson.message || '未知错误');
+          if (json.data?.symbol) syncSinglePairSymbol(json.data.symbol);
+          await Promise.all([loadConfigForm(), loadPairSnapshot().catch(error => console.warn(error))]);
+          pairSelect.disabled = wasDisabled;
         }
+        showConfigMessage(json.message || '策略配置已保存并生效', true);
       } catch (e) {
-        alertBox.style.display = 'block';
-        alertBox.style.background = 'var(--red-bg)';
-        alertBox.style.border = '1px solid var(--red)';
-        alertBox.style.color = 'var(--red)';
-        alertBox.textContent = '请求异常：' + e.message;
-      } finally {
-        btn.textContent = '保存并立即生效';
-        btn.disabled = false;
+        if (epoch === pairSwitchEpoch) showConfigMessage('配置保存失败：' + e.message);
         pairSelect.disabled = wasDisabled;
+      } finally {
+        pairManagementBusy = false;
+        renderPairManagement();
       }
     }
 

@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
-use tokio::time::interval;
+use tokio::time::{interval, interval_at};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -503,7 +503,7 @@ impl GridTradingEngine {
 
     /// Primary execution loop
     pub async fn run(&mut self) {
-        let sync_secs = self
+        let mut sync_secs = self
             .state
             .config
             .read()
@@ -529,8 +529,18 @@ impl GridTradingEngine {
                     match action {
                         Some(action) => {
                             let stopping = matches!(action, BotControlAction::Shutdown { .. });
+                            let updating_config = matches!(action, BotControlAction::UpdateConfig { .. });
                             self.handle_control_action(action).await;
                             if stopping { break; }
+                            if updating_config {
+                                // Use the installed config even if post-save reconciliation failed.
+                                let updated_secs = self.state.config.read().await.exchange.sync_interval_secs.max(1);
+                                if updated_secs != sync_secs {
+                                    sync_secs = updated_secs;
+                                    let period = Duration::from_secs(sync_secs);
+                                    sync_timer = interval_at(tokio::time::Instant::now() + period, period);
+                                }
+                            }
                         },
                         None => break,
                     }
@@ -672,7 +682,7 @@ impl GridTradingEngine {
         if let Some(symbol) = self.state.pair_scope() {
             anyhow::ensure!(
                 symbol == new_config.exchange.symbol,
-                "多交易对运行时不能重命名交易对，请修改配置后重启"
+                "交易对不能直接重命名，请在页面中添加新交易对"
             );
         }
         let old_config = self.state.config.read().await.clone();

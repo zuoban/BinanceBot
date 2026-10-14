@@ -487,6 +487,66 @@ impl Database {
         save_pair_config_on(&self.conn.lock().unwrap(), symbol, config)
     }
 
+    /// Membership changes merge with concurrent engine writes under one transaction.
+    pub fn add_pair_config(&self, config: &AppConfig) -> Result<()> {
+        config.validate()?;
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let json: String = tx.query_row(
+            "SELECT config_json FROM app_config WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        let mut saved: AppConfig = serde_json::from_str(&json)?;
+        saved.ensure_pair_list()?;
+        anyhow::ensure!(
+            !saved
+                .pairs
+                .iter()
+                .any(|pair| pair.symbol == config.exchange.symbol),
+            "交易对已存在"
+        );
+        let mut pair = crate::config::TradingPairConfig::new(config.exchange.symbol.clone());
+        pair.update_from(config);
+        saved.pairs.push(pair);
+        save_config_on(&tx, &saved)?;
+        let mode = TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
+        save_pair_status_on(&tx, &config.exchange.symbol, mode, BotStatus::Paused)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn remove_pair_config(&self, symbol: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let json: String = conn.query_row(
+            "SELECT config_json FROM app_config WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        let mut saved: AppConfig = serde_json::from_str(&json)?;
+        anyhow::ensure!(saved.pairs.len() > 1, "至少保留一个交易对");
+        let index = saved
+            .pairs
+            .iter()
+            .position(|pair| pair.symbol == symbol)
+            .context("交易对不存在")?;
+        saved.pairs.remove(index);
+        save_config_on(&conn, &saved)
+    }
+
+    pub fn save_server_config(&self, server: &crate::config::ServerConfig) -> Result<()> {
+        server.socket_addr()?;
+        let conn = self.conn.lock().unwrap();
+        let json: String = conn.query_row(
+            "SELECT config_json FROM app_config WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        let mut saved: AppConfig = serde_json::from_str(&json)?;
+        saved.server = server.clone();
+        save_config_on(&conn, &saved)
+    }
+
     /// A new configuration must never become durable without its current execution status.
     pub fn save_runtime_config(
         &self,
@@ -1090,7 +1150,7 @@ fn save_config_on(conn: &Connection, config: &AppConfig) -> Result<()> {
 fn save_pair_config_on(conn: &Connection, symbol: &str, config: &AppConfig) -> Result<()> {
     anyhow::ensure!(
         symbol == config.exchange.symbol,
-        "多交易对运行时不能重命名交易对，请修改配置后重启"
+        "交易对不能直接重命名，请在页面中添加新交易对"
     );
     let json: String = conn.query_row(
         "SELECT config_json FROM app_config WHERE id = 1",
@@ -1627,6 +1687,71 @@ mod tests {
         let loaded = db.load_config().unwrap().expect("config should exist");
         assert_eq!(loaded.exchange.symbol, "BTCUSDC");
         assert_eq!(loaded.grid.grid_interval, dec!(50.0));
+    }
+
+    #[test]
+    fn dashboard_membership_and_settings_survive_reopen_without_losing_history() {
+        let path =
+            std::env::temp_dir().join(format!("dashboard-settings-{}.db", uuid::Uuid::new_v4()));
+        let db = Database::open(&path).unwrap();
+        let mut initial = AppConfig::default();
+        initial.ensure_pair_list().unwrap();
+        db.save_config(&initial).unwrap();
+        db.conn.lock().unwrap().execute_batch(
+            "INSERT INTO trades (trade_id, client_order_id, symbol, mode, side, price, quantity, amount_usdc,
+               realized_pnl, commission, is_maker, timestamp, note)
+             VALUES ('history', 'gb_b_history', 'SOLUSDC', 'PAPER', 'BUY', '100', '1', '100', '0', '0', 1, '2026-10-10T00:00:00Z', 'test');"
+        ).unwrap();
+        let mut added = AppConfig::default();
+        added.exchange.symbol = "BTCUSDT".into();
+        added.grid.grid_interval = dec!(10);
+        added.exchange.recv_window = 9000;
+        db.add_pair_config(&added).unwrap();
+        db.save_server_config(&crate::config::ServerConfig {
+            host: "127.0.0.1".into(),
+            port: 9090,
+        })
+        .unwrap();
+        added.grid.buy_window = 3;
+        db.save_pair_config("BTCUSDT", &added).unwrap();
+        db.remove_pair_config("SOLUSDC").unwrap();
+        assert!(db.remove_pair_config("BTCUSDT").is_err());
+        drop(db);
+        let db = Database::open(&path).unwrap();
+        let config = db.load_config().unwrap().unwrap();
+        assert_eq!(config.server.port, 9090);
+        let strategies = config.strategy_configs().unwrap();
+        assert_eq!(strategies.len(), 1);
+        assert_eq!(strategies[0].exchange.symbol, "BTCUSDT");
+        assert_eq!(strategies[0].exchange.recv_window, 9000);
+        assert_eq!(strategies[0].grid.buy_window, 3);
+        assert_eq!(
+            db.load_pair_status("BTCUSDT", TradingMode::Paper).unwrap(),
+            Some(BotStatus::Paused)
+        );
+        assert_eq!(
+            db.get_recent_trades_for("SOLUSDC", TradingMode::Paper, 10)
+                .unwrap()
+                .len(),
+            1
+        );
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn adding_a_pair_rolls_back_if_initial_pause_cannot_be_saved() {
+        let db = Database::open(":memory:").unwrap();
+        let mut initial = AppConfig::default();
+        initial.ensure_pair_list().unwrap();
+        db.save_config(&initial).unwrap();
+        db.conn.lock().unwrap().execute_batch(
+            "CREATE TRIGGER reject_pair_status BEFORE INSERT ON pair_runtime BEGIN SELECT RAISE(ABORT, 'test status failure'); END;"
+        ).unwrap();
+        let mut added = AppConfig::default();
+        added.exchange.symbol = "BTCUSDT".into();
+        assert!(db.add_pair_config(&added).is_err());
+        assert_eq!(db.load_config().unwrap().unwrap().pairs.len(), 1);
     }
 
     #[test]

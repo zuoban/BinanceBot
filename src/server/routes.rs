@@ -1,3 +1,5 @@
+use crate::config::{AppConfig, ServerConfig};
+use crate::runtime::RuntimeHandle;
 use crate::server::state::AppState;
 use crate::server::ui::INDEX_HTML;
 use crate::types::{
@@ -6,15 +8,16 @@ use crate::types::{
     TradingPairView, UpdateConfigPayload, WebConfigView,
 };
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use std::sync::Arc;
+use tower::ServiceExt;
 use tracing::{error, info, warn};
 
 #[derive(Debug, Deserialize)]
@@ -144,6 +147,13 @@ fn create_base_router(state: Arc<AppState>, history_clear: bool) -> Router {
         require_auth_middleware,
     ));
 
+    public_routes()
+        .route("/ws", get(ws_handler))
+        .merge(api_protected)
+        .with_state(state)
+}
+
+fn public_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/", get(dashboard_handler))
         .route("/dashboard.css", get(dashboard_css_handler))
@@ -151,9 +161,6 @@ fn create_base_router(state: Arc<AppState>, history_clear: bool) -> Router {
         .route("/api/auth/setup", post(post_auth_setup_handler))
         .route("/api/auth/login", post(post_auth_login_handler))
         .route("/api/auth/logout", post(post_auth_logout_handler))
-        .route("/ws", get(ws_handler))
-        .merge(api_protected)
-        .with_state(state)
 }
 
 /// Existing unscoped APIs address the first pair; scoped APIs never change another pair.
@@ -206,6 +213,206 @@ async fn get_pairs_handler(
         data: Some(pairs),
         message: None,
     })
+}
+
+/// Dispatch through the current registry so newly added pairs are immediately addressable.
+pub async fn create_managed_router(handle: RuntimeHandle) -> Router {
+    let primary = handle.states.read().await[0].clone();
+    let protected = Router::new()
+        .route(
+            "/api/pairs",
+            get(get_managed_pairs_handler).post(add_pair_handler),
+        )
+        .route("/api/pairs/:symbol", delete(remove_pair_handler))
+        .route(
+            "/api/pairs/:symbol/:resource",
+            get(dispatch_pair).post(dispatch_pair),
+        )
+        .route("/api/status", get(dispatch_pair))
+        .route("/api/orders", get(dispatch_pair))
+        .route("/api/trades", get(dispatch_pair))
+        .route("/api/logs", get(dispatch_pair))
+        .route("/api/config", get(dispatch_pair).post(dispatch_pair))
+        .route("/api/control", post(dispatch_pair))
+        .route("/api/trades/clear", post(clear_managed_history_handler))
+        .route(
+            "/api/server/config",
+            get(get_server_config_handler).post(post_server_config_handler),
+        )
+        .route_layer(middleware::from_fn_with_state(
+            primary.clone(),
+            require_auth_middleware,
+        ))
+        .route("/ws", get(dispatch_pair))
+        .route("/api/pairs/:symbol/ws", get(dispatch_pair))
+        .with_state(handle);
+    let account = Router::new()
+        .route("/api/database/export", get(export_database_handler))
+        .route(
+            "/api/auth/change_password",
+            post(post_change_password_handler),
+        )
+        .route_layer(middleware::from_fn_with_state(
+            primary.clone(),
+            require_auth_middleware,
+        ));
+    public_routes()
+        .merge(account)
+        .with_state(primary)
+        .merge(protected)
+}
+
+async fn dispatch_pair(
+    State(handle): State<RuntimeHandle>,
+    mut req: axum::extract::Request,
+) -> Response {
+    let path = req.uri().path().to_string();
+    let (symbol, resource) = if let Some(scoped) = path.strip_prefix("/api/pairs/") {
+        let Some((symbol, resource)) = scoped.split_once('/') else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        (Some(symbol), resource)
+    } else {
+        (None, path.strip_prefix("/api/").unwrap_or("ws"))
+    };
+    let states = handle.states.read().await;
+    let state = match symbol {
+        Some(symbol) => states
+            .iter()
+            .find(|state| state.pair_scope() == Some(symbol)),
+        None => states.first(),
+    }
+    .cloned();
+    drop(states);
+    let Some(state) = state else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    // The selected router enforces each resource's HTTP methods and WebSocket authentication.
+    *req.uri_mut() = format!("/{}", resource).parse().unwrap();
+    pair_routes()
+        .route("/ws", get(ws_handler))
+        .with_state(state)
+        .oneshot(req)
+        .await
+        .unwrap()
+}
+
+async fn get_managed_pairs_handler(
+    State(handle): State<RuntimeHandle>,
+) -> Json<ApiResponse<Vec<TradingPairView>>> {
+    get_pairs_handler(State(Arc::new(handle.states.read().await.clone()))).await
+}
+
+async fn add_pair_handler(
+    State(handle): State<RuntimeHandle>,
+    Json(payload): Json<UpdateConfigPayload>,
+) -> Json<ApiResponse<String>> {
+    let result = async {
+        let config = apply_config_payload(AppConfig::default(), payload)?;
+        let symbol = config.exchange.symbol.clone();
+        handle.add_pair(config).await?;
+        Ok::<_, anyhow::Error>(symbol)
+    }
+    .await;
+    match result {
+        Ok(symbol) => Json(ApiResponse {
+            success: true,
+            data: Some(symbol),
+            message: Some("交易对已添加并保存，策略保持暂停；检查配置后手动恢复".into()),
+        }),
+        Err(error) => Json(ApiResponse {
+            success: false,
+            data: None,
+            message: Some(error.to_string()),
+        }),
+    }
+}
+
+async fn remove_pair_handler(
+    State(handle): State<RuntimeHandle>,
+    Path(symbol): Path<String>,
+    Json(payload): Json<ClearTradeHistoryRequest>,
+) -> Json<ApiResponse<String>> {
+    if !payload.confirm {
+        return Json(ApiResponse {
+            success: false,
+            data: None,
+            message: Some("请确认移除交易对；已有持仓和历史记录会保留".into()),
+        });
+    }
+    match handle.remove_pair(symbol.clone()).await {
+        Ok(()) => Json(ApiResponse {
+            success: true,
+            data: Some(symbol),
+            message: Some("交易对已移除，已有持仓和历史记录保留".into()),
+        }),
+        Err(error) => Json(ApiResponse {
+            success: false,
+            data: None,
+            message: Some(error.to_string()),
+        }),
+    }
+}
+
+async fn clear_managed_history_handler(
+    State(handle): State<RuntimeHandle>,
+    Json(payload): Json<ClearTradeHistoryRequest>,
+) -> (StatusCode, Json<ApiResponse<ClearTradeHistoryResponse>>) {
+    // Keep the set of caches stable while resetting shared history and statistics.
+    let _membership = handle.membership_lock.lock().await;
+    clear_multi_trade_history_handler(
+        State(Arc::new(handle.states.read().await.clone())),
+        Json(payload),
+    )
+    .await
+}
+
+#[derive(serde::Serialize)]
+struct ServerConfigView {
+    saved: ServerConfig,
+    active: ServerConfig,
+}
+
+async fn get_server_config_handler(
+    State(handle): State<RuntimeHandle>,
+) -> Json<ApiResponse<ServerConfigView>> {
+    match handle.db.run_blocking(|db| db.load_config()).await {
+        Ok(Some(config)) => Json(ApiResponse {
+            success: true,
+            data: Some(ServerConfigView {
+                saved: config.server,
+                active: handle.active_server,
+            }),
+            message: None,
+        }),
+        _ => Json(ApiResponse {
+            success: false,
+            data: None,
+            message: Some("无法读取服务设置".into()),
+        }),
+    }
+}
+
+async fn post_server_config_handler(
+    State(handle): State<RuntimeHandle>,
+    Json(server): Json<ServerConfig>,
+) -> Json<ApiResponse<ServerConfigView>> {
+    let result = handle
+        .db
+        .run_blocking(move |db| db.save_server_config(&server))
+        .await;
+    match result {
+        Ok(()) => {
+            let mut response = get_server_config_handler(State(handle)).await;
+            response.0.message = Some("服务设置已保存，重启程序后生效".into());
+            response
+        }
+        Err(error) => Json(ApiResponse {
+            success: false,
+            data: None,
+            message: Some(error.to_string()),
+        }),
+    }
 }
 
 async fn clear_multi_trade_history_handler(
@@ -733,7 +940,17 @@ async fn get_config_handler(
     let key_preview = if has_key {
         let k = &config.exchange.api_key;
         if k.len() > 8 {
-            format!("{}...{}", &k[..4], &k[k.len() - 4..])
+            format!(
+                "{}...{}",
+                k.chars().take(4).collect::<String>(),
+                k.chars()
+                    .rev()
+                    .take(4)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect::<String>()
+            )
         } else {
             "****".to_string()
         }
@@ -750,6 +967,8 @@ async fn get_config_handler(
         post_only: config.grid.post_only,
         dry_run: config.exchange.dry_run,
         is_testnet: config.exchange.is_testnet,
+        recv_window: config.exchange.recv_window,
+        sync_interval_secs: config.exchange.sync_interval_secs,
         has_api_key: has_key,
         has_api_secret: has_secret,
         api_key_preview: key_preview,
@@ -769,46 +988,11 @@ async fn get_config_handler(
     })
 }
 
-async fn post_config_handler(
-    State(state): State<Arc<AppState>>,
-    Json(payload): Json<UpdateConfigPayload>,
-) -> Json<ApiResponse<WebConfigView>> {
-    // Validation
-    let symbol = payload.symbol.trim().to_uppercase();
-    if symbol.is_empty() {
-        return Json(ApiResponse {
-            success: false,
-            data: None,
-            message: Some("交易对 (Symbol) 不能为空".to_string()),
-        });
-    }
-
-    if payload.grid_interval <= rust_decimal::Decimal::ZERO {
-        return Json(ApiResponse {
-            success: false,
-            data: None,
-            message: Some("网格间距必须大于 0".to_string()),
-        });
-    }
-
-    if payload.order_amount_usdc <= rust_decimal::Decimal::ZERO {
-        return Json(ApiResponse {
-            success: false,
-            data: None,
-            message: Some("每个网格下单金额必须大于 0".to_string()),
-        });
-    }
-
-    if payload.buy_window == 0 || payload.sell_window == 0 {
-        return Json(ApiResponse {
-            success: false,
-            data: None,
-            message: Some("买入/卖出窗口挂单数必须大于 0".to_string()),
-        });
-    }
-
-    let mut current_config = state.config.read().await.clone();
-    current_config.exchange.symbol = symbol;
+fn apply_config_payload(
+    mut current_config: AppConfig,
+    payload: UpdateConfigPayload,
+) -> anyhow::Result<AppConfig> {
+    current_config.exchange.symbol = payload.symbol.trim().to_uppercase();
     current_config.grid.grid_interval = payload.grid_interval;
     current_config.grid.order_amount_usdc = payload.order_amount_usdc;
     current_config.grid.buy_window = payload.buy_window;
@@ -822,6 +1006,20 @@ async fn post_config_handler(
     if let Some(is_testnet) = payload.is_testnet {
         current_config.exchange.is_testnet = is_testnet;
     }
+    if let Some(value) = payload.recv_window {
+        current_config.exchange.recv_window = value;
+    }
+    if let Some(value) = payload.sync_interval_secs {
+        current_config.exchange.sync_interval_secs = value;
+    }
+    if payload.clear_api_credentials {
+        current_config.exchange.api_key.clear();
+        current_config.exchange.api_secret.clear();
+    }
+    if payload.clear_telegram_credentials {
+        current_config.telegram.bot_token.clear();
+        current_config.telegram.chat_id.clear();
+    }
     current_config.grid.min_price = payload.min_price;
     current_config.grid.max_price = payload.max_price;
     current_config.grid.max_position_usdc = payload.max_position_usdc;
@@ -829,14 +1027,17 @@ async fn post_config_handler(
         current_config.grid.pause_on_max_position = enabled;
     }
 
-    if let Some(key) = payload.api_key {
+    if let Some(key) = payload.api_key.filter(|_| !payload.clear_api_credentials) {
         let key_trimmed = key.trim().to_string();
         if !key_trimmed.is_empty() {
             current_config.exchange.api_key = key_trimmed;
         }
     }
 
-    if let Some(secret) = payload.api_secret {
+    if let Some(secret) = payload
+        .api_secret
+        .filter(|_| !payload.clear_api_credentials)
+    {
         let secret_trimmed = secret.trim().to_string();
         if !secret_trimmed.is_empty() {
             current_config.exchange.api_secret = secret_trimmed;
@@ -846,34 +1047,48 @@ async fn post_config_handler(
     if let Some(enabled) = payload.telegram_enabled {
         current_config.telegram.enabled = enabled;
     }
-    if let Some(token) = payload.telegram_bot_token {
+    if let Some(token) = payload
+        .telegram_bot_token
+        .filter(|_| !payload.clear_telegram_credentials)
+    {
         let token = token.trim();
         if !token.is_empty() {
             current_config.telegram.bot_token = token.to_string();
         }
     }
-    if let Some(chat_id) = payload.telegram_chat_id {
-        let chat_id = chat_id.trim();
-        if !chat_id.is_empty() {
-            current_config.telegram.chat_id = chat_id.to_string();
-        }
-    }
-    if current_config.telegram.enabled
-        && (current_config.telegram.bot_token.trim().is_empty()
-            || current_config.telegram.chat_id.trim().is_empty())
+    if let Some(chat_id) = payload
+        .telegram_chat_id
+        .filter(|_| !payload.clear_telegram_credentials)
     {
-        return Json(ApiResponse {
-            success: false,
-            data: None,
-            message: Some("启用 Telegram 通知前请填写 Bot Token 和 Chat ID".to_string()),
-        });
+        let chat_id = chat_id.trim();
+        current_config.telegram.chat_id = chat_id.to_string();
     }
-    if let Err(error) = current_config.validate() {
-        return Json(ApiResponse {
-            success: false,
-            data: None,
-            message: Some(error.to_string()),
-        });
+    current_config.validate()?;
+    Ok(current_config)
+}
+
+async fn post_config_handler(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<UpdateConfigPayload>,
+) -> Json<ApiResponse<WebConfigView>> {
+    let current_config = match apply_config_payload(state.config.read().await.clone(), payload) {
+        Ok(config) => config,
+        Err(error) => {
+            return Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some(error.to_string()),
+            })
+        }
+    };
+    if let Some(symbol) = state.pair_scope() {
+        if symbol != current_config.exchange.symbol {
+            return Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some("交易对不能直接重命名，请在页面中添加新交易对".into()),
+            });
+        }
     }
 
     // The engine applies the change and persists it only after the exchange
@@ -912,45 +1127,9 @@ async fn post_config_handler(
         }
     }
 
-    let has_key = !current_config.exchange.api_key.trim().is_empty();
-    let has_secret = !current_config.exchange.api_secret.trim().is_empty();
-    let key_preview = if has_key {
-        let k = &current_config.exchange.api_key;
-        if k.len() > 8 {
-            format!("{}...{}", &k[..4], &k[k.len() - 4..])
-        } else {
-            "****".to_string()
-        }
-    } else {
-        "未配置".to_string()
-    };
-
-    let view = WebConfigView {
-        symbol: current_config.exchange.symbol.clone(),
-        grid_interval: current_config.grid.grid_interval,
-        order_amount_usdc: current_config.grid.order_amount_usdc,
-        buy_window: current_config.grid.buy_window,
-        sell_window: current_config.grid.sell_window,
-        post_only: current_config.grid.post_only,
-        dry_run: current_config.exchange.dry_run,
-        is_testnet: current_config.exchange.is_testnet,
-        has_api_key: has_key,
-        has_api_secret: has_secret,
-        api_key_preview: key_preview,
-        telegram_enabled: current_config.telegram.enabled,
-        has_telegram_bot_token: !current_config.telegram.bot_token.trim().is_empty(),
-        telegram_chat_id: current_config.telegram.chat_id.clone(),
-        min_price: current_config.grid.min_price,
-        max_price: current_config.grid.max_price,
-        max_position_usdc: current_config.grid.max_position_usdc,
-        pause_on_max_position: current_config.grid.pause_on_max_position,
-    };
-
-    Json(ApiResponse {
-        success: true,
-        data: Some(view),
-        message: Some("配置已保存至 SQLite 数据库并立即生效".to_string()),
-    })
+    let mut response = get_config_handler(State(state)).await;
+    response.0.message = Some("配置已保存至 SQLite 数据库并立即生效".into());
+    response
 }
 
 async fn post_control_handler(

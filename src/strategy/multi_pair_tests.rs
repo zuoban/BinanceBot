@@ -48,6 +48,126 @@ fn ticker(symbol: &str, price: Decimal) -> TickerInfo {
 }
 
 #[tokio::test]
+async fn running_engine_reschedules_sync_after_saved_updates_and_keeps_rejected_changes_out() {
+    use axum::{routing::get, Json, Router};
+    use serde_json::json;
+
+    let (sync_tx, mut sync_rx) = mpsc::unbounded_channel();
+    let app = Router::new().route(
+        "/fapi/v1/premiumIndex",
+        get(move || {
+            let sync_tx = sync_tx.clone();
+            async move {
+                let _ = sync_tx.send(());
+                Json(json!({"symbol": "SOLUSDC", "markPrice": "100.5"}))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (mut engine, other_engine, db) = engines().await;
+    engine.state.pause_trading().await.unwrap();
+    engine
+        .state
+        .config
+        .write()
+        .await
+        .exchange
+        .sync_interval_secs = 1;
+    let state = engine.state.clone();
+    engine.client = Arc::new(BinanceFuturesClient::with_base_url(
+        &state.config.read().await.exchange,
+        url,
+    ));
+    let engine_task = tokio::spawn(async move { engine.run().await });
+
+    let outcome = async {
+        // Observe the initial real synchronization request before changing the interval.
+        tokio::time::timeout(Duration::from_secs(2), sync_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        for seconds in [30, 1] {
+            let mut config = state.config.read().await.clone();
+            config.exchange.sync_interval_secs = seconds;
+            let (reply, response) = tokio::sync::oneshot::channel();
+            state
+                .action_tx
+                .send(BotControlAction::UpdateConfig {
+                    config: Box::new(config),
+                    reply,
+                })
+                .await
+                .unwrap();
+            response.await.unwrap().unwrap();
+            assert_eq!(
+                db.load_config()
+                    .unwrap()
+                    .unwrap()
+                    .strategy_configs()
+                    .unwrap()[0]
+                    .exchange
+                    .sync_interval_secs,
+                seconds
+            );
+            if seconds == 30 {
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(1500), sync_rx.recv())
+                        .await
+                        .is_err(),
+                    "the old one-second timer must stop after saving a longer interval"
+                );
+            } else {
+                tokio::time::timeout(Duration::from_secs(2), sync_rx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
+        }
+
+        let mut rejected = state.config.read().await.clone();
+        rejected.exchange.sync_interval_secs = 30;
+        rejected.grid.grid_interval = Decimal::ZERO;
+        let (reply, response) = tokio::sync::oneshot::channel();
+        state
+            .action_tx
+            .send(BotControlAction::UpdateConfig {
+                config: Box::new(rejected),
+                reply,
+            })
+            .await
+            .unwrap();
+        assert!(response.await.unwrap().is_err());
+        assert_eq!(state.config.read().await.exchange.sync_interval_secs, 1);
+        tokio::time::timeout(Duration::from_secs(2), sync_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            other_engine
+                .state
+                .config
+                .read()
+                .await
+                .exchange
+                .sync_interval_secs,
+            3
+        );
+    };
+    // Always stop the test tasks, including when an assertion fails.
+    use futures_util::FutureExt;
+    let result = std::panic::AssertUnwindSafe(outcome).catch_unwind().await;
+    engine_task.abort();
+    let _ = engine_task.await;
+    server.abort();
+    let _ = server.await;
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+#[tokio::test]
 async fn simultaneous_fills_and_pause_are_isolated_by_pair() {
     let (mut sol, mut btc, db) = engines().await;
     tokio::join!(sol.maintain_grid_window(), btc.maintain_grid_window());

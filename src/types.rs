@@ -360,8 +360,14 @@ pub struct UpdateConfigPayload {
     pub dry_run: Option<bool>,
     #[serde(default)]
     pub is_testnet: Option<bool>,
+    pub recv_window: Option<u64>,
+    pub sync_interval_secs: Option<u64>,
     pub api_key: Option<String>,
     pub api_secret: Option<String>,
+    #[serde(default)]
+    pub clear_api_credentials: bool,
+    #[serde(default)]
+    pub clear_telegram_credentials: bool,
     #[serde(default)]
     pub telegram_enabled: Option<bool>,
     pub telegram_bot_token: Option<String>,
@@ -371,8 +377,6 @@ pub struct UpdateConfigPayload {
     pub max_position_usdc: Option<Decimal>,
     #[serde(default)]
     pub pause_on_max_position: Option<bool>,
-    #[serde(default = "default_true")]
-    pub save_to_file: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -385,6 +389,8 @@ pub struct WebConfigView {
     pub post_only: bool,
     pub dry_run: bool,
     pub is_testnet: bool,
+    pub recv_window: u64,
+    pub sync_interval_secs: u64,
     pub has_api_key: bool,
     pub has_api_secret: bool,
     pub api_key_preview: String,
@@ -395,10 +401,6 @@ pub struct WebConfigView {
     pub max_price: Option<Decimal>,
     pub max_position_usdc: Option<Decimal>,
     pub pause_on_max_position: bool,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

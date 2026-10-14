@@ -32,7 +32,7 @@ function dashboard({ scoped = true, fetchStatus } = {}) {
     if (!elements.has(id)) elements.set(id, {
       value: '', disabled: false, style: {}, textContent: '', innerHTML: '', children: [],
       classList: { add() {}, remove() {} },
-      setAttribute() {}, replaceChildren(...children) { this.children = children; },
+      setAttribute() {}, focus() {}, replaceChildren(...children) { this.children = children; },
     });
     return elements.get(id);
   }
@@ -64,8 +64,24 @@ function dashboard({ scoped = true, fetchStatus } = {}) {
     confirm: text => { confirmations.push(text); return true; }, alert() {},
     fetch: async (url, options = {}) => {
       requests.push({ url, options });
-      if (url === '/api/pairs') return response(pairs.map(symbol => ({ symbol, scoped })));
+      if (url === '/api/server/config') return response({ saved: { host: '0.0.0.0', port: 8080 }, active: { host: '0.0.0.0', port: 8080 } });
+      if (url === '/api/pairs') {
+        if (options.method === 'POST') {
+          const config = JSON.parse(options.body);
+          if (pairs.includes(config.symbol)) return response(null, false);
+          pairs.push(config.symbol);
+          states.set(config.symbol, snapshot(config.symbol, 'PAUSED'));
+          return response(config.symbol);
+        }
+        return response(pairs.map(symbol => ({ symbol, scoped })));
+      }
       const symbol = scoped ? url.split('/')[3] : singleSymbol;
+      if (options.method === 'DELETE') {
+        const index = pairs.indexOf(symbol);
+        pairs.splice(index, 1);
+        states.delete(symbol);
+        return response(symbol);
+      }
       if (url.endsWith('/config')) return response({
         symbol, grid_interval: '1', order_amount_usdc: '100', buy_window: 5, sell_window: 5, dry_run: true,
       });
@@ -193,4 +209,77 @@ test('late HTTP state from a legacy symbol cannot undo a confirmed configuration
   assert.equal(ui.element('pair-select').value, 'BTCUSDT');
   await ui.run('loadPairSnapshot()');
   assert.equal(ui.element('symbol-badge').textContent, 'BTCUSDT PERP');
+});
+
+test('new pair forms ignore a late configuration response from the active strategy', async () => {
+  const ui = dashboard();
+  await ui.run('initConsole()');
+  ui.run('authFetch = () => pendingConfigResponse');
+  // Use a deferred promise inside the VM, so this also covers the asynchronous form reader.
+  ui.run('pendingConfigResponse = new Promise(resolve => resolveConfigResponse = resolve)');
+  const reading = ui.run('loadConfigForm()');
+  ui.run('startNewPair()');
+  ui.element('cfg-symbol').value = 'ETHUSDT';
+  ui.run("resolveConfigResponse({ ok: true, json: async () => ({ success: true, data: { symbol: 'SOLUSDC' } }) })");
+  await reading;
+  assert.equal(ui.element('cfg-symbol').value, 'ETHUSDT');
+  assert.equal(ui.element('cfg-symbol').readOnly, false);
+  assert.equal(ui.element('btn-save-cfg').textContent, '保存并添加交易对');
+});
+
+test('adding a pair saves through the global API and selects the paused new strategy', async () => {
+  const ui = dashboard();
+  await ui.run('initConsole()');
+  ui.run('startNewPair()');
+  ui.element('cfg-symbol').value = 'ethusdt';
+  await ui.run('submitConfig()');
+  const request = ui.requests.find(request => request.url === '/api/pairs' && request.options.method === 'POST');
+  const payload = JSON.parse(request.options.body);
+  assert.equal(payload.symbol, 'ETHUSDT');
+  assert.equal(payload.recv_window, 5000);
+  assert.equal(payload.sync_interval_secs, 3);
+  assert.equal(payload.api_key, null);
+  assert.equal(payload.api_secret, null);
+  assert.equal('save_to_file' in payload, false);
+  assert.equal(ui.run('selectedPair'), 'ETHUSDT');
+  assert.equal(ui.states.get('ETHUSDT').status, 'PAUSED');
+  assert.equal(ui.element('cfg-symbol').readOnly, true);
+  assert.equal(ui.element('btn-save-cfg').disabled, false);
+});
+
+test('removing the selected pair reloads selection and cancellation targets', async () => {
+  const ui = dashboard();
+  await ui.run('initConsole()');
+  await ui.run('removeSelectedPair()');
+  assert.equal(ui.run('selectedPair'), 'BTCUSDT');
+  assert.equal(ui.element('pair-select').disabled, true);
+  assert.equal(ui.element('btn-remove-pair').disabled, true);
+  assert.ok(ui.requests.some(request => request.options.method === 'DELETE' && request.url === '/api/pairs/SOLUSDC'));
+  ui.run('cancelAllOrders()');
+  await new Promise(setImmediate);
+  assert.match(ui.confirmations.at(-1), /BTCUSDT/);
+});
+
+test('failed configuration reads leave saving disabled instead of submitting stale values', async () => {
+  const ui = dashboard();
+  await ui.run('initConsole()');
+  ui.run("authFetch = async () => { throw new Error('offline'); }");
+  await ui.run('loadConfigForm()');
+  const count = ui.requests.length;
+  await ui.run('submitConfig()');
+  assert.equal(ui.element('btn-save-cfg').disabled, true);
+  assert.equal(ui.requests.length, count);
+  assert.match(ui.element('cfg-alert').textContent, /配置读取失败/);
+});
+
+test('server settings send an independent request and explain restart requirements', async () => {
+  const ui = dashboard();
+  await ui.run('initConsole()');
+  ui.element('cfg-server-host').value = '127.0.0.1';
+  ui.element('cfg-server-port').value = '9090';
+  await ui.run('submitServerConfig()');
+  const request = ui.requests.find(request => request.url === '/api/server/config' && request.options.method === 'POST');
+  assert.deepEqual(JSON.parse(request.options.body), { host: '127.0.0.1', port: 9090 });
+  assert.equal(ui.element('btn-save-server').disabled, false);
+  assert.equal(ui.run('selectedPair'), 'SOLUSDC');
 });

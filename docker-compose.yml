@@ -7,12 +7,9 @@ services:
     container_name: binance-grid-bot
     restart: unless-stopped
     stop_grace_period: 45s
-    env_file:
-      - path: .env
-        required: false
     ports:
-      - "${WEB_PORT:-8080}:${SERVER_PORT:-8080}"
+      - "8080:8080"
     volumes:
       - ./data:/app/data
     environment:
-      RUST_LOG: ${RUST_LOG:-binance_grid_bot=info,tower_http=info}
+      RUST_LOG: binance_grid_bot=info,tower_http=info

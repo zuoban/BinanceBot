@@ -58,62 +58,23 @@
 
 ---
 
-## 🐳 Docker 部署（推荐使用 `.env`）
+## 🐳 Docker 部署
 
-### 1. 使用 Docker Compose 与 `.env` 启动（推荐）
+### 1. 使用 Docker Compose 启动
 
-复制 [.env.example](.env.example) 为 `.env`，按需修改交易对和参数后启动：
+无需创建配置文件，直接运行：
 
 ```bash
-cp .env.example .env
-# 编辑 .env：设置 TRADING_PAIRS 及各交易对参数
 docker compose up -d --build
 ```
 
-例如，两个交易对使用不同网格间距：
+打开控制台并完成管理员初始化，在「策略参数」页面填写交易对、网格参数、运行模式、API 密钥和 Telegram 通知。点击「保存并立即生效」，参数会存入 SQLite；后续启动继续使用页面保存的设置。
 
-```dotenv
-TRADING_PAIRS=SOLUSDC,BTCUSDT
-BINANCE_DRY_RUN=true
-GRID_ORDER_AMOUNT_USDC=100
-PAIR_SOLUSDC_GRID_INTERVAL=0.1
-PAIR_BTCUSDT_GRID_INTERVAL=10
-PAIR_BTCUSDT_GRID_BUY_WINDOW=3
-PAIR_BTCUSDT_GRID_SELL_WINDOW=3
-```
+程序只从 SQLite 读取策略配置。旧的 `config.toml`、`.env`、`BINANCE_*`、`GRID_*`、`TELEGRAM_*`、`PAIR_*`、`TRADING_PAIRS` 和 `SERVER_*` 环境变量不再读取，也不再支持 `--config`、`--symbol`、`--interval`、`--amount`、`--buy-window`、`--sell-window`、`--live` 或 `--testnet`。升级前已保存到数据库的配置继续保留；旧的单交易对数据库会自动转换为页面可管理的交易对列表。
 
-Compose 将 `.env` 中的环境变量传入容器。`.env` 是可选文件；已有部署不创建它也可继续使用数据库和网页配置。可选 `env_file` 需要 Docker Compose 2.24.0+，详见 [Docker 官方说明](https://docs.docker.com/compose/how-tos/environment-variables/set-environment-variables/#additional-information-1)。
+首次启动提供 SOLUSDC 模拟盘默认参数，不需要 API 密钥。添加其他合约时，请在页面中选择与该合约价格步长相符的网格间距；新增交易对默认暂停，需检查配置后手动恢复。
 
-修改 `.env` 后，用下面的命令重新创建容器，使新环境变量生效；`docker compose restart` 不会重新载入 `.env`：
-
-```bash
-docker compose up -d --force-recreate
-```
-
-程序启动时的配置优先级（由低到高）：**SQLite 已保存配置 / 导入的 TOML → 公共环境变量 → 单交易对环境变量 → 命令行参数**。显式 `--config` 先导入 TOML，再应用环境变量和命令行；不传 `--config` 时沿用 SQLite。
-
-`.env` 中声明的参数每次启动都会覆盖数据库中的同名参数，网页修改即时生效，但下次启动仍以这些环境变量为准。未声明的参数保留数据库中的值。运行和暂停状态独立持久化，`.env` 不会自动恢复已经暂停的策略。
-
-| 环境变量 | 作用 |
-| --- | --- |
-| `TRADING_PAIRS` | 逗号分隔的运行列表，支持一个或多个交易对，替换已保存的列表 |
-| `BINANCE_API_KEY`、`BINANCE_API_SECRET` | API 凭证 |
-| `BINANCE_DRY_RUN`、`BINANCE_TESTNET` | 模拟盘和测试网设置 |
-| `BINANCE_RECV_WINDOW`、`BINANCE_SYNC_INTERVAL_SECS` | 请求窗口和同步间隔 |
-| `GRID_INTERVAL`、`GRID_ORDER_AMOUNT_USDC` | 公共网格间距和每格金额 |
-| `GRID_BUY_WINDOW`、`GRID_SELL_WINDOW` | 买、卖窗口数量 |
-| `GRID_MIN_PRICE`、`GRID_MAX_PRICE`、`GRID_MAX_POSITION_USDC` | 价格范围和持仓上限 |
-| `GRID_POST_ONLY`、`GRID_PAUSE_ON_MAX_POSITION` | Maker 挂单和达到持仓上限时暂停 |
-| `TELEGRAM_ENABLED`、`TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID` | 通知配置 |
-| `SERVER_HOST`、`SERVER_PORT` | 容器内监听地址和端口 |
-| `WEB_PORT` | Compose 的宿主机映射端口，默认 8080 |
-| `RUST_LOG` | 日志级别 |
-
-`BINANCE_*`、`GRID_*` 和 `TELEGRAM_*` 变量均可加上 `PAIR_<大写交易对>_` 前缀，仅覆盖对应交易对，例如 `PAIR_BTCUSDT_GRID_MAX_POSITION_USDC=1500` 或 `PAIR_BTCUSDT_BINANCE_DRY_RUN=true`。`*_USDC` 保留历史字段名，实际金额使用交易对的计价资产。
-
-API 凭证和 Telegram 字段声明为空时会清空保存的值；可选价格和持仓限制声明为空时清除限制。其他数值和布尔变量为空时视为未设置。布尔值建议写 `true` / `false`。格式错误、重复交易对和无效策略参数会阻止启动，错误信息不会输出变量值。
-
-`.env` 已加入 Git 和 Docker 构建上下文的忽略规则；构建镜像不会复制凭证文件。本地运行二进制时读取进程环境变量，不自动读取 `.env`，由 Docker Compose 的 `env_file` 或 `docker run --env-file` 负责载入文件。
+页面下方的「服务设置」可修改监听地址和端口，重启程序后生效。Docker 默认映射 `8080:8080`；修改容器监听端口时也需调整 Compose 或 `docker run` 的端口映射。日志级别仍可通过 `RUST_LOG` 调整。
 
 启动后在浏览器打开控制台：
 👉 **http://localhost:8080**
@@ -141,7 +102,6 @@ docker run -d \
   --name binance-grid-bot \
   -p 8080:8080 \
   -v $(pwd)/data:/app/data \
-  --env-file .env \
   --stop-timeout 45 \
   --restart unless-stopped \
   ghcr.io/zuoban/binancebot:latest
@@ -169,23 +129,22 @@ cargo run --release
 程序启动后，打开浏览器访问控制台：
 👉 **http://127.0.0.1:8080**
 
-在「策略参数在线配置」面板中自由调整参数并点击保存，策略引擎将实时热更新。
+在「策略参数」面板中自由调整参数并点击保存，策略引擎将实时热更新。
 
 ### Telegram 通知
 
 1. 在 Telegram 使用 @BotFather 创建 Bot，复制 Bot Token。
 2. 给 Bot 发送一条消息；打开 `https://api.telegram.org/bot<Bot Token>/getUpdates`，从返回内容中的 `message.chat.id` 获取 Chat ID。群组通知需先将 Bot 加入群组并获取该群组的 Chat ID。
-3. 在网页「策略参数在线配置」填写 Bot Token 和 Chat ID，勾选「启用 Telegram 通知」，点击「保存并立即生效」。Bot Token 不会在网页回显；留空可保留已保存的 Token。
+3. 在网页「策略参数」填写 Bot Token 和 Chat ID，勾选「启用 Telegram 通知」，点击「保存并立即生效」。Bot Token 不会在网页回显；留空可保留已保存的 Token。
 
-也可在首次启动时通过 `config.toml` 的 `[telegram]` 段配置，格式见 `config.example.toml`。配置会存入 SQLite，关闭开关即可暂停通知。
+配置会存入 SQLite，关闭开关即可暂停通知。页面支持清除已保存的 Telegram 凭证；清除前需关闭通知。
 
-#### 命令行快速指定数据库路径或参数
+#### 指定数据库路径或临时监听地址
+
 ```bash
-# 指定 SQLite 数据文件路径
 cargo run --release -- --db data/my_bot.db
-
-# 命令行快速预设参数（会自动同步写入 SQLite）
-cargo run --release -- --symbol SOLUSDC --interval 0.1 --amount 100 --buy-window 5 --sell-window 5
+# 监听参数仅作用于当前进程，可用于恢复误设的页面监听地址
+cargo run --release -- --host 127.0.0.1 --port 8080
 ```
 
 ---
@@ -194,65 +153,23 @@ cargo run --release -- --symbol SOLUSDC --interval 0.1 --amount 100 --buy-window
 
 每个交易对有独立的网格引擎、行情订阅、挂单、持仓、累计统计、日志和启停状态。所有交易对共享一个 Web 控制台、管理员登录和 SQLite 数据库；某个交易对初始化失败、行情中断或达到持仓上限时，只暂停该交易对。
 
-使用 [config.multi.example.toml](config.multi.example.toml) 设置不同交易对的网格参数，然后导入并启动：
+1. 在「策略参数」点击「新增交易对」，填写合约代码、网格间距、每格金额、买卖窗口、运行模式及连接参数。
+2. 点击「保存并添加交易对」。该交易对立即出现在顶部选择器中，策略保持暂停；检查参数后点击「恢复策略」。每个新增交易对使用独立的默认参数与空凭证，不会复制其他交易对的 API 密钥。
+3. 使用顶部选择器切换交易对，再保存各自的参数。网格、运行模式、API 凭证、请求有效窗口、同步间隔和 Telegram 通知均独立保存；重启不会被配置文件或环境变量覆盖。
+4. 移除交易对时，先暂停策略并等待挂单撤销完成，再点击「移除当前交易对」。系统再次核实撤单后移除引擎，已有持仓、成交历史、统计及恢复元数据保留；至少需要保留一个交易对。需要更换合约时，添加新的交易对后再移除旧的交易对。
 
-```bash
-cargo run --release -- --config config.multi.example.toml
-```
-
-显式 `--config` 会替换 SQLite 中的策略配置，保留已有管理员认证、成交、统计与订单恢复元数据。之后正常启动无需再指定文件，自动使用数据库中的配置。如果数据库尚无配置，也会自动导入当前目录的 `config.toml`；已存在数据库时，该文件不会自动覆盖网页保存的参数。
-
-配置格式如下：
-
-```toml
-[exchange]
-dry_run = true
-api_key = ""
-api_secret = ""
-
-[grid]
-grid_interval = "0.1"
-order_amount_usdc = "100"
-
-[server]
-host = "0.0.0.0"
-port = 8080
-
-[[pairs]]
-symbol = "SOLUSDC"
-
-[[pairs]]
-symbol = "BTCUSDT"
-[pairs.grid]
-grid_interval = "10"
-order_amount_usdc = "100"
-buy_window = 3
-sell_window = 3
-max_position_usdc = "1500"
-```
-
-- `[[pairs]]` 非空时，仅启动列表中的交易对；`[exchange].symbol` 不再额外启动一个策略。交易对名称须为大写字母和数字，同一交易对不能重复。
-- 未填写 `pairs.grid` 时继承全局 `[grid]`；填写时使用该交易对整套网格参数，省略字段使用程序默认值。不同合约需分别选择符合价格步长的网格间距。
-- API 凭证、运行模式和同步间隔默认继承 `[exchange]`，可用 `[pairs.exchange]` 覆盖；通知默认继承 `[telegram]`，可用 `[pairs.telegram]` 覆盖。网页保存后的参数仅作用于选中的交易对。
-- 控制台顶部选择交易对后，价格、仓位、订单、成交、日志和配置全部切换；暂停、恢复、刷新网格及撤单只操作当前交易对。新增、移除或重命名交易对时，Docker 部署可修改 `.env` 的 `TRADING_PAIRS` 并重新创建容器；TOML 部署则停止程序后重新用 `--config` 导入并启动。
 - 同一实盘账户内的交易对共用账户保证金，页面的账户权益不能按交易对相加；持仓上限按每个交易对分别计算。模拟盘为每个交易对提供独立的模拟账户。
+- API Key、API Secret 和 Telegram Bot Token 不会明文回显。留空密钥输入框保留已有值；勾选「清除已保存的 API Key 和 Secret」可在模拟盘模式下清除凭证。
 - Ctrl+C / SIGTERM 会立即阻止全部交易对新增订单，并同时撤销和核实各交易对的机器人挂单、保存独立暂停状态，保留持仓。
-- 不填写 `pairs` 时，旧版单交易对 TOML、SQLite 配置及 API 继续可用。
-
-也可以通过命令行创建列表，网格参数统一使用全局配置：
-
-```bash
-cargo run --release -- --symbol SOLUSDC,BTCUSDT --interval 10 --amount 100
-# 等价：--symbol SOLUSDC --symbol BTCUSDT
-```
-
-`--symbol` 在多交易对模式下替换运行列表，保留同名交易对的已有参数；其他网格参数及 `--live` / `--testnet` 覆盖所有交易对。不同间距建议通过 `.env` 的单交易对变量或 TOML 分别配置。Docker 推荐使用上面的 `.env` 部署方式，也可将 TOML 文件挂载到容器并用 `--db /app/data/bot.db --config /app/config.multi.toml` 导入。
 
 所有接口与 WebSocket 仍需管理员认证：
 
 | 接口 | 作用 |
 | --- | --- |
 | `GET /api/pairs` | 列出全部交易对、运行状态、模式和网格摘要 |
+| `POST /api/pairs` | 保存并添加交易对，初始暂停 |
+| `DELETE /api/pairs/{symbol}` | 移除已暂停且挂单已清理的交易对，请求体需含 `confirm: true` |
+| `GET / POST /api/server/config` | 查看当前与保存的监听设置，保存后重启生效 |
 | `GET /api/pairs/{symbol}/status` | 指定交易对的完整快照 |
 | `GET /api/pairs/{symbol}/orders`、`/trades`、`/logs` | 指定交易对的订单、成交、日志 |
 | `GET / POST /api/pairs/{symbol}/config` | 查看和在线修改指定交易对的参数 |

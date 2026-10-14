@@ -2,9 +2,6 @@ use anyhow::Context;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
-
-mod environment;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -22,7 +19,7 @@ pub struct AppConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradingPairConfig {
     pub symbol: String,
-    /// Omitted grids inherit the global [grid] defaults.
+    /// Omitted grids inherit the saved global defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grid: Option<GridConfig>,
     #[serde(default)]
@@ -31,7 +28,7 @@ pub struct TradingPairConfig {
     pub telegram: Option<TelegramConfig>,
 }
 
-/// Credentials and execution settings inherit [exchange] unless overridden.
+/// Credentials and execution settings inherit saved defaults unless overridden.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PairExchangeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -167,6 +164,17 @@ pub struct ServerConfig {
     pub port: u16,
 }
 
+impl ServerConfig {
+    pub fn socket_addr(&self) -> anyhow::Result<std::net::SocketAddr> {
+        anyhow::ensure!(self.port > 0, "监听端口必须在 1-65535 之间");
+        let host = self
+            .host
+            .parse::<std::net::IpAddr>()
+            .context("监听地址必须是有效的 IPv4 或 IPv6 地址")?;
+        Ok(std::net::SocketAddr::new(host, self.port))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GridConfigSummary {
     pub symbol: String,
@@ -228,8 +236,8 @@ impl Default for AppConfig {
         Self {
             exchange: ExchangeConfig {
                 symbol: "SOLUSDC".to_string(),
-                api_key: std::env::var("BINANCE_API_KEY").unwrap_or_default(),
-                api_secret: std::env::var("BINANCE_API_SECRET").unwrap_or_default(),
+                api_key: String::new(),
+                api_secret: String::new(),
                 is_testnet: false,
                 dry_run: true,
                 recv_window: 5000,
@@ -263,6 +271,24 @@ impl Default for GridConfig {
 }
 
 impl AppConfig {
+    /// Upgrade legacy single-pair SQLite settings without changing strategy parameters.
+    pub fn ensure_pair_list(&mut self) -> anyhow::Result<()> {
+        // Materialize inherited legacy credentials before clearing the obsolete shared copy.
+        self.pairs = self
+            .strategy_configs()?
+            .iter()
+            .map(|config| {
+                let mut pair = TradingPairConfig::new(config.exchange.symbol.clone());
+                pair.update_from(config);
+                pair
+            })
+            .collect();
+        self.exchange.api_key.clear();
+        self.exchange.api_secret.clear();
+        self.telegram = TelegramConfig::default();
+        Ok(())
+    }
+
     /// Resolve independent engine configs; the global symbol is ignored when pairs are explicit.
     pub fn strategy_configs(&self) -> anyhow::Result<Vec<Self>> {
         if self.pairs.is_empty() {
@@ -334,6 +360,10 @@ impl AppConfig {
             "启用达到上限时暂停策略前，请设置最大持仓名义价值"
         );
         anyhow::ensure!(self.exchange.sync_interval_secs > 0, "同步间隔必须大于 0");
+        anyhow::ensure!(
+            (1..=60_000).contains(&self.exchange.recv_window),
+            "请求有效窗口必须在 1-60000 毫秒之间"
+        );
         if !self.exchange.dry_run {
             anyhow::ensure!(
                 !self.exchange.api_key.trim().is_empty()
@@ -347,22 +377,6 @@ impl AppConfig {
                     && !self.telegram.chat_id.trim().is_empty()),
             "启用 Telegram 通知前请填写 Bot Token 和 Chat ID"
         );
-        Ok(())
-    }
-
-    pub fn load_from_file<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
-        let content = std::fs::read_to_string(path.as_ref())
-            .with_context(|| format!("Failed to read config file: {:?}", path.as_ref()))?;
-        let config: AppConfig =
-            toml::from_str(&content).with_context(|| "Failed to parse config TOML format")?;
-        Ok(config)
-    }
-
-    pub fn save_to_file<P: AsRef<Path>>(&self, path: P) -> anyhow::Result<()> {
-        let content = toml::to_string_pretty(self)
-            .with_context(|| "Failed to serialize configuration to TOML")?;
-        std::fs::write(path.as_ref(), content)
-            .with_context(|| format!("Failed to write configuration to {:?}", path.as_ref()))?;
         Ok(())
     }
 
@@ -403,6 +417,35 @@ mod tests {
     use rust_decimal_macros::dec;
 
     #[test]
+    fn legacy_shared_credentials_become_independent_pair_settings() {
+        let mut config = AppConfig::default();
+        config.exchange.api_key = "legacy-key".into();
+        config.exchange.api_secret = "legacy-secret".into();
+        config.telegram.enabled = true;
+        config.telegram.bot_token = "legacy-token".into();
+        config.telegram.chat_id = "1234".into();
+        config.pairs = ["SOLUSDC", "BTCUSDT"]
+            .map(|symbol| super::TradingPairConfig::new(symbol.into()))
+            .to_vec();
+        config.ensure_pair_list().unwrap();
+        assert!(config.exchange.api_key.is_empty());
+        assert!(config.telegram.bot_token.is_empty());
+        let strategies = config.strategy_configs().unwrap();
+        assert!(strategies
+            .iter()
+            .all(|strategy| strategy.exchange.api_key == "legacy-key"
+                && strategy.telegram.bot_token == "legacy-token"));
+        let mut cleared = strategies[0].clone();
+        cleared.exchange.api_key.clear();
+        cleared.exchange.api_secret.clear();
+        cleared.telegram = Default::default();
+        config.pairs[0].update_from(&cleared);
+        let strategies = config.strategy_configs().unwrap();
+        assert!(strategies[0].exchange.api_key.is_empty());
+        assert_eq!(strategies[1].exchange.api_key, "legacy-key");
+    }
+
+    #[test]
     fn existing_config_without_telegram_still_loads() {
         let mut legacy = serde_json::to_value(AppConfig::default()).unwrap();
         legacy.as_object_mut().unwrap().remove("telegram");
@@ -416,14 +459,6 @@ mod tests {
     fn legacy_configs_keep_position_pause_disabled() {
         let config = AppConfig::default();
         assert!(!config.grid.pause_on_max_position);
-        let mut legacy = toml::Value::try_from(&config).unwrap();
-        legacy["grid"]
-            .as_table_mut()
-            .unwrap()
-            .remove("pause_on_max_position");
-        let restored: AppConfig = toml::from_str(&toml::to_string(&legacy).unwrap()).unwrap();
-        assert!(!restored.grid.pause_on_max_position);
-
         let mut legacy = serde_json::to_value(config).unwrap();
         legacy["grid"]
             .as_object_mut()
@@ -447,48 +482,32 @@ mod tests {
     }
 
     #[test]
-    fn multi_pair_toml_inherits_defaults_and_round_trips() {
-        let source = r#"
-            [exchange]
-            api_key = "shared-key"
-            api_secret = "shared-secret"
-            [grid]
-            grid_interval = "1"
-            order_amount_usdc = "50"
-            [server]
-            [[pairs]]
-            symbol = "SOLUSDC"
-            [[pairs]]
-            symbol = "BTCUSDT"
-            [pairs.grid]
-            grid_interval = "10"
-            order_amount_usdc = "200"
-            buy_window = 3
-            [pairs.exchange]
-            is_testnet = true
-            dry_run = false
-        "#;
-        let config: AppConfig = toml::from_str(source).unwrap();
+    fn multi_pair_json_inherits_defaults_and_round_trips() {
+        let config: AppConfig = serde_json::from_value(serde_json::json!({
+            "exchange": {"api_key": "shared-key", "api_secret": "shared-secret"},
+            "grid": {"grid_interval": "1", "order_amount_usdc": "50"},
+            "server": {},
+            "pairs": [
+                {"symbol": "SOLUSDC"},
+                {"symbol": "BTCUSDT", "grid": {"grid_interval": "10", "order_amount_usdc": "200", "buy_window": 3},
+                 "exchange": {"is_testnet": true, "dry_run": false}}
+            ]
+        })).unwrap();
         config.validate().unwrap();
         let configs = config.strategy_configs().unwrap();
         assert_eq!(configs.len(), 2);
-        assert_eq!(configs[0].exchange.symbol, "SOLUSDC");
         assert_eq!(configs[0].grid.grid_interval, dec!(1));
         assert_eq!(configs[0].grid.order_amount_usdc, dec!(50));
         assert!(configs[0].exchange.dry_run);
-        assert_eq!(configs[1].exchange.symbol, "BTCUSDT");
         assert_eq!(configs[1].grid.grid_interval, dec!(10));
         assert_eq!(configs[1].grid.buy_window, 3);
         assert_eq!(configs[1].exchange.api_key, "shared-key");
         assert!(configs[1].exchange.is_testnet);
         assert!(!configs[1].exchange.dry_run);
         assert!(configs.iter().all(|c| c.pairs.is_empty()));
-        let restored: AppConfig =
-            toml::from_str(&toml::to_string_pretty(&config).unwrap()).unwrap();
-        assert_eq!(
-            serde_json::to_value(config).unwrap(),
-            serde_json::to_value(restored).unwrap()
-        );
+        let json = serde_json::to_value(config).unwrap();
+        let restored: AppConfig = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(json, serde_json::to_value(restored).unwrap());
     }
 
     #[test]
