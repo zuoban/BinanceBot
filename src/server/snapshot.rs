@@ -1,7 +1,7 @@
 use super::AppState;
 use crate::config::AppConfig;
 use crate::db::Database;
-use crate::types::{BotSnapshot, HourlyTradeStats, OrderSide, PriceHistory, TradingMode};
+use crate::types::{BotSnapshot, HourlyTradeStats, OrderSide, TradingMode};
 use chrono::{DateTime, Utc};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -10,14 +10,12 @@ use tracing::warn;
 
 const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(800);
 const TRADE_CACHE_TTL: Duration = Duration::from_secs(5);
-const PRICE_CACHE_TTL: Duration = Duration::from_secs(60);
 const QUERY_RETRY_DELAY: Duration = Duration::from_secs(5);
 
 #[derive(Clone, PartialEq, Eq)]
 struct SnapshotScope {
     symbol: String,
     mode: TradingMode,
-    is_testnet: bool,
 }
 
 impl SnapshotScope {
@@ -25,7 +23,6 @@ impl SnapshotScope {
         Self {
             symbol: config.exchange.symbol.clone(),
             mode: TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet),
-            is_testnet: config.exchange.is_testnet,
         }
     }
 }
@@ -34,14 +31,6 @@ impl SnapshotScope {
 struct TradeKey {
     symbol: String,
     mode: TradingMode,
-    hour: i64,
-    revision: u64,
-}
-
-#[derive(PartialEq, Eq)]
-struct PriceKey {
-    symbol: String,
-    is_testnet: bool,
     hour: i64,
     revision: u64,
 }
@@ -79,21 +68,14 @@ impl<K: PartialEq, V> CachedQuery<K, V> {
 }
 
 #[derive(Default)]
-struct ChartCache {
-    trades: Option<CachedQuery<TradeKey, HourlyTradeStats>>,
-    prices: Option<CachedQuery<PriceKey, PriceHistory>>,
-}
-
-#[derive(Default)]
 pub(super) struct SnapshotCache {
-    charts: Mutex<ChartCache>,
+    trades: Mutex<Option<CachedQuery<TradeKey, HourlyTradeStats>>>,
 }
 
 struct SnapshotCharts {
     scope: SnapshotScope,
-    revisions: (u64, u64),
+    revision: u64,
     trades: Option<HourlyTradeStats>,
-    prices: Option<PriceHistory>,
 }
 
 impl SnapshotCache {
@@ -104,72 +86,32 @@ impl SnapshotCache {
         now: DateTime<Utc>,
     ) -> SnapshotCharts {
         // Serialize only dashboard readers; trading never takes this mutex.
-        let mut cache = self.charts.lock().await;
-        let revisions = db.snapshot_data_revisions();
-        let hour = now.timestamp().div_euclid(3600);
-        let trade_key = TradeKey {
+        let mut cache = self.trades.lock().await;
+        let revision = db.trade_data_revision();
+        let key = TradeKey {
             symbol: scope.symbol.clone(),
             mode: scope.mode,
-            hour,
-            revision: revisions.0,
+            hour: now.timestamp().div_euclid(3600),
+            revision,
         };
-        let price_key = PriceKey {
-            symbol: scope.symbol.clone(),
-            is_testnet: scope.is_testnet,
-            hour,
-            revision: revisions.1,
-        };
-        let load_trades = cache
-            .trades
+        if cache
             .as_ref()
-            .is_none_or(|entry| !entry.reusable(&trade_key, now, TRADE_CACHE_TTL));
-        let load_prices = cache
-            .prices
-            .as_ref()
-            .is_none_or(|entry| !entry.reusable(&price_key, now, PRICE_CACHE_TTL));
-        if load_trades || load_prices {
+            .is_none_or(|entry| !entry.reusable(&key, now, TRADE_CACHE_TTL))
+        {
             let query_scope = scope.clone();
-            let result = db
+            let value = db
                 .run_blocking(move |db| {
-                    Ok((
-                        load_trades.then(|| {
-                            db.get_hourly_trade_stats(&query_scope.symbol, query_scope.mode, now)
-                        }),
-                        load_prices.then(|| {
-                            db.get_price_history(&query_scope.symbol, query_scope.is_testnet, now)
-                        }),
-                    ))
+                    db.get_hourly_trade_stats(&query_scope.symbol, query_scope.mode, now)
                 })
-                .await;
-            let (trades, prices) = match result {
-                Ok(result) => result,
-                Err(error) => {
-                    warn!("Snapshot database worker failed: {}", error);
-                    (None, None)
-                }
-            };
-            if load_trades {
-                let value = trades.and_then(|result| {
-                    result
-                        .map_err(|error| warn!("Failed to load hourly trade counts: {}", error))
-                        .ok()
-                });
-                cache.trades = Some(CachedQuery::new(trade_key, value, now));
-            }
-            if load_prices {
-                let value = prices.and_then(|result| {
-                    result
-                        .map_err(|error| warn!("Failed to load price history: {}", error))
-                        .ok()
-                });
-                cache.prices = Some(CachedQuery::new(price_key, value, now));
-            }
+                .await
+                .map_err(|error| warn!("Failed to load hourly trade counts: {}", error))
+                .ok();
+            *cache = Some(CachedQuery::new(key, value, now));
         }
         SnapshotCharts {
             scope,
-            revisions,
-            trades: cache.trades.as_ref().and_then(|entry| entry.value.clone()),
-            prices: cache.prices.as_ref().and_then(|entry| entry.value.clone()),
+            revision,
+            trades: cache.as_ref().and_then(|entry| entry.value.clone()),
         }
     }
 }
@@ -206,7 +148,7 @@ impl AppState {
         let config = self.config.read().await;
         if charts.as_ref().is_some_and(|charts| {
             charts.scope != SnapshotScope::from_config(&config)
-                || charts.revisions != self.db.snapshot_data_revisions()
+                || charts.revision != self.db.trade_data_revision()
         }) {
             return None;
         }
@@ -245,9 +187,7 @@ impl AppState {
             .take(50)
             .cloned()
             .collect();
-        let (hourly_trade_stats, price_history) = charts
-            .map(|charts| (charts.trades, charts.prices))
-            .unwrap_or_default();
+        let hourly_trade_stats = charts.and_then(|charts| charts.trades);
         Some(BotSnapshot {
             status,
             dry_run: config.exchange.dry_run,
@@ -261,7 +201,6 @@ impl AppState {
             active_orders,
             recent_trades,
             hourly_trade_stats,
-            price_history,
             recent_logs,
         })
     }

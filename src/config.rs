@@ -28,7 +28,7 @@ pub struct TradingPairConfig {
     pub telegram: Option<TelegramConfig>,
 }
 
-/// Credentials and execution settings inherit saved defaults unless overridden.
+/// Only execution mode is pair-specific. Other fields are read for legacy migration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PairExchangeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -47,23 +47,11 @@ pub struct PairExchangeConfig {
 
 impl PairExchangeConfig {
     fn apply(&self, exchange: &mut ExchangeConfig) {
-        if let Some(value) = &self.api_key {
-            exchange.api_key = value.clone();
-        }
-        if let Some(value) = &self.api_secret {
-            exchange.api_secret = value.clone();
-        }
         if let Some(value) = self.is_testnet {
             exchange.is_testnet = value;
         }
         if let Some(value) = self.dry_run {
             exchange.dry_run = value;
-        }
-        if let Some(value) = self.recv_window {
-            exchange.recv_window = value;
-        }
-        if let Some(value) = self.sync_interval_secs {
-            exchange.sync_interval_secs = value;
         }
     }
 }
@@ -81,18 +69,15 @@ impl TradingPairConfig {
     pub fn update_from(&mut self, config: &AppConfig) {
         self.grid = Some(config.grid.clone());
         self.exchange = PairExchangeConfig {
-            api_key: Some(config.exchange.api_key.clone()),
-            api_secret: Some(config.exchange.api_secret.clone()),
             is_testnet: Some(config.exchange.is_testnet),
             dry_run: Some(config.exchange.dry_run),
-            recv_window: Some(config.exchange.recv_window),
-            sync_interval_secs: Some(config.exchange.sync_interval_secs),
+            ..Default::default()
         };
-        self.telegram = Some(config.telegram.clone());
+        self.telegram = None;
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct TelegramConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -100,6 +85,36 @@ pub struct TelegramConfig {
     pub bot_token: String,
     #[serde(default)]
     pub chat_id: String,
+}
+
+/// Shared connection and notification settings, without a pair's symbol or mode.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GlobalConfig {
+    pub api_key: String,
+    pub api_secret: String,
+    pub recv_window: u64,
+    pub sync_interval_secs: u64,
+    pub telegram: TelegramConfig,
+}
+
+impl GlobalConfig {
+    pub fn from_app(config: &AppConfig) -> Self {
+        Self {
+            api_key: config.exchange.api_key.clone(),
+            api_secret: config.exchange.api_secret.clone(),
+            recv_window: config.exchange.recv_window,
+            sync_interval_secs: config.exchange.sync_interval_secs,
+            telegram: config.telegram.clone(),
+        }
+    }
+
+    pub fn apply_to(&self, config: &mut AppConfig) {
+        config.exchange.api_key = self.api_key.clone();
+        config.exchange.api_secret = self.api_secret.clone();
+        config.exchange.recv_window = self.recv_window;
+        config.exchange.sync_interval_secs = self.sync_interval_secs;
+        config.telegram = self.telegram.clone();
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -276,9 +291,27 @@ impl Default for GridConfig {
 }
 
 impl AppConfig {
-    /// Upgrade legacy single-pair SQLite settings without changing strategy parameters.
+    /// Normalize pair settings and promote legacy connection/notification overrides to globals.
     pub fn ensure_pair_list(&mut self) -> anyhow::Result<()> {
-        // Materialize inherited legacy credentials before clearing the obsolete shared copy.
+        // Previous versions stored globals in each pair and cleared the shared copy.
+        // The first pair supplies the migration baseline; subsequent saves remove overrides.
+        if let Some(first) = self.pairs.first() {
+            if let Some(value) = &first.exchange.api_key {
+                self.exchange.api_key = value.clone();
+            }
+            if let Some(value) = &first.exchange.api_secret {
+                self.exchange.api_secret = value.clone();
+            }
+            if let Some(value) = first.exchange.recv_window {
+                self.exchange.recv_window = value;
+            }
+            if let Some(value) = first.exchange.sync_interval_secs {
+                self.exchange.sync_interval_secs = value;
+            }
+            if let Some(value) = &first.telegram {
+                self.telegram = value.clone();
+            }
+        }
         self.pairs = self
             .strategy_configs()?
             .iter()
@@ -288,9 +321,6 @@ impl AppConfig {
                 pair
             })
             .collect();
-        self.exchange.api_key.clear();
-        self.exchange.api_secret.clear();
-        self.telegram = TelegramConfig::default();
         Ok(())
     }
 
@@ -313,10 +343,6 @@ impl AppConfig {
             config.exchange.symbol = pair.symbol.clone();
             pair.exchange.apply(&mut config.exchange);
             config.grid = pair.grid.clone().unwrap_or_else(|| self.grid.clone());
-            config.telegram = pair
-                .telegram
-                .clone()
-                .unwrap_or_else(|| self.telegram.clone());
             configs.push(config);
         }
         Ok(configs)
@@ -449,7 +475,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_shared_credentials_become_independent_pair_settings() {
+    fn shared_credentials_stay_global_when_pair_settings_are_saved() {
         let mut config = AppConfig::default();
         config.exchange.api_key = "legacy-key".into();
         config.exchange.api_secret = "legacy-secret".into();
@@ -460,8 +486,12 @@ mod tests {
             .map(|symbol| super::TradingPairConfig::new(symbol.into()))
             .to_vec();
         config.ensure_pair_list().unwrap();
-        assert!(config.exchange.api_key.is_empty());
-        assert!(config.telegram.bot_token.is_empty());
+        assert_eq!(config.exchange.api_key, "legacy-key");
+        assert_eq!(config.telegram.bot_token, "legacy-token");
+        assert!(config
+            .pairs
+            .iter()
+            .all(|pair| pair.exchange.api_key.is_none() && pair.telegram.is_none()));
         let strategies = config.strategy_configs().unwrap();
         assert!(strategies
             .iter()
@@ -473,8 +503,43 @@ mod tests {
         cleared.telegram = Default::default();
         config.pairs[0].update_from(&cleared);
         let strategies = config.strategy_configs().unwrap();
-        assert!(strategies[0].exchange.api_key.is_empty());
+        assert_eq!(strategies[0].exchange.api_key, "legacy-key");
         assert_eq!(strategies[1].exchange.api_key, "legacy-key");
+    }
+
+    #[test]
+    fn pair_overrides_migrate_once_to_first_pair_globals_without_changing_modes_or_grids() {
+        let mut config: AppConfig = serde_json::from_value(serde_json::json!({
+            "exchange": {}, "server": {}, "pairs": [
+                {"symbol":"SOLUSDC", "exchange":{"api_key":"first-key", "api_secret":"first-secret", "recv_window":8000, "sync_interval_secs":7, "dry_run":false},
+                 "telegram":{"enabled":true,"bot_token":"first-token","chat_id":"123"}},
+                {"symbol":"BTCUSDT", "grid":{"grid_interval":"10"},
+                 "exchange":{"api_key":"second-key","api_secret":"second-secret", "dry_run":true,"is_testnet":true},
+                 "telegram":{"enabled":false}}
+            ]
+        })).unwrap();
+        config.ensure_pair_list().unwrap();
+        config.validate().unwrap();
+        let configs = config.strategy_configs().unwrap();
+        assert!(configs
+            .iter()
+            .all(|strategy| strategy.exchange.api_key == "first-key"
+                && strategy.exchange.recv_window == 8000
+                && strategy.exchange.sync_interval_secs == 7
+                && strategy.telegram.bot_token == "first-token"));
+        assert!(!configs[0].exchange.dry_run);
+        assert!(configs[1].exchange.dry_run && configs[1].exchange.is_testnet);
+        assert_eq!(configs[1].grid.grid_interval, dec!(10));
+        let serialized = serde_json::to_value(&config).unwrap();
+        config.ensure_pair_list().unwrap();
+        assert_eq!(serialized, serde_json::to_value(&config).unwrap());
+        config.exchange.api_key = "new-global-key".into();
+        config.ensure_pair_list().unwrap();
+        assert!(config
+            .strategy_configs()
+            .unwrap()
+            .iter()
+            .all(|c| c.exchange.api_key == "new-global-key"));
     }
 
     #[test]

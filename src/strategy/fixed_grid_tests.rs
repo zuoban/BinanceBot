@@ -58,6 +58,27 @@ async fn orders(engine: &GridTradingEngine) -> Vec<GridOrder> {
 }
 
 #[tokio::test]
+async fn remainder_submission_waits_for_the_global_configuration_gate() {
+    let mut engine = paper_engine().await;
+    let state = engine.state.clone();
+    state.position.write().await.size = dec!(0.6);
+    let gate = state.order_submission_lock.clone().write_owned().await;
+    engine.reconcile_remainder(&[dec!(118.9)]).await.unwrap();
+    let pending = engine.load_remainder_plan().await.unwrap().unwrap();
+    assert_eq!(pending.phase, RemainderPhase::Submitting);
+    assert!(orders(&engine).await.is_empty());
+    assert!(engine.recover_remainder_plan().await.unwrap());
+    assert!(orders(&engine).await.is_empty());
+    drop(gate);
+    assert!(engine.recover_remainder_plan().await.unwrap());
+    let submitted = orders(&engine).await;
+    assert_eq!(submitted.len(), 1);
+    assert_eq!(submitted[0].client_order_id, pending.target.client_order_id);
+    assert_eq!(submitted[0].quantity, dec!(0.6));
+    assert_eq!(submitted[0].purpose, OrderPurpose::Remainder);
+}
+
+#[tokio::test]
 async fn max_position_pause_cancels_both_sides_and_survives_restart() {
     let mut engine = paper_engine().await;
     {

@@ -1,11 +1,11 @@
 use crate::auth;
 use crate::config::AppConfig;
 use crate::types::{
-    BotStatus, GridOrder, GridStats, HourlyTradeCount, HourlyTradeStats, OrderSide, PriceHistory,
-    PricePoint, RemainderPlan, TradeRecord, TradingMode,
+    BotStatus, GridOrder, GridStats, HourlyTradeCount, HourlyTradeStats, OrderSide, RemainderPlan,
+    TradeRecord, TradingMode,
 };
 use anyhow::{Context, Result};
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, FixedOffset, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use rust_decimal::Decimal;
 use std::path::Path;
@@ -14,15 +14,24 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use tracing::info;
 
+pub(crate) fn beijing_midnight(now: DateTime<Utc>) -> DateTime<Utc> {
+    let beijing = FixedOffset::east_opt(8 * 3600).unwrap();
+    now.with_timezone(&beijing)
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_local_timezone(beijing)
+        .single()
+        .unwrap()
+        .with_timezone(&Utc)
+}
+
 pub struct Database {
     conn: Mutex<Connection>,
     path: String,
     trade_revision: AtomicU64,
-    price_revision: AtomicU64,
     #[cfg(test)]
     hourly_stats_queries: AtomicU64,
-    #[cfg(test)]
-    price_history_queries: AtomicU64,
 }
 
 impl Database {
@@ -61,11 +70,8 @@ impl Database {
             conn: Mutex::new(conn),
             path: path_str,
             trade_revision: AtomicU64::new(0),
-            price_revision: AtomicU64::new(0),
             #[cfg(test)]
             hourly_stats_queries: AtomicU64::new(0),
-            #[cfg(test)]
-            price_history_queries: AtomicU64::new(0),
         };
 
         db.init_tables()?;
@@ -76,19 +82,13 @@ impl Database {
         &self.path
     }
 
-    pub(crate) fn snapshot_data_revisions(&self) -> (u64, u64) {
-        (
-            self.trade_revision.load(Ordering::Acquire),
-            self.price_revision.load(Ordering::Acquire),
-        )
+    pub(crate) fn trade_data_revision(&self) -> u64 {
+        self.trade_revision.load(Ordering::Acquire)
     }
 
     #[cfg(test)]
-    pub(crate) fn chart_query_counts(&self) -> (u64, u64) {
-        (
-            self.hourly_stats_queries.load(Ordering::Relaxed),
-            self.price_history_queries.load(Ordering::Relaxed),
-        )
+    pub(crate) fn hourly_stats_query_count(&self) -> u64 {
+        self.hourly_stats_queries.load(Ordering::Relaxed)
     }
 
     /// A consistent analysis snapshot, including committed WAL transactions.
@@ -242,14 +242,6 @@ impl Database {
                 price TEXT NOT NULL,
                 timestamp TEXT NOT NULL,
                 PRIMARY KEY (symbol, mode)
-            );
-
-            CREATE TABLE IF NOT EXISTS price_snapshots (
-                symbol TEXT NOT NULL,
-                is_testnet INTEGER NOT NULL,
-                timestamp INTEGER NOT NULL,
-                price TEXT NOT NULL,
-                PRIMARY KEY (symbol, is_testnet, timestamp)
             );
 
             CREATE TABLE IF NOT EXISTS managed_orders (
@@ -485,6 +477,20 @@ impl Database {
     /// Merge while holding the database mutex so simultaneous pair updates cannot lose changes.
     pub fn save_pair_config(&self, symbol: &str, config: &AppConfig) -> Result<()> {
         save_pair_config_on(&self.conn.lock().unwrap(), symbol, config)
+    }
+
+    pub fn save_global_config(&self, global: &crate::config::GlobalConfig) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let json: String = conn.query_row(
+            "SELECT config_json FROM app_config WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        let mut saved: AppConfig = serde_json::from_str(&json)?;
+        saved.ensure_pair_list()?;
+        global.apply_to(&mut saved);
+        saved.validate()?;
+        save_config_on(&conn, &saved)
     }
 
     /// Membership changes merge with concurrent engine writes under one transaction.
@@ -904,7 +910,7 @@ impl Database {
     ) -> Result<HourlyTradeStats> {
         #[cfg(test)]
         self.hourly_stats_queries.fetch_add(1, Ordering::Relaxed);
-        let window_start = crate::price_history::beijing_midnight(now);
+        let window_start = beijing_midnight(now);
         let first_hour = window_start.timestamp();
         let last_hour = now.timestamp().div_euclid(3600) * 3600;
         let mut buckets: Vec<_> = (first_hour..=last_hour)
@@ -948,87 +954,6 @@ impl Database {
             window_start,
             window_end: now,
             buckets,
-        })
-    }
-
-    /// Store exchange hourly opens once; a midnight snapshot must not change later.
-    pub fn save_price_points(
-        &self,
-        symbol: &str,
-        is_testnet: bool,
-        points: &[PricePoint],
-    ) -> Result<()> {
-        let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction()?;
-        let mut inserted = 0;
-        {
-            let mut stmt = tx.prepare(
-                "INSERT OR IGNORE INTO price_snapshots (symbol, is_testnet, timestamp, price) VALUES (?1, ?2, ?3, ?4);",
-            )?;
-            for point in points {
-                anyhow::ensure!(point.price > Decimal::ZERO, "Invalid snapshot price");
-                anyhow::ensure!(
-                    point.timestamp.timestamp().rem_euclid(3600) == 0
-                        && point.timestamp.timestamp_subsec_nanos() == 0,
-                    "Snapshot time must be an exact hour"
-                );
-                inserted += stmt.execute(params![
-                    symbol,
-                    is_testnet,
-                    point.timestamp.timestamp_millis(),
-                    point.price.to_string(),
-                ])?;
-            }
-        }
-        tx.commit()?;
-        if inserted > 0 {
-            self.price_revision.fetch_add(1, Ordering::Release);
-        }
-        Ok(())
-    }
-
-    pub fn get_price_history(
-        &self,
-        symbol: &str,
-        is_testnet: bool,
-        now: DateTime<Utc>,
-    ) -> Result<PriceHistory> {
-        #[cfg(test)]
-        self.price_history_queries.fetch_add(1, Ordering::Relaxed);
-        let day_start = crate::price_history::beijing_midnight(now);
-        let window_start = day_start - ChronoDuration::days(6);
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT timestamp, price FROM price_snapshots WHERE symbol = ?1 AND is_testnet = ?2 AND timestamp >= ?3 AND timestamp <= ?4 ORDER BY timestamp;",
-        )?;
-        let rows = stmt.query_map(
-            params![
-                symbol,
-                is_testnet,
-                window_start.timestamp_millis(),
-                now.timestamp_millis()
-            ],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
-        )?;
-        let mut points = Vec::new();
-        for row in rows {
-            let (timestamp, price) = row?;
-            points.push(PricePoint {
-                timestamp: DateTime::from_timestamp_millis(timestamp)
-                    .context("Invalid saved snapshot timestamp")?,
-                price: Decimal::from_str(&price).context("Invalid saved snapshot price")?,
-            });
-        }
-        let midnight_price = points
-            .iter()
-            .find(|point| point.timestamp == day_start)
-            .map(|point| point.price);
-        Ok(PriceHistory {
-            window_start,
-            window_end: now,
-            day_start,
-            midnight_price,
-            points,
         })
     }
 
@@ -1695,6 +1620,7 @@ mod tests {
             std::env::temp_dir().join(format!("dashboard-settings-{}.db", uuid::Uuid::new_v4()));
         let db = Database::open(&path).unwrap();
         let mut initial = AppConfig::default();
+        initial.exchange.recv_window = 9000;
         initial.ensure_pair_list().unwrap();
         db.save_config(&initial).unwrap();
         db.conn.lock().unwrap().execute_batch(
@@ -2237,9 +2163,7 @@ mod tests {
             conn: Mutex::new(conn),
             path: ":memory:".into(),
             trade_revision: AtomicU64::new(0),
-            price_revision: AtomicU64::new(0),
             hourly_stats_queries: AtomicU64::new(0),
-            price_history_queries: AtomicU64::new(0),
         };
         db.init_tables().unwrap();
 

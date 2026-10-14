@@ -346,6 +346,9 @@ impl GridTradingEngine {
             plan.phase = RemainderPhase::Complete;
             return self.persist_remainder_plan(plan).await;
         }
+        let Some(_submission) = self.state.try_order_submission() else {
+            return Ok(());
+        };
         plan.target.quantity = quantity;
         plan.target.amount_usdc = quantity * price;
         if rules.calculate_quantity(price, config.grid.order_amount_usdc) != Some(quantity) {

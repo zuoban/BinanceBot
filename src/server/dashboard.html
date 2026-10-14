@@ -12,6 +12,7 @@
   <svg xmlns="http://www.w3.org/2000/svg" aria-hidden="true" style="position:absolute;width:0;height:0;overflow:hidden">
     <symbol id="icon-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
     <symbol id="icon-sliders" viewBox="0 0 24 24"><path d="M4 7h9m4 0h3M4 17h3m4 0h9M13 5v4M7 15v4"/></symbol>
+    <symbol id="icon-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3v3m0 12v3M3 12h3m12 0h3M5.6 5.6l2.1 2.1m8.6 8.6 2.1 2.1M5.6 18.4l2.1-2.1m8.6-8.6 2.1-2.1"/><circle cx="12" cy="12" r="6"/></symbol>
     <symbol id="icon-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14"/></symbol>
     <symbol id="icon-play" viewBox="0 0 24 24"><path d="m8 5 11 7-11 7V5Z"/></symbol>
     <symbol id="icon-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5M5.8 9A7 7 0 0 1 18 7l2 5M4 12l2 5a7 7 0 0 0 12.2-2"/></symbol>
@@ -40,7 +41,8 @@
       <button class="tab-button active" id="tab-btn-overview" role="tab" aria-label="策略总览" title="策略总览" aria-selected="true" aria-controls="tab-overview" onclick="switchTab('tab-overview', this)"><svg class="icon" aria-hidden="true"><use href="#icon-overview"/></svg><span>策略总览</span></button>
       <button class="tab-button" id="tab-btn-orders" role="tab" aria-label="当前挂单" title="当前挂单" tabindex="-1" aria-selected="false" aria-controls="tab-orders" onclick="switchTab('tab-orders', this)"><svg class="icon" aria-hidden="true"><use href="#icon-orders"/></svg><span>当前挂单</span><span class="nav-count" id="count-orders">0</span></button>
       <button class="tab-button" id="tab-btn-trades" role="tab" aria-label="成交历史" title="成交历史" tabindex="-1" aria-selected="false" aria-controls="tab-trades" onclick="switchTab('tab-trades', this)"><svg class="icon" aria-hidden="true"><use href="#icon-history"/></svg><span>成交历史</span><span class="nav-count" id="count-trades">0</span></button>
-      <button class="tab-button" id="tab-btn-config" role="tab" aria-label="策略设置" title="策略设置" tabindex="-1" aria-selected="false" aria-controls="tab-config" onclick="switchTab('tab-config', this)"><svg class="icon" aria-hidden="true"><use href="#icon-sliders"/></svg><span>策略设置</span></button>
+      <button class="tab-button" id="tab-btn-config" role="tab" aria-label="策略参数" title="策略参数" tabindex="-1" aria-selected="false" aria-controls="tab-config" onclick="switchTab('tab-config', this)"><svg class="icon" aria-hidden="true"><use href="#icon-sliders"/></svg><span>策略参数</span></button>
+      <button class="tab-button" id="tab-btn-global-config" role="tab" aria-label="全局配置" title="全局配置" tabindex="-1" aria-selected="false" aria-controls="tab-global-config" onclick="switchTab('tab-global-config', this)"><svg class="icon" aria-hidden="true"><use href="#icon-settings"/></svg><span>全局配置</span></button>
       <button class="tab-button" id="tab-btn-logs" role="tab" aria-label="运行日志" title="运行日志" tabindex="-1" aria-selected="false" aria-controls="tab-logs" onclick="switchTab('tab-logs', this)"><svg class="icon" aria-hidden="true"><use href="#icon-logs"/></svg><span>运行日志</span></button>
     </nav>
     <div class="sidebar-bottom">
@@ -53,7 +55,7 @@
     <div class="workspace-context"><span class="workspace-label">我的工作台</span><span class="context-divider">/</span><label class="pair-picker" for="pair-select"><span class="pair-dot" aria-hidden="true"></span><select id="pair-select" onchange="selectPair(this.value)" aria-label="选择要查看和控制的交易对"><option value="">加载交易对…</option></select></label><span class="badge badge-purple" id="symbol-badge">永续合约</span></div>
     <div class="topbar-actions">
       <span class="badge badge-amber" id="mode-badge">等待模式</span>
-      <button class="btn-quiet settings-shortcut" onclick="openConfigTab()"><svg class="icon" aria-hidden="true"><use href="#icon-sliders"/></svg>策略设置</button>
+      <button class="btn-quiet settings-shortcut" onclick="openConfigTab()"><svg class="icon" aria-hidden="true"><use href="#icon-sliders"/></svg>策略参数</button>
       <button id="btn-pause-resume" disabled onclick="togglePauseResume()"><svg class="icon" aria-hidden="true"><use id="pause-icon-use" href="#icon-pause"/></svg><span id="pause-label">暂停策略</span></button>
       <div class="actions-menu">
         <button type="button" class="mobile-actions-toggle btn-quiet" aria-label="更多操作" aria-controls="header-actions" aria-expanded="false" onclick="toggleMobileActions()"><svg class="icon" aria-hidden="true"><use href="#icon-more"/></svg></button>
@@ -79,8 +81,8 @@
       <article class="metric-card">
         <div class="metric-title"><span id="card-price-title">标记价格</span><svg class="icon" aria-hidden="true"><use href="#icon-chart"/></svg></div>
         <div class="metric-value" id="card-price">--</div>
-        <div class="metric-sub"><span id="card-price-change">今日涨跌 --</span><span id="card-price-status" class="data-warning"></span></div>
-        <details class="metric-details"><summary>行情明细</summary><div><span>今日 00:00 <strong id="card-price-midnight">--</strong></span><span id="card-price-24h-change">近 24h 涨跌 --</span><span>24h 高 <strong id="card-high">--</strong> / 低 <strong id="card-low">--</strong></span></div></details>
+        <div class="metric-sub"><span id="card-price-change">近 24h 涨跌 --</span><span id="card-price-status" class="data-warning"></span></div>
+        <details class="metric-details"><summary>行情明细</summary><div><span>最新成交价 <strong id="card-last-price">--</strong></span><span>24h 高 <strong id="card-high">--</strong> / 低 <strong id="card-low">--</strong></span></div></details>
       </article>
       <article class="metric-card">
         <div class="metric-title"><span>累计已实现盈亏</span><svg class="icon" aria-hidden="true"><use href="#icon-chart"/></svg></div>
@@ -103,37 +105,6 @@
       <div class="strategy-strip"><span class="strategy-strip-icon"><svg class="icon" aria-hidden="true"><use href="#icon-position"/></svg></span><div><span class="strip-label">网格策略</span><strong id="card-grid-info">--</strong></div><span class="strip-divider"></span><span id="card-window-info">等待策略配置</span><span class="maker-label">Post-Only Maker</span><button class="btn-quiet strip-edit" onclick="openConfigTab()">调整参数<svg class="icon" aria-hidden="true"><use href="#icon-arrow"/></svg></button></div>
     </section>
     <div class="overview-workspace">
-    <section class="price-history-section" aria-labelledby="price-history-title">
-      <div class="section-title">
-        <div><span class="section-kicker">MARKET PERFORMANCE</span><h2 id="price-history-title">价格走势 <span class="period-label">近 7 天</span></h2></div>
-        <div class="price-history-summary">
-          <span>今日 00:00 <strong id="price-history-midnight">--</strong></span>
-          <span>今日涨跌 <strong id="price-history-change">--</strong></span>
-        </div>
-      </div>
-      <p class="trade-chart-note" id="price-history-range">北京时间 (UTC+8) · 最近 7 个自然日（含今天）· 每小时标记价格</p>
-      <p class="trade-chart-status" id="price-history-status" role="status">正在加载价格历史…</p>
-      <div class="price-history-chart" id="price-history-chart"></div>
-      <p class="trade-chart-note price-history-detail" id="price-history-detail" aria-live="polite">悬停曲线或聚焦后使用左右方向键查看价格；虚线为今日 00:00 基准。</p>
-    </section>
-
-    <section class="trade-chart-section" aria-labelledby="trade-chart-title">
-      <div class="section-title">
-        <div><span class="section-kicker">TRADING ACTIVITY</span><h2 id="trade-chart-title">今日成交</h2></div>
-        <div class="trade-chart-summary" aria-label="今日成交合计">
-          <span class="trade-chart-legend"><i class="buy-swatch" aria-hidden="true"></i>买单 <strong id="hourly-buy-total">--</strong> 笔</span>
-          <span class="trade-chart-legend"><i class="sell-swatch" aria-hidden="true"></i>卖单 <strong id="hourly-sell-total">--</strong> 笔</span>
-          <span>合计 <strong id="hourly-trade-total">--</strong> 笔</span>
-        </div>
-      </div>
-      <p class="trade-chart-note" id="trade-chart-range">统计当前交易对与运行模式的成交订单</p>
-      <p class="trade-chart-status" id="trade-chart-status" role="status">正在加载成交统计…</p>
-      <div class="trade-chart-scroll" tabindex="0" role="region" aria-label="每小时买卖成交笔数，可横向滚动">
-        <div class="trade-chart" id="hourly-trade-chart"></div>
-      </div>
-      <p class="trade-chart-note" id="trade-chart-detail">北京时间 · 最新小时在左 · 绿买 / 红卖 · 悬停或聚焦查看详情</p>
-    </section>
-
     <!-- Visual Grid Ladder Depth -->
     <section class="ladder-section" aria-labelledby="ladder-title">
       <div class="section-title">
@@ -146,8 +117,26 @@
       </div>
       <button class="ladder-all btn-quiet" onclick="switchTab('tab-orders', document.getElementById('tab-btn-orders'))">查看全部挂单<svg class="icon" aria-hidden="true"><use href="#icon-arrow"/></svg></button>
     </section>
+
+    <section class="trade-chart-section" aria-labelledby="trade-chart-title">
+      <div class="section-title">
+        <div><span class="section-kicker">TRADING ACTIVITY</span><h2 id="trade-chart-title">今日成交</h2></div>
+        <button class="btn-quiet section-link" onclick="switchTab('tab-trades', document.getElementById('tab-btn-trades'))">成交明细<svg class="icon" aria-hidden="true"><use href="#icon-arrow"/></svg></button>
+      </div>
+      <div class="trade-chart-summary" aria-label="今日成交合计">
+        <span class="trade-chart-legend"><i class="buy-swatch" aria-hidden="true"></i>买单 <strong id="hourly-buy-total">--</strong> 笔</span>
+        <span class="trade-chart-legend"><i class="sell-swatch" aria-hidden="true"></i>卖单 <strong id="hourly-sell-total">--</strong> 笔</span>
+        <span>合计 <strong id="hourly-trade-total">--</strong> 笔</span>
+      </div>
+      <p class="trade-chart-note" id="trade-chart-range">统计当前交易对与运行模式的成交订单</p>
+      <p class="trade-chart-status" id="trade-chart-status" role="status">正在加载成交统计…</p>
+      <div class="trade-chart-scroll" tabindex="0" role="region" aria-label="每小时买卖成交笔数，可横向滚动">
+        <div class="trade-chart" id="hourly-trade-chart"></div>
+      </div>
+      <p class="trade-chart-note" id="trade-chart-detail">北京时间 · 最新小时在左 · 绿买 / 红卖 · 悬停或聚焦查看详情</p>
+    </section>
     </div>
-    <p class="overview-footnote">行情与成交统计均按北京时间 (UTC+8) 展示 · 盈亏仅覆盖本程序已确认成交</p>
+    <p class="overview-footnote">成交统计按北京时间 (UTC+8) 展示 · 盈亏仅覆盖本程序已确认成交</p>
     </div>
 
     <!-- Detail pages -->
@@ -218,7 +207,7 @@
         <div class="config-container">
           <div class="config-header">
             <h3 id="config-title" tabindex="-1">策略运行参数</h3>
-            <p style="color: var(--text-dim); font-size: 13px; margin-top: 4px;">当前交易对的参数保存后立即生效，重启自动保留。每个交易对独立配置和启停；策略参数变更时会重新对齐该交易对的网格挂单。</p>
+            <p>当前交易对的网格、交易模式和仓位限制独立保存，立即生效，重启后保留。交易所连接和 Telegram 通知请前往「全局配置」页面设置。</p>
           </div>
 
           <div class="config-toolbar" aria-label="交易对管理">
@@ -285,7 +274,7 @@
                   <option value="testnet">币安合约测试网 (Testnet)</option>
                   <option value="live">币安合约实盘 (Live Real Trading)</option>
                 </select>
-                <span class="form-hint">模拟盘零风险体验，实盘需填写有效 API 密钥</span>
+                <span class="form-hint">实盘和测试网需要先在「全局配置」页面保存有效 API 密钥</span>
               </div>
 
               <div class="form-section-label"><span>02</span> 仓位与价格边界<small>管理策略敞口与运行范围</small></div>
@@ -327,7 +316,34 @@
                 <span class="form-hint">涨超该价格停止下单</span>
               </div>
 
-              <div class="form-section-label"><span>03</span> 交易所连接<small>配置同步频率与 API 凭证</small></div>
+            </div>
+
+            <!-- 底部保存栏 -->
+            <div class="form-actions">
+              <div style="display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-dim);">
+                <svg class="icon" aria-hidden="true"><use href="#icon-shield"/></svg>点击保存后立即生效，重启后保留
+              </div>
+              <div style="display: flex; gap: 10px;">
+                <button type="button" id="btn-reset-cfg" onclick="loadConfigForm()">↺ 还原当前配置</button>
+                <button type="submit" class="btn-primary" id="btn-save-cfg">保存并立即生效</button>
+              </div>
+            </div>
+            <div id="cfg-alert" role="status" aria-live="polite" style="display: none; margin-top: 14px; padding: 12px 16px; border-radius: 6px; font-size: 13px;"></div>
+          </form>
+
+        </div>
+      </div>
+
+      <!-- Tab: Global Config -->
+      <div class="tab-content" id="tab-global-config" role="tabpanel" aria-labelledby="tab-btn-global-config">
+        <div class="config-container">
+          <div class="config-header">
+            <h3 id="global-config-title" tabindex="-1">所有交易对共享</h3>
+            <p>交易所连接和 Telegram 通知只需配置一次。保存后应用于所有交易对，新增交易对自动共享，重启后保留。</p>
+          </div>
+          <form id="global-config-form" onsubmit="event.preventDefault(); submitGlobalConfig();">
+            <div class="config-form-grid">
+              <div class="form-section-label"><span>01</span> 交易所连接<small>所有交易对共享同步频率与 API 凭证</small></div>
               <div class="form-group">
                 <label for="cfg-recv-window">请求有效窗口 (毫秒)</label>
                 <input type="number" id="cfg-recv-window" min="1" max="60000" step="1" required />
@@ -355,10 +371,10 @@
 
               <div class="form-group">
                 <label><input type="checkbox" id="cfg-clear-api" /> 清除已保存的 API Key 和 Secret</label>
-                <span class="form-hint">仅在模拟盘模式下允许清除；留空密钥输入框则保留已保存的值</span>
+                <span class="form-hint">仅当所有交易对均为模拟盘时允许清除；留空密钥输入框则保留已保存的值</span>
               </div>
 
-              <div class="form-section-label"><span>04</span> Telegram 通知<small>及时接收成交与策略状态</small></div>
+              <div class="form-section-label"><span>02</span> Telegram 通知<small>接收所有交易对的成交与策略状态</small></div>
               <div class="form-group" style="justify-content: center;">
                 <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
                   <input type="checkbox" id="cfg-telegram-enabled" style="width: 17px; height: 17px; accent-color: var(--accent);" />
@@ -383,18 +399,14 @@
                 <span class="form-hint">清除前请关闭通知；Bot Token 和 Chat ID 会一起清除</span>
               </div>
             </div>
-
-            <!-- 底部保存栏 -->
             <div class="form-actions">
-              <div style="display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-dim);">
-                <svg class="icon" aria-hidden="true"><use href="#icon-shield"/></svg>点击保存后立即生效，重启后保留
-              </div>
+              <div>适用于所有交易对，与当前选择的交易对无关。</div>
               <div style="display: flex; gap: 10px;">
-                <button type="button" id="btn-reset-cfg" onclick="loadConfigForm()">↺ 还原当前配置</button>
-                <button type="submit" class="btn-primary" id="btn-save-cfg">保存并立即生效</button>
+                <button type="button" id="btn-reset-global" onclick="loadGlobalConfigForm()">↺ 还原全局设置</button>
+                <button type="submit" class="btn-primary" id="btn-save-global" disabled>保存全局设置</button>
               </div>
             </div>
-            <div id="cfg-alert" role="status" aria-live="polite" style="display: none; margin-top: 14px; padding: 12px 16px; border-radius: 6px; font-size: 13px;"></div>
+            <div id="global-cfg-alert" class="config-alert" role="status" aria-live="polite" style="display: none;"></div>
           </form>
 
           <form id="server-config-form" class="server-config" onsubmit="event.preventDefault(); submitServerConfig();">
@@ -413,7 +425,7 @@
               </div>
             </div>
             <div class="form-actions">
-              <div>策略参数即时生效；服务设置需要重启程序。</div>
+              <div>服务设置保存后，需要重启程序才能生效。</div>
               <div><button type="submit" id="btn-save-server" disabled>保存服务设置</button></div>
             </div>
             <div id="server-cfg-alert" class="config-alert" role="status" aria-live="polite" style="display: none;"></div>
@@ -885,6 +897,9 @@
     let editingNewPair = false;
     let configRequestEpoch = 0;
     let configurationLoaded = false;
+    let globalConfigurationLoaded = false;
+    let globalConfigBusy = false;
+    let globalConfigRequestEpoch = 0;
     let pairManagementBusy = false;
     let pairScoped = false;
     let pairSwitchEpoch = 0;
@@ -964,7 +979,10 @@
       select.disabled = !pairScoped || pairs.length < 2;
       await selectPair(active.symbol);
       renderPairManagement();
-      await loadServerConfigForm();
+      await Promise.all([
+        globalConfigurationLoaded ? Promise.resolve() : loadGlobalConfigForm(),
+        loadServerConfigForm()
+      ]);
     }
 
     async function selectPair(symbol) {
@@ -983,9 +1001,6 @@
       latestSymbol = symbol;
       latestMarkPrice = 0;
       latestMarkUpdatedAt = NaN;
-      latestPriceHistory = null;
-      priceHistorySelectedAt = null;
-      priceHistoryRenderKey = '';
       document.getElementById('log-console').replaceChildren();
       initWebSocket();
       await Promise.all([
@@ -1003,11 +1018,6 @@
     let latestSymbol = '';
     let latestMarkPrice = 0;
     let latestMarkUpdatedAt = NaN;
-    let latestPriceHistory = null;
-    let latestPriceTestnet = false;
-    let priceHistoryPlotPoints = [];
-    let priceHistorySelectedAt = null;
-    let priceHistoryRenderKey = '';
 
     function symbolAssets(symbol = latestSymbol) {
       const normalized = String(symbol || '').trim().toUpperCase();
@@ -1016,16 +1026,6 @@
         base: (quote ? normalized.slice(0, -quote.length) : normalized) || '--',
         quote: quote || '--'
       };
-    }
-
-    function beijingDayStart(timestamp = Date.now()) {
-      return Math.floor((timestamp + 8 * 3600000) / 86400000) * 86400000 - 8 * 3600000;
-    }
-
-    function midnightPrice() {
-      const price = parseFloat(latestPriceHistory?.midnight_price);
-      return Date.parse(latestPriceHistory?.day_start) === beijingDayStart()
-        && Number.isFinite(price) && price > 0 ? price : null;
     }
 
     function renderPageTitle() {
@@ -1038,122 +1038,10 @@
         && Date.now() - latestMarkUpdatedAt < 15000;
       document.getElementById('card-price').textContent = fresh ? `$${latestMarkPrice.toFixed(4)}` : '--';
       document.getElementById('card-price-status').textContent = fresh ? '' : '标记价格行情暂未更新';
-      const baseline = midnightPrice();
-      const change = fresh && baseline !== null ? latestMarkPrice - baseline : null;
-      const asset = symbolAssets().quote;
-      const changeText = change === null ? '--'
-        : `${change >= 0 ? '+' : ''}${(change / baseline * 100).toFixed(2)}% (${change >= 0 ? '+' : ''}${change.toFixed(4)} ${asset})`;
-      const changeClass = change === null ? '' : change >= 0 ? 'text-green' : 'text-red';
-      document.getElementById('card-price-change').textContent = `今日涨跌 ${changeText}`;
-      document.getElementById('card-price-change').className = changeClass;
-      document.getElementById('card-price-midnight').textContent = baseline === null ? '--' : `$${baseline.toFixed(4)}`;
-      document.getElementById('price-history-midnight').textContent = baseline === null ? '--' : `$${baseline.toFixed(4)}`;
-      document.getElementById('price-history-change').textContent = changeText;
-      document.getElementById('price-history-change').className = changeClass;
       renderPageTitle();
-      renderPriceHistory(fresh);
     }
 
     setInterval(renderMarkPrice, 1000);
-
-    function priceHistoryTime(timestamp, withTime = true) {
-      const date = new Date(timestamp + 8 * 3600000);
-      const pad = value => String(value).padStart(2, '0');
-      return `${pad(date.getUTCMonth() + 1)}/${pad(date.getUTCDate())}`
-        + (withTime ? ` ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}` : '');
-    }
-
-    function showPriceHistoryPoint(index) {
-      const point = priceHistoryPlotPoints[index];
-      const hover = document.querySelector('#price-history-chart .price-history-hover');
-      if (!point || !hover) return;
-      priceHistorySelectedAt = point.time;
-      hover.classList.add('is-active');
-      const line = hover.querySelector('line');
-      line.setAttribute('x1', point.x);
-      line.setAttribute('x2', point.x);
-      const dot = hover.querySelector('circle');
-      dot.setAttribute('cx', point.x);
-      dot.setAttribute('cy', point.y);
-      document.getElementById('price-history-detail').textContent = `${priceHistoryTime(point.time)} 北京时间 · 标记价格 $${point.price.toFixed(4)}${point.live ? ' · 实时' : ''}`;
-    }
-
-    function renderPriceHistory(fresh) {
-      const chart = document.getElementById('price-history-chart');
-      const now = Date.now();
-      const start = beijingDayStart(now) - 6 * 86400000;
-      const width = Math.max(280, chart.clientWidth);
-      const baseline = midnightPrice();
-      const points = (latestPriceHistory?.points || []).map(point => ({
-        time: Date.parse(point.timestamp), price: parseFloat(point.price), live: false
-      })).filter(point => Number.isFinite(point.time) && point.time >= start && point.time <= now
-        && Number.isFinite(point.price) && point.price > 0).sort((a, b) => a.time - b.time);
-      if (fresh && latestMarkUpdatedAt <= now && latestMarkUpdatedAt >= start) {
-        const last = points[points.length - 1];
-        const current = { time: latestMarkUpdatedAt, price: latestMarkPrice, live: true };
-        if (last?.time === current.time) points[points.length - 1] = current;
-        else if (!last || last.time < current.time) points.push(current);
-      }
-      document.getElementById('price-history-range').textContent = `${priceHistoryTime(start)} — ${priceHistoryTime(now)} · 北京时间 (UTC+8) · ${latestSymbol} / ${latestPriceTestnet ? '测试网' : '正式网'} · 每小时快照及实时价格`;
-      const status = document.getElementById('price-history-status');
-      const historyCount = points.filter(point => !point.live).length;
-      status.textContent = !historyCount ? '正在同步历史价格…' : baseline === null
-        ? '今日 00:00 快照暂未就绪，今日涨跌将在同步后显示。' : !fresh ? '实时行情暂未更新，曲线保留已保存的快照。' : '';
-      const key = JSON.stringify([latestSymbol, latestPriceTestnet, width, start, Math.floor(now / 60000), baseline, points]);
-      if (key === priceHistoryRenderKey) return;
-      priceHistoryRenderKey = key;
-      const focused = chart.contains(document.activeElement);
-      const selectedAt = priceHistorySelectedAt;
-      if (!points.length) {
-        chart.replaceChildren();
-        priceHistoryPlotPoints = [];
-        priceHistorySelectedAt = null;
-        document.getElementById('price-history-detail').textContent = '历史价格同步后自动显示曲线。';
-        return;
-      }
-      const left = 72, right = width - 14, top = 18, bottom = 220;
-      const values = points.map(point => point.price);
-      if (baseline !== null) values.push(baseline);
-      const min = Math.min(...values), max = Math.max(...values);
-      const padding = Math.max((max - min) * .12, max * .0005, .0001);
-      const low = min - padding, high = max + padding;
-      const x = time => left + (time - start) / (now - start) * (right - left);
-      const y = price => bottom - (price - low) / (high - low) * (bottom - top);
-      priceHistoryPlotPoints = points.map(point => ({ ...point, x: x(point.time), y: y(point.price) }));
-      const segments = [];
-      priceHistoryPlotPoints.forEach((point, index) => {
-        if (!index || point.time - points[index - 1].time > 3600000) segments.push([]);
-        segments[segments.length - 1].push(point);
-      });
-      const lines = segments.map(segment => segment.map((point, index) => `${index ? 'L' : 'M'}${point.x.toFixed(2)},${point.y.toFixed(2)}`).join(' '));
-      const areas = segments.map((segment, index) => `${lines[index]} L${segment[segment.length - 1].x.toFixed(2)},${bottom} L${segment[0].x.toFixed(2)},${bottom} Z`).join(' ');
-      const grid = Array.from({ length: 5 }, (_, index) => {
-        const value = high - (high - low) * index / 4;
-        const height = y(value);
-        return `<line class="price-history-grid" x1="${left}" x2="${right}" y1="${height}" y2="${height}"/><text class="price-history-axis" x="${left - 10}" y="${height + 4}" text-anchor="end">${value.toFixed(4)}</text>`;
-      }).join('');
-      const dates = Array.from({ length: 7 }, (_, index) => index).filter(index => width >= 520 || index % 2 === 0).map(index => {
-        const time = start + index * 86400000;
-        return `<text class="price-history-axis" x="${x(time)}" y="246" text-anchor="middle">${priceHistoryTime(time, false)}</text>`;
-      }).join('');
-      const last = priceHistoryPlotPoints[priceHistoryPlotPoints.length - 1];
-      chart.innerHTML = `<svg viewBox="0 0 ${width} 260" tabindex="0" role="img" aria-labelledby="price-history-title price-history-range" aria-describedby="price-history-detail">
-        <defs><linearGradient id="price-history-fill" x1="0" x2="0" y1="0" y2="1"><stop stop-color="var(--accent)" stop-opacity=".16"/><stop offset="1" stop-color="var(--accent)" stop-opacity="0"/></linearGradient></defs>
-        ${grid}${dates}<path d="${areas}" fill="url(#price-history-fill)"/>
-        ${baseline === null ? '' : `<line class="price-history-baseline" x1="${left}" x2="${right}" y1="${y(baseline)}" y2="${y(baseline)}"/>`}
-        <path class="price-history-line" d="${lines.join(' ')}"/>
-        <circle cx="${last.x}" cy="${last.y}" r="3.5" fill="var(--accent)"/>
-        <g class="price-history-hover"><line y1="${top}" y2="${bottom}"/><circle r="4"/></g>
-      </svg>`;
-      if (focused) chart.querySelector('svg').focus({ preventScroll: true });
-      const selected = priceHistoryPlotPoints.findIndex(point => point.time === selectedAt);
-      if (selected >= 0) showPriceHistoryPoint(selected);
-      else if (focused) showPriceHistoryPoint(priceHistoryPlotPoints.length - 1);
-      else {
-        priceHistorySelectedAt = null;
-        document.getElementById('price-history-detail').textContent = '悬停曲线或聚焦后使用左右方向键查看价格；虚线为今日 00:00 基准。';
-      }
-    }
 
     function initWebSocket() {
       const token = getAuthToken();
@@ -1256,16 +1144,17 @@
       // Ticker & Price Card
       latestSymbol = data.symbol;
       latestMarkPrice = data.ticker.symbol === data.symbol ? parseFloat(data.ticker.mark_price || 0) : 0;
-      const price = latestMarkPrice > 0 ? latestMarkPrice : parseFloat(data.ticker.last_price || 0);
+      const lastPrice = parseFloat(data.ticker.last_price || 0);
+      const price = latestMarkPrice > 0 ? latestMarkPrice : lastPrice;
       latestMarkUpdatedAt = Date.parse(data.ticker.mark_update_time || '');
-      latestPriceHistory = data.price_history || null;
-      latestPriceTestnet = data.grid_config.is_testnet;
       document.getElementById('card-price-title').textContent = `${data.symbol} 标记价格`;
       renderMarkPrice();
 
       const chgPct = parseFloat(data.ticker.change_percent_24h || 0);
       const chgVal = parseFloat(data.ticker.change_24h || 0);
-      const chgEl = document.getElementById('card-price-24h-change');
+      const chgEl = document.getElementById('card-price-change');
+      chgEl.className = chgPct >= 0 ? 'text-green' : 'text-red';
+      document.getElementById('card-last-price').textContent = lastPrice > 0 ? `$${lastPrice.toFixed(4)}` : '--';
       chgEl.textContent = `近 24h 涨跌 ${chgPct >= 0 ? '+' : ''}${chgPct.toFixed(2)}% (${chgVal >= 0 ? '+' : ''}${chgVal.toFixed(2)} ${pnlAsset})`;
 
       document.getElementById('card-high').textContent = parseFloat(data.ticker.high_24h || 0).toFixed(2);
@@ -1603,7 +1492,8 @@
       'tab-overview': ['YOUR STRATEGY, AT A GLANCE', '策略总览', '每一格交易，都在掌握之中。'],
       'tab-orders': ['OPEN ORDERS', '当前挂单', '查看当前交易对的有效挂单与网格档位。'],
       'tab-trades': ['TRADE HISTORY', '成交历史', '追踪每次成交、已实现盈亏与手续费。'],
-      'tab-config': ['STRATEGY SETTINGS', '策略设置', '配置网格、管理交易对，让策略按你的方式运行。'],
+      'tab-config': ['STRATEGY PARAMETERS', '策略参数', '配置当前交易对的网格、交易模式和仓位限制。'],
+      'tab-global-config': ['GLOBAL CONFIGURATION', '全局配置', '统一管理交易所连接、Telegram 通知和服务设置。'],
       'tab-logs': ['SYSTEM ACTIVITY', '运行日志', '查看当前交易对的执行记录与系统状态。']
     };
 
@@ -1626,6 +1516,7 @@
       if (!wasActive) {
         window.scrollTo({ top: 0, behavior: 'instant' });
         if (tabId === 'tab-config') loadConfigForm();
+        if (tabId === 'tab-global-config' && !globalConfigurationLoaded) loadGlobalConfigForm();
       }
       if (tabId === 'tab-overview') requestAnimationFrame(renderMarkPrice);
     }
@@ -1700,15 +1591,18 @@
           document.getElementById('cfg-max-position').value = c.max_position_usdc || '';
           document.getElementById('cfg-pause-on-max-position').checked = !!c.pause_on_max_position;
 
-          document.getElementById('cfg-api-key').value = '';
-          document.getElementById('cfg-api-secret').value = '';
+    }
 
-          document.getElementById('cfg-api-key-status').textContent = c.has_api_key ? `已配置 (${c.api_key_preview})` : '未配置';
-          document.getElementById('cfg-api-secret-status').textContent = c.has_api_secret ? '已配置 (已隐藏保护)' : '未配置';
-          document.getElementById('cfg-telegram-enabled').checked = c.telegram_enabled;
-          document.getElementById('cfg-telegram-token').value = '';
-          document.getElementById('cfg-telegram-token-status').textContent = c.has_telegram_bot_token ? '已配置 (已隐藏保护)' : '未配置';
-          document.getElementById('cfg-telegram-chat-id').value = c.telegram_chat_id || '';
+    function fillGlobalConfigForm(c) {
+      document.getElementById('cfg-api-key').value = '';
+      document.getElementById('cfg-api-secret').value = '';
+
+      document.getElementById('cfg-api-key-status').textContent = c.has_api_key ? `已配置 (${c.api_key_preview})` : '未配置';
+      document.getElementById('cfg-api-secret-status').textContent = c.has_api_secret ? '已配置 (已隐藏保护)' : '未配置';
+      document.getElementById('cfg-telegram-enabled').checked = c.telegram_enabled;
+      document.getElementById('cfg-telegram-token').value = '';
+      document.getElementById('cfg-telegram-token-status').textContent = c.has_telegram_bot_token ? '已配置 (已隐藏保护)' : '未配置';
+      document.getElementById('cfg-telegram-chat-id').value = c.telegram_chat_id || '';
       document.getElementById('cfg-recv-window').value = c.recv_window ?? 5000;
       document.getElementById('cfg-sync-interval').value = c.sync_interval_secs ?? 3;
       document.getElementById('cfg-clear-api').checked = false;
@@ -1722,7 +1616,7 @@
       configurationLoaded = true;
       document.getElementById('cfg-alert').style.display = 'none';
       fillConfigForm({ symbol: '', grid_interval: '0.1', order_amount_usdc: '100', buy_window: 5, sell_window: 5,
-        dry_run: true, max_position_usdc: '2000', recv_window: 5000, sync_interval_secs: 3 });
+        dry_run: true, max_position_usdc: '2000' });
       renderPairManagement();
       document.getElementById('cfg-symbol').focus();
     }
@@ -1774,6 +1668,62 @@
       }
     }
 
+    async function loadGlobalConfigForm() {
+      if (globalConfigBusy) return;
+      const requestEpoch = ++globalConfigRequestEpoch;
+      globalConfigurationLoaded = false;
+      document.getElementById('btn-save-global').disabled = true;
+      try {
+        const res = await authFetch('/api/global/config');
+        const json = await res.json();
+        if (requestEpoch !== globalConfigRequestEpoch) return;
+        if (!res.ok || !json.success || !json.data) throw new Error(json.message || '无法读取全局设置');
+        fillGlobalConfigForm(json.data);
+        globalConfigurationLoaded = true;
+        document.getElementById('btn-save-global').disabled = false;
+      } catch (e) {
+        if (requestEpoch === globalConfigRequestEpoch) showConfigMessage('全局设置读取失败：' + e.message, false, 'global-cfg-alert');
+      }
+    }
+
+    async function submitGlobalConfig() {
+      if (globalConfigBusy || !globalConfigurationLoaded) return;
+      globalConfigBusy = true;
+      ++globalConfigRequestEpoch;
+      const btn = document.getElementById('btn-save-global');
+      const reset = document.getElementById('btn-reset-global');
+      btn.disabled = reset.disabled = true;
+      btn.textContent = '保存中…';
+      document.getElementById('global-cfg-alert').style.display = 'none';
+      const apiKey = document.getElementById('cfg-api-key').value.trim();
+      const apiSecret = document.getElementById('cfg-api-secret').value.trim();
+      const telegramToken = document.getElementById('cfg-telegram-token').value.trim();
+      try {
+        const res = await authFetch('/api/global/config', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+            recv_window: Number(document.getElementById('cfg-recv-window').value),
+            sync_interval_secs: Number(document.getElementById('cfg-sync-interval').value),
+            clear_api_credentials: document.getElementById('cfg-clear-api').checked,
+            clear_telegram_credentials: document.getElementById('cfg-clear-telegram').checked,
+            api_key: apiKey || null, api_secret: apiSecret || null,
+            telegram_enabled: document.getElementById('cfg-telegram-enabled').checked,
+            telegram_bot_token: telegramToken || null,
+            telegram_chat_id: document.getElementById('cfg-telegram-chat-id').value.trim()
+          })
+        });
+        const json = await res.json();
+        if (!res.ok || !json.success || !json.data) throw new Error(json.message || '保存失败');
+        fillGlobalConfigForm(json.data);
+        showConfigMessage(json.message || '全局设置已保存，所有交易对立即生效', true, 'global-cfg-alert');
+      } catch (e) { showConfigMessage('全局设置保存失败：' + e.message, false, 'global-cfg-alert'); }
+      finally {
+        globalConfigBusy = false;
+        btn.disabled = !globalConfigurationLoaded;
+        reset.disabled = false;
+        btn.textContent = '保存全局设置';
+      }
+    }
+
     async function loadServerConfigForm() {
       document.getElementById('btn-save-server').disabled = true;
       try {
@@ -1817,10 +1767,6 @@
       const dry_run = mode === 'dry_run';
       const is_testnet = mode === 'testnet';
 
-      const apiKey = document.getElementById('cfg-api-key').value.trim();
-      const apiSecret = document.getElementById('cfg-api-secret').value.trim();
-      const telegramToken = document.getElementById('cfg-telegram-token').value.trim();
-
       const payload = {
         symbol: document.getElementById('cfg-symbol').value.trim().toUpperCase(),
         direction: document.getElementById('cfg-direction').value,
@@ -1831,15 +1777,6 @@
         post_only: document.getElementById('cfg-post-only').checked,
         dry_run: dry_run,
         is_testnet: is_testnet,
-        recv_window: Number(document.getElementById('cfg-recv-window').value),
-        sync_interval_secs: Number(document.getElementById('cfg-sync-interval').value),
-        clear_api_credentials: document.getElementById('cfg-clear-api').checked,
-        clear_telegram_credentials: document.getElementById('cfg-clear-telegram').checked,
-        api_key: apiKey ? apiKey : null,
-        api_secret: apiSecret ? apiSecret : null,
-        telegram_enabled: document.getElementById('cfg-telegram-enabled').checked,
-        telegram_bot_token: telegramToken ? telegramToken : null,
-        telegram_chat_id: document.getElementById('cfg-telegram-chat-id').value.trim(),
         min_price: document.getElementById('cfg-min-price').value ? document.getElementById('cfg-min-price').value : null,
         max_price: document.getElementById('cfg-max-price').value ? document.getElementById('cfg-max-price').value : null,
         max_position_usdc: document.getElementById('cfg-max-position').value ? document.getElementById('cfg-max-position').value : null,
@@ -1918,34 +1855,6 @@
       const syncNavigation = () => document.querySelector('.tab-nav').setAttribute('aria-orientation', mobileNavigation.matches ? 'horizontal' : 'vertical');
       syncNavigation();
       mobileNavigation.addEventListener('change', syncNavigation);
-      const priceChart = document.getElementById('price-history-chart');
-      priceChart.addEventListener('pointermove', event => {
-        const svg = priceChart.querySelector('svg');
-        if (!svg || !priceHistoryPlotPoints.length) return;
-        const rect = svg.getBoundingClientRect();
-        const pointerX = (event.clientX - rect.left) * svg.viewBox.baseVal.width / rect.width;
-        const nearest = priceHistoryPlotPoints.reduce((best, point, index) =>
-          Math.abs(point.x - pointerX) < Math.abs(priceHistoryPlotPoints[best].x - pointerX) ? index : best, 0);
-        showPriceHistoryPoint(nearest);
-      });
-      priceChart.addEventListener('focusin', () => showPriceHistoryPoint(priceHistoryPlotPoints.length - 1));
-      priceChart.addEventListener('keydown', event => {
-        if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key) || !priceHistoryPlotPoints.length) return;
-        event.preventDefault();
-        const index = priceHistoryPlotPoints.findIndex(point => point.time === priceHistorySelectedAt);
-        const next = event.key === 'Home' ? 0 : event.key === 'End' ? priceHistoryPlotPoints.length - 1
-          : Math.max(0, Math.min(priceHistoryPlotPoints.length - 1, index + (event.key === 'ArrowLeft' ? -1 : 1)));
-        showPriceHistoryPoint(next);
-      });
-      const clearPriceSelection = () => {
-        if (priceChart.contains(document.activeElement)) return;
-        priceHistorySelectedAt = null;
-        priceChart.querySelector('.price-history-hover')?.classList.remove('is-active');
-        document.getElementById('price-history-detail').textContent = '悬停曲线或聚焦后使用左右方向键查看价格；虚线为今日 00:00 基准。';
-      };
-      priceChart.addEventListener('pointerleave', clearPriceSelection);
-      priceChart.addEventListener('focusout', clearPriceSelection);
-      window.addEventListener('resize', renderMarkPrice);
       const tradeChart = document.getElementById('hourly-trade-chart');
       const tradeDetail = document.getElementById('trade-chart-detail');
       const tradeHint = tradeDetail.textContent;

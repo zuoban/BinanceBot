@@ -48,7 +48,45 @@ fn ticker(symbol: &str, price: Decimal) -> TickerInfo {
 }
 
 #[tokio::test]
-async fn running_engine_reschedules_sync_after_saved_updates_and_keeps_rejected_changes_out() {
+async fn global_transition_cancels_old_orders_but_cannot_replenish_before_commit() {
+    let (mut engine, _other, db) = engines().await;
+    let state = engine.state.clone();
+    engine.maintain_grid_window().await;
+    assert!(!state.active_orders.read().await.is_empty());
+    let gate = state.order_submission_lock.clone().write_owned().await;
+    let mut global = crate::config::GlobalConfig::from_app(&*state.config.read().await);
+    global.recv_window = 9000;
+    let (reply, response) = tokio::sync::oneshot::channel();
+    engine
+        .handle_control_action(BotControlAction::UpdateGlobalConfig {
+            config: Box::new(global.clone()),
+            reply,
+        })
+        .await;
+    response.await.unwrap().unwrap();
+    assert_eq!(state.config.read().await.exchange.recv_window, 9000);
+    assert_eq!(
+        db.load_config().unwrap().unwrap().exchange.recv_window,
+        5000
+    );
+    assert_eq!(*state.status.read().await, BotStatus::Running);
+    assert!(state.active_orders.read().await.is_empty());
+    state.resume_trading().await.unwrap();
+    assert!(
+        !engine
+            .place_grid_order(OrderSide::Buy, dec!(100), "gb_guarded_buy".into(), -1, None)
+            .await
+    );
+    engine.maintain_grid_window().await;
+    assert!(state.active_orders.read().await.is_empty());
+    db.save_global_config(&global).unwrap();
+    drop(gate);
+    engine.maintain_grid_window().await;
+    assert!(!state.active_orders.read().await.is_empty());
+}
+
+#[tokio::test]
+async fn running_engine_reschedules_sync_after_global_updates_and_keeps_rejected_changes_out() {
     use axum::{routing::get, Json, Router};
     use serde_json::json;
 
@@ -89,18 +127,20 @@ async fn running_engine_reschedules_sync_after_saved_updates_and_keeps_rejected_
             .unwrap()
             .unwrap();
         for seconds in [30, 1] {
-            let mut config = state.config.read().await.clone();
-            config.exchange.sync_interval_secs = seconds;
+            let mut config = crate::config::GlobalConfig::from_app(&*state.config.read().await);
+            config.sync_interval_secs = seconds;
+            let saved = config.clone();
             let (reply, response) = tokio::sync::oneshot::channel();
             state
                 .action_tx
-                .send(BotControlAction::UpdateConfig {
+                .send(BotControlAction::UpdateGlobalConfig {
                     config: Box::new(config),
                     reply,
                 })
                 .await
                 .unwrap();
             response.await.unwrap().unwrap();
+            db.save_global_config(&saved).unwrap();
             assert_eq!(
                 db.load_config()
                     .unwrap()
@@ -126,13 +166,12 @@ async fn running_engine_reschedules_sync_after_saved_updates_and_keeps_rejected_
             }
         }
 
-        let mut rejected = state.config.read().await.clone();
-        rejected.exchange.sync_interval_secs = 30;
-        rejected.grid.grid_interval = Decimal::ZERO;
+        let mut rejected = crate::config::GlobalConfig::from_app(&*state.config.read().await);
+        rejected.sync_interval_secs = 0;
         let (reply, response) = tokio::sync::oneshot::channel();
         state
             .action_tx
-            .send(BotControlAction::UpdateConfig {
+            .send(BotControlAction::UpdateGlobalConfig {
                 config: Box::new(rejected),
                 reply,
             })

@@ -13,7 +13,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
+use tokio::sync::{broadcast, mpsc, Mutex, OwnedRwLockReadGuard, RwLock};
 use tracing::{error, warn};
 
 #[path = "snapshot.rs"]
@@ -37,6 +37,8 @@ pub struct AppState {
     // Tracks the last non-maintenance status so internal cancellation does not send alerts.
     status_update_lock: Mutex<BotStatus>,
     trade_commit_lock: Arc<Mutex<()>>,
+    /// A global configuration transition holds the writer until commit or rollback completes.
+    pub(crate) order_submission_lock: Arc<RwLock<()>>,
     pair_scope: Option<String>,
     pub(crate) snapshot_scope_lock: RwLock<()>,
     snapshot_publish_lock: Mutex<()>,
@@ -169,6 +171,7 @@ impl AppState {
             shutdown_requested: AtomicBool::new(false),
             status_update_lock: Mutex::new(initial_status),
             trade_commit_lock,
+            order_submission_lock: Arc::new(RwLock::new(())),
             pair_scope,
             snapshot_scope_lock: RwLock::new(()),
             snapshot_publish_lock: Mutex::new(()),
@@ -616,6 +619,12 @@ impl AppState {
 
     pub fn pause_epoch(&self) -> u64 {
         self.pause_epoch.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn try_order_submission(&self) -> Option<OwnedRwLockReadGuard<()>> {
+        // Skip replenishment instead of waiting: the engine must stay available for
+        // configuration actions and cancellation while the coordinator holds the writer.
+        self.order_submission_lock.clone().try_read_owned().ok()
     }
 
     pub fn request_shutdown(&self) {

@@ -4,7 +4,6 @@ pub mod db;
 pub mod exchange;
 pub mod fx;
 pub mod lifecycle;
-pub mod price_history;
 pub mod runtime;
 pub mod server;
 pub mod strategy;

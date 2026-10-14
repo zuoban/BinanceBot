@@ -1,4 +1,4 @@
-use crate::config::AppConfig;
+use crate::config::{AppConfig, GlobalConfig};
 use crate::db::Database;
 use crate::exchange::{BinanceFuturesClient, BinanceWsStream};
 use crate::lifecycle::stop_engine;
@@ -39,6 +39,112 @@ pub struct RuntimeHandle {
 }
 
 impl RuntimeHandle {
+    pub async fn update_global_config(
+        &self,
+        payload: crate::types::UpdateGlobalConfigPayload,
+    ) -> anyhow::Result<()> {
+        // Finish propagation/rollback even if the HTTP client disconnects.
+        let handle = self.clone();
+        tokio::spawn(async move { handle.apply_global_config(payload).await }).await?
+    }
+
+    async fn send_global_config(
+        state: &Arc<AppState>,
+        config: &GlobalConfig,
+    ) -> anyhow::Result<()> {
+        let (reply, response) = oneshot::channel();
+        state
+            .action_tx
+            .send(crate::types::BotControlAction::UpdateGlobalConfig {
+                config: Box::new(config.clone()),
+                reply,
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("策略引擎已退出"))?;
+        response
+            .await
+            .map_err(|_| anyhow::anyhow!("策略未确认全局配置"))?
+            .map_err(anyhow::Error::msg)
+    }
+
+    async fn apply_global_config(
+        &self,
+        payload: crate::types::UpdateGlobalConfigPayload,
+    ) -> anyhow::Result<()> {
+        let _membership = self.membership_lock.lock().await;
+        let saved = self
+            .db
+            .run_blocking(|db| db.load_config())
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("无法读取全局配置"))?;
+        let mut config = GlobalConfig::from_app(&saved);
+        payload.apply_to(&mut config);
+        let states = self.states.read().await.clone();
+        // Validate every mode before changing any engine (including credential clearing).
+        for state in &states {
+            let mut strategy = state.config.read().await.clone();
+            config.apply_to(&mut strategy);
+            strategy.validate()?;
+        }
+        // Drain in-flight submissions in every old scope before installing any new
+        // credentials. Keep all writers through persistence and any rollback so no
+        // engine can replenish orders using settings that are not yet durable.
+        let mut submission_guards = Vec::with_capacity(states.len());
+        for state in &states {
+            submission_guards.push(state.order_submission_lock.clone().write_owned().await);
+        }
+        let mut attempted = Vec::new();
+        let mut failure = None;
+        for state in &states {
+            let old = GlobalConfig::from_app(&*state.config.read().await);
+            attempted.push((state.clone(), old));
+            if let Err(error) = Self::send_global_config(state, &config).await {
+                failure = Some(error);
+                break;
+            }
+        }
+        if failure.is_none() {
+            let saved = config.clone();
+            if let Err(error) = self
+                .db
+                .run_blocking(move |db| db.save_global_config(&saved))
+                .await
+            {
+                failure = Some(error);
+            }
+        }
+        if let Some(error) = failure {
+            let mut rollback_errors = Vec::new();
+            for (state, old) in attempted.into_iter().rev() {
+                if GlobalConfig::from_app(&*state.config.read().await) == old {
+                    continue;
+                }
+                if let Err(rollback) = Self::send_global_config(&state, &old).await {
+                    let symbol = state.config.read().await.exchange.symbol.clone();
+                    rollback_errors.push(format!("{}: {}", symbol, rollback));
+                }
+            }
+            if !rollback_errors.is_empty() {
+                for state in &states {
+                    let _ = state
+                        .pause_trading_with_reason("全局配置恢复失败，请检查系统运行日志")
+                        .await;
+                    let _ = state
+                        .action_tx
+                        .send(crate::types::BotControlAction::Pause)
+                        .await;
+                }
+                anyhow::bail!(
+                    "全局配置更新失败: {}；恢复失败，策略已暂停: {}",
+                    error,
+                    rollback_errors.join("; ")
+                );
+            }
+            anyhow::bail!("全局配置更新失败，已恢复原配置: {}", error);
+        }
+        Ok(())
+    }
+
     pub async fn add_pair(&self, config: AppConfig) -> anyhow::Result<()> {
         let (reply, response) = oneshot::channel();
         self.commands
@@ -195,7 +301,6 @@ impl TradingRuntime {
         let background = vec![
             tokio::spawn(stream.run()),
             tokio::spawn(state.clone().run_cny_rate_refresh()),
-            tokio::spawn(state.clone().run_price_history_refresh()),
             tokio::spawn(state.clone().run_snapshot_broadcast()),
         ];
         Ok(PairTask {
@@ -206,8 +311,15 @@ impl TradingRuntime {
         })
     }
 
-    async fn add_pair(&mut self, config: AppConfig) -> anyhow::Result<()> {
+    async fn add_pair(&mut self, mut config: AppConfig) -> anyhow::Result<()> {
         let _membership = self.handle.membership_lock.lock().await;
+        let saved = self
+            .handle
+            .db
+            .run_blocking(|db| db.load_config())
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("无法读取全局配置"))?;
+        GlobalConfig::from_app(&saved).apply_to(&mut config);
         config.validate()?;
         anyhow::ensure!(
             !self

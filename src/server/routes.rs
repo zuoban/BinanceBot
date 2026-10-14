@@ -5,7 +5,8 @@ use crate::server::ui::INDEX_HTML;
 use crate::types::{
     AuthLoginPayload, AuthSetupPayload, AuthStatusResponse, AuthTokenResponse, BotControlAction,
     BotSnapshot, ChangePasswordPayload, GridOrder, LogEntry, TradeRecord, TradingMode,
-    TradingPairView, UpdateConfigPayload, WebConfigView,
+    TradingPairView, UpdateConfigPayload, UpdateGlobalConfigPayload, WebConfigView,
+    WebGlobalConfigView,
 };
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
@@ -13,7 +14,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{delete, get, post};
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use std::sync::Arc;
@@ -114,12 +115,15 @@ async fn get_single_pair_handler(
 }
 
 fn pair_routes() -> Router<Arc<AppState>> {
+    pair_resource_routes().route("/config", get(get_config_handler).post(post_config_handler))
+}
+
+fn pair_resource_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/status", get(get_status_handler))
         .route("/orders", get(get_orders_handler))
         .route("/trades", get(get_trades_handler))
         .route("/logs", get(get_logs_handler))
-        .route("/config", get(get_config_handler).post(post_config_handler))
         .route("/control", post(post_control_handler))
 }
 
@@ -236,6 +240,10 @@ pub async fn create_managed_router(handle: RuntimeHandle) -> Router {
         .route("/api/control", post(dispatch_pair))
         .route("/api/trades/clear", post(clear_managed_history_handler))
         .route(
+            "/api/global/config",
+            get(get_global_config_handler).post(post_global_config_handler),
+        )
+        .route(
             "/api/server/config",
             get(get_server_config_handler).post(post_server_config_handler),
         )
@@ -289,8 +297,13 @@ async fn dispatch_pair(
     };
     // The selected router enforces each resource's HTTP methods and WebSocket authentication.
     *req.uri_mut() = format!("/{}", resource).parse().unwrap();
-    pair_routes()
+    pair_resource_routes()
+        .route(
+            "/config",
+            get(get_config_handler).post(post_managed_config_handler),
+        )
         .route("/ws", get(ws_handler))
+        .layer(Extension(handle))
         .with_state(state)
         .oneshot(req)
         .await
@@ -308,7 +321,18 @@ async fn add_pair_handler(
     Json(payload): Json<UpdateConfigPayload>,
 ) -> Json<ApiResponse<String>> {
     let result = async {
-        let config = apply_config_payload(AppConfig::default(), payload)?;
+        anyhow::ensure!(
+            !payload.has_global_updates(),
+            "连接和 Telegram 通知请在全局设置中保存"
+        );
+        let saved = handle
+            .db
+            .run_blocking(|db| db.load_config())
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("无法读取全局配置"))?;
+        let mut defaults = AppConfig::default();
+        crate::config::GlobalConfig::from_app(&saved).apply_to(&mut defaults);
+        let config = apply_config_payload(defaults, payload)?;
         let symbol = config.exchange.symbol.clone();
         handle.add_pair(config).await?;
         Ok::<_, anyhow::Error>(symbol)
@@ -326,6 +350,60 @@ async fn add_pair_handler(
             message: Some(error.to_string()),
         }),
     }
+}
+
+async fn post_managed_config_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(handle): Extension<RuntimeHandle>,
+    Json(payload): Json<UpdateConfigPayload>,
+) -> Json<ApiResponse<WebConfigView>> {
+    let _membership = handle.membership_lock.lock().await;
+    post_config_handler(State(state), Json(payload)).await
+}
+
+async fn get_global_config_handler(
+    State(handle): State<RuntimeHandle>,
+) -> Json<ApiResponse<WebGlobalConfigView>> {
+    match handle.db.run_blocking(|db| db.load_config()).await {
+        Ok(Some(config)) => {
+            let view = web_config_view(&config);
+            Json(ApiResponse {
+                success: true,
+                data: Some(WebGlobalConfigView {
+                    recv_window: view.recv_window,
+                    sync_interval_secs: view.sync_interval_secs,
+                    has_api_key: view.has_api_key,
+                    has_api_secret: view.has_api_secret,
+                    api_key_preview: view.api_key_preview,
+                    telegram_enabled: view.telegram_enabled,
+                    has_telegram_bot_token: view.has_telegram_bot_token,
+                    telegram_chat_id: view.telegram_chat_id,
+                }),
+                message: None,
+            })
+        }
+        _ => Json(ApiResponse {
+            success: false,
+            data: None,
+            message: Some("无法读取全局设置".into()),
+        }),
+    }
+}
+
+async fn post_global_config_handler(
+    State(handle): State<RuntimeHandle>,
+    Json(payload): Json<UpdateGlobalConfigPayload>,
+) -> Json<ApiResponse<WebGlobalConfigView>> {
+    if let Err(error) = handle.update_global_config(payload).await {
+        return Json(ApiResponse {
+            success: false,
+            data: None,
+            message: Some(error.to_string()),
+        });
+    }
+    let mut response = get_global_config_handler(State(handle)).await;
+    response.0.message = Some("全局设置已保存，所有交易对立即生效".into());
+    response
 }
 
 async fn remove_pair_handler(
@@ -934,6 +1012,14 @@ async fn get_config_handler(
     State(state): State<Arc<AppState>>,
 ) -> Json<ApiResponse<WebConfigView>> {
     let config = state.config.read().await;
+    Json(ApiResponse {
+        success: true,
+        data: Some(web_config_view(&config)),
+        message: None,
+    })
+}
+
+fn web_config_view(config: &AppConfig) -> WebConfigView {
     let has_key = !config.exchange.api_key.trim().is_empty();
     let has_secret = !config.exchange.api_secret.trim().is_empty();
 
@@ -982,11 +1068,7 @@ async fn get_config_handler(
         pause_on_max_position: config.grid.pause_on_max_position,
     };
 
-    Json(ApiResponse {
-        success: true,
-        data: Some(view),
-        message: None,
-    })
+    view
 }
 
 fn apply_config_payload(
@@ -1075,6 +1157,13 @@ async fn post_config_handler(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<UpdateConfigPayload>,
 ) -> Json<ApiResponse<WebConfigView>> {
+    if state.pair_scope().is_some() && payload.has_global_updates() {
+        return Json(ApiResponse {
+            success: false,
+            data: None,
+            message: Some("连接和 Telegram 通知请在全局设置中保存".into()),
+        });
+    }
     let current_config = match apply_config_payload(state.config.read().await.clone(), payload) {
         Ok(config) => config,
         Err(error) => {

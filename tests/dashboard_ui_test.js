@@ -64,6 +64,7 @@ function dashboard({ scoped = true, fetchStatus } = {}) {
     confirm: text => { confirmations.push(text); return true; }, alert() {},
     fetch: async (url, options = {}) => {
       requests.push({ url, options });
+      if (url === '/api/global/config') return response({ recv_window: 8000, sync_interval_secs: 7, has_api_key: true, api_key_preview: 'glob...key1', has_api_secret: true, telegram_enabled: true, has_telegram_bot_token: true, telegram_chat_id: '123456' });
       if (url === '/api/server/config') return response({ saved: { host: '0.0.0.0', port: 8080 }, active: { host: '0.0.0.0', port: 8080 } });
       if (url === '/api/pairs') {
         if (options.method === 'POST') {
@@ -100,7 +101,7 @@ function dashboard({ scoped = true, fetchStatus } = {}) {
   vm.runInContext(source, context);
   // Exercise the real selection/control code; chart geometry is tested separately by browser QA.
   vm.runInContext(`
-    renderMarkPrice = () => {}; renderLadder = () => {}; renderOrdersTable = () => {};
+    renderLadder = () => {}; renderOrdersTable = () => {};
     renderTradesTable = () => {}; renderHourlyTradeChart = () => {}; renderLogs = () => {};
   `, context);
   return {
@@ -236,10 +237,9 @@ test('adding a pair saves through the global API and selects the paused new stra
   const request = ui.requests.find(request => request.url === '/api/pairs' && request.options.method === 'POST');
   const payload = JSON.parse(request.options.body);
   assert.equal(payload.symbol, 'ETHUSDT');
-  assert.equal(payload.recv_window, 5000);
-  assert.equal(payload.sync_interval_secs, 3);
-  assert.equal(payload.api_key, null);
-  assert.equal(payload.api_secret, null);
+  for (const field of ['recv_window', 'sync_interval_secs', 'api_key', 'api_secret', 'telegram_enabled', 'telegram_bot_token', 'telegram_chat_id']) {
+    assert.equal(field in payload, false, `${field} must be saved only in global settings`);
+  }
   assert.equal('save_to_file' in payload, false);
   assert.equal(ui.run('selectedPair'), 'ETHUSDT');
   assert.equal(ui.states.get('ETHUSDT').status, 'PAUSED');
@@ -282,6 +282,61 @@ test('server settings send an independent request and explain restart requiremen
   assert.deepEqual(JSON.parse(request.options.body), { host: '127.0.0.1', port: 9090 });
   assert.equal(ui.element('btn-save-server').disabled, false);
   assert.equal(ui.run('selectedPair'), 'SOLUSDC');
+});
+
+test('switching and adding pairs preserves unsaved global credentials and notification settings', async () => {
+  const ui = dashboard();
+  await ui.run('initConsole()');
+  assert.equal(ui.element('cfg-recv-window').value, 8000);
+  assert.equal(ui.element('cfg-telegram-chat-id').value, '123456');
+  ui.element('cfg-api-key').value = 'unsaved-global-key';
+  ui.element('cfg-telegram-chat-id').value = '987654';
+  await ui.run("selectPair('BTCUSDT')");
+  ui.run('startNewPair()');
+  assert.equal(ui.element('cfg-api-key').value, 'unsaved-global-key');
+  assert.equal(ui.element('cfg-telegram-chat-id').value, '987654');
+  assert.equal(ui.element('cfg-recv-window').value, 8000);
+  ui.element('cfg-symbol').value = 'ETHUSDT';
+  await ui.run('submitConfig()');
+  assert.equal(ui.element('cfg-api-key').value, 'unsaved-global-key');
+  assert.equal(ui.element('cfg-telegram-chat-id').value, '987654');
+});
+
+test('global settings save independently of the selected pair and never send strategy fields', async () => {
+  const ui = dashboard();
+  await ui.run('initConsole()');
+  await ui.run("selectPair('BTCUSDT')");
+  ui.element('cfg-api-key').value = ' new-global-key ';
+  ui.element('cfg-api-secret').value = ' new-global-secret ';
+  await ui.run('submitGlobalConfig()');
+  const request = ui.requests.find(request => request.url === '/api/global/config' && request.options.method === 'POST');
+  const payload = JSON.parse(request.options.body);
+  assert.equal(payload.api_key, 'new-global-key');
+  assert.equal(payload.api_secret, 'new-global-secret');
+  assert.equal(payload.recv_window, 8000);
+  assert.equal(payload.telegram_enabled, true);
+  for (const field of ['symbol', 'direction', 'grid_interval', 'dry_run', 'is_testnet']) {
+    assert.equal(field in payload, false);
+  }
+  assert.equal(ui.run('selectedPair'), 'BTCUSDT');
+  assert.equal(ui.element('cfg-api-key').value, '');
+  assert.equal(ui.element('btn-save-global').disabled, false);
+});
+
+test('failed global reads disable saving to prevent submitting stale global settings', async () => {
+  const ui = dashboard();
+  await ui.run('initConsole()');
+  ui.run('pendingGlobalResponse = new Promise(resolve => resolveGlobalResponse = resolve)');
+  ui.run('authFetch = () => pendingGlobalResponse');
+  const reading = ui.run('loadGlobalConfigForm()');
+  assert.equal(ui.element('btn-save-global').disabled, true);
+  const count = ui.requests.length;
+  await ui.run('submitGlobalConfig()');
+  assert.equal(ui.requests.length, count);
+  ui.run("resolveGlobalResponse({ ok: false, json: async () => ({ success: false, message: 'offline' }) })");
+  await reading;
+  assert.equal(ui.element('btn-save-global').disabled, true);
+  assert.match(ui.element('global-cfg-alert').textContent, /全局设置读取失败/);
 });
 
 test('direction form loads short, preserves the submitted value, and defaults new pairs to long', async () => {

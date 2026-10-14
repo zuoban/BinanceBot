@@ -582,7 +582,7 @@ impl GridTradingEngine {
                     match action {
                         Some(action) => {
                             let stopping = matches!(action, BotControlAction::Shutdown { .. });
-                            let updating_config = matches!(action, BotControlAction::UpdateConfig { .. });
+                            let updating_config = matches!(action, BotControlAction::UpdateConfig { .. } | BotControlAction::UpdateGlobalConfig { .. });
                             self.handle_control_action(action).await;
                             if stopping { break; }
                             if updating_config {
@@ -618,7 +618,9 @@ impl GridTradingEngine {
 
     async fn handle_control_action(&mut self, action: BotControlAction) {
         if self.state.is_shutting_down() && !matches!(action, BotControlAction::Shutdown { .. }) {
-            if let BotControlAction::UpdateConfig { reply, .. } = action {
+            if let BotControlAction::UpdateConfig { reply, .. }
+            | BotControlAction::UpdateGlobalConfig { reply, .. } = action
+            {
                 let _ = reply.send(Err("程序正在退出，配置未应用".into()));
             }
             return;
@@ -681,6 +683,20 @@ impl GridTradingEngine {
                 if let Err(error) = &result {
                     self.state
                         .add_log("ERROR", format!("Configuration update rejected: {}", error))
+                        .await;
+                }
+                let _ = reply.send(result.map_err(|error| error.to_string()));
+            }
+            BotControlAction::UpdateGlobalConfig { config, reply } => {
+                let mut updated = self.state.config.read().await.clone();
+                config.apply_to(&mut updated);
+                let result = self.apply_config(updated).await;
+                if let Err(error) = &result {
+                    self.state
+                        .add_log(
+                            "ERROR",
+                            format!("Global configuration update rejected: {}", error),
+                        )
                         .await;
                 }
                 let _ = reply.send(result.map_err(|error| error.to_string()));
@@ -1948,6 +1964,9 @@ impl GridTradingEngine {
 
     /// Ensure the active pre-placed order window matches buy_window and sell_window
     async fn maintain_grid_window(&mut self) {
+        if self.state.try_order_submission().is_none() {
+            return;
+        }
         let config = self.state.config.read().await.clone();
         if self.state.is_shutting_down() || *self.state.status.read().await != BotStatus::Running {
             return;
@@ -2302,6 +2321,9 @@ impl GridTradingEngine {
         paired_client_order_id: Option<String>,
         order_quantity: Option<Decimal>,
     ) -> bool {
+        let Some(_submission) = self.state.try_order_submission() else {
+            return false;
+        };
         if self.state.is_shutting_down() || *self.state.status.read().await != BotStatus::Running {
             return false;
         }

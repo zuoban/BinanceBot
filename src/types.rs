@@ -323,21 +323,6 @@ pub struct HourlyTradeStats {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PricePoint {
-    pub timestamp: DateTime<Utc>,
-    pub price: Decimal,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PriceHistory {
-    pub window_start: DateTime<Utc>,
-    pub window_end: DateTime<Utc>,
-    pub day_start: DateTime<Utc>,
-    pub midnight_price: Option<Decimal>,
-    pub points: Vec<PricePoint>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BotSnapshot {
     pub status: BotStatus,
     pub dry_run: bool,
@@ -351,7 +336,6 @@ pub struct BotSnapshot {
     pub active_orders: Vec<GridOrder>,
     pub recent_trades: Vec<TradeRecord>,
     pub hourly_trade_stats: Option<HourlyTradeStats>,
-    pub price_history: Option<PriceHistory>,
     pub recent_logs: Vec<LogEntry>,
 }
 
@@ -378,6 +362,78 @@ pub enum BotControlAction {
         config: Box<crate::config::AppConfig>,
         reply: tokio::sync::oneshot::Sender<Result<(), String>>,
     },
+    UpdateGlobalConfig {
+        config: Box<crate::config::GlobalConfig>,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct UpdateGlobalConfigPayload {
+    pub recv_window: Option<u64>,
+    pub sync_interval_secs: Option<u64>,
+    pub api_key: Option<String>,
+    pub api_secret: Option<String>,
+    #[serde(default)]
+    pub clear_api_credentials: bool,
+    #[serde(default)]
+    pub clear_telegram_credentials: bool,
+    pub telegram_enabled: Option<bool>,
+    pub telegram_bot_token: Option<String>,
+    pub telegram_chat_id: Option<String>,
+}
+
+impl UpdateGlobalConfigPayload {
+    pub fn apply_to(self, config: &mut crate::config::GlobalConfig) {
+        if let Some(value) = self.recv_window {
+            config.recv_window = value;
+        }
+        if let Some(value) = self.sync_interval_secs {
+            config.sync_interval_secs = value;
+        }
+        if self.clear_api_credentials {
+            config.api_key.clear();
+            config.api_secret.clear();
+        } else {
+            for (target, value) in [
+                (&mut config.api_key, self.api_key),
+                (&mut config.api_secret, self.api_secret),
+            ] {
+                if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
+                    *target = value.trim().to_string();
+                }
+            }
+        }
+        if let Some(enabled) = self.telegram_enabled {
+            config.telegram.enabled = enabled;
+        }
+        if self.clear_telegram_credentials {
+            config.telegram.bot_token.clear();
+            config.telegram.chat_id.clear();
+        } else {
+            if let Some(token) = self
+                .telegram_bot_token
+                .filter(|value| !value.trim().is_empty())
+            {
+                config.telegram.bot_token = token.trim().to_string();
+            }
+            if let Some(chat_id) = self.telegram_chat_id {
+                config.telegram.chat_id = chat_id.trim().to_string();
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WebGlobalConfigView {
+    pub recv_window: u64,
+    pub sync_interval_secs: u64,
+    pub has_api_key: bool,
+    pub has_api_secret: bool,
+    pub api_key_preview: String,
+    pub telegram_enabled: bool,
+    pub has_telegram_bot_token: bool,
+    pub telegram_chat_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -412,6 +468,20 @@ pub struct UpdateConfigPayload {
     pub max_position_usdc: Option<Decimal>,
     #[serde(default)]
     pub pause_on_max_position: Option<bool>,
+}
+
+impl UpdateConfigPayload {
+    pub fn has_global_updates(&self) -> bool {
+        self.recv_window.is_some()
+            || self.sync_interval_secs.is_some()
+            || self.api_key.is_some()
+            || self.api_secret.is_some()
+            || self.clear_api_credentials
+            || self.clear_telegram_credentials
+            || self.telegram_enabled.is_some()
+            || self.telegram_bot_token.is_some()
+            || self.telegram_chat_id.is_some()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
