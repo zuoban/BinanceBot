@@ -282,7 +282,7 @@ async fn next_buy_pause_uses_mark_price_fallbacks_and_allows_short_reduction() {
         (dec!(0), dec!(0), dec!(100.05), dec!(9), true),
         // The limit price alone fits, but valuing the added quantity at the mark does not.
         (dec!(100), dec!(100), dec!(100.05), dec!(8.002), true),
-        // A buy reduces this short position and must not cause an early pause.
+        // A short strategy's closing buy must not cause an early pause.
         (dec!(100), dec!(100), dec!(100.05), dec!(-9), false),
     ] {
         let mut engine = paper_engine().await;
@@ -290,6 +290,9 @@ async fn next_buy_pause_uses_mark_price_fallbacks_and_allows_short_reduction() {
             let mut config = engine.state.config.write().await;
             config.grid.max_position_usdc = Some(dec!(1000));
             config.grid.pause_on_max_position = true;
+            if position_size < Decimal::ZERO {
+                config.grid.direction = GridDirection::Short;
+            }
         }
         {
             let mut ticker = engine.state.ticker.write().await;

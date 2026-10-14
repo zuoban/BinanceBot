@@ -5,7 +5,7 @@ use crate::strategy::precision::SymbolRules;
 use crate::types::*;
 use anyhow::{anyhow, Result};
 use chrono::Utc;
-use rust_decimal::Decimal;
+use rust_decimal::{prelude::Signed, Decimal};
 #[cfg(test)]
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -83,13 +83,23 @@ fn is_window_order(order: &GridOrder) -> bool {
     is_grid_order(&order.client_order_id) && order.status == OrderStatus::New
 }
 
-fn buy_exposure_usdc(position_size: Decimal, mark_price: Decimal, orders: &[GridOrder]) -> Decimal {
-    position_size.max(Decimal::ZERO) * mark_price
+fn opening_exposure_usdc(
+    direction: GridDirection,
+    position_size: Decimal,
+    mark_price: Decimal,
+    orders: &[GridOrder],
+) -> Decimal {
+    direction.position_quantity(position_size) * mark_price
         + orders
             .iter()
-            .filter(|order| order.side == OrderSide::Buy)
+            .filter(|order| order.side == direction.opening_side())
             .map(|order| order.price * order.quantity)
             .sum::<Decimal>()
+}
+
+#[cfg(test)]
+fn buy_exposure_usdc(position_size: Decimal, mark_price: Decimal, orders: &[GridOrder]) -> Decimal {
+    opening_exposure_usdc(GridDirection::Long, position_size, mark_price, orders)
 }
 
 fn position_valuation_price(position: &PositionInfo, ticker: &TickerInfo) -> Decimal {
@@ -128,16 +138,31 @@ fn grid_level_occupied(
     has_nearby_grid_order(&occupied, price, interval, tick_size)
 }
 
-fn reserved_sell_quantity(orders: &[GridOrder]) -> Decimal {
+fn reserved_closing_quantity(direction: GridDirection, orders: &[GridOrder]) -> Decimal {
     orders
         .iter()
-        .filter(|o| o.side == OrderSide::Sell)
+        .filter(|o| o.side == direction.closing_side())
         .map(|o| o.quantity)
         .sum()
 }
 
+fn closing_quantity_available(
+    direction: GridDirection,
+    position_size: Decimal,
+    orders: &[GridOrder],
+) -> Decimal {
+    (direction.position_quantity(position_size) - reserved_closing_quantity(direction, orders))
+        .max(Decimal::ZERO)
+}
+
+#[cfg(test)]
+fn reserved_sell_quantity(orders: &[GridOrder]) -> Decimal {
+    reserved_closing_quantity(GridDirection::Long, orders)
+}
+
+#[cfg(test)]
 fn sell_quantity_available(position_size: Decimal, orders: &[GridOrder]) -> Decimal {
-    (position_size.max(Decimal::ZERO) - reserved_sell_quantity(orders)).max(Decimal::ZERO)
+    closing_quantity_available(GridDirection::Long, position_size, orders)
 }
 
 fn aggregate_execution_pnl(
@@ -236,7 +261,7 @@ impl GridTradingEngine {
         }
     }
 
-    /// Check filled position value independently of buy-order placement and reservations.
+    /// Check filled position value independently of opening-order reservations.
     async fn pause_if_position_limit_reached(&mut self) -> bool {
         if *self.state.status.read().await != BotStatus::Running {
             return false;
@@ -283,6 +308,34 @@ impl GridTradingEngine {
                 )
                 .await;
         }
+    }
+
+    async fn position_direction_ready(&mut self) -> bool {
+        let direction = self.state.config.read().await.grid.direction;
+        if self.state.position.read().await.size * direction.sign() >= Decimal::ZERO {
+            return true;
+        }
+        self.pause_trading_with_reason("持仓方向与策略方向不一致，请先平仓后手动恢复")
+            .await;
+        self.state
+            .add_log("ERROR", "持仓方向与策略方向不一致，策略已暂停")
+            .await;
+        self.cancel_all_orders().await;
+        false
+    }
+
+    async fn ensure_flat_for_direction_change(&mut self) -> Result<()> {
+        if !self.state.config.read().await.exchange.dry_run {
+            anyhow::ensure!(
+                self.sync_account_and_position().await,
+                "无法确认当前持仓，交易方向未切换"
+            );
+        }
+        anyhow::ensure!(
+            self.state.position.read().await.size.is_zero(),
+            "切换做多 / 做空方向前，请先平掉当前持仓"
+        );
+        Ok(())
     }
 
     async fn save_managed_order(&self, order: &GridOrder) -> Result<()> {
@@ -686,6 +739,10 @@ impl GridTradingEngine {
             );
         }
         let old_config = self.state.config.read().await.clone();
+        let direction_changed = old_config.grid.direction != new_config.grid.direction;
+        if direction_changed {
+            self.ensure_flat_for_direction_change().await?;
+        }
         let strategy_changed =
             old_config.exchange != new_config.exchange || old_config.grid != new_config.grid;
         let mut resized_grid = old_config.grid.clone();
@@ -717,10 +774,14 @@ impl GridTradingEngine {
         };
         if !new_config.exchange.dry_run {
             new_client.sync_server_time().await?;
-            new_client
+            let new_position = new_client
                 .get_position(&new_config.exchange.symbol)
                 .await?
                 .ok_or_else(|| anyhow!("New symbol has no position information"))?;
+            anyhow::ensure!(
+                !direction_changed || new_position.position_amt.is_zero(),
+                "切换做多 / 做空方向前，请先平掉目标账户的持仓"
+            );
             let account = new_client.get_account().await?;
             if account
                 .margin_asset_for_symbol(&new_config.exchange.symbol)
@@ -776,6 +837,15 @@ impl GridTradingEngine {
             return Err(anyhow!(
                 "Could not cancel old managed orders; configuration unchanged"
             ));
+        }
+        // Cancellation may reveal a racing fill. Recheck the old account before
+        // committing the new direction so an exit cannot become an opening order.
+        if direction_changed {
+            if let Err(error) = self.ensure_flat_for_direction_change().await {
+                self.pause_trading_with_reason("撤单后未确认空仓，交易方向未切换")
+                    .await;
+                return Err(error);
+            }
         }
         // Snapshot readers must see the new config together with its matching runtime data.
         let transition_state = Arc::clone(&self.state);
@@ -905,6 +975,9 @@ impl GridTradingEngine {
 
     /// Check simulated fills in Dry Run mode
     async fn simulate_order_fills(&mut self, current_price: Decimal) {
+        if !self.position_direction_ready().await {
+            return;
+        }
         let mut filled_orders = Vec::new();
 
         {
@@ -943,6 +1016,21 @@ impl GridTradingEngine {
         for mut order in filled_orders {
             if *self.state.status.read().await != BotStatus::Running {
                 break;
+            }
+            let direction = self.state.config.read().await.grid.direction;
+            if order.side == direction.closing_side() {
+                order.quantity = order
+                    .quantity
+                    .min(direction.position_quantity(self.state.position.read().await.size));
+                if order.quantity <= Decimal::ZERO {
+                    self.state
+                        .active_orders
+                        .write()
+                        .await
+                        .remove(&order.client_order_id);
+                    continue;
+                }
+                order.amount_usdc = order.price * order.quantity;
             }
             self.on_order_filled(&mut order).await;
             if self.pause_if_position_limit_reached().await {
@@ -992,7 +1080,7 @@ impl GridTradingEngine {
         if self.pause_if_position_limit_reached().await {
             return;
         }
-        self.trim_sell_orders_to_position().await;
+        self.trim_closing_orders_to_position().await;
 
         if *self.state.status.read().await == BotStatus::Running && account_ready {
             self.maintain_grid_window().await;
@@ -1729,102 +1817,76 @@ impl GridTradingEngine {
         let mut cycle_profit = Decimal::ZERO;
         let mut simulated_pnl = Decimal::ZERO;
         let mut is_completed_cycle = false;
-        let mut completed_buy_price = None;
-        let note;
+        let mut note = format!(
+            "Grid {} filled at {} (Qty: {})",
+            order.side.as_str(),
+            order.price,
+            order.quantity
+        );
 
-        match order.side {
-            OrderSide::Buy => {
-                note = format!(
-                    "Grid BUY filled at {} (Qty: {})",
-                    order.price, order.quantity
-                );
-
-                // Update simulated position in dry-run
-                if config.exchange.dry_run {
-                    let mut pos = self.state.position.write().await;
-                    let prev_size = pos.size;
-                    let new_size = prev_size + order.quantity;
-                    if !new_size.is_zero() {
-                        pos.entry_price = if prev_size >= Decimal::ZERO {
-                            (pos.entry_price * prev_size + order.price * order.quantity) / new_size
-                        } else {
-                            order.price
-                        };
-                    }
-                    pos.size = new_size;
-                } else {
-                    // Refresh the position after this confirmed fill before reserving the paired exit.
-                    self.sync_account_and_position().await;
+        // Legacy paired cycles retain their spread estimate in either direction.
+        if order.side == config.grid.direction.closing_side() {
+            if let Some(paired_id) = &order.paired_client_order_id {
+                let paired_id = paired_id.clone();
+                let opening_trade = self
+                    .state
+                    .db
+                    .run_blocking(move |db| db.get_trade_by_client_id(&paired_id, mode))
+                    .await
+                    .ok()
+                    .flatten()
+                    .filter(|trade| trade.side == config.grid.direction.opening_side());
+                if let Some(opening) = opening_trade {
+                    cycle_profit = (order.price - opening.price)
+                        * config.grid.direction.sign()
+                        * order.quantity.min(opening.quantity);
+                    is_completed_cycle = true;
+                    note = format!(
+                        "Completed Grid Cycle! {} at {} (Paired Entry: {}, Spread Estimate: {} USDC)",
+                        order.side.as_str(), order.price, opening.price, cycle_profit
+                    );
+                    self.state.add_log("SUCCESS", note.clone()).await;
                 }
             }
-            OrderSide::Sell => {
-                // Check if this sell closed a previously tracked buy order
-                if let Some(paired_id) = &order.paired_client_order_id {
-                    // Legacy pairs keep their historical accounting only.
-                    let paired_id = paired_id.clone();
-                    let purchase = self
-                        .state
-                        .db
-                        .run_blocking(move |db| db.get_trade_by_client_id(&paired_id, mode))
-                        .await
-                        .ok()
-                        .flatten()
-                        .filter(|trade| trade.side == OrderSide::Buy)
-                        .map(|trade| (trade.price, trade.quantity));
-                    if let Some((buy_price, buy_qty)) = purchase {
-                        let exec_qty = order.quantity.min(buy_qty);
-                        cycle_profit = (order.price - buy_price) * exec_qty;
-                        completed_buy_price = Some(buy_price);
-                        is_completed_cycle = true;
-                    }
-                }
+        }
+        if !is_completed_cycle {
+            self.state.add_log("INFO", note.clone()).await;
+        }
 
-                if is_completed_cycle {
-                    note = format!(
-                        "Completed Grid Cycle! Sold at {} (Paired Buy: {}, Spread Estimate: +{} USDC)",
-                        order.price, completed_buy_price.unwrap(), cycle_profit
-                    );
-                    self.state
-                        .add_log(
-                            "SUCCESS",
-                            format!(
-                                "🎉 Grid Cycle Completed! Sold at {}, Spread Estimate: +{} USDC",
-                                order.price, cycle_profit
-                            ),
-                        )
-                        .await;
-                } else {
-                    note = format!(
-                        "Grid SELL filled at {} (Qty: {})",
-                        order.price, order.quantity
-                    );
-                    self.state
-                        .add_log(
-                            "INFO",
-                            format!(
-                                "🔴 SELL Filled at {} (Qty: {})",
-                                order.price, order.quantity
-                            ),
-                        )
-                        .await;
-                }
-
-                // Update simulated position in dry-run
-                if config.exchange.dry_run {
-                    let mut pos = self.state.position.write().await;
-                    let prev_size = pos.size;
-                    let closed_qty = order.quantity.min(prev_size.max(Decimal::ZERO));
-                    simulated_pnl = (order.price - pos.entry_price) * closed_qty;
-                    let new_size = prev_size - order.quantity;
-                    pos.size = new_size;
-
-                    let mut acc = self.state.account.write().await;
-                    acc.total_wallet_balance += simulated_pnl;
-                    acc.available_balance += simulated_pnl;
-                } else {
-                    self.sync_account_and_position().await;
+        if config.exchange.dry_run {
+            let mut pos = self.state.position.write().await;
+            let delta = if order.side == OrderSide::Buy {
+                order.quantity
+            } else {
+                -order.quantity
+            };
+            let prev_size = pos.size;
+            let new_size = prev_size + delta;
+            if prev_size.is_zero() || prev_size.signum() == delta.signum() {
+                pos.entry_price = (pos.entry_price * prev_size.abs()
+                    + order.price * order.quantity)
+                    / new_size.abs();
+            } else {
+                simulated_pnl = (order.price - pos.entry_price)
+                    * prev_size.signum()
+                    * order.quantity.min(prev_size.abs());
+                if new_size.is_zero() {
+                    pos.entry_price = Decimal::ZERO;
+                } else if new_size.signum() != prev_size.signum() {
+                    pos.entry_price = order.price;
                 }
             }
+            pos.size = new_size;
+            let ticker = self.state.ticker.read().await.clone();
+            pos.mark_price = ticker.grid_reference_price();
+            pos.unrealized_pnl = (pos.mark_price - pos.entry_price) * pos.size;
+            let mut acc = self.state.account.write().await;
+            acc.total_wallet_balance += simulated_pnl;
+            acc.available_balance += simulated_pnl;
+            acc.unrealized_profit = pos.unrealized_pnl;
+            acc.margin_balance = acc.total_wallet_balance + pos.unrealized_pnl;
+        } else {
+            self.sync_account_and_position().await;
         }
 
         let (realized_pnl, commission, is_maker, pnl_verified) = if config.exchange.dry_run {
@@ -1893,6 +1955,10 @@ impl GridTradingEngine {
         if self.pause_if_position_limit_reached().await {
             return;
         }
+        // Opposite positions require cancellation even while prices are stale.
+        if !self.position_direction_ready().await {
+            return;
+        }
         if !self.market_data_ready().await {
             return;
         }
@@ -1924,7 +1990,7 @@ impl GridTradingEngine {
                 }
             }
         }
-        self.trim_sell_orders_to_position().await;
+        self.trim_closing_orders_to_position().await;
         if !config.exchange.dry_run {
             let symbol = config.exchange.symbol.clone();
             let mode = TradingMode::from_exchange(false, config.exchange.is_testnet);
@@ -2098,7 +2164,12 @@ impl GridTradingEngine {
             }
         }
 
-        if let Err(e) = self.reconcile_remainder(&desired_sell_prices).await {
+        let closing_prices = if config.grid.direction == GridDirection::Long {
+            &desired_sell_prices
+        } else {
+            &desired_buy_prices
+        };
+        if let Err(e) = self.reconcile_remainder(closing_prices).await {
             self.state
                 .add_log("WARN", format!("Remainder reconciliation pending: {}", e))
                 .await;
@@ -2172,25 +2243,28 @@ impl GridTradingEngine {
         true
     }
 
-    /// Keep outstanding sells within the actual long position, nearest prices first.
-    async fn trim_sell_orders_to_position(&mut self) {
-        let mut sell_orders: Vec<GridOrder> = self
+    /// Keep closing orders within the directional position, nearest prices first.
+    async fn trim_closing_orders_to_position(&mut self) {
+        let direction = self.state.config.read().await.grid.direction;
+        let mut closing_orders: Vec<GridOrder> = self
             .state
             .active_orders
             .read()
             .await
             .values()
-            .filter(|order| order.side == OrderSide::Sell)
+            .filter(|order| order.side == direction.closing_side())
             .cloned()
             .collect();
-        sell_orders.sort_by(|a, b| {
-            a.price
-                .cmp(&b.price)
-                .then_with(|| a.client_order_id.cmp(&b.client_order_id))
+        closing_orders.sort_by(|a, b| {
+            let price_order = if direction == GridDirection::Long {
+                a.price.cmp(&b.price)
+            } else {
+                b.price.cmp(&a.price)
+            };
+            price_order.then_with(|| a.client_order_id.cmp(&b.client_order_id))
         });
-
-        let mut remaining = self.state.position.read().await.size.max(Decimal::ZERO);
-        for order in sell_orders {
+        let mut remaining = direction.position_quantity(self.state.position.read().await.size);
+        for order in closing_orders {
             if order.quantity <= remaining {
                 remaining -= order.quantity;
             } else if !self.cancel_single_order(&order).await {
@@ -2232,6 +2306,9 @@ impl GridTradingEngine {
             return false;
         }
         if self.pause_if_position_limit_reached().await {
+            return false;
+        }
+        if !self.position_direction_ready().await {
             return false;
         }
         let config = self.state.config.read().await.clone();
@@ -2331,13 +2408,15 @@ impl GridTradingEngine {
         ) {
             return false;
         }
-        let quantity = if side == OrderSide::Buy {
+        let quantity = if side == config.grid.direction.opening_side() {
             if let Some(limit) = config.grid.max_position_usdc {
                 let position = self.state.position.read().await.clone();
                 let mark_price = position_valuation_price(&position, &ticker);
                 let position_value = position.size.abs() * mark_price;
-                let projected_position_value = (position.size + full_quantity).abs() * mark_price;
-                // A full next buy must fit the filled position even when the position
+                let projected_position_value =
+                    (position.size + config.grid.direction.sign() * full_quantity).abs()
+                        * mark_price;
+                // A full next opening order must fit the filled position even when the position
                 // has not yet reached the cap. Pending orders alone still only reserve funds.
                 if config.grid.pause_on_max_position
                     && mark_price > Decimal::ZERO
@@ -2345,32 +2424,46 @@ impl GridTradingEngine {
                     && projected_position_value > position_value
                 {
                     self.pause_for_position_limit(format!(
-                        "持仓名义价值 {}，下一笔买单（价格 {}，数量 {}）成交后预计持仓名义价值 {} 将超过最大持仓名义价值 {}",
-                        position_value, price, full_quantity, projected_position_value, limit
+                        "持仓名义价值 {}，下一笔{}单（价格 {}，数量 {}）成交后预计持仓名义价值 {} 将超过最大持仓名义价值 {}",
+                        position_value, if side == OrderSide::Buy { "买" } else { "卖" }, price, full_quantity, projected_position_value, limit
                     ))
                     .await;
                     return false;
                 }
                 let valuation_price = reference_price.max(current_market_price).max(price);
-                let exposure = buy_exposure_usdc(position.size, valuation_price, &orders)
-                    + price * full_quantity;
+                let exposure = opening_exposure_usdc(
+                    config.grid.direction,
+                    position.size,
+                    valuation_price,
+                    &orders,
+                ) + price * full_quantity;
                 if exposure > limit {
                     debug!(
-                        "Skipping BUY at {}: projected exposure {} exceeds limit {}",
-                        price, exposure, limit
+                        "Skipping {} at {}: projected exposure {} exceeds limit {}",
+                        side.as_str(),
+                        price,
+                        exposure,
+                        limit
                     );
                     return false;
                 }
             }
             full_quantity
         } else {
-            let available = sell_quantity_available(self.state.position.read().await.size, &orders);
+            let available = closing_quantity_available(
+                config.grid.direction,
+                self.state.position.read().await.size,
+                &orders,
+            );
             if available >= full_quantity {
                 full_quantity
             } else {
                 debug!(
-                    "Skipping SELL at {}: available {} < full grid quantity {}",
-                    price, available, full_quantity
+                    "Skipping {} at {}: available {} < full grid quantity {}",
+                    side.as_str(),
+                    price,
+                    available,
+                    full_quantity
                 );
                 return false;
             }
@@ -2441,7 +2534,7 @@ impl GridTradingEngine {
                     quantity: &formatted_qty,
                     client_order_id: &client_order_id,
                     post_only: true,
-                    reduce_only: side == OrderSide::Sell,
+                    reduce_only: side == config.grid.direction.closing_side(),
                 })
                 .await
             {
@@ -3824,7 +3917,7 @@ mod tests {
         );
 
         state.position.write().await.size = dec!(-1);
-        engine.trim_sell_orders_to_position().await;
+        engine.trim_closing_orders_to_position().await;
         let orders: Vec<_> = state.active_orders.read().await.values().cloned().collect();
         assert_eq!(reserved_sell_quantity(&orders), dec!(0));
     }
@@ -4027,3 +4120,7 @@ mod fixed_grid_tests;
 #[cfg(test)]
 #[path = "multi_pair_tests.rs"]
 mod multi_pair_tests;
+
+#[cfg(test)]
+#[path = "short_tests.rs"]
+mod short_tests;

@@ -83,10 +83,10 @@
         <div class="metric-title">当前持仓与未实现盈亏</div>
         <div class="metric-value" id="card-position">--</div>
         <div class="metric-sub">
-          <span title="持仓数量 × 标记价格">持仓金额: <strong id="card-position-value">--</strong></span>
+          <span title="持仓数量绝对值 × 标记价格">持仓金额: <strong id="card-position-value">--</strong></span>
           <span>未结盈亏: <span id="card-unrealized">--</span></span>
           <span style="color: var(--text-dim);">开仓均价: <span id="card-entry">--</span></span>
-          <span style="color: var(--text-dim);">已挂卖: <span id="card-sell-reserved">--</span></span>
+          <span style="color: var(--text-dim);"><span id="card-close-reserved-label">已挂卖平多</span>: <span id="card-sell-reserved">--</span></span>
         </div>
       </div>
 
@@ -247,6 +247,15 @@
                 <span class="form-hint" id="cfg-symbol-hint">币安合约交易对代码</span>
               </div>
 
+              <div class="form-group">
+                <label for="cfg-direction">交易方向</label>
+                <select id="cfg-direction">
+                  <option value="LONG">做多 · 买入开仓 / 卖出平仓</option>
+                  <option value="SHORT">做空 · 卖出开仓 / 买入平仓</option>
+                </select>
+                <span class="form-hint">切换方向前需平掉当前持仓；测试网和实盘需使用单向持仓模式</span>
+              </div>
+
               <!-- 网格间距 -->
               <div class="form-group">
                 <label for="cfg-interval">网格间距 (Grid Interval, 计价资产)</label>
@@ -258,7 +267,7 @@
               <div class="form-group">
                 <label for="cfg-amount">单格下单金额 (Order Amount, 计价资产)</label>
                 <input type="number" id="cfg-amount" step="any" min="1" required placeholder="100.0" />
-                <span class="form-hint">普通单按目标金额向下取整；成交后统一补窗口，余量卖单使用剩余可卖数量</span>
+                <span class="form-hint">普通单按目标金额向下取整；成交后统一补窗口，尾仓平仓单使用剩余可平数量</span>
               </div>
 
               <!-- 买单窗口 -->
@@ -291,7 +300,7 @@
               <div class="form-group">
                 <label for="cfg-max-position">最大持仓名义价值 (计价资产, 可选)</label>
                 <input type="number" id="cfg-max-position" step="any" placeholder="例如 2000" />
-                <span class="form-hint">买入挂单受持仓与未成交买单合计敞口上限限制</span>
+                <span class="form-hint">开仓挂单受持仓与未成交开仓单合计敞口上限限制；平仓单仅减仓</span>
               </div>
 
               <div class="form-group" style="justify-content: center;">
@@ -299,7 +308,7 @@
                   <input type="checkbox" id="cfg-pause-on-max-position" aria-describedby="cfg-pause-on-max-position-hint" style="width: 17px; height: 17px; accent-color: var(--accent);" />
                   <span>达到最大持仓名义价值时暂停策略</span>
                 </label>
-                <span class="form-hint" id="cfg-pause-on-max-position-hint">需设置上限。按标记价格估值：持仓达到上限，或下一笔完整买单成交后将超限时暂停；撤销策略挂单，保留持仓，需手动恢复</span>
+                <span class="form-hint" id="cfg-pause-on-max-position-hint">需设置上限。按标记价格估值：持仓达到上限，或下一笔完整开仓单成交后将超限时暂停；撤销策略挂单，保留持仓，需手动恢复</span>
               </div>
 
               <!-- 只做 Maker -->
@@ -1277,15 +1286,17 @@
       const posEl = document.getElementById('card-position');
       posEl.textContent = `${posSize > 0 ? '+' : ''}${posSize.toFixed(2)} ${baseAsset}`;
       posEl.className = posSize > 0 ? 'metric-value text-green' : (posSize < 0 ? 'metric-value text-red' : 'metric-value');
-      const positionValue = posSize * latestMarkPrice;
+      const positionValue = Math.abs(posSize) * latestMarkPrice;
       document.getElementById('card-position-value').textContent = latestMarkPrice > 0 && Number.isFinite(positionValue)
         ? `${positionValue.toFixed(2)} ${pnlAsset}` : `-- ${pnlAsset}`;
+      const shortGrid = data.grid_config.direction === 'SHORT';
+      document.getElementById('card-close-reserved-label').textContent = shortGrid ? '已挂买平空' : '已挂卖平多';
       const sellReserved = data.active_orders
-        .filter(o => o.side === 'SELL')
+        .filter(o => o.side === (shortGrid ? 'BUY' : 'SELL'))
         .reduce((total, o) => total + parseFloat(o.quantity || 0), 0);
       const sellReservedEl = document.getElementById('card-sell-reserved');
       sellReservedEl.textContent = `${sellReserved.toFixed(2)} ${baseAsset}`;
-      sellReservedEl.className = sellReserved > Math.max(posSize, 0) + 0.000001 ? 'text-red' : '';
+      sellReservedEl.className = sellReserved > Math.max(shortGrid ? -posSize : posSize, 0) + 0.000001 ? 'text-red' : '';
 
       const unPnl = parseFloat(data.position.unrealized_pnl || 0);
       const unPnlEl = document.getElementById('card-unrealized');
@@ -1321,7 +1332,7 @@
 
       // Grid Info Card
       document.getElementById('card-grid-info').textContent = `${data.grid_config.grid_interval} ${pnlAsset} / ${data.grid_config.order_amount_usdc} ${pnlAsset}`;
-      document.getElementById('card-window-info').textContent = `${data.grid_config.buy_window} 买 / ${data.grid_config.sell_window} 卖`;
+      document.getElementById('card-window-info').textContent = `${shortGrid ? '做空' : '做多'} · ${data.grid_config.buy_window} 买 / ${data.grid_config.sell_window} 卖`;
       document.getElementById('ladder-step').textContent = data.grid_config.grid_interval;
       document.getElementById('ladder-amount').textContent = data.grid_config.order_amount_usdc;
 
@@ -1638,6 +1649,7 @@
 
     function fillConfigForm(c) {
           document.getElementById('cfg-symbol').value = c.symbol;
+          document.getElementById('cfg-direction').value = c.direction || 'LONG';
           document.getElementById('cfg-interval').value = c.grid_interval;
           document.getElementById('cfg-amount').value = c.order_amount_usdc;
           document.getElementById('cfg-buy-window').value = c.buy_window;
@@ -1780,6 +1792,7 @@
 
       const payload = {
         symbol: document.getElementById('cfg-symbol').value.trim().toUpperCase(),
+        direction: document.getElementById('cfg-direction').value,
         grid_interval: document.getElementById('cfg-interval').value,
         order_amount_usdc: document.getElementById('cfg-amount').value,
         buy_window: parseInt(document.getElementById('cfg-buy-window').value),

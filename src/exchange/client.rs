@@ -371,7 +371,7 @@ impl BinanceFuturesClient {
     }
 
     /// Place an order. If post_only is true, timeInForce is set to GTX (Maker Only).
-    /// reduce_only prevents a sell from opening a short when the position changes on Binance.
+    /// reduce_only prevents a closing order from opening the opposite position.
     pub async fn place_order(
         &self,
         order: NewOrderRequest<'_>,
@@ -474,10 +474,7 @@ impl BinanceFuturesClient {
         }
 
         let positions: Vec<BinancePositionRisk> = resp.json().await?;
-        let pos = positions
-            .into_iter()
-            .find(|p| p.symbol.eq_ignore_ascii_case(symbol));
-        Ok(pos)
+        one_way_position(positions, symbol)
     }
 
     /// Fetch account balance summary
@@ -521,9 +518,50 @@ impl BinanceFuturesClient {
     }
 }
 
+fn one_way_position(
+    positions: Vec<BinancePositionRisk>,
+    symbol: &str,
+) -> Result<Option<BinancePositionRisk>> {
+    let mut positions = positions
+        .into_iter()
+        .filter(|position| position.symbol.eq_ignore_ascii_case(symbol));
+    let position = positions.next();
+    anyhow::ensure!(
+        position.as_ref().is_none_or(|position| position
+            .position_side
+            .as_deref()
+            .is_none_or(|side| side == "BOTH"))
+            && positions.next().is_none(),
+        "策略仅支持币安单向持仓模式，请先将账户设置为单向持仓"
+    );
+    Ok(position)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn position_selection_accepts_one_way_short_and_rejects_hedge_mode() {
+        let position = |side: &str, amount: &str| {
+            serde_json::from_value::<BinancePositionRisk>(serde_json::json!({
+                "symbol": "SOLUSDC", "positionSide": side, "positionAmt": amount,
+                "entryPrice": "100", "markPrice": "99", "unRealizedProfit": "1",
+                "liquidationPrice": "0", "leverage": "20"
+            }))
+            .unwrap()
+        };
+        let short = one_way_position(vec![position("BOTH", "-1")], "SOLUSDC")
+            .unwrap()
+            .unwrap();
+        assert_eq!(short.position_amt, rust_decimal_macros::dec!(-1));
+        assert!(one_way_position(vec![position("SHORT", "-1")], "SOLUSDC").is_err());
+        assert!(one_way_position(
+            vec![position("LONG", "0"), position("SHORT", "0")],
+            "SOLUSDC"
+        )
+        .is_err());
+    }
 
     #[test]
     fn order_errors_distinguish_uncertain_execution_from_explicit_rejection() {

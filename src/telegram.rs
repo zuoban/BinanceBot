@@ -1,7 +1,8 @@
 use crate::config::TelegramConfig;
 use crate::fx::CnyRate;
 use crate::types::{
-    AccountInfo, HourlyTradeStats, OrderSide, PositionInfo, TickerInfo, TradeRecord, TradingMode,
+    AccountInfo, GridDirection, HourlyTradeStats, OrderSide, PositionInfo, TickerInfo, TradeRecord,
+    TradingMode,
 };
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Duration, FixedOffset, Utc};
@@ -145,6 +146,7 @@ impl TelegramNotifier {
 
 #[derive(Debug, Default)]
 pub struct TradeNotificationContext {
+    pub direction: GridDirection,
     pub today_count: Option<u64>,
     pub hour_count: Option<u64>,
     pub account_equity: Option<Decimal>,
@@ -187,6 +189,7 @@ impl TradeNotificationContext {
             })
             .map(|rate| rate.cny_per_unit);
         Self {
+            direction: GridDirection::Long,
             today_count,
             hour_count,
             account_equity,
@@ -194,6 +197,11 @@ impl TradeNotificationContext {
             position_amount: None,
             cny_per_unit,
         }
+    }
+
+    pub fn with_direction(mut self, direction: GridDirection) -> Self {
+        self.direction = direction;
+        self
     }
 
     pub fn with_position(
@@ -269,7 +277,7 @@ pub fn format_trade_message(trade: &TradeRecord, context: &TradeNotificationCont
             || "--".to_string(),
             |value| format!("{:.2}%", value.round_dp(2)),
         );
-    let pnl_line = if trade.side == OrderSide::Sell {
+    let pnl_line = if trade.side == context.direction.closing_side() {
         if trade.pnl_verified {
             format!(
                 "\n已实现盈亏：{:+.4} {quote}",
@@ -431,6 +439,20 @@ mod tests {
             format_trade_message(&trade, &context(&trade)),
             "<b>🟢 BUY｜123.4500｜2 SOL｜246.90 USDC｜7｜2</b>\n<b>账户权益：11254.48 USDC｜</b>≈ ¥75453.41\n持仓金额：2469.00 USDC\n可用保证金：3878.03 USDC｜34.46%"
         );
+    }
+
+    #[test]
+    fn short_notifications_show_realized_pnl_on_closing_buys() {
+        let mut closing = trade(OrderSide::Buy);
+        closing.realized_pnl = dec!(3.25);
+        let short_context = context(&closing).with_direction(GridDirection::Short);
+        assert!(
+            format_trade_message(&closing, &short_context).ends_with("已实现盈亏：+3.2500 USDC")
+        );
+        closing.pnl_verified = false;
+        assert!(format_trade_message(&closing, &short_context).ends_with("已实现盈亏：待同步"));
+        let opening = trade(OrderSide::Sell);
+        assert!(!format_trade_message(&opening, &short_context).contains("已实现盈亏"));
     }
 
     #[test]

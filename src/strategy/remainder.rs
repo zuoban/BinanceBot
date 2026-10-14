@@ -1,4 +1,4 @@
-//! A durable cancel/reconcile/submit workflow for explicitly identified long-position remainders.
+//! A durable cancel/reconcile/submit workflow for explicitly identified closing-position remainders.
 use super::*;
 
 impl GridTradingEngine {
@@ -32,8 +32,15 @@ impl GridTradingEngine {
 
     pub(super) async fn reconcile_remainder(&mut self, desired_prices: &[Decimal]) -> Result<()> {
         let config = self.state.config.read().await.clone();
+        let direction = config.grid.direction;
+        let closing_side = direction.closing_side();
+        let closing_window = if closing_side == OrderSide::Buy {
+            config.grid.buy_window
+        } else {
+            config.grid.sell_window
+        };
         if self.state.is_shutting_down()
-            || config.grid.sell_window == 0
+            || closing_window == 0
             || *self.state.status.read().await != BotStatus::Running
             || !self.state.ticker.read().await.prices_are_fresh(Utc::now())
         {
@@ -52,7 +59,7 @@ impl GridTradingEngine {
             .iter()
             .filter(|o| {
                 o.symbol == config.exchange.symbol
-                    && o.side == OrderSide::Sell
+                    && o.side == closing_side
                     && o.purpose == OrderPurpose::Remainder
                     && o.paired_client_order_id.is_none()
                     && is_grid_order(&o.client_order_id)
@@ -63,7 +70,7 @@ impl GridTradingEngine {
         let occupied: Vec<_> = orders
             .iter()
             .filter(|o| {
-                o.side == OrderSide::Sell
+                o.side == closing_side
                     && !sources
                         .iter()
                         .any(|s| s.client_order_id == o.client_order_id)
@@ -81,10 +88,12 @@ impl GridTradingEngine {
         let Some(price) = price else { return Ok(()) };
         let market = self.state.ticker.read().await.last_price;
         if market <= Decimal::ZERO
-            || price <= market
+            || (closing_side == OrderSide::Sell && price <= market)
+            || (closing_side == OrderSide::Buy && price >= market)
             || price < rules.min_price
             || price > rules.max_price
             || config.grid.max_price.is_some_and(|max| price > max)
+            || config.grid.min_price.is_some_and(|min| price < min)
             || rules.round_price(price) != price
         {
             return Ok(());
@@ -104,7 +113,11 @@ impl GridTradingEngine {
             .cloned()
             .collect();
         let quantity = rules
-            .round_quantity(sell_quantity_available(position, &other_orders))
+            .round_quantity(closing_quantity_available(
+                direction,
+                position,
+                &other_orders,
+            ))
             .min(full_quantity);
         if quantity < rules.min_qty || quantity * price < rules.min_notional {
             return Ok(());
@@ -133,17 +146,21 @@ impl GridTradingEngine {
         }
         let now = Utc::now();
         let target = GridOrder {
-            client_order_id: new_grid_client_order_id(OrderSide::Sell),
+            client_order_id: new_grid_client_order_id(closing_side),
             order_id: None,
             symbol: config.exchange.symbol.clone(),
-            side: OrderSide::Sell,
+            side: closing_side,
             price,
             quantity,
             amount_usdc: price * quantity,
             status: OrderStatus::New,
             created_at: now,
             updated_at: now,
-            grid_level: 1,
+            grid_level: if closing_side == OrderSide::Buy {
+                -1
+            } else {
+                1
+            },
             paired_client_order_id: None,
             is_take_profit: false,
             purpose,
@@ -270,16 +287,26 @@ impl GridTradingEngine {
         if market <= Decimal::ZERO {
             return Ok(());
         }
-        let (_, sells) = self
+        let direction = config.grid.direction;
+        let closing_side = direction.closing_side();
+        let (buys, sells) = self
             .window_prices(&config, &rules, ticker.grid_reference_price())
             .await?;
-        if !sells.contains(&price)
+        let window = if closing_side == OrderSide::Buy {
+            buys
+        } else {
+            sells
+        };
+        if plan.target.side != closing_side
+            || !window.contains(&price)
             || !rules.is_grid_price(price, config.grid.grid_interval)
-            || price <= market
+            || (closing_side == OrderSide::Sell && price <= market)
+            || (closing_side == OrderSide::Buy && price >= market)
             || rules.round_price(price) != price
             || price < rules.min_price
             || price > rules.max_price
             || config.grid.max_price.is_some_and(|max| price > max)
+            || config.grid.min_price.is_some_and(|min| price < min)
         {
             // Sources are terminal and the target lookup above confirmed that
             // no order was accepted. Keeping this plan active would freeze both
@@ -304,12 +331,13 @@ impl GridTradingEngine {
             .collect();
         if orders
             .iter()
-            .any(|o| o.side == OrderSide::Sell && o.price == price)
+            .any(|o| o.side == closing_side && o.price == price)
         {
             plan.phase = RemainderPhase::Abandoned;
             return self.persist_remainder_plan(plan).await;
         }
-        let available = sell_quantity_available(self.state.position.read().await.size, &orders);
+        let available =
+            closing_quantity_available(direction, self.state.position.read().await.size, &orders);
         // Never grow beyond the planned allocation when fills arrive during cancellation.
         let quantity = rules
             .round_quantity(available.min(plan.target.quantity))
@@ -345,7 +373,7 @@ impl GridTradingEngine {
                 .client
                 .place_order(NewOrderRequest {
                     symbol: &plan.symbol,
-                    side: "SELL",
+                    side: closing_side.as_str(),
                     price: &price,
                     quantity: &quantity,
                     client_order_id: &plan.target.client_order_id,
@@ -363,8 +391,9 @@ impl GridTradingEngine {
             .add_log(
                 "INFO",
                 format!(
-                    "Remainder allocation confirmed: {} sources → SELL {} at {} (id: {})",
+                    "Remainder allocation confirmed: {} sources → {} {} at {} (id: {})",
                     plan.sources.len(),
+                    closing_side.as_str(),
                     plan.target.quantity,
                     plan.target.price,
                     plan.target.client_order_id
@@ -402,7 +431,7 @@ impl GridTradingEngine {
     ) -> Result<()> {
         if found.client_order_id != order.client_order_id
             || found.symbol != order.symbol
-            || found.side != "SELL"
+            || found.side != order.side.as_str()
         {
             return Err(anyhow!("Remainder exchange identity mismatch"));
         }

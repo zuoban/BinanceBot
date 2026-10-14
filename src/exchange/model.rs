@@ -127,6 +127,8 @@ pub struct Binance24hrTicker {
 #[derive(Debug, Deserialize, Clone)]
 pub struct BinancePositionRisk {
     pub symbol: String,
+    #[serde(rename = "positionSide", default)]
+    pub position_side: Option<String>,
     #[serde(rename = "positionAmt")]
     pub position_amt: Decimal,
     #[serde(rename = "entryPrice")]

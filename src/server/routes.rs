@@ -960,6 +960,7 @@ async fn get_config_handler(
 
     let view = WebConfigView {
         symbol: config.exchange.symbol.clone(),
+        direction: config.grid.direction,
         grid_interval: config.grid.grid_interval,
         order_amount_usdc: config.grid.order_amount_usdc,
         buy_window: config.grid.buy_window,
@@ -993,6 +994,9 @@ fn apply_config_payload(
     payload: UpdateConfigPayload,
 ) -> anyhow::Result<AppConfig> {
     current_config.exchange.symbol = payload.symbol.trim().to_uppercase();
+    if let Some(direction) = payload.direction {
+        current_config.grid.direction = direction;
+    }
     current_config.grid.grid_interval = payload.grid_interval;
     current_config.grid.order_amount_usdc = payload.order_amount_usdc;
     current_config.grid.buy_window = payload.buy_window;
@@ -1293,6 +1297,41 @@ mod tests {
     use crate::config::AppConfig;
     use crate::db::Database;
     use crate::types::BotStatus;
+
+    #[tokio::test]
+    async fn short_direction_is_saved_returned_and_preserved_for_legacy_clients() {
+        use crate::types::GridDirection;
+        let mut config = AppConfig::default();
+        let payload = serde_json::json!({
+            "symbol": "SOLUSDC", "grid_interval": "0.1", "order_amount_usdc": "100",
+            "buy_window": 5, "sell_window": 5, "direction": "SHORT"
+        });
+        config =
+            apply_config_payload(config, serde_json::from_value(payload.clone()).unwrap()).unwrap();
+        assert_eq!(config.grid.direction, GridDirection::Short);
+        let mut legacy = payload.clone();
+        legacy.as_object_mut().unwrap().remove("direction");
+        config = apply_config_payload(config, serde_json::from_value(legacy).unwrap()).unwrap();
+        assert_eq!(config.grid.direction, GridDirection::Short);
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        db.save_config(&config).unwrap();
+        let saved = db.load_config().unwrap().unwrap();
+        assert_eq!(saved.grid.direction, GridDirection::Short);
+        let (tx, _) = tokio::sync::mpsc::channel(1);
+        let state = AppState::new(saved, db, tx);
+        assert_eq!(
+            get_config_handler(State(state))
+                .await
+                .0
+                .data
+                .unwrap()
+                .direction,
+            GridDirection::Short
+        );
+        let mut invalid = payload;
+        invalid["direction"] = serde_json::json!("BOTH");
+        assert!(serde_json::from_value::<UpdateConfigPayload>(invalid).is_err());
+    }
 
     #[tokio::test]
     async fn max_position_pause_is_saved_returned_and_preserved_for_legacy_clients() {

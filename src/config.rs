@@ -122,6 +122,9 @@ pub struct ExchangeConfig {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GridConfig {
+    /// Long buys to open; short sells to open. Exits are always reduce-only.
+    #[serde(default)]
+    pub direction: crate::types::GridDirection,
     /// Grid spacing / interval (e.g. 0.1 USDC)
     #[serde(default = "default_grid_interval")]
     pub grid_interval: Decimal,
@@ -151,7 +154,7 @@ pub struct GridConfig {
     /// Maximum position limit in USDC value
     pub max_position_usdc: Option<Decimal>,
 
-    /// Pause and cancel managed orders at the position limit or before a buy would exceed it.
+    /// Pause and cancel managed orders at the limit or before an opening order would exceed it.
     #[serde(default)]
     pub pause_on_max_position: bool,
 }
@@ -178,6 +181,7 @@ impl ServerConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GridConfigSummary {
     pub symbol: String,
+    pub direction: crate::types::GridDirection,
     pub grid_interval: Decimal,
     pub order_amount_usdc: Decimal,
     pub buy_window: usize,
@@ -257,6 +261,7 @@ impl Default for AppConfig {
 impl Default for GridConfig {
     fn default() -> Self {
         Self {
+            direction: crate::types::GridDirection::Long,
             grid_interval: dec!(0.1),
             order_amount_usdc: dec!(100.0),
             buy_window: 5,
@@ -383,6 +388,7 @@ impl AppConfig {
     pub fn summary(&self) -> GridConfigSummary {
         GridConfigSummary {
             symbol: self.exchange.symbol.clone(),
+            direction: self.grid.direction,
             grid_interval: self.grid.grid_interval,
             order_amount_usdc: self.grid.order_amount_usdc,
             buy_window: self.grid.buy_window,
@@ -415,6 +421,32 @@ mod tests {
     use super::AppConfig;
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
+
+    #[test]
+    fn legacy_configs_default_long_and_pairs_keep_independent_directions() {
+        use crate::types::GridDirection;
+        let mut serialized = serde_json::to_value(AppConfig::default()).unwrap();
+        serialized["grid"]
+            .as_object_mut()
+            .unwrap()
+            .remove("direction");
+        let mut config: AppConfig = serde_json::from_value(serialized).unwrap();
+        assert_eq!(config.grid.direction, GridDirection::Long);
+        config.pairs = ["SOLUSDC", "BTCUSDT"]
+            .map(|symbol| super::TradingPairConfig::new(symbol.into()))
+            .to_vec();
+        let mut short = config.grid.clone();
+        short.direction = GridDirection::Short;
+        config.pairs[1].grid = Some(short);
+        let configs = config.strategy_configs().unwrap();
+        assert_eq!(configs[0].grid.direction, GridDirection::Long);
+        assert_eq!(configs[1].grid.direction, GridDirection::Short);
+        config.ensure_pair_list().unwrap();
+        assert_eq!(
+            config.pairs[1].grid.as_ref().unwrap().direction,
+            GridDirection::Short
+        );
+    }
 
     #[test]
     fn legacy_shared_credentials_become_independent_pair_settings() {

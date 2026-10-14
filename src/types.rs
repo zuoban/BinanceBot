@@ -25,6 +25,39 @@ impl OrderSide {
     }
 }
 
+/// Strategy direction in Binance's one-way position mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum GridDirection {
+    #[default]
+    Long,
+    Short,
+}
+
+impl GridDirection {
+    pub fn opening_side(self) -> OrderSide {
+        match self {
+            Self::Long => OrderSide::Buy,
+            Self::Short => OrderSide::Sell,
+        }
+    }
+
+    pub fn closing_side(self) -> OrderSide {
+        self.opening_side().opposite()
+    }
+
+    pub fn sign(self) -> Decimal {
+        match self {
+            Self::Long => Decimal::ONE,
+            Self::Short => -Decimal::ONE,
+        }
+    }
+
+    pub fn position_quantity(self, size: Decimal) -> Decimal {
+        (size * self.sign()).max(Decimal::ZERO)
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum TradingMode {
@@ -350,6 +383,8 @@ pub enum BotControlAction {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateConfigPayload {
     pub symbol: String,
+    #[serde(default)]
+    pub direction: Option<GridDirection>,
     pub grid_interval: Decimal,
     pub order_amount_usdc: Decimal,
     pub buy_window: usize,
@@ -382,6 +417,7 @@ pub struct UpdateConfigPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebConfigView {
     pub symbol: String,
+    pub direction: GridDirection,
     pub grid_interval: Decimal,
     pub order_amount_usdc: Decimal,
     pub buy_window: usize,

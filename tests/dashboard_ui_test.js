@@ -283,3 +283,41 @@ test('server settings send an independent request and explain restart requiremen
   assert.equal(ui.element('btn-save-server').disabled, false);
   assert.equal(ui.run('selectedPair'), 'SOLUSDC');
 });
+
+test('direction form loads short, preserves the submitted value, and defaults new pairs to long', async () => {
+  const ui = dashboard();
+  await ui.run('initConsole()');
+  ui.run("fillConfigForm({ symbol: 'SOLUSDC', direction: 'SHORT', grid_interval: '1', order_amount_usdc: '100', buy_window: 3, sell_window: 3, dry_run: true })");
+  assert.equal(ui.element('cfg-direction').value, 'SHORT');
+  await ui.run('loadConfigForm()');
+  assert.equal(ui.element('cfg-direction').value, 'LONG');
+  ui.element('cfg-direction').value = 'SHORT';
+  await ui.run('submitConfig()');
+  const request = ui.requests.find(request => request.url === '/api/pairs/SOLUSDC/config' && request.options.method === 'POST');
+  assert.equal(JSON.parse(request.options.body).direction, 'SHORT');
+  ui.run('startNewPair()');
+  assert.equal(ui.element('cfg-direction').value, 'LONG');
+});
+
+test('short position shows positive notional and reserves only closing buys', async () => {
+  const ui = dashboard();
+  await ui.run('initConsole()');
+  const data = snapshot('SOLUSDC');
+  data.grid_config.direction = 'SHORT';
+  data.position.size = '-2';
+  data.ticker.mark_price = '100';
+  data.active_orders = [
+    { side: 'BUY', quantity: '1.5' },
+    { side: 'SELL', quantity: '3' },
+  ];
+  ui.states.set('SOLUSDC', data);
+  await ui.poll();
+  assert.equal(ui.element('card-position-value').textContent, '200.00 USDC');
+  assert.equal(ui.element('card-close-reserved-label').textContent, '已挂买平空');
+  assert.equal(ui.element('card-sell-reserved').textContent, '1.50 SOL');
+  assert.equal(ui.element('card-sell-reserved').className, '');
+  assert.match(ui.element('card-window-info').textContent, /做空/);
+  data.active_orders[0].quantity = '2.5';
+  await ui.poll();
+  assert.equal(ui.element('card-sell-reserved').className, 'text-red');
+});

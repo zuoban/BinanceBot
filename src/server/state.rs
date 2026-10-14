@@ -201,6 +201,7 @@ impl AppState {
             current_config.exchange.is_testnet,
         );
         let telegram = current_config.telegram.clone();
+        let direction = current_config.grid.direction;
         drop(current_config);
         if trade.symbol != current_symbol || trade.mode != current_mode {
             error!(
@@ -294,7 +295,8 @@ impl AppState {
                 cny_rate.as_ref(),
                 Utc::now(),
             )
-            .with_position(&trade, &position, &ticker);
+            .with_position(&trade, &position, &ticker)
+            .with_direction(direction);
             let notifier = self.telegram_notifier.clone();
             let state = Arc::clone(self);
             tokio::spawn(async move {
