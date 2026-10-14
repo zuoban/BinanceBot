@@ -83,6 +83,7 @@
         <div class="metric-title">当前持仓与未实现盈亏</div>
         <div class="metric-value" id="card-position">--</div>
         <div class="metric-sub">
+          <span title="持仓数量 × 标记价格">持仓金额: <strong id="card-position-value">--</strong></span>
           <span>未结盈亏: <span id="card-unrealized">--</span></span>
           <span style="color: var(--text-dim);">开仓均价: <span id="card-entry">--</span></span>
           <span style="color: var(--text-dim);">已挂卖: <span id="card-sell-reserved">--</span></span>
@@ -1211,6 +1212,9 @@
       const posEl = document.getElementById('card-position');
       posEl.textContent = `${posSize > 0 ? '+' : ''}${posSize.toFixed(2)} ${baseAsset}`;
       posEl.className = posSize > 0 ? 'metric-value text-green' : (posSize < 0 ? 'metric-value text-red' : 'metric-value');
+      const positionValue = posSize * latestMarkPrice;
+      document.getElementById('card-position-value').textContent = latestMarkPrice > 0 && Number.isFinite(positionValue)
+        ? `${positionValue.toFixed(2)} ${pnlAsset}` : `-- ${pnlAsset}`;
       const sellReserved = data.active_orders
         .filter(o => o.side === 'SELL')
         .reduce((total, o) => total + parseFloat(o.quantity || 0), 0);
