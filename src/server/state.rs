@@ -6,6 +6,7 @@ use crate::telegram::{
     StrategyEvent, StrategyNotification, TelegramNotifier, TradeNotificationContext,
 };
 use crate::types::*;
+use anyhow::Context;
 use chrono::Utc;
 use rust_decimal::Decimal;
 use std::collections::{HashMap, VecDeque};
@@ -35,7 +36,8 @@ pub struct AppState {
     shutdown_requested: AtomicBool,
     // Tracks the last non-maintenance status so internal cancellation does not send alerts.
     status_update_lock: Mutex<BotStatus>,
-    trade_commit_lock: Mutex<()>,
+    trade_commit_lock: Arc<Mutex<()>>,
+    pair_scope: Option<String>,
     pub(crate) snapshot_scope_lock: RwLock<()>,
     snapshot_publish_lock: Mutex<()>,
     snapshot_cache: snapshot::SnapshotCache,
@@ -53,10 +55,37 @@ impl AppState {
         db: Arc<Database>,
         action_tx: mpsc::Sender<BotControlAction>,
     ) -> Arc<Self> {
+        Self::build(config, db, action_tx, None, Arc::new(Mutex::new(())))
+    }
+
+    pub fn new_for_pair(
+        config: AppConfig,
+        db: Arc<Database>,
+        action_tx: mpsc::Sender<BotControlAction>,
+        trade_commit_lock: Arc<Mutex<()>>,
+    ) -> Arc<Self> {
+        let symbol = config.exchange.symbol.clone();
+        Self::build(config, db, action_tx, Some(symbol), trade_commit_lock)
+    }
+
+    fn build(
+        config: AppConfig,
+        db: Arc<Database>,
+        action_tx: mpsc::Sender<BotControlAction>,
+        pair_scope: Option<String>,
+        trade_commit_lock: Arc<Mutex<()>>,
+    ) -> Arc<Self> {
         let (ws_broadcast_tx, _) = broadcast::channel(100);
         let symbol = config.exchange.symbol.clone();
         let mode = TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
-        let initial_status = match db.load_bot_status() {
+        let saved_status = db.load_pair_status(&symbol, mode).and_then(|status| {
+            if status.is_some() || pair_scope.is_some() {
+                Ok(status)
+            } else {
+                db.load_bot_status()
+            }
+        });
+        let initial_status = match saved_status {
             Ok(Some(status)) => status,
             Ok(None) if config.exchange.dry_run => BotStatus::Running,
             Ok(None) => BotStatus::Paused,
@@ -139,7 +168,8 @@ impl AppState {
             pause_epoch: AtomicU64::new(0),
             shutdown_requested: AtomicBool::new(false),
             status_update_lock: Mutex::new(initial_status),
-            trade_commit_lock: Mutex::new(()),
+            trade_commit_lock,
+            pair_scope,
             snapshot_scope_lock: RwLock::new(()),
             snapshot_publish_lock: Mutex::new(()),
             snapshot_cache: snapshot::SnapshotCache::default(),
@@ -354,6 +384,21 @@ impl AppState {
     pub async fn clear_trade_history(&self) -> anyhow::Result<usize> {
         let _commit = self.trade_commit_lock.lock().await;
         let deleted = self.db.run_blocking(Database::clear_trade_history).await?;
+        self.reset_trade_history_cache().await;
+        Ok(deleted)
+    }
+
+    pub async fn clear_trade_history_for(states: &[Arc<Self>]) -> anyhow::Result<usize> {
+        let first = states.first().context("没有运行中的交易对")?;
+        let _commit = first.trade_commit_lock.lock().await;
+        let deleted = first.db.run_blocking(Database::clear_trade_history).await?;
+        for state in states {
+            state.reset_trade_history_cache().await;
+        }
+        Ok(deleted)
+    }
+
+    async fn reset_trade_history_cache(&self) {
         let mut stats = self.stats.write().await;
         *stats = GridStats {
             start_time: stats.start_time,
@@ -363,7 +408,34 @@ impl AppState {
             ..GridStats::default()
         };
         self.recent_trades.write().await.clear();
-        Ok(deleted)
+    }
+
+    pub fn pair_scope(&self) -> Option<&str> {
+        self.pair_scope.as_deref()
+    }
+
+    pub async fn save_runtime_config(&self, config: AppConfig) -> anyhow::Result<()> {
+        // An immediate HTTP pause cannot slip between saving a new mode and installing it.
+        let _update = self.status_update_lock.lock().await;
+        let status = *self.status.read().await;
+        let scope = self.pair_scope.clone();
+        let saved = config.clone();
+        self.db
+            .run_blocking(move |db| db.save_runtime_config(&saved, scope.as_deref(), status))
+            .await?;
+        *self.config.write().await = config;
+        Ok(())
+    }
+
+    async fn persist_status(&self, status: BotStatus) -> anyhow::Result<()> {
+        let config = self.config.read().await;
+        let symbol = config.exchange.symbol.clone();
+        let mode = TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
+        let legacy = self.pair_scope.is_none();
+        drop(config);
+        self.db
+            .run_blocking(move |db| db.save_runtime_status(&symbol, mode, status, legacy))
+            .await
     }
 
     pub async fn add_log(&self, level: &str, message: impl Into<String>) {
@@ -483,13 +555,9 @@ impl AppState {
         let saved = if status == BotStatus::Paused {
             // An unsafe strategy must stop even if persistence fails.
             *self.status.write().await = status;
-            self.db
-                .run_blocking(move |db| db.save_bot_status(status))
-                .await
+            self.persist_status(status).await
         } else {
-            self.db
-                .run_blocking(move |db| db.save_bot_status(status))
-                .await?;
+            self.persist_status(status).await?;
             *self.status.write().await = status;
             Ok(())
         };
@@ -572,6 +640,73 @@ impl AppState {
 mod tests {
     use super::*;
     use rust_decimal_macros::dec;
+
+    #[tokio::test]
+    async fn legacy_and_multi_pair_formats_preserve_pause_and_manual_resume() {
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let mut config = AppConfig::default();
+        config.exchange.dry_run = false;
+        config.exchange.api_key = "test-key".into();
+        config.exchange.api_secret = "test-secret".into();
+        config.pairs = vec![crate::config::TradingPairConfig::new("SOLUSDC".into())];
+        db.save_config(&config).unwrap();
+        db.save_bot_status(BotStatus::Running).unwrap();
+        let strategy = config.strategy_configs().unwrap().remove(0);
+        let (tx, _) = mpsc::channel(8);
+        let multi =
+            AppState::new_for_pair(strategy.clone(), db.clone(), tx, Arc::new(Mutex::new(())));
+        multi.pause_trading().await.unwrap();
+        assert_eq!(db.load_bot_status().unwrap(), Some(BotStatus::Running));
+
+        db.save_config(&strategy).unwrap();
+        let (tx, _) = mpsc::channel(8);
+        let legacy = AppState::new(strategy.clone(), db.clone(), tx);
+        assert_eq!(*legacy.status.read().await, BotStatus::Paused);
+        legacy.resume_trading().await.unwrap();
+        assert_eq!(db.load_bot_status().unwrap(), Some(BotStatus::Running));
+        assert_eq!(
+            db.load_pair_status("SOLUSDC", TradingMode::Live).unwrap(),
+            Some(BotStatus::Running)
+        );
+
+        db.save_config(&config).unwrap();
+        let (tx, _) = mpsc::channel(8);
+        let multi = AppState::new_for_pair(strategy, db.clone(), tx, Arc::new(Mutex::new(())));
+        assert_eq!(*multi.status.read().await, BotStatus::Running);
+        multi.pause_trading().await.unwrap();
+        assert_eq!(*multi.status.read().await, BotStatus::Paused);
+    }
+
+    #[tokio::test]
+    async fn a_pause_racing_a_mode_commit_is_persisted_in_the_new_mode() {
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let config = AppConfig {
+            pairs: vec![crate::config::TradingPairConfig::new("SOLUSDC".into())],
+            ..Default::default()
+        };
+        db.save_config(&config).unwrap();
+        db.save_pair_status("SOLUSDC", TradingMode::Live, BotStatus::Running)
+            .unwrap();
+        let (tx, _) = mpsc::channel(8);
+        let state = AppState::new_for_pair(
+            config.strategy_configs().unwrap().remove(0),
+            db.clone(),
+            tx,
+            Arc::new(Mutex::new(())),
+        );
+        let mut live = state.config.read().await.clone();
+        live.exchange.dry_run = false;
+        let (committed, paused) =
+            tokio::join!(state.save_runtime_config(live), state.pause_trading());
+        committed.unwrap();
+        paused.unwrap();
+        assert!(!state.config.read().await.exchange.dry_run);
+        assert_eq!(*state.status.read().await, BotStatus::Paused);
+        assert_eq!(
+            db.load_pair_status("SOLUSDC", TradingMode::Live).unwrap(),
+            Some(BotStatus::Paused)
+        );
+    }
 
     struct NotificationFixture {
         state: Arc<AppState>,

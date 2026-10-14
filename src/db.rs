@@ -118,6 +118,14 @@ impl Database {
             config.exchange.api_secret.clear();
             config.telegram.bot_token.clear();
             config.telegram.chat_id.clear();
+            for pair in &mut config.pairs {
+                pair.exchange.api_key = None;
+                pair.exchange.api_secret = None;
+                if let Some(telegram) = &mut pair.telegram {
+                    telegram.bot_token.clear();
+                    telegram.chat_id.clear();
+                }
+            }
             snapshot.execute(
                 "UPDATE app_config SET config_json = ?1 WHERE id = 1",
                 params![serde_json::to_string(&config)?],
@@ -141,16 +149,41 @@ impl Database {
     }
 
     pub fn save_bot_status(&self, status: BotStatus) -> Result<()> {
-        let value = serde_json::to_value(status)?;
-        let name = value
-            .as_str()
-            .context("Invalid bot status representation")?;
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO bot_runtime (id, status, updated_at) VALUES (1, ?1, ?2) ON CONFLICT(id) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at;",
-            params![name, Utc::now().to_rfc3339()],
-        )?;
-        Ok(())
+        save_bot_status_on(&self.conn.lock().unwrap(), status)
+    }
+
+    pub fn load_pair_status(&self, symbol: &str, mode: TradingMode) -> Result<Option<BotStatus>> {
+        let value: Option<String> = {
+            let conn = self.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT status FROM pair_runtime WHERE symbol = ?1 AND mode = ?2",
+                params![symbol, mode.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?
+        };
+        if let Some(value) = value {
+            return Ok(Some(serde_json::from_str(&value)?));
+        }
+        // Only the former single strategy inherits the legacy global status.
+        if let Some(config) = self.load_config()? {
+            if config.exchange.symbol == symbol
+                && TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet)
+                    == mode
+            {
+                return self.load_bot_status();
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn save_pair_status(
+        &self,
+        symbol: &str,
+        mode: TradingMode,
+        status: BotStatus,
+    ) -> Result<()> {
+        save_pair_status_on(&self.conn.lock().unwrap(), symbol, mode, status)
     }
 
     pub fn init_tables(&self) -> Result<()> {
@@ -162,6 +195,14 @@ impl Database {
                 symbol TEXT NOT NULL,
                 config_json TEXT NOT NULL,
                 updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS pair_runtime (
+                symbol TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                status TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (symbol, mode)
             );
 
             CREATE TABLE IF NOT EXISTS trades (
@@ -438,22 +479,51 @@ impl Database {
     }
 
     pub fn save_config(&self, config: &AppConfig) -> Result<()> {
-        let json_str = serde_json::to_string_pretty(config)
-            .context("Failed to serialize AppConfig to JSON")?;
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            r#"
-            INSERT INTO app_config (id, symbol, config_json, updated_at)
-            VALUES (1, ?1, ?2, ?3)
-            ON CONFLICT(id) DO UPDATE SET
-                symbol = excluded.symbol,
-                config_json = excluded.config_json,
-                updated_at = excluded.updated_at;
-            "#,
-            params![config.exchange.symbol, json_str, Utc::now().to_rfc3339(),],
-        )
-        .context("Failed to save config to SQLite database")?;
+        save_config_on(&self.conn.lock().unwrap(), config)
+    }
 
+    /// Merge while holding the database mutex so simultaneous pair updates cannot lose changes.
+    pub fn save_pair_config(&self, symbol: &str, config: &AppConfig) -> Result<()> {
+        save_pair_config_on(&self.conn.lock().unwrap(), symbol, config)
+    }
+
+    /// A new configuration must never become durable without its current execution status.
+    pub fn save_runtime_config(
+        &self,
+        config: &AppConfig,
+        pair_scope: Option<&str>,
+        status: BotStatus,
+    ) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        match pair_scope {
+            Some(symbol) => save_pair_config_on(&tx, symbol, config)?,
+            None => save_config_on(&tx, config)?,
+        }
+        let mode = TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
+        save_pair_status_on(&tx, &config.exchange.symbol, mode, status)?;
+        if pair_scope.is_none() {
+            save_bot_status_on(&tx, status)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Legacy writers also update the scoped row so switching configuration formats is reversible.
+    pub fn save_runtime_status(
+        &self,
+        symbol: &str,
+        mode: TradingMode,
+        status: BotStatus,
+        legacy: bool,
+    ) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        save_pair_status_on(&tx, symbol, mode, status)?;
+        if legacy {
+            save_bot_status_on(&tx, status)?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -1002,6 +1072,66 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         save_stats_on(&conn, stats)
     }
+}
+
+fn save_config_on(conn: &Connection, config: &AppConfig) -> Result<()> {
+    let json =
+        serde_json::to_string_pretty(config).context("Failed to serialize AppConfig to JSON")?;
+    conn.execute(
+        "INSERT INTO app_config (id, symbol, config_json, updated_at) VALUES (1, ?1, ?2, ?3)
+         ON CONFLICT(id) DO UPDATE SET symbol = excluded.symbol,
+         config_json = excluded.config_json, updated_at = excluded.updated_at",
+        params![config.exchange.symbol, json, Utc::now().to_rfc3339()],
+    )
+    .context("Failed to save config to SQLite database")?;
+    Ok(())
+}
+
+fn save_pair_config_on(conn: &Connection, symbol: &str, config: &AppConfig) -> Result<()> {
+    anyhow::ensure!(
+        symbol == config.exchange.symbol,
+        "多交易对运行时不能重命名交易对，请修改配置后重启"
+    );
+    let json: String = conn.query_row(
+        "SELECT config_json FROM app_config WHERE id = 1",
+        [],
+        |row| row.get(0),
+    )?;
+    let mut saved: AppConfig = serde_json::from_str(&json)?;
+    let pair = saved
+        .pairs
+        .iter_mut()
+        .find(|pair| pair.symbol == symbol)
+        .with_context(|| format!("交易对 {} 不在已保存的配置中", symbol))?;
+    pair.update_from(config);
+    save_config_on(conn, &saved)
+}
+
+fn save_pair_status_on(
+    conn: &Connection,
+    symbol: &str,
+    mode: TradingMode,
+    status: BotStatus,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO pair_runtime (symbol, mode, status, updated_at) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(symbol, mode) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at",
+        params![symbol, mode.as_str(), serde_json::to_string(&status)?, Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+fn save_bot_status_on(conn: &Connection, status: BotStatus) -> Result<()> {
+    let value = serde_json::to_value(status)?;
+    let name = value
+        .as_str()
+        .context("Invalid bot status representation")?;
+    conn.execute(
+        "INSERT INTO bot_runtime (id, status, updated_at) VALUES (1, ?1, ?2)
+         ON CONFLICT(id) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at",
+        params![name, Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
 }
 
 fn insert_trade_on(conn: &Connection, trade: &TradeRecord) -> Result<bool> {
@@ -2062,5 +2192,151 @@ mod tests {
 
         db.delete_session(token).unwrap();
         assert!(!db.is_session_valid(token).unwrap());
+    }
+
+    #[test]
+    fn concurrent_pair_updates_preserve_the_other_strategy_and_shared_defaults() {
+        use std::sync::Arc;
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let mut config = AppConfig::default();
+        config.pairs = ["SOLUSDC", "BTCUSDT"]
+            .map(|s| crate::config::TradingPairConfig::new(s.into()))
+            .to_vec();
+        db.save_config(&config).unwrap();
+        let mut strategies = config.strategy_configs().unwrap();
+        strategies[0].grid.buy_window = 2;
+        strategies[1].grid.grid_interval = dec!(10);
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let workers: Vec<_> = strategies
+            .into_iter()
+            .map(|config| {
+                let db = db.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    db.save_pair_config(&config.exchange.symbol, &config)
+                        .unwrap();
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        let saved = db.load_config().unwrap().unwrap();
+        assert_eq!(saved.grid.buy_window, 5);
+        assert_eq!(saved.grid.grid_interval, dec!(0.1));
+        let restored = saved.strategy_configs().unwrap();
+        assert_eq!(restored[0].grid.buy_window, 2);
+        assert_eq!(restored[1].grid.grid_interval, dec!(10));
+        assert!(db.save_pair_config("SOLUSDC", &restored[1]).is_err());
+    }
+
+    #[test]
+    fn a_failed_runtime_status_write_rolls_back_the_configuration_too() {
+        let db = Database::open(":memory:").unwrap();
+        let config = AppConfig {
+            pairs: vec![crate::config::TradingPairConfig::new("SOLUSDC".into())],
+            ..Default::default()
+        };
+        db.save_config(&config).unwrap();
+        db.save_pair_status("SOLUSDC", TradingMode::Live, BotStatus::Running)
+            .unwrap();
+        let mut candidate = config.strategy_configs().unwrap().remove(0);
+        candidate.exchange.dry_run = false;
+        candidate.grid.buy_window = 7;
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER reject_status BEFORE UPDATE ON pair_runtime
+             BEGIN SELECT RAISE(ABORT, 'status write failed'); END;",
+            )
+            .unwrap();
+        assert!(db
+            .save_runtime_config(&candidate, Some("SOLUSDC"), BotStatus::Paused)
+            .is_err());
+        assert_eq!(
+            serde_json::to_value(db.load_config().unwrap().unwrap()).unwrap(),
+            serde_json::to_value(config).unwrap()
+        );
+        assert_eq!(
+            db.load_pair_status("SOLUSDC", TradingMode::Live).unwrap(),
+            Some(BotStatus::Running)
+        );
+    }
+
+    #[test]
+    fn pair_status_survives_restart_and_only_the_original_pair_inherits_legacy_pause() {
+        let path =
+            std::env::temp_dir().join(format!("multi-pair-status-{}.db", uuid::Uuid::new_v4()));
+        {
+            let db = Database::open(&path).unwrap();
+            db.save_config(&AppConfig::default()).unwrap();
+            db.save_bot_status(BotStatus::Paused).unwrap();
+            assert_eq!(
+                db.load_pair_status("SOLUSDC", TradingMode::Paper).unwrap(),
+                Some(BotStatus::Paused)
+            );
+            assert_eq!(
+                db.load_pair_status("BTCUSDT", TradingMode::Paper).unwrap(),
+                None
+            );
+            db.save_pair_status("SOLUSDC", TradingMode::Paper, BotStatus::Running)
+                .unwrap();
+            db.save_pair_status("BTCUSDT", TradingMode::Paper, BotStatus::Paused)
+                .unwrap();
+            db.save_pair_status("BTCUSDT", TradingMode::Testnet, BotStatus::Running)
+                .unwrap();
+        }
+        let db = Database::open(&path).unwrap();
+        assert_eq!(
+            db.load_pair_status("SOLUSDC", TradingMode::Paper).unwrap(),
+            Some(BotStatus::Running)
+        );
+        assert_eq!(
+            db.load_pair_status("BTCUSDT", TradingMode::Paper).unwrap(),
+            Some(BotStatus::Paused)
+        );
+        assert_eq!(
+            db.load_pair_status("BTCUSDT", TradingMode::Testnet)
+                .unwrap(),
+            Some(BotStatus::Running)
+        );
+        assert_eq!(
+            db.load_pair_status("BTCUSDT", TradingMode::Live).unwrap(),
+            None
+        );
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn analysis_export_removes_credentials_from_pair_overrides() {
+        let db = Database::open(":memory:").unwrap();
+        let mut config = AppConfig::default();
+        let mut pair = crate::config::TradingPairConfig::new("BTCUSDT".into());
+        pair.exchange.api_key = Some("pair-sensitive-key".into());
+        pair.exchange.api_secret = Some("pair-sensitive-secret".into());
+        pair.telegram = Some(crate::config::TelegramConfig {
+            enabled: true,
+            bot_token: "pair-sensitive-token".into(),
+            chat_id: "pair-sensitive-chat".into(),
+        });
+        config.pairs.push(pair);
+        db.save_config(&config).unwrap();
+        let bytes = db.export_analysis_snapshot().unwrap();
+        let exported = String::from_utf8_lossy(&bytes);
+        for secret in [
+            "pair-sensitive-key",
+            "pair-sensitive-secret",
+            "pair-sensitive-token",
+            "pair-sensitive-chat",
+        ] {
+            assert!(!exported.contains(secret));
+        }
+        assert!(db.load_config().unwrap().unwrap().pairs[0]
+            .exchange
+            .api_secret
+            .is_some());
     }
 }

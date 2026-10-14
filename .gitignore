@@ -5,3 +5,6 @@ data/
 *.db-wal
 config.toml
 *.log
+.env
+.env.*
+!.env.example

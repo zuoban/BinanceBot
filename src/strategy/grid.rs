@@ -487,6 +487,20 @@ impl GridTradingEngine {
         Ok(())
     }
 
+    /// Clear recovered live orders before processing controls queued during initialization.
+    pub async fn reconcile_initial_pause(&mut self) {
+        let live = !self.state.config.read().await.exchange.dry_run;
+        let paused = *self.state.status.read().await == BotStatus::Paused;
+        if live && paused && !self.state.is_shutting_down() && !self.cancel_all_orders().await {
+            self.state
+                .add_log(
+                    "ERROR",
+                    "Startup cancellation incomplete; trading remains paused",
+                )
+                .await;
+        }
+    }
+
     /// Primary execution loop
     pub async fn run(&mut self) {
         let sync_secs = self
@@ -655,6 +669,12 @@ impl GridTradingEngine {
 
     async fn apply_config(&mut self, new_config: crate::config::AppConfig) -> Result<()> {
         new_config.validate()?;
+        if let Some(symbol) = self.state.pair_scope() {
+            anyhow::ensure!(
+                symbol == new_config.exchange.symbol,
+                "多交易对运行时不能重命名交易对，请修改配置后重启"
+            );
+        }
         let old_config = self.state.config.read().await.clone();
         let strategy_changed =
             old_config.exchange != new_config.exchange || old_config.grid != new_config.grid;
@@ -673,11 +693,7 @@ impl GridTradingEngine {
 
         if !strategy_changed {
             let saved = new_config.clone();
-            self.state
-                .db
-                .run_blocking(move |db| db.save_config(&saved))
-                .await?;
-            *self.state.config.write().await = new_config;
+            self.state.save_runtime_config(saved).await?;
             self.state
                 .add_log("SUCCESS", "Notification configuration updated")
                 .await;
@@ -751,24 +767,16 @@ impl GridTradingEngine {
                 "Could not cancel old managed orders; configuration unchanged"
             ));
         }
+        // Snapshot readers must see the new config together with its matching runtime data.
+        let transition_state = Arc::clone(&self.state);
+        let scope_transition = transition_state.snapshot_scope_lock.write().await;
         let saved = new_config.clone();
-        if let Err(error) = self
-            .state
-            .db
-            .run_blocking(move |db| db.save_config(&saved))
-            .await
-        {
+        if let Err(error) = self.state.save_runtime_config(saved).await {
             self.pause_trading().await;
             return Err(error);
         }
 
         self.client = new_client;
-        // Only protect the state transition. Snapshot database reads happen
-        // outside this lock, so a slow dashboard query cannot delay applying
-        // configuration or hold the trading state while waiting for SQLite.
-        let transition_state = Arc::clone(&self.state);
-        let scope_transition = transition_state.snapshot_scope_lock.write().await;
-        *self.state.config.write().await = new_config.clone();
         if market_changed || mode_changed {
             *self.state.rules.write().await = new_rules;
             let mut ticker = TickerInfo {
@@ -4005,3 +4013,7 @@ mod tests {
 #[cfg(test)]
 #[path = "fixed_grid_tests.rs"]
 mod fixed_grid_tests;
+
+#[cfg(test)]
+#[path = "multi_pair_tests.rs"]
+mod multi_pair_tests;

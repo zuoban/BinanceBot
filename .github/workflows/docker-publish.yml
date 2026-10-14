@@ -26,6 +26,12 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Run tests
         run: cargo test --locked
+      - name: Set up Node.js for dashboard tests
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Run dashboard regression tests
+        run: node --test tests/dashboard_ui_test.js
 
   build:
     needs: checks

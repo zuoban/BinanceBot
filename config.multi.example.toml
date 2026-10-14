@@ -1,0 +1,60 @@
+# 多交易对示例：启动时用 --config config.multi.example.toml 导入 SQLite。
+# 导入会替换数据库中的策略配置；管理员密码、成交和统计不会删除。
+# 修改、增加、删除交易对后，重新指定 --config 导入并重启。
+
+[exchange]
+# 共享默认值，每个交易对可通过 [pairs.exchange] 覆盖。
+api_key = ""
+api_secret = ""
+dry_run = true
+is_testnet = false
+recv_window = 5000
+sync_interval_secs = 3
+
+[grid]
+# 未配置 [pairs.grid] 的交易对继承整套默认网格参数。
+grid_interval = "0.1"
+order_amount_usdc = "100"
+buy_window = 5
+sell_window = 5
+post_only = true
+max_position_usdc = "2000"
+pause_on_max_position = false
+
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[telegram]
+enabled = false
+bot_token = ""
+chat_id = ""
+
+[[pairs]]
+symbol = "SOLUSDC"
+
+[[pairs]]
+symbol = "BTCUSDT"
+
+[pairs.grid]
+# [pairs.grid] 是完整的该交易对网格配置；未填写字段使用程序默认值。
+# BTC 的价格步长与 SOL 不同，须分别设置合法间距。
+grid_interval = "10"
+order_amount_usdc = "100"
+buy_window = 3
+sell_window = 3
+post_only = true
+max_position_usdc = "1500"
+pause_on_max_position = false
+
+# 可按交易对覆盖执行设置或通知配置；省略时继承共享配置。
+# [pairs.exchange]
+# dry_run = true
+# is_testnet = false
+# api_key = ""
+# api_secret = ""
+# sync_interval_secs = 5
+# [pairs.telegram]
+# enabled = false
+# bot_token = ""
+# chat_id = ""

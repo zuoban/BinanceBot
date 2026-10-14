@@ -1,17 +1,16 @@
-use binance_grid_bot::config::AppConfig;
+use binance_grid_bot::config::{AppConfig, GridConfig, TradingPairConfig};
 use binance_grid_bot::db::Database;
-use binance_grid_bot::exchange::{BinanceFuturesClient, BinanceWsStream};
-use binance_grid_bot::lifecycle::{shutdown_signal, stop_engine};
-use binance_grid_bot::server::{create_router, AppState};
-use binance_grid_bot::strategy::GridTradingEngine;
-use binance_grid_bot::types::{BotStatus, TickerInfo};
+use binance_grid_bot::lifecycle::shutdown_signal;
+use binance_grid_bot::runtime::TradingRuntime;
+use binance_grid_bot::server::{create_multi_router, create_router};
 use clap::Parser;
 use rust_decimal::Decimal;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{broadcast, mpsc, oneshot, watch};
+use tokio::sync::watch;
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -25,13 +24,13 @@ struct CliArgs {
     #[arg(short, long, default_value = "data/bot.db")]
     db: PathBuf,
 
-    /// Optional path to legacy configuration TOML file (if migrating from file)
+    /// Import a TOML configuration, replacing the saved SQLite configuration
     #[arg(short, long)]
     config: Option<PathBuf>,
 
-    /// Trading symbol (e.g. SOLUSDC)
-    #[arg(short, long)]
-    symbol: Option<String>,
+    /// Trading symbols; repeat --symbol or use commas (e.g. SOLUSDC,BTCUSDT)
+    #[arg(short, long, value_delimiter = ',')]
+    symbol: Vec<String>,
 
     /// Grid interval spacing (e.g. 0.1)
     #[arg(short, long)]
@@ -66,6 +65,106 @@ struct CliArgs {
     testnet: bool,
 }
 
+fn apply_symbol_overrides(config: &mut AppConfig, symbols: &[String]) -> bool {
+    if !symbols.is_empty() {
+        let symbols: Vec<_> = symbols.iter().map(|s| s.trim().to_uppercase()).collect();
+        if symbols.len() == 1 && config.pairs.is_empty() {
+            config.exchange.symbol = symbols[0].clone();
+        } else {
+            config.pairs = symbols
+                .into_iter()
+                .map(|symbol| {
+                    config
+                        .pairs
+                        .iter()
+                        .find(|pair| pair.symbol == symbol)
+                        .cloned()
+                        .unwrap_or_else(|| TradingPairConfig::new(symbol))
+                })
+                .collect();
+        }
+        return true;
+    }
+    false
+}
+
+fn apply_cli_overrides(config: &mut AppConfig, args: &CliArgs) -> bool {
+    let mut changed = apply_symbol_overrides(config, &args.symbol);
+    let grid_changed = args.interval.is_some()
+        || args.amount.is_some()
+        || args.buy_window.is_some()
+        || args.sell_window.is_some();
+    if grid_changed {
+        let overrides = |grid: &mut GridConfig| {
+            if let Some(value) = args.interval {
+                grid.grid_interval = value;
+            }
+            if let Some(value) = args.amount {
+                grid.order_amount_usdc = value;
+            }
+            if let Some(value) = args.buy_window {
+                grid.buy_window = value;
+            }
+            if let Some(value) = args.sell_window {
+                grid.sell_window = value;
+            }
+        };
+        overrides(&mut config.grid);
+        for pair in &mut config.pairs {
+            let grid = pair.grid.get_or_insert_with(|| config.grid.clone());
+            overrides(grid);
+        }
+        changed = true;
+    }
+    if let Some(host) = &args.host {
+        config.server.host = host.clone();
+        changed = true;
+    }
+    if let Some(port) = args.port {
+        config.server.port = port;
+        changed = true;
+    }
+    if args.live {
+        config.exchange.dry_run = false;
+        for pair in &mut config.pairs {
+            pair.exchange.dry_run = Some(false);
+        }
+        changed = true;
+    }
+    if args.testnet {
+        config.exchange.is_testnet = true;
+        for pair in &mut config.pairs {
+            pair.exchange.is_testnet = Some(true);
+        }
+        changed = true;
+    }
+    changed
+}
+
+fn apply_startup_overrides(
+    config: &mut AppConfig,
+    args: &CliArgs,
+    values: &HashMap<String, String>,
+) -> anyhow::Result<bool> {
+    let mut changed = false;
+    if args.host.is_none()
+        && !values.contains_key("SERVER_HOST")
+        && config.server.host == "127.0.0.1"
+    {
+        config.server.host = "0.0.0.0".into();
+        changed = true;
+    }
+    // Select CLI symbols first so their per-pair environment settings are resolved too.
+    let symbols_changed = apply_symbol_overrides(config, &args.symbol);
+    let mut environment = values.clone();
+    if symbols_changed {
+        environment.remove("TRADING_PAIRS");
+    }
+    changed |= config.apply_environment(&environment)?;
+    changed |= apply_cli_overrides(config, args);
+    Ok(changed)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::registry()
@@ -75,285 +174,77 @@ async fn main() -> anyhow::Result<()> {
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
-
     let args = CliArgs::parse();
-
-    // Initialize SQLite database
     let db = Arc::new(Database::open(&args.db)?);
-
-    // Load configuration from SQLite or initialize defaults
-    let mut config = match db.load_config()? {
-        Some(saved_cfg) => {
-            info!("Loaded existing configuration from SQLite ({:?})", args.db);
-            saved_cfg
-        }
-        None => {
-            // Check if legacy config file was provided or exists
-            let legacy_found = if let Some(ref path) = args.config {
-                path.exists()
-            } else {
-                Path::new("config.toml").exists()
-            };
-
-            if legacy_found {
-                let legacy_path = args
-                    .config
-                    .as_deref()
-                    .unwrap_or_else(|| Path::new("config.toml"));
-                info!(
-                    "Found legacy config {:?}, importing into SQLite database...",
-                    legacy_path
-                );
-                let loaded = AppConfig::load_from_file(legacy_path)?;
-                db.save_config(&loaded)?;
-                loaded
-            } else {
-                info!(
-                    "No existing configuration found. Initialized default strategy in SQLite ({:?}): SOLUSDC, 0.1 interval, 100 USDC amount",
-                    args.db
-                );
-                let default_cfg = AppConfig::default();
-                db.save_config(&default_cfg)?;
-                default_cfg
-            }
-        }
+    let (mut config, imported) = if let Some(path) = &args.config {
+        info!("Importing configuration from {:?}", path);
+        (AppConfig::load_from_file(path)?, true)
+    } else if let Some(saved) = db.load_config()? {
+        info!("Loaded configuration from SQLite ({:?})", args.db);
+        (saved, false)
+    } else if Path::new("config.toml").exists() {
+        (AppConfig::load_from_file("config.toml")?, true)
+    } else {
+        (AppConfig::default(), true)
     };
-
-    // Apply CLI overrides if provided
-    let mut overridden = false;
-    if let Some(s) = args.symbol {
-        config.exchange.symbol = s;
-        overridden = true;
-    }
-    if let Some(i) = args.interval {
-        config.grid.grid_interval = i;
-        overridden = true;
-    }
-    if let Some(a) = args.amount {
-        config.grid.order_amount_usdc = a;
-        overridden = true;
-    }
-    if let Some(bw) = args.buy_window {
-        config.grid.buy_window = bw;
-        overridden = true;
-    }
-    if let Some(sw) = args.sell_window {
-        config.grid.sell_window = sw;
-        overridden = true;
-    }
-    if let Some(h) = args.host {
-        config.server.host = h;
-        overridden = true;
-    } else if config.server.host == "127.0.0.1" {
-        // Automatically upgrade legacy loopback binding to 0.0.0.0 so server and docker deployments can be accessed externally
-        info!(
-            "Updating server host binding from 127.0.0.1 to 0.0.0.0 for remote/external web access"
-        );
-        config.server.host = "0.0.0.0".to_string();
-        overridden = true;
-    }
-    if let Some(p) = args.port {
-        config.server.port = p;
-        overridden = true;
-    }
-    if args.live {
-        config.exchange.dry_run = false;
-        overridden = true;
-    }
-    if args.testnet {
-        config.exchange.is_testnet = true;
-        overridden = true;
-    }
-
-    let startup_config_error = config.validate().err();
-    if overridden {
+    let environment = std::env::vars_os()
+        .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)))
+        .collect();
+    let overridden = apply_startup_overrides(&mut config, &args, &environment)?;
+    let strategies = config.strategy_configs()?;
+    if imported || overridden {
         config.validate()?;
         db.save_config(&config)?;
     }
-
-    let has_admin_pwd = db.is_admin_password_set()?;
-    if !has_admin_pwd {
-        if config.server.host == "0.0.0.0" {
-            info!("🛡️  【首次安全初始化】系统尚未设置管理员密码！请打开控制台 http://<服务器公网IP>:{} (本地: http://127.0.0.1:{}) 进行初始密码设置。", config.server.port, config.server.port);
-        } else {
-            info!("🛡️  【首次安全初始化】系统尚未设置管理员密码！请打开控制台 http://{}:{} 进行初始密码设置。", config.server.host, config.server.port);
-        }
-    } else {
-        info!("🔒 管理员密码认证已启用");
-    }
-
-    info!("============================================================");
-    info!("🚀 Binance Futures Grid Trading Robot (Rust Engine)");
+    let has_admin = db.is_admin_password_set()?;
     info!(
-        "• Persistence:      SQLite ({:?}) - Zero config files required!",
-        args.db
+        "Binance Futures Grid Bot — SQLite {:?}, {} trading pair(s)",
+        args.db,
+        strategies.len()
     );
     info!(
-        "• Admin Auth:       {}",
-        if has_admin_pwd {
-            "PROTECTED (Password Set)"
+        "Admin authentication: {}",
+        if has_admin {
+            "PROTECTED"
         } else {
-            "PENDING SETUP (Visit Web to initialize)"
+            "PENDING SETUP"
         }
     );
-    info!("• Symbol:           {}", config.exchange.symbol);
-    info!("• Grid Interval:    {} USDC", config.grid.grid_interval);
-    info!(
-        "• Order Size:       {} USDC per grid",
-        config.grid.order_amount_usdc
-    );
-    info!(
-        "• Window Orders:    {} Buy / {} Sell",
-        config.grid.buy_window, config.grid.sell_window
-    );
-    info!("• Order Type:       Post-Only Maker (GTX)");
-    info!(
-        "• Trading Mode:     {}",
-        if config.exchange.dry_run {
-            "PAPER TRADING (Simulation)"
-        } else if config.exchange.is_testnet {
-            "TESTNET"
-        } else {
-            "LIVE REAL"
-        }
-    );
-    if config.server.host == "0.0.0.0" {
+    for strategy in &strategies {
         info!(
-            "• Dashboard Web:    http://<服务器公网IP>:{} (本地: http://127.0.0.1:{})",
-            config.server.port, config.server.port
-        );
-    } else {
-        info!(
-            "• Dashboard Web:    http://{}:{}",
-            config.server.host, config.server.port
+            "{}: interval {}, amount {}, window {} buy / {} sell, mode {}",
+            strategy.exchange.symbol,
+            strategy.grid.grid_interval,
+            strategy.grid.order_amount_usdc,
+            strategy.grid.buy_window,
+            strategy.grid.sell_window,
+            binance_grid_bot::types::TradingMode::from_exchange(
+                strategy.exchange.dry_run,
+                strategy.exchange.is_testnet
+            )
+            .as_str()
         );
     }
-    info!("============================================================");
-
     let addr: SocketAddr = format!("{}:{}", config.server.host, config.server.port).parse()?;
-
-    // Channels
-    let (action_tx, action_rx) = mpsc::channel(32);
-    let (ticker_tx, ticker_rx) = broadcast::channel::<TickerInfo>(64);
-    let (market_stream_tx, market_stream_rx) =
-        watch::channel((config.exchange.symbol.clone(), config.exchange.is_testnet));
-
-    let client = Arc::new(BinanceFuturesClient::new(&config.exchange));
-    let state = AppState::new(config.clone(), db.clone(), action_tx.clone());
-    if let Some(code) = state.setup_code() {
+    // Bind before starting any engine, including initialization-time reconciliation.
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let mut runtime = TradingRuntime::start(&config, db).await?;
+    let states = runtime.states();
+    if let Some(code) = states[0].setup_code() {
         info!(
             "首次设置管理员密码需要初始化码: {}（可在应用日志中查看）",
             code
         );
     }
-    if let Some(error) = startup_config_error {
-        state
-            .pause_trading_with_reason("启动时发现策略配置无效，请检查系统运行日志")
-            .await?;
-        state
-            .add_log(
-                "ERROR",
-                format!("Saved configuration is invalid; trading paused: {}", error),
-            )
-            .await;
-    }
-    if !has_admin_pwd && !config.exchange.dry_run {
-        state
-            .pause_trading_with_reason("实盘策略等待管理员完成初始化")
-            .await?;
-        state
-            .add_log(
-                "WARN",
-                "Live trading paused until administrator setup is complete",
-            )
-            .await;
-    }
-
-    // Spawn Binance WebSocket market data stream
-    let ws_stream = BinanceWsStream::new(market_stream_rx, ticker_tx.clone());
-    let ws_task = tokio::spawn(async move {
-        ws_stream.run().await;
-    });
-
-    // Initialize and spawn Grid Trading Engine
-    let mut engine = GridTradingEngine::new(state.clone(), client.clone(), action_rx, ticker_rx);
-    engine.set_market_stream_tx(market_stream_tx);
-
-    let signal = shutdown_signal();
-    tokio::pin!(signal);
-    let mut early_shutdown = None;
-    let initialized = tokio::select! {
-        result = engine.initialize() => result,
-        reason = &mut signal => {
-            early_shutdown = Some(reason?);
-            state.request_shutdown();
-            Ok(())
-        }
-    };
-    if let Err(e) = initialized {
-        error!("Engine initialization failed; trading paused: {}", e);
-        state
-            .pause_trading_with_reason("策略启动时账户或挂单对账失败，请检查系统运行日志")
-            .await?;
-        state
-            .add_log(
-                "ERROR",
-                format!("Startup reconciliation failed; trading paused: {}", e),
-            )
-            .await;
-    }
-    if !config.exchange.dry_run && *state.status.read().await == BotStatus::Paused {
-        action_tx
-            .send(binance_grid_bot::types::BotControlAction::Pause)
-            .await?;
-    }
-
-    let cny_task = tokio::spawn(state.clone().run_cny_rate_refresh());
-    let history_task = tokio::spawn(state.clone().run_price_history_refresh());
-    let snapshot_task = tokio::spawn(state.clone().run_snapshot_broadcast());
-
-    let (engine_start, started) = oneshot::channel();
-    let mut engine_task = tokio::spawn(async move {
-        if started.await.is_ok() {
-            engine.run().await;
-        }
-    });
-
-    if let Some(reason) = early_shutdown {
-        info!("Received {} during initialization; stopping bot...", reason);
-        let _ = engine_start.send(());
-        let result = stop_engine(&state, &mut engine_task, Duration::from_secs(30)).await;
-        for task in [ws_task, cny_task, history_task, snapshot_task] {
-            task.abort();
-            let _ = task.await;
-        }
-        return result;
-    }
-
-    // Start Web Server
-    let app = create_router(state.clone());
-    if config.server.host == "0.0.0.0" {
-        info!("🌐 Web Dashboard 运行中: 远程访问 http://<服务器公网IP>:{} | 本地访问 http://127.0.0.1:{}", config.server.port, config.server.port);
+    let app = if config.pairs.is_empty() {
+        create_router(states[0].clone())
     } else {
-        info!("🌐 Web Dashboard running at http://{}", addr);
-    }
-
-    // Bind before starting the engine loop so a port conflict cannot leave a
-    // trading task running without its control server.
-    let listener = match tokio::net::TcpListener::bind(&addr).await {
-        Ok(listener) => listener,
-        Err(error) => {
-            state.request_shutdown();
-            let _ = engine_start.send(());
-            let _ = stop_engine(&state, &mut engine_task, Duration::from_secs(30)).await;
-            for task in [ws_task, cny_task, history_task, snapshot_task] {
-                task.abort();
-                let _ = task.await;
-            }
-            return Err(error.into());
-        }
+        create_multi_router(states)
     };
-    let _ = engine_start.send(());
+    info!(
+        "Web Dashboard running at http://{} (local: http://127.0.0.1:{})",
+        addr, config.server.port
+    );
     let (web_stop, mut web_stop_rx) = watch::channel(false);
     let mut web_task = tokio::spawn(async move {
         axum::serve(listener, app)
@@ -367,25 +258,12 @@ async fn main() -> anyhow::Result<()> {
             .await
     });
     let reason = tokio::select! {
-        reason = &mut signal => reason.map(str::to_string),
-        result = &mut web_task => {
-            Err(anyhow::anyhow!("Web server stopped: {:?}", result))
-        }
-        result = &mut engine_task => {
-            Err(anyhow::anyhow!("Strategy engine stopped: {:?}", result))
-        }
+        reason = shutdown_signal() => reason.map(str::to_string),
+        result = &mut web_task => Err(anyhow::anyhow!("Web server stopped: {:?}", result)),
+        message = runtime.wait_for_exit() => Err(anyhow::anyhow!(message)),
     };
     info!("Stopping bot: {:?}", reason);
-    // If the engine already exited, pause persistently without polling its
-    // completed JoinHandle a second time.
-    let cleanup = if engine_task.is_finished() {
-        state.request_shutdown();
-        state
-            .pause_trading_with_reason("策略引擎退出，请核实交易所挂单")
-            .await
-    } else {
-        stop_engine(&state, &mut engine_task, Duration::from_secs(30)).await
-    };
+    let cleanup = runtime.shutdown(Duration::from_secs(30)).await;
     if let Err(error) = &cleanup {
         error!("Shutdown cleanup incomplete: {}", error);
     }
@@ -398,11 +276,79 @@ async fn main() -> anyhow::Result<()> {
         web_task.abort();
         let _ = web_task.await;
     }
-    for task in [ws_task, cny_task, history_task, snapshot_task] {
-        task.abort();
-        let _ = task.await;
-    }
     cleanup?;
     reason?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+
+    #[test]
+    fn multiple_cli_symbols_share_overrides_and_keep_individual_grid_settings() {
+        let args = CliArgs::parse_from([
+            "bot",
+            "--symbol",
+            "solusdc,BTCUSDT",
+            "--symbol",
+            "ETHUSDT",
+            "--amount",
+            "25",
+        ]);
+        let mut config = AppConfig::default();
+        let mut btc = TradingPairConfig::new("BTCUSDT".into());
+        btc.grid = Some(GridConfig {
+            grid_interval: dec!(10),
+            ..Default::default()
+        });
+        config.pairs.push(btc);
+        assert!(apply_cli_overrides(&mut config, &args));
+        let strategies = config.strategy_configs().unwrap();
+        assert_eq!(
+            strategies
+                .iter()
+                .map(|c| c.exchange.symbol.as_str())
+                .collect::<Vec<_>>(),
+            ["SOLUSDC", "BTCUSDT", "ETHUSDT"]
+        );
+        assert_eq!(strategies[1].grid.grid_interval, dec!(10));
+        assert!(strategies
+            .iter()
+            .all(|c| c.grid.order_amount_usdc == dec!(25)));
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn single_symbol_cli_remains_compatible() {
+        let args = CliArgs::parse_from(["bot", "--symbol", "BTCUSDT", "--interval", "10"]);
+        let mut config = AppConfig::default();
+        apply_cli_overrides(&mut config, &args);
+        assert!(config.pairs.is_empty());
+        assert_eq!(config.exchange.symbol, "BTCUSDT");
+        assert_eq!(config.grid.grid_interval, dec!(10));
+    }
+
+    #[test]
+    fn startup_cli_wins_over_env_and_resolves_the_selected_pairs_env() {
+        let args = CliArgs::parse_from(["bot", "--symbol", "BTCUSDT", "--amount", "75"]);
+        let mut config = AppConfig::default();
+        let values = [
+            ("TRADING_PAIRS", "SOLUSDC,ETHUSDT"),
+            ("GRID_ORDER_AMOUNT_USDC", "50"),
+            ("PAIR_BTCUSDT_GRID_INTERVAL", "10"),
+            ("PAIR_BTCUSDT_GRID_ORDER_AMOUNT_USDC", "100"),
+            ("SERVER_HOST", "127.0.0.1"),
+        ]
+        .map(|(key, value)| (key.into(), value.into()))
+        .into();
+        assert!(apply_startup_overrides(&mut config, &args, &values).unwrap());
+        let strategies = config.strategy_configs().unwrap();
+        assert_eq!(strategies.len(), 1);
+        assert_eq!(strategies[0].exchange.symbol, "BTCUSDT");
+        assert_eq!(strategies[0].grid.grid_interval, dec!(10));
+        assert_eq!(strategies[0].grid.order_amount_usdc, dec!(75));
+        assert_eq!(config.server.host, "127.0.0.1");
+    }
 }

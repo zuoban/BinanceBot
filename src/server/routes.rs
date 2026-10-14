@@ -3,7 +3,7 @@ use crate::server::ui::INDEX_HTML;
 use crate::types::{
     AuthLoginPayload, AuthSetupPayload, AuthStatusResponse, AuthTokenResponse, BotControlAction,
     BotSnapshot, ChangePasswordPayload, GridOrder, LogEntry, TradeRecord, TradingMode,
-    UpdateConfigPayload, WebConfigView,
+    TradingPairView, UpdateConfigPayload, WebConfigView,
 };
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -94,11 +94,37 @@ async fn require_auth_middleware(
 }
 
 pub fn create_router(state: Arc<AppState>) -> Router {
-    let api_protected = Router::new()
+    let pairs = Router::new()
+        .route("/api/pairs", get(get_single_pair_handler))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_auth_middleware,
+        ))
+        .with_state(state.clone());
+    create_base_router(state, true).merge(pairs)
+}
+
+async fn get_single_pair_handler(
+    State(state): State<Arc<AppState>>,
+) -> Json<ApiResponse<Vec<TradingPairView>>> {
+    get_pairs_handler(State(Arc::new(vec![state]))).await
+}
+
+fn pair_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/status", get(get_status_handler))
+        .route("/orders", get(get_orders_handler))
+        .route("/trades", get(get_trades_handler))
+        .route("/logs", get(get_logs_handler))
+        .route("/config", get(get_config_handler).post(post_config_handler))
+        .route("/control", post(post_control_handler))
+}
+
+fn create_base_router(state: Arc<AppState>, history_clear: bool) -> Router {
+    let mut api_protected = Router::new()
         .route("/api/status", get(get_status_handler))
         .route("/api/orders", get(get_orders_handler))
         .route("/api/trades", get(get_trades_handler))
-        .route("/api/trades/clear", post(clear_trade_history_handler))
         .route("/api/logs", get(get_logs_handler))
         .route("/api/database/export", get(export_database_handler))
         .route(
@@ -109,11 +135,14 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/auth/change_password",
             post(post_change_password_handler),
-        )
-        .route_layer(middleware::from_fn_with_state(
-            state.clone(),
-            require_auth_middleware,
-        ));
+        );
+    if history_clear {
+        api_protected = api_protected.route("/api/trades/clear", post(clear_trade_history_handler));
+    }
+    let api_protected = api_protected.route_layer(middleware::from_fn_with_state(
+        state.clone(),
+        require_auth_middleware,
+    ));
 
     Router::new()
         .route("/", get(dashboard_handler))
@@ -125,6 +154,117 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/ws", get(ws_handler))
         .merge(api_protected)
         .with_state(state)
+}
+
+/// Existing unscoped APIs address the first pair; scoped APIs never change another pair.
+pub fn create_multi_router(states: Vec<Arc<AppState>>) -> Router {
+    let primary = states
+        .first()
+        .expect("At least one trading pair is required")
+        .clone();
+    let mut router = create_base_router(primary.clone(), false);
+    for state in &states {
+        let symbol = state
+            .pair_scope()
+            .expect("Multi-pair routes require a stable symbol");
+        let scoped = pair_routes()
+            .route_layer(middleware::from_fn_with_state(
+                state.clone(),
+                require_auth_middleware,
+            ))
+            .route("/ws", get(ws_handler))
+            .with_state(state.clone());
+        router = router.nest(&format!("/api/pairs/{}", symbol), scoped);
+    }
+    let global = Router::new()
+        .route("/api/pairs", get(get_pairs_handler))
+        .route("/api/trades/clear", post(clear_multi_trade_history_handler))
+        .route_layer(middleware::from_fn_with_state(
+            primary,
+            require_auth_middleware,
+        ))
+        .with_state(Arc::new(states));
+    router.merge(global)
+}
+
+async fn get_pairs_handler(
+    State(states): State<Arc<Vec<Arc<AppState>>>>,
+) -> Json<ApiResponse<Vec<TradingPairView>>> {
+    let mut pairs = Vec::with_capacity(states.len());
+    for state in states.iter() {
+        let config = state.config.read().await;
+        pairs.push(TradingPairView {
+            symbol: config.exchange.symbol.clone(),
+            scoped: state.pair_scope().is_some(),
+            status: *state.status.read().await,
+            mode: TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet),
+            grid_config: config.summary(),
+        });
+    }
+    Json(ApiResponse {
+        success: true,
+        data: Some(pairs),
+        message: None,
+    })
+}
+
+async fn clear_multi_trade_history_handler(
+    State(states): State<Arc<Vec<Arc<AppState>>>>,
+    Json(payload): Json<ClearTradeHistoryRequest>,
+) -> (StatusCode, Json<ApiResponse<ClearTradeHistoryResponse>>) {
+    if !payload.confirm {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some("请先确认清理全部交易对和运行模式的历史成交及累计统计".into()),
+            }),
+        );
+    }
+    match AppState::clear_trade_history_for(&states).await {
+        Ok(deleted_trades) => {
+            // Invalidate every client's cached statistics after the shared database cleanup.
+            let mut primary_snapshot = None;
+            for state in states.iter() {
+                state
+                    .add_log(
+                        "WARN",
+                        format!("已清理全部历史成交记录，共 {} 笔", deleted_trades),
+                    )
+                    .await;
+                let snapshot = state.broadcast_snapshot().await;
+                if primary_snapshot.is_none() {
+                    primary_snapshot = Some(snapshot);
+                }
+            }
+            (
+                StatusCode::OK,
+                Json(ApiResponse {
+                    success: true,
+                    data: Some(ClearTradeHistoryResponse {
+                        deleted_trades,
+                        snapshot: primary_snapshot.unwrap(),
+                    }),
+                    message: Some(format!(
+                        "已清理 {} 笔历史成交记录，全部交易对累计统计已重置",
+                        deleted_trades
+                    )),
+                }),
+            )
+        }
+        Err(error) => {
+            error!("Trade history cleanup failed: {}", error);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    message: Some("历史记录清理失败，请稍后重试或查看服务器日志".into()),
+                }),
+            )
+        }
+    }
 }
 
 async fn dashboard_handler() -> Html<&'static str> {

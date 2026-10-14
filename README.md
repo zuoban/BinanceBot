@@ -1,6 +1,6 @@
 # ⚡ 币安合约网格交易机器人 (Binance Futures Grid Trading Bot in Rust)
 
-基于 Rust 编写的高性能币安 USDⓈ-M 合约网格量化交易机器人，针对 **SOLUSDC** 等合约进行自动化网格交易。内置现代化 Web 监控与控制面板，支持 WebSocket 毫秒级行情推送、只做 Maker（Post-Only GTX）挂单、动态滑动窗口、网页直接在线配置策略以及内嵌 **SQLite 数据库持久化**。
+基于 Rust 编写的高性能币安 USDⓈ-M 合约网格量化交易机器人，支持同时配置和运行 **SOLUSDC、BTCUSDT 等多个交易对**。内置现代化 Web 监控与控制面板，支持 WebSocket 毫秒级行情推送、只做 Maker（Post-Only GTX）挂单、动态滑动窗口、网页直接在线配置策略以及内嵌 **SQLite 数据库持久化**。
 
 ---
 
@@ -41,6 +41,7 @@
 7. **内嵌式实时 Web 监控控制台**：
    - 零外部前端依赖，HTML/CSS/JS 静态资源直接编译进单个 Rust 二进制文件。
    - 面板快照由独立后台任务每 800ms 生成并推送，交易 REST 请求变慢时仍可刷新已知状态、挂单和日志。无人订阅 WebSocket 时跳过定时生成，HTTP 状态查询和新连接仍可获取快照。今日成交统计缓存最多 5 秒，价格历史缓存最多 60 秒；保存新成交、清理历史或写入新价格快照后，下次生成立即重新查询相关图表，整点、北京时间跨日及交易范围切换也会刷新。缓存查询失败时以等待状态显示，并在 5 秒后重试。
+   - 登录和切换交易对时通过 HTTP 获取初始状态；WebSocket 超过 5 秒没有快照时，每 3 秒通过 HTTP 刷新。即使暂时无法获取状态，仍可执行撤单并暂停。
    - 通过 WebSocket 展示：标记价格、已确认成交的累计已实现盈亏、手续费、扣费后金额、历史配对循环次数、当前持仓与未实现盈亏、挂单及成交历史。实时网格深度的中间基准及挂单价差也使用标记价格。
    - 今日成交柱状图：从数据库统计北京时间当天 00:00 至当前时间、当前交易对及运行模式下每小时买单、卖单笔数和总计，不受最近成交列表条数限制。按小时倒序排列，最新小时在最左侧，当前小时仅统计至当前时间，空小时补零，并随 WebSocket 快照更新；跨午夜后自动切换到新一天。
    - 每日价格快照：按北京时间每天 00:00 保存标记价格，展示当前标记价格相对快照的涨跌金额及百分比。最近 7 个自然日（含今天）的价格曲线按小时展示，并接上最新实时价格；支持悬停和键盘查看。启动时从 Binance 标记价格 K 线补齐，午夜停机后可恢复真实的 00:00 开盘价格，已保存快照不会覆盖。暂停策略时继续同步，交易对和正式网、测试网分别存储；历史数据暂未就绪时显示等待状态。
@@ -57,15 +58,62 @@
 
 ---
 
-## 🐳 Docker 极简部署指南（无需配置文件）
+## 🐳 Docker 部署（推荐使用 `.env`）
 
-### 1. 使用 Docker Compose 一键启动（推荐）
+### 1. 使用 Docker Compose 与 `.env` 启动（推荐）
 
-只需一行命令启动，无需创建任何配置文件：
+复制 [.env.example](.env.example) 为 `.env`，按需修改交易对和参数后启动：
 
 ```bash
-docker compose up -d
+cp .env.example .env
+# 编辑 .env：设置 TRADING_PAIRS 及各交易对参数
+docker compose up -d --build
 ```
+
+例如，两个交易对使用不同网格间距：
+
+```dotenv
+TRADING_PAIRS=SOLUSDC,BTCUSDT
+BINANCE_DRY_RUN=true
+GRID_ORDER_AMOUNT_USDC=100
+PAIR_SOLUSDC_GRID_INTERVAL=0.1
+PAIR_BTCUSDT_GRID_INTERVAL=10
+PAIR_BTCUSDT_GRID_BUY_WINDOW=3
+PAIR_BTCUSDT_GRID_SELL_WINDOW=3
+```
+
+Compose 将 `.env` 中的环境变量传入容器。`.env` 是可选文件；已有部署不创建它也可继续使用数据库和网页配置。可选 `env_file` 需要 Docker Compose 2.24.0+，详见 [Docker 官方说明](https://docs.docker.com/compose/how-tos/environment-variables/set-environment-variables/#additional-information-1)。
+
+修改 `.env` 后，用下面的命令重新创建容器，使新环境变量生效；`docker compose restart` 不会重新载入 `.env`：
+
+```bash
+docker compose up -d --force-recreate
+```
+
+程序启动时的配置优先级（由低到高）：**SQLite 已保存配置 / 导入的 TOML → 公共环境变量 → 单交易对环境变量 → 命令行参数**。显式 `--config` 先导入 TOML，再应用环境变量和命令行；不传 `--config` 时沿用 SQLite。
+
+`.env` 中声明的参数每次启动都会覆盖数据库中的同名参数，网页修改即时生效，但下次启动仍以这些环境变量为准。未声明的参数保留数据库中的值。运行和暂停状态独立持久化，`.env` 不会自动恢复已经暂停的策略。
+
+| 环境变量 | 作用 |
+| --- | --- |
+| `TRADING_PAIRS` | 逗号分隔的运行列表，支持一个或多个交易对，替换已保存的列表 |
+| `BINANCE_API_KEY`、`BINANCE_API_SECRET` | API 凭证 |
+| `BINANCE_DRY_RUN`、`BINANCE_TESTNET` | 模拟盘和测试网设置 |
+| `BINANCE_RECV_WINDOW`、`BINANCE_SYNC_INTERVAL_SECS` | 请求窗口和同步间隔 |
+| `GRID_INTERVAL`、`GRID_ORDER_AMOUNT_USDC` | 公共网格间距和每格金额 |
+| `GRID_BUY_WINDOW`、`GRID_SELL_WINDOW` | 买、卖窗口数量 |
+| `GRID_MIN_PRICE`、`GRID_MAX_PRICE`、`GRID_MAX_POSITION_USDC` | 价格范围和持仓上限 |
+| `GRID_POST_ONLY`、`GRID_PAUSE_ON_MAX_POSITION` | Maker 挂单和达到持仓上限时暂停 |
+| `TELEGRAM_ENABLED`、`TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID` | 通知配置 |
+| `SERVER_HOST`、`SERVER_PORT` | 容器内监听地址和端口 |
+| `WEB_PORT` | Compose 的宿主机映射端口，默认 8080 |
+| `RUST_LOG` | 日志级别 |
+
+`BINANCE_*`、`GRID_*` 和 `TELEGRAM_*` 变量均可加上 `PAIR_<大写交易对>_` 前缀，仅覆盖对应交易对，例如 `PAIR_BTCUSDT_GRID_MAX_POSITION_USDC=1500` 或 `PAIR_BTCUSDT_BINANCE_DRY_RUN=true`。`*_USDC` 保留历史字段名，实际金额使用交易对的计价资产。
+
+API 凭证和 Telegram 字段声明为空时会清空保存的值；可选价格和持仓限制声明为空时清除限制。其他数值和布尔变量为空时视为未设置。布尔值建议写 `true` / `false`。格式错误、重复交易对和无效策略参数会阻止启动，错误信息不会输出变量值。
+
+`.env` 已加入 Git 和 Docker 构建上下文的忽略规则；构建镜像不会复制凭证文件。本地运行二进制时读取进程环境变量，不自动读取 `.env`，由 Docker Compose 的 `env_file` 或 `docker run --env-file` 负责载入文件。
 
 启动后在浏览器打开控制台：
 👉 **http://localhost:8080**
@@ -93,6 +141,8 @@ docker run -d \
   --name binance-grid-bot \
   -p 8080:8080 \
   -v $(pwd)/data:/app/data \
+  --env-file .env \
+  --stop-timeout 45 \
   --restart unless-stopped \
   ghcr.io/zuoban/binancebot:latest
 ```
@@ -140,6 +190,79 @@ cargo run --release -- --symbol SOLUSDC --interval 0.1 --amount 100 --buy-window
 
 ---
 
+## 多交易对配置与运行
+
+每个交易对有独立的网格引擎、行情订阅、挂单、持仓、累计统计、日志和启停状态。所有交易对共享一个 Web 控制台、管理员登录和 SQLite 数据库；某个交易对初始化失败、行情中断或达到持仓上限时，只暂停该交易对。
+
+使用 [config.multi.example.toml](config.multi.example.toml) 设置不同交易对的网格参数，然后导入并启动：
+
+```bash
+cargo run --release -- --config config.multi.example.toml
+```
+
+显式 `--config` 会替换 SQLite 中的策略配置，保留已有管理员认证、成交、统计与订单恢复元数据。之后正常启动无需再指定文件，自动使用数据库中的配置。如果数据库尚无配置，也会自动导入当前目录的 `config.toml`；已存在数据库时，该文件不会自动覆盖网页保存的参数。
+
+配置格式如下：
+
+```toml
+[exchange]
+dry_run = true
+api_key = ""
+api_secret = ""
+
+[grid]
+grid_interval = "0.1"
+order_amount_usdc = "100"
+
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[[pairs]]
+symbol = "SOLUSDC"
+
+[[pairs]]
+symbol = "BTCUSDT"
+[pairs.grid]
+grid_interval = "10"
+order_amount_usdc = "100"
+buy_window = 3
+sell_window = 3
+max_position_usdc = "1500"
+```
+
+- `[[pairs]]` 非空时，仅启动列表中的交易对；`[exchange].symbol` 不再额外启动一个策略。交易对名称须为大写字母和数字，同一交易对不能重复。
+- 未填写 `pairs.grid` 时继承全局 `[grid]`；填写时使用该交易对整套网格参数，省略字段使用程序默认值。不同合约需分别选择符合价格步长的网格间距。
+- API 凭证、运行模式和同步间隔默认继承 `[exchange]`，可用 `[pairs.exchange]` 覆盖；通知默认继承 `[telegram]`，可用 `[pairs.telegram]` 覆盖。网页保存后的参数仅作用于选中的交易对。
+- 控制台顶部选择交易对后，价格、仓位、订单、成交、日志和配置全部切换；暂停、恢复、刷新网格及撤单只操作当前交易对。新增、移除或重命名交易对时，Docker 部署可修改 `.env` 的 `TRADING_PAIRS` 并重新创建容器；TOML 部署则停止程序后重新用 `--config` 导入并启动。
+- 同一实盘账户内的交易对共用账户保证金，页面的账户权益不能按交易对相加；持仓上限按每个交易对分别计算。模拟盘为每个交易对提供独立的模拟账户。
+- Ctrl+C / SIGTERM 会立即阻止全部交易对新增订单，并同时撤销和核实各交易对的机器人挂单、保存独立暂停状态，保留持仓。
+- 不填写 `pairs` 时，旧版单交易对 TOML、SQLite 配置及 API 继续可用。
+
+也可以通过命令行创建列表，网格参数统一使用全局配置：
+
+```bash
+cargo run --release -- --symbol SOLUSDC,BTCUSDT --interval 10 --amount 100
+# 等价：--symbol SOLUSDC --symbol BTCUSDT
+```
+
+`--symbol` 在多交易对模式下替换运行列表，保留同名交易对的已有参数；其他网格参数及 `--live` / `--testnet` 覆盖所有交易对。不同间距建议通过 `.env` 的单交易对变量或 TOML 分别配置。Docker 推荐使用上面的 `.env` 部署方式，也可将 TOML 文件挂载到容器并用 `--db /app/data/bot.db --config /app/config.multi.toml` 导入。
+
+所有接口与 WebSocket 仍需管理员认证：
+
+| 接口 | 作用 |
+| --- | --- |
+| `GET /api/pairs` | 列出全部交易对、运行状态、模式和网格摘要 |
+| `GET /api/pairs/{symbol}/status` | 指定交易对的完整快照 |
+| `GET /api/pairs/{symbol}/orders`、`/trades`、`/logs` | 指定交易对的订单、成交、日志 |
+| `GET / POST /api/pairs/{symbol}/config` | 查看和在线修改指定交易对的参数 |
+| `POST /api/pairs/{symbol}/control` | 对指定交易对执行 `pause`、`resume`、`cancel_all`、`rebalance` |
+| `/api/pairs/{symbol}/ws` | 指定交易对的快照、日志和控制通道，认证方式同 `/ws` |
+
+原 `/api/status`、`/api/config`、`/api/control` 和 `/ws` 在多交易对模式下指向列表中的第一个交易对。数据库导出及历史清理仍为全局操作，历史清理会同步重置全部交易对的内存统计。
+
+---
+
 ## 💾 数据库存储说明 (`SQLite`)
 
 机器人的所有状态与数据自动保存在 SQLite 数据库中（默认路径 `data/bot.db`）：
@@ -149,7 +272,8 @@ cargo run --release -- --symbol SOLUSDC --interval 0.1 --amount 100 --buy-window
 - **`scoped_grid_stats` 表**：按交易对及运行模式分别累计成交量、成交笔数、已完成网格循环次数及配对价差估算。当前模式的已实现盈亏与手续费从同一范围的 `trades` 记录汇总；原 `grid_stats` 表保留旧版历史数据。
 - **`managed_orders` 表**：保存机器人挂单及配对元数据，供重启对账使用。
 - **`pair_intents` 表**：保留旧版恢复元数据；升级后先查询交易所核实可能已接受的订单，确认不存在时结束旧意图，不生成新配对单。
-- **`bot_runtime` 表**：保存运行或暂停状态。
+- **`bot_runtime` 表**：单交易对配置继续同步运行或暂停状态，兼容旧版本。
+- **`pair_runtime` 表**：按交易对及运行模式独立保存启停状态，单交易对与多交易对配置均优先读取该表，缺失时兼容旧状态。在线切换运行模式时，配置与当前启停状态在同一事务中保存，重启后保持暂停状态。
 
 已实现盈亏统计仅覆盖本程序保存的已确认订单，扣费后金额扣除同一报价资产的成交手续费；资金费和手工交易不计入。
 
@@ -218,4 +342,7 @@ docker ps
 运行项目完整测试套件：
 ```bash
 cargo test
+node --test tests/dashboard_ui_test.js
 ```
+
+前端回归测试使用 Node.js 22，覆盖连接中断、交易对切换和迟到响应。CI 同时运行 Rust 与前端测试；生产运行和 Docker 镜像不需要 Node.js。

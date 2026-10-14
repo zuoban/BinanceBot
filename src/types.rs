@@ -322,6 +322,16 @@ pub struct BotSnapshot {
     pub recent_logs: Vec<LogEntry>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TradingPairView {
+    pub symbol: String,
+    /// True when this pair has a stable /api/pairs/{symbol} route.
+    pub scoped: bool,
+    pub status: BotStatus,
+    pub mode: TradingMode,
+    pub grid_config: crate::config::GridConfigSummary,
+}
+
 #[derive(Debug)]
 pub enum BotControlAction {
     Pause,
