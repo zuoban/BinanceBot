@@ -63,6 +63,17 @@ function snapshot(symbol, status = 'RUNNING') {
   };
 }
 
+function overviewData(states, scoped = true) {
+  return {
+    generated_at: new Date().toISOString(),
+    pairs: [...states.values()].map(state => ({
+      scoped,
+      mode: state.dry_run ? 'PAPER' : state.grid_config.is_testnet ? 'TESTNET' : 'LIVE',
+      snapshot: state,
+    })),
+  };
+}
+
 function response(data, success = true) {
   return { ok: true, status: 200, json: async () => ({ success, data }) };
 }
@@ -73,7 +84,7 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-function dashboard({ scoped = true, fetchStatus, charts = false } = {}) {
+function dashboard({ scoped = true, fetchStatus, fetchOverview, charts = false } = {}) {
   const elements = new Map();
   function element(id) {
     if (!elements.has(id)) {
@@ -96,7 +107,7 @@ function dashboard({ scoped = true, fetchStatus, charts = false } = {}) {
     }
     return elements.get(id);
   }
-  const tabNames = ['overview', 'orders', 'trades', 'config', 'global-config', 'logs'];
+  const tabNames = ['overview', 'detail', 'orders', 'trades', 'config', 'global-config', 'logs'];
   const tabs = tabNames.map(name => {
     const tab = element(`tab-btn-${name}`);
     tab.setAttribute('aria-controls', `tab-${name}`);
@@ -104,6 +115,9 @@ function dashboard({ scoped = true, fetchStatus, charts = false } = {}) {
     return tab;
   });
   element('console-nav').children = tabs;
+  element('overview-status-filter').value = 'all';
+  element('overview-mode-filter').value = 'all';
+  element('overview-sort').value = 'default';
   const pairs = scoped ? ['SOLUSDC', 'BTCUSDT'] : ['SOLUSDC'];
   const states = new Map(pairs.map(symbol => [symbol, snapshot(symbol)]));
   const requests = [], sockets = [], intervals = [], confirmations = [], history = [];
@@ -145,6 +159,9 @@ function dashboard({ scoped = true, fetchStatus, charts = false } = {}) {
     confirm: text => { confirmations.push(text); return true; }, alert() {},
     fetch: async (url, options = {}) => {
       requests.push({ url, options });
+      if (url === '/api/overview') return fetchOverview ? fetchOverview(states) : response(overviewData(
+        scoped ? states : new Map([[singleSymbol, states.get(singleSymbol)]]), scoped,
+      ));
       if (url === '/api/global/config') return response({ recv_window: 8000, sync_interval_secs: 7, has_api_key: true, api_key_preview: 'glob...key1', has_api_secret: true, telegram_enabled: true, has_telegram_bot_token: true, telegram_chat_id: '123456' });
       if (url === '/api/server/config') return response({ saved: { host: '0.0.0.0', port: 8080 }, active: { host: '0.0.0.0', port: 8080 } });
       if (url === '/api/pairs') {
@@ -190,8 +207,16 @@ function dashboard({ scoped = true, fetchStatus, charts = false } = {}) {
     element, requests, sockets, states, intervals, confirmations, clock, history,
     run: code => vm.runInContext(code, context),
     setSingleSymbol: symbol => { singleSymbol = symbol; states.set(symbol, snapshot(symbol)); },
+    addExternalPair(symbol, status = 'PAUSED') {
+      pairs.push(symbol);
+      states.set(symbol, snapshot(symbol, status));
+    },
+    removeExternalPair(symbol) {
+      pairs.splice(pairs.indexOf(symbol), 1);
+      states.delete(symbol);
+    },
     async poll() {
-      intervals.find(timer => timer.ms === 3000).fn();
+      intervals.filter(timer => timer.ms === 3000).forEach(timer => timer.fn());
       await new Promise(setImmediate);
     },
   };
@@ -222,7 +247,7 @@ test('cancellation stays available even when both snapshot transports fail', asy
   assert.ok(ui.requests.some(request => request.url.endsWith('/control')));
 });
 
-test('connection warnings remain visible with the actions menu closed until fresh data arrives', async () => {
+test('pair-page connection warnings remain visible with the actions menu closed until fresh data arrives', async () => {
   let offline = false;
   const ui = dashboard({ fetchStatus: (symbol, states) => {
     if (offline) throw new Error('offline');
@@ -230,6 +255,7 @@ test('connection warnings remain visible with the actions menu closed until fres
   } });
   ui.element('header-actions').hidden = true;
   await ui.run('initConsole()');
+  await ui.run("openPairPage('SOLUSDC')");
   assert.equal(ui.element('connection-alert').hidden, true);
   assert.equal(ui.element('log-update-status').textContent, '定时刷新');
   ui.sockets.at(-1).sendSnapshot(snapshot('SOLUSDC'));
@@ -279,9 +305,10 @@ test('polling resumes after WebSocket silence and reflects completed controls', 
   const ui = dashboard();
   await ui.run('initConsole()');
   ui.sockets.at(-1).sendSnapshot(snapshot('SOLUSDC'));
-  const count = ui.requests.length;
+  const count = ui.requests.filter(request => request.url.endsWith('/status')).length;
   await ui.poll();
-  assert.equal(ui.requests.length, count, 'fresh WebSocket snapshots should suppress HTTP polling');
+  assert.equal(ui.requests.filter(request => request.url.endsWith('/status')).length, count,
+    'fresh WebSocket snapshots should suppress selected-pair HTTP polling');
   ui.clock.now += 6000;
   ui.states.get('SOLUSDC').status = 'PAUSED';
   await ui.poll();
@@ -510,4 +537,339 @@ test('short position shows positive notional and reserves only closing buys', as
   data.active_orders[0].quantity = '2.5';
   await ui.poll();
   assert.equal(ui.element('card-sell-reserved').className, 'text-red');
+});
+
+test('the overview displays every configured pair and totals all strategies independently of selection', async () => {
+  const ui = dashboard();
+  const sol = ui.states.get('SOLUSDC');
+  const btc = ui.states.get('BTCUSDT');
+  sol.active_orders = [{ side: 'BUY', quantity: '1' }];
+  btc.active_orders = [{ side: 'BUY', quantity: '1' }, { side: 'SELL', quantity: '1' }];
+  btc.status = 'PAUSED';
+  const window = { window_start: new Date(ui.clock.now - 3600000).toISOString(), window_end: new Date(ui.clock.now).toISOString() };
+  sol.hourly_trade_stats = { ...window, buckets: [{ buy_count: 2, sell_count: 1 }] };
+  btc.hourly_trade_stats = { ...window, buckets: [{ buy_count: 1, sell_count: 3 }] };
+  await ui.run('initConsole()');
+  const cards = ui.element('overview-pairs').innerHTML;
+  assert.match(cards, /SOLUSDC/);
+  assert.match(cards, /BTCUSDT/);
+  assert.equal(String(ui.element('overview-pair-count').textContent), '2');
+  assert.equal(String(ui.element('overview-running-count').textContent), '1');
+  assert.equal(String(ui.element('overview-order-count').textContent), '3');
+  assert.equal(String(ui.element('overview-trade-count').textContent), '7');
+  assert.equal(ui.run('selectedPair'), 'SOLUSDC');
+  await ui.run("selectPair('BTCUSDT')");
+  assert.match(ui.element('overview-pairs').innerHTML, /SOLUSDC/);
+  assert.equal(String(ui.element('overview-order-count').textContent), '3');
+});
+
+test('overview search, status, and mode filters combine without changing global totals', async () => {
+  const ui = dashboard();
+  const btc = ui.states.get('BTCUSDT');
+  btc.status = 'PAUSED';
+  btc.dry_run = false;
+  btc.grid_config.is_testnet = true;
+  await ui.run('initConsole()');
+  ui.element('overview-search').value = ' btc ';
+  ui.element('overview-status-filter').value = 'PAUSED';
+  ui.element('overview-mode-filter').value = 'TESTNET';
+  ui.run('renderOverview()');
+  assert.match(ui.element('overview-pairs').innerHTML, /BTCUSDT/);
+  assert.doesNotMatch(ui.element('overview-pairs').innerHTML, /SOLUSDC/);
+  ui.element('overview-mode-filter').value = 'PAPER';
+  ui.run('renderOverview()');
+  assert.doesNotMatch(ui.element('overview-pairs').innerHTML, /BTCUSDT|SOLUSDC/);
+  assert.equal(String(ui.element('overview-pair-count').textContent), '2');
+  assert.equal(String(ui.element('overview-running-count').textContent), '1');
+  ui.element('overview-search').value = '';
+  ui.element('overview-status-filter').value = 'all';
+  ui.element('overview-mode-filter').value = 'all';
+  ui.run('renderOverview()');
+  assert.match(ui.element('overview-pairs').innerHTML, /SOLUSDC/);
+  assert.match(ui.element('overview-pairs').innerHTML, /BTCUSDT/);
+});
+
+test('overview refresh continues while the selected pair has a fresh WebSocket snapshot', async () => {
+  const ui = dashboard();
+  await ui.run('initConsole()');
+  ui.sockets.at(-1).sendSnapshot(snapshot('SOLUSDC'));
+  ui.states.get('BTCUSDT').status = 'PAUSED';
+  const overviewReads = ui.requests.filter(request => request.url === '/api/overview').length;
+  const selectedReads = ui.requests.filter(request => request.url === '/api/pairs/SOLUSDC/status').length;
+  await ui.poll();
+  assert.equal(ui.requests.filter(request => request.url === '/api/overview').length, overviewReads + 1);
+  assert.equal(ui.requests.filter(request => request.url === '/api/pairs/SOLUSDC/status').length, selectedReads);
+  assert.equal(String(ui.element('overview-running-count').textContent), '1');
+  assert.equal(ui.run('selectedPair'), 'SOLUSDC');
+});
+
+test('a failed overview refresh retains cards and leaves healthy selected-pair data usable', async () => {
+  let offline = false;
+  const ui = dashboard({ fetchOverview: states => {
+    if (offline) throw new Error('overview unavailable');
+    return response(overviewData(states));
+  } });
+  await ui.run('initConsole()');
+  const cards = ui.element('overview-pairs').innerHTML;
+  ui.sockets.at(-1).sendSnapshot(snapshot('SOLUSDC'));
+  offline = true;
+  await ui.poll();
+  assert.equal(ui.element('overview-pairs').innerHTML, cards);
+  assert.equal(ui.element('overview-alert').hidden, false);
+  assert.equal(ui.element('connection-alert').hidden, true);
+  assert.equal(ui.element('btn-pause-resume').disabled, false);
+  offline = false;
+  await ui.poll();
+  assert.equal(ui.element('overview-alert').hidden, true);
+});
+
+test('opening a pair page updates navigation, the picker, and the control target together', async () => {
+  const ui = dashboard();
+  await ui.run('initConsole()');
+  await ui.run("openPairPage('BTCUSDT', 'tab-orders')");
+  assert.equal(ui.run('selectedPair'), 'BTCUSDT');
+  assert.equal(ui.element('pair-select').value, 'BTCUSDT');
+  assert.equal(ui.element('tab-btn-orders').getAttribute('aria-selected'), 'true');
+  await ui.run("sendControlAction('pause')");
+  assert.equal(ui.states.get('BTCUSDT').status, 'PAUSED');
+  assert.equal(ui.states.get('SOLUSDC').status, 'RUNNING');
+  await ui.run("openPairPage('SOLUSDC', 'tab-detail')");
+  assert.equal(ui.element('tab-btn-detail').getAttribute('aria-selected'), 'true');
+  assert.equal(ui.element('pair-select').value, 'SOLUSDC');
+  await ui.run("openPairPage('BTCUSDT', 'tab-config')");
+  assert.equal(ui.element('tab-btn-config').getAttribute('aria-selected'), 'true');
+  assert.equal(ui.element('cfg-symbol').value, 'BTCUSDT');
+});
+
+test('a late overview response cannot restore a pair removed during its request', async () => {
+  const pending = deferred();
+  let reads = 0;
+  const ui = dashboard({ fetchOverview: states => ++reads === 2
+    ? pending.promise : response(overviewData(states)) });
+  await ui.run('initConsole()');
+  const oldData = overviewData(ui.states);
+  const oldRead = ui.run('loadOverview()');
+  await new Promise(setImmediate);
+  await ui.run('removeSelectedPair()');
+  pending.resolve(response(oldData));
+  await oldRead;
+  assert.equal(String(ui.element('overview-pair-count').textContent), '1');
+  assert.match(ui.element('overview-pairs').innerHTML, /BTCUSDT/);
+  assert.doesNotMatch(ui.element('overview-pairs').innerHTML, /SOLUSDC/);
+  assert.equal(ui.run('selectedPair'), 'BTCUSDT');
+  assert.equal(ui.element('overview-alert').hidden, true);
+});
+
+test('a late overview failure cannot replace a successful refresh after pair-list reload', async () => {
+  const pending = deferred();
+  let reads = 0;
+  const ui = dashboard({ fetchOverview: states => ++reads === 2
+    ? pending.promise : response(overviewData(states)) });
+  await ui.run('initConsole()');
+  const oldRead = ui.run('loadOverview()');
+  await new Promise(setImmediate);
+  await ui.run('initConsole()');
+  pending.reject(new Error('old request failed'));
+  await oldRead;
+  assert.equal(ui.element('overview-alert').hidden, true);
+  assert.equal(ui.element('btn-refresh-overview').disabled, false);
+  assert.equal(String(ui.element('overview-pair-count').textContent), '2');
+});
+
+test('the overview retains configured pairs as pending cards when its first read fails', async () => {
+  const ui = dashboard({ fetchOverview: async () => { throw new Error('offline'); } });
+  await ui.run('initConsole()');
+  assert.match(ui.element('overview-pairs').innerHTML, /SOLUSDC/);
+  assert.match(ui.element('overview-pairs').innerHTML, /BTCUSDT/);
+  assert.match(ui.element('overview-pairs').innerHTML, /等待数据/);
+  assert.equal(String(ui.element('overview-pair-count').textContent), '2');
+  assert.equal(String(ui.element('overview-order-count').textContent), '--');
+  assert.equal(ui.element('overview-alert').hidden, false);
+  assert.equal(ui.element('overview-pairs').getAttribute('aria-busy'), 'false');
+  assert.equal(ui.element('btn-pause-resume').disabled, false);
+});
+
+test('overview order and activity sorting retains each pair and reset restores all filters', async () => {
+  const ui = dashboard();
+  const sol = ui.states.get('SOLUSDC');
+  const btc = ui.states.get('BTCUSDT');
+  sol.active_orders = [{ side: 'BUY', quantity: '1' }];
+  btc.active_orders = [{ side: 'BUY', quantity: '1' }, { side: 'SELL', quantity: '1' }];
+  sol.hourly_trade_stats = { window_end: new Date(ui.clock.now).toISOString(), buckets: [{ buy_count: 5, sell_count: 0 }] };
+  btc.hourly_trade_stats = { window_end: new Date(ui.clock.now).toISOString(), buckets: [{ buy_count: 0, sell_count: 2 }] };
+  await ui.run('initConsole()');
+  ui.element('overview-sort').value = 'orders';
+  ui.run('renderOverview()');
+  let cards = ui.element('overview-pairs').innerHTML;
+  assert.ok(cards.indexOf('data-symbol="BTCUSDT"') < cards.indexOf('data-symbol="SOLUSDC"'));
+  ui.element('overview-sort').value = 'activity';
+  ui.run('renderOverview()');
+  cards = ui.element('overview-pairs').innerHTML;
+  assert.ok(cards.indexOf('data-symbol="SOLUSDC"') < cards.indexOf('data-symbol="BTCUSDT"'));
+  ui.element('overview-search').value = 'missing';
+  ui.element('overview-status-filter').value = 'PAUSED';
+  ui.element('overview-mode-filter').value = 'LIVE';
+  ui.run('resetOverviewFilters()');
+  assert.equal(ui.element('overview-search').value, '');
+  assert.equal(ui.element('overview-status-filter').value, 'all');
+  assert.equal(ui.element('overview-mode-filter').value, 'all');
+  assert.equal(ui.element('overview-visible-count').textContent, '2 / 2');
+  assert.equal(ui.run('document.activeElement.id'), 'overview-search');
+});
+
+test('missing or previous-day trade statistics remain unavailable until every pair is current', async () => {
+  const ui = dashboard();
+  ui.clock.now = Date.parse('2026-10-16T04:00:00Z');
+  const current = { window_end: '2026-10-16T12:00:00+08:00', buckets: [{ buy_count: 2, sell_count: 1 }] };
+  ui.states.get('SOLUSDC').hourly_trade_stats = current;
+  ui.states.get('BTCUSDT').hourly_trade_stats = { ...current, window_end: '2026-10-15T23:00:00+08:00' };
+  await ui.run('initConsole()');
+  assert.equal(String(ui.element('overview-trade-count').textContent), '--');
+  assert.match(ui.element('overview-trade-note').textContent, /待更新/);
+  ui.states.get('BTCUSDT').hourly_trade_stats = current;
+  await ui.run('loadOverview()');
+  assert.equal(String(ui.element('overview-trade-count').textContent), '6');
+  ui.clock.now = Date.parse('2026-10-16T16:00:01Z');
+  ui.run('renderOverview()');
+  assert.equal(String(ui.element('overview-trade-count').textContent), '--');
+});
+
+test('shared-page navigation hides pair actions and returning to detail restores their context', async () => {
+  const ui = dashboard();
+  await ui.run('initConsole()');
+  for (const id of ['pair-picker', 'mode-badge', 'btn-pause-resume', 'pair-actions']) {
+    assert.equal(ui.element(id).hidden, true);
+  }
+  assert.equal(ui.element('overview-scope').hidden, false);
+  await ui.run("openPairPage('BTCUSDT')");
+  for (const id of ['pair-picker', 'mode-badge', 'btn-pause-resume', 'pair-actions']) {
+    assert.equal(ui.element(id).hidden, false);
+  }
+  assert.match(ui.element('pair-actions-label').textContent, /BTCUSDT/);
+  ui.run("switchTab('tab-global-config', document.getElementById('tab-btn-global-config'))");
+  assert.equal(ui.element('pair-actions').hidden, true);
+  assert.equal(ui.element('overview-scope').hidden, true);
+  ui.run("switchTab('tab-detail', document.getElementById('tab-btn-detail'))");
+  assert.equal(ui.element('pair-actions').hidden, false);
+  assert.match(ui.element('detail-pair-title').textContent, /BTCUSDT/);
+});
+
+test('a slow card selection cannot move the user away from a page chosen afterward', async () => {
+  const pending = deferred();
+  const ui = dashboard({ fetchStatus: (symbol, states) => symbol === 'BTCUSDT'
+    ? pending.promise : response(states.get(symbol)) });
+  await ui.run('initConsole()');
+  const opening = ui.run("openPairPage('BTCUSDT')");
+  await new Promise(setImmediate);
+  ui.run("switchTab('tab-global-config', document.getElementById('tab-btn-global-config'))");
+  pending.resolve(response(snapshot('BTCUSDT')));
+  await opening;
+  assert.equal(ui.element('tab-btn-global-config').getAttribute('aria-selected'), 'true');
+  assert.equal(ui.element('pair-actions').hidden, true);
+});
+
+test('pairs added in another window become selectable without replacing an unsaved strategy form', async () => {
+  const ui = dashboard();
+  await ui.run('initConsole()');
+  await ui.run("openPairPage('SOLUSDC', 'tab-config')");
+  await new Promise(setImmediate);
+  ui.element('cfg-interval').value = '7.25';
+  ui.addExternalPair('ETHUSDT');
+  await ui.run('loadOverview()');
+  assert.equal(ui.element('pair-select').children.length, 3);
+  assert.ok(ui.element('pair-select').children.some(option => option.value === 'ETHUSDT'));
+  assert.equal(ui.element('pair-select').value, 'SOLUSDC');
+  assert.equal(ui.element('cfg-interval').value, '7.25');
+  assert.equal(ui.element('config-pair-count').textContent, '已配置 3 个交易对');
+  assert.match(ui.element('overview-pairs').innerHTML, /ETHUSDT/);
+  await ui.run("openPairPage('ETHUSDT')");
+  assert.equal(ui.run('selectedPair'), 'ETHUSDT');
+  assert.equal(ui.element('pair-select').value, 'ETHUSDT');
+  assert.equal(ui.element('tab-btn-detail').getAttribute('aria-selected'), 'true');
+  await ui.run("sendControlAction('resume')");
+  assert.equal(ui.states.get('ETHUSDT').status, 'RUNNING');
+  assert.equal(ui.states.get('SOLUSDC').status, 'RUNNING');
+});
+
+test('a selected pair removed in another window falls back to an existing strategy and retires its socket', async () => {
+  const ui = dashboard();
+  await ui.run('initConsole()');
+  await ui.run("openPairPage('SOLUSDC')");
+  const oldSocket = ui.sockets.at(-1);
+  ui.removeExternalPair('SOLUSDC');
+  await ui.run('loadOverview()');
+  assert.equal(ui.run('selectedPair'), 'BTCUSDT');
+  assert.equal(ui.element('pair-select').value, 'BTCUSDT');
+  assert.equal(ui.element('pair-select').children.length, 1);
+  assert.equal(ui.element('pair-select').disabled, true);
+  assert.equal(ui.element('cfg-symbol').value, 'BTCUSDT');
+  assert.match(ui.element('detail-pair-title').textContent, /BTCUSDT/);
+  assert.doesNotMatch(ui.element('overview-pairs').innerHTML, /SOLUSDC/);
+  oldSocket.sendSnapshot(snapshot('SOLUSDC', 'PAUSED'));
+  assert.equal(ui.element('symbol-badge').textContent, 'BTCUSDT PERP');
+  await ui.run("sendControlAction('pause')");
+  assert.equal(ui.states.get('BTCUSDT').status, 'PAUSED');
+});
+
+test('external pair changes preserve a new-pair draft and cancelling falls back to an existing strategy', async () => {
+  const ui = dashboard();
+  await ui.run('initConsole()');
+  ui.run('openNewPair()');
+  ui.element('cfg-symbol').value = 'XRPUSDT';
+  ui.element('cfg-interval').value = '0.0075';
+  ui.element('cfg-direction').value = 'SHORT';
+  ui.removeExternalPair('SOLUSDC');
+  ui.addExternalPair('ETHUSDT');
+  await ui.run('loadOverview()');
+  assert.equal(ui.run('editingNewPair'), true);
+  assert.equal(ui.element('cfg-symbol').value, 'XRPUSDT');
+  assert.equal(ui.element('cfg-interval').value, '0.0075');
+  assert.equal(ui.element('cfg-direction').value, 'SHORT');
+  assert.equal(ui.element('btn-save-cfg').textContent, '保存并添加交易对');
+  assert.equal(ui.element('pair-actions').hidden, true);
+  assert.equal(ui.element('btn-pause-resume').hidden, true);
+  await ui.run('loadConfigForm()');
+  assert.equal(ui.run('editingNewPair'), false);
+  assert.equal(ui.run('selectedPair'), 'BTCUSDT');
+  assert.equal(ui.element('cfg-symbol').value, 'BTCUSDT');
+  assert.equal(ui.element('pair-select').value, 'BTCUSDT');
+  assert.equal(ui.element('pair-actions').hidden, false);
+});
+
+test('overview cards preserve nonzero prices and position sizes smaller than four decimals', async () => {
+  const ui = dashboard();
+  const sol = ui.states.get('SOLUSDC');
+  sol.ticker.mark_price = '0.000012345';
+  sol.ticker.mark_update_time = new Date(ui.clock.now).toISOString();
+  sol.position.size = '-0.00000042';
+  await ui.run('initConsole()');
+  const card = ui.element('overview-pairs').innerHTML.match(/<article[^>]*data-symbol="SOLUSDC"[\s\S]*?<\/article>/)[0];
+  const price = card.match(/class="pair-price">([^<]+)</)[1];
+  const position = card.match(/<dt>持仓 <small>SOL<\/small><\/dt><dd>([^<]+)</)[1];
+  assert.ok(Number(price) > 0, `the price must remain nonzero: ${price}`);
+  assert.ok(Number(position) < 0, `the position must retain its negative amount: ${position}`);
+  assert.ok(Math.abs(Number(price) - Number(sol.ticker.mark_price)) / Number(sol.ticker.mark_price) < 0.01);
+  assert.equal(Number(position), Number(sol.position.size));
+});
+
+test('external removal while a strategy save is pending falls back after saving finishes', async () => {
+  const ui = dashboard();
+  await ui.run('initConsole()');
+  ui.run(`
+    pendingSave = new Promise(resolve => resolveSave = resolve);
+    originalAuthFetch = authFetch;
+    authFetch = (url, options) => url === '/api/pairs/SOLUSDC/config' && options?.method === 'POST'
+      ? pendingSave : originalAuthFetch(url, options);
+  `);
+  const saving = ui.run('submitConfig()');
+  await new Promise(setImmediate);
+  ui.removeExternalPair('SOLUSDC');
+  await ui.run('loadOverview()');
+  assert.equal(ui.run('pairManagementBusy'), true);
+  ui.run("resolveSave({ ok: false, json: async () => ({ success: false, message: 'pair removed' }) })");
+  await saving;
+  await ui.run('loadOverview()');
+  assert.equal(ui.run('selectedPair'), 'BTCUSDT');
+  assert.equal(ui.element('pair-select').value, 'BTCUSDT');
+  assert.equal(ui.element('cfg-symbol').value, 'BTCUSDT');
 });

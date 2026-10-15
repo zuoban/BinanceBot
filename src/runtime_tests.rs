@@ -224,6 +224,7 @@ async fn management_authenticates_add_remove_server_settings_and_pair_resources(
     let runtime = fixture();
     let router = create_managed_router(runtime.handle()).await;
     for (path, method, body) in [
+        ("/api/overview", "GET", Value::Null),
         ("/api/pairs", "POST", payload("ETHUSDT")),
         ("/api/pairs/SOLUSDC", "DELETE", json!({"confirm":true})),
         ("/api/server/config", "GET", Value::Null),
@@ -252,6 +253,26 @@ async fn management_authenticates_add_remove_server_settings_and_pair_resources(
             .len(),
         2
     );
+}
+
+#[tokio::test]
+async fn overview_reads_current_managed_membership_without_restarting_router() {
+    let mut runtime = fixture();
+    let router = create_managed_router(runtime.handle()).await;
+    let (status, response) = request(&router, "/api/overview", "GET", Value::Null, true).await;
+    assert_eq!(status, StatusCode::OK);
+    let pairs = response["data"]["pairs"].as_array().unwrap();
+    assert_eq!(pairs.len(), 2);
+    assert_eq!(pairs[0]["snapshot"]["symbol"], "SOLUSDC");
+    assert_eq!(pairs[1]["snapshot"]["symbol"], "BTCUSDT");
+
+    runtime.states()[0].pause_trading().await.unwrap();
+    runtime.remove_pair("SOLUSDC").await.unwrap();
+    let (status, response) = request(&router, "/api/overview", "GET", Value::Null, true).await;
+    assert_eq!(status, StatusCode::OK);
+    let pairs = response["data"]["pairs"].as_array().unwrap();
+    assert_eq!(pairs.len(), 1);
+    assert_eq!(pairs[0]["snapshot"]["symbol"], "BTCUSDT");
 }
 
 #[tokio::test]

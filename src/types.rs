@@ -349,6 +349,21 @@ pub struct TradingPairView {
     pub grid_config: crate::config::GridConfigSummary,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OverviewPairView {
+    pub scoped: bool,
+    pub mode: TradingMode,
+    pub snapshot: BotSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OverviewSnapshot {
+    pub generated_at: DateTime<Utc>,
+    /// Each account belongs to its pair snapshot and may represent the same wallet.
+    /// Consumers must not sum account balances across pairs.
+    pub pairs: Vec<OverviewPairView>,
+}
+
 #[derive(Debug)]
 pub enum BotControlAction {
     Pause,

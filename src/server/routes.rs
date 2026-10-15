@@ -4,9 +4,9 @@ use crate::server::state::AppState;
 use crate::server::ui::INDEX_HTML;
 use crate::types::{
     AuthLoginPayload, AuthSetupPayload, AuthStatusResponse, AuthTokenResponse, BotControlAction,
-    BotSnapshot, ChangePasswordPayload, GridOrder, LogEntry, TradeRecord, TradingMode,
-    TradingPairView, UpdateConfigPayload, UpdateGlobalConfigPayload, WebConfigView,
-    WebGlobalConfigView,
+    BotSnapshot, ChangePasswordPayload, GridOrder, LogEntry, OverviewPairView, OverviewSnapshot,
+    TradeRecord, TradingMode, TradingPairView, UpdateConfigPayload, UpdateGlobalConfigPayload,
+    WebConfigView, WebGlobalConfigView,
 };
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
@@ -100,6 +100,7 @@ async fn require_auth_middleware(
 pub fn create_router(state: Arc<AppState>) -> Router {
     let pairs = Router::new()
         .route("/api/pairs", get(get_single_pair_handler))
+        .route("/api/overview", get(get_single_overview_handler))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_auth_middleware,
@@ -112,6 +113,12 @@ async fn get_single_pair_handler(
     State(state): State<Arc<AppState>>,
 ) -> Json<ApiResponse<Vec<TradingPairView>>> {
     get_pairs_handler(State(Arc::new(vec![state]))).await
+}
+
+async fn get_single_overview_handler(
+    State(state): State<Arc<AppState>>,
+) -> Json<ApiResponse<OverviewSnapshot>> {
+    get_overview_handler(State(Arc::new(vec![state]))).await
 }
 
 fn pair_routes() -> Router<Arc<AppState>> {
@@ -189,6 +196,7 @@ pub fn create_multi_router(states: Vec<Arc<AppState>>) -> Router {
     }
     let global = Router::new()
         .route("/api/pairs", get(get_pairs_handler))
+        .route("/api/overview", get(get_overview_handler))
         .route("/api/trades/clear", post(clear_multi_trade_history_handler))
         .route_layer(middleware::from_fn_with_state(
             primary,
@@ -219,6 +227,30 @@ async fn get_pairs_handler(
     })
 }
 
+async fn get_overview_handler(
+    State(states): State<Arc<Vec<Arc<AppState>>>>,
+) -> Json<ApiResponse<OverviewSnapshot>> {
+    let generated_at = chrono::Utc::now();
+    let pairs = futures_util::future::join_all(states.iter().map(|state| async move {
+        // Reuse the per-pair chart cache and in-memory live fields used by WebSockets.
+        let snapshot = state.snapshot().await;
+        OverviewPairView {
+            scoped: state.pair_scope().is_some(),
+            mode: TradingMode::from_exchange(snapshot.dry_run, snapshot.grid_config.is_testnet),
+            snapshot,
+        }
+    }))
+    .await;
+    Json(ApiResponse {
+        success: true,
+        data: Some(OverviewSnapshot {
+            generated_at,
+            pairs,
+        }),
+        message: None,
+    })
+}
+
 /// Dispatch through the current registry so newly added pairs are immediately addressable.
 pub async fn create_managed_router(handle: RuntimeHandle) -> Router {
     let primary = handle.states.read().await[0].clone();
@@ -227,6 +259,7 @@ pub async fn create_managed_router(handle: RuntimeHandle) -> Router {
             "/api/pairs",
             get(get_managed_pairs_handler).post(add_pair_handler),
         )
+        .route("/api/overview", get(get_managed_overview_handler))
         .route("/api/pairs/:symbol", delete(remove_pair_handler))
         .route(
             "/api/pairs/:symbol/:resource",
@@ -314,6 +347,15 @@ async fn get_managed_pairs_handler(
     State(handle): State<RuntimeHandle>,
 ) -> Json<ApiResponse<Vec<TradingPairView>>> {
     get_pairs_handler(State(Arc::new(handle.states.read().await.clone()))).await
+}
+
+async fn get_managed_overview_handler(
+    State(handle): State<RuntimeHandle>,
+) -> Json<ApiResponse<OverviewSnapshot>> {
+    // Release the registry lock before collecting snapshots so dashboard reads
+    // do not hold up pair additions or removals during database work.
+    let states = handle.states.read().await.clone();
+    get_overview_handler(State(Arc::new(states))).await
 }
 
 async fn add_pair_handler(
@@ -1386,6 +1428,130 @@ mod tests {
     use crate::config::AppConfig;
     use crate::db::Database;
     use crate::types::BotStatus;
+
+    async fn overview_response(
+        router: &Router,
+        authenticated: bool,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut request = axum::http::Request::builder().uri("/api/overview");
+        if authenticated {
+            request = request.header("Authorization", "Bearer overview-test-token");
+        }
+        let response = router
+            .clone()
+            .oneshot(request.body(axum::body::Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn overview_authenticates_single_and_multi_pair_routes() {
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        db.create_session("overview-test-token").unwrap();
+        let (tx, _) = tokio::sync::mpsc::channel(1);
+        let mut config = AppConfig::default();
+        config.exchange.api_key = "overview-private-api-key".into();
+        config.exchange.api_secret = "overview-private-api-secret".into();
+        config.telegram.bot_token = "overview-private-telegram-token".into();
+        config.telegram.chat_id = "overview-private-chat-id".into();
+        let state = AppState::new(config, db, tx);
+        let router = create_router(state);
+        assert_eq!(
+            overview_response(&router, false).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        let (status, response) = overview_response(&router, true).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["success"], true);
+        assert_eq!(response["data"]["pairs"].as_array().unwrap().len(), 1);
+        assert_eq!(response["data"]["pairs"][0]["scoped"], false);
+        assert_eq!(
+            response["data"]["pairs"][0]["snapshot"]["symbol"],
+            "SOLUSDC"
+        );
+        let serialized = response.to_string();
+        for private_value in [
+            "overview-private-api-key",
+            "overview-private-api-secret",
+            "overview-private-telegram-token",
+            "overview-private-chat-id",
+        ] {
+            assert!(!serialized.contains(private_value));
+        }
+        let summary = &response["data"]["pairs"][0]["snapshot"]["grid_config"];
+        for private_field in ["api_key", "api_secret", "telegram", "bot_token", "chat_id"] {
+            assert!(summary.get(private_field).is_none());
+        }
+
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        db.create_session("overview-test-token").unwrap();
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        let mut states = Vec::new();
+        for (symbol, dry_run, is_testnet) in [("SOLUSDC", true, false), ("BTCUSDT", false, true)] {
+            let mut config = AppConfig::default();
+            config.exchange.symbol = symbol.into();
+            config.exchange.dry_run = dry_run;
+            config.exchange.is_testnet = is_testnet;
+            let (tx, _) = tokio::sync::mpsc::channel(1);
+            states.push(AppState::new_for_pair(config, db.clone(), tx, lock.clone()));
+        }
+        let account_time = chrono::Utc::now() - chrono::Duration::minutes(2);
+        states[0].ticker.write().await.last_price = rust_decimal_macros::dec!(123);
+        states[1].ticker.write().await.last_price = rust_decimal_macros::dec!(67890);
+        states[1].account.write().await.update_time = account_time;
+        states[0].add_log("INFO", "SOL scoped log").await;
+        states[1].add_log("WARN", "BTC scoped log").await;
+        let router = create_multi_router(states.clone());
+        assert_eq!(
+            overview_response(&router, false).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        let (status, response) = overview_response(&router, true).await;
+        assert_eq!(status, StatusCode::OK);
+        let overview: OverviewSnapshot = serde_json::from_value(response["data"].clone()).unwrap();
+        assert_eq!(overview.pairs.len(), 2);
+        assert!(overview.pairs.iter().all(|pair| pair.scoped));
+        assert_eq!(overview.pairs[0].mode, TradingMode::Paper);
+        assert_eq!(overview.pairs[1].mode, TradingMode::Testnet);
+        assert_eq!(overview.pairs[0].snapshot.symbol, "SOLUSDC");
+        assert_eq!(overview.pairs[1].snapshot.symbol, "BTCUSDT");
+        assert_eq!(
+            overview.pairs[0].snapshot.ticker.last_price,
+            rust_decimal_macros::dec!(123)
+        );
+        assert_eq!(
+            overview.pairs[1].snapshot.ticker.last_price,
+            rust_decimal_macros::dec!(67890)
+        );
+        assert_eq!(overview.pairs[1].snapshot.account.update_time, account_time);
+        assert_eq!(
+            overview.pairs[0].snapshot.recent_logs[0].message,
+            "SOL scoped log"
+        );
+        assert_eq!(
+            overview.pairs[1].snapshot.recent_logs[0].message,
+            "BTC scoped log"
+        );
+
+        // No WebSocket subscribers are required for live fields to refresh.
+        // Only chart queries are cached between overview polls.
+        assert_eq!(db.hourly_stats_query_count(), 2);
+        states[1].ticker.write().await.last_price = rust_decimal_macros::dec!(67900);
+        states[1].account.write().await.update_time = chrono::Utc::now();
+        let (_, response) = overview_response(&router, true).await;
+        let refreshed: OverviewSnapshot = serde_json::from_value(response["data"].clone()).unwrap();
+        assert_eq!(
+            refreshed.pairs[1].snapshot.ticker.last_price,
+            rust_decimal_macros::dec!(67900)
+        );
+        assert!(refreshed.pairs[1].snapshot.account.update_time > account_time);
+        assert_eq!(db.hourly_stats_query_count(), 2);
+    }
 
     #[tokio::test]
     async fn short_direction_is_saved_returned_and_preserved_for_legacy_clients() {
