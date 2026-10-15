@@ -7,6 +7,53 @@ const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '../src/server/dashboard.html'), 'utf8')
   .match(/<script>([\s\S]*?)<\/script>/)[1];
 
+test('page links restore the requested tab and browser back restores the root overview', () => {
+  const ui = dashboard();
+  ui.run("switchTab('tab-orders', document.getElementById('tab-btn-orders'))");
+  assert.equal(ui.element('page-title').textContent, '当前挂单');
+  assert.deepEqual(ui.history, ['#orders']);
+  ui.run("window.location.hash = '#logs'; restoreNavigation()");
+  assert.equal(ui.element('page-title').textContent, '运行日志');
+  assert.equal(ui.element('tab-btn-logs').getAttribute('aria-selected'), 'true');
+  assert.deepEqual(ui.history, ['#orders'], 'restoring browser history must not add another entry');
+  ui.run("window.location.hash = ''; restoreNavigation()");
+  assert.equal(ui.element('page-title').textContent, '策略总览');
+  ui.run("window.location.hash = '#unknown'; restoreNavigation()");
+  assert.equal(ui.element('page-title').textContent, '策略总览');
+});
+
+test('compact navigation closes after selection and returns focus to its visible trigger', () => {
+  const ui = dashboard();
+  ui.run('toggleNavigation()');
+  assert.equal(ui.element('nav-toggle').getAttribute('aria-expanded'), 'true');
+  ui.run("switchTab('tab-orders', document.getElementById('tab-btn-orders'))");
+  assert.equal(ui.element('nav-toggle').getAttribute('aria-expanded'), 'false');
+  assert.equal(ui.element('mobile-page-label').textContent, '当前挂单');
+  assert.equal(ui.run('document.activeElement.id'), 'nav-toggle');
+});
+
+test('hourly chart and its table share totals, retain zero hours, and clear stale data together', () => {
+  const ui = dashboard({ charts: true });
+  ui.run(`renderHourlyTradeChart({
+    window_start: '2026-10-15T00:00:00+08:00', window_end: '2026-10-15T02:00:00+08:00',
+    buckets: [
+      { hour_start: '2026-10-15T00:00:00+08:00', buy_count: 0, sell_count: 0 },
+      { hour_start: '2026-10-15T01:00:00+08:00', buy_count: 3, sell_count: 2 }
+    ]
+  })`);
+  assert.equal(ui.element('hourly-trade-total').textContent, 5);
+  assert.equal(ui.element('hourly-buy-total').textContent, 3);
+  assert.equal(ui.element('hourly-sell-total').textContent, 2);
+  const table = ui.element('hourly-data-tbody').innerHTML;
+  assert.match(table, /01:00<\/th><td>3<\/td><td>2<\/td><td>5<\/td>/);
+  assert.match(table, /00:00<\/th><td>0<\/td><td>0<\/td><td>0<\/td>/);
+  assert.ok(table.indexOf('01:00') < table.indexOf('00:00'), 'newest hour is first in both views');
+  ui.run('renderHourlyTradeChart(null)');
+  assert.equal(ui.element('hourly-trade-total').textContent, '--');
+  assert.equal(ui.element('hourly-trade-chart').innerHTML, '');
+  assert.match(ui.element('hourly-data-tbody').innerHTML, /成交统计暂不可用/);
+});
+
 function snapshot(symbol, status = 'RUNNING') {
   return {
     symbol, status, dry_run: true,
@@ -21,24 +68,45 @@ function response(data, success = true) {
 }
 
 function deferred() {
-  let resolve;
-  const promise = new Promise(done => { resolve = done; });
-  return { promise, resolve };
+  let resolve, reject;
+  const promise = new Promise((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
 }
 
-function dashboard({ scoped = true, fetchStatus } = {}) {
+function dashboard({ scoped = true, fetchStatus, charts = false } = {}) {
   const elements = new Map();
   function element(id) {
-    if (!elements.has(id)) elements.set(id, {
-      value: '', disabled: false, style: {}, textContent: '', innerHTML: '', children: [],
-      classList: { add() {}, remove() {} },
-      setAttribute() {}, focus() {}, replaceChildren(...children) { this.children = children; },
-    });
+    if (!elements.has(id)) {
+      const classes = new Set(), attributes = new Map();
+      elements.set(id, {
+        id, value: '', disabled: false, style: { setProperty() {} }, dataset: {},
+        textContent: '', innerHTML: '', children: [],
+        classList: {
+          add: name => classes.add(name), remove: name => classes.delete(name),
+          contains: name => classes.has(name),
+          toggle(name, force = !classes.has(name)) { force ? classes.add(name) : classes.delete(name); },
+        },
+        setAttribute: (name, value) => attributes.set(name, value),
+        getAttribute: name => attributes.get(name),
+        focus() { context.document.activeElement = this; },
+        getClientRects: () => [{}], scrollIntoView() {},
+        contains(target) { return this.children.includes(target); },
+        replaceChildren(...children) { this.children = children; this.innerHTML = ''; },
+      });
+    }
     return elements.get(id);
   }
+  const tabNames = ['overview', 'orders', 'trades', 'config', 'global-config', 'logs'];
+  const tabs = tabNames.map(name => {
+    const tab = element(`tab-btn-${name}`);
+    tab.setAttribute('aria-controls', `tab-${name}`);
+    if (name === 'overview') tab.classList.add('active');
+    return tab;
+  });
+  element('console-nav').children = tabs;
   const pairs = scoped ? ['SOLUSDC', 'BTCUSDT'] : ['SOLUSDC'];
   const states = new Map(pairs.map(symbol => [symbol, snapshot(symbol)]));
-  const requests = [], sockets = [], intervals = [], confirmations = [];
+  const requests = [], sockets = [], intervals = [], confirmations = [], history = [];
   const clock = { now: Date.now() };
   const storage = new Map([['binance_bot_auth_token', 'test-token']]);
   let singleSymbol = 'SOLUSDC';
@@ -53,14 +121,27 @@ function dashboard({ scoped = true, fetchStatus } = {}) {
     }
   }
   const context = {
-    document: { getElementById: element, querySelectorAll: () => [], createElement: () => ({}) },
+    document: {
+      activeElement: null, getElementById: element,
+      querySelectorAll: selector => selector === '.tab-button' ? tabs
+        : selector === '.tab-content' ? tabNames.map(name => element(`tab-${name}`)) : [],
+      querySelector: selector => selector === '.tab-nav' ? element('console-nav')
+        : selector === '.app-header' ? element('app-header')
+        : selector === '.mobile-actions-toggle' ? element('actions-toggle')
+        : selector === '.tab-button.active' ? tabs.find(tab => tab.classList.contains('active'))
+        : tabs.find(tab => selector === `[aria-controls="${tab.getAttribute('aria-controls')}"]`),
+      createElement: () => ({}),
+    },
     sessionStorage: {
       getItem: key => storage.get(key) || '', setItem: (key, value) => storage.set(key, value),
       removeItem: key => storage.delete(key),
     },
-    window: { location: { protocol: 'http:', host: 'localhost' }, addEventListener() {} },
+    window: {
+      location: { protocol: 'http:', host: 'localhost', hash: '' }, addEventListener() {}, scrollTo() {},
+      history: { pushState(_state, _title, hash) { history.push(hash); context.window.location.hash = hash; } },
+    },
     Date: Clock, WebSocket: Socket, console: { log() {}, warn() {}, error() {} },
-    setTimeout() {}, setInterval: (fn, ms) => { intervals.push({ fn, ms }); },
+    setTimeout() {}, setInterval: (fn, ms) => { intervals.push({ fn, ms }); }, requestAnimationFrame: fn => fn(),
     confirm: text => { confirmations.push(text); return true; }, alert() {},
     fetch: async (url, options = {}) => {
       requests.push({ url, options });
@@ -102,10 +183,11 @@ function dashboard({ scoped = true, fetchStatus } = {}) {
   // Exercise the real selection/control code; chart geometry is tested separately by browser QA.
   vm.runInContext(`
     renderLadder = () => {}; renderOrdersTable = () => {};
-    renderTradesTable = () => {}; renderHourlyTradeChart = () => {}; renderLogs = () => {};
+    renderTradesTable = () => {}; renderLogs = () => {};
   `, context);
+  if (!charts) vm.runInContext('renderHourlyTradeChart = () => {};', context);
   return {
-    element, requests, sockets, states, intervals, confirmations, clock,
+    element, requests, sockets, states, intervals, confirmations, clock, history,
     run: code => vm.runInContext(code, context),
     setSingleSymbol: symbol => { singleSymbol = symbol; states.set(symbol, snapshot(symbol)); },
     async poll() {
@@ -138,6 +220,59 @@ test('cancellation stays available even when both snapshot transports fail', asy
   await new Promise(setImmediate);
   assert.equal(ui.states.get('SOLUSDC').status, 'PAUSED');
   assert.ok(ui.requests.some(request => request.url.endsWith('/control')));
+});
+
+test('connection warnings remain visible with the actions menu closed until fresh data arrives', async () => {
+  let offline = false;
+  const ui = dashboard({ fetchStatus: (symbol, states) => {
+    if (offline) throw new Error('offline');
+    return response(states.get(symbol));
+  } });
+  ui.element('header-actions').hidden = true;
+  await ui.run('initConsole()');
+  assert.equal(ui.element('connection-alert').hidden, true);
+  assert.equal(ui.element('log-update-status').textContent, '定时刷新');
+  ui.sockets.at(-1).sendSnapshot(snapshot('SOLUSDC'));
+  assert.equal(ui.element('log-update-status').textContent, '自动更新');
+
+  offline = true;
+  ui.sockets.at(-1).close();
+  assert.equal(ui.element('connection-alert').hidden, false);
+  assert.match(ui.element('connection-alert').textContent, /连接中断.*数据可能已过期/);
+  assert.equal(ui.element('log-update-status').textContent, '更新中断');
+  assert.equal(ui.element('header-actions').hidden, true);
+
+  ui.run('initWebSocket()');
+  assert.equal(ui.element('connection-alert').hidden, false, 'a reconnect attempt must not hide the warning');
+  const retry = ui.sockets.at(-1);
+  retry.readyState = 1;
+  retry.onopen();
+  assert.equal(ui.element('connection-alert').hidden, false, 'opening a socket alone does not refresh stale data');
+  await ui.poll();
+  assert.equal(ui.element('connection-alert').hidden, false);
+  assert.match(ui.element('connection-alert').textContent, /数据刷新失败/);
+
+  offline = false;
+  await ui.poll();
+  assert.equal(ui.element('connection-alert').hidden, true);
+  assert.equal(ui.element('log-update-status').textContent, '定时刷新');
+  retry.sendSnapshot(snapshot('SOLUSDC'));
+  assert.equal(ui.element('connection-alert').hidden, true);
+  assert.equal(ui.element('log-update-status').textContent, '自动更新');
+  assert.equal(ui.element('log-update-indicator').classList.contains('is-disconnected'), false);
+});
+
+test('a late HTTP failure cannot replace the healthy state of a fresh WebSocket snapshot', async () => {
+  const pending = deferred();
+  const ui = dashboard({ fetchStatus: () => pending.promise });
+  const initializing = ui.run('initConsole()');
+  await new Promise(setImmediate);
+  ui.sockets.at(-1).sendSnapshot(snapshot('SOLUSDC'));
+  pending.reject(new Error('offline'));
+  await initializing;
+  assert.equal(ui.element('connection-alert').hidden, true);
+  assert.equal(ui.element('connection-status').classList.contains('is-disconnected'), false);
+  assert.equal(ui.element('log-update-status').textContent, '自动更新');
 });
 
 test('polling resumes after WebSocket silence and reflects completed controls', async () => {
