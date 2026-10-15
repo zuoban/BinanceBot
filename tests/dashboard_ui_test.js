@@ -74,6 +74,17 @@ function overviewData(states, scoped = true) {
   };
 }
 
+function setAccount(ui, symbol, { mode = 'PAPER', asset = 'USDC', equity = '10000', available = '10000', unrealized = '0', age = 0 } = {}) {
+  const data = ui.states.get(symbol);
+  data.dry_run = mode === 'PAPER';
+  data.grid_config.is_testnet = mode === 'TESTNET';
+  data.account = {
+    asset, total_wallet_balance: equity, margin_balance: equity,
+    available_balance: available, update_time: new Date(ui.clock.now - age).toISOString(),
+  };
+  data.position.unrealized_pnl = unrealized;
+}
+
 function response(data, success = true) {
   return { ok: true, status: 200, json: async () => ({ success, data }) };
 }
@@ -84,7 +95,7 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-function dashboard({ scoped = true, fetchStatus, fetchOverview, charts = false } = {}) {
+function dashboard({ scoped = true, fetchStatus, fetchOverview, fetchControl, confirmResult = true, charts = false } = {}) {
   const elements = new Map();
   function element(id) {
     if (!elements.has(id)) {
@@ -156,7 +167,7 @@ function dashboard({ scoped = true, fetchStatus, fetchOverview, charts = false }
     },
     Date: Clock, WebSocket: Socket, console: { log() {}, warn() {}, error() {} },
     setTimeout() {}, setInterval: (fn, ms) => { intervals.push({ fn, ms }); }, requestAnimationFrame: fn => fn(),
-    confirm: text => { confirmations.push(text); return true; }, alert() {},
+    confirm: text => { confirmations.push(text); return confirmResult; }, alert() {},
     fetch: async (url, options = {}) => {
       requests.push({ url, options });
       if (url === '/api/overview') return fetchOverview ? fetchOverview(states) : response(overviewData(
@@ -186,6 +197,7 @@ function dashboard({ scoped = true, fetchStatus, fetchOverview, charts = false }
       });
       if (url.endsWith('/control')) {
         const action = JSON.parse(options.body).action;
+        if (fetchControl) return fetchControl(symbol, action, states);
         states.get(symbol).status = action === 'resume' ? 'RUNNING' : 'PAUSED';
         return response('accepted');
       }
@@ -539,6 +551,106 @@ test('short position shows positive notional and reserves only closing buys', as
   assert.equal(ui.element('card-sell-reserved').className, 'text-red');
 });
 
+test('account balances move above the cards and independent paper wallets are summed by asset', async () => {
+  const ui = dashboard();
+  setAccount(ui, 'SOLUSDC', { equity: '10000', available: '9000', unrealized: '12.5' });
+  setAccount(ui, 'BTCUSDT', { equity: '10000', available: '8000', unrealized: '-2.5' });
+  await ui.run('initConsole()');
+  const accounts = ui.element('overview-accounts').innerHTML;
+  assert.match(accounts, /2 个独立模拟账户合计/);
+  assert.match(accounts, /data-account-equity>20,010\.00/);
+  assert.match(accounts, /data-account-available>17,000\.00/);
+  assert.match(ui.run('document.title'), /账户权益 20,010\.00 USDC · 可用余额 17,000\.00 USDC · 策略总览/);
+  assert.doesNotMatch(ui.element('overview-pairs').innerHTML, /pair-account|账户权益|可用余额/);
+  assert.equal(ui.element('overview-accounts').getAttribute('aria-busy'), 'false');
+  ui.element('overview-search').value = 'SOL';
+  ui.run('renderOverview()');
+  assert.equal(ui.element('overview-accounts').innerHTML, accounts, 'pair filters must not hide account funds');
+  assert.match(ui.run('document.title'), /账户权益 20,010\.00 USDC · 可用余额 17,000\.00 USDC/);
+});
+
+test('shared account balances use the newest account observation once regardless of pair order', async () => {
+  const ui = dashboard();
+  setAccount(ui, 'SOLUSDC', { mode: 'LIVE', equity: '12345', available: '8000', age: 1000 });
+  setAccount(ui, 'BTCUSDT', { mode: 'LIVE', equity: '10000', available: '7000', age: 5000 });
+  await ui.run('initConsole()');
+  const accounts = ui.element('overview-accounts').innerHTML;
+  assert.equal((accounts.match(/class="account-summary"/g) || []).length, 1);
+  assert.match(accounts, /2 个交易对共用/);
+  assert.match(accounts, /data-account-equity>12,345\.00/);
+  assert.match(accounts, /data-account-available>8,000\.00/);
+  setAccount(ui, 'BTCUSDT', { mode: 'LIVE', equity: '12400', available: '8100' });
+  await ui.run('loadOverview()');
+  assert.match(ui.element('overview-accounts').innerHTML, /data-account-equity>12,400\.00/);
+  assert.match(ui.element('overview-accounts').innerHTML, /data-account-available>8,100\.00/);
+  assert.match(ui.run('document.title'), /账户权益 12,400\.00 USDC · 可用余额 8,100\.00 USDC/);
+});
+
+test('account overview keeps execution modes and quote assets separate even for identical balances', async () => {
+  const ui = dashboard();
+  ui.addExternalPair('ETHUSDC');
+  ui.addExternalPair('XRPUSDT');
+  setAccount(ui, 'SOLUSDC', { mode: 'LIVE' });
+  setAccount(ui, 'BTCUSDT', { mode: 'TESTNET' });
+  setAccount(ui, 'ETHUSDC');
+  setAccount(ui, 'XRPUSDT', { asset: 'USDT' });
+  await ui.run('initConsole()');
+  const accounts = ui.element('overview-accounts').innerHTML;
+  assert.equal((accounts.match(/class="account-summary"/g) || []).length, 4);
+  for (const [mode, asset] of [['LIVE', 'USDC'], ['TESTNET', 'USDC'], ['PAPER', 'USDC'], ['PAPER', 'USDT']]) {
+    assert.match(accounts, new RegExp(`data-mode="${mode}" data-asset="${asset}"`));
+  }
+  for (const [mode, asset] of [['实盘', 'USDC'], ['测试网', 'USDC'], ['模拟', 'USDC'], ['模拟', 'USDT']]) {
+    assert.match(ui.run('document.title'), new RegExp(`${mode} 账户权益 10,000\\.00 ${asset} · 可用余额 10,000\\.00 ${asset}`));
+  }
+  assert.doesNotMatch(accounts, /20,000|40,000/);
+});
+
+test('stale shared funds and incomplete paper totals are unavailable while valid zero balances remain visible', async () => {
+  const ui = dashboard();
+  setAccount(ui, 'SOLUSDC', { mode: 'LIVE', age: 31000 });
+  setAccount(ui, 'BTCUSDT', { mode: 'LIVE', age: 60000 });
+  await ui.run('initConsole()');
+  assert.match(ui.element('overview-accounts').innerHTML, /data-account-equity>--/);
+  assert.match(ui.element('overview-accounts').innerHTML, /账户数据待更新/);
+  assert.match(ui.run('document.title'), /账户权益 -- USDC · 可用余额 -- USDC/);
+  setAccount(ui, 'SOLUSDC', { equity: '0', available: '0' });
+  setAccount(ui, 'BTCUSDT', { equity: '100', available: undefined });
+  delete ui.states.get('BTCUSDT').account.available_balance;
+  await ui.run('loadOverview()');
+  assert.match(ui.element('overview-accounts').innerHTML, /data-account-equity>100\.00/);
+  assert.match(ui.element('overview-accounts').innerHTML, /data-account-available>--/);
+  ui.states.get('BTCUSDT').account.available_balance = '0';
+  await ui.run('loadOverview()');
+  assert.match(ui.element('overview-accounts').innerHTML, /data-account-available>0\.00/);
+  assert.doesNotMatch(ui.element('overview-accounts').innerHTML, /账户数据待更新/);
+  delete ui.states.get('BTCUSDT').account.total_wallet_balance;
+  await ui.run('loadOverview()');
+  assert.match(ui.element('overview-accounts').innerHTML, /data-account-equity>--/);
+});
+
+test('account overview survives a failed refresh and expires shared balances using account timestamps', async () => {
+  let offline = false;
+  const ui = dashboard({ fetchOverview: states => {
+    if (offline) throw new Error('offline');
+    return response(overviewData(states));
+  } });
+  setAccount(ui, 'SOLUSDC', { mode: 'LIVE' });
+  setAccount(ui, 'BTCUSDT', { mode: 'LIVE' });
+  await ui.run('initConsole()');
+  const accounts = ui.element('overview-accounts').innerHTML;
+  offline = true;
+  await ui.run('loadOverview()');
+  assert.equal(ui.element('overview-accounts').innerHTML, accounts);
+  ui.clock.now += 31000;
+  ui.run('renderMarkPrice()');
+  assert.match(ui.run('document.title'), /账户权益 -- USDC · 可用余额 -- USDC/);
+  await ui.run('loadOverview()');
+  assert.match(ui.element('overview-accounts').innerHTML, /data-account-equity>--/);
+  assert.match(ui.element('overview-accounts').innerHTML, /data-account-available>--/);
+  assert.equal(ui.element('overview-alert').hidden, false);
+});
+
 test('the overview displays every configured pair and totals all strategies independently of selection', async () => {
   const ui = dashboard();
   const sol = ui.states.get('SOLUSDC');
@@ -557,10 +669,16 @@ test('the overview displays every configured pair and totals all strategies inde
   assert.equal(String(ui.element('overview-running-count').textContent), '1');
   assert.equal(String(ui.element('overview-order-count').textContent), '3');
   assert.equal(String(ui.element('overview-trade-count').textContent), '7');
+  assert.equal(String(ui.element('overview-buy-count').textContent), '3');
+  assert.equal(String(ui.element('overview-sell-count').textContent), '4');
   assert.equal(ui.run('selectedPair'), 'SOLUSDC');
   await ui.run("selectPair('BTCUSDT')");
   assert.match(ui.element('overview-pairs').innerHTML, /SOLUSDC/);
   assert.equal(String(ui.element('overview-order-count').textContent), '3');
+  ui.element('overview-search').value = 'BTC';
+  ui.run('renderOverview()');
+  assert.equal(String(ui.element('overview-buy-count').textContent), '3');
+  assert.equal(String(ui.element('overview-sell-count').textContent), '4');
 });
 
 test('overview search, status, and mode filters combine without changing global totals', async () => {
@@ -725,13 +843,19 @@ test('missing or previous-day trade statistics remain unavailable until every pa
   ui.states.get('BTCUSDT').hourly_trade_stats = { ...current, window_end: '2026-10-15T23:00:00+08:00' };
   await ui.run('initConsole()');
   assert.equal(String(ui.element('overview-trade-count').textContent), '--');
+  assert.equal(String(ui.element('overview-buy-count').textContent), '--');
+  assert.equal(String(ui.element('overview-sell-count').textContent), '--');
   assert.match(ui.element('overview-trade-note').textContent, /待更新/);
   ui.states.get('BTCUSDT').hourly_trade_stats = current;
   await ui.run('loadOverview()');
   assert.equal(String(ui.element('overview-trade-count').textContent), '6');
+  assert.equal(String(ui.element('overview-buy-count').textContent), '4');
+  assert.equal(String(ui.element('overview-sell-count').textContent), '2');
   ui.clock.now = Date.parse('2026-10-16T16:00:01Z');
   ui.run('renderOverview()');
   assert.equal(String(ui.element('overview-trade-count').textContent), '--');
+  assert.equal(String(ui.element('overview-buy-count').textContent), '--');
+  assert.equal(String(ui.element('overview-sell-count').textContent), '--');
 });
 
 test('shared-page navigation hides pair actions and returning to detail restores their context', async () => {
@@ -852,6 +976,82 @@ test('overview cards preserve nonzero prices and position sizes smaller than fou
   assert.equal(Number(position), Number(sol.position.size));
 });
 
+function cardMetric(ui, symbol, label) {
+  const card = ui.element('overview-pairs').innerHTML.match(new RegExp(`<article[^>]*data-symbol="${symbol}"[\\s\\S]*?</article>`))[0];
+  const metric = card.match(new RegExp(`<dt>${label} <small>([^<]+)</small></dt><dd(?: class="([^"]*)")?>([^<]+)([\\s\\S]*?)</dd>`));
+  assert.ok(metric, `${symbol} must display ${label}`);
+  return { unit: metric[1], color: metric[2] || '', value: metric[3], pending: metric[4].includes('待同步') };
+}
+
+test('pair cards value long and short positions at mark price and add raw realized PnL to unrealized PnL', async () => {
+  const ui = dashboard();
+  const sol = ui.states.get('SOLUSDC');
+  const btc = ui.states.get('BTCUSDT');
+  sol.ticker = { symbol: 'SOLUSDC', mark_price: '105.25', last_price: '999', mark_update_time: new Date(ui.clock.now).toISOString() };
+  sol.position = { size: '2.5', unrealized_pnl: '-4.25' };
+  sol.stats = { total_realized_pnl: '10.5', total_commission: '3' };
+  btc.ticker = { symbol: 'BTCUSDT', mark_price: '60000', mark_update_time: new Date(ui.clock.now).toISOString() };
+  btc.position = { size: '-0.125', unrealized_pnl: '12.5' };
+  btc.stats = { total_realized_pnl: '-20' }; // Missing commission must not hide realized PnL.
+  await ui.run('initConsole()');
+  assert.equal(cardMetric(ui, 'SOLUSDC', '持仓金额').value, '263.13');
+  assert.equal(cardMetric(ui, 'SOLUSDC', '持仓金额').unit, 'USDC');
+  assert.equal(cardMetric(ui, 'BTCUSDT', '持仓金额').value, '7,500.00');
+  assert.equal(cardMetric(ui, 'BTCUSDT', '持仓金额').unit, 'USDT');
+  assert.equal(cardMetric(ui, 'SOLUSDC', '已实现盈亏').value, '+10.5000');
+  assert.equal(cardMetric(ui, 'SOLUSDC', '累计盈亏').value, '+6.2500');
+  assert.equal(cardMetric(ui, 'SOLUSDC', '累计盈亏').color, 'text-green');
+  assert.equal(cardMetric(ui, 'BTCUSDT', '已实现盈亏').value, '-20.0000');
+  assert.equal(cardMetric(ui, 'BTCUSDT', '累计盈亏').value, '-7.5000');
+  assert.equal(cardMetric(ui, 'BTCUSDT', '累计盈亏').color, 'text-red');
+  assert.doesNotMatch(ui.element('overview-pairs').innerHTML, /累计扣费后/);
+});
+
+test('card totals preserve real zeroes and keep missing or invalid operands unavailable', async () => {
+  const ui = dashboard({ scoped: false });
+  const sol = ui.states.get('SOLUSDC');
+  sol.ticker = { symbol: 'SOLUSDC', mark_price: '105', mark_update_time: new Date(ui.clock.now).toISOString() };
+  sol.position = { size: '0', unrealized_pnl: '0' };
+  sol.stats = { total_realized_pnl: '0' };
+  await ui.run('initConsole()');
+  assert.equal(cardMetric(ui, 'SOLUSDC', '持仓金额').value, '0.00');
+  assert.equal(cardMetric(ui, 'SOLUSDC', '累计盈亏').value, '0.0000');
+  for (const invalid of [undefined, null, '', 'invalid', 'Infinity']) {
+    sol.position.size = invalid;
+    sol.position.unrealized_pnl = invalid;
+    await ui.run('loadOverview()');
+    assert.equal(cardMetric(ui, 'SOLUSDC', '持仓金额').value, '--');
+    assert.equal(cardMetric(ui, 'SOLUSDC', '累计盈亏').value, '--');
+    sol.position.unrealized_pnl = '5';
+    sol.stats.total_realized_pnl = invalid;
+    await ui.run('loadOverview()');
+    assert.equal(cardMetric(ui, 'SOLUSDC', '已实现盈亏').value, '--');
+    assert.equal(cardMetric(ui, 'SOLUSDC', '累计盈亏').value, '--');
+    sol.stats.total_realized_pnl = '0';
+  }
+});
+
+test('position valuation requires a fresh matching mark price and pending realized PnL marks both totals', async () => {
+  const ui = dashboard({ scoped: false });
+  const sol = ui.states.get('SOLUSDC');
+  sol.position = { size: '-2', unrealized_pnl: '5' };
+  sol.stats = { total_realized_pnl: '10', pending_pnl_trades: 1 };
+  sol.ticker = { symbol: 'SOLUSDC', mark_price: '105', mark_update_time: new Date(ui.clock.now).toISOString() };
+  await ui.run('initConsole()');
+  assert.equal(cardMetric(ui, 'SOLUSDC', '持仓金额').value, '210.00');
+  assert.equal(cardMetric(ui, 'SOLUSDC', '已实现盈亏').pending, true);
+  assert.equal(cardMetric(ui, 'SOLUSDC', '累计盈亏').pending, true);
+  for (const update of [
+    { mark_update_time: new Date(ui.clock.now - 15000).toISOString() },
+    { symbol: 'BTCUSDT' }, { mark_price: 'Infinity' }, { mark_price: null }, { mark_price: '0' },
+  ]) {
+    sol.ticker = { symbol: 'SOLUSDC', mark_price: '105', mark_update_time: new Date(ui.clock.now).toISOString(), ...update };
+    await ui.run('loadOverview()');
+    assert.equal(cardMetric(ui, 'SOLUSDC', '持仓金额').value, '--');
+    assert.equal(cardMetric(ui, 'SOLUSDC', '累计盈亏').value, '+15.0000');
+  }
+});
+
 test('external removal while a strategy save is pending falls back after saving finishes', async () => {
   const ui = dashboard();
   await ui.run('initConsole()');
@@ -872,4 +1072,232 @@ test('external removal while a strategy save is pending falls back after saving 
   assert.equal(ui.run('selectedPair'), 'BTCUSDT');
   assert.equal(ui.element('pair-select').value, 'BTCUSDT');
   assert.equal(ui.element('cfg-symbol').value, 'BTCUSDT');
+});
+
+test('card controls address their own pair without changing the selected detail or navigation', async () => {
+  const ui = dashboard();
+  ui.states.get('BTCUSDT').status = 'PAUSED';
+  await ui.run('initConsole()');
+  await ui.run("controlOverviewPair('BTCUSDT', 'resume')");
+  assert.equal(ui.states.get('BTCUSDT').status, 'RUNNING');
+  assert.equal(ui.run('selectedPair'), 'SOLUSDC');
+  assert.equal(ui.element('pair-select').value, 'SOLUSDC');
+  assert.equal(ui.run('activeTab'), 'tab-overview');
+  assert.equal(ui.run("overviewControls.get('BTCUSDT').confirmed"), true);
+  assert.equal(ui.requests.filter(request => request.url.endsWith('/control')).at(-1).url, '/api/pairs/BTCUSDT/control');
+  await ui.run("controlOverviewPair('BTCUSDT', 'pause')");
+  assert.equal(ui.states.get('BTCUSDT').status, 'PAUSED');
+  assert.equal(ui.states.get('SOLUSDC').status, 'RUNNING');
+  assert.match(ui.element('overview-pairs').innerHTML, /暂停已确认/);
+});
+
+test('start all includes filtered-out paused pairs and skips strategies already running', async () => {
+  const ui = dashboard();
+  ui.states.get('SOLUSDC').status = 'PAUSED';
+  ui.states.get('BTCUSDT').status = 'PAUSED';
+  ui.addExternalPair('ETHUSDT', 'RUNNING');
+  await ui.run('initConsole()');
+  ui.element('overview-search').value = 'SOL';
+  ui.run('renderOverview()');
+  await ui.run("controlAllOverviewPairs('resume')");
+  const requests = ui.requests.filter(request => request.url.endsWith('/control'));
+  assert.equal(requests.length, 2);
+  assert.deepEqual(requests.map(request => request.url).sort(), ['/api/pairs/BTCUSDT/control', '/api/pairs/SOLUSDC/control']);
+  assert.equal(ui.states.get('SOLUSDC').status, 'RUNNING');
+  assert.equal(ui.states.get('BTCUSDT').status, 'RUNNING');
+  assert.equal(ui.run('selectedPair'), 'SOLUSDC');
+  assert.equal(ui.element('overview-search').value, 'SOL');
+  assert.match(ui.element('overview-control-scope').textContent, /全部 3 个交易对/);
+  assert.match(ui.element('overview-control-report').textContent, /2 个已确认/);
+  assert.equal(ui.element('btn-overview-resume-all').disabled, true);
+  assert.equal(ui.element('btn-overview-pause-all').disabled, false);
+});
+
+test('pause all also cleans paused pairs with remaining orders and is usable without overview snapshots', async () => {
+  const ui = dashboard({ fetchOverview: async () => { throw new Error('snapshot unavailable'); } });
+  await ui.run('initConsole()');
+  assert.equal(ui.element('btn-overview-resume-all').disabled, true);
+  assert.equal(ui.element('btn-overview-pause-all').disabled, false);
+  await ui.run("controlAllOverviewPairs('pause')");
+  assert.equal(ui.states.get('SOLUSDC').status, 'PAUSED');
+  assert.equal(ui.states.get('BTCUSDT').status, 'PAUSED');
+  assert.equal(ui.requests.filter(request => request.url.endsWith('/control')).length, 2);
+
+  const healthy = dashboard();
+  healthy.states.get('BTCUSDT').status = 'PAUSED';
+  healthy.states.get('BTCUSDT').active_orders = [{ side: 'BUY' }];
+  await healthy.run('initConsole()');
+  await healthy.run("controlAllOverviewPairs('pause')");
+  assert.equal(healthy.requests.filter(request => request.url.endsWith('/control')).length, 2);
+  assert.match(healthy.element('overview-control-report').textContent, /2 个已确认/);
+});
+
+test('batch failures retain per-pair results and failed strategies can be retried individually', async () => {
+  let failBtc = true;
+  const ui = dashboard({ fetchControl: (symbol, action, states) => {
+    if (symbol === 'BTCUSDT' && failBtc) return { ok: false, json: async () => ({ success: false, message: '拒绝启动 <retry>' }) };
+    states.get(symbol).status = action === 'resume' ? 'RUNNING' : 'PAUSED';
+    return response('accepted');
+  } });
+  ui.states.get('SOLUSDC').status = 'PAUSED';
+  ui.states.get('BTCUSDT').status = 'PAUSED';
+  await ui.run('initConsole()');
+  await ui.run("controlAllOverviewPairs('resume')");
+  assert.equal(ui.states.get('SOLUSDC').status, 'RUNNING');
+  assert.equal(ui.states.get('BTCUSDT').status, 'PAUSED');
+  assert.match(ui.element('overview-control-report').textContent, /1 个已确认.*1 个未完成/);
+  assert.match(ui.element('overview-pairs').innerHTML, /拒绝启动 &lt;retry&gt;/);
+  failBtc = false;
+  await ui.run("controlOverviewPair('BTCUSDT', 'resume')");
+  assert.equal(ui.run("overviewControls.get('BTCUSDT').confirmed"), true);
+  assert.equal(ui.states.get('BTCUSDT').status, 'RUNNING');
+});
+
+test('an in-flight card operation blocks duplicate card and batch submissions until confirmed', async () => {
+  const pending = deferred();
+  const ui = dashboard({ fetchControl: async (symbol, action, states) => {
+    await pending.promise;
+    states.get(symbol).status = action === 'resume' ? 'RUNNING' : 'PAUSED';
+    return response('accepted');
+  } });
+  ui.states.get('BTCUSDT').status = 'PAUSED';
+  await ui.run('initConsole()');
+  const starting = ui.run("controlOverviewPair('BTCUSDT', 'resume')");
+  await new Promise(setImmediate);
+  assert.equal(ui.run("overviewControls.get('BTCUSDT').pending"), true);
+  assert.equal(ui.element('btn-overview-pause-all').disabled, true);
+  await ui.run("controlOverviewPair('BTCUSDT', 'resume')");
+  await ui.run("controlAllOverviewPairs('pause')");
+  assert.equal(ui.requests.filter(request => request.url.endsWith('/control')).length, 1);
+  pending.resolve();
+  await starting;
+  assert.equal(ui.run("overviewControls.get('BTCUSDT').confirmed"), true);
+  assert.equal(ui.element('btn-overview-pause-all').disabled, false);
+});
+
+test('accepted controls remain pending until new state confirms them and do not automatically retry', async () => {
+  const ui = dashboard({ fetchControl: () => response('queued') });
+  ui.states.get('BTCUSDT').status = 'PAUSED';
+  await ui.run('initConsole()');
+  await ui.run("controlOverviewPair('BTCUSDT', 'resume')");
+  assert.equal(ui.run("overviewControls.get('BTCUSDT').pending"), true);
+  assert.equal(ui.run("overviewControls.get('BTCUSDT').confirmed"), false);
+  assert.equal(ui.states.get('BTCUSDT').status, 'PAUSED');
+  ui.clock.now += 15001;
+  await ui.run('loadOverview()');
+  assert.equal(ui.run("overviewControls.get('BTCUSDT').pending"), false);
+  assert.match(ui.element('overview-pairs').innerHTML, /启动尚未确认，请查看运行日志/);
+  assert.equal(ui.requests.filter(request => request.url.endsWith('/control')).length, 1);
+});
+
+test('an overview read started before control acknowledgement cannot confirm its outcome', async () => {
+  const oldRead = deferred();
+  let reads = 0;
+  const ui = dashboard({ fetchOverview: states => ++reads === 2 ? oldRead.promise : response(overviewData(states)) });
+  ui.states.get('BTCUSDT').status = 'PAUSED';
+  await ui.run('initConsole()');
+  const reading = ui.run('loadOverview()');
+  await ui.run("controlOverviewPair('BTCUSDT', 'resume')");
+  oldRead.resolve(response(overviewData(ui.states)));
+  await reading;
+  assert.equal(ui.run("overviewControls.get('BTCUSDT').pending"), true);
+  await ui.run('loadOverview()');
+  assert.equal(ui.run("overviewControls.get('BTCUSDT').confirmed"), true);
+});
+
+test('live starts identify their scope for confirmation and cancellation sends no controls', async () => {
+  const ui = dashboard({ confirmResult: false });
+  for (const state of ui.states.values()) { state.status = 'PAUSED'; state.dry_run = false; }
+  await ui.run('initConsole()');
+  await ui.run("controlOverviewPair('BTCUSDT', 'resume')");
+  await ui.run("controlAllOverviewPairs('resume')");
+  assert.match(ui.confirmations[0], /BTCUSDT.*实盘/);
+  assert.match(ui.confirmations[1], /全部 2 个.*2 个实盘.*筛选外/);
+  assert.equal(ui.requests.filter(request => request.url.endsWith('/control')).length, 0);
+  assert.equal(ui.run('overviewControls.size'), 0);
+});
+
+test('legacy card and bulk controls use the unscoped control endpoint', async () => {
+  const ui = dashboard({ scoped: false });
+  ui.states.get('SOLUSDC').status = 'PAUSED';
+  await ui.run('initConsole()');
+  await ui.run("controlOverviewPair('SOLUSDC', 'resume')");
+  await ui.run("controlAllOverviewPairs('pause')");
+  const requests = ui.requests.filter(request => request.url.endsWith('/control'));
+  assert.equal(requests.length, 2);
+  assert.ok(requests.every(request => request.url === '/api/control'));
+  assert.equal(ui.states.get('SOLUSDC').status, 'PAUSED');
+});
+
+test('large batch controls limit concurrent requests while processing every strategy', async () => {
+  let active = 0, maxActive = 0;
+  const ui = dashboard({ fetchControl: async (symbol, action, states) => {
+    active++;
+    maxActive = Math.max(maxActive, active);
+    await new Promise(setImmediate);
+    states.get(symbol).status = 'PAUSED';
+    active--;
+    return response('accepted');
+  } });
+  for (const symbol of ['ETHUSDT', 'XRPUSDT', 'BNBUSDT', 'DOGEUSDT']) ui.addExternalPair(symbol, 'RUNNING');
+  await ui.run('initConsole()');
+  await ui.run("controlAllOverviewPairs('pause')");
+  assert.equal(ui.requests.filter(request => request.url.endsWith('/control')).length, 6);
+  assert.equal(maxActive, 4);
+  assert.match(ui.element('overview-control-report').textContent, /6 个已确认/);
+});
+
+test('timed-out or lost responses are checked against strategy state without repeating commands', async () => {
+  for (const name of ['TimeoutError', 'TypeError']) {
+    const ui = dashboard({ fetchControl: (symbol, action, states) => {
+      states.get(symbol).status = 'RUNNING';
+      const error = new Error('response lost');
+      error.name = name;
+      throw error;
+    } });
+    ui.states.get('BTCUSDT').status = 'PAUSED';
+    await ui.run('initConsole()');
+    await ui.run("controlOverviewPair('BTCUSDT', 'resume')");
+    assert.equal(ui.run("overviewControls.get('BTCUSDT').confirmed"), true);
+    assert.equal(ui.requests.filter(request => request.url.endsWith('/control')).length, 1);
+  }
+});
+
+test('queued batch requests stop when the login session changes', async () => {
+  const ui = dashboard({ fetchControl: () => {
+    ui.run("setAuthToken('')");
+    return response('queued');
+  } });
+  for (const symbol of ['ETHUSDT', 'XRPUSDT', 'BNBUSDT', 'DOGEUSDT']) ui.addExternalPair(symbol, 'RUNNING');
+  await ui.run('initConsole()');
+  await ui.run("controlAllOverviewPairs('pause')");
+  assert.equal(ui.requests.filter(request => request.url.endsWith('/control')).length, 1);
+  assert.equal(ui.element('btn-overview-resume-all').disabled, true);
+  assert.equal(ui.element('btn-overview-pause-all').disabled, true);
+  assert.match(ui.element('overview-control-report').textContent, /6 个未完成/);
+});
+
+test('a queued start is skipped if its strategy changes execution mode before dispatch', async () => {
+  const gate = deferred();
+  const ui = dashboard({ fetchControl: async (symbol, action, states) => {
+    await gate.promise;
+    states.get(symbol).status = 'RUNNING';
+    return response('accepted');
+  } });
+  for (const symbol of ['ETHUSDT', 'XRPUSDT', 'BNBUSDT', 'DOGEUSDT']) ui.addExternalPair(symbol);
+  for (const state of ui.states.values()) state.status = 'PAUSED';
+  await ui.run('initConsole()');
+  const starting = ui.run("controlAllOverviewPairs('resume')");
+  await new Promise(setImmediate);
+  assert.equal(ui.requests.filter(request => request.url.endsWith('/control')).length, 4);
+  ui.states.get('BNBUSDT').dry_run = false;
+  await ui.run('loadOverview()');
+  gate.resolve();
+  await starting;
+  const controls = ui.requests.filter(request => request.url.endsWith('/control'));
+  assert.equal(controls.length, 5);
+  assert.ok(controls.every(request => request.url !== '/api/pairs/BNBUSDT/control'));
+  assert.equal(ui.states.get('BNBUSDT').status, 'PAUSED');
+  assert.match(ui.element('overview-control-report').textContent, /5 个已确认.*1 个未完成/);
+  assert.match(ui.element('overview-pairs').innerHTML, /交易模式已变更/);
 });

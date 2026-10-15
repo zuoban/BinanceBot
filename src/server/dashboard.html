@@ -86,14 +86,17 @@
       <div><span class="eyebrow" id="page-eyebrow">WORKSPACE / OVERVIEW</span><h1 id="page-title" tabindex="-1">策略总览</h1><p id="page-description">全部交易对，一览掌握。查看行情、持仓与网格运行状态。</p></div>
     </div>
     <div class="tab-content active overview-panel" id="tab-overview" role="tabpanel" aria-labelledby="tab-btn-overview">
+      <section class="account-overview" id="overview-accounts" aria-label="账户概览" aria-busy="true"><p class="account-overview-empty">正在加载账户信息…</p></section>
       <section class="board-summary" aria-label="全部交易对统计">
         <article><span>已配置交易对</span><strong id="overview-pair-count">--</strong><small>覆盖所有运行模式</small></article>
         <article><span><i class="pulse-dot text-green" aria-hidden="true"></i>运行中</span><strong id="overview-running-count">--</strong><small id="overview-paused-count">等待策略状态</small></article>
         <article><span>当前挂单</span><strong id="overview-order-count">--</strong><small>所有交易对的有效委托</small></article>
-        <article><span>今日成交</span><strong id="overview-trade-count">--</strong><small id="overview-trade-note">北京时间 · 当前运行模式</small></article>
+        <article><span>今日成交</span><strong id="overview-trade-count">--</strong><div class="board-trade-sides" aria-label="今日买卖成交笔数"><span class="text-green">买单 <b id="overview-buy-count">--</b> 笔</span><span class="text-red">卖单 <b id="overview-sell-count">--</b> 笔</span></div><small id="overview-trade-note">北京时间 · 当前运行模式</small></article>
       </section>
       <section class="pairs-section" aria-labelledby="pairs-heading">
         <div class="board-section-heading"><div><span class="section-kicker">YOUR STRATEGIES</span><h2 id="pairs-heading">全部交易对 <span id="overview-visible-count" class="board-count"></span></h2></div><div class="board-heading-actions"><span class="update-status" id="overview-update-status" role="status">正在加载看板</span><button type="button" class="btn-quiet" id="btn-refresh-overview" onclick="loadOverview()" aria-label="刷新全部交易对" title="刷新全部交易对"><svg class="icon" aria-hidden="true"><use href="#icon-refresh"/></svg></button><button type="button" class="btn-primary" onclick="openNewPair()"><span aria-hidden="true">＋</span>新增交易对</button></div></div>
+        <div class="board-controlbar"><p id="overview-control-scope">作用于全部已配置交易对，不受筛选影响</p><div role="group" aria-label="全部策略操作"><button type="button" class="strategy-start" id="btn-overview-resume-all" disabled onclick="controlAllOverviewPairs('resume')"><svg class="icon" aria-hidden="true"><use href="#icon-play"/></svg>全部启动</button><button type="button" id="btn-overview-pause-all" disabled onclick="controlAllOverviewPairs('pause')"><svg class="icon" aria-hidden="true"><use href="#icon-pause"/></svg>全部暂停</button></div></div>
+        <p class="board-control-report" id="overview-control-report" role="status" hidden></p>
         <div class="board-toolbar" role="search" aria-label="筛选交易对">
           <label class="board-search"><svg class="icon" aria-hidden="true"><use href="#icon-search"/></svg><span class="sr-only">搜索交易对</span><input id="overview-search" type="search" placeholder="搜索交易对，如 BTC" autocomplete="off" oninput="renderOverview()"></label>
           <label><span class="sr-only">运行状态</span><select id="overview-status-filter" onchange="renderOverview()"><option value="all">全部状态</option><option value="RUNNING">运行中</option><option value="PAUSED">已暂停</option></select></label>
@@ -102,7 +105,7 @@
         </div>
         <p class="board-alert" id="overview-alert" role="status" hidden></p>
         <div class="pair-cards" id="overview-pairs" aria-busy="true"><div class="board-empty"><strong>正在加载全部交易对</strong><span>行情、仓位与策略状态将在这里显示</span></div></div>
-        <p class="board-footnote">每 3 秒更新 · 成交按北京时间统计 · 盈亏仅含本程序已确认成交；不同计价资产分别展示。实盘及测试网的同模式交易对共用账户权益，模拟盘账户相互独立。</p>
+        <p class="board-footnote">每 3 秒更新 · 成交按北京时间统计 · 盈亏仅含本程序已确认成交；不同计价资产分别展示。账户权益与可用余额统一显示在看板上方。</p>
       </section>
     </div>
     <div class="tab-content overview-panel" id="tab-detail" role="tabpanel" aria-labelledby="tab-btn-detail">
@@ -957,6 +960,151 @@
     let overviewMarkup = '';
     let activeTab = 'tab-overview';
     let pairPageEpoch = 0;
+    const overviewControls = new Map();
+    let overviewBatchBusy = false;
+    let overviewBatchReport = null;
+    let overviewRequestSerial = 0;
+    let overviewSnapshotSerial = 0;
+
+    function overviewEntries() {
+      return overviewPairs.length || overviewUpdatedAt ? overviewPairs : configuredPairs;
+    }
+
+    function overviewControlPending() {
+      return overviewBatchBusy || [...overviewControls.values()].some(record => record.pending);
+    }
+
+    function canStartOverview() {
+      return getAuthToken() && overviewUpdatedAt > 0 && !overviewFailed && Date.now() - overviewUpdatedAt < 10000;
+    }
+
+    function overviewControlTargets(action) {
+      return overviewEntries().filter(entry => action === 'resume' ? entry.snapshot?.status === 'PAUSED'
+        : entry.snapshot?.status !== 'PAUSED' || entry.snapshot?.active_orders?.length > 0);
+    }
+
+    function syncOverviewControls(entries) {
+      for (const record of overviewControls.values()) {
+        if (!record.pending) continue;
+        const entry = entries.find(entry => (entry.snapshot?.symbol || entry.symbol) === record.symbol);
+        const fail = message => { record.pending = false; record.error = true; record.message = message; };
+        if (record.authToken !== getAuthToken()) { fail('登录状态已变化，请重新操作'); continue; }
+        if (!entry) { fail('交易对已移除'); continue; }
+        if (record.mode !== overviewMode(entry)) { fail('交易模式已变更，请核对当前策略'); continue; }
+        if (!record.acknowledged) continue;
+        const expected = record.action === 'resume' ? 'RUNNING' : 'PAUSED';
+        if (overviewSnapshotSerial > record.afterSerial && entry.snapshot?.status === expected) {
+          record.pending = false;
+          record.confirmed = true;
+          record.message = record.action === 'resume' ? '启动已确认' : '暂停已确认';
+        } else if (Date.now() - record.sentAt >= 15000) {
+          fail(`${record.action === 'resume' ? '启动' : '暂停'}尚未确认，请查看运行日志`);
+        }
+      }
+      const busy = overviewControlPending() || pairManagementBusy || !getAuthToken();
+      document.getElementById('btn-overview-resume-all').disabled = busy || !canStartOverview() || !overviewControlTargets('resume').length;
+      document.getElementById('btn-overview-pause-all').disabled = busy || !overviewControlTargets('pause').length;
+      document.getElementById('overview-control-scope').textContent = `作用于全部 ${entries.length} 个交易对，不受筛选影响`;
+      const report = document.getElementById('overview-control-report');
+      report.hidden = !overviewBatchReport;
+      if (overviewBatchReport) {
+        const records = overviewBatchReport.records;
+        const confirmed = records.filter(record => record.confirmed).length;
+        const pending = records.filter(record => record.pending).length;
+        const failed = records.filter(record => record.error).length;
+        report.textContent = `${overviewBatchReport.label}：${confirmed} 个已确认${pending ? ` · ${pending} 个处理中` : ''}${failed ? ` · ${failed} 个未完成，请查看对应交易对结果` : ''}`;
+        report.classList.toggle('has-errors', failed > 0);
+      }
+    }
+
+    function beginOverviewControl(entry, action) {
+      const record = { symbol: entry.snapshot?.symbol || entry.symbol, mode: overviewMode(entry), scoped: entry.scoped,
+        action, pending: true, acknowledged: false, confirmed: false, error: false,
+        authToken: getAuthToken(),
+        message: action === 'resume' ? '正在启动…' : '正在暂停…' };
+      overviewControls.set(record.symbol, record);
+      return record;
+    }
+
+    async function sendOverviewControl(record) {
+      if (overviewControls.get(record.symbol) !== record || !record.pending) return;
+      let outcomeUnknown = false;
+      try {
+        if (record.authToken !== getAuthToken()) throw new Error('登录状态已变化，请重新操作');
+        const url = record.scoped === false ? '/api/control' : `/api/pairs/${encodeURIComponent(record.symbol)}/control`;
+        outcomeUnknown = true;
+        const response = await authFetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: record.action }),
+          ...(typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? { signal: AbortSignal.timeout(15000) } : {}) });
+        const result = await response.json();
+        if (overviewControls.get(record.symbol) !== record || !record.pending) return;
+        if (record.authToken !== getAuthToken()) throw new Error('登录状态已变化，请重新操作');
+        if (!response.ok || !result.success) {
+          outcomeUnknown = false;
+          throw new Error(result.message || '操作失败');
+        }
+        record.acknowledged = true;
+        record.sentAt = Date.now();
+        record.afterSerial = overviewRequestSerial;
+        record.message = `${record.action === 'resume' ? '启动' : '暂停'}指令已发送，等待状态更新`;
+      } catch (error) {
+        if (overviewControls.get(record.symbol) !== record || !record.pending) return;
+        if (outcomeUnknown && record.authToken === getAuthToken()) {
+          record.acknowledged = true;
+          record.sentAt = Date.now();
+          record.afterSerial = overviewRequestSerial;
+          record.message = ['TimeoutError', 'AbortError'].includes(error.name) ? '请求超时，正在核实策略状态' : '请求结果未确认，正在核实策略状态';
+        } else {
+          record.pending = false;
+          record.error = true;
+          record.message = error.message || '未能确认操作结果，请查看当前状态';
+        }
+      }
+      renderOverview();
+    }
+
+    async function refreshOverviewControls() {
+      await loadOverview();
+      if (overviewControls.has(selectedPair)) {
+        await loadPairSnapshot().catch(error => console.warn('Control status refresh failed:', error));
+      }
+    }
+
+    async function controlOverviewPair(symbol, action) {
+      if (!['pause', 'resume'].includes(action) || pairManagementBusy || overviewBatchBusy || !getAuthToken()
+        || overviewControls.get(symbol)?.pending) return;
+      const entry = overviewEntries().find(entry => (entry.snapshot?.symbol || entry.symbol) === symbol);
+      if (!entry || (action === 'resume' && (!canStartOverview() || entry.snapshot?.status !== 'PAUSED'))) return;
+      if (action === 'resume' && overviewMode(entry) === 'LIVE'
+        && !confirm(`确认启动 ${symbol} 的实盘策略？启动后将按当前参数自动挂单。`)) return;
+      overviewBatchReport = null;
+      const record = beginOverviewControl(entry, action);
+      renderOverview();
+      await sendOverviewControl(record);
+      await refreshOverviewControls();
+    }
+
+    async function controlAllOverviewPairs(action) {
+      if (!['pause', 'resume'].includes(action) || overviewControlPending() || pairManagementBusy || !getAuthToken()
+        || (action === 'resume' && !canStartOverview())) return;
+      const targets = overviewControlTargets(action);
+      if (!targets.length) return;
+      const live = targets.filter(entry => overviewMode(entry) === 'LIVE').length;
+      if (action === 'resume' && live && !confirm(`确认启动全部 ${targets.length} 个已暂停策略（其中 ${live} 个实盘）？包括筛选外的交易对，启动后将按当前参数自动挂单。`)) return;
+      const records = targets.map(entry => beginOverviewControl(entry, action));
+      overviewBatchBusy = true;
+      overviewBatchReport = { label: action === 'resume' ? '全部启动' : '全部暂停', records };
+      renderOverview();
+      try {
+        const queue = [...records];
+        await Promise.all(Array.from({ length: Math.min(4, queue.length) }, async () => {
+          while (queue.length) await sendOverviewControl(queue.shift());
+        }));
+      } finally {
+        overviewBatchBusy = false;
+        renderOverview();
+      }
+      await refreshOverviewControls();
+    }
 
     function overviewMode(entry) {
       const snapshot = entry.snapshot;
@@ -987,6 +1135,66 @@
       return number > 0 && Number.isFinite(number) ? Math.min(10, Math.max(4, 2 - Math.floor(Math.log10(number)))) : 4;
     }
 
+    function overviewAccountGroups(entries) {
+      const groups = new Map();
+      const number = value => value == null || value === '' || !Number.isFinite(Number(value)) ? null : Number(value);
+      for (const entry of entries) {
+        const data = entry.snapshot;
+        const mode = overviewMode(entry);
+        if (!['LIVE', 'TESTNET', 'PAPER'].includes(mode)) continue;
+        const asset = data?.account?.asset || symbolAssets(data?.symbol || entry.symbol).quote;
+        const key = `${mode}:${asset}`;
+        if (!groups.has(key)) groups.set(key, { mode, asset, rows: [] });
+        const wallet = number(data?.account?.total_wallet_balance);
+        const unrealized = number(data?.position?.unrealized_pnl);
+        groups.get(key).rows.push({
+          updatedAt: Date.parse(data?.account?.update_time || ''),
+          equity: mode === 'PAPER' ? wallet !== null && unrealized !== null ? wallet + unrealized : null
+            : number(data?.account?.margin_balance),
+          available: number(data?.account?.available_balance)
+        });
+      }
+      return [...groups.values()].map(group => {
+        let equity, available;
+        if (group.mode === 'PAPER') {
+          // Each paper pair owns a separate wallet, even when starting balances match.
+          const sum = field => group.rows.every(row => row[field] !== null)
+            ? group.rows.reduce((total, row) => total + row[field], 0) : null;
+          equity = sum('equity');
+          available = sum('available');
+        } else {
+          // Shared-wallet snapshots may arrive at different times. Use the newest
+          // account observation once, rather than adding the per-pair copies.
+          const newest = group.rows.reduce((latest, row) => !latest
+            || (Number.isFinite(row.updatedAt) && (!Number.isFinite(latest.updatedAt) || row.updatedAt > latest.updatedAt))
+            ? row : latest, null);
+          const fresh = Number.isFinite(newest?.updatedAt) && Date.now() - newest.updatedAt < 30000;
+          equity = fresh ? newest.equity : null;
+          available = fresh ? newest.available : null;
+        }
+        return { mode: group.mode, asset: group.asset, count: group.rows.length, equity, available };
+      }).sort((a, b) => ['LIVE', 'TESTNET', 'PAPER'].indexOf(a.mode) - ['LIVE', 'TESTNET', 'PAPER'].indexOf(b.mode)
+        || a.asset.localeCompare(b.asset));
+    }
+
+    function renderOverviewAccounts(entries) {
+      const groups = overviewAccountGroups(entries);
+      const html = groups.map(group => {
+        const label = { LIVE: '实盘账户', TESTNET: '测试网账户', PAPER: '模拟账户' }[group.mode];
+        const note = group.mode === 'PAPER'
+          ? `${group.count} 个独立模拟账户${group.count > 1 ? '合计' : ''}`
+          : `${group.count} 个交易对共用 · 余额不重复累计`;
+        const pending = group.equity === null || group.available === null;
+        return `<article class="account-summary" data-mode="${group.mode}" data-asset="${escapeHtml(group.asset)}">
+          <div class="account-summary-heading"><span class="account-summary-icon" aria-hidden="true"><svg class="icon"><use href="#icon-wallet"/></svg></span><div><h2>${label}<span>${escapeHtml(group.asset)}</span></h2><p>${note}</p>${pending ? '<small class="data-warning">账户数据待更新</small>' : ''}</div></div>
+          <dl><div><dt>账户权益</dt><dd data-account-equity>${overviewNumber(group.equity)}<small>${escapeHtml(group.asset)}</small></dd></div><div><dt>可用余额</dt><dd data-account-available>${overviewNumber(group.available)}<small>${escapeHtml(group.asset)}</small></dd></div></dl>
+        </article>`;
+      }).join('') || `<p class="account-overview-empty">${overviewFailed ? '账户数据暂不可用，正在重试' : '正在加载账户信息…'}</p>`;
+      const container = document.getElementById('overview-accounts');
+      if (container.innerHTML !== html) container.innerHTML = html;
+      container.setAttribute('aria-busy', String(!overviewUpdatedAt && !overviewFailed));
+    }
+
     function overviewCard(entry) {
       const data = entry.snapshot;
       const symbol = data?.symbol || entry.symbol;
@@ -997,38 +1205,49 @@
       const running = data?.status === 'RUNNING';
       const mark = Number(data?.ticker?.mark_price);
       const markTime = Date.parse(data?.ticker?.mark_update_time || '');
-      const priceFresh = data?.ticker?.symbol === symbol && mark > 0 && Number.isFinite(markTime) && Date.now() - markTime < 15000;
+      const priceFresh = data?.ticker?.symbol === symbol && Number.isFinite(mark) && mark > 0 && Number.isFinite(markTime) && Date.now() - markTime < 15000;
       const change = data?.ticker?.change_percent_24h;
-      const size = data?.position?.size;
-      const unpnl = data?.position?.unrealized_pnl;
-      const realized = data?.stats?.total_realized_pnl;
-      const commission = data?.stats?.total_commission;
-      const net = realized != null && commission != null ? Number(realized) - Number(commission) : null;
+      const number = value => value == null || value === '' || !Number.isFinite(Number(value)) ? null : Number(value);
+      const size = number(data?.position?.size);
+      const unpnl = number(data?.position?.unrealized_pnl);
+      const realized = number(data?.stats?.total_realized_pnl);
+      const notional = priceFresh && size !== null ? Math.abs(size * mark) : null;
+      const totalPnl = unpnl !== null && realized !== null ? unpnl + realized : null;
+      const pendingPnl = data?.stats?.pending_pnl_trades > 0 ? '<span class="pending-pnl" title="部分成交盈亏待同步">待同步</span>' : '';
       const today = overviewToday(data);
       const orders = data?.active_orders || [];
       const buyOrders = orders.filter(order => order.side === 'BUY').length;
       const sellOrders = orders.filter(order => order.side === 'SELL').length;
-      const account = data?.account;
-      const accountTime = Date.parse(account?.update_time || '');
-      const accountFresh = data && (data.dry_run || (Number.isFinite(accountTime) && Date.now() - accountTime < 30000));
-      const equity = accountFresh ? data.dry_run ? Number(account?.total_wallet_balance) + Number(unpnl) : account?.margin_balance : null;
-      const accountAsset = account?.asset || quote;
       const signedClass = value => value == null || !Number.isFinite(Number(value)) ? '' : Number(value) < 0 ? 'text-red' : 'text-green';
       const config = data?.grid_config;
+      const control = overviewControls.get(symbol);
+      const controlAction = !data || running ? 'pause' : 'resume';
+      const controlLabel = controlAction === 'resume' ? '启动' : '暂停';
+      const controlDisabled = overviewBatchBusy || pairManagementBusy || control?.pending || !getAuthToken()
+        || (controlAction === 'resume' && !canStartOverview());
       const action = (tab, label, primary = false) => `<button type="button" class="${primary ? 'pair-open' : 'btn-quiet'}" data-pair="${safeSymbol}" data-page="${tab}" aria-label="${safeSymbol} ${label}">${label}${primary ? '<svg class="icon" aria-hidden="true"><use href="#icon-arrow"/></svg>' : ''}</button>`;
       return `<article class="pair-card${!data ? ' is-pending' : ''}" data-symbol="${safeSymbol}">
         <div class="pair-card-heading"><div class="pair-identity"><span class="pair-monogram" aria-hidden="true">${escapeHtml(base.slice(0, 2))}</span><div><h3>${safeSymbol}</h3><span>${escapeHtml(base)} / ${escapeHtml(quote)} · 永续</span></div></div><span class="pair-state ${running ? 'is-running' : 'is-paused'}"><i class="pulse-dot" aria-hidden="true"></i>${data ? running ? '运行中' : '已暂停' : '等待数据'}</span></div>
         <div class="pair-market"><div><span class="pair-field-label">标记价格 <small>${escapeHtml(quote)}</small></span><strong class="pair-price">${priceFresh ? overviewNumber(mark, overviewDigits(mark)) : '--'}</strong></div><span class="pair-change ${priceFresh ? signedClass(change) : 'data-warning'}">${priceFresh ? `${overviewNumber(change, 2, true)}%<small>近 24h</small>` : '行情待更新'}</span></div>
-        <dl class="pair-data"><div><dt>持仓 <small>${escapeHtml(base)}</small></dt><dd>${overviewNumber(size, overviewDigits(size), true)}</dd></div><div><dt>未实现盈亏 <small>${escapeHtml(quote)}</small></dt><dd class="${signedClass(unpnl)}">${overviewNumber(unpnl, 4, true)}</dd></div><div><dt>累计扣费后 <small>${escapeHtml(quote)}</small></dt><dd class="${signedClass(net)}">${overviewNumber(net, 4, true)}${data?.stats?.pending_pnl_trades > 0 ? '<span class="pending-pnl" title="部分成交盈亏待同步">待同步</span>' : ''}</dd></div><div><dt>当前挂单</dt><dd>${data ? orders.length : '--'}<small>${data ? `<span class="text-green">买 ${buyOrders}</span> / <span class="text-red">卖 ${sellOrders}</span>` : '等待数据'}</small></dd></div></dl>
+        <dl class="pair-data">
+          <div><dt>持仓 <small>${escapeHtml(base)}</small></dt><dd>${overviewNumber(size, overviewDigits(size), true)}</dd></div>
+          <div><dt>持仓金额 <small>${escapeHtml(quote)}</small></dt><dd>${overviewNumber(notional)}</dd></div>
+          <div><dt>未实现盈亏 <small>${escapeHtml(quote)}</small></dt><dd class="${signedClass(unpnl)}">${overviewNumber(unpnl, 4, true)}</dd></div>
+          <div><dt>已实现盈亏 <small>${escapeHtml(quote)}</small></dt><dd class="${signedClass(realized)}">${overviewNumber(realized, 4, true)}${pendingPnl}</dd></div>
+          <div><dt>累计盈亏 <small>${escapeHtml(quote)}</small></dt><dd class="${signedClass(totalPnl)}">${overviewNumber(totalPnl, 4, true)}${pendingPnl}</dd></div>
+          <div><dt>当前挂单</dt><dd>${data ? orders.length : '--'}<small>${data ? `<span class="text-green">买 ${buyOrders}</span> / <span class="text-red">卖 ${sellOrders}</span>` : '等待数据'}</small></dd></div>
+        </dl>
         <div class="pair-activity"><span>今日成交 <strong>${today ? today.buy + today.sell : '--'}</strong> 笔</span><span>${today ? `<span class="text-green">买 ${today.buy}</span><span class="text-red">卖 ${today.sell}</span>` : '统计待更新'}</span></div>
-        <div class="pair-account"><span>${mode === 'PAPER' ? '模拟账户权益' : '共享账户权益'} <strong>${overviewNumber(equity)} ${escapeHtml(accountAsset)}</strong></span><span>可用 <strong>${overviewNumber(accountFresh ? account?.available_balance : null)} ${escapeHtml(accountAsset)}</strong></span></div>
-        <div class="pair-config"><span class="badge ${mode === 'LIVE' ? 'badge-red' : mode === 'TESTNET' ? 'badge-amber' : 'badge-purple'}">${modeLabel}</span><span>${config ? `${config.direction === 'SHORT' ? '做空' : '做多'} · 间距 ${escapeHtml(config.grid_interval)} · 每格 ${escapeHtml(config.order_amount_usdc)} ${escapeHtml(quote)}` : '等待策略配置'}</span></div>
-        <div class="pair-card-actions">${action('tab-detail', '查看详情', true)}<div>${action('tab-orders', '挂单')}${action('tab-config', '参数')}</div></div>
+        <div class="pair-config"><span class="badge ${mode === 'LIVE' ? 'badge-red' : mode === 'TESTNET' ? 'badge-amber' : 'badge-purple'}">${modeLabel}</span><span>${config ? `${config.direction === 'SHORT' ? '做空' : '做多'} · 间距 ${escapeHtml(config.grid_interval)} · 每格 ${escapeHtml(config.order_amount_usdc)} ${escapeHtml(quote)} · 最大持仓 ${config.max_position_usdc != null ? `${escapeHtml(config.max_position_usdc)} ${escapeHtml(quote)}` : '不限'}` : '等待策略配置'}</span></div>
+        <div class="pair-card-actions">${action('tab-detail', '查看详情', true)}<div class="pair-secondary-actions">${action('tab-orders', '挂单')}${action('tab-config', '参数')}</div><button type="button" class="pair-strategy-control ${controlAction === 'resume' ? 'strategy-start' : ''}" data-pair="${safeSymbol}" data-control-action="${controlAction}" aria-label="${safeSymbol} ${controlLabel}策略" ${controlDisabled ? 'disabled' : ''}><svg class="icon" aria-hidden="true"><use href="#icon-${controlAction === 'resume' ? 'play' : 'pause'}"/></svg>${control?.pending ? '处理中' : controlLabel}</button></div>
+        ${control ? `<p class="pair-control-status ${control.error ? 'data-warning' : control.confirmed ? 'text-green' : ''}">${escapeHtml(control.message)}</p>` : ''}
       </article>`;
     }
 
     function renderOverview() {
-      const entries = overviewPairs.length || overviewUpdatedAt ? overviewPairs : configuredPairs;
+      const entries = overviewEntries();
+      syncOverviewControls(entries);
+      renderOverviewAccounts(entries);
       const snapshots = entries.map(entry => entry.snapshot).filter(Boolean);
       const today = snapshots.map(overviewToday);
       const running = snapshots.filter(data => data.status === 'RUNNING').length;
@@ -1037,7 +1256,10 @@
       document.getElementById('overview-paused-count').textContent = `${snapshots.length - running} 个已暂停${snapshots.length < entries.length ? ` · ${entries.length - snapshots.length} 个等待数据` : ''}`;
       document.getElementById('overview-order-count').textContent = snapshots.length ? snapshots.reduce((total, data) => total + data.active_orders.length, 0) : '--';
       const allTradesReady = snapshots.length === entries.length && today.every(Boolean);
-      document.getElementById('overview-trade-count').textContent = allTradesReady ? today.reduce((total, count) => total + count.buy + count.sell, 0) : '--';
+      const tradeCounts = allTradesReady ? today.reduce((total, count) => ({ buy: total.buy + count.buy, sell: total.sell + count.sell }), { buy: 0, sell: 0 }) : null;
+      document.getElementById('overview-trade-count').textContent = tradeCounts ? tradeCounts.buy + tradeCounts.sell : '--';
+      document.getElementById('overview-buy-count').textContent = tradeCounts ? tradeCounts.buy : '--';
+      document.getElementById('overview-sell-count').textContent = tradeCounts ? tradeCounts.sell : '--';
       document.getElementById('overview-trade-note').textContent = allTradesReady ? '北京时间 · 当前运行模式' : '部分交易对成交统计待更新';
       const query = document.getElementById('overview-search').value.trim().toUpperCase();
       const status = document.getElementById('overview-status-filter').value || 'all';
@@ -1067,10 +1289,11 @@
         const focused = document.activeElement;
         const focusPair = focused?.dataset?.pair;
         const focusPage = focused?.dataset?.page;
+        const focusControl = focused?.dataset?.controlAction;
         container.innerHTML = markup;
         overviewMarkup = markup;
-        if (focusPair && focusPage) [...container.querySelectorAll('button[data-pair]')]
-          .find(button => button.dataset.pair === focusPair && button.dataset.page === focusPage)?.focus({ preventScroll: true });
+        if (focusPair && (focusPage || focusControl)) [...container.querySelectorAll('button[data-pair]')]
+          .find(button => button.dataset.pair === focusPair && (focusControl ? button.dataset.controlAction : button.dataset.page === focusPage))?.focus({ preventScroll: true });
       }
       container.setAttribute('aria-busy', String(!overviewUpdatedAt && !overviewFailed));
       const update = document.getElementById('overview-update-status');
@@ -1080,13 +1303,14 @@
       const warning = document.getElementById('overview-alert');
       warning.hidden = !overviewFailed;
       warning.textContent = overviewFailed ? overviewUpdatedAt ? '全部交易对刷新失败，暂时显示上次数据；正在自动重试。' : '暂时无法获取看板数据，正在自动重试。也可点击刷新。' : '';
-      if (activeTab === 'tab-overview') document.title = `策略总览 · ${entries.length} 个交易对 · Grid Console`;
+      if (activeTab === 'tab-overview') renderPageTitle();
     }
 
     async function loadOverview(epoch = overviewEpoch) {
       if (overviewRequestEpoch === epoch || !getAuthToken()) return;
       const token = getAuthToken();
       overviewRequestEpoch = epoch;
+      const serial = ++overviewRequestSerial;
       document.getElementById('btn-refresh-overview').disabled = true;
       try {
         const response = await authFetch('/api/overview', { cache: 'no-store' });
@@ -1094,6 +1318,7 @@
         if (epoch !== overviewEpoch || token !== getAuthToken()) return;
         if (!response.ok || !result.success || !Array.isArray(result.data?.pairs)) throw new Error(result.message || '无法获取全部交易对');
         overviewPairs = result.data.pairs;
+        overviewSnapshotSerial = serial;
         overviewUpdatedAt = Date.now();
         overviewFailed = false;
         await reconcileOverviewPairs(overviewPairs);
@@ -1316,7 +1541,16 @@
     }
 
     function renderPageTitle() {
-      if (activeTab === 'tab-overview') return;
+      if (activeTab === 'tab-overview') {
+        const entries = overviewEntries();
+        const groups = overviewAccountGroups(entries);
+        const balances = groups.map(group => {
+          const mode = groups.length > 1 ? `${{ LIVE: '实盘', TESTNET: '测试网', PAPER: '模拟' }[group.mode]} ` : '';
+          return `${mode}账户权益 ${overviewNumber(group.equity)} ${group.asset} · 可用余额 ${overviewNumber(group.available)} ${group.asset}`;
+        }).join(' / ');
+        document.title = `${balances ? `${balances} · ` : ''}策略总览 · ${entries.length} 个交易对 · Grid Console`;
+        return;
+      }
       document.title = ['card-price', 'hourly-buy-total', 'hourly-sell-total']
         .map(id => document.getElementById(id).textContent).join(' | ');
     }
@@ -2211,6 +2445,7 @@
       document.getElementById('overview-pairs').addEventListener('click', event => {
         const button = event.target.closest('button');
         if (button?.hasAttribute('data-reset-filters')) resetOverviewFilters();
+        else if (button?.dataset.controlAction) controlOverviewPair(button.dataset.pair, button.dataset.controlAction);
         else if (button?.dataset.pair) openPairPage(button.dataset.pair, button.dataset.page);
       });
       const tradeChart = document.getElementById('hourly-trade-chart');
