@@ -439,7 +439,7 @@ main:focus, #page-title:focus { outline: none; }
 @media (max-width: 1200px) {
   .navigation-bar { display: flex; justify-content: space-between; }
   .nav-toggle { display: inline-flex; flex: 0 0 auto; }
-  .tab-nav { position: absolute; inset: calc(100% + 8px) 0 auto; display: none; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 8px; padding: 12px; border: 1px solid var(--border-strong); border-radius: 14px; background: var(--surface-glass); backdrop-filter: blur(20px); box-shadow: var(--shadow); }
+  .tab-nav { position: absolute; inset: calc(100% + 8px) 0 auto; display: none; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 8px; padding: 12px; border: 1px solid var(--border-strong); border-radius: 14px; background: var(--surface); box-shadow: var(--shadow); }
   .nav-open .tab-nav { display: grid; animation: menu-enter var(--motion) ease-out; }
   .tab-button { justify-content: flex-start; min-height: 48px; padding: 12px; border: 1px solid var(--border); border-radius: 10px; }
   .tab-button.active { border-color: var(--border-strong); background: var(--surface-raised); }
