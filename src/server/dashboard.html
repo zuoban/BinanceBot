@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="theme-color" content="#08090b">
   <meta name="color-scheme" content="dark">
-  <title>策略总览 · Grid Console</title>
+  <title>--|--</title>
   <link rel="stylesheet" href="/dashboard.css">
 </head>
 <body>
@@ -588,11 +588,13 @@
     }
 
     function setAuthToken(token) {
+      const previous = getAuthToken();
       if (token) {
         sessionStorage.setItem(AUTH_TOKEN_KEY, token);
       } else {
         sessionStorage.removeItem(AUTH_TOKEN_KEY);
       }
+      if (previous !== (token || '')) closeAccountStream();
     }
 
     async function authFetch(url, options = {}) {
@@ -965,6 +967,54 @@
     let overviewBatchReport = null;
     let overviewRequestSerial = 0;
     let overviewSnapshotSerial = 0;
+    let accountSocket = null;
+    let accountEntries = null;
+    let lastAccountSnapshotAt = 0;
+
+    function hasFreshAccountSnapshot() {
+      return accountEntries !== null && Date.now() - lastAccountSnapshotAt < 5000;
+    }
+
+    function accountOverviewEntries() {
+      return hasFreshAccountSnapshot() ? accountEntries : overviewEntries();
+    }
+
+    function closeAccountStream() {
+      const previous = accountSocket;
+      accountSocket = null;
+      accountEntries = null;
+      lastAccountSnapshotAt = 0;
+      previous?.close();
+      renderPageTitle();
+    }
+
+    function initAccountStream() {
+      closeAccountStream();
+      const token = getAuthToken();
+      if (!token) return;
+      const epoch = overviewEpoch;
+      const loc = window.location;
+      const socket = new WebSocket(`${loc.protocol === 'https:' ? 'wss:' : 'ws:'}//${loc.host}/api/accounts/ws`, ['auth', `token.${token}`]);
+      accountSocket = socket;
+      socket.onmessage = event => {
+        if (accountSocket !== socket || getAuthToken() !== token || overviewEpoch !== epoch) return;
+        try {
+          const payload = JSON.parse(event.data);
+          if (payload.type !== 'accounts' || !Array.isArray(payload.data?.pairs)) return;
+          accountEntries = payload.data.pairs;
+          lastAccountSnapshotAt = Date.now();
+          renderOverviewAccounts(accountEntries);
+          renderPageTitle();
+        } catch (error) { console.warn('Account stream update failed:', error); }
+      };
+      socket.onclose = () => {
+        if (accountSocket !== socket || getAuthToken() !== token || overviewEpoch !== epoch) return;
+        accountEntries = null;
+        lastAccountSnapshotAt = 0;
+        renderPageTitle();
+        setTimeout(() => { if (accountSocket === socket && getAuthToken() === token && overviewEpoch === epoch) initAccountStream(); }, 2000);
+      };
+    }
 
     function overviewEntries() {
       return overviewPairs.length || overviewUpdatedAt ? overviewPairs : configuredPairs;
@@ -1247,7 +1297,7 @@
     function renderOverview() {
       const entries = overviewEntries();
       syncOverviewControls(entries);
-      renderOverviewAccounts(entries);
+      renderOverviewAccounts(accountOverviewEntries());
       const snapshots = entries.map(entry => entry.snapshot).filter(Boolean);
       const today = snapshots.map(overviewToday);
       const running = snapshots.filter(data => data.status === 'RUNNING').length;
@@ -1303,7 +1353,7 @@
       const warning = document.getElementById('overview-alert');
       warning.hidden = !overviewFailed;
       warning.textContent = overviewFailed ? overviewUpdatedAt ? '全部交易对刷新失败，暂时显示上次数据；正在自动重试。' : '暂时无法获取看板数据，正在自动重试。也可点击刷新。' : '';
-      if (activeTab === 'tab-overview') renderPageTitle();
+      renderPageTitle();
     }
 
     async function loadOverview(epoch = overviewEpoch) {
@@ -1462,7 +1512,8 @@
     }
 
     setInterval(() => {
-      if (getAuthToken() && selectedPair && activeTab === 'tab-overview') loadOverview();
+      if (getAuthToken() && (!accountSocket || accountSocket.readyState > 1)) initAccountStream();
+      if (getAuthToken() && selectedPair && (activeTab === 'tab-overview' || !hasFreshAccountSnapshot())) loadOverview();
       if (getAuthToken() && selectedPair && !hasFreshSocketSnapshot()) {
         loadPairSnapshot().catch(error => console.warn('HTTP status refresh failed:', error));
       }
@@ -1470,6 +1521,7 @@
 
     async function initConsole() {
       const epoch = ++overviewEpoch;
+      closeAccountStream();
       const response = await authFetch('/api/pairs');
       const result = await response.json();
       if (epoch !== overviewEpoch) return;
@@ -1492,6 +1544,7 @@
       pairScoped = active.scoped;
       select.disabled = !pairScoped || pairs.length < 2;
       await Promise.all([selectPair(active.symbol), loadOverview(epoch)]);
+      initAccountStream();
       renderPairManagement();
       await Promise.all([
         globalConfigurationLoaded ? Promise.resolve() : loadGlobalConfigForm(),
@@ -1541,18 +1594,8 @@
     }
 
     function renderPageTitle() {
-      if (activeTab === 'tab-overview') {
-        const entries = overviewEntries();
-        const groups = overviewAccountGroups(entries);
-        const balances = groups.map(group => {
-          const mode = groups.length > 1 ? `${{ LIVE: '实盘', TESTNET: '测试网', PAPER: '模拟' }[group.mode]} ` : '';
-          return `${mode}账户权益 ${overviewNumber(group.equity)} ${group.asset} · 可用余额 ${overviewNumber(group.available)} ${group.asset}`;
-        }).join(' / ');
-        document.title = `${balances ? `${balances} · ` : ''}策略总览 · ${entries.length} 个交易对 · Grid Console`;
-        return;
-      }
-      document.title = ['card-price', 'hourly-buy-total', 'hourly-sell-total']
-        .map(id => document.getElementById(id).textContent).join(' | ');
+      const groups = getAuthToken() ? overviewAccountGroups(accountOverviewEntries()) : [];
+      document.title = groups.map(group => `${overviewNumber(group.equity)}|${overviewNumber(group.available)}`).join(' / ') || '--|--';
     }
 
     function renderMarkPrice() {

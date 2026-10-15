@@ -131,23 +131,32 @@ function dashboard({ scoped = true, fetchStatus, fetchOverview, fetchControl, co
   element('overview-sort').value = 'default';
   const pairs = scoped ? ['SOLUSDC', 'BTCUSDT'] : ['SOLUSDC'];
   const states = new Map(pairs.map(symbol => [symbol, snapshot(symbol)]));
-  const requests = [], sockets = [], intervals = [], confirmations = [], history = [];
+  const requests = [], sockets = [], accountSockets = [], intervals = [], confirmations = [], history = [];
   const clock = { now: Date.now() };
   const storage = new Map([['binance_bot_auth_token', 'test-token']]);
   let singleSymbol = 'SOLUSDC';
   class Clock extends Date { static now() { return clock.now; } }
   class Socket {
     static OPEN = 1;
-    constructor() { this.readyState = 0; sockets.push(this); }
+    constructor(url, protocols) {
+      this.readyState = 0;
+      this.url = url;
+      this.protocols = protocols;
+      (url.endsWith('/api/accounts/ws') ? accountSockets : sockets).push(this);
+    }
     close() { this.readyState = 3; this.onclose?.(); }
     sendSnapshot(data) {
       this.readyState = Socket.OPEN;
       this.onmessage({ data: JSON.stringify({ type: 'snapshot', data }) });
     }
+    sendAccounts(pairs) {
+      this.readyState = 1;
+      this.onmessage({ data: JSON.stringify({ type: 'accounts', data: { pairs } }) });
+    }
   }
   const context = {
     document: {
-      activeElement: null, getElementById: element,
+      activeElement: null, hidden: false, getElementById: element,
       querySelectorAll: selector => selector === '.tab-button' ? tabs
         : selector === '.tab-content' ? tabNames.map(name => element(`tab-${name}`)) : [],
       querySelector: selector => selector === '.tab-nav' ? element('console-nav')
@@ -216,7 +225,7 @@ function dashboard({ scoped = true, fetchStatus, fetchOverview, fetchControl, co
   `, context);
   if (!charts) vm.runInContext('renderHourlyTradeChart = () => {};', context);
   return {
-    element, requests, sockets, states, intervals, confirmations, clock, history,
+    element, requests, sockets, accountSockets, states, intervals, confirmations, clock, history,
     run: code => vm.runInContext(code, context),
     setSingleSymbol: symbol => { singleSymbol = symbol; states.set(symbol, snapshot(symbol)); },
     addExternalPair(symbol, status = 'PAUSED') {
@@ -560,13 +569,13 @@ test('account balances move above the cards and independent paper wallets are su
   assert.match(accounts, /2 个独立模拟账户合计/);
   assert.match(accounts, /data-account-equity>20,010\.00/);
   assert.match(accounts, /data-account-available>17,000\.00/);
-  assert.match(ui.run('document.title'), /账户权益 20,010\.00 USDC · 可用余额 17,000\.00 USDC · 策略总览/);
+  assert.equal(ui.run('document.title'), '20,010.00|17,000.00');
   assert.doesNotMatch(ui.element('overview-pairs').innerHTML, /pair-account|账户权益|可用余额/);
   assert.equal(ui.element('overview-accounts').getAttribute('aria-busy'), 'false');
   ui.element('overview-search').value = 'SOL';
   ui.run('renderOverview()');
   assert.equal(ui.element('overview-accounts').innerHTML, accounts, 'pair filters must not hide account funds');
-  assert.match(ui.run('document.title'), /账户权益 20,010\.00 USDC · 可用余额 17,000\.00 USDC/);
+  assert.equal(ui.run('document.title'), '20,010.00|17,000.00');
 });
 
 test('shared account balances use the newest account observation once regardless of pair order', async () => {
@@ -583,7 +592,7 @@ test('shared account balances use the newest account observation once regardless
   await ui.run('loadOverview()');
   assert.match(ui.element('overview-accounts').innerHTML, /data-account-equity>12,400\.00/);
   assert.match(ui.element('overview-accounts').innerHTML, /data-account-available>8,100\.00/);
-  assert.match(ui.run('document.title'), /账户权益 12,400\.00 USDC · 可用余额 8,100\.00 USDC/);
+  assert.equal(ui.run('document.title'), '12,400.00|8,100.00');
 });
 
 test('account overview keeps execution modes and quote assets separate even for identical balances', async () => {
@@ -600,9 +609,7 @@ test('account overview keeps execution modes and quote assets separate even for 
   for (const [mode, asset] of [['LIVE', 'USDC'], ['TESTNET', 'USDC'], ['PAPER', 'USDC'], ['PAPER', 'USDT']]) {
     assert.match(accounts, new RegExp(`data-mode="${mode}" data-asset="${asset}"`));
   }
-  for (const [mode, asset] of [['实盘', 'USDC'], ['测试网', 'USDC'], ['模拟', 'USDC'], ['模拟', 'USDT']]) {
-    assert.match(ui.run('document.title'), new RegExp(`${mode} 账户权益 10,000\\.00 ${asset} · 可用余额 10,000\\.00 ${asset}`));
-  }
+  assert.equal(ui.run('document.title'), Array(4).fill('10,000.00|10,000.00').join(' / '));
   assert.doesNotMatch(accounts, /20,000|40,000/);
 });
 
@@ -613,7 +620,7 @@ test('stale shared funds and incomplete paper totals are unavailable while valid
   await ui.run('initConsole()');
   assert.match(ui.element('overview-accounts').innerHTML, /data-account-equity>--/);
   assert.match(ui.element('overview-accounts').innerHTML, /账户数据待更新/);
-  assert.match(ui.run('document.title'), /账户权益 -- USDC · 可用余额 -- USDC/);
+  assert.equal(ui.run('document.title'), '--|--');
   setAccount(ui, 'SOLUSDC', { equity: '0', available: '0' });
   setAccount(ui, 'BTCUSDT', { equity: '100', available: undefined });
   delete ui.states.get('BTCUSDT').account.available_balance;
@@ -644,11 +651,58 @@ test('account overview survives a failed refresh and expires shared balances usi
   assert.equal(ui.element('overview-accounts').innerHTML, accounts);
   ui.clock.now += 31000;
   ui.run('renderMarkPrice()');
-  assert.match(ui.run('document.title'), /账户权益 -- USDC · 可用余额 -- USDC/);
+  assert.equal(ui.run('document.title'), '--|--');
   await ui.run('loadOverview()');
   assert.match(ui.element('overview-accounts').innerHTML, /data-account-equity>--/);
   assert.match(ui.element('overview-accounts').innerHTML, /data-account-available>--/);
   assert.equal(ui.element('overview-alert').hidden, false);
+});
+
+test('account pushes update the compact title in a background tab without waiting for timers', async () => {
+  const ui = dashboard();
+  setAccount(ui, 'SOLUSDC', { equity: '100', available: '90' });
+  setAccount(ui, 'BTCUSDT', { equity: '200', available: '180' });
+  await ui.run('initConsole()');
+  assert.equal(ui.run('document.title'), '300.00|270.00');
+  ui.run("document.hidden = true; switchTab('tab-logs', document.getElementById('tab-btn-logs'))");
+  const requests = ui.requests.length;
+  setAccount(ui, 'SOLUSDC', { equity: '150', available: '120', unrealized: '2.5' });
+  ui.accountSockets[0].sendAccounts(overviewData(ui.states).pairs);
+  assert.equal(ui.run('document.hidden'), true);
+  assert.equal(ui.run('document.title'), '352.50|300.00');
+  assert.equal(ui.requests.length, requests, 'a pushed update must not depend on HTTP polling');
+  assert.match(ui.element('overview-accounts').innerHTML, /data-account-equity>352\.50/);
+  ui.sockets.at(-1).sendSnapshot(snapshot('SOLUSDC'));
+  assert.equal(ui.run('document.title'), '352.50|300.00', 'detail snapshots must not overwrite the balance title');
+});
+
+test('account streams recover through HTTP and reconnect without depending on the active page', async () => {
+  const ui = dashboard({ scoped: false });
+  setAccount(ui, 'SOLUSDC', { equity: '100', available: '90' });
+  await ui.run('initConsole()');
+  ui.accountSockets[0].sendAccounts(overviewData(ui.states).pairs);
+  ui.run("switchTab('tab-global-config', document.getElementById('tab-btn-global-config'))");
+  const reads = ui.requests.filter(request => request.url === '/api/overview').length;
+  ui.accountSockets[0].close();
+  setAccount(ui, 'SOLUSDC', { equity: '250', available: '210' });
+  await ui.poll();
+  assert.equal(ui.run('document.title'), '250.00|210.00');
+  assert.equal(ui.accountSockets.length, 2);
+  assert.ok(ui.requests.filter(request => request.url === '/api/overview').length > reads);
+});
+
+test('logging out closes the account stream and old session messages cannot restore balances', async () => {
+  const ui = dashboard({ scoped: false });
+  setAccount(ui, 'SOLUSDC', { equity: '100', available: '90' });
+  await ui.run('initConsole()');
+  const stream = ui.accountSockets[0];
+  stream.sendAccounts(overviewData(ui.states).pairs);
+  assert.equal(ui.run('document.title'), '100.00|90.00');
+  ui.run("setAuthToken('')");
+  assert.equal(stream.readyState, 3);
+  stream.sendAccounts(overviewData(ui.states).pairs);
+  assert.equal(ui.run('document.title'), '--|--');
+  assert.equal(ui.run('accountEntries'), null);
 });
 
 test('the overview displays every configured pair and totals all strategies independently of selection', async () => {

@@ -105,6 +105,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             state.clone(),
             require_auth_middleware,
         ))
+        .route("/api/accounts/ws", get(single_accounts_ws_handler))
         .with_state(state.clone());
     create_base_router(state, true).merge(pairs)
 }
@@ -202,6 +203,7 @@ pub fn create_multi_router(states: Vec<Arc<AppState>>) -> Router {
             primary,
             require_auth_middleware,
         ))
+        .route("/api/accounts/ws", get(accounts_ws_handler))
         .with_state(Arc::new(states));
     router.merge(global)
 }
@@ -286,6 +288,7 @@ pub async fn create_managed_router(handle: RuntimeHandle) -> Router {
         ))
         .route("/ws", get(dispatch_pair))
         .route("/api/pairs/:symbol/ws", get(dispatch_pair))
+        .route("/api/accounts/ws", get(managed_accounts_ws_handler))
         .with_state(handle);
     let account = Router::new()
         .route("/api/database/export", get(export_database_handler))
@@ -1321,12 +1324,8 @@ async fn post_control_handler(
     })
 }
 
-async fn ws_handler(
-    ws: WebSocketUpgrade,
-    headers: HeaderMap,
-    State(state): State<Arc<AppState>>,
-) -> Response {
-    let token = headers
+fn websocket_token(headers: &HeaderMap) -> &str {
+    headers
         .get(axum::http::header::SEC_WEBSOCKET_PROTOCOL)
         .and_then(|value| value.to_str().ok())
         .and_then(|protocols| {
@@ -1334,7 +1333,110 @@ async fn ws_handler(
                 .split(',')
                 .find_map(|protocol| protocol.trim().strip_prefix("token."))
         })
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+#[derive(Clone)]
+enum AccountSource {
+    Fixed(Arc<Vec<Arc<AppState>>>),
+    Managed(RuntimeHandle),
+}
+
+impl AccountSource {
+    async fn states(&self) -> Vec<Arc<AppState>> {
+        match self {
+            Self::Fixed(states) => states.as_ref().clone(),
+            Self::Managed(handle) => handle.states.read().await.clone(),
+        }
+    }
+}
+
+async fn single_accounts_ws_handler(
+    ws: WebSocketUpgrade,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> Response {
+    upgrade_accounts_socket(ws, headers, AccountSource::Fixed(Arc::new(vec![state]))).await
+}
+
+async fn accounts_ws_handler(
+    ws: WebSocketUpgrade,
+    headers: HeaderMap,
+    State(states): State<Arc<Vec<Arc<AppState>>>>,
+) -> Response {
+    upgrade_accounts_socket(ws, headers, AccountSource::Fixed(states)).await
+}
+
+async fn managed_accounts_ws_handler(
+    ws: WebSocketUpgrade,
+    headers: HeaderMap,
+    State(handle): State<RuntimeHandle>,
+) -> Response {
+    upgrade_accounts_socket(ws, headers, AccountSource::Managed(handle)).await
+}
+
+async fn upgrade_accounts_socket(
+    ws: WebSocketUpgrade,
+    headers: HeaderMap,
+    source: AccountSource,
+) -> Response {
+    let token = websocket_token(&headers).to_string();
+    let states = source.states().await;
+    let Some(primary) = states.first().cloned() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    if !primary.is_token_valid(&token).await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    ws.protocols(["auth"]).on_upgrade(move |socket| async move {
+        let (mut sender, mut receiver) = socket.split();
+        let mut ticks = tokio::time::interval(std::time::Duration::from_secs(1));
+        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = ticks.tick() => {
+                    if !primary.is_token_valid(&token).await { break; }
+                    // Resolve current membership without keeping the registry locked.
+                    // Reuse coherent pair snapshots, but send only account fields.
+                    let states = source.states().await;
+                    let pairs = futures_util::future::join_all(states.iter().map(|state| async move {
+                        let snapshot = state.snapshot().await;
+                        serde_json::json!({
+                            "mode": TradingMode::from_exchange(snapshot.dry_run, snapshot.grid_config.is_testnet),
+                            "snapshot": {
+                                "symbol": snapshot.symbol,
+                                "dry_run": snapshot.dry_run,
+                                "grid_config": { "is_testnet": snapshot.grid_config.is_testnet },
+                                "position": { "unrealized_pnl": snapshot.position.unrealized_pnl },
+                                "account": snapshot.account,
+                            }
+                        })
+                    })).await;
+                    let message = Message::Text(serde_json::json!({
+                        "type": "accounts", "data": { "pairs": pairs }
+                    }).to_string());
+                    if !matches!(tokio::time::timeout(std::time::Duration::from_secs(5), sender.send(message)).await, Ok(Ok(()))) { break; }
+                }
+                message = receiver.next() => {
+                    match message {
+                        Some(Ok(Message::Ping(payload))) => {
+                            if sender.send(Message::Pong(payload)).await.is_err() { break; }
+                        }
+                        Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                        _ => {}
+                    }
+                }
+            }
+        }
+    })
+}
+
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> Response {
+    let token = websocket_token(&headers);
     if !state.is_token_valid(token).await {
         return (
             StatusCode::UNAUTHORIZED,
@@ -1447,6 +1549,77 @@ mod tests {
             .await
             .unwrap();
         (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn account_stream_authenticates_pushes_live_balances_and_rejects_revoked_sessions() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let (tx, _) = tokio::sync::mpsc::channel(1);
+        let mut config = AppConfig::default();
+        config.exchange.api_key = "account-stream-private-key".into();
+        let state = AppState::new(config.clone(), db.clone(), tx.clone());
+        let scoped = AppState::new_for_pair(
+            config,
+            db.clone(),
+            tx,
+            Arc::new(tokio::sync::Mutex::new(())),
+        );
+        for (router, state) in [
+            (create_router(state.clone()), state),
+            (create_multi_router(vec![scoped.clone()]), scoped),
+        ] {
+            db.create_session("account-stream-token").unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+            let url = format!("ws://{address}/api/accounts/ws");
+            assert!(tokio_tungstenite::connect_async(&url).await.is_err());
+            let mut request = url.into_client_request().unwrap();
+            request.headers_mut().insert(
+                "Sec-WebSocket-Protocol",
+                "auth, token.account-stream-token".parse().unwrap(),
+            );
+            let (mut socket, response) = tokio_tungstenite::connect_async(request).await.unwrap();
+            assert_eq!(response.headers()["Sec-WebSocket-Protocol"], "auth");
+            let first = tokio::time::timeout(std::time::Duration::from_secs(3), socket.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert!(!first
+                .to_text()
+                .unwrap()
+                .contains("account-stream-private-key"));
+            let first: serde_json::Value = serde_json::from_str(first.to_text().unwrap()).unwrap();
+            assert_eq!(first["type"], "accounts");
+            assert_eq!(first["data"]["pairs"].as_array().unwrap().len(), 1);
+            assert!(first["data"]["pairs"][0]["snapshot"]["grid_config"]
+                .get("api_key")
+                .is_none());
+            state.account.write().await.available_balance = rust_decimal_macros::dec!(1234);
+            let updated = tokio::time::timeout(std::time::Duration::from_secs(3), socket.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let updated: serde_json::Value =
+                serde_json::from_str(updated.to_text().unwrap()).unwrap();
+            assert_eq!(
+                updated["data"]["pairs"][0]["snapshot"]["account"]["available_balance"],
+                "1234"
+            );
+            db.delete_session("account-stream-token").unwrap();
+            let closed = tokio::time::timeout(std::time::Duration::from_secs(3), socket.next())
+                .await
+                .unwrap();
+            assert!(!matches!(
+                closed,
+                Some(Ok(tokio_tungstenite::tungstenite::Message::Text(_)))
+            ));
+            server.abort();
+            let _ = server.await;
+        }
     }
 
     #[tokio::test]

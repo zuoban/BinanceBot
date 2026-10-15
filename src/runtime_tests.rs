@@ -438,6 +438,44 @@ async fn settings_validation_and_server_changes_preserve_independent_pair_update
 }
 
 #[tokio::test]
+async fn managed_account_stream_tracks_current_pair_membership() {
+    use futures_util::StreamExt;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let runtime = fixture();
+    let handle = runtime.handle();
+    let router = create_managed_router(handle.clone()).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let url = format!("ws://{address}/api/accounts/ws");
+    assert!(tokio_tungstenite::connect_async(&url).await.is_err());
+    let mut request = url.into_client_request().unwrap();
+    request.headers_mut().insert(
+        "Sec-WebSocket-Protocol",
+        "auth, token.configuration-test-token".parse().unwrap(),
+    );
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    let first = tokio::time::timeout(Duration::from_secs(3), socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let first: Value = serde_json::from_str(first.to_text().unwrap()).unwrap();
+    assert_eq!(first["data"]["pairs"].as_array().unwrap().len(), 2);
+    handle.states.write().await.pop();
+    let updated = tokio::time::timeout(Duration::from_secs(3), socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let updated: Value = serde_json::from_str(updated.to_text().unwrap()).unwrap();
+    assert_eq!(updated["data"]["pairs"].as_array().unwrap().len(), 1);
+    assert_eq!(updated["data"]["pairs"][0]["snapshot"]["symbol"], "SOLUSDC");
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
 async fn managed_websockets_accept_protocol_tokens_without_bearer_headers() {
     use futures_util::StreamExt;
     use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
