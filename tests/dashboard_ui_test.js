@@ -32,6 +32,89 @@ test('compact navigation closes after selection and returns focus to its visible
   assert.equal(ui.run('document.activeElement.id'), 'nav-toggle');
 });
 
+test('strategy edits survive navigation and returning to the saved value clears the draft indicator', async () => {
+  const ui = dashboard();
+  await ui.run('initConsole()');
+  const reads = ui.requests.filter(request => request.url === '/api/pairs/SOLUSDC/config').length;
+  ui.element('cfg-amount').value = '250';
+  ui.run("syncFormState('config-form'); switchTab('tab-config', document.getElementById('tab-btn-config'))");
+  assert.equal(ui.element('config-draft-status').textContent, '有未保存的修改');
+  ui.run("switchTab('tab-orders', document.getElementById('tab-btn-orders')); switchTab('tab-config', document.getElementById('tab-btn-config'))");
+  await new Promise(setImmediate);
+  assert.equal(ui.element('cfg-amount').value, '250');
+  assert.equal(ui.requests.filter(request => request.url === '/api/pairs/SOLUSDC/config').length, reads);
+  ui.element('cfg-amount').value = '100';
+  ui.run("syncFormState('config-form')");
+  assert.equal(ui.run("isFormDirty('config-form')"), false);
+  assert.equal(ui.element('config-draft-status').classList.contains('is-dirty'), false);
+});
+
+test('a new strategy draft remains open after leaving and returning, even before it is edited', async () => {
+  const ui = dashboard();
+  await ui.run('initConsole()');
+  ui.run("openNewPair(); switchTab('tab-overview', document.getElementById('tab-btn-overview')); switchTab('tab-config', document.getElementById('tab-btn-config'))");
+  await new Promise(setImmediate);
+  assert.equal(ui.run('editingNewPair'), true);
+  assert.equal(ui.element('cfg-symbol').value, '');
+  assert.equal(ui.element('config-title').textContent, '新增交易对');
+});
+
+test('cancelling a pair switch or reset preserves the draft, selection, and connection', async () => {
+  const ui = dashboard({ confirmResult: false });
+  await ui.run('initConsole()');
+  ui.element('cfg-interval').value = '2';
+  const requests = ui.requests.length, socket = ui.sockets.at(-1);
+  await ui.run("selectPair('BTCUSDT')");
+  await ui.run('resetConfigForm()');
+  assert.equal(ui.confirmations.length, 2);
+  assert.equal(ui.run('selectedPair'), 'SOLUSDC');
+  assert.equal(ui.element('pair-select').value, 'SOLUSDC');
+  assert.equal(ui.element('cfg-interval').value, '2');
+  assert.equal(ui.sockets.at(-1), socket);
+  assert.equal(ui.requests.length, requests);
+});
+
+test('accepting a reset restores the server configuration and clears unsaved changes', async () => {
+  const ui = dashboard();
+  await ui.run('initConsole()');
+  ui.element('cfg-interval').value = '2';
+  await ui.run('resetConfigForm()');
+  assert.equal(ui.confirmations.length, 1);
+  assert.equal(ui.element('cfg-interval').value, '1');
+  assert.equal(ui.run("isFormDirty('config-form')"), false);
+  ui.run("fillConfigForm({ symbol: 'SOLUSDC', min_price: '80', dry_run: true })");
+  assert.equal(ui.element('cfg-advanced').open, true, 'active price boundaries must remain visible');
+});
+
+test('failed global saves retain the draft and successful saves synchronize its indicator', async () => {
+  const ui = dashboard();
+  await ui.run('initConsole()');
+  ui.element('cfg-sync-interval').value = '12';
+  ui.run(`originalAuthFetch = authFetch;
+    authFetch = async (url, options) => url === '/api/global/config' && options?.method === 'POST'
+      ? { ok: false, json: async () => ({ success: false, message: 'save failed' }) } : originalAuthFetch(url, options);`);
+  await ui.run('submitGlobalConfig()');
+  assert.equal(ui.run("isFormDirty('global-config-form')"), true);
+  assert.equal(ui.element('cfg-sync-interval').disabled, false);
+  ui.run('authFetch = originalAuthFetch');
+  await ui.run('submitGlobalConfig()');
+  assert.equal(ui.run("isFormDirty('global-config-form')"), false);
+  assert.equal(ui.element('global-draft-status').classList.contains('is-dirty'), false);
+});
+
+test('clearing filters also restores default sorting and the clear action reflects active filters', async () => {
+  const ui = dashboard();
+  await ui.run('initConsole()');
+  assert.equal(ui.element('overview-reset-filters').hidden, true);
+  ui.element('overview-sort').value = 'activity';
+  ui.run('renderOverview()');
+  assert.equal(ui.element('overview-reset-filters').hidden, false);
+  ui.run('resetOverviewFilters()');
+  assert.equal(ui.element('overview-sort').value, 'default');
+  assert.equal(ui.element('overview-reset-filters').hidden, true);
+  assert.equal(ui.run('document.activeElement.id'), 'overview-search');
+});
+
 test('hourly chart and its table share totals, retain zero hours, and clear stale data together', () => {
   const ui = dashboard({ charts: true });
   ui.run(`renderHourlyTradeChart({

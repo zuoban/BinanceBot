@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="theme-color" content="#08090b">
-  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#f6f7f9">
+  <meta name="color-scheme" content="light">
   <title>--|--</title>
   <link rel="stylesheet" href="/dashboard.css">
 </head>
@@ -41,8 +41,8 @@
         <div class="brand-icon" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
         <div class="brand-lockup"><span class="brand-name">Grid<span class="brand-name-light">Console</span></span></div>
       </a>
-      <button type="button" class="nav-toggle" id="nav-toggle" aria-label="展开页面导航" aria-expanded="false" aria-controls="console-nav" onclick="toggleNavigation()"><svg class="icon" aria-hidden="true"><use href="#icon-menu"/></svg><span id="mobile-page-label">策略总览</span><svg class="icon nav-chevron" aria-hidden="true"><use href="#icon-chevron"/></svg></button>
-      <nav class="tab-nav" id="console-nav" role="tablist" aria-label="控制台页面" aria-orientation="horizontal">
+      <span class="nav-section-label" aria-hidden="true">工作空间</span>
+      <nav class="tab-nav" id="console-nav" role="tablist" aria-label="控制台页面" aria-orientation="vertical">
         <button class="tab-button active" id="tab-btn-overview" role="tab" aria-label="策略总览" title="策略总览" aria-selected="true" aria-controls="tab-overview" onclick="switchTab('tab-overview', this)"><svg class="icon" aria-hidden="true"><use href="#icon-overview"/></svg><span>策略总览</span></button>
         <button class="tab-button" id="tab-btn-detail" role="tab" aria-label="交易对详情" title="交易对详情" tabindex="-1" aria-selected="false" aria-controls="tab-detail" onclick="switchTab('tab-detail', this)"><svg class="icon" aria-hidden="true"><use href="#icon-chart"/></svg><span>交易对详情</span></button>
         <button class="tab-button" id="tab-btn-orders" role="tab" aria-label="当前挂单" title="当前挂单" tabindex="-1" aria-selected="false" aria-controls="tab-orders" onclick="switchTab('tab-orders', this)"><svg class="icon" aria-hidden="true"><use href="#icon-orders"/></svg><span>当前挂单</span><span class="nav-count" id="count-orders">0</span></button>
@@ -51,6 +51,14 @@
         <button class="tab-button" id="tab-btn-global-config" role="tab" aria-label="全局配置" title="全局配置" tabindex="-1" aria-selected="false" aria-controls="tab-global-config" onclick="switchTab('tab-global-config', this)"><svg class="icon" aria-hidden="true"><use href="#icon-settings"/></svg><span>全局配置</span></button>
         <button class="tab-button" id="tab-btn-logs" role="tab" aria-label="运行日志" title="运行日志" tabindex="-1" aria-selected="false" aria-controls="tab-logs" onclick="switchTab('tab-logs', this)"><svg class="icon" aria-hidden="true"><use href="#icon-logs"/></svg><span>运行日志</span></button>
       </nav>
+      <div class="sidebar-footer"><span class="sidebar-product">BINANCE FUTURES</span><p>让每一格，有条不紊。</p><span class="brand-version" id="app-version" title="当前运行版本">v{{APP_VERSION}}</span></div>
+    </div>
+  </header>
+  <div class="app-shell">
+  <div class="workspace-header" id="workspace-header">
+    <div class="workspace-topbar">
+      <button type="button" class="nav-toggle" id="nav-toggle" aria-label="展开页面导航" aria-expanded="false" aria-controls="console-nav" onclick="toggleNavigation()"><svg class="icon" aria-hidden="true"><use href="#icon-menu"/></svg><span id="mobile-page-label">策略总览</span><svg class="icon nav-chevron" aria-hidden="true"><use href="#icon-chevron"/></svg></button>
+      <div class="workspace-crumb"><span>工作空间</span><span aria-hidden="true">/</span><strong id="workspace-page-label">策略总览</strong></div>
       <section class="header-controls" aria-label="交易对与策略操作">
         <span class="overview-scope" id="overview-scope"><span class="pulse-dot"></span>全部交易对</span>
         <div class="pair-context">
@@ -72,15 +80,14 @@
               <span class="menu-label menu-divider">账户管理</span>
               <button onclick="openChangePasswordModal()"><svg class="icon" aria-hidden="true"><use href="#icon-lock"/></svg>修改密码</button>
               <button onclick="logout()"><svg class="icon" aria-hidden="true"><use href="#icon-logout"/></svg>退出登录</button>
-              <span class="menu-label menu-divider">Grid Console <span class="brand-version" id="app-version" title="当前运行版本">v{{APP_VERSION}}</span></span>
+              <span class="menu-label menu-divider">Grid Console · 管理员</span>
             </div>
           </div>
         </div>
       </section>
     </div>
     <p class="connection-alert" id="connection-alert" role="status" hidden></p>
-  </header>
-  <div class="app-shell">
+  </div>
   <main id="main-content" tabindex="-1">
     <div class="page-heading" id="page-heading">
       <div><span class="eyebrow" id="page-eyebrow">WORKSPACE / OVERVIEW</span><h1 id="page-title" tabindex="-1">策略总览</h1><p id="page-description">全部交易对，一览掌握。查看行情、持仓与网格运行状态。</p></div>
@@ -88,24 +95,34 @@
     <div class="tab-content active overview-panel" id="tab-overview" role="tabpanel" aria-labelledby="tab-btn-overview">
       <section class="account-overview" id="overview-accounts" aria-label="账户概览" aria-busy="true"><p class="account-overview-empty">正在加载账户信息…</p></section>
       <section class="board-summary" aria-label="全部交易对统计">
-        <article><span>已配置交易对</span><strong id="overview-pair-count">--</strong><small>覆盖所有运行模式</small></article>
+        <article><span>交易对</span><strong id="overview-pair-count">--</strong><small>覆盖所有运行模式</small></article>
         <article><span><i class="pulse-dot text-green" aria-hidden="true"></i>运行中</span><strong id="overview-running-count">--</strong><small id="overview-paused-count">等待策略状态</small></article>
         <article><span>当前挂单</span><strong id="overview-order-count">--</strong><small>所有交易对的有效委托</small></article>
         <article><span>今日成交</span><strong id="overview-trade-count">--</strong><div class="board-trade-sides" aria-label="今日买卖成交笔数"><span class="text-green">买单 <b id="overview-buy-count">--</b> 笔</span><span class="text-red">卖单 <b id="overview-sell-count">--</b> 笔</span></div><small id="overview-trade-note">北京时间 · 当前运行模式</small></article>
       </section>
       <section class="pairs-section" aria-labelledby="pairs-heading">
-        <div class="board-section-heading"><div><span class="section-kicker">YOUR STRATEGIES</span><h2 id="pairs-heading">全部交易对 <span id="overview-visible-count" class="board-count"></span></h2></div><div class="board-heading-actions"><span class="update-status" id="overview-update-status" role="status">正在加载看板</span><button type="button" class="btn-quiet" id="btn-refresh-overview" onclick="loadOverview()" aria-label="刷新全部交易对" title="刷新全部交易对"><svg class="icon" aria-hidden="true"><use href="#icon-refresh"/></svg></button><button type="button" class="btn-primary" onclick="openNewPair()"><span aria-hidden="true">＋</span>新增交易对</button></div></div>
-        <div class="board-controlbar"><p id="overview-control-scope">作用于全部已配置交易对，不受筛选影响</p><div role="group" aria-label="全部策略操作"><button type="button" class="strategy-start" id="btn-overview-resume-all" disabled onclick="controlAllOverviewPairs('resume')"><svg class="icon" aria-hidden="true"><use href="#icon-play"/></svg>全部启动</button><button type="button" id="btn-overview-pause-all" disabled onclick="controlAllOverviewPairs('pause')"><svg class="icon" aria-hidden="true"><use href="#icon-pause"/></svg>全部暂停</button></div></div>
+        <div class="board-section-heading">
+          <div><h2 id="pairs-heading">我的策略 <span id="overview-visible-count" class="board-count"></span></h2><span class="update-status" id="overview-update-status" role="status">正在加载看板</span></div>
+          <div class="board-heading-actions">
+            <button type="button" class="btn-quiet" id="btn-refresh-overview" onclick="loadOverview()" aria-label="刷新全部交易对" title="刷新全部交易对"><svg class="icon" aria-hidden="true"><use href="#icon-refresh"/></svg></button>
+            <details class="bulk-actions" id="overview-bulk-actions">
+              <summary>批量操作<svg class="icon" aria-hidden="true"><use href="#icon-chevron"/></svg></summary>
+              <div class="board-controlbar"><p id="overview-control-scope">作用于全部已配置交易对，不受筛选影响</p><div role="group" aria-label="全部策略操作"><button type="button" class="strategy-start" id="btn-overview-resume-all" disabled onclick="controlAllOverviewPairs('resume')"><svg class="icon" aria-hidden="true"><use href="#icon-play"/></svg>全部启动</button><button type="button" id="btn-overview-pause-all" disabled onclick="controlAllOverviewPairs('pause')"><svg class="icon" aria-hidden="true"><use href="#icon-pause"/></svg>全部暂停</button></div></div>
+            </details>
+            <button type="button" class="btn-primary" onclick="openNewPair()"><span aria-hidden="true">＋</span>新增交易对</button>
+          </div>
+        </div>
         <p class="board-control-report" id="overview-control-report" role="status" hidden></p>
         <div class="board-toolbar" role="search" aria-label="筛选交易对">
           <label class="board-search"><svg class="icon" aria-hidden="true"><use href="#icon-search"/></svg><span class="sr-only">搜索交易对</span><input id="overview-search" type="search" placeholder="搜索交易对，如 BTC" autocomplete="off" oninput="renderOverview()"></label>
           <label><span class="sr-only">运行状态</span><select id="overview-status-filter" onchange="renderOverview()"><option value="all">全部状态</option><option value="RUNNING">运行中</option><option value="PAUSED">已暂停</option></select></label>
           <label><span class="sr-only">运行模式</span><select id="overview-mode-filter" onchange="renderOverview()"><option value="all">全部模式</option><option value="PAPER">模拟交易</option><option value="TESTNET">测试网</option><option value="LIVE">实盘交易</option></select></label>
           <label class="board-sort"><span class="sr-only">排序方式</span><select id="overview-sort" onchange="renderOverview()"><option value="default">默认排序</option><option value="symbol">交易对名称</option><option value="activity">今日成交最多</option><option value="orders">当前挂单最多</option></select></label>
+          <button type="button" class="btn-quiet board-reset" id="overview-reset-filters" onclick="resetOverviewFilters()" hidden>清除筛选</button>
         </div>
         <p class="board-alert" id="overview-alert" role="status" hidden></p>
         <div class="pair-cards" id="overview-pairs" aria-busy="true"><div class="board-empty"><strong>正在加载全部交易对</strong><span>行情、仓位与策略状态将在这里显示</span></div></div>
-        <p class="board-footnote">每 3 秒更新 · 成交按北京时间统计 · 盈亏仅含本程序已确认成交；不同计价资产分别展示。账户权益与可用余额统一显示在看板上方。</p>
+        <p class="board-footnote"><span class="pulse-dot" aria-hidden="true"></span>每 3 秒自动更新<span>北京时间 · 盈亏仅含本程序已确认成交 · 不同资产分别计价</span></p>
       </section>
     </div>
     <div class="tab-content overview-panel" id="tab-detail" role="tabpanel" aria-labelledby="tab-btn-detail">
@@ -252,7 +269,7 @@
         <div class="config-container">
           <div class="config-header">
             <h2 id="config-title" tabindex="-1">策略运行参数</h2>
-            <p>当前交易对的网格、交易模式和仓位限制独立保存，立即生效，重启后保留。交易所连接和 Telegram 通知请前往「全局配置」页面设置。</p>
+            <p>为当前交易对设置网格与仓位限制。保存后立即生效，重启后保留。</p>
           </div>
 
           <div class="config-toolbar" aria-label="交易对管理">
@@ -293,7 +310,7 @@
               <div class="form-group">
                 <label for="cfg-amount">每格金额 · 计价资产</label>
                 <input type="number" aria-describedby="cfg-amount-hint" id="cfg-amount" step="any" min="1" required placeholder="100.0" />
-                <span class="form-hint" id="cfg-amount-hint">普通单按目标金额向下取整；成交后统一补窗口，尾仓平仓单使用剩余可平数量</span>
+                <span class="form-hint" id="cfg-amount-hint">按交易所步长向下取整；尾仓平仓使用剩余可平数量</span>
               </div>
 
               <!-- 买单窗口 -->
@@ -338,8 +355,13 @@
                 <span class="form-hint" id="cfg-pause-on-max-position-hint">需设置上限。按标记价格估值：持仓达到上限，或下一笔完整开仓单成交后将超限时暂停；撤销策略挂单，保留持仓，需手动恢复</span>
               </div>
 
+            </div>
+
+            <details class="advanced-settings" id="cfg-advanced">
+              <summary><div><strong>价格边界与执行方式</strong><span>可选设置 · 默认不限制价格范围</span></div><svg class="icon" aria-hidden="true"><use href="#icon-chevron"/></svg></summary>
+              <div class="config-form-grid">
               <!-- 只做 Maker -->
-              <div class="form-group" style="justify-content: center;">
+              <div class="form-group form-full-width" style="justify-content: center;">
                 <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
                   <input type="checkbox" aria-describedby="cfg-post-only-hint" id="cfg-post-only" checked disabled style="width: 17px; height: 17px; accent-color: var(--accent);" />
                   <span>只做 Maker 挂单 (Post-Only GTX)</span>
@@ -361,15 +383,14 @@
                 <span class="form-hint" id="cfg-max-price-hint">涨超该价格停止下单</span>
               </div>
 
-            </div>
+              </div>
+            </details>
 
             <!-- 底部保存栏 -->
             <div class="form-actions">
-              <div style="display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-dim);">
-                <svg class="icon" aria-hidden="true"><use href="#icon-shield"/></svg>点击保存后立即生效，重启后保留
-              </div>
+              <span class="draft-status" id="config-draft-status" role="status">正在读取配置…</span>
               <div style="display: flex; gap: 10px;">
-                <button type="button" id="btn-reset-cfg" onclick="loadConfigForm()">↺ 还原当前配置</button>
+                <button type="button" id="btn-reset-cfg" onclick="resetConfigForm()">还原配置</button>
                 <button type="submit" class="btn-primary" id="btn-save-cfg">保存并立即生效</button>
               </div>
             </div>
@@ -445,9 +466,9 @@
               </div>
             </div>
             <div class="form-actions">
-              <div>适用于所有交易对，与当前选择的交易对无关。</div>
+              <span class="draft-status" id="global-draft-status" role="status">正在读取设置…</span>
               <div style="display: flex; gap: 10px;">
-                <button type="button" id="btn-reset-global" onclick="loadGlobalConfigForm()">↺ 还原全局设置</button>
+                <button type="button" id="btn-reset-global" onclick="resetGlobalConfigForm()">还原设置</button>
                 <button type="submit" class="btn-primary" id="btn-save-global" disabled>保存全局设置</button>
               </div>
             </div>
@@ -970,6 +991,57 @@
     let accountSocket = null;
     let accountEntries = null;
     let lastAccountSnapshotAt = 0;
+    const formFields = {
+      'config-form': ['cfg-symbol', 'cfg-direction', 'cfg-interval', 'cfg-amount', 'cfg-buy-window', 'cfg-sell-window',
+        'cfg-mode', 'cfg-min-price', 'cfg-max-price', 'cfg-max-position', 'cfg-pause-on-max-position'],
+      'global-config-form': ['cfg-api-key', 'cfg-api-secret', 'cfg-recv-window', 'cfg-sync-interval', 'cfg-clear-api',
+        'cfg-telegram-enabled', 'cfg-telegram-token', 'cfg-telegram-chat-id', 'cfg-clear-telegram']
+    };
+    const checkboxFields = new Set(['cfg-pause-on-max-position', 'cfg-clear-api', 'cfg-telegram-enabled', 'cfg-clear-telegram']);
+    const formBaselines = new Map();
+
+    function formValues(formId) {
+      return JSON.stringify(formFields[formId].map(id => {
+        const field = document.getElementById(id);
+        return checkboxFields.has(id) ? !!field.checked : String(field.value ?? '');
+      }));
+    }
+
+    function isFormDirty(formId) {
+      return formBaselines.has(formId) && formBaselines.get(formId) !== formValues(formId);
+    }
+
+    function syncFormState(formId) {
+      const dirty = isFormDirty(formId);
+      const status = document.getElementById(formId === 'config-form' ? 'config-draft-status' : 'global-draft-status');
+      status.classList.toggle('is-dirty', dirty);
+      status.textContent = dirty ? '有未保存的修改' : formId === 'config-form' && editingNewPair ? '新增策略保存后保持暂停' : '已与当前配置同步';
+    }
+
+    function markFormSaved(formId) {
+      formBaselines.set(formId, formValues(formId));
+      syncFormState(formId);
+    }
+
+    function setFormFieldsDisabled(formId, disabled) {
+      formFields[formId].forEach(id => document.getElementById(id).disabled = disabled);
+    }
+
+    function confirmDiscardForm(formId) {
+      return !isFormDirty(formId) || confirm('有未保存的修改，确定放弃这些修改吗？');
+    }
+
+    function resetConfigForm() {
+      if (pairManagementBusy || !confirmDiscardForm('config-form')) return;
+      document.getElementById('cfg-alert').style.display = 'none';
+      return loadConfigForm();
+    }
+
+    function resetGlobalConfigForm() {
+      if (globalConfigBusy || !confirmDiscardForm('global-config-form')) return;
+      document.getElementById('global-cfg-alert').style.display = 'none';
+      return loadGlobalConfigForm();
+    }
 
     function hasFreshAccountSnapshot() {
       return accountEntries !== null && Date.now() - lastAccountSnapshotAt < 5000;
@@ -1311,10 +1383,12 @@
       document.getElementById('overview-buy-count').textContent = tradeCounts ? tradeCounts.buy : '--';
       document.getElementById('overview-sell-count').textContent = tradeCounts ? tradeCounts.sell : '--';
       document.getElementById('overview-trade-note').textContent = allTradesReady ? '北京时间 · 当前运行模式' : '部分交易对成交统计待更新';
+      document.getElementById('overview-trade-note').hidden = allTradesReady;
       const query = document.getElementById('overview-search').value.trim().toUpperCase();
       const status = document.getElementById('overview-status-filter').value || 'all';
       const mode = document.getElementById('overview-mode-filter').value || 'all';
       const sort = document.getElementById('overview-sort').value;
+      document.getElementById('overview-reset-filters').hidden = !query && status === 'all' && mode === 'all' && (!sort || sort === 'default');
       const visible = entries.filter(entry => {
         const data = entry.snapshot;
         return (data?.symbol || entry.symbol || '').toUpperCase().includes(query)
@@ -1413,6 +1487,7 @@
     function resetOverviewFilters() {
       document.getElementById('overview-search').value = '';
       ['overview-status-filter', 'overview-mode-filter'].forEach(id => document.getElementById(id).value = 'all');
+      document.getElementById('overview-sort').value = 'default';
       renderOverview();
       document.getElementById('overview-search').focus();
     }
@@ -1430,13 +1505,14 @@
     }
 
     function openNewPair() {
-      if (pairManagementBusy) return;
+      if (!startNewPair()) return;
       switchTab('tab-config', document.getElementById('tab-btn-config'));
-      startNewPair();
+      document.getElementById('cfg-symbol').focus();
     }
 
     function syncPageContext() {
       const pairPage = !(editingNewPair && activeTab === 'tab-config') && !['tab-overview', 'tab-global-config'].includes(activeTab);
+      document.getElementById('workspace-header').classList.toggle('has-pair-context', pairPage);
       ['pair-picker', 'mode-badge', 'btn-pause-resume', 'pair-actions'].forEach(id => document.getElementById(id).hidden = !pairPage);
       ['count-orders', 'count-trades'].forEach(id => document.getElementById(id).hidden = !pairPage);
       document.getElementById('overview-scope').hidden = activeTab !== 'tab-overview';
@@ -1555,6 +1631,11 @@
 
     async function selectPair(symbol) {
       if (pairManagementBusy) {
+        document.getElementById('pair-select').value = selectedPair;
+        return;
+      }
+      if (symbol !== selectedPair && configuredPairs.some(pair => pair.symbol === selectedPair)
+        && !confirmDiscardForm('config-form')) {
         document.getElementById('pair-select').value = selectedPair;
         return;
       }
@@ -2129,6 +2210,7 @@
       document.getElementById('page-title').textContent = title;
       document.getElementById('page-description').textContent = description;
       document.getElementById('mobile-page-label').textContent = title;
+      document.getElementById('workspace-page-label').textContent = title;
       if (updateHistory && window.location.hash !== `#${tabId.slice(4)}`) {
         window.history.pushState(null, '', `#${tabId.slice(4)}`);
       }
@@ -2143,7 +2225,7 @@
       if (!wasActive) {
         window.scrollTo({ top: 0, behavior: 'instant' });
         if (!updateHistory) document.getElementById('page-title').focus({ preventScroll: true });
-        if (tabId === 'tab-config') loadConfigForm();
+        if (tabId === 'tab-config' && !editingNewPair && !isFormDirty('config-form')) loadConfigForm();
         if (tabId === 'tab-global-config' && !globalConfigurationLoaded) loadGlobalConfigForm();
       }
       if (tabId === 'tab-overview') { renderOverview(); loadOverview(); }
@@ -2183,8 +2265,9 @@
       document.getElementById('btn-remove-pair').disabled = pairManagementBusy || editingNewPair || configuredPairs.length < 2;
       document.getElementById('btn-save-cfg').textContent = pairManagementBusy ? '保存中…' : editingNewPair ? '保存并添加交易对' : '保存并立即生效';
       document.getElementById('btn-save-cfg').disabled = pairManagementBusy || !configurationLoaded;
+      setFormFieldsDisabled('config-form', pairManagementBusy || !configurationLoaded);
       document.getElementById('btn-reset-cfg').disabled = pairManagementBusy;
-      document.getElementById('btn-reset-cfg').textContent = editingNewPair ? '取消新增' : '↺ 还原当前配置';
+      document.getElementById('btn-reset-cfg').textContent = editingNewPair ? '取消新增' : '还原配置';
       document.getElementById('cfg-symbol').readOnly = !editingNewPair && pairScoped;
       document.getElementById('cfg-symbol-hint').textContent = editingNewPair ? '填写币安合约交易对代码，例如 BTCUSDT'
         : pairScoped ? '使用顶部选择器切换交易对，也可在本页新增或移除交易对' : '币安合约交易对代码';
@@ -2221,7 +2304,8 @@
           document.getElementById('cfg-max-price').value = c.max_price || '';
           document.getElementById('cfg-max-position').value = c.max_position_usdc || '';
           document.getElementById('cfg-pause-on-max-position').checked = !!c.pause_on_max_position;
-
+          document.getElementById('cfg-advanced').open = !!(c.min_price || c.max_price);
+          markFormSaved('config-form');
     }
 
     function fillGlobalConfigForm(c) {
@@ -2238,10 +2322,11 @@
       document.getElementById('cfg-sync-interval').value = c.sync_interval_secs ?? 3;
       document.getElementById('cfg-clear-api').checked = false;
       document.getElementById('cfg-clear-telegram').checked = false;
+      markFormSaved('global-config-form');
     }
 
     function startNewPair() {
-      if (pairManagementBusy) return;
+      if (pairManagementBusy || !confirmDiscardForm('config-form')) return false;
       ++configRequestEpoch;
       editingNewPair = true;
       configurationLoaded = true;
@@ -2250,6 +2335,7 @@
         dry_run: true, max_position_usdc: '2000' });
       renderPairManagement();
       document.getElementById('cfg-symbol').focus();
+      return true;
     }
 
     async function loadConfigForm() {
@@ -2306,6 +2392,7 @@
       if (globalConfigBusy) return;
       const requestEpoch = ++globalConfigRequestEpoch;
       globalConfigurationLoaded = false;
+      setFormFieldsDisabled('global-config-form', true);
       document.getElementById('btn-save-global').disabled = true;
       try {
         const res = await authFetch('/api/global/config');
@@ -2314,6 +2401,7 @@
         if (!res.ok || !json.success || !json.data) throw new Error(json.message || '无法读取全局设置');
         fillGlobalConfigForm(json.data);
         globalConfigurationLoaded = true;
+        setFormFieldsDisabled('global-config-form', false);
         document.getElementById('btn-save-global').disabled = false;
       } catch (e) {
         if (requestEpoch === globalConfigRequestEpoch) showConfigMessage('全局设置读取失败：' + e.message, false, 'global-cfg-alert');
@@ -2323,6 +2411,7 @@
     async function submitGlobalConfig() {
       if (globalConfigBusy || !globalConfigurationLoaded) return;
       globalConfigBusy = true;
+      setFormFieldsDisabled('global-config-form', true);
       ++globalConfigRequestEpoch;
       const btn = document.getElementById('btn-save-global');
       const reset = document.getElementById('btn-reset-global');
@@ -2352,6 +2441,7 @@
       } catch (e) { showConfigMessage('全局设置保存失败：' + e.message, false, 'global-cfg-alert'); }
       finally {
         globalConfigBusy = false;
+        setFormFieldsDisabled('global-config-form', !globalConfigurationLoaded);
         btn.disabled = !globalConfigurationLoaded;
         reset.disabled = false;
         btn.textContent = '保存全局设置';
@@ -2427,6 +2517,7 @@
         const json = await res.json();
         if (epoch !== pairSwitchEpoch) return;
         if (!res.ok || !json.success) throw new Error(json.message || '未知错误');
+        markFormSaved('config-form');
         pairManagementBusy = false;
         if (adding) {
           sessionStorage.setItem('binance_bot_selected_pair', json.data);
@@ -2485,6 +2576,15 @@
     }
 
     window.addEventListener('DOMContentLoaded', () => {
+      Object.keys(formFields).forEach(formId => {
+        ['input', 'change'].forEach(type => document.getElementById(formId).addEventListener(type, () => syncFormState(formId)));
+      });
+      window.addEventListener('beforeunload', event => {
+        if (Object.keys(formFields).some(isFormDirty)) {
+          event.preventDefault();
+          event.returnValue = '';
+        }
+      });
       document.getElementById('overview-pairs').addEventListener('click', event => {
         const button = event.target.closest('button');
         if (button?.hasAttribute('data-reset-filters')) resetOverviewFilters();
@@ -2505,19 +2605,20 @@
         if (event.target.closest('button')) closeMobileActions();
       });
       document.querySelector('.tab-nav').addEventListener('keydown', (event) => {
-        if (!['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(event.key)) return;
+        if (!['ArrowRight', 'ArrowLeft', 'ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
         const tabs = [...document.querySelectorAll('.tab-button')];
         const index = tabs.indexOf(document.activeElement);
         if (index < 0) return;
         event.preventDefault();
         const next = tabs[event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1
-          : (index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length];
+          : (index + (['ArrowRight', 'ArrowDown'].includes(event.key) ? 1 : -1) + tabs.length) % tabs.length];
         next.focus();
         switchTab(next.getAttribute('aria-controls'), next, { keepNavigation: true });
       });
       document.addEventListener('click', event => {
         if (!event.target.closest('.actions-menu')) closeMobileActions();
         if (!event.target.closest('.tab-nav, .nav-toggle')) closeNavigation();
+        if (!event.target.closest('.bulk-actions')) document.getElementById('overview-bulk-actions').open = false;
       });
       window.addEventListener('popstate', restoreNavigation);
       window.addEventListener('hashchange', restoreNavigation);
@@ -2533,6 +2634,11 @@
           }
         }
         if (event.key === 'Escape') {
+          const bulkActions = document.getElementById('overview-bulk-actions');
+          if (bulkActions.open) {
+            bulkActions.open = false;
+            bulkActions.querySelector('summary').focus();
+          }
           if (document.querySelector('.app-header').classList.contains('nav-open')) {
             closeNavigation();
             document.getElementById('nav-toggle').focus();
