@@ -59,6 +59,60 @@ test('a new strategy draft remains open after leaving and returning, even before
   assert.equal(ui.element('config-title').textContent, '新增交易对');
 });
 
+test('a card parameter action opens its strategy after leaving a new-pair draft', async () => {
+  for (const draftSymbol of ['ETHUSDT', '']) {
+    const ui = dashboard();
+    await ui.run('initConsole()');
+    ui.run('openNewPair()');
+    ui.element('cfg-symbol').value = draftSymbol;
+    ui.run("switchTab('tab-overview', document.getElementById('tab-btn-overview'))");
+    await ui.run("openPairPage('SOLUSDC', 'tab-config')");
+    await new Promise(setImmediate);
+    assert.equal(ui.confirmations.length, draftSymbol ? 1 : 0);
+    assert.equal(ui.run('editingNewPair'), false);
+    assert.equal(ui.run('selectedPair'), 'SOLUSDC');
+    assert.equal(ui.element('cfg-symbol').value, 'SOLUSDC');
+    assert.equal(ui.element('config-title').textContent, 'SOLUSDC · 策略参数');
+    assert.equal(ui.element('cfg-symbol').readOnly, true);
+    assert.equal(ui.element('btn-save-cfg').textContent, '保存并立即生效');
+    assert.equal(ui.run('activeTab'), 'tab-config');
+  }
+});
+
+test('cancelling a card parameter action preserves the new-pair draft and current page', async () => {
+  const ui = dashboard({ confirmResult: false });
+  await ui.run('initConsole()');
+  ui.run('openNewPair()');
+  ui.element('cfg-symbol').value = 'ETHUSDT';
+  ui.element('cfg-amount').value = '250';
+  ui.run("switchTab('tab-overview', document.getElementById('tab-btn-overview'))");
+  await new Promise(setImmediate);
+  const requests = ui.requests.length, socket = ui.sockets.at(-1);
+  await ui.run("openPairPage('SOLUSDC', 'tab-config')");
+  assert.equal(ui.confirmations.length, 1);
+  assert.equal(ui.run('editingNewPair'), true);
+  assert.equal(ui.element('cfg-symbol').value, 'ETHUSDT');
+  assert.equal(ui.element('cfg-amount').value, '250');
+  assert.equal(ui.run('activeTab'), 'tab-overview');
+  assert.equal(ui.element('pair-select').value, 'SOLUSDC');
+  assert.equal(ui.requests.length, requests);
+  assert.equal(ui.sockets.at(-1), socket);
+});
+
+test('other current-pair card actions keep the new-pair draft available', async () => {
+  const ui = dashboard();
+  await ui.run('initConsole()');
+  ui.run('openNewPair()');
+  ui.element('cfg-symbol').value = 'ETHUSDT';
+  for (const tabId of ['tab-detail', 'tab-orders']) {
+    await ui.run(`openPairPage('SOLUSDC', '${tabId}')`);
+    assert.equal(ui.run('activeTab'), tabId);
+    assert.equal(ui.run('editingNewPair'), true);
+    assert.equal(ui.element('cfg-symbol').value, 'ETHUSDT');
+  }
+  assert.equal(ui.confirmations.length, 0);
+});
+
 test('cancelling a pair switch or reset preserves the draft, selection, and connection', async () => {
   const ui = dashboard({ confirmResult: false });
   await ui.run('initConsole()');
@@ -266,7 +320,6 @@ function dashboard({ scoped = true, fetchStatus, fetchOverview, fetchControl, co
         scoped ? states : new Map([[singleSymbol, states.get(singleSymbol)]]), scoped,
       ));
       if (url === '/api/global/config') return response({ recv_window: 8000, sync_interval_secs: 7, has_api_key: true, api_key_preview: 'glob...key1', has_api_secret: true, telegram_enabled: true, has_telegram_bot_token: true, telegram_chat_id: '123456' });
-      if (url === '/api/server/config') return response({ saved: { host: '0.0.0.0', port: 8080 }, active: { host: '0.0.0.0', port: 8080 } });
       if (url === '/api/pairs') {
         if (options.method === 'POST') {
           const config = JSON.parse(options.body);
@@ -536,18 +589,6 @@ test('failed configuration reads leave saving disabled instead of submitting sta
   assert.equal(ui.element('btn-save-cfg').disabled, true);
   assert.equal(ui.requests.length, count);
   assert.match(ui.element('cfg-alert').textContent, /配置读取失败/);
-});
-
-test('server settings send an independent request and explain restart requirements', async () => {
-  const ui = dashboard();
-  await ui.run('initConsole()');
-  ui.element('cfg-server-host').value = '127.0.0.1';
-  ui.element('cfg-server-port').value = '9090';
-  await ui.run('submitServerConfig()');
-  const request = ui.requests.find(request => request.url === '/api/server/config' && request.options.method === 'POST');
-  assert.deepEqual(JSON.parse(request.options.body), { host: '127.0.0.1', port: 9090 });
-  assert.equal(ui.element('btn-save-server').disabled, false);
-  assert.equal(ui.run('selectedPair'), 'SOLUSDC');
 });
 
 test('switching and adding pairs preserves unsaved global credentials and notification settings', async () => {

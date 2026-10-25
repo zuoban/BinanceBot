@@ -475,27 +475,6 @@
             <div id="global-cfg-alert" class="config-alert" role="status" aria-live="polite" style="display: none;"></div>
           </form>
 
-          <form id="server-config-form" class="server-config" onsubmit="event.preventDefault(); submitServerConfig();">
-            <h3>服务设置</h3>
-            <p class="form-hint">监听地址和端口在重启程序后生效。Docker 部署时，容器监听端口需与端口映射对应。</p>
-            <div class="config-form-grid">
-              <div class="form-group">
-                <label for="cfg-server-host">监听地址</label>
-                <input type="text" aria-describedby="cfg-server-host-hint" id="cfg-server-host" required placeholder="0.0.0.0" />
-                <span class="form-hint" id="cfg-server-host-hint">填写 IPv4 或 IPv6 地址，例如 0.0.0.0、127.0.0.1 或 ::</span>
-              </div>
-              <div class="form-group">
-                <label for="cfg-server-port">监听端口</label>
-                <input type="number" aria-describedby="server-active-address" id="cfg-server-port" min="1" max="65535" step="1" required />
-                <span class="form-hint" id="server-active-address">正在读取当前监听地址…</span>
-              </div>
-            </div>
-            <div class="form-actions">
-              <div>服务设置保存后，需要重启程序才能生效。</div>
-              <div><button type="submit" id="btn-save-server" disabled>保存服务设置</button></div>
-            </div>
-            <div id="server-cfg-alert" class="config-alert" role="status" aria-live="polite" style="display: none;"></div>
-          </form>
         </div>
       </div>
 
@@ -1498,8 +1477,9 @@
         || configuredPairs.find(entry => entry.symbol === symbol);
       if (!entry) return;
       const epoch = ++pairPageEpoch;
-      if (symbol !== selectedPair) await selectPair(symbol);
-      if (epoch !== pairPageEpoch || selectedPair !== symbol) return;
+      const openingConfig = tabId === 'tab-config';
+      if (symbol !== selectedPair || (openingConfig && editingNewPair)) await selectPair(symbol);
+      if (epoch !== pairPageEpoch || selectedPair !== symbol || (openingConfig && editingNewPair)) return;
       switchTab(tabId, document.getElementById(`tab-btn-${tabId.slice(4)}`));
       document.getElementById('page-title').focus({ preventScroll: true });
     }
@@ -1622,10 +1602,7 @@
       await Promise.all([selectPair(active.symbol), loadOverview(epoch)]);
       initAccountStream();
       renderPairManagement();
-      await Promise.all([
-        globalConfigurationLoaded ? Promise.resolve() : loadGlobalConfigForm(),
-        loadServerConfigForm()
-      ]);
+      if (!globalConfigurationLoaded) await loadGlobalConfigForm();
       if (window.location.hash) restoreNavigation();
     }
 
@@ -1634,7 +1611,7 @@
         document.getElementById('pair-select').value = selectedPair;
         return;
       }
-      if (symbol !== selectedPair && configuredPairs.some(pair => pair.symbol === selectedPair)
+      if ((symbol !== selectedPair || editingNewPair) && configuredPairs.some(pair => pair.symbol === selectedPair)
         && !confirmDiscardForm('config-form')) {
         document.getElementById('pair-select').value = selectedPair;
         return;
@@ -2164,7 +2141,7 @@
       'tab-orders': ['OPEN ORDERS', '当前挂单', '查看当前交易对的有效挂单与网格档位。'],
       'tab-trades': ['TRADE HISTORY', '成交历史', '追踪每次成交、已实现盈亏与手续费。'],
       'tab-config': ['STRATEGY PARAMETERS', '策略参数', '配置当前交易对的网格、交易模式和仓位限制。'],
-      'tab-global-config': ['GLOBAL CONFIGURATION', '全局配置', '统一管理交易所连接、Telegram 通知和服务设置。'],
+      'tab-global-config': ['GLOBAL CONFIGURATION', '全局配置', '统一管理交易所连接与 Telegram 通知。'],
       'tab-logs': ['SYSTEM ACTIVITY', '运行日志', '查看当前交易对的执行记录与系统状态。']
     };
 
@@ -2446,37 +2423,6 @@
         reset.disabled = false;
         btn.textContent = '保存全局设置';
       }
-    }
-
-    async function loadServerConfigForm() {
-      document.getElementById('btn-save-server').disabled = true;
-      try {
-        const res = await authFetch('/api/server/config');
-        const json = await res.json();
-        if (!res.ok || !json.success || !json.data) throw new Error(json.message || '无法读取服务设置');
-        document.getElementById('cfg-server-host').value = json.data.saved.host;
-        document.getElementById('cfg-server-port').value = json.data.saved.port;
-        document.getElementById('server-active-address').textContent = `当前监听：${json.data.active.host}:${json.data.active.port}`;
-        document.getElementById('btn-save-server').disabled = false;
-      } catch (e) {
-        showConfigMessage('服务设置读取失败：' + e.message, false, 'server-cfg-alert');
-      }
-    }
-
-    async function submitServerConfig() {
-      const btn = document.getElementById('btn-save-server');
-      btn.disabled = true;
-      try {
-        const res = await authFetch('/api/server/config', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
-            host: document.getElementById('cfg-server-host').value.trim(), port: Number(document.getElementById('cfg-server-port').value)
-          })
-        });
-        const json = await res.json();
-        if (!res.ok || !json.success) throw new Error(json.message || '保存失败');
-        showConfigMessage(json.message, true, 'server-cfg-alert');
-      } catch (e) { showConfigMessage('服务设置保存失败：' + e.message, false, 'server-cfg-alert'); }
-      finally { btn.disabled = false; }
     }
 
     async function submitConfig() {

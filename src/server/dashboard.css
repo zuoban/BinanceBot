@@ -169,7 +169,7 @@ h1 { color: var(--text); font-size: 28px; font-weight: 650; line-height: 1.4; le
 .board-trade-sides { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 11px; }
 .board-trade-sides b { font-weight: 600; }
 .pairs-section { margin-top: 30px; }
-.board-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
+.board-section-heading { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
 .board-section-heading h2 { font-size: 18px; font-weight: 600; letter-spacing: -.3px; }
 .board-section-heading .update-status { margin-top: 5px; }
 .board-count { margin-left: 6px; color: var(--text-dim); font: 11px var(--font-numbers); letter-spacing: 0; }
@@ -423,9 +423,6 @@ input[type="checkbox"] { width: 16px; height: 16px; margin: 0; accent-color: var
 .draft-status::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: #a6b2c2; }
 .draft-status.is-dirty { color: var(--amber); }
 .draft-status.is-dirty::before { background: #cf9d29; }
-.server-config { margin-top: 50px; padding-top: 24px; border-top: 1px solid var(--border); }
-.server-config h3 { margin-bottom: 8px; font-size: 18px; font-weight: 600; }
-.server-config .form-actions { position: static; margin: 0; padding: 18px 0 0; box-shadow: none; border-radius: 0; }
 .config-alert { margin-top: 14px; padding: 12px 16px; border-radius: 7px; font-size: .75rem; line-height: 1.8; }
 #cfg-alert, #setup-alert, #login-alert, #chg-alert { line-height: 1.8; }
 #cfg-alert, #global-cfg-alert { margin-top: 40px !important; }
@@ -522,7 +519,8 @@ input[type="checkbox"] { width: 16px; height: 16px; margin: 0; accent-color: var
   .board-heading-actions { gap: 6px; }
   .board-heading-actions button, .bulk-actions > summary { min-height: 40px; font-size: 11px; padding-inline: 10px; }
   .board-heading-actions .btn-quiet { width: 36px; min-width: 36px; padding: 9px; }
-  .board-controlbar { width: min(280px,calc(100vw - 40px)); right: -105px; }
+  .bulk-actions { position: static; }
+  .board-controlbar { width: min(280px,100%); right: 0; }
   .board-toolbar > label:not(.board-search) { flex: 1; min-width: 0; }
   .board-toolbar select { width: 100%; padding-inline: 9px 20px; font-size: 11px; }
   .board-sort { margin-left: 0; }
