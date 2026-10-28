@@ -44,6 +44,12 @@ impl SymbolRules {
             .iter()
             .find(|s| s.symbol.eq_ignore_ascii_case(symbol_name))?;
 
+        if !sym.filters.iter().any(|filter| matches!(filter, BinanceFilter::PriceFilter { tick_size, .. } if *tick_size > Decimal::ZERO))
+            || !sym.filters.iter().any(|filter| matches!(filter, BinanceFilter::LotSize { step_size, .. } if *step_size > Decimal::ZERO))
+        {
+            return None;
+        }
+
         let mut tick_size = dec!(0.01);
         let mut min_price = dec!(0.0001);
         let mut max_price = dec!(1000000.0);
@@ -241,6 +247,31 @@ fn calculate_scale(d: Decimal) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exchange_rules_require_price_and_quantity_filters() {
+        let mut info: BinanceExchangeInfo = serde_json::from_value(serde_json::json!({
+            "symbols": [{
+                "symbol": "SOLUSDC", "status": "TRADING", "pricePrecision": 2,
+                "quantityPrecision": 2, "filters": [
+                    {"filterType": "LOT_SIZE", "minQty": "0.01", "maxQty": "1000", "stepSize": "0.01"}
+                ]
+            }]
+        }))
+        .unwrap();
+        assert!(SymbolRules::from_exchange_info(&info, "SOLUSDC").is_none());
+        info.symbols[0].filters.push(BinanceFilter::PriceFilter {
+            min_price: dec!(0.01),
+            max_price: dec!(1000),
+            tick_size: dec!(0.00001),
+        });
+        assert_eq!(
+            SymbolRules::from_exchange_info(&info, "SOLUSDC")
+                .unwrap()
+                .tick_size,
+            dec!(0.00001)
+        );
+    }
 
     #[test]
     fn test_symbol_rules_rounding() {

@@ -248,6 +248,7 @@ pub struct GridTradingEngine {
     mark_retry: MarketRetry,
     ticker_retry: MarketRetry,
     reconciliation_blocked: bool,
+    exchange_rules_loaded: bool,
     market_data_blocked: bool,
     last_remainder_change: Option<Instant>,
     market_stream_tx: Option<watch::Sender<(String, bool)>>,
@@ -283,6 +284,7 @@ impl GridTradingEngine {
             mark_retry: MarketRetry::default(),
             ticker_retry: MarketRetry::default(),
             reconciliation_blocked: false,
+            exchange_rules_loaded: false,
             market_data_blocked: false,
             last_remainder_change: None,
             market_stream_tx: None,
@@ -500,23 +502,10 @@ impl GridTradingEngine {
         }
 
         // Fetch symbol rules from exchangeInfo
-        match self.client.get_exchange_info(Some(&symbol)).await {
-            Ok(info) => {
-                if let Some(rules) = SymbolRules::from_exchange_info(&info, &symbol) {
-                    info!(
-                        "Loaded Binance exchange rules for {}: tick_size={}, step_size={}, min_notional={}",
-                        symbol, rules.tick_size, rules.step_size, rules.min_notional
-                    );
-                    *self.state.rules.write().await = rules;
-                } else if !config.exchange.dry_run {
-                    return Err(anyhow!("Missing Binance exchange rules for {}", symbol));
-                }
-            }
+        match self.load_exchange_rules(&symbol).await {
+            Ok(()) => {}
             Err(e) => {
-                warn!(
-                    "Could not fetch exchangeInfo for {}, using defaults: {}",
-                    symbol, e
-                );
+                warn!("Could not load exchange rules for {}: {}", symbol, e);
                 if !config.exchange.dry_run {
                     return Err(anyhow!(
                         "Could not load Binance exchange rules for {}: {}",
@@ -594,6 +583,38 @@ impl GridTradingEngine {
             }
         }
 
+        Ok(())
+    }
+
+    async fn load_exchange_rules(&mut self, symbol: &str) -> Result<()> {
+        let info = self.client.get_exchange_info(Some(symbol)).await?;
+        let symbol_info = info
+            .symbols
+            .iter()
+            .find(|item| item.symbol.eq_ignore_ascii_case(symbol))
+            .ok_or_else(|| anyhow!("Missing Binance exchange rules for {}", symbol))?;
+        anyhow::ensure!(
+            symbol_info.status == "TRADING",
+            "Symbol {} is not trading",
+            symbol
+        );
+        let rules = SymbolRules::from_exchange_info(&info, symbol)
+            .ok_or_else(|| anyhow!("Missing Binance exchange rules for {}", symbol))?;
+        info!(
+            "Loaded Binance exchange rules for {}: tick_size={}, step_size={}, min_notional={}",
+            symbol, rules.tick_size, rules.step_size, rules.min_notional
+        );
+        self.state
+            .add_log(
+                "INFO",
+                format!(
+                    "Loaded Binance exchange rules for {}: tick_size={}, step_size={}",
+                    symbol, rules.tick_size, rules.step_size
+                ),
+            )
+            .await;
+        *self.state.rules.write().await = rules;
+        self.exchange_rules_loaded = true;
         Ok(())
     }
 
@@ -706,6 +727,32 @@ impl GridTradingEngine {
             }
             BotControlAction::Resume => {
                 info!("Bot resumed by user command");
+                let config = self.state.config.read().await.clone();
+                if !self.exchange_rules_loaded {
+                    if let Err(error) = self.load_exchange_rules(&config.exchange.symbol).await {
+                        if !config.exchange.dry_run {
+                            self.state
+                                .add_log("ERROR", format!("Resume failed: could not load Binance exchange rules for {}: {}", config.exchange.symbol, error))
+                                .await;
+                            return;
+                        }
+                        self.state
+                            .add_log("WARN", format!("Could not load Binance exchange rules for {}; paper trading will use default rules: {}", config.exchange.symbol, error))
+                            .await;
+                    }
+                }
+                if let Err(error) = self
+                    .state
+                    .rules
+                    .read()
+                    .await
+                    .validate_grid_interval(config.grid.grid_interval)
+                {
+                    self.state
+                        .add_log("ERROR", format!("Resume failed: {}", error))
+                        .await;
+                    return;
+                }
                 if let Err(error) = self.state.resume_trading().await {
                     error!("Could not persist resumed bot status: {}", error);
                     self.state
@@ -873,7 +920,10 @@ impl GridTradingEngine {
             }
         }
 
-        let new_rules = if market_changed || mode_changed {
+        let fetch_rules = market_changed
+            || mode_changed
+            || (!new_config.exchange.dry_run && !self.exchange_rules_loaded);
+        let new_rules = if fetch_rules {
             let info = new_client
                 .get_exchange_info(Some(&new_config.exchange.symbol))
                 .await?;
@@ -939,10 +989,13 @@ impl GridTradingEngine {
         }
 
         self.client = new_client;
+        if fetch_rules {
+            *self.state.rules.write().await = new_rules;
+            self.exchange_rules_loaded = true;
+        }
         if market_changed || mode_changed {
             self.mark_retry.reset();
             self.ticker_retry.reset();
-            *self.state.rules.write().await = new_rules;
             let mut ticker = TickerInfo {
                 symbol: new_config.exchange.symbol.clone(),
                 ..Default::default()

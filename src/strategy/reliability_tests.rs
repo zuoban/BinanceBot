@@ -24,10 +24,21 @@ struct Exchange {
     fill_on_cancel: Arc<AtomicBool>,
     lose_cancel_response: Arc<AtomicBool>,
     hide_open_orders: Arc<AtomicBool>,
+    rules_unavailable: Arc<AtomicBool>,
 }
 
 async fn exchange_server(fake: Exchange) -> (String, JoinHandle<()>) {
     let app = Router::new()
+        .route("/fapi/v1/exchangeInfo", get(|State(fake): State<Exchange>| async move {
+            if fake.rules_unavailable.load(Ordering::SeqCst) {
+                return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"code": -1007, "msg": "unavailable"})));
+            }
+            (StatusCode::OK, Json(json!({"symbols":[{"symbol":"SOLUSDC","status":"TRADING","pricePrecision":5,"quantityPrecision":2,"filters":[
+                {"filterType":"PRICE_FILTER","minPrice":"0.00001","maxPrice":"100000","tickSize":"0.00001"},
+                {"filterType":"LOT_SIZE","minQty":"0.01","maxQty":"100000","stepSize":"0.01"},
+                {"filterType":"MIN_NOTIONAL","notional":"5"}
+            ]}]})))
+        }))
         .route("/fapi/v1/openOrders", get(|State(fake): State<Exchange>| async move {
             if fake.hide_open_orders.load(Ordering::SeqCst) {
                 return Json(Vec::<BinanceOrderResponse>::new());
@@ -151,6 +162,79 @@ fn database() -> Arc<Database> {
     let db = Arc::new(Database::open(":memory:").unwrap());
     db.save_bot_status(BotStatus::Running).unwrap();
     db
+}
+
+#[tokio::test]
+async fn resume_reloads_rules_after_initialization_failure_and_rejects_invalid_spacing() {
+    let fake = Exchange::default();
+    fake.rules_unavailable.store(true, Ordering::SeqCst);
+    let (url, server) = exchange_server(fake.clone()).await;
+    let mut engine = engine(database(), &url).await;
+    engine.state.config.write().await.grid.grid_interval = dec!(0.00005);
+    assert!(engine.initialize().await.is_err());
+    engine.state.pause_trading().await.unwrap();
+
+    engine.handle_control_action(BotControlAction::Resume).await;
+    assert_eq!(*engine.state.status.read().await, BotStatus::Paused);
+    assert!(!engine.exchange_rules_loaded);
+    assert_eq!(engine.state.rules.read().await.tick_size, dec!(0.01));
+    assert!(fake.posts.lock().unwrap().is_empty());
+
+    fake.rules_unavailable.store(false, Ordering::SeqCst);
+    engine.state.config.write().await.grid.grid_interval = dec!(0.000015);
+    engine.handle_control_action(BotControlAction::Resume).await;
+    assert_eq!(*engine.state.status.read().await, BotStatus::Paused);
+    assert_eq!(engine.state.rules.read().await.tick_size, dec!(0.00001));
+    assert!(fake.posts.lock().unwrap().is_empty());
+
+    engine.state.config.write().await.grid.grid_interval = dec!(0.00005);
+    engine.handle_control_action(BotControlAction::Resume).await;
+    assert_eq!(*engine.state.status.read().await, BotStatus::Running);
+    server.abort();
+}
+
+#[tokio::test]
+async fn paper_resume_retries_rules_after_initialization_failure() {
+    let fake = Exchange::default();
+    fake.rules_unavailable.store(true, Ordering::SeqCst);
+    let (url, server) = exchange_server(fake.clone()).await;
+    let mut engine = engine(database(), &url).await;
+    {
+        let mut config = engine.state.config.write().await;
+        config.exchange.dry_run = true;
+        config.grid.grid_interval = dec!(0.00005);
+    }
+    assert!(engine.initialize().await.is_err());
+    engine.state.pause_trading().await.unwrap();
+    *engine.state.ticker.write().await = TickerInfo::default();
+
+    engine.handle_control_action(BotControlAction::Resume).await;
+    assert_eq!(*engine.state.status.read().await, BotStatus::Paused);
+    assert!(!engine.exchange_rules_loaded);
+
+    fake.rules_unavailable.store(false, Ordering::SeqCst);
+    engine.handle_control_action(BotControlAction::Resume).await;
+    assert_eq!(*engine.state.status.read().await, BotStatus::Running);
+    assert!(engine.exchange_rules_loaded);
+    assert_eq!(engine.state.rules.read().await.tick_size, dec!(0.00001));
+    server.abort();
+}
+
+#[tokio::test]
+async fn paper_resume_can_use_default_rules_when_exchange_is_unavailable() {
+    let fake = Exchange::default();
+    fake.rules_unavailable.store(true, Ordering::SeqCst);
+    let (url, server) = exchange_server(fake).await;
+    let mut engine = engine(database(), &url).await;
+    engine.state.config.write().await.exchange.dry_run = true;
+    engine.state.pause_trading().await.unwrap();
+    *engine.state.ticker.write().await = TickerInfo::default();
+
+    engine.handle_control_action(BotControlAction::Resume).await;
+    assert_eq!(*engine.state.status.read().await, BotStatus::Running);
+    assert!(!engine.exchange_rules_loaded);
+    assert_eq!(engine.state.rules.read().await.tick_size, dec!(0.01));
+    server.abort();
 }
 
 async fn submit(engine: &mut GridTradingEngine) -> bool {

@@ -438,6 +438,8 @@ async fn live_engine(direction: GridDirection, url: String) -> GridTradingEngine
     config.exchange.api_secret = "test-secret".into();
     engine.client = Arc::new(BinanceFuturesClient::with_base_url(&config.exchange, url));
     drop(config);
+    // This fixture starts after exchange rules have already been installed.
+    engine.exchange_rules_loaded = true;
     assert!(engine.sync_account_and_position().await);
     assert!(engine.sync_live_orders().await);
     engine
