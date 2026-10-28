@@ -5,8 +5,17 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#123c35" />
     <title>Grid Console · 网格交易控制台</title>
+    <script>
+      let preference;
+      try { preference = localStorage.getItem('binance_bot_theme'); } catch {}
+      const dark = preference === 'dark' || (preference !== 'light' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+      document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+      document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
+    </script>
     <style>
       body { margin: 0; background: #f4f6f3; }
+      html[data-theme="dark"] body { background: #101a17; }
+      html[data-theme="dark"] .boot-screen { color: #a6bdb0; }
       .boot-screen { min-height: 100vh; display: grid; place-content: center; justify-items: center; gap: 18px; color: #496258; font: 12px 'PingFang SC', sans-serif; }
       .boot-mark { display: grid; place-items: center; width: 44px; height: 44px; border-radius: 12px; background: #174d40; color: #d5edab; font: 700 26px Georgia, serif; }
       .boot-screen p { margin: 0; }

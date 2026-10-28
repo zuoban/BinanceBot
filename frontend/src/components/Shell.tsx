@@ -6,6 +6,7 @@ import { useLiveAccounts, useOverview, usePairs } from '../lib/queries';
 import { AccountsContext, EditContext, useSession } from '../lib/session';
 import { accountGroups, number } from '../lib/format';
 import { ControlProvider } from './Controls';
+import { ThemeSwitch } from './ThemeSwitch';
 
 export default function Shell() {
   const navigate = useNavigate(), location = useLocation();
@@ -63,10 +64,10 @@ export default function Shell() {
     <Layout>
       <Layout.Header className="topbar">
         <Space><Button className="mobile-menu" icon={<MenuOutlined />} aria-label="打开导航" onClick={() => setOpen(true)} />
-          <span className="topbar-label">STRATEGY WORKSPACE</span><span className="topbar-separator">/</span><span>{selected === 'overview' ? '策略总览' : selected === 'settings' ? '全局设置' : '策略详情'}</span>
+          <span className="topbar-label">STRATEGY WORKSPACE</span><span className="topbar-separator">/</span><span className={selected === 'pair' && symbol !== 'new' ? 'topbar-current topbar-pair-current' : 'topbar-current'}>{selected === 'overview' ? '策略总览' : selected === 'settings' ? '全局设置' : '策略详情'}</span>
         </Space>
-        <Space>{selected === 'pair' && symbol !== 'new' && <Select aria-label="切换交易对" value={symbol} options={pairs.data?.map(p => ({ value: p.symbol, label: p.symbol }))} onChange={value => navigate(`/pairs/${value}${location.pathname.endsWith('/config') ? '/config' : ''}`)} style={{ minWidth: 135 }} />}
-          <Button type="text" icon={<LogoutOutlined />} onClick={() => void logOut()}>退出</Button></Space>
+        <Space>{selected === 'pair' && symbol !== 'new' && <Select className="topbar-pair-select" aria-label="切换交易对" value={symbol} options={pairs.data?.map(p => ({ value: p.symbol, label: p.symbol }))} onChange={value => navigate(`/pairs/${value}${location.pathname.endsWith('/config') ? '/config' : ''}`)} />}
+          <ThemeSwitch /><Button type="text" icon={<LogoutOutlined />} onClick={() => void logOut()}>退出</Button></Space>
       </Layout.Header>
       <Layout.Content className="content"><Outlet /></Layout.Content>
       <Layout.Footer className="footer"><span>GRID CONSOLE · 策略工作台</span><span>所有时间默认显示北京时间</span></Layout.Footer>

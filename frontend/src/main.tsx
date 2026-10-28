@@ -1,7 +1,6 @@
 import React, { Suspense, lazy, useCallback, useEffect, useState } from 'react';
 import ReactDOM from 'react-dom/client';
-import { App as AntApp, ConfigProvider } from 'antd';
-import zhCN from 'antd/locale/zh_CN';
+import { App as AntApp } from 'antd';
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
 import { createBrowserRouter, RouterProvider } from 'react-router-dom';
 import { api, post, tokenStore } from './lib/api';
@@ -10,6 +9,7 @@ import { SessionContext } from './lib/session';
 import Shell from './components/Shell';
 import Login from './pages/Login';
 import { LoadingScreen, PageLoading } from './components/Loading';
+import { ThemeProvider } from './lib/theme';
 import './style.css';
 
 const Overview = lazy(() => import('./pages/Overview'));
@@ -46,7 +46,7 @@ function Root() {
 }
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
-  <React.StrictMode><ConfigProvider locale={zhCN} theme={{ token: { colorPrimary: '#176e59', colorInfo: '#176e59', colorSuccess: '#17745e', colorError: '#bd5c4b', borderRadius: 8, fontFamily: '"Avenir Next", "PingFang SC", "Microsoft YaHei", sans-serif', colorBgLayout: '#f4f6f3' }, components: { Card: { borderRadiusLG: 12 }, Menu: { itemSelectedBg: '#e5f0eb', itemSelectedColor: '#176e59' } } }}>
+  <React.StrictMode><ThemeProvider>
     <AntApp><QueryClientProvider client={client}><Root /></QueryClientProvider></AntApp>
-  </ConfigProvider></React.StrictMode>,
+  </ThemeProvider></React.StrictMode>,
 );
