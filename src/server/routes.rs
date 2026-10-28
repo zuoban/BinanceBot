@@ -1,7 +1,6 @@
 use crate::config::{AppConfig, ServerConfig};
 use crate::runtime::RuntimeHandle;
 use crate::server::state::AppState;
-use crate::server::ui::INDEX_HTML;
 use crate::types::{
     AuthLoginPayload, AuthSetupPayload, AuthStatusResponse, AuthTokenResponse, BotControlAction,
     BotSnapshot, ChangePasswordPayload, GridOrder, LogEntry, OverviewPairView, OverviewSnapshot,
@@ -12,7 +11,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Extension, Json, Router};
 use futures_util::{SinkExt, StreamExt};
@@ -167,8 +166,6 @@ fn create_base_router(state: Arc<AppState>, history_clear: bool) -> Router {
 
 fn public_routes() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/", get(dashboard_handler))
-        .route("/dashboard.css", get(dashboard_css_handler))
         .route("/api/auth/status", get(get_auth_status_handler))
         .route("/api/auth/setup", post(post_auth_setup_handler))
         .route("/api/auth/login", post(post_auth_login_handler))
@@ -595,20 +592,6 @@ async fn clear_multi_trade_history_handler(
             )
         }
     }
-}
-
-async fn dashboard_handler() -> Html<&'static str> {
-    Html(INDEX_HTML.as_str())
-}
-
-async fn dashboard_css_handler() -> (
-    [(axum::http::header::HeaderName, &'static str); 1],
-    &'static str,
-) {
-    (
-        [(axum::http::header::CONTENT_TYPE, "text/css; charset=utf-8")],
-        include_str!("dashboard.css"),
-    )
 }
 
 async fn get_auth_status_handler(

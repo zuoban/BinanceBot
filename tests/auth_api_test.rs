@@ -35,6 +35,14 @@ async fn test_full_auth_lifecycle() {
     });
     let app = create_router(state);
 
+    // The backend is API-only; the separately deployed frontend serves the SPA.
+    let res = app
+        .clone()
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
     // 1. Initial status: should be uninitialized
     let res = app
         .clone()

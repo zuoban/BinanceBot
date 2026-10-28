@@ -1,8 +1,14 @@
-target/
-.git/
+.git
 .gitignore
+.DS_Store
+target
+data
 config.toml
 *.log
-.DS_Store
 .env
 .env.*
+frontend/node_modules
+frontend/dist
+*.db
+*.db-shm
+*.db-wal

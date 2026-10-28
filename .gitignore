@@ -7,3 +7,6 @@ config.toml
 *.log
 .env
 .env.*
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo

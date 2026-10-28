@@ -14,18 +14,18 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 #[derive(Parser, Debug)]
 #[command(
     name = "binance-grid-bot",
-    about = "High-performance Binance Futures Grid Trading Bot with Web Dashboard and SQLite Storage"
+    about = "High-performance Binance Futures Grid Trading Bot API and SQLite Storage"
 )]
 struct CliArgs {
     /// Path to SQLite database file
     #[arg(short, long, default_value = "data/bot.db")]
     db: PathBuf,
 
-    /// Web server dashboard host (default: 0.0.0.0 for external access)
+    /// API server host (default: 0.0.0.0 for external access)
     #[arg(long)]
     host: Option<String>,
 
-    /// Web server dashboard port
+    /// API server port
     #[arg(short, long)]
     port: Option<u16>,
 }
@@ -99,7 +99,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let app = create_managed_router(runtime.handle()).await;
     info!(
-        "Web Dashboard running at http://{} (local: http://127.0.0.1:{})",
+        "API server running at http://{} (local: http://127.0.0.1:{})",
         addr, config.server.port
     );
     let (web_stop, mut web_stop_rx) = watch::channel(false);

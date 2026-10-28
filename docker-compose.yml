@@ -7,9 +7,18 @@ services:
     container_name: binance-grid-bot
     restart: unless-stopped
     stop_grace_period: 45s
-    ports:
-      - "8080:8080"
+    command: ["--db", "/app/data/bot.db", "--host", "0.0.0.0", "--port", "8080"]
     volumes:
       - ./data:/app/data
     environment:
       RUST_LOG: binance_grid_bot=info,tower_http=info
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    image: ghcr.io/zuoban/binancebot-frontend:latest
+    restart: unless-stopped
+    depends_on:
+      - binance-bot
+    ports:
+      - "8080:80"

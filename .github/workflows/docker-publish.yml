@@ -30,8 +30,12 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Run dashboard regression tests
-        run: node --test tests/dashboard_ui_test.js
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: frontend
+      - name: Test and build frontend
+        run: npm test && npm run build
+        working-directory: frontend
 
   build:
     needs: checks
@@ -41,9 +45,23 @@ jobs:
           - platform: linux/amd64
             arch: amd64
             runner: ubuntu-24.04
+            component: backend
+            dockerfile: Dockerfile
           - platform: linux/arm64
             arch: arm64
             runner: ubuntu-24.04-arm
+            component: backend
+            dockerfile: Dockerfile
+          - platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-24.04
+            component: frontend
+            dockerfile: frontend/Dockerfile
+          - platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+            component: frontend
+            dockerfile: frontend/Dockerfile
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -54,7 +72,10 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set image name
-        run: echo "IMAGE=${REGISTRY}/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+        run: |
+          image="${REGISTRY}/${GITHUB_REPOSITORY,,}"
+          if [[ "${{ matrix.component }}" == "frontend" ]]; then image="${image}-frontend"; fi
+          echo "IMAGE=${image}" >> "$GITHUB_ENV"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -84,13 +105,13 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
+          file: ${{ matrix.dockerfile }}
           platforms: ${{ matrix.platform }}
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: |
-            type=gha,scope=${{ matrix.arch }}
-            type=gha
-          cache-to: type=gha,scope=${{ matrix.arch }},mode=max
+            type=gha,scope=${{ matrix.component }}-${{ matrix.arch }}
+          cache-to: type=gha,scope=${{ matrix.component }}-${{ matrix.arch }},mode=max
 
       - name: Save image digest
         env:
@@ -102,13 +123,16 @@ jobs:
       - name: Upload image digest
         uses: actions/upload-artifact@v4
         with:
-          name: digests-${{ matrix.arch }}
+          name: digests-${{ matrix.component }}-${{ matrix.arch }}
           path: ${{ runner.temp }}/digests/*
           if-no-files-found: error
           retention-days: 1
 
   merge:
     needs: build
+    strategy:
+      matrix:
+        component: [backend, frontend]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -116,13 +140,16 @@ jobs:
 
     steps:
       - name: Set image name
-        run: echo "IMAGE=${REGISTRY}/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+        run: |
+          image="${REGISTRY}/${GITHUB_REPOSITORY,,}"
+          if [[ "${{ matrix.component }}" == "frontend" ]]; then image="${image}-frontend"; fi
+          echo "IMAGE=${image}" >> "$GITHUB_ENV"
 
       - name: Download image digests
         uses: actions/download-artifact@v4
         with:
           path: ${{ runner.temp }}/digests
-          pattern: digests-*
+          pattern: digests-${{ matrix.component }}-*
           merge-multiple: true
 
       - name: Set up Docker Buildx
