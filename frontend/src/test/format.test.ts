@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { accountGroups, comparePositionAmount, positionAmount, todayCount } from '../lib/format';
+import { accountGroups, comparePositionAmount, positionAmount, positionGroups, todayCount } from '../lib/format';
 import { snapshot } from './fixtures';
 
 describe('account and trade summaries', () => {
@@ -25,6 +25,33 @@ describe('account and trade summaries', () => {
   });
 });
 
+describe('position summaries', () => {
+  it('groups by mode and quote asset and uses actual position direction', () => {
+    const long = snapshot('BTCUSDC'), short = snapshot('ETHUSDC');
+    const live = snapshot('SOLUSDC', 'LIVE'), otherAsset = snapshot('BTCUSDT');
+    long.position.size = '3';
+    short.position.size = '-1';
+    short.grid_config.direction = 'LONG';
+    live.position.size = '-2';
+    otherAsset.position.size = '1';
+    const groups = positionGroups([long, short, live, otherAsset].map(s => ({ snapshot: s, mode: s.dry_run ? 'PAPER' : 'LIVE', scoped: true })));
+    expect(groups.find(g => g.key === 'PAPER:USDC')).toMatchObject({ long: 303, short: 101, total: 404 });
+    expect(groups.find(g => g.key === 'LIVE:USDC')).toMatchObject({ long: 0, short: 202, total: 202 });
+    expect(groups.find(g => g.key === 'PAPER:USDT')).toMatchObject({ total: 101 });
+  });
+
+  it('does not show partial totals when an open position cannot be valued', () => {
+    const flat = snapshot('BTCUSDC'), missing = snapshot('ETHUSDC');
+    flat.ticker.mark_price = '0';
+    missing.position.size = '1';
+    missing.ticker.mark_price = '0';
+    missing.position.mark_price = '0';
+    const entry = (s: typeof flat) => ({ snapshot: s, mode: 'PAPER' as const, scoped: true });
+    expect(positionGroups([entry(flat)])[0]).toMatchObject({ total: 0, long: 0, short: 0 });
+    expect(positionGroups([entry(flat), entry(missing)])[0]).toMatchObject({ total: null, long: null, short: null });
+  });
+});
+
 describe('position amount sorting', () => {
   it('sorts absolute position values from largest to smallest and puts unavailable values last', () => {
     const large = snapshot('LARGEUSDC'), short = snapshot('SHORTUSDC');
@@ -32,6 +59,7 @@ describe('position amount sorting', () => {
     large.position.size = '3';
     short.position.size = '-2';
     unavailable.ticker.mark_price = '0';
+    unavailable.position.mark_price = '0';
     expect([unavailable, empty, short, large].sort(comparePositionAmount).map(s => s.symbol))
       .toEqual(['LARGEUSDC', 'SHORTUSDC', 'EMPTYUSDC', 'UNKNOWNUSDC']);
     expect(positionAmount(short)).toBe(202);
@@ -44,6 +72,19 @@ describe('position amount sorting', () => {
     expect(positionAmount(s)).toBeNull();
     s.position.size = '2';
     s.ticker.mark_price = 'not-a-price';
+    s.position.mark_price = '0';
     expect(positionAmount(s)).toBeNull();
+  });
+
+  it('uses the position mark when the ticker mark is unavailable', () => {
+    const s = snapshot('BTCUSDC', 'LIVE');
+    s.position.size = '-2';
+    s.ticker.mark_price = '0';
+    s.position.mark_price = '100';
+    expect(positionAmount(s)).toBe(200);
+    expect(positionGroups([{ snapshot: s, mode: 'LIVE', scoped: true }])[0])
+      .toMatchObject({ long: 0, short: 200, total: 200 });
+    s.ticker.mark_price = '101';
+    expect(positionAmount(s)).toBe(202);
   });
 });

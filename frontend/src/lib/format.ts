@@ -6,7 +6,8 @@ export const modeOf = (s: Snapshot): Mode => s.dry_run ? 'PAPER' : s.grid_config
 export const quoteAsset = (symbol: string) => ['USDC', 'USDT', 'FDUSD', 'BUSD'].find(a => symbol.endsWith(a)) ?? '';
 export const numeric = (value: unknown): number | null => value === null || value === undefined || value === '' || !Number.isFinite(Number(value)) ? null : Number(value);
 export function positionAmount(s: Snapshot): number | null {
-  const size = numeric(s.position.size), mark = numeric(s.ticker.mark_price);
+  const size = numeric(s.position.size), tickerMark = numeric(s.ticker.mark_price);
+  const mark = tickerMark !== null && tickerMark > 0 ? tickerMark : numeric(s.position.mark_price);
   if (size === null || mark === null || mark <= 0) return null;
   const amount = Math.abs(size * mark);
   return Number.isFinite(amount) ? amount : null;
@@ -15,6 +16,27 @@ export function comparePositionAmount(a: Snapshot, b: Snapshot) {
   const left = positionAmount(a), right = positionAmount(b);
   return (right ?? -1) - (left ?? -1) || a.symbol.localeCompare(b.symbol);
 }
+export function positionGroups(entries: Overview['pairs']) {
+  const groups = new Map<string, { mode: Mode; asset: string; snapshots: Snapshot[] }>();
+  for (const { mode, snapshot } of entries) {
+    const asset = quoteAsset(snapshot.symbol) || snapshot.symbol;
+    const key = `${mode}:${asset}`;
+    const group = groups.get(key) ?? { mode, asset, snapshots: [] };
+    group.snapshots.push(snapshot);
+    groups.set(key, group);
+  }
+  return [...groups.entries()].map(([key, group]) => {
+    let long = 0, short = 0, complete = true;
+    for (const s of group.snapshots) {
+      const size = numeric(s.position.size);
+      const amount = size === 0 ? 0 : positionAmount(s);
+      if (size === null || amount === null) { complete = false; continue; }
+      if (size > 0) long += amount;
+      if (size < 0) short += amount;
+    }
+    return { key, mode: group.mode, asset: group.asset, long: complete ? long : null, short: complete ? short : null, total: complete ? long + short : null };
+  });
+}
 export function number(value: unknown, digits = 2) {
   const n = numeric(value);
   return n === null ? '--' : n.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits });
@@ -22,10 +44,14 @@ export function number(value: unknown, digits = 2) {
 export const price = (value: unknown) => number(value, Math.min(10, Math.max(4, 2 - Math.floor(Math.log10(Math.abs(Number(value)) || 1)))));
 export const time = (value: string) => new Date(value).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
 export const beijingDay = (value: number) => new Date(value + 8 * 3600_000).toISOString().slice(0, 10);
-export function todayCount(s: Snapshot, now = Date.now()) {
+export function todayTradeCounts(s: Snapshot, now = Date.now()) {
   const stats = s.hourly_trade_stats;
   if (!stats || !Number.isFinite(Date.parse(stats.window_end)) || beijingDay(Date.parse(stats.window_end)) !== beijingDay(now)) return null;
-  return stats.buckets.reduce((sum, b) => sum + b.buy_count + b.sell_count, 0);
+  return stats.buckets.reduce((counts, b) => ({ buy: counts.buy + b.buy_count, sell: counts.sell + b.sell_count }), { buy: 0, sell: 0 });
+}
+export function todayCount(s: Snapshot, now = Date.now()) {
+  const counts = todayTradeCounts(s, now);
+  return counts ? counts.buy + counts.sell : null;
 }
 export function accountGroups(entries: Overview['pairs'], now = Date.now()) {
   const groups = new Map<string, { mode: Mode; asset: string; snapshots: Snapshot[] }>();

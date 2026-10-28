@@ -4,7 +4,7 @@ import { App, Button, Card, Col, Dropdown, Empty, Input, Row, Select, Space, Sta
 import { ArrowRightOutlined, PlusOutlined, ReloadOutlined, SearchOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { useOverview } from '../lib/queries';
 import { AccountsContext } from '../lib/session';
-import { accountGroups, comparePositionAmount, modeLabel, number, positionAmount, price, quoteAsset, todayCount } from '../lib/format';
+import { accountGroups, comparePositionAmount, modeLabel, number, positionAmount, positionGroups, price, quoteAsset, todayCount, todayTradeCounts } from '../lib/format';
 import { ErrorNotice, ModeTag, PageTitle, Pnl, StatusTag } from '../components/Common';
 import { PairControls, runBatchControls, useControls } from '../components/Controls';
 import type { Pair } from '../lib/types';
@@ -45,14 +45,15 @@ export default function OverviewPage() {
     .sort((a, b) => sort === 'position' ? comparePositionAmount(a.snapshot, b.snapshot) : sort === 'today' ? (todayCount(b.snapshot) ?? -1) - (todayCount(a.snapshot) ?? -1) : sort === 'orders' ? b.snapshot.active_orders.length - a.snapshot.active_orders.length : a.snapshot.symbol.localeCompare(b.snapshot.symbol));
   const clearFilters = () => { setSearch(''); setStatus('ALL'); setMode('ALL'); setSort('position'); };
   const filterCount = Number(status !== 'ALL') + Number(mode !== 'ALL');
-  const today = entries.every(e => todayCount(e.snapshot) !== null) ? entries.reduce((n, e) => n + todayCount(e.snapshot)!, 0) : null;
+  const counts = entries.map(e => todayTradeCounts(e.snapshot));
+  const today = counts.every(c => c !== null) ? counts.reduce<{ buy: number; sell: number }>((sum, c) => ({ buy: sum.buy + c!.buy, sell: sum.sell + c!.sell }), { buy: 0, sell: 0 }) : null;
   return <>
     <PageTitle eyebrow="WORKSPACE / OVERVIEW" title="策略总览" description="账户全貌与每一条运行中的策略。"
       extra={<><Button icon={<ReloadOutlined />} loading={overview.isFetching} onClick={() => void overview.refetch()} aria-label="刷新看板" /><Link to="/pairs/new"><Button type="primary" icon={<PlusOutlined />}>新增交易对</Button></Link></>} />
     <ErrorNotice error={overview.error} retry={() => void overview.refetch()} />
     <div className="overview-banner" aria-label="策略运行概览">
       <div className="overview-summary"><span className="eyebrow">STRATEGY STATUS</span><h2>策略运行概览</h2><p>{overview.dataUpdatedAt ? `最近同步 ${new Date(overview.dataUpdatedAt).toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })} · 北京时间` : '等待首次同步'}</p><span className={stale ? 'sync-warning' : 'sync-ok'}>{stale ? '数据暂未更新，请刷新核对' : '自动刷新 / 3 秒'}</span></div>
-      <div className="overview-stats">{([['运行中', 'RUNNING'], ['已暂停', 'PAUSED'], ['异常', 'ERROR'], ['已停止', 'STOPPED']] as const).map(([label, state]) => <div key={state} className={state === 'ERROR' && pairs.some(p => p.status === state) ? 'overview-stat overview-stat-alert' : 'overview-stat'}><span>{label}</span><strong>{overview.data ? pairs.filter(p => p.status === state).length : '--'}</strong></div>)}<div className="overview-stat"><span>今日成交</span><strong>{overview.data ? today ?? '--' : '--'}<small> 笔</small></strong></div></div>
+      <div className="overview-stats"><div className="overview-stat"><span>运行中</span><strong>{overview.data ? pairs.filter(p => p.status === 'RUNNING').length : '--'}</strong></div><div className="overview-stat"><span>策略总数</span><strong>{overview.data ? pairs.length : '--'}</strong></div><div className="overview-stat"><span>今日成交</span><strong>{overview.data && today ? today.buy + today.sell : '--'}<small> 笔</small></strong><span className="overview-trade-breakdown">买单 {overview.data && today ? today.buy : '--'} 笔 / 卖单 {overview.data && today ? today.sell : '--'} 笔</span></div></div>
     </div>
     {overview.isPending && !overview.data ? <OverviewLoading /> : overview.data && <>
     <Row gutter={[16, 16]} className="account-row">
@@ -60,9 +61,27 @@ export default function OverviewPage() {
         <div className="section-line"><span className="eyebrow">{group.asset} ACCOUNT</span><ModeTag mode={group.mode} /></div>
         <Statistic title="账户权益" value={group.equity ?? '--'} precision={2} suffix={group.asset} />
         <div className="section-line account-bottom"><span>可用 {number(group.available)}</span><span>{group.cny !== null ? `≈ ¥${number(group.cny)}` : '人民币估值待更新'}</span></div>
+        <div className="account-margin-ratio">可用保证金比例 <strong>{group.available !== null && group.equity !== null && group.equity > 0 ? `${number(group.available / group.equity * 100)}%` : '--'}</strong></div>
         <div className="muted">{group.mode === 'PAPER' ? `${group.count} 个独立模拟账户合计` : `${group.count} 个策略共用账户 · 去重展示`}</div>
       </Card></Col>)}
     </Row>
+    {entries.length > 0 && <>
+      <div className="section-heading"><h2>持仓概览</h2><span className="muted">按标记价格计算 · 全部策略</span></div>
+      <Row gutter={[16, 16]} className="position-row">
+        {positionGroups(entries).map(group => <Col xs={24} xl={12} key={group.key}>
+          <Card className="position-summary" size="small">
+            <div className="section-line"><span className="eyebrow">{group.asset} POSITION</span><ModeTag mode={group.mode} /></div>
+            <div className="position-summary-metrics">
+              <div><span>总持仓金额 / {group.asset}</span><strong>{number(group.total)}</strong></div>
+              <div><span>做多持仓金额</span><strong className="position-long">{number(group.long)}</strong></div>
+              <div><span>做空持仓金额</span><strong className="position-short">{number(group.short)}</strong></div>
+              <div><span>多空比（金额占比）</span><strong>{group.total !== null && group.total > 0 && group.long !== null && group.short !== null ? `${number(group.long / group.total * 100, 1)}% / ${number(group.short / group.total * 100, 1)}%` : '--'}</strong></div>
+            </div>
+            <div className="muted">按实际持仓方向统计{group.total === null ? ' · 部分持仓数据不可用' : ''}</div>
+          </Card>
+        </Col>)}
+      </Row>
+    </>}
     <div className="section-heading"><h2>交易策略 <span>{pairs.length.toString().padStart(2, '0')}</span></h2>
       <Dropdown trigger={['click']} disabled={batchBusy || controls.busy.size > 0 || !pairs.length} menu={{ items: [{ key: 'resume', label: '全部恢复', disabled: stale }, { key: 'pause', label: '全部暂停' }], onClick: ({ key }) => void batch(key as 'pause' | 'resume') }}>
         <Button loading={batchBusy} icon={<ThunderboltOutlined />}>批量操作</Button>

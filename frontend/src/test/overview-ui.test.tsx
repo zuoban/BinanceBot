@@ -6,6 +6,7 @@ import { beforeEach, expect, it, vi } from 'vitest';
 import OverviewPage from '../pages/Overview';
 import { snapshot } from './fixtures';
 import type { Overview } from '../lib/types';
+import { AccountsContext } from '../lib/session';
 
 const overview = vi.hoisted(() => ({ data: undefined as Overview | undefined, error: null, dataUpdatedAt: Date.now(), isFetching: false, isPending: false, refetch: vi.fn() }));
 beforeEach(() => { vi.stubGlobal('matchMedia', vi.fn().mockImplementation(query => ({ matches: false, media: query, addListener: vi.fn(), removeListener: vi.fn(), addEventListener: vi.fn(), removeEventListener: vi.fn() }))); });
@@ -18,7 +19,11 @@ it('summarizes statuses and lets the user clear a search with no results', async
   overview.data = { generated_at: new Date().toISOString(), pairs: [running, error].map(s => ({ snapshot: s, mode: 'PAPER' as const, scoped: true })) };
   render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
   const summary = screen.getByLabelText('策略运行概览');
-  expect(within(summary).getByText('异常').parentElement).toHaveTextContent('1');
+  expect(within(summary).getByText('运行中').parentElement).toHaveTextContent('1');
+  expect(within(summary).getByText('策略总数').parentElement).toHaveTextContent('2');
+  expect(within(summary).queryByText('异常')).not.toBeInTheDocument();
+  expect(within(summary).getByText('今日成交').parentElement).toHaveTextContent('10 笔');
+  expect(within(summary).getByText('买单 4 笔 / 卖单 6 笔')).toBeInTheDocument();
   const user = userEvent.setup();
   await user.type(screen.getByLabelText('搜索交易对'), 'NOTFOUND');
   expect(screen.getByText('没有符合筛选条件的策略')).toBeInTheDocument();
@@ -26,9 +31,49 @@ it('summarizes statuses and lets the user clear a search with no results', async
   expect(screen.getByText('BTCUSDC')).toBeInTheDocument();
 });
 
+it('shows unavailable trade counts when a strategy has no current-day statistics', () => {
+  const s = snapshot('BTCUSDC');
+  s.hourly_trade_stats = null;
+  overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: s, mode: 'PAPER', scoped: true }] };
+  render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+  expect(within(screen.getByLabelText('策略运行概览')).getByText('买单 -- 笔 / 卖单 -- 笔')).toBeInTheDocument();
+});
+
 it('offers creation when there are no strategies', () => {
   overview.data = { generated_at: new Date().toISOString(), pairs: [] };
   render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
   expect(screen.getByText('暂无策略数据')).toBeInTheDocument();
   expect(screen.getAllByRole('link', { name: /新增交易对/ })).toHaveLength(2);
+});
+
+it('shows position amounts and their long/short shares for all strategies', async () => {
+  const long = snapshot('BTCUSDC'), short = snapshot('ETHUSDC');
+  long.position.size = '3';
+  short.position.size = '-1';
+  overview.data = { generated_at: new Date().toISOString(), pairs: [long, short].map(s => ({ snapshot: s, mode: 'PAPER' as const, scoped: true })) };
+  render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+  expect(screen.getByText('总持仓金额 / USDC').parentElement).toHaveTextContent('404.00');
+  expect(screen.getByText('做多持仓金额').parentElement).toHaveTextContent('303.00');
+  expect(screen.getByText('做空持仓金额').parentElement).toHaveTextContent('101.00');
+  expect(screen.getByText('多空比（金额占比）').parentElement).toHaveTextContent('75.0% / 25.0%');
+  await userEvent.setup().type(screen.getByLabelText('搜索交易对'), 'BTC');
+  expect(screen.getByText('总持仓金额 / USDC').parentElement).toHaveTextContent('404.00');
+});
+
+it('shows available margin as a percentage of account equity', () => {
+  const s = snapshot('BTCUSDC');
+  const pairs = [{ snapshot: s, mode: 'PAPER' as const, scoped: true }];
+  overview.data = { generated_at: new Date().toISOString(), pairs };
+  render(<MemoryRouter><App><AccountsContext.Provider value={pairs}><OverviewPage /></AccountsContext.Provider></App></MemoryRouter>);
+  expect(screen.getByText(/可用保证金比例/)).toHaveTextContent('76.19%');
+});
+
+it('does not calculate an available margin ratio for zero equity', () => {
+  const s = snapshot('BTCUSDC');
+  s.account.total_wallet_balance = '0';
+  s.position.unrealized_pnl = '0';
+  const pairs = [{ snapshot: s, mode: 'PAPER' as const, scoped: true }];
+  overview.data = { generated_at: new Date().toISOString(), pairs };
+  render(<MemoryRouter><App><AccountsContext.Provider value={pairs}><OverviewPage /></AccountsContext.Provider></App></MemoryRouter>);
+  expect(screen.getByText(/可用保证金比例/)).toHaveTextContent('--');
 });
