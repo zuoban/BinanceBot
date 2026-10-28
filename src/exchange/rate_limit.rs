@@ -37,8 +37,7 @@ impl RequestClass {
 struct Counter {
     events: VecDeque<(Instant, u64)>,
     local_total: u64,
-    external: u64,
-    external_at: Option<Instant>,
+    external: VecDeque<(Instant, u64)>,
 }
 
 impl Counter {
@@ -52,12 +51,12 @@ impl Counter {
                 self.local_total -= weight;
             }
         }
-        if self
-            .external_at
-            .is_some_and(|at| now.duration_since(at) >= window)
+        while self
+            .external
+            .front()
+            .is_some_and(|(at, _)| now.duration_since(*at) >= window)
         {
-            self.external = 0;
-            self.external_at = None;
+            self.external.pop_front();
         }
     }
 
@@ -71,15 +70,23 @@ impl Counter {
     }
 
     fn total(&self) -> u64 {
-        self.local().saturating_add(self.external)
+        self.local()
+            .saturating_add(self.external.front().map_or(0, |(_, count)| *count))
     }
 
     fn observe(&mut self, count: u64, now: Instant, window: Duration) {
         self.prune(now, window);
         let external = count.saturating_sub(self.local());
-        if external > self.external {
-            self.external = external;
-            self.external_at = Some(now);
+        if external > 0 {
+            // Keep the maximum unexpired observation, including later smaller ones.
+            while self
+                .external
+                .back()
+                .is_some_and(|(_, count)| *count <= external)
+            {
+                self.external.pop_back();
+            }
+            self.external.push_back((now, external));
         }
     }
 }
@@ -371,6 +378,33 @@ mod tests {
         assert!(limiter
             .reserve("main", [1; 32], 1, RequestClass::Critical)
             .is_ok());
+    }
+
+    #[test]
+    fn repeated_external_usage_extends_expiry_without_accepting_lower_counts() {
+        let start = Instant::now();
+        let mut counter = Counter::default();
+        counter.observe(1000, start, MINUTE);
+        counter.observe(1000, start + Duration::from_secs(59), MINUTE);
+        counter.observe(1, start + Duration::from_secs(60), MINUTE);
+        counter.prune(start + Duration::from_secs(61), MINUTE);
+        assert_eq!(counter.total(), 1000);
+        counter.prune(start + Duration::from_secs(119), MINUTE);
+        assert_eq!(counter.total(), 1);
+        counter.prune(start + Duration::from_secs(120), MINUTE);
+        assert_eq!(counter.total(), 0);
+    }
+
+    #[test]
+    fn lower_external_usage_remains_after_older_higher_observation_expires() {
+        let start = Instant::now();
+        let mut counter = Counter::default();
+        counter.observe(1000, start, MINUTE);
+        counter.observe(900, start + Duration::from_secs(59), MINUTE);
+        counter.prune(start + Duration::from_secs(60), MINUTE);
+        assert_eq!(counter.total(), 900);
+        counter.prune(start + Duration::from_secs(119), MINUTE);
+        assert_eq!(counter.total(), 0);
     }
 
     #[test]

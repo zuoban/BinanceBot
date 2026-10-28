@@ -118,6 +118,13 @@ pub struct BinanceMarkPrice {
     pub mark_price: Decimal,
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct BinanceMarkPriceWithSymbol {
+    pub symbol: String,
+    #[serde(rename = "markPrice")]
+    pub mark_price: Decimal,
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct Binance24hrTicker {
     pub symbol: String,

@@ -100,6 +100,19 @@ pub struct BinanceFuturesClient {
 }
 
 impl BinanceFuturesClient {
+    pub(crate) fn market_cache_key(&self) -> &str {
+        &self.base_url
+    }
+
+    pub(crate) async fn get_all_mark_prices_for_fallback(
+        &self,
+    ) -> Result<Vec<BinanceMarkPriceWithSymbol>> {
+        self.reserve(10, RequestClass::MarketFallback)?;
+        let url = format!("{}/fapi/v1/premiumIndex", self.base_url);
+        let resp = self.send(self.client.get(&url)).await?.error_for_status()?;
+        Ok(resp.json().await?)
+    }
+
     pub fn new(config: &ExchangeConfig) -> Self {
         Self::new_with_limiter(config, Arc::new(RateLimiter::default()))
     }

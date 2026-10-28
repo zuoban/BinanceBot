@@ -326,16 +326,10 @@ mod tests {
                 let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
                 if index == 2 {
                     let wrong = serde_json::json!({"stream": "btcusdt@markPrice@1s", "data": {"e": "markPriceUpdate", "E": Utc::now().timestamp_millis(), "s": "BTCUSDT", "p": "1"}});
-                    socket
-                        .send(Message::Text(wrong.to_string().into()))
-                        .await
-                        .unwrap();
+                    socket.send(Message::Text(wrong.to_string())).await.unwrap();
                 }
                 let event = serde_json::json!({"stream": format!("{}@markPrice@1s", symbol.to_lowercase()), "data": {"e": "markPriceUpdate", "E": Utc::now().timestamp_millis(), "s": symbol, "p": "100"}});
-                socket
-                    .send(Message::Text(event.to_string().into()))
-                    .await
-                    .unwrap();
+                socket.send(Message::Text(event.to_string())).await.unwrap();
                 if index == 1 {
                     while socket.next().await.is_some() {}
                 }

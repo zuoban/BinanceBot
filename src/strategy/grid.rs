@@ -1,5 +1,6 @@
 use crate::exchange::account_cache::AccountCache;
 use crate::exchange::client::{BinanceFuturesClient, ExchangeError, NewOrderRequest};
+use crate::exchange::market_cache::MarketCache;
 use crate::exchange::position_cache::PositionCache;
 use crate::exchange::{BinanceOrderResponse, BinanceUserTrade};
 use crate::server::state::AppState;
@@ -237,6 +238,7 @@ pub struct GridTradingEngine {
     client: Arc<BinanceFuturesClient>,
     account_cache: Arc<AccountCache>,
     position_cache: Arc<PositionCache>,
+    market_cache: Arc<MarketCache>,
     action_rx: mpsc::Receiver<BotControlAction>,
     ticker_rx: broadcast::Receiver<TickerInfo>,
     pnl_reconcile_offset: usize,
@@ -271,6 +273,7 @@ impl GridTradingEngine {
             client,
             account_cache: Arc::new(AccountCache::default()),
             position_cache: Arc::new(PositionCache::default()),
+            market_cache: Arc::new(MarketCache::default()),
             action_rx,
             ticker_rx,
             pnl_reconcile_offset: 0,
@@ -288,6 +291,10 @@ impl GridTradingEngine {
 
     pub fn set_market_stream_tx(&mut self, tx: watch::Sender<(String, bool)>) {
         self.market_stream_tx = Some(tx);
+    }
+
+    pub(crate) fn set_market_cache(&mut self, cache: Arc<MarketCache>) {
+        self.market_cache = cache;
     }
 
     pub(crate) fn set_account_cache(&mut self, cache: Arc<AccountCache>) {
@@ -971,12 +978,9 @@ impl GridTradingEngine {
                     new_config.exchange.is_testnet,
                 ));
             }
-            loop {
-                match self.ticker_rx.try_recv() {
-                    Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
-                    Err(_) => break,
-                }
-            }
+            while let Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_)) =
+                self.ticker_rx.try_recv()
+            {}
             self.state.refresh_current_scope().await;
         }
         drop(scope_transition);
@@ -1200,14 +1204,14 @@ impl GridTradingEngine {
         if !self.mark_retry.ready() {
             return;
         }
-        let requested_at = Utc::now();
-        match self.client.get_mark_price_for_fallback(symbol).await {
-            Ok(price) if price > Decimal::ZERO => {
+        match self.market_cache.mark_price(&self.client, symbol).await {
+            Ok((price, requested_at)) if price > Decimal::ZERO => {
                 self.mark_retry.reset();
                 let mut ticker = self.state.ticker.write().await;
                 if ticker.symbol != previous.symbol
                     || ticker.mark_update_time != previous.mark_update_time
                     || ticker.mark_price != previous.mark_price
+                    || (ticker.mark_price > Decimal::ZERO && requested_at < ticker.mark_update_time)
                 {
                     return;
                 }
@@ -1899,7 +1903,11 @@ impl GridTradingEngine {
             return false;
         }
 
-        let account = self.account_cache.get(&self.client).await;
+        let account = if shared_position {
+            self.account_cache.get(&self.client).await
+        } else {
+            self.account_cache.refresh(&self.client).await
+        };
         let account_instant = account
             .as_ref()
             .ok()
@@ -1945,6 +1953,8 @@ impl GridTradingEngine {
         let config = self.state.config.read().await.clone();
         if config.exchange.dry_run {
             order.updated_at = Utc::now();
+        } else {
+            self.account_cache.invalidate(&self.client).await;
         }
         let mode = TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
         let recorded_id = order.client_order_id.clone();
@@ -4428,6 +4438,14 @@ mod tests {
             .await;
         assert!(engine.mark_retry.ready());
         assert!(state.ticker.read().await.prices_are_fresh(Utc::now()));
+        let future = Utc::now() + chrono::Duration::seconds(30);
+        state.ticker.write().await.mark_update_time = future;
+        fail.store(false, Ordering::SeqCst);
+        engine.refresh_mark_price(symbol, true).await;
+        let ticker = state.ticker.read().await;
+        assert_eq!(ticker.mark_price, dec!(106));
+        assert_eq!(ticker.mark_update_time, future);
+        assert!(!ticker.prices_are_fresh(Utc::now()));
         server.abort();
     }
 

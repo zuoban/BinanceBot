@@ -1,6 +1,7 @@
 use crate::config::{AppConfig, GlobalConfig};
 use crate::db::Database;
 use crate::exchange::account_cache::AccountCache;
+use crate::exchange::market_cache::MarketCache;
 use crate::exchange::position_cache::PositionCache;
 use crate::exchange::rate_limit::RateLimiter;
 use crate::exchange::{BinanceFuturesClient, BinanceWsStream};
@@ -186,6 +187,7 @@ pub struct TradingRuntime {
     cny_rates: Arc<CnyRateCache>,
     account_cache: Arc<AccountCache>,
     position_cache: Arc<PositionCache>,
+    market_cache: Arc<MarketCache>,
     rate_limiter: Arc<RateLimiter>,
 }
 
@@ -214,6 +216,7 @@ impl TradingRuntime {
             cny_rates: Arc::new(CnyRateCache::new()),
             account_cache: Arc::new(AccountCache::default()),
             position_cache: Arc::new(PositionCache::default()),
+            market_cache: Arc::new(MarketCache::default()),
             rate_limiter: Arc::new(RateLimiter::default()),
         }
     }
@@ -227,17 +230,9 @@ impl TradingRuntime {
             config.server.clone(),
         );
         for strategy in config.strategy_configs()? {
-            let pair = Self::prepare_pair(
-                strategy,
-                db.clone(),
-                trade_lock.clone(),
-                runtime.cny_rates.clone(),
-                runtime.account_cache.clone(),
-                runtime.position_cache.clone(),
-                runtime.rate_limiter.clone(),
-                !config.pairs.is_empty(),
-            )
-            .await?;
+            let pair = runtime
+                .prepare_pair(strategy, !config.pairs.is_empty())
+                .await?;
             runtime.pairs.push(pair);
         }
         *runtime.handle.states.write().await = runtime.states();
@@ -248,16 +243,8 @@ impl TradingRuntime {
         self.handle.clone()
     }
 
-    async fn prepare_pair(
-        strategy: AppConfig,
-        db: Arc<Database>,
-        trade_lock: Arc<Mutex<()>>,
-        cny_rates: Arc<CnyRateCache>,
-        account_cache: Arc<AccountCache>,
-        position_cache: Arc<PositionCache>,
-        rate_limiter: Arc<RateLimiter>,
-        multi: bool,
-    ) -> anyhow::Result<PairTask> {
+    async fn prepare_pair(&self, strategy: AppConfig, multi: bool) -> anyhow::Result<PairTask> {
+        let db = self.handle.db.clone();
         let has_admin = db.is_admin_password_set()?;
         let (action_tx, action_rx) = mpsc::channel(32);
         let (ticker_tx, ticker_rx) = broadcast::channel::<TickerInfo>(64);
@@ -267,18 +254,23 @@ impl TradingRuntime {
         ));
         let client = Arc::new(BinanceFuturesClient::new_with_limiter(
             &strategy.exchange,
-            rate_limiter,
+            self.rate_limiter.clone(),
         ));
         let state = if multi {
             AppState::new_for_pair_with_rates(
                 strategy.clone(),
                 db.clone(),
                 action_tx,
-                trade_lock.clone(),
-                cny_rates,
+                self.trade_lock.clone(),
+                self.cny_rates.clone(),
             )
         } else {
-            AppState::new_with_rates(strategy.clone(), db.clone(), action_tx, cny_rates)
+            AppState::new_with_rates(
+                strategy.clone(),
+                db.clone(),
+                action_tx,
+                self.cny_rates.clone(),
+            )
         };
         if let Err(error) = strategy.validate() {
             state
@@ -303,8 +295,9 @@ impl TradingRuntime {
                 .await;
         }
         let mut engine = GridTradingEngine::new(state.clone(), client, action_rx, ticker_rx);
-        engine.set_account_cache(account_cache);
-        engine.set_position_cache(position_cache);
+        engine.set_account_cache(self.account_cache.clone());
+        engine.set_position_cache(self.position_cache.clone());
+        engine.set_market_cache(self.market_cache.clone());
         engine.set_market_stream_tx(market_tx);
         let stream = BinanceWsStream::new(market_rx, ticker_tx);
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
@@ -364,17 +357,7 @@ impl TradingRuntime {
             .db
             .run_blocking(move |db| db.add_pair_config(&saved))
             .await?;
-        let pair = Self::prepare_pair(
-            config,
-            self.handle.db.clone(),
-            self.trade_lock.clone(),
-            self.cny_rates.clone(),
-            self.account_cache.clone(),
-            self.position_cache.clone(),
-            self.rate_limiter.clone(),
-            true,
-        )
-        .await?;
+        let pair = self.prepare_pair(config, true).await?;
         self.pairs.push(pair);
         *self.handle.states.write().await = self.states();
         Ok(())

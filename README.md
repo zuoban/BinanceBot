@@ -96,6 +96,8 @@ docker compose up -d --build
 
 每个交易对通过一条 `/market` WebSocket 组合连接接收成交价与每秒标记价格。成交价或标记价格缺失或至少 8 秒未更新时，下一次同步周期尝试通过 REST 补取；失败后按交易对及行情类型分别退避，成功或收到有效推送后重置。行情兜底使用较低的本地请求预算上限，给周期账户、持仓和挂单对账留出空间；持续高负载下，行情兜底仍可能被延迟。请求失败不会刷新行情时间，同步周期较长或发生网络延迟时，REST 兜底可能晚于 15 秒，过期保护仍会阻止新增订单。行情时间依赖本机时钟，需保持系统时间同步；明显过旧或超前的推送会被丢弃。
 
+标记价格 REST 兜底在同一交易所地址的 10 秒内有至少 10 个不同交易对请求时，会共享全市场标记价格快照；请求开始时间作为行情时间，主网和测试网分别缓存。共享请求失败会短暂冷却，等待同一请求超过 100 毫秒的交易对会继续后续对账并按退避规则重试。快照没有对应交易对时使用单对请求。该优化降低多对断流时的标记价格请求量，但不保证在预算长期耗尽时每个交易对都能获得行情。
+
 ### 2. 使用预构建镜像
 
 发布后的两个镜像均需要。使用仓库内的 Compose 配置运行：
@@ -215,7 +217,7 @@ BENCH_PAIRS=30 BENCH_SECONDS=65 cargo test --release --lib simulated_live_reconc
 BENCH_PAIRS=50 BENCH_SECONDS=65 BENCH_OUTAGE_SECS=40 BENCH_FAIL_MARK=1 cargo test --release --lib simulated_live_reconciliation -- --ignored --nocapture
 ```
 
-`BENCH_FAIL_MARK=1` 让模拟标记价格 REST 接口在断流期间返回 503；设为 `0` 则允许 REST 兜底。`ticker_sent` 和 `mark_sent` 分别统计模拟服务收到的成交价和标记价格请求，`outage_fresh`、`outage_stale` 统计断流期间同步后行情有效和过期的次数，`recovery_fresh` 统计恢复推送后行情有效的次数。这些次数是同步轮次，不是交易对数；模拟引擎处于暂停状态，不发送真实订单。
+`BENCH_FAIL_MARK=1` 让模拟标记价格 REST 接口在断流期间返回 503；设为 `0` 则允许 REST 兜底。`ticker_sent` 和 `mark_sent` 分别统计模拟服务收到的成交价和标记价格请求，其中 `mark_bulk_sent` 是全市场标记请求数，其余为单对请求；估算权重分别按 10 和 1 计。`outage_fresh`、`outage_stale` 统计断流期间同步后行情有效和过期的次数，`recovery_fresh` 统计恢复推送后行情有效的次数。这些次数是同步轮次，不是交易对数；模拟引擎处于暂停状态，不发送真实订单。
 
 一轮本机测试的数据及适用范围见 [多交易对容量测试记录](docs/multi-pair-capacity.md)。
 

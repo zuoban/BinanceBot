@@ -126,8 +126,10 @@ async fn live_pair_sync_shares_account_but_keeps_positions_and_assets_separate()
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     let account_calls = Arc::new(AtomicUsize::new(0));
+    let available_usdc = Arc::new(AtomicUsize::new(10));
     let position_calls = Arc::new(AtomicUsize::new(0));
     let calls = account_calls.clone();
+    let balance = available_usdc.clone();
     let positions = position_calls.clone();
     let app = Router::new()
         .route(
@@ -152,14 +154,16 @@ async fn live_pair_sync_shares_account_but_keeps_positions_and_assets_separate()
             "/fapi/v2/account",
             get(move || {
                 let calls = calls.clone();
+                let balance = balance.clone();
                 async move {
                     calls.fetch_add(1, Ordering::SeqCst);
+                    let available = balance.load(Ordering::SeqCst).to_string();
                     Json(json!({
                         "totalWalletBalance": "30", "totalMarginBalance": "30",
                         "totalUnrealizedProfit": "0", "availableBalance": "30",
                         "assets": [
                             {"asset": "USDC", "walletBalance": "10", "unrealizedProfit": "0",
-                             "marginBalance": "10", "availableBalance": "10"},
+                             "marginBalance": "10", "availableBalance": available},
                             {"asset": "USDT", "walletBalance": "20", "unrealizedProfit": "0",
                              "marginBalance": "20", "availableBalance": "20"}
                         ]
@@ -200,9 +204,13 @@ async fn live_pair_sync_shares_account_but_keeps_positions_and_assets_separate()
     drop(sol_account);
     drop(btc_account);
     // A critical reconciliation bypasses and invalidates the shared snapshot.
+    available_usdc.store(4, Ordering::SeqCst);
     assert!(sol.sync_account_and_position().await);
+    assert_eq!(account_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(sol.state.account.read().await.available_balance, dec!(4));
     assert_eq!(position_calls.load(Ordering::SeqCst), 2);
     assert!(btc.sync_account_and_position_inner(true).await);
+    assert_eq!(account_calls.load(Ordering::SeqCst), 2);
     assert_eq!(position_calls.load(Ordering::SeqCst), 3);
     server.abort();
 }

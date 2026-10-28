@@ -17,13 +17,39 @@ pub(crate) struct AccountSnapshot {
     pub received_instant: Instant,
 }
 
+type AccountEntry = Arc<Mutex<Option<AccountSnapshot>>>;
+
 #[derive(Default)]
 pub(crate) struct AccountCache {
-    entries: Mutex<HashMap<[u8; 32], Arc<Mutex<Option<AccountSnapshot>>>>>,
+    entries: Mutex<HashMap<[u8; 32], AccountEntry>>,
 }
 
 impl AccountCache {
     pub async fn get(&self, client: &BinanceFuturesClient) -> Result<AccountSnapshot> {
+        self.get_inner(client, false).await
+    }
+
+    pub async fn refresh(&self, client: &BinanceFuturesClient) -> Result<AccountSnapshot> {
+        self.get_inner(client, true).await
+    }
+
+    pub async fn invalidate(&self, client: &BinanceFuturesClient) {
+        let entry = self
+            .entries
+            .lock()
+            .await
+            .get(&client.account_cache_key())
+            .cloned();
+        if let Some(entry) = entry {
+            *entry.lock().await = None;
+        }
+    }
+
+    async fn get_inner(
+        &self,
+        client: &BinanceFuturesClient,
+        force: bool,
+    ) -> Result<AccountSnapshot> {
         let entry = {
             let mut entries = self.entries.lock().await;
             entries
@@ -32,7 +58,7 @@ impl AccountCache {
                 .clone()
         };
         let mut cached = entry.lock().await;
-        if let Some(snapshot) = cached.as_ref() {
+        if let Some(snapshot) = cached.as_ref().filter(|_| !force) {
             if snapshot.received_instant.elapsed() < MAX_AGE {
                 return Ok(snapshot.clone());
             }
@@ -116,6 +142,68 @@ mod tests {
             assert_eq!(first.received_at, snapshot.received_at);
         }
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn critical_refresh_waits_for_inflight_snapshot_then_fetches_again() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let app = Router::new().route(
+            "/fapi/v2/account",
+            get({
+                let calls = calls.clone();
+                let started = started.clone();
+                let release = release.clone();
+                move || {
+                    let calls = calls.clone();
+                    let started = started.clone();
+                    let release = release.clone();
+                    async move {
+                        let number = calls.fetch_add(1, Ordering::SeqCst);
+                        if number == 0 {
+                            started.notify_one();
+                            release.notified().await;
+                        }
+                        let balance = if number == 0 { "8" } else { "3" };
+                        Json(json!({
+                            "totalWalletBalance": "10", "totalMarginBalance": "10",
+                            "totalUnrealizedProfit": "0", "availableBalance": balance,
+                            "assets": [{"asset": "USDT", "walletBalance": "10",
+                                "unrealizedProfit": "0", "marginBalance": "10",
+                                "availableBalance": balance}]
+                        }))
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = BinanceFuturesClient::with_base_url(&AppConfig::default().exchange, url);
+        let cache = AccountCache::default();
+        let (initial, refreshed) = tokio::join!(cache.get(&client), async {
+            started.notified().await;
+            release.notify_one();
+            cache.refresh(&client).await
+        });
+        assert_eq!(
+            initial.unwrap().account.assets[0].available_balance,
+            rust_decimal_macros::dec!(8)
+        );
+        assert_eq!(
+            refreshed.unwrap().account.assets[0].available_balance,
+            rust_decimal_macros::dec!(3)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            cache.get(&client).await.unwrap().account.assets[0].available_balance,
+            rust_decimal_macros::dec!(3)
+        );
+        cache.invalidate(&client).await;
+        cache.get(&client).await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
         server.abort();
     }
 

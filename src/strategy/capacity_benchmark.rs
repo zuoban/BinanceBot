@@ -95,6 +95,7 @@ async fn simulated_pair_burst() {
 #[ignore = "explicit local reconciliation benchmark"]
 async fn simulated_live_reconciliation() {
     use crate::exchange::account_cache::AccountCache;
+    use crate::exchange::market_cache::MarketCache;
     use crate::exchange::position_cache::PositionCache;
     use crate::exchange::rate_limit::RateLimiter;
     use axum::{extract::Query, routing::get, Json, Router};
@@ -111,6 +112,7 @@ async fn simulated_live_reconciliation() {
     let start = tokio::time::Instant::now();
     let outage_end = outage_start + Duration::from_secs(outage_secs as u64);
     let mark_calls = Arc::new(AtomicUsize::new(0));
+    let bulk_mark_calls = Arc::new(AtomicUsize::new(0));
     let ticker_calls = Arc::new(AtomicUsize::new(0));
     let order_calls = Arc::new(AtomicUsize::new(0));
     let account_calls = Arc::new(AtomicUsize::new(0));
@@ -133,8 +135,13 @@ async fn simulated_live_reconciliation() {
             "/fapi/v1/premiumIndex",
             get({
                 let calls = mark_calls.clone();
-                move || {
+                let bulk_calls = bulk_mark_calls.clone();
+                move |Query(query): Query<HashMap<String, String>>| {
                     calls.fetch_add(1, Ordering::Relaxed);
+                    let symbol = query.get("symbol").cloned();
+                    if symbol.is_none() {
+                        bulk_calls.fetch_add(1, Ordering::Relaxed);
+                    }
                     async move {
                         let elapsed = start.elapsed();
                         if fail_mark && elapsed >= outage_start && elapsed < outage_end {
@@ -145,7 +152,12 @@ async fn simulated_live_reconciliation() {
                         } else {
                             (
                                 axum::http::StatusCode::OK,
-                                Json(json!({"symbol": "IGNORED", "markPrice": "100"})),
+                                Json(match symbol {
+                                    Some(symbol) => json!({"symbol": symbol, "markPrice": "100"}),
+                                    None => json!((0..pairs).map(|i| json!({
+                                        "symbol": format!("BENCH{i}USDT"), "markPrice": "100"
+                                    })).collect::<Vec<_>>()),
+                                }),
                             )
                         }
                     }
@@ -233,6 +245,7 @@ async fn simulated_live_reconciliation() {
     let trade_lock = Arc::new(tokio::sync::Mutex::new(()));
     let account_cache = Arc::new(AccountCache::default());
     let position_cache = Arc::new(PositionCache::default());
+    let market_cache = Arc::new(MarketCache::default());
     let limiter = Arc::new(RateLimiter::default());
     let deadline = start + Duration::from_secs(seconds as u64);
     let mut probe_config = AppConfig::default().exchange;
@@ -271,6 +284,7 @@ async fn simulated_live_reconciliation() {
         let mut engine = GridTradingEngine::new(state, client, action_rx, ticker_rx);
         engine.set_account_cache(account_cache.clone());
         engine.set_position_cache(position_cache.clone());
+        engine.set_market_cache(market_cache.clone());
         tasks.push(tokio::spawn(async move {
             let offset = Duration::from_millis((i as u64 * 3000) / pairs as u64);
             let mut timer = tokio::time::interval_at(start + offset, Duration::from_secs(3));
@@ -353,6 +367,7 @@ async fn simulated_live_reconciliation() {
     samples.sort_by(f64::total_cmp);
     let percentile = |percent: usize| samples[(cycles - 1) * percent / 100];
     let marks = mark_calls.load(Ordering::Relaxed);
+    let bulk_marks = bulk_mark_calls.load(Ordering::Relaxed);
     if outage_secs == 0 {
         assert_eq!(marks, 0, "fresh pushed marks must not trigger REST");
     } else {
@@ -374,8 +389,8 @@ async fn simulated_live_reconciliation() {
         usize::from(emergency_cancel_ok)
     );
     println!(
-        "pairs={pairs} seconds={seconds} outage_secs={outage_secs} fail_mark={fail_mark} cycles={cycles} orders_ok={orders_ok} account_position_ok={account_ok} mark_sent={marks} ticker_sent={tickers} orders_sent={orders} account_sent={accounts} position_sent={positions} outage_fresh={outage_fresh} outage_stale={outage_stale} recovery_fresh={recovery_fresh} emergency_list_ok={emergency_list_ok} emergency_cancel_ok={emergency_cancel_ok} estimated_weight={} cycle_ms_p50={:.2} cycle_ms_p95={:.2} cycle_ms_p99={:.2}",
-        marks + tickers + orders + 5 * (accounts + positions),
+        "pairs={pairs} seconds={seconds} outage_secs={outage_secs} fail_mark={fail_mark} cycles={cycles} orders_ok={orders_ok} account_position_ok={account_ok} mark_sent={marks} mark_bulk_sent={bulk_marks} ticker_sent={tickers} orders_sent={orders} account_sent={accounts} position_sent={positions} outage_fresh={outage_fresh} outage_stale={outage_stale} recovery_fresh={recovery_fresh} emergency_list_ok={emergency_list_ok} emergency_cancel_ok={emergency_cancel_ok} estimated_weight={} cycle_ms_p50={:.2} cycle_ms_p95={:.2} cycle_ms_p99={:.2}",
+        marks + 9 * bulk_marks + tickers + orders + 5 * (accounts + positions),
         percentile(50),
         percentile(95),
         percentile(99)

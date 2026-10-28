@@ -13,9 +13,11 @@ struct PositionSnapshot {
     received_instant: Instant,
 }
 
+type PositionEntry = Arc<Mutex<Option<PositionSnapshot>>>;
+
 #[derive(Default)]
 pub(crate) struct PositionCache {
-    entries: Mutex<HashMap<[u8; 32], Arc<Mutex<Option<PositionSnapshot>>>>>,
+    entries: Mutex<HashMap<[u8; 32], PositionEntry>>,
 }
 
 impl PositionCache {
