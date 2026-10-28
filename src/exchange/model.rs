@@ -16,6 +16,18 @@ pub struct BinanceApiError {
 #[derive(Debug, Deserialize)]
 pub struct BinanceExchangeInfo {
     pub symbols: Vec<BinanceSymbolInfo>,
+    #[serde(rename = "rateLimits", default)]
+    pub rate_limits: Vec<BinanceRateLimit>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BinanceRateLimit {
+    #[serde(rename = "rateLimitType")]
+    pub rate_limit_type: String,
+    pub interval: String,
+    #[serde(rename = "intervalNum")]
+    pub interval_num: u64,
+    pub limit: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -190,6 +202,8 @@ pub struct BinanceListenKeyResponse {
 pub struct BinanceWs24hrTicker {
     #[serde(rename = "e")]
     pub event_type: String,
+    #[serde(rename = "E")]
+    pub event_time: i64,
     #[serde(rename = "s")]
     pub symbol: String,
     #[serde(rename = "c")]
@@ -204,6 +218,18 @@ pub struct BinanceWs24hrTicker {
     pub volume: Decimal,
     #[serde(rename = "q")]
     pub quote_volume: Decimal,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BinanceWsMarkPrice {
+    #[serde(rename = "e")]
+    pub event_type: String,
+    #[serde(rename = "E")]
+    pub event_time: i64,
+    #[serde(rename = "s")]
+    pub symbol: String,
+    #[serde(rename = "p")]
+    pub mark_price: Decimal,
 }
 
 #[cfg(test)]

@@ -28,7 +28,7 @@ pub struct AppState {
     pub stats: RwLock<GridStats>,
     pub position: RwLock<PositionInfo>,
     pub account: RwLock<AccountInfo>,
-    pub cny_rates: CnyRateCache,
+    pub cny_rates: Arc<CnyRateCache>,
     pub active_orders: RwLock<HashMap<String, GridOrder>>,
     pub recent_trades: RwLock<VecDeque<TradeRecord>>,
     pub recent_logs: RwLock<VecDeque<LogEntry>>,
@@ -57,7 +57,23 @@ impl AppState {
         db: Arc<Database>,
         action_tx: mpsc::Sender<BotControlAction>,
     ) -> Arc<Self> {
-        Self::build(config, db, action_tx, None, Arc::new(Mutex::new(())))
+        Self::new_with_rates(config, db, action_tx, Arc::new(CnyRateCache::new()))
+    }
+
+    pub(crate) fn new_with_rates(
+        config: AppConfig,
+        db: Arc<Database>,
+        action_tx: mpsc::Sender<BotControlAction>,
+        cny_rates: Arc<CnyRateCache>,
+    ) -> Arc<Self> {
+        Self::build(
+            config,
+            db,
+            action_tx,
+            None,
+            Arc::new(Mutex::new(())),
+            cny_rates,
+        )
     }
 
     pub fn new_for_pair(
@@ -66,8 +82,31 @@ impl AppState {
         action_tx: mpsc::Sender<BotControlAction>,
         trade_commit_lock: Arc<Mutex<()>>,
     ) -> Arc<Self> {
+        Self::new_for_pair_with_rates(
+            config,
+            db,
+            action_tx,
+            trade_commit_lock,
+            Arc::new(CnyRateCache::new()),
+        )
+    }
+
+    pub(crate) fn new_for_pair_with_rates(
+        config: AppConfig,
+        db: Arc<Database>,
+        action_tx: mpsc::Sender<BotControlAction>,
+        trade_commit_lock: Arc<Mutex<()>>,
+        cny_rates: Arc<CnyRateCache>,
+    ) -> Arc<Self> {
         let symbol = config.exchange.symbol.clone();
-        Self::build(config, db, action_tx, Some(symbol), trade_commit_lock)
+        Self::build(
+            config,
+            db,
+            action_tx,
+            Some(symbol),
+            trade_commit_lock,
+            cny_rates,
+        )
     }
 
     fn build(
@@ -76,6 +115,7 @@ impl AppState {
         action_tx: mpsc::Sender<BotControlAction>,
         pair_scope: Option<String>,
         trade_commit_lock: Arc<Mutex<()>>,
+        cny_rates: Arc<CnyRateCache>,
     ) -> Arc<Self> {
         let (ws_broadcast_tx, _) = broadcast::channel(100);
         let symbol = config.exchange.symbol.clone();
@@ -163,7 +203,7 @@ impl AppState {
             stats: RwLock::new(initial_stats),
             position: RwLock::new(PositionInfo::default()),
             account: RwLock::new(initial_account),
-            cny_rates: CnyRateCache::new(),
+            cny_rates,
             active_orders: RwLock::new(HashMap::new()),
             recent_trades: RwLock::new(recent_trades),
             recent_logs: RwLock::new(VecDeque::with_capacity(300)),

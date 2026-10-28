@@ -1,4 +1,6 @@
+use crate::exchange::account_cache::AccountCache;
 use crate::exchange::client::{BinanceFuturesClient, ExchangeError, NewOrderRequest};
+use crate::exchange::position_cache::PositionCache;
 use crate::exchange::{BinanceOrderResponse, BinanceUserTrade};
 use crate::server::state::AppState;
 use crate::strategy::precision::SymbolRules;
@@ -20,6 +22,12 @@ use uuid::Uuid;
 // An unknown submission can take time to become queryable. Never release its
 // reservation on an initial negative lookup, or for an already accepted order.
 const UNKNOWN_SUBMISSION_GRACE_SECS: i64 = 30;
+
+#[derive(Clone, Copy)]
+enum ReconciliationPriority {
+    Periodic,
+    Critical,
+}
 
 /// Binance Futures allows at most 36 characters for newClientOrderId.
 fn new_grid_client_order_id(side: OrderSide) -> String {
@@ -203,6 +211,8 @@ fn exchange_fill_time(order: &BinanceOrderResponse) -> chrono::DateTime<Utc> {
 pub struct GridTradingEngine {
     state: Arc<AppState>,
     client: Arc<BinanceFuturesClient>,
+    account_cache: Arc<AccountCache>,
+    position_cache: Arc<PositionCache>,
     action_rx: mpsc::Receiver<BotControlAction>,
     ticker_rx: broadcast::Receiver<TickerInfo>,
     pnl_reconcile_offset: usize,
@@ -233,6 +243,8 @@ impl GridTradingEngine {
         Self {
             state,
             client,
+            account_cache: Arc::new(AccountCache::default()),
+            position_cache: Arc::new(PositionCache::default()),
             action_rx,
             ticker_rx,
             pnl_reconcile_offset: 0,
@@ -248,6 +260,14 @@ impl GridTradingEngine {
 
     pub fn set_market_stream_tx(&mut self, tx: watch::Sender<(String, bool)>) {
         self.market_stream_tx = Some(tx);
+    }
+
+    pub(crate) fn set_account_cache(&mut self, cache: Arc<AccountCache>) {
+        self.account_cache = cache;
+    }
+
+    pub(crate) fn set_position_cache(&mut self, cache: Arc<PositionCache>) {
+        self.position_cache = cache;
     }
 
     async fn pause_trading(&self) {
@@ -479,12 +499,13 @@ impl GridTradingEngine {
             .validate_grid_interval(config.grid.grid_interval)?;
 
         // Fetch initial market price
+        let ticker_requested_at = Utc::now();
         match self.client.get_ticker_price(&symbol).await {
             Ok(price) => {
                 let mut ticker = self.state.ticker.write().await;
                 ticker.symbol = symbol.clone();
                 ticker.last_price = price;
-                ticker.update_time = Utc::now();
+                ticker.update_time = ticker_requested_at;
                 info!("Initial market price for {}: {}", symbol, price);
             }
             Err(e) => {
@@ -495,11 +516,12 @@ impl GridTradingEngine {
             }
         }
 
+        let mark_requested_at = Utc::now();
         match self.client.get_mark_price(&symbol).await {
             Ok(price) => {
                 let mut ticker = self.state.ticker.write().await;
                 ticker.mark_price = price;
-                ticker.mark_update_time = Utc::now();
+                ticker.mark_update_time = mark_requested_at;
             }
             Err(e) => warn!("Failed to fetch initial mark price: {}", e),
         }
@@ -564,7 +586,11 @@ impl GridTradingEngine {
             .exchange
             .sync_interval_secs
             .max(1);
-        let mut sync_timer = interval(Duration::from_secs(sync_secs));
+        let period = Duration::from_secs(sync_secs);
+        let offset =
+            Duration::from_millis(rand::random::<u64>() % sync_secs.saturating_mul(1000).max(1));
+        let mut sync_timer = interval_at(tokio::time::Instant::now() + offset, period);
+        sync_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut pnl_timer = interval(Duration::from_secs(60));
 
         // Preserve recovered orders. Reconciliation and the regular window
@@ -591,7 +617,9 @@ impl GridTradingEngine {
                                 if updated_secs != sync_secs {
                                     sync_secs = updated_secs;
                                     let period = Duration::from_secs(sync_secs);
-                                    sync_timer = interval_at(tokio::time::Instant::now() + period, period);
+                                    let offset = Duration::from_millis(rand::random::<u64>() % sync_secs.saturating_mul(1000).max(1));
+                                    sync_timer = interval_at(tokio::time::Instant::now() + offset, period);
+                                    sync_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                                 }
                             }
                         },
@@ -784,7 +812,10 @@ impl GridTradingEngine {
         }
 
         let new_client = if client_changed {
-            Arc::new(BinanceFuturesClient::new(&new_config.exchange))
+            Arc::new(BinanceFuturesClient::new_with_limiter(
+                &new_config.exchange,
+                self.client.limiter(),
+            ))
         } else {
             Arc::clone(&self.client)
         };
@@ -910,6 +941,12 @@ impl GridTradingEngine {
                     new_config.exchange.is_testnet,
                 ));
             }
+            loop {
+                match self.ticker_rx.try_recv() {
+                    Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
+                    Err(_) => break,
+                }
+            }
             self.state.refresh_current_scope().await;
         }
         drop(scope_transition);
@@ -945,33 +982,41 @@ impl GridTradingEngine {
             return;
         }
 
-        // Update state ticker
-        {
+        let (last_updated, valuation_price) = {
             let mut ticker = self.state.ticker.write().await;
-            ticker.last_price = ticker_update.last_price;
-            if ticker_update.mark_price > Decimal::ZERO {
+            let now = Utc::now();
+            let fresh = |time| {
+                let age = now.signed_duration_since(time);
+                age >= chrono::Duration::zero() && age < chrono::Duration::seconds(15)
+            };
+            let last_updated = ticker_update.last_price > Decimal::ZERO
+                && fresh(ticker_update.update_time)
+                && ticker_update.update_time >= ticker.update_time;
+            if last_updated {
+                ticker.last_price = ticker_update.last_price;
+                ticker.high_24h = ticker_update.high_24h;
+                ticker.low_24h = ticker_update.low_24h;
+                ticker.change_24h = ticker_update.change_24h;
+                ticker.change_percent_24h = ticker_update.change_percent_24h;
+                ticker.volume_24h = ticker_update.volume_24h;
+                ticker.update_time = ticker_update.update_time;
+            }
+            if ticker_update.mark_price > Decimal::ZERO
+                && fresh(ticker_update.mark_update_time)
+                && ticker_update.mark_update_time >= ticker.mark_update_time
+            {
                 ticker.mark_price = ticker_update.mark_price;
                 ticker.mark_update_time = ticker_update.mark_update_time;
             }
-            ticker.high_24h = ticker_update.high_24h;
-            ticker.low_24h = ticker_update.low_24h;
-            ticker.change_24h = ticker_update.change_24h;
-            ticker.change_percent_24h = ticker_update.change_percent_24h;
-            ticker.volume_24h = ticker_update.volume_24h;
-            ticker.update_time = ticker_update.update_time;
-        }
+            ticker.symbol = ticker_update.symbol.clone();
+            (last_updated, ticker.grid_reference_price())
+        };
 
         // Update unrealized PnL for current position
         let is_dry_run = self.state.config.read().await.exchange.dry_run;
         if is_dry_run {
-            let mark_price = self.state.ticker.read().await.mark_price;
-            let valuation_price = if mark_price > Decimal::ZERO {
-                mark_price
-            } else {
-                ticker_update.last_price
-            };
             let mut pos = self.state.position.write().await;
-            if !pos.size.is_zero() {
+            if !pos.size.is_zero() && valuation_price > Decimal::ZERO {
                 pos.mark_price = valuation_price;
                 pos.unrealized_pnl = (valuation_price - pos.entry_price) * pos.size;
             }
@@ -984,7 +1029,7 @@ impl GridTradingEngine {
 
         // In Paper Trading / Dry Run mode, match simulated orders against live market price
         let prices_fresh = self.state.ticker.read().await.prices_are_fresh(Utc::now());
-        if is_running && is_dry_run && prices_fresh {
+        if is_running && is_dry_run && prices_fresh && last_updated {
             self.simulate_order_fills(ticker_update.last_price).await;
         }
     }
@@ -1076,14 +1121,16 @@ impl GridTradingEngine {
         }
 
         let account_ready = if !is_dry_run {
-            let orders_ready = self.sync_live_orders().await;
+            let orders_ready = self
+                .sync_live_orders_with_priority(ReconciliationPriority::Periodic)
+                .await;
             if !orders_ready {
                 self.last_orders_sync = None;
             }
             if self.state.pause_epoch() != pause_epoch {
                 return;
             }
-            let account_ready = self.sync_account_and_position().await;
+            let account_ready = self.sync_account_and_position_inner(true).await;
             orders_ready && account_ready
         } else {
             true
@@ -1104,11 +1151,27 @@ impl GridTradingEngine {
     }
 
     async fn refresh_mark_price(&self, symbol: &str, is_dry_run: bool) {
+        let previous = self.state.ticker.read().await.clone();
+        let age = Utc::now().signed_duration_since(previous.mark_update_time);
+        if previous.symbol == symbol
+            && previous.mark_price > Decimal::ZERO
+            && age >= chrono::Duration::zero()
+            && age < chrono::Duration::seconds(5)
+        {
+            return;
+        }
+        let requested_at = Utc::now();
         match self.client.get_mark_price(symbol).await {
             Ok(price) if price > Decimal::ZERO => {
                 let mut ticker = self.state.ticker.write().await;
+                if ticker.symbol != previous.symbol
+                    || ticker.mark_update_time != previous.mark_update_time
+                    || ticker.mark_price != previous.mark_price
+                {
+                    return;
+                }
                 ticker.mark_price = price;
-                ticker.mark_update_time = Utc::now();
+                ticker.mark_update_time = requested_at;
                 drop(ticker);
 
                 if is_dry_run {
@@ -1131,6 +1194,7 @@ impl GridTradingEngine {
         }
 
         let mut update = ticker;
+        let mut requested_at = Utc::now();
         update.symbol = symbol.to_string();
         match self.client.get_24hr_ticker(symbol).await {
             Ok(stats) => {
@@ -1143,6 +1207,7 @@ impl GridTradingEngine {
             }
             Err(e) => {
                 debug!("Could not refresh 24h ticker for {}: {}", symbol, e);
+                requested_at = Utc::now();
                 match self.client.get_ticker_price(symbol).await {
                     Ok(price) => update.last_price = price,
                     Err(e) => {
@@ -1156,12 +1221,17 @@ impl GridTradingEngine {
             return;
         }
         update.mark_price = Decimal::ZERO;
-        update.update_time = Utc::now();
+        update.update_time = requested_at;
         self.handle_ticker_update(update).await;
     }
 
     /// Reconcile open orders from Binance in Live mode
     async fn sync_live_orders(&mut self) -> bool {
+        self.sync_live_orders_with_priority(ReconciliationPriority::Critical)
+            .await
+    }
+
+    async fn sync_live_orders_with_priority(&mut self, priority: ReconciliationPriority) -> bool {
         let pause_epoch = self.state.pause_epoch();
         let config = self.state.config.read().await.clone();
         let symbol = config.exchange.symbol.clone();
@@ -1191,7 +1261,13 @@ impl GridTradingEngine {
                 return false;
             }
         };
-        match self.client.get_open_orders(&symbol).await {
+        let open_orders = match priority {
+            ReconciliationPriority::Periodic => {
+                self.client.get_open_orders_for_periodic_sync(&symbol).await
+            }
+            ReconciliationPriority::Critical => self.client.get_open_orders(&symbol).await,
+        };
+        match open_orders {
             Ok(live_orders) => {
                 self.last_orders_sync = None;
                 if self.state.pause_epoch() != pause_epoch {
@@ -1728,10 +1804,25 @@ impl GridTradingEngine {
 
     /// Fetch position and account balances from Binance in Live mode
     async fn sync_account_and_position(&mut self) -> bool {
+        self.sync_account_and_position_inner(false).await
+    }
+
+    async fn sync_account_and_position_inner(&mut self, shared_position: bool) -> bool {
         let pause_epoch = self.state.pause_epoch();
         let symbol = self.state.config.read().await.exchange.symbol.clone();
 
-        let position_ok = if let Ok(Some(pos)) = self.client.get_position(&symbol).await {
+        let position_result = if shared_position {
+            self.position_cache.get(&self.client, &symbol).await
+        } else {
+            let result = self.client.get_position(&symbol).await;
+            let received_at = Instant::now();
+            // Critical reconciliations and fills must not leave an older
+            // account-wide position snapshot available for later polling.
+            self.position_cache.invalidate(&self.client).await;
+            result.map(|position| (position, received_at))
+        };
+        let position_instant = position_result.as_ref().ok().map(|(_, at)| *at);
+        let position_ok = if let Ok((Some(pos), _)) = position_result {
             let mut state_pos = self.state.position.write().await;
             state_pos.symbol = pos.symbol;
             state_pos.size = pos.position_amt;
@@ -1750,16 +1841,21 @@ impl GridTradingEngine {
             return false;
         }
 
-        let account_ok = match self.client.get_account().await {
-            Ok(acc) => {
-                if let Some(asset) = acc.margin_asset_for_symbol(&symbol) {
+        let account = self.account_cache.get(&self.client).await;
+        let account_instant = account
+            .as_ref()
+            .ok()
+            .map(|snapshot| snapshot.received_instant);
+        let account_ok = match account {
+            Ok(snapshot) => {
+                if let Some(asset) = snapshot.account.margin_asset_for_symbol(&symbol) {
                     let mut state_acc = self.state.account.write().await;
                     state_acc.asset = asset.asset.clone();
                     state_acc.total_wallet_balance = asset.wallet_balance;
                     state_acc.available_balance = asset.available_balance;
                     state_acc.margin_balance = asset.margin_balance;
                     state_acc.unrealized_profit = asset.unrealized_profit;
-                    state_acc.update_time = Utc::now();
+                    state_acc.update_time = snapshot.received_at;
                     true
                 } else {
                     warn!(
@@ -1775,7 +1871,9 @@ impl GridTradingEngine {
             }
         };
         if position_ok && account_ok {
-            self.last_account_sync = Some(Instant::now());
+            self.last_account_sync = account_instant
+                .zip(position_instant)
+                .map(|(account, position)| account.min(position));
             true
         } else {
             self.last_account_sync = None;
@@ -4119,6 +4217,239 @@ mod tests {
         assert_eq!(ticker.mark_update_time, mark_updated_at);
     }
 
+    #[tokio::test]
+    async fn mark_update_preserves_ticker_and_does_not_fill_paper_orders() {
+        let config = AppConfig::default();
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let (action_tx, action_rx) = mpsc::channel(1);
+        let (_, ticker_rx) = broadcast::channel(1);
+        let state = AppState::new(config.clone(), db, action_tx);
+        let client = Arc::new(BinanceFuturesClient::new(&config.exchange));
+        let mut engine = GridTradingEngine::new(state.clone(), client, action_rx, ticker_rx);
+        let now = Utc::now();
+        {
+            let mut ticker = state.ticker.write().await;
+            ticker.last_price = dec!(100);
+            ticker.high_24h = dec!(110);
+            ticker.update_time = now;
+        }
+        *state.status.write().await = BotStatus::Running;
+        state.active_orders.write().await.insert(
+            "gb_b_test".into(),
+            GridOrder {
+                client_order_id: "gb_b_test".into(),
+                order_id: None,
+                symbol: config.exchange.symbol.clone(),
+                side: OrderSide::Buy,
+                price: dec!(99),
+                quantity: dec!(1),
+                amount_usdc: dec!(99),
+                status: OrderStatus::New,
+                created_at: now,
+                updated_at: now,
+                grid_level: -1,
+                paired_client_order_id: None,
+                is_take_profit: false,
+                purpose: OrderPurpose::Grid,
+                merge_sources: Vec::new(),
+            },
+        );
+        {
+            let mut position = state.position.write().await;
+            position.size = dec!(1);
+            position.entry_price = dec!(90);
+        }
+        engine
+            .handle_ticker_update(TickerInfo {
+                symbol: config.exchange.symbol.clone(),
+                mark_price: dec!(102),
+                mark_update_time: Utc::now(),
+                ..Default::default()
+            })
+            .await;
+        let ticker = state.ticker.read().await.clone();
+        assert_eq!(ticker.last_price, dec!(100));
+        assert_eq!(ticker.high_24h, dec!(110));
+        assert_eq!(ticker.update_time, now);
+        assert_eq!(ticker.mark_price, dec!(102));
+        assert_eq!(state.position.read().await.unrealized_pnl, dec!(12));
+        assert!(state.active_orders.read().await.contains_key("gb_b_test"));
+
+        engine
+            .handle_ticker_update(TickerInfo {
+                symbol: config.exchange.symbol,
+                mark_price: dec!(50),
+                mark_update_time: now - chrono::Duration::seconds(1),
+                ..Default::default()
+            })
+            .await;
+        assert_eq!(state.ticker.read().await.mark_price, dec!(102));
+    }
+
+    #[tokio::test]
+    async fn mark_rest_fallback_only_refreshes_missing_or_stale_values() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let fail = Arc::new(AtomicBool::new(false));
+        let app = Router::new().route(
+            "/fapi/v1/premiumIndex",
+            get({
+                let calls = calls.clone();
+                let fail = fail.clone();
+                move || {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    let failed = fail.load(Ordering::SeqCst);
+                    async move {
+                        if failed {
+                            (
+                                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                                Json(serde_json::json!({"code": -1000})),
+                            )
+                        } else {
+                            (
+                                axum::http::StatusCode::OK,
+                                Json(serde_json::json!({"symbol": "SOLUSDC", "markPrice": "105"})),
+                            )
+                        }
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let config = AppConfig::default();
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let (action_tx, action_rx) = mpsc::channel(1);
+        let (_, ticker_rx) = broadcast::channel(1);
+        let state = AppState::new(config.clone(), db, action_tx);
+        let client = Arc::new(BinanceFuturesClient::with_base_url(&config.exchange, url));
+        let engine = GridTradingEngine::new(state.clone(), client, action_rx, ticker_rx);
+        let symbol = &config.exchange.symbol;
+        {
+            let mut ticker = state.ticker.write().await;
+            ticker.symbol = symbol.clone();
+            ticker.last_price = dec!(100);
+            ticker.update_time = Utc::now();
+        }
+        engine.refresh_mark_price(symbol, true).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(state.ticker.read().await.mark_price, dec!(105));
+        engine.refresh_mark_price(symbol, true).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let stale = Utc::now() - chrono::Duration::seconds(16);
+        state.ticker.write().await.mark_update_time = stale;
+        fail.store(true, Ordering::SeqCst);
+        engine.refresh_mark_price(symbol, true).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let ticker = state.ticker.read().await;
+        assert_eq!(ticker.mark_update_time, stale);
+        assert!(!ticker.prices_are_fresh(Utc::now()));
+        drop(ticker);
+        fail.store(false, Ordering::SeqCst);
+        engine.refresh_mark_price(symbol, true).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert!(state.ticker.read().await.prices_are_fresh(Utc::now()));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn delayed_mark_rest_response_does_not_overwrite_a_newer_update() {
+        let requested = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let app = Router::new().route(
+            "/fapi/v1/premiumIndex",
+            get({
+                let requested = requested.clone();
+                let release = release.clone();
+                move || {
+                    let requested = requested.clone();
+                    let release = release.clone();
+                    async move {
+                        requested.notify_one();
+                        release.notified().await;
+                        Json(serde_json::json!({"symbol": "SOLUSDC", "markPrice": "90"}))
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let config = AppConfig::default();
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let (action_tx, action_rx) = mpsc::channel(1);
+        let (_, ticker_rx) = broadcast::channel(1);
+        let state = AppState::new(config.clone(), db, action_tx);
+        let client = Arc::new(BinanceFuturesClient::with_base_url(&config.exchange, url));
+        let engine = GridTradingEngine::new(state.clone(), client, action_rx, ticker_rx);
+        let ((), ()) = tokio::join!(
+            engine.refresh_mark_price(&config.exchange.symbol, true),
+            async {
+                requested.notified().await;
+                let mut ticker = state.ticker.write().await;
+                ticker.mark_price = dec!(110);
+                ticker.mark_update_time = Utc::now();
+                drop(ticker);
+                release.notify_one();
+            }
+        );
+        assert_eq!(state.ticker.read().await.mark_price, dec!(110));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn queued_mark_event_from_during_rest_request_is_not_discarded() {
+        let requested = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let app = Router::new().route(
+            "/fapi/v1/premiumIndex",
+            get({
+                let requested = requested.clone();
+                let release = release.clone();
+                move || {
+                    let requested = requested.clone();
+                    let release = release.clone();
+                    async move {
+                        requested.notify_one();
+                        release.notified().await;
+                        Json(serde_json::json!({"symbol": "SOLUSDC", "markPrice": "90"}))
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let config = AppConfig::default();
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let (action_tx, action_rx) = mpsc::channel(1);
+        let (_, ticker_rx) = broadcast::channel(1);
+        let state = AppState::new(config.clone(), db, action_tx);
+        let client = Arc::new(BinanceFuturesClient::with_base_url(&config.exchange, url));
+        let mut engine = GridTradingEngine::new(state.clone(), client, action_rx, ticker_rx);
+        let (_, event_time) = tokio::join!(
+            engine.refresh_mark_price(&config.exchange.symbol, true),
+            async {
+                requested.notified().await;
+                let event_time = Utc::now();
+                release.notify_one();
+                event_time
+            }
+        );
+        engine
+            .handle_ticker_update(TickerInfo {
+                symbol: config.exchange.symbol,
+                mark_price: dec!(110),
+                mark_update_time: event_time,
+                ..Default::default()
+            })
+            .await;
+        assert_eq!(state.ticker.read().await.mark_price, dec!(110));
+        server.abort();
+    }
+
     #[test]
     fn grid_client_order_ids_fit_binance_limit() {
         for (side, prefix) in [(OrderSide::Buy, "gb_b_"), (OrderSide::Sell, "gb_s_")] {
@@ -4142,6 +4473,10 @@ mod fixed_grid_tests;
 #[cfg(test)]
 #[path = "multi_pair_tests.rs"]
 mod multi_pair_tests;
+
+#[cfg(test)]
+#[path = "capacity_benchmark.rs"]
+mod capacity_benchmark;
 
 #[cfg(test)]
 #[path = "short_tests.rs"]

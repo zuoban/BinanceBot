@@ -384,6 +384,8 @@ async fn delayed_ticker_does_not_become_fresh_when_consumed() {
     let fake = Exchange::default();
     let (url, server) = exchange_server(fake.clone()).await;
     let mut engine = engine(database(), &url).await;
+    let previous = Utc::now() - chrono::Duration::seconds(20);
+    engine.state.ticker.write().await.update_time = previous;
     let received = Utc::now() - chrono::Duration::seconds(16);
     engine
         .handle_ticker_update(TickerInfo {
@@ -393,7 +395,7 @@ async fn delayed_ticker_does_not_become_fresh_when_consumed() {
             ..Default::default()
         })
         .await;
-    assert_eq!(engine.state.ticker.read().await.update_time, received);
+    assert_eq!(engine.state.ticker.read().await.update_time, previous);
     assert!(!submit(&mut engine).await);
     assert!(fake.posts.lock().unwrap().is_empty());
     server.abort();

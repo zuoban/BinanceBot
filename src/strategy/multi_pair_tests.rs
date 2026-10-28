@@ -48,6 +48,166 @@ fn ticker(symbol: &str, price: Decimal) -> TickerInfo {
 }
 
 #[tokio::test]
+async fn periodic_reconciliation_preserves_critical_budget_for_cancellation() {
+    use crate::exchange::rate_limit::{RateLimiter, RequestClass};
+    use axum::{routing::get, Json, Router};
+    use serde_json::json;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    let canceled = Arc::new(AtomicBool::new(false));
+    let listings = Arc::new(AtomicUsize::new(0));
+    let app = Router::new()
+        .route(
+            "/fapi/v1/openOrders",
+            get({
+                let canceled = canceled.clone();
+                let listings = listings.clone();
+                move || {
+                    let canceled = canceled.clone();
+                    let listings = listings.clone();
+                    async move {
+                        listings.fetch_add(1, Ordering::SeqCst);
+                        if canceled.load(Ordering::SeqCst) {
+                            Json(json!([]))
+                        } else {
+                            Json(json!([{
+                                "orderId": 123, "clientOrderId": "gb_test",
+                                "symbol": "SOLUSDC", "status": "NEW", "price": "100",
+                                "origQty": "1", "executedQty": "0", "side": "BUY",
+                                "type": "LIMIT", "timeInForce": "GTX", "updateTime": 0
+                            }]))
+                        }
+                    }
+                }
+            }),
+        )
+        .route(
+            "/fapi/v1/order",
+            axum::routing::delete({
+                let canceled = canceled.clone();
+                move || {
+                    let canceled = canceled.clone();
+                    async move {
+                        canceled.store(true, Ordering::SeqCst);
+                        Json(json!({}))
+                    }
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (mut engine, _, _) = engines().await;
+    engine.state.config.write().await.exchange.dry_run = false;
+    let limiter = Arc::new(RateLimiter::default());
+    limiter
+        .reserve(&url, [0; 32], 1800, RequestClass::Normal)
+        .unwrap();
+    engine.client = Arc::new(BinanceFuturesClient::with_base_url_and_limiter(
+        &engine.state.config.read().await.exchange,
+        url,
+        limiter,
+    ));
+    engine.last_orders_sync = Some(Instant::now());
+    engine.sync_cycle().await;
+    assert_eq!(listings.load(Ordering::SeqCst), 0);
+    assert!(engine.last_orders_sync.is_none());
+    assert!(engine.reconciliation_blocked);
+    assert!(engine.cancel_all_orders().await);
+    assert!(canceled.load(Ordering::SeqCst));
+    assert_eq!(listings.load(Ordering::SeqCst), 2);
+    server.abort();
+}
+
+#[tokio::test]
+async fn live_pair_sync_shares_account_but_keeps_positions_and_assets_separate() {
+    use axum::{extract::Query, routing::get, Json, Router};
+    use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let account_calls = Arc::new(AtomicUsize::new(0));
+    let position_calls = Arc::new(AtomicUsize::new(0));
+    let calls = account_calls.clone();
+    let positions = position_calls.clone();
+    let app = Router::new()
+        .route(
+            "/fapi/v2/positionRisk",
+            get(move |Query(query): Query<HashMap<String, String>>| {
+                let positions = positions.clone();
+                async move {
+                    positions.fetch_add(1, Ordering::SeqCst);
+                    let symbols = match query.get("symbol") {
+                        Some(symbol) => vec![symbol.as_str()],
+                        None => vec!["SOLUSDC", "BTCUSDT"],
+                    };
+                    Json(symbols.into_iter().map(|symbol| json!({
+                        "symbol": symbol, "positionSide": "BOTH",
+                        "positionAmt": "0", "entryPrice": "0", "markPrice": "100",
+                        "unRealizedProfit": "0", "liquidationPrice": "0", "leverage": "20"
+                    })).collect::<Vec<_>>())
+                }
+            }),
+        )
+        .route(
+            "/fapi/v2/account",
+            get(move || {
+                let calls = calls.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Json(json!({
+                        "totalWalletBalance": "30", "totalMarginBalance": "30",
+                        "totalUnrealizedProfit": "0", "availableBalance": "30",
+                        "assets": [
+                            {"asset": "USDC", "walletBalance": "10", "unrealizedProfit": "0",
+                             "marginBalance": "10", "availableBalance": "10"},
+                            {"asset": "USDT", "walletBalance": "20", "unrealizedProfit": "0",
+                             "marginBalance": "20", "availableBalance": "20"}
+                        ]
+                    }))
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (mut sol, mut btc, _) = engines().await;
+    let cache = Arc::new(AccountCache::default());
+    let position_cache = Arc::new(PositionCache::default());
+    for engine in [&mut sol, &mut btc] {
+        engine.client = Arc::new(BinanceFuturesClient::with_base_url(
+            &engine.state.config.read().await.exchange,
+            url.clone(),
+        ));
+        engine.set_account_cache(cache.clone());
+        engine.set_position_cache(position_cache.clone());
+    }
+    let (sol_ok, btc_ok) = tokio::join!(
+        sol.sync_account_and_position_inner(true),
+        btc.sync_account_and_position_inner(true)
+    );
+    assert!(sol_ok && btc_ok);
+    assert_eq!(account_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(position_calls.load(Ordering::SeqCst), 1);
+    let sol_account = sol.state.account.read().await;
+    let btc_account = btc.state.account.read().await;
+    assert_eq!(sol_account.asset, "USDC");
+    assert_eq!(sol_account.available_balance, dec!(10));
+    assert_eq!(btc_account.asset, "USDT");
+    assert_eq!(btc_account.available_balance, dec!(20));
+    assert_eq!(sol_account.update_time, btc_account.update_time);
+    assert_eq!(sol.state.position.read().await.symbol, "SOLUSDC");
+    assert_eq!(btc.state.position.read().await.symbol, "BTCUSDT");
+    drop(sol_account);
+    drop(btc_account);
+    // A critical reconciliation bypasses and invalidates the shared snapshot.
+    assert!(sol.sync_account_and_position().await);
+    assert_eq!(position_calls.load(Ordering::SeqCst), 2);
+    assert!(btc.sync_account_and_position_inner(true).await);
+    assert_eq!(position_calls.load(Ordering::SeqCst), 3);
+    server.abort();
+}
+
+#[tokio::test]
 async fn global_transition_cancels_old_orders_but_cannot_replenish_before_commit() {
     let (mut engine, _other, db) = engines().await;
     let state = engine.state.clone();
@@ -97,7 +257,7 @@ async fn running_engine_reschedules_sync_after_global_updates_and_keeps_rejected
             let sync_tx = sync_tx.clone();
             async move {
                 let _ = sync_tx.send(());
-                Json(json!({"symbol": "SOLUSDC", "markPrice": "100.5"}))
+                Json(json!({"symbol": "SOLUSDC", "markPrice": "0"}))
             }
         }),
     );
@@ -114,6 +274,7 @@ async fn running_engine_reschedules_sync_after_global_updates_and_keeps_rejected
         .exchange
         .sync_interval_secs = 1;
     let state = engine.state.clone();
+    state.ticker.write().await.mark_update_time = Utc::now() - chrono::Duration::seconds(16);
     engine.client = Arc::new(BinanceFuturesClient::with_base_url(
         &state.config.read().await.exchange,
         url,

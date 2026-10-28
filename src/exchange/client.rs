@@ -1,12 +1,15 @@
 use crate::config::ExchangeConfig;
 use crate::exchange::model::*;
+use crate::exchange::rate_limit::{RateLimiter, RequestClass};
 use crate::exchange::signature::sign_query;
 use anyhow::{anyhow, Result};
 use chrono::Utc;
 use reqwest::header::{HeaderMap, HeaderValue};
 use reqwest::Client;
 use rust_decimal::Decimal;
+use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, info};
 
@@ -93,10 +96,15 @@ pub struct BinanceFuturesClient {
     client: Client,
     recv_window: u64,
     time_offset_ms: AtomicI64,
+    limiter: Arc<RateLimiter>,
 }
 
 impl BinanceFuturesClient {
     pub fn new(config: &ExchangeConfig) -> Self {
+        Self::new_with_limiter(config, Arc::new(RateLimiter::default()))
+    }
+
+    pub(crate) fn new_with_limiter(config: &ExchangeConfig, limiter: Arc<RateLimiter>) -> Self {
         let base_url = if config.is_testnet {
             "https://testnet.binancefuture.com".to_string()
         } else {
@@ -124,20 +132,31 @@ impl BinanceFuturesClient {
             client,
             recv_window: config.recv_window,
             time_offset_ms: AtomicI64::new(0),
+            limiter,
         }
     }
 
     #[cfg(test)]
     pub(crate) fn with_base_url(config: &ExchangeConfig, base_url: String) -> Self {
-        let mut client = Self::new(config);
+        Self::with_base_url_and_limiter(config, base_url, Arc::new(RateLimiter::default()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_base_url_and_limiter(
+        config: &ExchangeConfig,
+        base_url: String,
+        limiter: Arc<RateLimiter>,
+    ) -> Self {
+        let mut client = Self::new_with_limiter(config, limiter);
         client.base_url = base_url;
         client
     }
 
     /// Synchronize local timestamp with Binance Futures server time
     pub async fn sync_server_time(&self) -> Result<i64> {
+        self.reserve(1, RequestClass::Normal)?;
         let url = format!("{}/fapi/v1/time", self.base_url);
-        let resp = self.client.get(&url).send().await?.error_for_status()?;
+        let resp = self.send(self.client.get(&url)).await?.error_for_status()?;
         let server_time: BinanceServerTime = resp.json().await?;
 
         let local_now = Utc::now().timestamp_millis();
@@ -160,45 +179,114 @@ impl BinanceFuturesClient {
         format!("{}&signature={}", params, signature)
     }
 
+    pub(crate) fn account_cache_key(&self) -> [u8; 32] {
+        let mut hash = Sha256::new();
+        for value in [
+            self.base_url.as_bytes(),
+            self._api_key.as_bytes(),
+            self.api_secret.as_bytes(),
+            &self.recv_window.to_be_bytes(),
+        ] {
+            hash.update((value.len() as u64).to_be_bytes());
+            hash.update(value);
+        }
+        hash.finalize().into()
+    }
+
+    fn rate_account_key(&self) -> [u8; 32] {
+        Sha256::digest(self._api_key.as_bytes()).into()
+    }
+
+    pub(crate) fn limiter(&self) -> Arc<RateLimiter> {
+        self.limiter.clone()
+    }
+
+    fn reserve(&self, weight: u64, class: RequestClass) -> Result<()> {
+        self.limiter
+            .reserve(&self.base_url, self.rate_account_key(), weight, class)
+            .map_err(|error| {
+                tracing::warn!("{}", error);
+                anyhow!(error)
+            })
+    }
+
+    async fn send(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, reqwest::Error> {
+        let response = request.send().await?;
+        self.limiter.observe(
+            &self.base_url,
+            self.rate_account_key(),
+            response.status(),
+            response.headers(),
+        );
+        Ok(response)
+    }
+
     /// Fetch exchange info (symbol filters)
     pub async fn get_exchange_info(&self, symbol: Option<&str>) -> Result<BinanceExchangeInfo> {
+        self.reserve(1, RequestClass::Normal)?;
         let url = if let Some(sym) = symbol {
             format!("{}/fapi/v1/exchangeInfo?symbol={}", self.base_url, sym)
         } else {
             format!("{}/fapi/v1/exchangeInfo", self.base_url)
         };
 
-        let resp = self.client.get(&url).send().await?.error_for_status()?;
+        let resp = self.send(self.client.get(&url)).await?.error_for_status()?;
         let info: BinanceExchangeInfo = resp.json().await?;
+        self.limiter
+            .update_exchange_limits(&self.base_url, &info.rate_limits);
         Ok(info)
     }
 
     /// Fetch the latest traded price.
     pub async fn get_ticker_price(&self, symbol: &str) -> Result<Decimal> {
+        self.reserve(1, RequestClass::Normal)?;
         let url = format!("{}/fapi/v1/ticker/price?symbol={}", self.base_url, symbol);
-        let resp = self.client.get(&url).send().await?.error_for_status()?;
+        let resp = self.send(self.client.get(&url)).await?.error_for_status()?;
         let ticker: BinanceTickerPrice = resp.json().await?;
         Ok(ticker.price)
     }
 
     /// Fetch the futures mark price, which differs from the latest traded price.
     pub async fn get_mark_price(&self, symbol: &str) -> Result<Decimal> {
+        self.reserve(1, RequestClass::Normal)?;
         let url = format!("{}/fapi/v1/premiumIndex?symbol={}", self.base_url, symbol);
-        let resp = self.client.get(&url).send().await?.error_for_status()?;
+        let resp = self.send(self.client.get(&url)).await?.error_for_status()?;
         let mark: BinanceMarkPrice = resp.json().await?;
         Ok(mark.mark_price)
     }
 
     /// Fetch 24-hour ticker statistics
     pub async fn get_24hr_ticker(&self, symbol: &str) -> Result<Binance24hrTicker> {
+        self.reserve(1, RequestClass::Normal)?;
         let url = format!("{}/fapi/v1/ticker/24hr?symbol={}", self.base_url, symbol);
-        let resp = self.client.get(&url).send().await?.error_for_status()?;
+        let resp = self.send(self.client.get(&url)).await?.error_for_status()?;
         let ticker: Binance24hrTicker = resp.json().await?;
         Ok(ticker)
     }
 
     /// Fetch open orders for symbol
     pub async fn get_open_orders(&self, symbol: &str) -> Result<Vec<BinanceOrderResponse>> {
+        self.get_open_orders_with_class(symbol, RequestClass::Critical)
+            .await
+    }
+
+    pub(crate) async fn get_open_orders_for_periodic_sync(
+        &self,
+        symbol: &str,
+    ) -> Result<Vec<BinanceOrderResponse>> {
+        self.get_open_orders_with_class(symbol, RequestClass::Normal)
+            .await
+    }
+
+    async fn get_open_orders_with_class(
+        &self,
+        symbol: &str,
+        class: RequestClass,
+    ) -> Result<Vec<BinanceOrderResponse>> {
+        self.reserve(1, class)?;
         let ts = self.current_timestamp();
         let query = format!(
             "symbol={}&recvWindow={}&timestamp={}",
@@ -207,7 +295,7 @@ impl BinanceFuturesClient {
         let signed_query = self.sign_params(&query);
         let url = format!("{}/fapi/v1/openOrders?{}", self.base_url, signed_query);
 
-        let resp = self.client.get(&url).send().await?;
+        let resp = self.send(self.client.get(&url)).await?;
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
@@ -220,6 +308,7 @@ impl BinanceFuturesClient {
 
     /// Fetch an order's final status before treating it as a fill.
     pub async fn get_order(&self, symbol: &str, order_id: i64) -> Result<BinanceOrderResponse> {
+        self.reserve(1, RequestClass::Critical)?;
         let ts = self.current_timestamp();
         let query = format!(
             "symbol={}&orderId={}&recvWindow={}&timestamp={}",
@@ -227,7 +316,7 @@ impl BinanceFuturesClient {
         );
         let signed_query = self.sign_params(&query);
         let url = format!("{}/fapi/v1/order?{}", self.base_url, signed_query);
-        let resp = self.client.get(&url).send().await?;
+        let resp = self.send(self.client.get(&url)).await?;
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
@@ -253,6 +342,7 @@ impl BinanceFuturesClient {
         symbol: &str,
         client_order_id: &str,
     ) -> Result<Option<BinanceOrderResponse>> {
+        self.reserve(1, RequestClass::Critical)?;
         let ts = self.current_timestamp();
         let query = format!(
             "symbol={}&origClientOrderId={}&recvWindow={}&timestamp={}",
@@ -263,7 +353,7 @@ impl BinanceFuturesClient {
             self.base_url,
             self.sign_params(&query)
         );
-        let resp = self.client.get(&url).send().await?;
+        let resp = self.send(self.client.get(&url)).await?;
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
@@ -289,6 +379,7 @@ impl BinanceFuturesClient {
         symbol: &str,
         order_id: i64,
     ) -> Result<Vec<BinanceUserTrade>> {
+        self.reserve(5, RequestClass::Critical)?;
         let ts = self.current_timestamp();
         let query = format!(
             "symbol={}&orderId={}&limit=1000&recvWindow={}&timestamp={}",
@@ -299,7 +390,7 @@ impl BinanceFuturesClient {
             self.base_url,
             self.sign_params(&query)
         );
-        let resp = self.client.get(&url).send().await?;
+        let resp = self.send(self.client.get(&url)).await?;
         if !resp.status().is_success() {
             return Err(anyhow!(
                 "Failed to fetch trades for order {}: {}",
@@ -323,6 +414,15 @@ impl BinanceFuturesClient {
         &self,
         order: NewOrderRequest<'_>,
     ) -> std::result::Result<BinanceOrderResponse, ExchangeError> {
+        self.reserve(
+            0,
+            if order.reduce_only {
+                RequestClass::ClosingOrder
+            } else {
+                RequestClass::OpeningOrder
+            },
+        )
+        .map_err(|error| ExchangeError::RequestRejected(error.to_string()))?;
         let ts = self.current_timestamp();
         let tif = if order.post_only { "GTX" } else { "GTC" };
 
@@ -342,7 +442,7 @@ impl BinanceFuturesClient {
             "Sending Binance order request: side={}, price={}, qty={}, tif={}",
             order.side, order.price, order.quantity, tif
         );
-        let resp = self.client.post(&url).send().await?;
+        let resp = self.send(self.client.post(&url)).await?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -364,6 +464,7 @@ impl BinanceFuturesClient {
         order_id: Option<i64>,
         client_order_id: Option<&str>,
     ) -> Result<()> {
+        self.reserve(1, RequestClass::Critical)?;
         let ts = self.current_timestamp();
         let mut query = format!(
             "symbol={}&recvWindow={}&timestamp={}",
@@ -378,7 +479,7 @@ impl BinanceFuturesClient {
         let signed_query = self.sign_params(&query);
         let url = format!("{}/fapi/v1/order?{}", self.base_url, signed_query);
 
-        let resp = self.client.delete(&url).send().await?;
+        let resp = self.send(self.client.delete(&url)).await?;
         if !resp.status().is_success() {
             let body = resp.text().await.unwrap_or_default();
             return Err(anyhow!("Failed to cancel order: {}", body));
@@ -388,6 +489,7 @@ impl BinanceFuturesClient {
 
     /// Cancel all open orders for symbol
     pub async fn cancel_all_orders(&self, symbol: &str) -> Result<()> {
+        self.reserve(1, RequestClass::Critical)?;
         let ts = self.current_timestamp();
         let query = format!(
             "symbol={}&recvWindow={}&timestamp={}",
@@ -396,7 +498,7 @@ impl BinanceFuturesClient {
         let signed_query = self.sign_params(&query);
         let url = format!("{}/fapi/v1/allOpenOrders?{}", self.base_url, signed_query);
 
-        let resp = self.client.delete(&url).send().await?;
+        let resp = self.send(self.client.delete(&url)).await?;
         if !resp.status().is_success() {
             let body = resp.text().await.unwrap_or_default();
             return Err(anyhow!("Failed to cancel all orders: {}", body));
@@ -406,6 +508,7 @@ impl BinanceFuturesClient {
 
     /// Fetch position risk information for symbol
     pub async fn get_position(&self, symbol: &str) -> Result<Option<BinancePositionRisk>> {
+        self.reserve(5, RequestClass::Critical)?;
         let ts = self.current_timestamp();
         let query = format!(
             "symbol={}&recvWindow={}&timestamp={}",
@@ -414,7 +517,7 @@ impl BinanceFuturesClient {
         let signed_query = self.sign_params(&query);
         let url = format!("{}/fapi/v2/positionRisk?{}", self.base_url, signed_query);
 
-        let resp = self.client.get(&url).send().await?;
+        let resp = self.send(self.client.get(&url)).await?;
         if !resp.status().is_success() {
             let body = resp.text().await.unwrap_or_default();
             return Err(anyhow!("Failed to get position risk: {}", body));
@@ -424,14 +527,30 @@ impl BinanceFuturesClient {
         one_way_position(positions, symbol)
     }
 
+    /// Fetch position risk for all symbols on the account.
+    pub(crate) async fn get_all_positions(&self) -> Result<Vec<BinancePositionRisk>> {
+        self.reserve(5, RequestClass::Normal)?;
+        let ts = self.current_timestamp();
+        let query = format!("recvWindow={}&timestamp={}", self.recv_window, ts);
+        let signed_query = self.sign_params(&query);
+        let url = format!("{}/fapi/v2/positionRisk?{}", self.base_url, signed_query);
+        let resp = self.send(self.client.get(&url)).await?;
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("Failed to get position risk: {}", body));
+        }
+        Ok(resp.json().await?)
+    }
+
     /// Fetch account balance summary
     pub async fn get_account(&self) -> Result<BinanceAccountInfoResponse> {
+        self.reserve(5, RequestClass::Normal)?;
         let ts = self.current_timestamp();
         let query = format!("recvWindow={}&timestamp={}", self.recv_window, ts);
         let signed_query = self.sign_params(&query);
         let url = format!("{}/fapi/v2/account?{}", self.base_url, signed_query);
 
-        let resp = self.client.get(&url).send().await?;
+        let resp = self.send(self.client.get(&url)).await?;
         if !resp.status().is_success() {
             let body = resp.text().await.unwrap_or_default();
             return Err(anyhow!("Failed to get account info: {}", body));
@@ -443,8 +562,9 @@ impl BinanceFuturesClient {
 
     /// Request a user data stream listenKey
     pub async fn get_listen_key(&self) -> Result<String> {
+        self.reserve(1, RequestClass::Normal)?;
         let url = format!("{}/fapi/v1/listenKey", self.base_url);
-        let resp = self.client.post(&url).send().await?;
+        let resp = self.send(self.client.post(&url)).await?;
         if !resp.status().is_success() {
             let body = resp.text().await.unwrap_or_default();
             return Err(anyhow!("Failed to obtain listenKey: {}", body));
@@ -455,8 +575,9 @@ impl BinanceFuturesClient {
 
     /// Keepalive user data stream listenKey
     pub async fn keepalive_listen_key(&self) -> Result<()> {
+        self.reserve(1, RequestClass::Normal)?;
         let url = format!("{}/fapi/v1/listenKey", self.base_url);
-        let resp = self.client.put(&url).send().await?;
+        let resp = self.send(self.client.put(&url)).await?;
         if !resp.status().is_success() {
             let body = resp.text().await.unwrap_or_default();
             return Err(anyhow!("Failed to keepalive listenKey: {}", body));
@@ -469,8 +590,15 @@ fn one_way_position(
     positions: Vec<BinancePositionRisk>,
     symbol: &str,
 ) -> Result<Option<BinancePositionRisk>> {
+    Ok(one_way_position_ref(&positions, symbol)?.cloned())
+}
+
+pub(crate) fn one_way_position_ref<'a>(
+    positions: &'a [BinancePositionRisk],
+    symbol: &str,
+) -> Result<Option<&'a BinancePositionRisk>> {
     let mut positions = positions
-        .into_iter()
+        .iter()
         .filter(|position| position.symbol.eq_ignore_ascii_case(symbol));
     let position = positions.next();
     anyhow::ensure!(
@@ -487,6 +615,81 @@ fn one_way_position(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn rate_limit_response_blocks_shared_clients_then_recovers() {
+        use axum::{http::StatusCode, routing::get, Json, Router};
+        use serde_json::json;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route(
+            "/fapi/v1/premiumIndex",
+            get({
+                let calls = calls.clone();
+                move || {
+                    let calls = calls.clone();
+                    async move {
+                        if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                            (
+                                StatusCode::TOO_MANY_REQUESTS,
+                                [("retry-after", "1")],
+                                Json(json!({})),
+                            )
+                        } else {
+                            (
+                                StatusCode::OK,
+                                [("retry-after", "1")],
+                                Json(json!({"markPrice":"100"})),
+                            )
+                        }
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let config = crate::config::AppConfig::default().exchange;
+        let limiter = Arc::new(RateLimiter::default());
+        let mut first = BinanceFuturesClient::with_base_url(&config, url.clone());
+        let mut second = BinanceFuturesClient::with_base_url(&config, url);
+        first.limiter = limiter.clone();
+        second.limiter = limiter;
+        assert!(first.get_mark_price("SOLUSDC").await.is_err());
+        assert!(second.get_mark_price("BTCUSDT").await.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        tokio::time::sleep(Duration::from_millis(1050)).await;
+        assert_eq!(
+            second.get_mark_price("BTCUSDT").await.unwrap(),
+            rust_decimal_macros::dec!(100)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn locally_blocked_order_is_known_not_to_have_been_submitted() {
+        let config = crate::config::AppConfig::default().exchange;
+        let client = BinanceFuturesClient::with_base_url(&config, "http://127.0.0.1:1".into());
+        for _ in 0..100 {
+            client.reserve(0, RequestClass::OpeningOrder).unwrap();
+        }
+        let error = client
+            .place_order(NewOrderRequest {
+                symbol: "SOLUSDC",
+                side: "BUY",
+                price: "100",
+                quantity: "1",
+                client_order_id: "gb_test",
+                post_only: true,
+                reduce_only: false,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ExchangeError::RequestRejected(_)));
+        assert!(!error.execution_status_unknown());
+    }
 
     #[test]
     fn position_selection_accepts_one_way_short_and_rejects_hedge_mode() {

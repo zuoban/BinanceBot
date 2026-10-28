@@ -1,6 +1,10 @@
 use crate::config::{AppConfig, GlobalConfig};
 use crate::db::Database;
+use crate::exchange::account_cache::AccountCache;
+use crate::exchange::position_cache::PositionCache;
+use crate::exchange::rate_limit::RateLimiter;
 use crate::exchange::{BinanceFuturesClient, BinanceWsStream};
+use crate::fx::CnyRateCache;
 use crate::lifecycle::stop_engine;
 use crate::server::AppState;
 use crate::strategy::GridTradingEngine;
@@ -179,6 +183,10 @@ pub struct TradingRuntime {
     handle: RuntimeHandle,
     command_rx: mpsc::Receiver<RuntimeCommand>,
     trade_lock: Arc<Mutex<()>>,
+    cny_rates: Arc<CnyRateCache>,
+    account_cache: Arc<AccountCache>,
+    position_cache: Arc<PositionCache>,
+    rate_limiter: Arc<RateLimiter>,
 }
 
 impl TradingRuntime {
@@ -203,6 +211,10 @@ impl TradingRuntime {
             },
             command_rx,
             trade_lock,
+            cny_rates: Arc::new(CnyRateCache::new()),
+            account_cache: Arc::new(AccountCache::default()),
+            position_cache: Arc::new(PositionCache::default()),
+            rate_limiter: Arc::new(RateLimiter::default()),
         }
     }
 
@@ -219,6 +231,10 @@ impl TradingRuntime {
                 strategy,
                 db.clone(),
                 trade_lock.clone(),
+                runtime.cny_rates.clone(),
+                runtime.account_cache.clone(),
+                runtime.position_cache.clone(),
+                runtime.rate_limiter.clone(),
                 !config.pairs.is_empty(),
             )
             .await?;
@@ -236,6 +252,10 @@ impl TradingRuntime {
         strategy: AppConfig,
         db: Arc<Database>,
         trade_lock: Arc<Mutex<()>>,
+        cny_rates: Arc<CnyRateCache>,
+        account_cache: Arc<AccountCache>,
+        position_cache: Arc<PositionCache>,
+        rate_limiter: Arc<RateLimiter>,
         multi: bool,
     ) -> anyhow::Result<PairTask> {
         let has_admin = db.is_admin_password_set()?;
@@ -245,11 +265,20 @@ impl TradingRuntime {
             strategy.exchange.symbol.clone(),
             strategy.exchange.is_testnet,
         ));
-        let client = Arc::new(BinanceFuturesClient::new(&strategy.exchange));
+        let client = Arc::new(BinanceFuturesClient::new_with_limiter(
+            &strategy.exchange,
+            rate_limiter,
+        ));
         let state = if multi {
-            AppState::new_for_pair(strategy.clone(), db.clone(), action_tx, trade_lock.clone())
+            AppState::new_for_pair_with_rates(
+                strategy.clone(),
+                db.clone(),
+                action_tx,
+                trade_lock.clone(),
+                cny_rates,
+            )
         } else {
-            AppState::new(strategy.clone(), db.clone(), action_tx)
+            AppState::new_with_rates(strategy.clone(), db.clone(), action_tx, cny_rates)
         };
         if let Err(error) = strategy.validate() {
             state
@@ -274,6 +303,8 @@ impl TradingRuntime {
                 .await;
         }
         let mut engine = GridTradingEngine::new(state.clone(), client, action_rx, ticker_rx);
+        engine.set_account_cache(account_cache);
+        engine.set_position_cache(position_cache);
         engine.set_market_stream_tx(market_tx);
         let stream = BinanceWsStream::new(market_rx, ticker_tx);
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
@@ -337,6 +368,10 @@ impl TradingRuntime {
             config,
             self.handle.db.clone(),
             self.trade_lock.clone(),
+            self.cny_rates.clone(),
+            self.account_cache.clone(),
+            self.position_cache.clone(),
+            self.rate_limiter.clone(),
             true,
         )
         .await?;
