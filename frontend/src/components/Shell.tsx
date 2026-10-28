@@ -7,6 +7,7 @@ import { AccountsContext, EditContext, useSession } from '../lib/session';
 import { accountGroups, number } from '../lib/format';
 import { ControlProvider } from './Controls';
 import { ThemeSwitch } from './ThemeSwitch';
+import { defaultTitle, useDocumentTitle } from '../lib/documentTitle';
 
 export default function Shell() {
   const navigate = useNavigate(), location = useLocation();
@@ -16,11 +17,8 @@ export default function Shell() {
   const [dirty, setDirty] = useState(false), [saving, setSaving] = useState(false), [open, setOpen] = useState(false);
   const { modal } = App.useApp();
   const { logout } = useSession();
-  useEffect(() => {
-    const groups = accountGroups(accounts);
-    document.title = groups.length ? groups.map(group => `${number(group.equity)} | ${number(group.available)} ${group.asset}`).join(' / ') : 'Grid Console · 网格交易控制台';
-    return () => { document.title = 'Grid Console · 网格交易控制台'; };
-  }, [accounts]);
+  const groups = accountGroups(accounts);
+  useDocumentTitle(groups.length ? groups.map(group => `${number(group.equity)} | ${number(group.available)} ${group.asset}`).join(' / ') : defaultTitle);
   const blocker = useBlocker(({ currentLocation, nextLocation }) => (dirty || saving) && currentLocation.pathname !== nextLocation.pathname);
   useEffect(() => {
     if (blocker.state !== 'blocked') return;
