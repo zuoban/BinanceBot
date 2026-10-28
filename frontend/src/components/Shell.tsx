@@ -55,7 +55,7 @@ export default function Shell() {
     await logout();
   }, [dirty, saving, logout, modal]);
   const sidebar = <><div className="sidebar-brand"><div className="brand-symbol">G</div><div><b>GRID CONSOLE</b><small>BINANCE FUTURES</small></div></div>
-    <div className="sidebar-caption">WORKSPACE</div>{menu}<div className="sidebar-footer"><span className="online-dot" /> 策略控制台 <small>操作前请核对运行模式</small></div></>;
+    <div className="sidebar-caption">WORKSPACE</div>{menu}<div className="sidebar-footer">策略控制台 <small>操作前请核对运行模式</small></div></>;
   return <EditContext.Provider value={context}><AccountsContext.Provider value={accounts}><ControlProvider><Layout className="app-layout">
     <Layout.Sider width={232} className="desktop-sider">{sidebar}</Layout.Sider>
     <Drawer title="GRID CONSOLE" placement="left" open={open} onClose={() => setOpen(false)} styles={{ body: { padding: 0 } }} size={260}>{menu}<div className="drawer-actions"><Link to="/pairs/new" onClick={() => setOpen(false)}><Button icon={<PlusOutlined />}>新增交易对</Button></Link></div></Drawer>

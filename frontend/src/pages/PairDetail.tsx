@@ -36,7 +36,7 @@ export default function PairDetail() {
       <Tabs defaultActiveKey="monitor" items={[
         { key: 'monitor', label: '实时监控', children: <>
           <Row gutter={[20, 20]}><Col xs={24} xl={14}><Card title="今日成交" extra={<span className="muted">北京时间 · 最新小时在左</span>}><HourlyChart snapshot={s} /></Card></Col>
-            <Col xs={24} xl={10}><Card title="实时网格深度"><DepthChart snapshot={s} /></Card></Col></Row>
+            <Col xs={24} xl={10}><Card title="实时网格深度" extra={<span className="muted">横轴：价格 / {asset} · 纵轴：数量</span>}><DepthChart snapshot={s} /></Card></Col></Row>
           <Card title="仓位与策略明细" className="detail-card"><Descriptions column={{ xs: 1, sm: 2, lg: 3 }} items={[
             { key: 'direction', label: '方向', children: s.grid_config.direction === 'SHORT' ? '做空' : '做多' },
             { key: 'entry', label: '持仓均价', children: price(s.position.entry_price) },

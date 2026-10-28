@@ -98,7 +98,7 @@ export default function Settings() {
   const { modal } = App.useApp();
   const [active, setActive] = useState('global');
   return <><PageTitle eyebrow="WORKSPACE / SETTINGS" title="全局设置" description="交易所连接、通知和控制台安全设置。" />
-    <Tabs activeKey={active} onChange={async key => {
+    <Tabs className="settings-tabs" activeKey={active} onChange={async key => {
       if (edit.saving) return;
       if (edit.dirty && !await modal.confirm({ title: '放弃未保存的修改？', okText: '放弃修改', cancelText: '继续编辑' })) return;
       edit.setDirty(false); setActive(key);
