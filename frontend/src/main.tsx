@@ -1,6 +1,6 @@
 import React, { Suspense, lazy, useCallback, useEffect, useState } from 'react';
 import ReactDOM from 'react-dom/client';
-import { App as AntApp, ConfigProvider, Spin } from 'antd';
+import { App as AntApp, ConfigProvider } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
 import { createBrowserRouter, RouterProvider } from 'react-router-dom';
@@ -9,13 +9,14 @@ import type { AuthStatus } from './lib/types';
 import { SessionContext } from './lib/session';
 import Shell from './components/Shell';
 import Login from './pages/Login';
+import { LoadingScreen, PageLoading } from './components/Loading';
 import './style.css';
 
 const Overview = lazy(() => import('./pages/Overview'));
 const PairDetail = lazy(() => import('./pages/PairDetail'));
 const PairConfig = lazy(() => import('./pages/PairConfig'));
 const Settings = lazy(() => import('./pages/Settings'));
-const page = (component: React.ReactNode) => <Suspense fallback={<div className="page-loading"><Spin description="正在加载页面"><div /></Spin></div>}>{component}</Suspense>;
+const page = (component: React.ReactNode) => <Suspense fallback={<PageLoading />}>{component}</Suspense>;
 const client = new QueryClient({ defaultOptions: { queries: { retry: 1, refetchOnWindowFocus: true }, mutations: { retry: false } } });
 const router = createBrowserRouter([{ element: <Shell />, children: [
   { path: '/', element: page(<Overview />) },
@@ -39,7 +40,7 @@ function Root() {
   }, []);
   useEffect(() => { if (status.data && !status.data.authenticated) { tokenStore.clear(); client.clear(); setLoggedIn(false); } }, [status.data]);
   const session = { logout };
-  if (loggedIn && status.isPending) return <div className="loading-screen"><Spin size="large" description="正在验证会话"><div /></Spin></div>;
+  if (loggedIn && status.isPending) return <LoadingScreen label="正在验证会话" />;
   if (loggedIn && status.error) return <div className="loading-screen"><div>无法连接后端服务：{status.error.message}<br /><button onClick={() => void status.refetch()}>重试</button></div></div>;
   return <SessionContext.Provider value={session}>{loggedIn && status.data?.authenticated ? <RouterProvider router={router} /> : <Login onLogin={() => { client.clear(); setLoggedIn(true); }} />}</SessionContext.Provider>;
 }

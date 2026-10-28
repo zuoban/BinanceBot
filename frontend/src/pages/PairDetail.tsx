@@ -25,7 +25,7 @@ export default function PairDetail() {
     {controls.results[symbol ?? ''] && <Alert type="info" title={controls.results[symbol ?? '']} />}
     {pair && <div className="detail-status"><Space><ModeTag mode={currentPair!.mode} /><StatusTag status={currentPair!.status} /><Tag color={query.live ? 'success' : 'warning'}>{query.live ? '实时连接' : 'HTTP 自动刷新'}</Tag></Space><span className="muted">{query.dataUpdatedAt ? `最近同步 ${new Date(query.dataUpdatedAt).toLocaleTimeString('zh-CN')}` : '等待首次快照'}</span></div>}
     {query.stale && s && <Alert type="warning" showIcon title="快照暂未更新，数值可能已过期；仍可撤单并暂停。" />}
-    {!s && pair && <Card><Skeleton active /></Card>}
+    {!s && (pairs.isPending || (pair && query.isPending)) && <Card role="status" aria-label="正在加载策略详情"><Skeleton active /></Card>}
     {s && <>
       <Row gutter={[16, 16]} className="metric-row">
         <Col xs={12} xl={6}><Card><Statistic title={`标记价格 / ${asset}`} value={Number(s.ticker.mark_price) > 0 ? price(s.ticker.mark_price) : '--'} /><div className="muted">最新成交 {price(s.ticker.last_price)}</div></Card></Col>

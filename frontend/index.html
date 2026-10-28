@@ -5,9 +5,15 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#123c35" />
     <title>Grid Console · 网格交易控制台</title>
+    <style>
+      body { margin: 0; background: #f4f6f3; }
+      .boot-screen { min-height: 100vh; display: grid; place-content: center; justify-items: center; gap: 18px; color: #496258; font: 12px 'PingFang SC', sans-serif; }
+      .boot-mark { display: grid; place-items: center; width: 44px; height: 44px; border-radius: 12px; background: #174d40; color: #d5edab; font: 700 26px Georgia, serif; }
+      .boot-screen p { margin: 0; }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root"><div class="boot-screen" role="status"><span class="boot-mark">G</span><p>正在准备工作台…</p></div></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

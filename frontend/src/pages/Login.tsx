@@ -5,6 +5,7 @@ import { useMutation, useQuery } from '@tanstack/react-query';
 import { api, post, tokenStore } from '../lib/api';
 import type { AuthStatus } from '../lib/types';
 import { ErrorNotice } from '../components/Common';
+import { LoadingScreen } from '../components/Loading';
 
 export default function Login({ onLogin }: { onLogin: () => void }) {
   const status = useQuery({ queryKey: ['auth-status'], queryFn: () => api<AuthStatus>('/api/auth/status'), retry: false });
@@ -15,6 +16,7 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
     onSuccess: data => { tokenStore.set(data.token); onLogin(); },
     onError: setError,
   });
+  if (status.isPending) return <LoadingScreen label="正在连接控制台" />;
   return <main className="login-page">
     <section className="login-story"><div className="brand-mark">G<span> / </span>GRID CONSOLE</div><div>
       <div className="eyebrow">BINANCE FUTURES · STRATEGY WORKSPACE</div>

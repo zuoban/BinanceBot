@@ -8,6 +8,7 @@ import { accountGroups, comparePositionAmount, modeLabel, number, positionAmount
 import { ErrorNotice, ModeTag, PageTitle, Pnl, StatusTag } from '../components/Common';
 import { PairControls, runBatchControls, useControls } from '../components/Controls';
 import type { Pair } from '../lib/types';
+import { OverviewLoading } from '../components/Loading';
 
 export default function OverviewPage() {
   const overview = useOverview();
@@ -50,6 +51,7 @@ export default function OverviewPage() {
     <div className="overview-banner"><div><span className="eyebrow">YOUR STRATEGIES, AT A GLANCE</span><h2>保持全局视野。</h2><p>{overview.data ? `${pairs.length} 个交易对 · ${pairs.filter(p => p.status === 'RUNNING').length} 个正在运行` : '正在同步策略数据…'}</p></div>
       <div className="banner-stat"><span>今日成交 · 北京时间</span><strong>{overview.data ? today ?? '--' : '--'}<small>笔</small></strong><span>{stale ? '数据暂未更新' : '自动刷新 / 3 秒'}</span></div>
     </div>
+    {overview.isPending && !overview.data ? <OverviewLoading /> : overview.data && <>
     <Row gutter={[16, 16]} className="account-row">
       {accountGroups(accounts).map(group => <Col xs={24} md={12} xl={8} key={group.key}><Card className="account-card" size="small">
         <div className="section-line"><span className="eyebrow">{group.asset} ACCOUNT</span><Tag>{modeLabel[group.mode]}</Tag></div>
@@ -74,15 +76,16 @@ export default function OverviewPage() {
       {visible.map(({ snapshot: s, mode: m, scoped }) => {
         const pair: Pair = { symbol: s.symbol, status: s.status, mode: m, grid_config: s.grid_config, scoped };
         const quote = quoteAsset(s.symbol), result = controls.results[s.symbol];
-        return <Col xs={24} lg={12} xxl={8} key={s.symbol}><Card className="strategy-card">
-          <div className="section-line"><Space><div className="coin-monogram">{s.symbol.slice(0, 1)}</div><div><Link className="pair-name" to={`/pairs/${s.symbol}`}>{s.symbol}</Link><div className="muted">{s.grid_config.direction === 'SHORT' ? '做空' : '做多'}网格 · {quote}</div></div></Space><StatusTag status={s.status} /></div>
+        return <Col xs={24} lg={12} xxl={8} key={s.symbol}><Card className={`strategy-card ${s.grid_config.direction === 'SHORT' ? 'strategy-short' : 'strategy-long'}`}>
+          <div className="section-line"><Space><div className="coin-monogram">{s.symbol.slice(0, 1)}</div><div><Link className="pair-name" to={`/pairs/${s.symbol}`}>{s.symbol}</Link><div className="strategy-subtitle"><span className="direction-label">{s.grid_config.direction === 'SHORT' ? '做空' : '做多'}</span><span className="muted">网格 · {quote}</span></div></div></Space><StatusTag status={s.status} /></div>
           <div className="strategy-price"><span className="muted">标记价格</span><strong>{Number(s.ticker.mark_price) > 0 ? price(s.ticker.mark_price) : '--'}</strong><ModeTag mode={m} /></div>
           <div className="strategy-metrics"><div><span>已实现盈亏 / {quote}</span><strong><Pnl value={s.stats.total_realized_pnl} /></strong></div><div><span>未实现盈亏 / {quote}</span><strong><Pnl value={s.position.unrealized_pnl} /></strong></div><div><span>今日成交</span><strong>{todayCount(s) ?? '--'} <small>笔</small></strong></div><div><span>买单 / 卖单</span><strong>{s.stats.active_buy_orders} <small>/</small> {s.stats.active_sell_orders}</strong></div><div><span>持仓数量</span><strong>{price(s.position.size)}</strong></div><div><span>持仓金额 / {quote}</span><strong>{number(positionAmount(s))}</strong></div></div>
           <div className="strategy-footer"><PairControls pair={pair} compact stale={stale} /><Link to={`/pairs/${s.symbol}`}><Button type="text" size="small">查看策略 <ArrowRightOutlined /></Button></Link></div>
           {result && <div className={result.startsWith('失败') ? 'negative operation-result' : 'muted operation-result'} role="status">{result}</div>}
         </Card></Col>;
       })}
-      {!visible.length && <Col span={24}><Card loading={overview.isPending}><Empty description={pairs.length ? '没有符合筛选条件的策略' : '暂无策略数据'} /></Card></Col>}
+      {!visible.length && <Col span={24}><Card><Empty description={pairs.length ? '没有符合筛选条件的策略' : '暂无策略数据'} /></Card></Col>}
     </Row>
+    </>}
   </>;
 }
