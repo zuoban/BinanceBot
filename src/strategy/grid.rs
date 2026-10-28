@@ -22,6 +22,7 @@ use uuid::Uuid;
 // An unknown submission can take time to become queryable. Never release its
 // reservation on an initial negative lookup, or for an already accepted order.
 const UNKNOWN_SUBMISSION_GRACE_SECS: i64 = 30;
+const MARKET_FALLBACK_AFTER_SECS: i64 = 8;
 
 #[derive(Clone, Copy)]
 enum ReconciliationPriority {
@@ -208,6 +209,29 @@ fn exchange_fill_time(order: &BinanceOrderResponse) -> chrono::DateTime<Utc> {
         .unwrap_or_else(Utc::now)
 }
 
+#[derive(Default)]
+struct MarketRetry {
+    failures: u32,
+    retry_at: Option<Instant>,
+}
+
+impl MarketRetry {
+    fn ready(&self) -> bool {
+        self.retry_at.is_none_or(|at| Instant::now() >= at)
+    }
+
+    fn failed(&mut self) {
+        let seconds = (2_u64 << self.failures.min(4)).min(30);
+        let jitter_ms = rand::random::<u64>() % 501;
+        self.retry_at = Some(Instant::now() + Duration::from_millis(seconds * 1000 + jitter_ms));
+        self.failures = self.failures.saturating_add(1);
+    }
+
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
 pub struct GridTradingEngine {
     state: Arc<AppState>,
     client: Arc<BinanceFuturesClient>,
@@ -219,6 +243,8 @@ pub struct GridTradingEngine {
     pnl_reconcile_task: Option<JoinHandle<()>>,
     last_account_sync: Option<Instant>,
     last_orders_sync: Option<Instant>,
+    mark_retry: MarketRetry,
+    ticker_retry: MarketRetry,
     reconciliation_blocked: bool,
     market_data_blocked: bool,
     last_remainder_change: Option<Instant>,
@@ -251,6 +277,8 @@ impl GridTradingEngine {
             pnl_reconcile_task: None,
             last_account_sync: None,
             last_orders_sync: None,
+            mark_retry: MarketRetry::default(),
+            ticker_retry: MarketRetry::default(),
             reconciliation_blocked: false,
             market_data_blocked: false,
             last_remainder_change: None,
@@ -905,6 +933,8 @@ impl GridTradingEngine {
 
         self.client = new_client;
         if market_changed || mode_changed {
+            self.mark_retry.reset();
+            self.ticker_retry.reset();
             *self.state.rules.write().await = new_rules;
             let mut ticker = TickerInfo {
                 symbol: new_config.exchange.symbol.clone(),
@@ -982,7 +1012,7 @@ impl GridTradingEngine {
             return;
         }
 
-        let (last_updated, valuation_price) = {
+        let (last_updated, mark_updated, valuation_price) = {
             let mut ticker = self.state.ticker.write().await;
             let now = Utc::now();
             let fresh = |time| {
@@ -1001,16 +1031,22 @@ impl GridTradingEngine {
                 ticker.volume_24h = ticker_update.volume_24h;
                 ticker.update_time = ticker_update.update_time;
             }
-            if ticker_update.mark_price > Decimal::ZERO
+            let mark_updated = ticker_update.mark_price > Decimal::ZERO
                 && fresh(ticker_update.mark_update_time)
-                && ticker_update.mark_update_time >= ticker.mark_update_time
-            {
+                && ticker_update.mark_update_time >= ticker.mark_update_time;
+            if mark_updated {
                 ticker.mark_price = ticker_update.mark_price;
                 ticker.mark_update_time = ticker_update.mark_update_time;
             }
             ticker.symbol = ticker_update.symbol.clone();
-            (last_updated, ticker.grid_reference_price())
+            (last_updated, mark_updated, ticker.grid_reference_price())
         };
+        if last_updated {
+            self.ticker_retry.reset();
+        }
+        if mark_updated {
+            self.mark_retry.reset();
+        }
 
         // Update unrealized PnL for current position
         let is_dry_run = self.state.config.read().await.exchange.dry_run;
@@ -1150,19 +1186,24 @@ impl GridTradingEngine {
         }
     }
 
-    async fn refresh_mark_price(&self, symbol: &str, is_dry_run: bool) {
+    async fn refresh_mark_price(&mut self, symbol: &str, is_dry_run: bool) {
         let previous = self.state.ticker.read().await.clone();
         let age = Utc::now().signed_duration_since(previous.mark_update_time);
         if previous.symbol == symbol
             && previous.mark_price > Decimal::ZERO
             && age >= chrono::Duration::zero()
-            && age < chrono::Duration::seconds(5)
+            && age < chrono::Duration::seconds(MARKET_FALLBACK_AFTER_SECS)
         {
+            self.mark_retry.reset();
+            return;
+        }
+        if !self.mark_retry.ready() {
             return;
         }
         let requested_at = Utc::now();
-        match self.client.get_mark_price(symbol).await {
+        match self.client.get_mark_price_for_fallback(symbol).await {
             Ok(price) if price > Decimal::ZERO => {
+                self.mark_retry.reset();
                 let mut ticker = self.state.ticker.write().await;
                 if ticker.symbol != previous.symbol
                     || ticker.mark_update_time != previous.mark_update_time
@@ -1182,21 +1223,35 @@ impl GridTradingEngine {
                     }
                 }
             }
-            Ok(_) => warn!("Binance returned a zero mark price for {}", symbol),
-            Err(e) => debug!("Could not refresh mark price for {}: {}", symbol, e),
+            Ok(_) => {
+                self.mark_retry.failed();
+                warn!("Binance returned a zero mark price for {}", symbol);
+            }
+            Err(e) => {
+                self.mark_retry.failed();
+                debug!("Could not refresh mark price for {}: {}", symbol, e);
+            }
         }
     }
 
     async fn refresh_stale_ticker(&mut self, symbol: &str) {
         let ticker = self.state.ticker.read().await.clone();
-        if ticker.symbol == symbol && (Utc::now() - ticker.update_time).num_seconds() < 5 {
+        let age = Utc::now() - ticker.update_time;
+        if ticker.symbol == symbol
+            && age >= chrono::Duration::zero()
+            && age < chrono::Duration::seconds(MARKET_FALLBACK_AFTER_SECS)
+        {
+            self.ticker_retry.reset();
+            return;
+        }
+        if !self.ticker_retry.ready() {
             return;
         }
 
         let mut update = ticker;
         let mut requested_at = Utc::now();
         update.symbol = symbol.to_string();
-        match self.client.get_24hr_ticker(symbol).await {
+        match self.client.get_24hr_ticker_for_fallback(symbol).await {
             Ok(stats) => {
                 update.last_price = stats.last_price;
                 update.high_24h = stats.high_price;
@@ -1208,9 +1263,10 @@ impl GridTradingEngine {
             Err(e) => {
                 debug!("Could not refresh 24h ticker for {}: {}", symbol, e);
                 requested_at = Utc::now();
-                match self.client.get_ticker_price(symbol).await {
+                match self.client.get_ticker_price_for_fallback(symbol).await {
                     Ok(price) => update.last_price = price,
                     Err(e) => {
+                        self.ticker_retry.failed();
                         warn!("Could not refresh stale market price for {}: {}", symbol, e);
                         return;
                     }
@@ -1218,8 +1274,10 @@ impl GridTradingEngine {
             }
         }
         if update.last_price <= Decimal::ZERO {
+            self.ticker_retry.failed();
             return;
         }
+        self.ticker_retry.reset();
         update.mark_price = Decimal::ZERO;
         update.update_time = requested_at;
         self.handle_ticker_update(update).await;
@@ -4325,7 +4383,7 @@ mod tests {
         let (_, ticker_rx) = broadcast::channel(1);
         let state = AppState::new(config.clone(), db, action_tx);
         let client = Arc::new(BinanceFuturesClient::with_base_url(&config.exchange, url));
-        let engine = GridTradingEngine::new(state.clone(), client, action_rx, ticker_rx);
+        let mut engine = GridTradingEngine::new(state.clone(), client, action_rx, ticker_rx);
         let symbol = &config.exchange.symbol;
         {
             let mut ticker = state.ticker.write().await;
@@ -4349,7 +4407,107 @@ mod tests {
         drop(ticker);
         fail.store(false, Ordering::SeqCst);
         engine.refresh_mark_price(symbol, true).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(!state.ticker.read().await.prices_are_fresh(Utc::now()));
+        engine.mark_retry.retry_at = Some(Instant::now() - std::time::Duration::from_secs(1));
+        engine.refresh_mark_price(symbol, true).await;
         assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert!(state.ticker.read().await.prices_are_fresh(Utc::now()));
+
+        state.ticker.write().await.mark_update_time = stale;
+        fail.store(true, Ordering::SeqCst);
+        engine.refresh_mark_price(symbol, true).await;
+        assert!(!engine.mark_retry.ready());
+        engine
+            .handle_ticker_update(TickerInfo {
+                symbol: symbol.clone(),
+                mark_price: dec!(106),
+                mark_update_time: Utc::now(),
+                ..Default::default()
+            })
+            .await;
+        assert!(engine.mark_retry.ready());
+        assert!(state.ticker.read().await.prices_are_fresh(Utc::now()));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn failed_ticker_fallback_backs_off_and_recovers_on_push_or_retry() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let available = Arc::new(AtomicBool::new(false));
+        let app = Router::new()
+            .route(
+                "/fapi/v1/ticker/24hr",
+                get({
+                    let calls = calls.clone();
+                    move || {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        async { axum::http::StatusCode::SERVICE_UNAVAILABLE }
+                    }
+                }),
+            )
+            .route(
+                "/fapi/v1/ticker/price",
+                get({
+                    let calls = calls.clone();
+                    let available = available.clone();
+                    move || {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        let available = available.load(Ordering::SeqCst);
+                        async move {
+                            if available {
+                                (
+                                    axum::http::StatusCode::OK,
+                                    Json(serde_json::json!({"symbol": "SOLUSDC", "price": "101", "time": 1})),
+                                )
+                            } else {
+                                (
+                                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                                    Json(serde_json::json!({})),
+                                )
+                            }
+                        }
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let config = AppConfig::default();
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let (action_tx, action_rx) = mpsc::channel(1);
+        let (_, ticker_rx) = broadcast::channel(1);
+        let state = AppState::new(config.clone(), db, action_tx);
+        let client = Arc::new(BinanceFuturesClient::with_base_url(&config.exchange, url));
+        let mut engine = GridTradingEngine::new(state.clone(), client, action_rx, ticker_rx);
+        let symbol = &config.exchange.symbol;
+
+        engine.refresh_stale_ticker(symbol).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        engine.refresh_stale_ticker(symbol).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(!state.ticker.read().await.prices_are_fresh(Utc::now()));
+        engine
+            .handle_ticker_update(TickerInfo {
+                symbol: symbol.clone(),
+                last_price: dec!(100),
+                update_time: Utc::now(),
+                ..Default::default()
+            })
+            .await;
+        assert!(engine.ticker_retry.ready());
+        assert!(state.ticker.read().await.prices_are_fresh(Utc::now()));
+
+        state.ticker.write().await.update_time = Utc::now() - chrono::Duration::seconds(16);
+        engine.refresh_stale_ticker(symbol).await;
+        assert!(!engine.ticker_retry.ready());
+        available.store(true, Ordering::SeqCst);
+        engine.ticker_retry.retry_at = Some(Instant::now() - std::time::Duration::from_secs(1));
+        engine.refresh_stale_ticker(symbol).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 6);
+        assert_eq!(state.ticker.read().await.last_price, dec!(101));
         assert!(state.ticker.read().await.prices_are_fresh(Utc::now()));
         server.abort();
     }
@@ -4383,7 +4541,7 @@ mod tests {
         let (_, ticker_rx) = broadcast::channel(1);
         let state = AppState::new(config.clone(), db, action_tx);
         let client = Arc::new(BinanceFuturesClient::with_base_url(&config.exchange, url));
-        let engine = GridTradingEngine::new(state.clone(), client, action_rx, ticker_rx);
+        let mut engine = GridTradingEngine::new(state.clone(), client, action_rx, ticker_rx);
         let ((), ()) = tokio::join!(
             engine.refresh_mark_price(&config.exchange.symbol, true),
             async {

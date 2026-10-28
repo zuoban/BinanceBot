@@ -103,8 +103,15 @@ async fn simulated_live_reconciliation() {
 
     let pairs = parameter("BENCH_PAIRS", 30);
     let seconds = parameter("BENCH_SECONDS", 65);
+    let outage_secs = parameter("BENCH_OUTAGE_SECS", 0);
+    let fail_mark = parameter("BENCH_FAIL_MARK", 0) != 0;
+    let outage_start = Duration::from_secs(6);
     assert!(pairs > 0 && seconds >= 4);
+    assert!(outage_secs == 0 || seconds > outage_secs + 11);
+    let start = tokio::time::Instant::now();
+    let outage_end = outage_start + Duration::from_secs(outage_secs as u64);
     let mark_calls = Arc::new(AtomicUsize::new(0));
+    let ticker_calls = Arc::new(AtomicUsize::new(0));
     let order_calls = Arc::new(AtomicUsize::new(0));
     let account_calls = Arc::new(AtomicUsize::new(0));
     let position_calls = Arc::new(AtomicUsize::new(0));
@@ -128,7 +135,36 @@ async fn simulated_live_reconciliation() {
                 let calls = mark_calls.clone();
                 move || {
                     calls.fetch_add(1, Ordering::Relaxed);
-                    async { Json(json!({"symbol": "IGNORED", "markPrice": "100"})) }
+                    async move {
+                        let elapsed = start.elapsed();
+                        if fail_mark && elapsed >= outage_start && elapsed < outage_end {
+                            (
+                                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                                Json(json!({"code": -1000})),
+                            )
+                        } else {
+                            (
+                                axum::http::StatusCode::OK,
+                                Json(json!({"symbol": "IGNORED", "markPrice": "100"})),
+                            )
+                        }
+                    }
+                }
+            }),
+        )
+        .route(
+            "/fapi/v1/ticker/24hr",
+            get({
+                let calls = ticker_calls.clone();
+                move |Query(query): Query<HashMap<String, String>>| {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    async move {
+                        Json(json!({
+                            "symbol": query.get("symbol").cloned().unwrap_or_default(),
+                            "lastPrice": "100", "priceChange": "0", "priceChangePercent": "0",
+                            "highPrice": "100", "lowPrice": "100", "volume": "1", "quoteVolume": "100"
+                        }))
+                    }
                 }
             }),
         )
@@ -198,7 +234,6 @@ async fn simulated_live_reconciliation() {
     let account_cache = Arc::new(AccountCache::default());
     let position_cache = Arc::new(PositionCache::default());
     let limiter = Arc::new(RateLimiter::default());
-    let start = tokio::time::Instant::now();
     let deadline = start + Duration::from_secs(seconds as u64);
     let mut probe_config = AppConfig::default().exchange;
     probe_config.api_key = "benchmark-key".into();
@@ -243,23 +278,29 @@ async fn simulated_live_reconciliation() {
             let mut samples = Vec::new();
             let mut orders_ok = 0;
             let mut account_ok = 0;
+            let mut outage_fresh = 0;
+            let mut outage_stale = 0;
+            let mut recovery_fresh = 0;
             loop {
                 let scheduled = timer.tick().await;
                 if scheduled >= deadline || tokio::time::Instant::now() >= deadline {
                     break;
                 }
-                // Model a fresh mark-price push before each reconciliation.
-                let now = Utc::now();
-                engine
-                    .handle_ticker_update(TickerInfo {
-                        symbol: config.exchange.symbol.clone(),
-                        last_price: dec!(100),
-                        mark_price: dec!(100),
-                        update_time: now,
-                        mark_update_time: now,
-                        ..Default::default()
-                    })
-                    .await;
+                let elapsed = start.elapsed();
+                let in_outage = outage_secs > 0 && elapsed >= outage_start && elapsed < outage_end;
+                if !in_outage {
+                    let now = Utc::now();
+                    engine
+                        .handle_ticker_update(TickerInfo {
+                            symbol: config.exchange.symbol.clone(),
+                            last_price: dec!(100),
+                            mark_price: dec!(100),
+                            update_time: now,
+                            mark_update_time: now,
+                            ..Default::default()
+                        })
+                        .await;
+                }
                 engine.last_orders_sync = None;
                 engine.last_account_sync = None;
                 let cycle_start = Instant::now();
@@ -267,18 +308,43 @@ async fn simulated_live_reconciliation() {
                 samples.push(cycle_start.elapsed().as_secs_f64() * 1000.0);
                 orders_ok += usize::from(engine.last_orders_sync.is_some());
                 account_ok += usize::from(engine.last_account_sync.is_some());
+                let fresh = engine
+                    .state
+                    .ticker
+                    .read()
+                    .await
+                    .prices_are_fresh(Utc::now());
+                if in_outage {
+                    outage_fresh += usize::from(fresh);
+                    outage_stale += usize::from(!fresh);
+                } else if outage_secs > 0 && elapsed >= outage_end {
+                    recovery_fresh += usize::from(fresh);
+                }
             }
-            (samples, orders_ok, account_ok)
+            (
+                samples,
+                orders_ok,
+                account_ok,
+                outage_fresh,
+                outage_stale,
+                recovery_fresh,
+            )
         }));
     }
     let mut samples = Vec::new();
     let mut orders_ok = 0;
     let mut account_ok = 0;
+    let mut outage_fresh = 0;
+    let mut outage_stale = 0;
+    let mut recovery_fresh = 0;
     for result in join_all(tasks).await {
-        let (cycle_samples, orders, account) = result.unwrap();
+        let (cycle_samples, orders, account, fresh, stale, recovered) = result.unwrap();
         samples.extend(cycle_samples);
         orders_ok += orders;
         account_ok += account;
+        outage_fresh += fresh;
+        outage_stale += stale;
+        recovery_fresh += recovered;
     }
     let (emergency_list_ok, emergency_cancel_ok) = emergency.await.unwrap();
     server.abort();
@@ -287,8 +353,16 @@ async fn simulated_live_reconciliation() {
     samples.sort_by(f64::total_cmp);
     let percentile = |percent: usize| samples[(cycles - 1) * percent / 100];
     let marks = mark_calls.load(Ordering::Relaxed);
-    assert_eq!(marks, 0, "fresh pushed marks must not trigger REST");
+    if outage_secs == 0 {
+        assert_eq!(marks, 0, "fresh pushed marks must not trigger REST");
+    } else {
+        assert!(marks > 0 && recovery_fresh > 0);
+        if fail_mark && outage_secs >= 18 {
+            assert!(outage_stale > 0, "expired marks must stop trading");
+        }
+    }
     let orders = order_calls.load(Ordering::Relaxed);
+    let tickers = ticker_calls.load(Ordering::Relaxed);
     let accounts = account_calls.load(Ordering::Relaxed);
     let positions = position_calls.load(Ordering::Relaxed);
     assert_eq!(
@@ -300,8 +374,8 @@ async fn simulated_live_reconciliation() {
         usize::from(emergency_cancel_ok)
     );
     println!(
-        "pairs={pairs} seconds={seconds} cycles={cycles} orders_ok={orders_ok} account_position_ok={account_ok} mark_sent={marks} orders_sent={orders} account_sent={accounts} position_sent={positions} emergency_list_ok={emergency_list_ok} emergency_cancel_ok={emergency_cancel_ok} estimated_weight={} cycle_ms_p50={:.2} cycle_ms_p95={:.2} cycle_ms_p99={:.2}",
-        marks + orders + 5 * (accounts + positions),
+        "pairs={pairs} seconds={seconds} outage_secs={outage_secs} fail_mark={fail_mark} cycles={cycles} orders_ok={orders_ok} account_position_ok={account_ok} mark_sent={marks} ticker_sent={tickers} orders_sent={orders} account_sent={accounts} position_sent={positions} outage_fresh={outage_fresh} outage_stale={outage_stale} recovery_fresh={recovery_fresh} emergency_list_ok={emergency_list_ok} emergency_cancel_ok={emergency_cancel_ok} estimated_weight={} cycle_ms_p50={:.2} cycle_ms_p95={:.2} cycle_ms_p99={:.2}",
+        marks + tickers + orders + 5 * (accounts + positions),
         percentile(50),
         percentile(95),
         percentile(99)

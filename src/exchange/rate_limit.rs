@@ -18,6 +18,7 @@ const ORDERS_CRITICAL_1M: u64 = 1100;
 #[derive(Clone, Copy)]
 pub(crate) enum RequestClass {
     Normal,
+    MarketFallback,
     Critical,
     OpeningOrder,
     ClosingOrder,
@@ -127,6 +128,11 @@ impl RateLimiter {
         .min(endpoint.ip_limit.map_or(u64::MAX, |limit| {
             limit.saturating_mul(if class.critical() { 95 } else { 75 }) / 100
         }));
+        let weight_limit = if matches!(class, RequestClass::MarketFallback) {
+            weight_limit.saturating_mul(3) / 4
+        } else {
+            weight_limit
+        };
         if endpoint.weight.total().saturating_add(weight) > weight_limit {
             return Err(format!(
                 "local Binance IP request-weight budget reached ({weight_limit}/minute)"
@@ -287,6 +293,43 @@ mod tests {
             .is_ok());
         assert!(limiter
             .reserve("testnet", [1; 32], 1, RequestClass::Normal)
+            .is_ok());
+    }
+
+    #[test]
+    fn market_fallback_preserves_normal_budget_and_recovers_when_window_expires() {
+        let limiter = RateLimiter::default();
+        let fallback_limit = IP_NORMAL * 3 / 4;
+        limiter
+            .reserve(
+                "main",
+                [1; 32],
+                fallback_limit,
+                RequestClass::MarketFallback,
+            )
+            .unwrap();
+        assert!(limiter
+            .reserve("main", [2; 32], 1, RequestClass::MarketFallback)
+            .is_err());
+        assert!(limiter
+            .reserve(
+                "main",
+                [2; 32],
+                IP_NORMAL - fallback_limit,
+                RequestClass::Normal
+            )
+            .is_ok());
+        assert!(limiter
+            .reserve("main", [2; 32], 1, RequestClass::Critical)
+            .is_ok());
+        let mut endpoints = limiter.endpoints.lock().unwrap();
+        let counter = &mut endpoints.get_mut("main").unwrap().weight;
+        for (time, _) in &mut counter.events {
+            *time = Instant::now() - MINUTE;
+        }
+        drop(endpoints);
+        assert!(limiter
+            .reserve("main", [2; 32], 1, RequestClass::MarketFallback)
             .is_ok());
     }
 

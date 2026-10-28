@@ -242,7 +242,21 @@ impl BinanceFuturesClient {
 
     /// Fetch the latest traded price.
     pub async fn get_ticker_price(&self, symbol: &str) -> Result<Decimal> {
-        self.reserve(1, RequestClass::Normal)?;
+        self.get_ticker_price_with_class(symbol, RequestClass::Normal)
+            .await
+    }
+
+    pub(crate) async fn get_ticker_price_for_fallback(&self, symbol: &str) -> Result<Decimal> {
+        self.get_ticker_price_with_class(symbol, RequestClass::MarketFallback)
+            .await
+    }
+
+    async fn get_ticker_price_with_class(
+        &self,
+        symbol: &str,
+        class: RequestClass,
+    ) -> Result<Decimal> {
+        self.reserve(1, class)?;
         let url = format!("{}/fapi/v1/ticker/price?symbol={}", self.base_url, symbol);
         let resp = self.send(self.client.get(&url)).await?.error_for_status()?;
         let ticker: BinanceTickerPrice = resp.json().await?;
@@ -251,7 +265,21 @@ impl BinanceFuturesClient {
 
     /// Fetch the futures mark price, which differs from the latest traded price.
     pub async fn get_mark_price(&self, symbol: &str) -> Result<Decimal> {
-        self.reserve(1, RequestClass::Normal)?;
+        self.get_mark_price_with_class(symbol, RequestClass::Normal)
+            .await
+    }
+
+    pub(crate) async fn get_mark_price_for_fallback(&self, symbol: &str) -> Result<Decimal> {
+        self.get_mark_price_with_class(symbol, RequestClass::MarketFallback)
+            .await
+    }
+
+    async fn get_mark_price_with_class(
+        &self,
+        symbol: &str,
+        class: RequestClass,
+    ) -> Result<Decimal> {
+        self.reserve(1, class)?;
         let url = format!("{}/fapi/v1/premiumIndex?symbol={}", self.base_url, symbol);
         let resp = self.send(self.client.get(&url)).await?.error_for_status()?;
         let mark: BinanceMarkPrice = resp.json().await?;
@@ -260,7 +288,24 @@ impl BinanceFuturesClient {
 
     /// Fetch 24-hour ticker statistics
     pub async fn get_24hr_ticker(&self, symbol: &str) -> Result<Binance24hrTicker> {
-        self.reserve(1, RequestClass::Normal)?;
+        self.get_24hr_ticker_with_class(symbol, RequestClass::Normal)
+            .await
+    }
+
+    pub(crate) async fn get_24hr_ticker_for_fallback(
+        &self,
+        symbol: &str,
+    ) -> Result<Binance24hrTicker> {
+        self.get_24hr_ticker_with_class(symbol, RequestClass::MarketFallback)
+            .await
+    }
+
+    async fn get_24hr_ticker_with_class(
+        &self,
+        symbol: &str,
+        class: RequestClass,
+    ) -> Result<Binance24hrTicker> {
+        self.reserve(1, class)?;
         let url = format!("{}/fapi/v1/ticker/24hr?symbol={}", self.base_url, symbol);
         let resp = self.send(self.client.get(&url)).await?.error_for_status()?;
         let ticker: Binance24hrTicker = resp.json().await?;

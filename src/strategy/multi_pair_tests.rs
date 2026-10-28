@@ -257,7 +257,7 @@ async fn running_engine_reschedules_sync_after_global_updates_and_keeps_rejected
             let sync_tx = sync_tx.clone();
             async move {
                 let _ = sync_tx.send(());
-                Json(json!({"symbol": "SOLUSDC", "markPrice": "0"}))
+                Json(json!({"symbol": "SOLUSDC", "markPrice": "100"}))
             }
         }),
     );
@@ -282,11 +282,29 @@ async fn running_engine_reschedules_sync_after_global_updates_and_keeps_rejected
     let engine_task = tokio::spawn(async move { engine.run().await });
 
     let outcome = async {
+        async fn expire_mark_after_response(state: &Arc<crate::server::state::AppState>) {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let mut ticker = state.ticker.write().await;
+                    if ticker.mark_price > rust_decimal::Decimal::ZERO
+                        && Utc::now() - ticker.mark_update_time < chrono::Duration::seconds(8)
+                    {
+                        ticker.mark_update_time = Utc::now() - chrono::Duration::seconds(16);
+                        return;
+                    }
+                    drop(ticker);
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        }
         // Observe the initial real synchronization request before changing the interval.
         tokio::time::timeout(Duration::from_secs(2), sync_rx.recv())
             .await
             .unwrap()
             .unwrap();
+        expire_mark_after_response(&state).await;
         for seconds in [30, 1] {
             let mut config = crate::config::GlobalConfig::from_app(&*state.config.read().await);
             config.sync_interval_secs = seconds;
@@ -324,6 +342,7 @@ async fn running_engine_reschedules_sync_after_global_updates_and_keeps_rejected
                     .await
                     .unwrap()
                     .unwrap();
+                expire_mark_after_response(&state).await;
             }
         }
 
@@ -495,9 +514,15 @@ async fn mode_changes_keep_pause_after_database_reopen_for_live_and_testnet() {
             url.clone(),
         ));
         let mut engine = GridTradingEngine::new(state.clone(), client, rx, ticker_rx);
+        engine.mark_retry.failed();
+        engine.ticker_retry.failed();
+        assert!(!engine.mark_retry.ready());
+        assert!(!engine.ticker_retry.ready());
         let mut live = paper;
         live.exchange.dry_run = false;
         engine.apply_config(live.clone()).await.unwrap();
+        assert!(engine.mark_retry.ready());
+        assert!(engine.ticker_retry.ready());
         assert_eq!(*state.status.read().await, BotStatus::Paused);
         // Reopen directly, without a Shutdown action that could conceal a missing status commit.
         let reopened = Arc::new(Database::open(&path).unwrap());
