@@ -251,7 +251,7 @@ pub fn format_trade_message(trade: &TradeRecord, context: &TradeNotificationCont
     };
     let quote = quote_asset(&trade.symbol);
     let base = trade.symbol.strip_suffix(quote).unwrap_or("");
-    let average_price = trade.price.round_dp(4);
+    let average_price = trade.price.normalize();
     let count = |value: Option<u64>| value.map_or_else(|| "--".to_string(), |n| n.to_string());
     let money = |value: Option<Decimal>| {
         value.map_or_else(
@@ -290,7 +290,7 @@ pub fn format_trade_message(trade: &TradeRecord, context: &TradeNotificationCont
         String::new()
     };
     format!(
-        "<b>{icon} {direction}｜{average_price:.4}｜{quantity} {base}｜{amount:.2} {quote}｜{today}｜{hour}</b>\n<b>账户权益：{equity}｜</b>{cny}\n持仓金额：{position_amount}\n可用保证金：{available}｜{ratio}{pnl_line}",
+        "<b>{icon} {direction}｜{average_price}｜{quantity} {base}｜{amount:.2} {quote}｜{today}｜{hour}</b>\n<b>账户权益：{equity}｜</b>{cny}\n持仓金额：{position_amount}\n可用保证金：{available}｜{ratio}{pnl_line}",
         direction = trade.side.as_str(),
         quantity = trade.quantity.normalize(),
         base = escape_html(base),
@@ -437,7 +437,7 @@ mod tests {
         let trade = trade(OrderSide::Buy);
         assert_eq!(
             format_trade_message(&trade, &context(&trade)),
-            "<b>🟢 BUY｜123.4500｜2 SOL｜246.90 USDC｜7｜2</b>\n<b>账户权益：11254.48 USDC｜</b>≈ ¥75453.41\n持仓金额：2469.00 USDC\n可用保证金：3878.03 USDC｜34.46%"
+            "<b>🟢 BUY｜123.45｜2 SOL｜246.90 USDC｜7｜2</b>\n<b>账户权益：11254.48 USDC｜</b>≈ ¥75453.41\n持仓金额：2469.00 USDC\n可用保证金：3878.03 USDC｜34.46%"
         );
     }
 
@@ -554,7 +554,7 @@ mod tests {
         trade.commission = dec!(0.80);
         assert_eq!(
             format_trade_message(&trade, &context(&trade)),
-            "<b>🔴 SELL｜123.4500｜2 SOL｜246.90 USDC｜4｜1</b>\n<b>账户权益：11254.48 USDC｜</b>≈ ¥75453.41\n持仓金额：2469.00 USDC\n可用保证金：3878.03 USDC｜34.46%\n已实现盈亏：-3.2500 USDC"
+            "<b>🔴 SELL｜123.45｜2 SOL｜246.90 USDC｜4｜1</b>\n<b>账户权益：11254.48 USDC｜</b>≈ ¥75453.41\n持仓金额：2469.00 USDC\n可用保证金：3878.03 USDC｜34.46%\n已实现盈亏：-3.2500 USDC"
     );
         trade.realized_pnl = dec!(1.25);
         assert!(
@@ -580,11 +580,19 @@ mod tests {
                     "🔴"
                 };
                 assert!(message.starts_with(&format!(
-                    "<b>{icon} {}｜117.1235｜4.27 SOL｜500.12 USDC｜--｜--</b>",
+                    "<b>{icon} {}｜117.123456｜4.27 SOL｜500.12 USDC｜--｜--</b>",
                     side.as_str()
                 )));
             }
         }
+    }
+
+    #[test]
+    fn title_preserves_small_execution_price() {
+        let mut trade = trade(OrderSide::Buy);
+        trade.price = dec!(0.0000123400);
+        let message = format_trade_message(&trade, &TradeNotificationContext::default());
+        assert!(message.starts_with("<b>🟢 BUY｜0.00001234｜"));
     }
 
     #[test]
