@@ -82,6 +82,55 @@ impl Database {
         &self.path
     }
 
+    pub fn save_hourly_account_snapshot(
+        &self,
+        hour: i64,
+        groups: &[crate::snapshots::SnapshotGroup],
+    ) -> Result<()> {
+        let payload = serde_json::to_string(groups)?;
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT OR IGNORE INTO account_hourly_snapshots (hour, payload) VALUES (?1, ?2)",
+            params![hour, payload],
+        )?;
+        tx.execute(
+            "DELETE FROM account_hourly_snapshots WHERE hour < ?1",
+            params![hour - 30 * 24 * 3600],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn cleanup_hourly_account_snapshots(&self, now: i64) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "DELETE FROM account_hourly_snapshots WHERE hour < ?1",
+            params![now - 30 * 24 * 3600],
+        )?;
+        Ok(())
+    }
+
+    pub fn hourly_account_snapshots(
+        &self,
+        since: i64,
+    ) -> Result<Vec<crate::snapshots::HourlySnapshot>> {
+        let conn = self.conn.lock().unwrap();
+        let mut statement = conn.prepare(
+            "SELECT hour, payload FROM account_hourly_snapshots WHERE hour >= ?1 ORDER BY hour",
+        )?;
+        let rows = statement.query_map(params![since], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.map(|row| {
+            let (hour, payload) = row?;
+            Ok(crate::snapshots::HourlySnapshot {
+                hour,
+                groups: serde_json::from_str(&payload)?,
+            })
+        })
+        .collect()
+    }
+
     pub(crate) fn trade_data_revision(&self) -> u64 {
         self.trade_revision.load(Ordering::Acquire)
     }
@@ -195,6 +244,11 @@ impl Database {
                 symbol TEXT NOT NULL,
                 config_json TEXT NOT NULL,
                 updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS account_hourly_snapshots (
+                hour INTEGER PRIMARY KEY,
+                payload TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS pair_runtime (

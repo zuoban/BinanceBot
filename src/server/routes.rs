@@ -259,6 +259,7 @@ pub async fn create_managed_router(handle: RuntimeHandle) -> Router {
             get(get_managed_pairs_handler).post(add_pair_handler),
         )
         .route("/api/overview", get(get_managed_overview_handler))
+        .route("/api/overview/history", get(get_overview_history_handler))
         .route("/api/pairs/:symbol", delete(remove_pair_handler))
         .route(
             "/api/pairs/:symbol/:resource",
@@ -356,6 +357,31 @@ async fn get_managed_overview_handler(
     // do not hold up pair additions or removals during database work.
     let states = handle.states.read().await.clone();
     get_overview_handler(State(Arc::new(states))).await
+}
+
+async fn get_overview_history_handler(
+    State(handle): State<RuntimeHandle>,
+) -> Json<ApiResponse<Vec<crate::snapshots::HourlySnapshot>>> {
+    let since = chrono::Utc::now().timestamp() - 24 * 3600;
+    match handle
+        .db
+        .run_blocking(move |db| db.hourly_account_snapshots(since))
+        .await
+    {
+        Ok(data) => Json(ApiResponse {
+            success: true,
+            data: Some(data),
+            message: None,
+        }),
+        Err(error) => {
+            tracing::warn!(%error, "Could not read account snapshots");
+            Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some("无法读取历史快照".into()),
+            })
+        }
+    }
 }
 
 async fn add_pair_handler(

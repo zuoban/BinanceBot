@@ -225,6 +225,7 @@ async fn management_authenticates_add_remove_server_settings_and_pair_resources(
     let router = create_managed_router(runtime.handle()).await;
     for (path, method, body) in [
         ("/api/overview", "GET", Value::Null),
+        ("/api/overview/history", "GET", Value::Null),
         ("/api/pairs", "POST", payload("ETHUSDT")),
         ("/api/pairs/SOLUSDC", "DELETE", json!({"confirm":true})),
         ("/api/server/config", "GET", Value::Null),
@@ -253,6 +254,29 @@ async fn management_authenticates_add_remove_server_settings_and_pair_resources(
             .len(),
         2
     );
+}
+
+#[tokio::test]
+async fn overview_history_returns_saved_snapshots() {
+    let runtime = fixture();
+    let hour = chrono::Utc::now().timestamp().div_euclid(3600) * 3600;
+    let group = crate::snapshots::SnapshotGroup {
+        mode: TradingMode::Paper,
+        asset: "USDC".into(),
+        equity: Some(rust_decimal_macros::dec!(100)),
+        long: Some(rust_decimal_macros::dec!(20)),
+        short: Some(rust_decimal_macros::dec!(0)),
+    };
+    runtime
+        .handle
+        .db
+        .save_hourly_account_snapshot(hour, &[group])
+        .unwrap();
+    let router = create_managed_router(runtime.handle()).await;
+    let (status, body) = request(&router, "/api/overview/history", "GET", Value::Null, true).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"][0]["hour"], hour);
+    assert_eq!(body["data"][0]["groups"][0]["asset"], "USDC");
 }
 
 #[tokio::test]

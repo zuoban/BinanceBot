@@ -25,6 +25,7 @@ struct Exchange {
     lose_cancel_response: Arc<AtomicBool>,
     hide_open_orders: Arc<AtomicBool>,
     rules_unavailable: Arc<AtomicBool>,
+    position_unavailable: Arc<AtomicBool>,
 }
 
 async fn exchange_server(fake: Exchange) -> (String, JoinHandle<()>) {
@@ -97,8 +98,11 @@ async fn exchange_server(fake: Exchange) -> (String, JoinHandle<()>) {
             }
             (StatusCode::OK, Json(serde_json::to_value(found).unwrap()))
         }))
-        .route("/fapi/v2/positionRisk", get(|| async {
-            Json(json!([{"symbol":"SOLUSDC", "positionAmt":"1", "entryPrice":"100", "markPrice":"100.5", "unRealizedProfit":"0.5", "liquidationPrice":"0", "leverage":"1"}]))
+        .route("/fapi/v2/positionRisk", get(|State(fake): State<Exchange>| async move {
+            if fake.position_unavailable.load(Ordering::SeqCst) {
+                return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"msg":"unavailable"})));
+            }
+            (StatusCode::OK, Json(json!([{"symbol":"SOLUSDC", "positionAmt":"1", "entryPrice":"100", "markPrice":"100.5", "unRealizedProfit":"0.5", "liquidationPrice":"0", "leverage":"1"}])))
         }))
         .route("/fapi/v2/account", get(|| async {
             Json(json!({"totalWalletBalance":"10000", "totalMarginBalance":"10000", "totalUnrealizedProfit":"0", "availableBalance":"10000", "assets":[{"asset":"USDC", "walletBalance":"10000", "marginBalance":"10000", "availableBalance":"10000", "unrealizedProfit":"0"}]}))
@@ -156,6 +160,20 @@ async fn engine(db: Arc<Database>, url: &str) -> GridTradingEngine {
     engine.last_account_sync = Some(Instant::now());
     engine.last_orders_sync = Some(Instant::now());
     engine
+}
+
+#[tokio::test]
+async fn position_sync_marks_data_valid_only_after_success() {
+    let fake = Exchange::default();
+    let (url, server) = exchange_server(fake.clone()).await;
+    let mut engine = engine(Arc::new(Database::open(":memory:").unwrap()), &url).await;
+    assert!(engine.state.position.read().await.update_time.is_none());
+    assert!(engine.sync_account_and_position().await);
+    assert!(engine.state.position.read().await.update_time.is_some());
+    fake.position_unavailable.store(true, Ordering::SeqCst);
+    assert!(!engine.sync_account_and_position().await);
+    assert!(engine.state.position.read().await.update_time.is_none());
+    server.abort();
 }
 
 fn database() -> Arc<Database> {

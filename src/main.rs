@@ -90,6 +90,9 @@ async fn main() -> anyhow::Result<()> {
     // Bind before starting any engine, including initialization-time reconciliation.
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let mut runtime = TradingRuntime::start(&config, db).await?;
+    let snapshot_task = tokio::spawn(binance_grid_bot::snapshots::run_hourly_snapshots(
+        runtime.handle(),
+    ));
     let states = runtime.states();
     if let Some(code) = states[0].setup_code() {
         info!(
@@ -120,6 +123,7 @@ async fn main() -> anyhow::Result<()> {
         message = runtime.run() => Err(anyhow::anyhow!(message)),
     };
     info!("Stopping bot: {:?}", reason);
+    snapshot_task.abort();
     let cleanup = runtime.shutdown(Duration::from_secs(30)).await;
     if let Err(error) = &cleanup {
         error!("Shutdown cleanup incomplete: {}", error);

@@ -51,6 +51,10 @@ export interface Snapshot {
   hourly_trade_stats: { window_start: string; window_end: string; buckets: { hour_start: string; buy_count: number; sell_count: number }[] } | null;
 }
 export interface Overview { generated_at: string; pairs: { scoped: boolean; mode: Mode; snapshot: Snapshot }[] }
+export interface HourlySnapshot {
+  hour: number;
+  groups: { mode: Mode; asset: string; equity: Decimal | null; long: Decimal | null; short: Decimal | null }[];
+}
 export interface GlobalConfig {
   recv_window: number; sync_interval_secs: number; has_api_key: boolean; has_api_secret: boolean;
   api_key_preview: string; telegram_enabled: boolean; has_telegram_bot_token: boolean; telegram_chat_id: string;

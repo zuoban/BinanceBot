@@ -9,6 +9,7 @@ import { ErrorNotice, ModeTag, PageTitle, Pnl, StatusTag } from '../components/C
 import { PairControls, runBatchControls, useControls } from '../components/Controls';
 import type { Pair } from '../lib/types';
 import { OverviewLoading } from '../components/Loading';
+import { OverviewHistory } from '../components/OverviewHistory';
 
 const number = (value: unknown, digits?: number) => trimFractionZeros(fixedNumber(value, digits));
 const price = (value: unknown) => trimFractionZeros(fixedPrice(value));
@@ -98,6 +99,7 @@ export default function OverviewPage() {
         </Col>)}
       </Row>
     </>}
+    <OverviewHistory />
     <div className="section-heading"><h2>交易策略 <span>{pairs.length.toString().padStart(2, '0')}</span></h2>
       <Dropdown trigger={['click']} disabled={batchBusy || controls.busy.size > 0 || !pairs.length} menu={{ items: [{ key: 'resume', label: '全部恢复', disabled: stale }, { key: 'pause', label: '全部暂停' }], onClick: ({ key }) => void batch(key as 'pause' | 'resume') }}>
         <Button loading={batchBusy} icon={<ThunderboltOutlined />}>批量操作</Button>

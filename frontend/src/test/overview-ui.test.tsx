@@ -13,7 +13,7 @@ beforeEach(() => {
   vi.stubGlobal('matchMedia', vi.fn().mockImplementation(query => ({ matches: false, media: query, addListener: vi.fn(), removeListener: vi.fn(), addEventListener: vi.fn(), removeEventListener: vi.fn() })));
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
 });
-vi.mock('../lib/queries', () => ({ useOverview: () => overview }));
+vi.mock('../lib/queries', () => ({ useOverview: () => overview, useOverviewHistory: () => ({ data: [], isPending: false, error: null }) }));
 vi.mock('../components/Controls', () => ({ useControls: () => ({ busy: new Set(), results: {}, run: vi.fn() }), PairControls: () => null, runBatchControls: vi.fn() }));
 
 it('keeps the refresh icon stable during polling and disables it only during a manual refresh', async () => {

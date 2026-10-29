@@ -989,6 +989,9 @@ impl GridTradingEngine {
         }
 
         self.client = new_client;
+        if client_changed {
+            self.state.position.write().await.update_time = None;
+        }
         if fetch_rules {
             *self.state.rules.write().await = new_rules;
             self.exchange_rules_loaded = true;
@@ -1010,12 +1013,9 @@ impl GridTradingEngine {
             self.last_orders_sync = None;
             if new_config.exchange.dry_run {
                 *self.state.account.write().await = AccountInfo {
-                    asset: if new_config.exchange.symbol.ends_with("USDT") {
-                        "USDT"
-                    } else {
-                        "USDC"
-                    }
-                    .to_string(),
+                    asset: quote_asset(&new_config.exchange.symbol)
+                        .unwrap_or(&new_config.exchange.symbol)
+                        .to_string(),
                     total_wallet_balance: rust_decimal_macros::dec!(10000),
                     available_balance: rust_decimal_macros::dec!(10000),
                     margin_balance: rust_decimal_macros::dec!(10000),
@@ -1937,7 +1937,7 @@ impl GridTradingEngine {
             result.map(|position| (position, received_at))
         };
         let position_instant = position_result.as_ref().ok().map(|(_, at)| *at);
-        let position_ok = if let Ok((Some(pos), _)) = position_result {
+        let position_ok = if let Ok((Some(pos), received_at)) = position_result {
             let mut state_pos = self.state.position.write().await;
             state_pos.symbol = pos.symbol;
             state_pos.size = pos.position_amt;
@@ -1946,8 +1946,12 @@ impl GridTradingEngine {
             state_pos.unrealized_pnl = pos.un_realized_profit;
             state_pos.liquidation_price = pos.liquidation_price;
             state_pos.leverage = pos.leverage.parse().unwrap_or(20);
+            state_pos.update_time = chrono::Duration::from_std(received_at.elapsed())
+                .ok()
+                .map(|age| Utc::now() - age);
             true
         } else {
+            self.state.position.write().await.update_time = None;
             warn!("Could not sync Binance position for {}", symbol);
             false
         };

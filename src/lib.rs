@@ -6,6 +6,7 @@ pub mod fx;
 pub mod lifecycle;
 pub mod runtime;
 pub mod server;
+pub mod snapshots;
 pub mod strategy;
 pub mod telegram;
 pub mod types;

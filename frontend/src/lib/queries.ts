@@ -1,13 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, pairPath, socketUrl, tokenStore } from './api';
-import type { Overview, Pair, Snapshot } from './types';
+import type { HourlySnapshot, Overview, Pair, Snapshot } from './types';
 
 export function usePairs() {
   return useQuery({ queryKey: ['pairs'], queryFn: ({ signal }) => api<Pair[]>('/api/pairs', { signal }), refetchInterval: 10_000 });
 }
 export function useOverview() {
   return useQuery({ queryKey: ['overview'], queryFn: ({ signal }) => api<Overview>('/api/overview', { signal }), refetchInterval: 3000 });
+}
+export function useOverviewHistory() {
+  return useQuery({ queryKey: ['overview-history'], queryFn: ({ signal }) => api<HourlySnapshot[]>('/api/overview/history', { signal }), refetchInterval: 60_000 });
 }
 
 export function useSocket<T>(path: string | undefined, onData: (data: T) => void) {

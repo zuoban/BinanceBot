@@ -147,12 +147,7 @@ impl AppState {
 
         let initial_account = if config.exchange.dry_run {
             AccountInfo {
-                asset: if symbol.ends_with("USDT") {
-                    "USDT"
-                } else {
-                    "USDC"
-                }
-                .to_string(),
+                asset: quote_asset(&symbol).unwrap_or(&symbol).to_string(),
                 total_wallet_balance: rust_decimal_macros::dec!(10000.0),
                 available_balance: rust_decimal_macros::dec!(10000.0),
                 margin_balance: rust_decimal_macros::dec!(10000.0),

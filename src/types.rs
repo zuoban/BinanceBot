@@ -194,6 +194,14 @@ pub struct PositionInfo {
     pub unrealized_pnl: Decimal,
     pub liquidation_price: Decimal,
     pub leverage: u32,
+    #[serde(default)]
+    pub update_time: Option<DateTime<Utc>>,
+}
+
+pub fn quote_asset(symbol: &str) -> Option<&str> {
+    ["FDUSD", "USDC", "USDT", "BUSD"]
+        .into_iter()
+        .find(|asset| symbol.ends_with(asset))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
