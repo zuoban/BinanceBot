@@ -1640,12 +1640,12 @@ impl GridTradingEngine {
     // Compatibility recovery only: adopted exchange orders are reconciled, but
     // an absent legacy counter-order is retired instead of creating a new pair.
     async fn pair_submission_decision(&mut self, _intent: &GridOrder) -> PairPlacementDecision {
-        if !self
+        if self
             .last_account_sync
-            .is_some_and(|at| at.elapsed() < Duration::from_secs(10))
-            || !self
+            .is_none_or(|at| at.elapsed() >= Duration::from_secs(10))
+            || self
                 .last_orders_sync
-                .is_some_and(|at| at.elapsed() < Duration::from_secs(10))
+                .is_none_or(|at| at.elapsed() >= Duration::from_secs(10))
         {
             return PairPlacementDecision::Wait;
         }
@@ -2580,17 +2580,17 @@ impl GridTradingEngine {
         }
 
         if !config.exchange.dry_run
-            && !self
+            && self
                 .last_account_sync
-                .is_some_and(|at| at.elapsed() < Duration::from_secs(10))
+                .is_none_or(|at| at.elapsed() >= Duration::from_secs(10))
         {
             warn!("Skipping order: Binance account or position has not been synchronized recently");
             return false;
         }
         if !config.exchange.dry_run
-            && !self
+            && self
                 .last_orders_sync
-                .is_some_and(|at| at.elapsed() < Duration::from_secs(10))
+                .is_none_or(|at| at.elapsed() >= Duration::from_secs(10))
         {
             warn!("Skipping order: Binance open orders have not been synchronized recently");
             return false;

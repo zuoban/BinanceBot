@@ -268,12 +268,12 @@ impl GridTradingEngine {
             return Ok(()); // Paired exits retain priority and their inventory reservation.
         }
         if !paper
-            && (!self
+            && (self
                 .last_account_sync
-                .is_some_and(|at| at.elapsed() < Duration::from_secs(10))
-                || !self
+                .is_none_or(|at| at.elapsed() >= Duration::from_secs(10))
+                || self
                     .last_orders_sync
-                    .is_some_and(|at| at.elapsed() < Duration::from_secs(10)))
+                    .is_none_or(|at| at.elapsed() >= Duration::from_secs(10)))
         {
             return Ok(());
         }
