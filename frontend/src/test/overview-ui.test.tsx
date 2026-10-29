@@ -65,10 +65,15 @@ it('summarizes statuses and lets the user clear a search with no results', async
   const summary = screen.getByLabelText('策略运行概览');
   expect(within(summary).getByText('运行中').parentElement).toHaveTextContent('1');
   expect(within(summary).getByText('策略总数').parentElement).toHaveTextContent('2');
-  expect(within(summary).queryByText('异常')).not.toBeInTheDocument();
+  expect(within(summary).getByRole('button', { name: '异常 1' })).toBeInTheDocument();
   expect(within(summary).getByText('今日成交').parentElement).toHaveTextContent('10 笔');
   expect(within(summary).getByText('买单 4 笔 / 卖单 6 笔')).toBeInTheDocument();
   const user = userEvent.setup();
+  await user.click(within(summary).getByRole('button', { name: '异常 1' }));
+  expect(screen.getByRole('status')).toHaveTextContent('当前筛选：异常');
+  expect(screen.getByText('SOLUSDC')).toBeInTheDocument();
+  expect(screen.queryByText('BTCUSDC')).not.toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: '清除筛选' }));
   await user.type(screen.getByLabelText('搜索交易对'), 'NOTFOUND');
   expect(screen.getByText('没有符合筛选条件的策略')).toBeInTheDocument();
   await user.click(screen.getAllByRole('button', { name: '清除筛选' })[0]);

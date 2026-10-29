@@ -55,20 +55,20 @@ export default function Shell() {
     await logout();
   }, [dirty, saving, logout, modal]);
   const sidebar = <><div className="sidebar-brand"><div className="brand-symbol">G</div><div><b>GRID CONSOLE</b><small>BINANCE FUTURES</small></div></div>
-    <div className="sidebar-caption">WORKSPACE</div>{menu}<div className="sidebar-footer">策略控制台 <small>操作前请核对运行模式</small></div></>;
+    {menu}<div className="sidebar-footer">操作前请核对运行模式</div></>;
   return <EditContext.Provider value={context}><AccountsContext.Provider value={accounts}><ControlProvider><Layout className="app-layout">
     <Layout.Sider width={232} className="desktop-sider">{sidebar}</Layout.Sider>
     <Drawer title="GRID CONSOLE" placement="left" open={open} onClose={() => setOpen(false)} styles={{ body: { padding: 0 } }} size={260}>{menu}<div className="drawer-actions"><Link to="/pairs/new" onClick={() => setOpen(false)}><Button icon={<PlusOutlined />}>新增交易对</Button></Link></div></Drawer>
     <Layout>
       <Layout.Header className="topbar">
         <Space><Button className="mobile-menu" icon={<MenuOutlined />} aria-label="打开导航" onClick={() => setOpen(true)} />
-          <span className="topbar-label">STRATEGY WORKSPACE</span><span className="topbar-separator">/</span><span className={selected === 'pair' && symbol !== 'new' ? 'topbar-current topbar-pair-current' : 'topbar-current'}>{selected === 'overview' ? '策略总览' : selected === 'settings' ? '全局设置' : '策略详情'}</span>
+          <span className={selected === 'pair' && symbol !== 'new' ? 'topbar-current topbar-pair-current' : 'topbar-current'}>{selected === 'overview' ? '策略总览' : selected === 'settings' ? '全局设置' : '策略详情'}</span>
         </Space>
         <Space>{selected === 'pair' && symbol !== 'new' && <Select className="topbar-pair-select" aria-label="切换交易对" value={symbol} options={pairs.data?.map(p => ({ value: p.symbol, label: p.symbol }))} onChange={value => navigate(`/pairs/${value}${location.pathname.endsWith('/config') ? '/config' : ''}`)} />}
           <ThemeSwitch /><Button type="text" icon={<LogoutOutlined />} onClick={() => void logOut()}>退出</Button></Space>
       </Layout.Header>
       <Layout.Content className="content"><Outlet /></Layout.Content>
-      <Layout.Footer className="footer"><span>GRID CONSOLE · 策略工作台</span><span>所有时间默认显示北京时间</span></Layout.Footer>
+      <Layout.Footer className="footer"><span>所有时间默认显示北京时间</span></Layout.Footer>
     </Layout>
   </Layout></ControlProvider></AccountsContext.Provider></EditContext.Provider>;
 }

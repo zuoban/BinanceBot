@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-29T14:00:00Z",
+  "title": "Design System: Grid Console",
+  "extensions": {
+    "colorMeta": {
+      "pine": { "role": "primary", "displayName": "深松绿", "canonical": "#176e59" },
+      "mist": { "role": "neutral", "displayName": "雾灰绿", "canonical": "#f4f6f3" },
+      "short": { "role": "semantic", "displayName": "暖陶红", "canonical": "#c26b55" }
+    },
+    "shadows": [
+      { "name": "strategy-hover", "value": "0 12px 30px #213e2f0d", "purpose": "策略卡悬停" },
+      { "name": "save-bar", "value": "0 8px 28px #2a40321a", "purpose": "浮动保存栏" }
+    ],
+    "motion": [ { "name": "strategy-hover", "value": "box-shadow .2s, transform .2s", "purpose": "策略卡悬停；遵循减少动态效果设置" } ],
+    "breakpoints": [ { "name": "navigation", "value": "991px" }, { "name": "mobile", "value": "600px" }, { "name": "compact", "value": "400px" } ]
+  },
+  "components": [
+    { "name": "Strategy Card", "kind": "card", "description": "以方向色和指标分组展示策略。", "html": "<div class=\"ds-card\"><strong>SOLUSDC</strong><p>标记价格</p><b>111.86</b></div>", "css": ".ds-card{padding:20px;border:1px solid #e7ede8;border-left:3px solid #238367;border-radius:12px;background:linear-gradient(135deg,#f0f8f2,#fff 45%);color:#183d30;font-family:DM Sans,sans-serif;transition:box-shadow .2s,transform .2s}.ds-card:hover{box-shadow:0 12px 30px #213e2f0d;transform:translateY(-2px)}.ds-card p{color:#66796d;font-size:12px}.ds-card b{font:500 27px DM Mono,monospace}" }
+  ],
+  "narrative": {
+    "northStar": "沉稳的交易工作台",
+    "overview": "沉稳、清晰，以任务和数据可读性为先；通过色面、边框和卡片组织信息。",
+    "keyCharacteristics": ["深松绿与雾灰绿", "等宽数据", "浅色和深色主题"],
+    "rules": [],
+    "dos": ["保持主题中的状态及数据可读性", "用文字或图标补充状态色"],
+    "donts": ["不要仅凭颜色传达状态", "不要让装饰妨碍数据扫描"]
+  }
+}

@@ -1,7 +1,7 @@
 import { useContext, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { App, Button, Card, Col, Dropdown, Empty, Input, Popover, Row, Select, Space, Statistic } from 'antd';
-import { ArrowDownOutlined, ArrowRightOutlined, ArrowUpOutlined, EyeOutlined, PlusOutlined, ReloadOutlined, SearchOutlined, ThunderboltOutlined } from '@ant-design/icons';
+import { ArrowDownOutlined, ArrowRightOutlined, ArrowUpOutlined, PlusOutlined, ReloadOutlined, SearchOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { useOverview } from '../lib/queries';
 import { AccountsContext } from '../lib/session';
 import { accountGroups, comparePositionAmount, modeLabel, number as fixedNumber, positionAmount, positionGroups, price as fixedPrice, quoteAsset, todayCount, todayTradeCounts, trimFractionZeros } from '../lib/format';
@@ -13,6 +13,7 @@ import { OverviewHistory } from '../components/OverviewHistory';
 
 const number = (value: unknown, digits?: number) => trimFractionZeros(fixedNumber(value, digits));
 const price = (value: unknown) => trimFractionZeros(fixedPrice(value));
+const statusLabels: Record<string, string> = { RUNNING: '运行中', PAUSED: '已暂停', ERROR: '异常', STOPPED: '已停止' };
 
 export default function OverviewPage() {
   const overview = useOverview();
@@ -27,6 +28,7 @@ export default function OverviewPage() {
   const [refreshing, setRefreshing] = useState(false);
   const refreshLock = useRef(false);
   const batchLock = useRef(false);
+  const strategiesRef = useRef<HTMLElement>(null);
   const refresh = async () => {
     if (refreshLock.current) return;
     refreshLock.current = true;
@@ -57,6 +59,11 @@ export default function OverviewPage() {
   const visible = entries.filter(e => e.snapshot.symbol.includes(search.toUpperCase().trim()) && (status === 'ALL' || e.snapshot.status === status) && (mode === 'ALL' || e.mode === mode))
     .sort((a, b) => sort === 'position' ? comparePositionAmount(a.snapshot, b.snapshot) : sort === 'today' ? (todayCount(b.snapshot) ?? -1) - (todayCount(a.snapshot) ?? -1) : sort === 'orders' ? b.snapshot.active_orders.length - a.snapshot.active_orders.length : a.snapshot.symbol.localeCompare(b.snapshot.symbol));
   const clearFilters = () => { setSearch(''); setStatus('ALL'); setMode('ALL'); setSort('position'); };
+  const showStatus = (nextStatus: string) => {
+    setSearch(''); setMode('ALL'); setStatus(nextStatus);
+    strategiesRef.current?.scrollIntoView?.({ block: 'start' });
+    strategiesRef.current?.focus({ preventScroll: true });
+  };
   const filterCount = Number(status !== 'ALL') + Number(mode !== 'ALL');
   const counts = entries.map(e => todayTradeCounts(e.snapshot));
   const today = counts.every(c => c !== null) ? counts.reduce<{ buy: number; sell: number }>((sum, c) => ({ buy: sum.buy + c!.buy, sell: sum.sell + c!.sell }), { buy: 0, sell: 0 }) : null;
@@ -70,12 +77,15 @@ export default function OverviewPage() {
         <div className="overview-stat"><span>运行中</span><strong>{overview.data ? pairs.filter(p => p.status === 'RUNNING').length : '--'}</strong></div>
         <div className="overview-stat"><span>策略总数</span><strong>{overview.data ? pairs.length : '--'}</strong></div>
         <div className="overview-stat"><span>今日成交</span><strong>{overview.data && today ? today.buy + today.sell : '--'}<small> 笔</small></strong></div>
-        <div className="overview-trade-breakdown">买单 {overview.data && today ? today.buy : '--'} 笔 / 卖单 {overview.data && today ? today.sell : '--'} 笔</div>
+        <div className="overview-trade-breakdown"><span>买单 {overview.data && today ? today.buy : '--'} 笔 / 卖单 {overview.data && today ? today.sell : '--'} 笔</span>{overview.data && <span className="overview-status-links"><button type="button" onClick={() => showStatus('PAUSED')}>已暂停 {pairs.filter(p => p.status === 'PAUSED').length}</button><button type="button" onClick={() => showStatus('ERROR')}>异常 {pairs.filter(p => p.status === 'ERROR').length}</button></span>}</div>
       </div>
     </div>
     {overview.isPending && !overview.data ? <OverviewLoading /> : overview.data && <>
+    <div className="overview-finances">
+    <section className="overview-finance-group" aria-labelledby="accounts-heading">
+    <div className="section-heading"><h2 id="accounts-heading">账户概览</h2></div>
     <Row gutter={[16, 16]} className="account-row">
-      {accountGroups(accounts).map(group => <Col xs={24} md={12} xl={8} key={group.key}><Card className="account-card" size="small">
+      {accountGroups(accounts).map(group => <Col xs={24} xl={12} key={group.key}><Card className="account-card" size="small">
         <div className="section-line account-card-heading"><span>账户权益</span><ModeTag mode={group.mode} /></div>
         <Statistic value={group.equity ?? '--'} formatter={() => number(group.equity)} suffix={group.asset} />
         <div className="section-line account-bottom"><span>可用 {number(group.available)}</span><span>{group.cny !== null ? `≈ ¥${number(group.cny)}` : '人民币估值待更新'}</span></div>
@@ -83,8 +93,9 @@ export default function OverviewPage() {
         <div className="muted">{group.mode === 'PAPER' ? `${group.count} 个独立模拟账户合计` : `${group.count} 个策略共用账户 · 去重展示`}</div>
       </Card></Col>)}
     </Row>
-    {entries.length > 0 && <>
-      <div className="section-heading"><h2>持仓概览</h2><span className="muted">按标记价格计算 · 全部策略</span></div>
+    </section>
+    {entries.length > 0 && <section className="overview-finance-group" aria-labelledby="positions-heading">
+      <div className="section-heading"><h2 id="positions-heading">持仓概览</h2><span className="muted">按标记价格计算 · 全部策略</span></div>
       <Row gutter={[16, 16]} className="position-row">
         {positionGroups(entries).map(group => <Col xs={24} xl={12} key={group.key}>
           <Card className="position-summary" size="small">
@@ -98,11 +109,12 @@ export default function OverviewPage() {
           </Card>
         </Col>)}
       </Row>
-    </>}
-    <OverviewHistory />
-    <div className="section-heading"><h2>交易策略 <span>{pairs.length.toString().padStart(2, '0')}</span></h2>
+    </section>}
+    </div>
+    <section ref={strategiesRef} className="strategies-section" aria-labelledby="strategies-heading" tabIndex={-1}>
+    <div className="section-heading"><h2 id="strategies-heading">交易策略 <span>{pairs.length.toString().padStart(2, '0')}</span></h2>
       <Dropdown trigger={['click']} disabled={batchBusy || controls.busy.size > 0 || !pairs.length} menu={{ items: [{ key: 'resume', label: '全部恢复', disabled: stale }, { key: 'pause', label: '全部暂停' }], onClick: ({ key }) => void batch(key as 'pause' | 'resume') }}>
-        <Button loading={batchBusy} icon={<ThunderboltOutlined />}>批量操作</Button>
+        <Button loading={batchBusy} icon={<ThunderboltOutlined />}>全部策略操作</Button>
       </Dropdown>
     </div>
     <div className="filter-bar">
@@ -112,6 +124,7 @@ export default function OverviewPage() {
         <Select aria-label="运行状态筛选" value={status} onChange={setStatus} options={[{ value: 'ALL', label: '全部状态' }, { value: 'RUNNING', label: '运行中' }, { value: 'PAUSED', label: '已暂停' }, { value: 'ERROR', label: '异常' }, { value: 'STOPPED', label: '已停止' }]} />
         <Select aria-label="交易模式筛选" value={mode} onChange={setMode} options={[{ value: 'ALL', label: '全部模式' }, ...Object.entries(modeLabel).map(([value, label]) => ({ value, label }))]} />
       </div></details>
+      {filterCount > 0 && <span className="active-filters" role="status">当前筛选：{[status !== 'ALL' ? statusLabels[status] : null, mode !== 'ALL' ? modeLabel[mode as keyof typeof modeLabel] : null].filter(Boolean).join(' · ')}</span>}
       {(search || status !== 'ALL' || mode !== 'ALL' || sort !== 'position') && <Button type="text" onClick={clearFilters}>清除筛选</Button>}
     </div>
     <Row gutter={[20, 20]}>
@@ -135,7 +148,7 @@ export default function OverviewPage() {
               </dl>
               <Link to={`/pairs/${s.symbol}/config`}>查看完整配置 <ArrowRightOutlined /></Link>
             </div>
-          }><Button type="text" size="small" icon={<EyeOutlined />} aria-label={`查看 ${s.symbol} 策略配置`} /></Popover></Space></div>
+          }><Button type="text" size="small" aria-label={`查看 ${s.symbol} 策略配置`}>配置</Button></Popover></Space></div>
           <div className="strategy-price"><span className="muted">标记价格</span><strong>{Number(s.ticker.mark_price) > 0 ? price(s.ticker.mark_price) : '--'}</strong><ModeTag mode={m} /></div>
           <div className="strategy-metrics"><div><span>已实现盈亏 / {quote}</span><strong><Pnl value={s.stats.total_realized_pnl} compact /></strong></div><div><span>未实现盈亏 / {quote}</span><strong><Pnl value={s.position.unrealized_pnl} compact /></strong></div><div><span>持仓金额 / {quote}</span><strong>{number(positionAmount(s))}</strong></div><div><span>持仓数量</span><strong>{price(s.position.size)}</strong></div><div><span>今日成交</span><strong>{todayCount(s) ?? '--'} <small>笔</small></strong></div><div><span>买单 / 卖单</span><strong>{s.stats.active_buy_orders} <small>/</small> {s.stats.active_sell_orders}</strong></div></div>
           <div className="strategy-footer"><PairControls pair={pair} compact stale={stale} /><Link to={`/pairs/${s.symbol}`}><Button type="text" size="small">查看策略 <ArrowRightOutlined /></Button></Link></div>
@@ -144,6 +157,8 @@ export default function OverviewPage() {
       })}
       {!visible.length && <Col span={24}><Card><Empty description={pairs.length ? '没有符合筛选条件的策略' : '暂无策略数据'}>{pairs.length ? <Button onClick={clearFilters}>清除筛选</Button> : <Link to="/pairs/new"><Button type="primary">新增交易对</Button></Link>}</Empty></Card></Col>}
     </Row>
+    </section>
+    <OverviewHistory />
     </>}
   </>;
 }

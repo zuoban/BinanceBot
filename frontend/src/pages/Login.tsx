@@ -21,9 +21,8 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
   return <main className="login-page">
     <div className="login-theme"><ThemeSwitch /></div>
     <section className="login-story"><div className="brand-mark">G<span> / </span>GRID CONSOLE</div><div>
-      <div className="eyebrow">BINANCE FUTURES · STRATEGY WORKSPACE</div>
       <h1>让每一格，<br />清晰可见。</h1><p>行情、仓位与策略状态，<br />在一个工作台中掌握。</p>
-    </div><div className="login-foot">实时监控 / 独立策略 / 统一管理</div></section>
+    </div></section>
     <section className="login-form"><Card variant="borderless">
       <SafetyCertificateOutlined className="login-icon" /><Typography.Title level={2}>{setup ? '初始化控制台' : '欢迎回来'}</Typography.Title>
       <Typography.Paragraph type="secondary">{setup ? '使用启动日志中的初始化码，创建管理员密码。' : '输入管理员密码，进入你的策略工作台。'}</Typography.Paragraph>
