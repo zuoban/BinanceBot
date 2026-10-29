@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { accountGroups, comparePositionAmount, positionAmount, positionGroups, todayCount } from '../lib/format';
+import { accountGroups, comparePositionAmount, positionAmount, positionGroups, todayCount, trimFractionZeros } from '../lib/format';
 import { snapshot } from './fixtures';
+
+it('removes only insignificant fractional zeros', () => {
+  expect(['10,000.00', '99.5400', '0.0000', '0.0010', '-1.20', '--'].map(trimFractionZeros))
+    .toEqual(['10,000', '99.54', '0', '0.001', '-1.2', '--']);
+});
 
 describe('account and trade summaries', () => {
   it('sums independent paper accounts but deduplicates shared live accounts', () => {

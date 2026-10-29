@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react';
+import { act, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { App } from 'antd';
 import { MemoryRouter } from 'react-router-dom';
@@ -9,9 +9,53 @@ import type { Overview } from '../lib/types';
 import { AccountsContext } from '../lib/session';
 
 const overview = vi.hoisted(() => ({ data: undefined as Overview | undefined, error: null, dataUpdatedAt: Date.now(), isFetching: false, isPending: false, refetch: vi.fn() }));
-beforeEach(() => { vi.stubGlobal('matchMedia', vi.fn().mockImplementation(query => ({ matches: false, media: query, addListener: vi.fn(), removeListener: vi.fn(), addEventListener: vi.fn(), removeEventListener: vi.fn() }))); });
+beforeEach(() => {
+  vi.stubGlobal('matchMedia', vi.fn().mockImplementation(query => ({ matches: false, media: query, addListener: vi.fn(), removeListener: vi.fn(), addEventListener: vi.fn(), removeEventListener: vi.fn() })));
+  vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
+});
 vi.mock('../lib/queries', () => ({ useOverview: () => overview }));
 vi.mock('../components/Controls', () => ({ useControls: () => ({ busy: new Set(), results: {}, run: vi.fn() }), PairControls: () => null, runBatchControls: vi.fn() }));
+
+it('keeps the refresh icon stable during polling and disables it only during a manual refresh', async () => {
+  overview.data = { generated_at: new Date().toISOString(), pairs: [] };
+  overview.isFetching = true;
+  let finish!: () => void;
+  overview.refetch.mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve; }));
+  render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+  const button = screen.getByRole('button', { name: '刷新看板' });
+  expect(button).toBeEnabled();
+  expect(button.querySelector('.anticon-reload')).toBeInTheDocument();
+  await userEvent.setup().click(button);
+  expect(button).toBeDisabled();
+  expect(button).toHaveAttribute('aria-busy', 'true');
+  expect(button.querySelector('.anticon-reload')).toBeInTheDocument();
+  await act(async () => { finish(); });
+  expect(button).toBeEnabled();
+  overview.isFetching = false;
+});
+
+it('opens the selected strategy configuration from its card', async () => {
+  const s = snapshot('BTCUSDC');
+  s.grid_config.max_position_usdc = '2000';
+  s.grid_config.pause_on_max_position = true;
+  overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: s, mode: 'PAPER', scoped: true }] };
+  render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+  await userEvent.setup().click(screen.getByRole('button', { name: '查看 BTCUSDC 策略配置' }));
+  expect(await screen.findByText('BTCUSDC 策略配置')).toBeInTheDocument();
+  expect(screen.getByText('2000 USDC')).toBeInTheDocument();
+  expect(screen.getByText('暂停策略')).toBeInTheDocument();
+  expect(screen.getByRole('link', { name: /查看完整配置/ })).toHaveAttribute('href', '/pairs/BTCUSDC/config');
+});
+
+it('identifies each strategy direction without opening its configuration', () => {
+  const long = snapshot('BTCUSDC'), short = snapshot('ETHUSDC');
+  long.grid_config.direction = 'LONG';
+  short.grid_config.direction = 'SHORT';
+  overview.data = { generated_at: new Date().toISOString(), pairs: [long, short].map(s => ({ snapshot: s, mode: 'PAPER' as const, scoped: true })) };
+  render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+  expect(screen.getByRole('img', { name: '策略方向：做多' }).querySelector('.anticon-arrow-up')).toBeInTheDocument();
+  expect(screen.getByRole('img', { name: '策略方向：做空' }).querySelector('.anticon-arrow-down')).toBeInTheDocument();
+});
 
 it('summarizes statuses and lets the user clear a search with no results', async () => {
   const running = snapshot('BTCUSDC'); running.status = 'RUNNING';
@@ -52,12 +96,12 @@ it('shows position amounts and their long/short shares for all strategies', asyn
   short.position.size = '-1';
   overview.data = { generated_at: new Date().toISOString(), pairs: [long, short].map(s => ({ snapshot: s, mode: 'PAPER' as const, scoped: true })) };
   render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
-  expect(screen.getByText('总持仓金额 / USDC').parentElement).toHaveTextContent('404.00');
-  expect(screen.getByText('做多持仓金额').parentElement).toHaveTextContent('303.00');
-  expect(screen.getByText('做空持仓金额').parentElement).toHaveTextContent('101.00');
-  expect(screen.getByText('多空比（金额占比）').parentElement).toHaveTextContent('75.0% / 25.0%');
+  expect(screen.getByText('总持仓金额 / USDC').parentElement).toHaveTextContent('404');
+  expect(screen.getByText('做多持仓金额').parentElement).toHaveTextContent('303');
+  expect(screen.getByText('做空持仓金额').parentElement).toHaveTextContent('101');
+  expect(screen.getByText('多空比（金额占比）').parentElement).toHaveTextContent('75% / 25%');
   await userEvent.setup().type(screen.getByLabelText('搜索交易对'), 'BTC');
-  expect(screen.getByText('总持仓金额 / USDC').parentElement).toHaveTextContent('404.00');
+  expect(screen.getByText('总持仓金额 / USDC').parentElement).toHaveTextContent('404');
 });
 
 it('shows available margin as a percentage of account equity', () => {

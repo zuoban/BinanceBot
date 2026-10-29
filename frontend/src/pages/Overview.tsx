@@ -1,14 +1,17 @@
 import { useContext, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { App, Button, Card, Col, Dropdown, Empty, Input, Row, Select, Space, Statistic } from 'antd';
-import { ArrowRightOutlined, PlusOutlined, ReloadOutlined, SearchOutlined, ThunderboltOutlined } from '@ant-design/icons';
+import { App, Button, Card, Col, Dropdown, Empty, Input, Popover, Row, Select, Space, Statistic } from 'antd';
+import { ArrowDownOutlined, ArrowRightOutlined, ArrowUpOutlined, EyeOutlined, PlusOutlined, ReloadOutlined, SearchOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { useOverview } from '../lib/queries';
 import { AccountsContext } from '../lib/session';
-import { accountGroups, comparePositionAmount, modeLabel, number, positionAmount, positionGroups, price, quoteAsset, todayCount, todayTradeCounts } from '../lib/format';
+import { accountGroups, comparePositionAmount, modeLabel, number as fixedNumber, positionAmount, positionGroups, price as fixedPrice, quoteAsset, todayCount, todayTradeCounts, trimFractionZeros } from '../lib/format';
 import { ErrorNotice, ModeTag, PageTitle, Pnl, StatusTag } from '../components/Common';
 import { PairControls, runBatchControls, useControls } from '../components/Controls';
 import type { Pair } from '../lib/types';
 import { OverviewLoading } from '../components/Loading';
+
+const number = (value: unknown, digits?: number) => trimFractionZeros(fixedNumber(value, digits));
+const price = (value: unknown) => trimFractionZeros(fixedPrice(value));
 
 export default function OverviewPage() {
   const overview = useOverview();
@@ -20,7 +23,16 @@ export default function OverviewPage() {
   const [mode, setMode] = useState('ALL');
   const [sort, setSort] = useState('position');
   const [batchBusy, setBatchBusy] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const refreshLock = useRef(false);
   const batchLock = useRef(false);
+  const refresh = async () => {
+    if (refreshLock.current) return;
+    refreshLock.current = true;
+    setRefreshing(true);
+    try { await overview.refetch(); }
+    finally { refreshLock.current = false; setRefreshing(false); }
+  };
   const entries = overview.data?.pairs ?? [];
   const stale = !!overview.error || Date.now() - overview.dataUpdatedAt > 10_000;
   const pairs = entries.map(e => ({ symbol: e.snapshot.symbol, status: e.snapshot.status, mode: e.mode, grid_config: e.snapshot.grid_config, scoped: e.scoped } satisfies Pair));
@@ -48,18 +60,23 @@ export default function OverviewPage() {
   const counts = entries.map(e => todayTradeCounts(e.snapshot));
   const today = counts.every(c => c !== null) ? counts.reduce<{ buy: number; sell: number }>((sum, c) => ({ buy: sum.buy + c!.buy, sell: sum.sell + c!.sell }), { buy: 0, sell: 0 }) : null;
   return <>
-    <PageTitle eyebrow="WORKSPACE / OVERVIEW" title="策略总览" description="账户全貌与每一条运行中的策略。"
-      extra={<><Button icon={<ReloadOutlined />} loading={overview.isFetching} onClick={() => void overview.refetch()} aria-label="刷新看板" /><Link to="/pairs/new"><Button type="primary" icon={<PlusOutlined />}>新增交易对</Button></Link></>} />
+    <PageTitle title="策略总览"
+      extra={<><Button icon={<ReloadOutlined />} disabled={refreshing} aria-busy={refreshing} onClick={() => void refresh()} aria-label="刷新看板" /><Link to="/pairs/new"><Button type="primary" icon={<PlusOutlined />}>新增交易对</Button></Link></>} />
     <ErrorNotice error={overview.error} retry={() => void overview.refetch()} />
     <div className="overview-banner" aria-label="策略运行概览">
-      <div className="overview-summary"><span className="eyebrow">STRATEGY STATUS</span><h2>策略运行概览</h2><p>{overview.dataUpdatedAt ? `最近同步 ${new Date(overview.dataUpdatedAt).toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })} · 北京时间` : '等待首次同步'}</p><span className={stale ? 'sync-warning' : 'sync-ok'}>{stale ? '数据暂未更新，请刷新核对' : '自动刷新 / 3 秒'}</span></div>
-      <div className="overview-stats"><div className="overview-stat"><span>运行中</span><strong>{overview.data ? pairs.filter(p => p.status === 'RUNNING').length : '--'}</strong></div><div className="overview-stat"><span>策略总数</span><strong>{overview.data ? pairs.length : '--'}</strong></div><div className="overview-stat"><span>今日成交</span><strong>{overview.data && today ? today.buy + today.sell : '--'}<small> 笔</small></strong><span className="overview-trade-breakdown">买单 {overview.data && today ? today.buy : '--'} 笔 / 卖单 {overview.data && today ? today.sell : '--'} 笔</span></div></div>
+      <div className="overview-summary"><h2>策略运行概览</h2><p>{overview.dataUpdatedAt ? `最近同步 ${new Date(overview.dataUpdatedAt).toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })} · 北京时间` : '等待首次同步'}</p><span className={stale ? 'sync-warning' : 'sync-ok'}>{stale ? '数据暂未更新，请刷新核对' : '自动刷新 / 3 秒'}</span></div>
+      <div className="overview-stats">
+        <div className="overview-stat"><span>运行中</span><strong>{overview.data ? pairs.filter(p => p.status === 'RUNNING').length : '--'}</strong></div>
+        <div className="overview-stat"><span>策略总数</span><strong>{overview.data ? pairs.length : '--'}</strong></div>
+        <div className="overview-stat"><span>今日成交</span><strong>{overview.data && today ? today.buy + today.sell : '--'}<small> 笔</small></strong></div>
+        <div className="overview-trade-breakdown">买单 {overview.data && today ? today.buy : '--'} 笔 / 卖单 {overview.data && today ? today.sell : '--'} 笔</div>
+      </div>
     </div>
     {overview.isPending && !overview.data ? <OverviewLoading /> : overview.data && <>
     <Row gutter={[16, 16]} className="account-row">
       {accountGroups(accounts).map(group => <Col xs={24} md={12} xl={8} key={group.key}><Card className="account-card" size="small">
-        <div className="section-line"><span className="eyebrow">{group.asset} ACCOUNT</span><ModeTag mode={group.mode} /></div>
-        <Statistic title="账户权益" value={group.equity ?? '--'} precision={2} suffix={group.asset} />
+        <div className="section-line account-card-heading"><span>账户权益</span><ModeTag mode={group.mode} /></div>
+        <Statistic value={group.equity ?? '--'} formatter={() => number(group.equity)} suffix={group.asset} />
         <div className="section-line account-bottom"><span>可用 {number(group.available)}</span><span>{group.cny !== null ? `≈ ¥${number(group.cny)}` : '人民币估值待更新'}</span></div>
         <div className="account-margin-ratio">可用保证金比例 <strong>{group.available !== null && group.equity !== null && group.equity > 0 ? `${number(group.available / group.equity * 100)}%` : '--'}</strong></div>
         <div className="muted">{group.mode === 'PAPER' ? `${group.count} 个独立模拟账户合计` : `${group.count} 个策略共用账户 · 去重展示`}</div>
@@ -70,14 +87,13 @@ export default function OverviewPage() {
       <Row gutter={[16, 16]} className="position-row">
         {positionGroups(entries).map(group => <Col xs={24} xl={12} key={group.key}>
           <Card className="position-summary" size="small">
-            <div className="section-line"><span className="eyebrow">{group.asset} POSITION</span><ModeTag mode={group.mode} /></div>
             <div className="position-summary-metrics">
               <div><span>总持仓金额 / {group.asset}</span><strong>{number(group.total)}</strong></div>
               <div><span>做多持仓金额</span><strong className="position-long">{number(group.long)}</strong></div>
               <div><span>做空持仓金额</span><strong className="position-short">{number(group.short)}</strong></div>
               <div><span>多空比（金额占比）</span><strong>{group.total !== null && group.total > 0 && group.long !== null && group.short !== null ? `${number(group.long / group.total * 100, 1)}% / ${number(group.short / group.total * 100, 1)}%` : '--'}</strong></div>
             </div>
-            <div className="muted">按实际持仓方向统计{group.total === null ? ' · 部分持仓数据不可用' : ''}</div>
+            <div className="section-line position-summary-footer"><span className="muted">按实际持仓方向统计{group.total === null ? ' · 部分持仓数据不可用' : ''}</span><ModeTag mode={group.mode} /></div>
           </Card>
         </Col>)}
       </Row>
@@ -101,9 +117,25 @@ export default function OverviewPage() {
         const pair: Pair = { symbol: s.symbol, status: s.status, mode: m, grid_config: s.grid_config, scoped };
         const quote = quoteAsset(s.symbol), result = controls.results[s.symbol];
         return <Col xs={24} lg={12} xxl={8} key={s.symbol}><Card className={`strategy-card ${s.grid_config.direction === 'SHORT' ? 'strategy-short' : 'strategy-long'}`}>
-          <div className="section-line"><Space><div className="coin-monogram">{s.symbol.slice(0, 1)}</div><div><Link className="pair-name" to={`/pairs/${s.symbol}`}>{s.symbol}</Link><div className="strategy-subtitle"><span className="direction-label">{s.grid_config.direction === 'SHORT' ? '做空' : '做多'}</span><span className="muted">网格 · {quote}</span></div></div></Space><StatusTag status={s.status} /></div>
+          <div className="section-line"><div className="strategy-identity"><Link className="pair-name" to={`/pairs/${s.symbol}`}>{s.symbol}</Link><span className="strategy-direction" role="img" aria-label={s.grid_config.direction === 'SHORT' ? '策略方向：做空' : '策略方向：做多'} title={s.grid_config.direction === 'SHORT' ? '做空' : '做多'}>{s.grid_config.direction === 'SHORT' ? <ArrowDownOutlined /> : <ArrowUpOutlined />}</span></div><Space size={2}><StatusTag status={s.status} /><Popover trigger="click" placement="bottomRight" title={`${s.symbol} 策略配置`} content={
+            <div className="strategy-config-popover">
+              <dl>
+                <div><dt>交易方向</dt><dd>{s.grid_config.direction === 'SHORT' ? '做空' : '做多'}</dd></div>
+                <div><dt>运行模式</dt><dd>{modeLabel[m]}</dd></div>
+                <div><dt>网格间距</dt><dd>{trimFractionZeros(s.grid_config.grid_interval)} {quote}</dd></div>
+                <div><dt>每格金额</dt><dd>{trimFractionZeros(s.grid_config.order_amount_usdc)} {quote}</dd></div>
+                <div><dt>买单 / 卖单窗口</dt><dd>{s.grid_config.buy_window} / {s.grid_config.sell_window}</dd></div>
+                <div><dt>最低价格</dt><dd>{s.grid_config.min_price == null ? '未设置' : trimFractionZeros(s.grid_config.min_price)}</dd></div>
+                <div><dt>最高价格</dt><dd>{s.grid_config.max_price == null ? '未设置' : trimFractionZeros(s.grid_config.max_price)}</dd></div>
+                <div><dt>最大持仓名义价值</dt><dd>{s.grid_config.max_position_usdc == null ? '未设置' : `${trimFractionZeros(s.grid_config.max_position_usdc)} ${quote}`}</dd></div>
+                <div><dt>达到持仓上限时</dt><dd>{s.grid_config.pause_on_max_position ? '暂停策略' : '限制开仓'}</dd></div>
+                <div><dt>仅挂单</dt><dd>{s.grid_config.post_only ? '开启' : '关闭'}</dd></div>
+              </dl>
+              <Link to={`/pairs/${s.symbol}/config`}>查看完整配置 <ArrowRightOutlined /></Link>
+            </div>
+          }><Button type="text" size="small" icon={<EyeOutlined />} aria-label={`查看 ${s.symbol} 策略配置`} /></Popover></Space></div>
           <div className="strategy-price"><span className="muted">标记价格</span><strong>{Number(s.ticker.mark_price) > 0 ? price(s.ticker.mark_price) : '--'}</strong><ModeTag mode={m} /></div>
-          <div className="strategy-metrics"><div><span>已实现盈亏 / {quote}</span><strong><Pnl value={s.stats.total_realized_pnl} /></strong></div><div><span>未实现盈亏 / {quote}</span><strong><Pnl value={s.position.unrealized_pnl} /></strong></div><div><span>持仓金额 / {quote}</span><strong>{number(positionAmount(s))}</strong></div><div><span>持仓数量</span><strong>{price(s.position.size)}</strong></div><div><span>今日成交</span><strong>{todayCount(s) ?? '--'} <small>笔</small></strong></div><div><span>买单 / 卖单</span><strong>{s.stats.active_buy_orders} <small>/</small> {s.stats.active_sell_orders}</strong></div></div>
+          <div className="strategy-metrics"><div><span>已实现盈亏 / {quote}</span><strong><Pnl value={s.stats.total_realized_pnl} compact /></strong></div><div><span>未实现盈亏 / {quote}</span><strong><Pnl value={s.position.unrealized_pnl} compact /></strong></div><div><span>持仓金额 / {quote}</span><strong>{number(positionAmount(s))}</strong></div><div><span>持仓数量</span><strong>{price(s.position.size)}</strong></div><div><span>今日成交</span><strong>{todayCount(s) ?? '--'} <small>笔</small></strong></div><div><span>买单 / 卖单</span><strong>{s.stats.active_buy_orders} <small>/</small> {s.stats.active_sell_orders}</strong></div></div>
           <div className="strategy-footer"><PairControls pair={pair} compact stale={stale} /><Link to={`/pairs/${s.symbol}`}><Button type="text" size="small">查看策略 <ArrowRightOutlined /></Button></Link></div>
           {result && <div className={result.startsWith('失败') ? 'negative operation-result' : 'muted operation-result'} role="status">{result}</div>}
         </Card></Col>;

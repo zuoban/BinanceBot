@@ -42,6 +42,7 @@ export function number(value: unknown, digits = 2) {
   return n === null ? '--' : n.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits });
 }
 export const price = (value: unknown) => number(value, Math.min(10, Math.max(4, 2 - Math.floor(Math.log10(Math.abs(Number(value)) || 1)))));
+export const trimFractionZeros = (value: string) => value.replace(/(\.\d*?[1-9])0+$|\.0+$/, '$1');
 export const time = (value: string) => new Date(value).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
 export const beijingDay = (value: number) => new Date(value + 8 * 3600_000).toISOString().slice(0, 10);
 export function todayTradeCounts(s: Snapshot, now = Date.now()) {
