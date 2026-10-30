@@ -92,7 +92,7 @@ it('shows unavailable trade counts when a strategy has no current-day statistics
   expect(within(screen.getByLabelText('策略运行概览')).getByText('买单 -- 笔 / 卖单 -- 笔')).toBeInTheDocument();
 });
 
-it('shows the 20 newest trades across strategies with their modes', () => {
+it('shows five newest trades and expands to twenty across strategies', async () => {
   const btc = snapshot('BTCUSDC'), eth = snapshot('ETHUSDC');
   const trade = (symbol: string, index: number) => ({
     trade_id: `${symbol}-${index}`, symbol, mode: symbol === 'BTCUSDC' ? 'PAPER' as const : 'LIVE' as const,
@@ -104,13 +104,18 @@ it('shows the 20 newest trades across strategies with their modes', () => {
   overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: btc, mode: 'PAPER', scoped: true }, { snapshot: eth, mode: 'LIVE', scoped: true }] };
   render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
   const table = screen.getByText('最近成交').closest('.ant-card')!;
-  const rows = within(table as HTMLElement).getAllByRole('row').slice(1);
-  expect(rows).toHaveLength(20);
-  expect(within(table as HTMLElement).getByRole('columnheader', { name: '方向' })).not.toHaveClass('ant-table-cell-fix-left');
-  expect(rows[0]).toHaveTextContent('ETHUSDC');
-  expect(rows[0]).toHaveTextContent('成交 21');
-  expect(rows[19]).toHaveTextContent('成交 2');
-  expect(within(table as HTMLElement).queryByText('成交 1')).not.toBeInTheDocument();
+  const card = within(table as HTMLElement);
+  expect(card.getAllByRole('row').slice(1)).toHaveLength(5);
+  expect(card.getByRole('columnheader', { name: '方向' })).not.toHaveClass('ant-table-cell-fix-left');
+  expect(card.getAllByRole('row')[1]).toHaveTextContent('ETHUSDC');
+  expect(card.getAllByRole('row')[1]).toHaveTextContent('成交 21');
+  const user = userEvent.setup();
+  await user.click(card.getByRole('button', { name: '展开最近 20 条' }));
+  expect(card.getAllByRole('row').slice(1)).toHaveLength(20);
+  expect(card.getAllByRole('row')[20]).toHaveTextContent('成交 2');
+  expect(card.queryByText('成交 1')).not.toBeInTheDocument();
+  await user.click(card.getByRole('button', { name: '收起' }));
+  expect(card.getAllByRole('row').slice(1)).toHaveLength(5);
 });
 
 it('offers creation when there are no strategies', () => {

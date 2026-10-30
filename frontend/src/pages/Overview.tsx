@@ -28,6 +28,7 @@ export default function OverviewPage() {
   const [sort, setSort] = useState('position');
   const [batchBusy, setBatchBusy] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [tradesExpanded, setTradesExpanded] = useState(false);
   const refreshLock = useRef(false);
   const batchLock = useRef(false);
   const strategiesRef = useRef<HTMLElement>(null);
@@ -39,6 +40,7 @@ export default function OverviewPage() {
     finally { refreshLock.current = false; setRefreshing(false); }
   };
   const entries = overview.data?.pairs ?? [];
+  const recentTrades = entries.flatMap(entry => entry.snapshot.recent_trades).sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp)).slice(0, 20);
   const stale = !!overview.error || Date.now() - overview.dataUpdatedAt > 10_000;
   const pairs = entries.map(e => ({ symbol: e.snapshot.symbol, status: e.snapshot.status, mode: e.mode, grid_config: e.snapshot.grid_config, scoped: e.scoped } satisfies Pair));
   const batch = async (action: 'pause' | 'resume') => {
@@ -161,7 +163,8 @@ export default function OverviewPage() {
     </Row>
     </section>
     <Card className="overview-trades" title="最近成交" extra={<span className="muted">全部策略当前模式 · 最近 20 条</span>}>
-      <TradesTable overview trades={entries.flatMap(entry => entry.snapshot.recent_trades).sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp)).slice(0, 20)} />
+      <div id="recent-trades-list"><TradesTable overview trades={recentTrades.slice(0, tradesExpanded ? 20 : 5)} /></div>
+      {recentTrades.length > 5 && <div className="overview-trades-toggle"><Button type="text" aria-expanded={tradesExpanded} aria-controls="recent-trades-list" onClick={() => setTradesExpanded(value => !value)}>{tradesExpanded ? '收起' : '展开最近 20 条'}</Button></div>}
     </Card>
     <OverviewHistory />
     </>}

@@ -332,24 +332,32 @@ a { color: inherit; }
 [data-theme="dark"] .overview-trades-table .trade-time { color: #b2c6b8; }
 [data-theme="dark"] .overview-trades-table .ant-table-tbody > tr > td { border-bottom-color: #304339; }
 [data-theme="dark"] .overview-trades-table .trade-symbol { color: #dce9e1; }
+.overview-trades-toggle { display: flex; justify-content: center; padding: 8px 0 4px; }
+.overview-trades-toggle .ant-btn { color: #176e59; min-height: 40px; }
+[data-theme="dark"] .overview-trades-toggle .ant-btn { color: #a2dfbb; }
+.overview-trades-mobile { display: none; }
 @media (max-width: 600px) {
-  .overview-trades .ant-card-body { padding: 0 12px 10px; }
+  .overview-trades .ant-card-body { padding: 0 16px 8px; }
   .overview-trades .ant-card-extra { font-size: 11px; }
-  .overview-trades-table .ant-table-content > table { width: 100% !important; min-width: 0 !important; table-layout: auto; }
-  .overview-trades-table colgroup col:nth-child(2),
-  .overview-trades-table colgroup col:nth-child(5),
-  .overview-trades-table colgroup col:nth-child(6),
-  .overview-trades-table colgroup col:nth-child(n+9),
-  .overview-trades-table tr > :nth-child(2),
-  .overview-trades-table tr > :nth-child(5),
-  .overview-trades-table tr > :nth-child(6),
-  .overview-trades-table tr > :nth-child(n+9) { display: none; }
-  .overview-trades-table .ant-table-cell { padding: 10px 3px !important; font-size: 11px; overflow-wrap: anywhere; }
-  .overview-trades-table .trade-symbol { font-size: 11px; letter-spacing: 0; }
-  .overview-trades-table .ant-tag { padding-inline: 3px; font-size: 11px; line-height: 20px; }
-  .overview-trades-table .table-numeric { overflow-wrap: normal; word-break: normal; }
-  .overview-trades-table .ant-table-cell-fix-left { position: static !important; }
-  .overview-trades-table .ant-tag { margin-inline-end: 0; }
+  .overview-trades-desktop { display: none; }
+  .overview-trades-mobile { display: block; }
+  .trade-list { margin: 0; padding: 0; list-style: none; }
+  .trade-list-item { padding: 16px 0; border-bottom: 1px solid #edf1ee; }
+  .trade-list-item:last-child { border-bottom: 0; }
+  .trade-list-heading { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .trade-list-heading strong { min-width: 0; color: #233e34; font-size: 13px; overflow-wrap: anywhere; }
+  .trade-list-heading .ant-tag { flex: none; border: 0; padding: 1px 7px; font-size: 11px; line-height: 20px; }
+  .trade-list-time { margin-left: auto; color: #66796d; font-size: 12px; white-space: nowrap; flex: none; }
+  .trade-list dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin: 14px 0 0; }
+  .trade-list dl > div { min-width: 0; }
+  .trade-list dl > div:last-child { text-align: right; }
+  .trade-list dt { color: #66796d; font-size: 11px; line-height: 1.4; }
+  .trade-list dd { margin: 5px 0 0; font: 500 14px/1.35 'DM Mono', monospace; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  .trade-list dd .ant-tag { margin: 0; }
+  .trade-list-empty { padding: 28px 0; text-align: center; color: #66796d; }
+  [data-theme="dark"] .trade-list-item { border-color: #304339; }
+  [data-theme="dark"] .trade-list-heading strong { color: #dce9e1; }
+  [data-theme="dark"] .trade-list-time, [data-theme="dark"] .trade-list dt, [data-theme="dark"] .trade-list-empty { color: #b2c6b8; }
 }
 .config-form, .settings-tabs { max-width: 1050px; }
 .page-heading > div:first-child, .section-heading > :first-child { min-width: 0; }

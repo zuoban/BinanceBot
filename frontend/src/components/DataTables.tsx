@@ -42,7 +42,14 @@ export function TradesTable({ trades, overview = false }: { trades: Trade[]; ove
     { title: '成交方式', render: (_, t) => t.is_maker ? 'Maker' : 'Taker' },
     { title: '备注', dataIndex: 'note', ellipsis: true },
   ];
-  return <div className={overview ? 'overview-trades-table' : undefined}>{!overview && <p className="table-scroll-hint">左右滑动查看完整成交信息</p>}<Table<Trade> rowKey="trade_id" columns={columns} dataSource={trades} size="small" scroll={{ x: 1000 }} pagination={overview ? false : { pageSize: 15, showSizeChanger: false, hideOnSinglePage: true }} /></div>;
+  return <div className={overview ? 'overview-trades-table' : undefined}>
+    {!overview && <p className="table-scroll-hint">左右滑动查看完整成交信息</p>}
+    <div className={overview ? 'overview-trades-desktop' : undefined}><Table<Trade> rowKey="trade_id" columns={columns} dataSource={trades} size="small" scroll={{ x: 1000 }} pagination={overview ? false : { pageSize: 15, showSizeChanger: false, hideOnSinglePage: true }} /></div>
+    {overview && <div className="overview-trades-mobile">{trades.length ? <ul className="trade-list">{trades.map(trade => <li className="trade-list-item" key={trade.trade_id}>
+      <div className="trade-list-heading"><strong>{trade.symbol}</strong>{side(trade.side)}<span className="trade-list-time" title={Number.isFinite(Date.parse(trade.timestamp)) ? `${time(trade.timestamp)}（北京时间）` : undefined}>{relativeTime(trade.timestamp, now)}</span></div>
+      <dl><div><dt>金额</dt><dd>{number(trade.amount_usdc)}</dd></div><div><dt>已实现盈亏</dt><dd>{trade.pnl_verified ? <Pnl value={trade.realized_pnl} /> : <Tag>待同步</Tag>}</dd></div></dl>
+    </li>)}</ul> : <div className="trade-list-empty">暂无成交记录</div>}</div>}
+  </div>;
 }
 export function LogsTable({ logs }: { logs: Log[] }) {
   return <><p className="table-scroll-hint">左右滑动查看完整日志</p><Table<Log> rowKey={l => `${l.timestamp}-${l.level}-${l.message}`} dataSource={logs} size="small" scroll={{ x: 600 }} pagination={{ pageSize: 30, showSizeChanger: false }} columns={[
