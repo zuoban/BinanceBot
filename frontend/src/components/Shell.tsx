@@ -68,7 +68,7 @@ export default function Shell() {
           <ThemeSwitch /><Button type="text" icon={<LogoutOutlined />} onClick={() => void logOut()}>退出</Button></Space>
       </Layout.Header>
       <Layout.Content className="content"><Outlet /></Layout.Content>
-      <Layout.Footer className="footer"><span>所有时间默认显示北京时间</span></Layout.Footer>
+      <Layout.Footer className="footer"><span>所有时间默认显示北京时间</span><span>版本 v{import.meta.env.VITE_APP_VERSION}</span></Layout.Footer>
     </Layout>
   </Layout></ControlProvider></AccountsContext.Provider></EditContext.Provider>;
 }
