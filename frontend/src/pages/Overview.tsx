@@ -1,7 +1,7 @@
 import { useContext, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { App, Button, Card, Col, Dropdown, Empty, Input, Popover, Row, Select, Space, Statistic } from 'antd';
-import { ArrowDownOutlined, ArrowRightOutlined, ArrowUpOutlined, PlusOutlined, ReloadOutlined, SearchOutlined, ThunderboltOutlined } from '@ant-design/icons';
+import { ArrowDownOutlined, ArrowRightOutlined, ArrowUpOutlined, EyeOutlined, PlusOutlined, ReloadOutlined, SearchOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { useOverview } from '../lib/queries';
 import { AccountsContext } from '../lib/session';
 import { accountGroups, comparePositionAmount, modeLabel, number as fixedNumber, positionAmount, positionGroups, price as fixedPrice, quoteAsset, todayCount, todayTradeCounts, trimFractionZeros } from '../lib/format';
@@ -133,7 +133,7 @@ export default function OverviewPage() {
         const pair: Pair = { symbol: s.symbol, status: s.status, mode: m, grid_config: s.grid_config, scoped };
         const quote = quoteAsset(s.symbol), result = controls.results[s.symbol];
         return <Col xs={24} lg={12} xxl={8} key={s.symbol}><Card className={`strategy-card ${s.grid_config.direction === 'SHORT' ? 'strategy-short' : 'strategy-long'}`}>
-          <div className="section-line"><div className="strategy-identity"><Link className="pair-name" to={`/pairs/${s.symbol}`}>{s.symbol}</Link><span className="strategy-direction" role="img" aria-label={s.grid_config.direction === 'SHORT' ? '策略方向：做空' : '策略方向：做多'} title={s.grid_config.direction === 'SHORT' ? '做空' : '做多'}>{s.grid_config.direction === 'SHORT' ? <ArrowDownOutlined /> : <ArrowUpOutlined />}</span></div><Space size={2}><StatusTag status={s.status} /><Popover trigger="click" placement="bottomRight" title={`${s.symbol} 策略配置`} content={
+          <div className="section-line"><div className="strategy-identity"><Link className="pair-name" to={`/pairs/${s.symbol}`}>{s.symbol}</Link><span className="strategy-direction" role="img" aria-label={s.grid_config.direction === 'SHORT' ? '策略方向：做空' : '策略方向：做多'}>{s.grid_config.direction === 'SHORT' ? <><ArrowDownOutlined />做空</> : <><ArrowUpOutlined />做多</>}</span></div><Space size={2}><StatusTag status={s.status} /><Popover trigger="click" placement="bottomRight" title={`${s.symbol} 策略配置`} content={
             <div className="strategy-config-popover">
               <dl>
                 <div><dt>交易方向</dt><dd>{s.grid_config.direction === 'SHORT' ? '做空' : '做多'}</dd></div>
@@ -149,7 +149,7 @@ export default function OverviewPage() {
               </dl>
               <Link to={`/pairs/${s.symbol}/config`}>查看完整配置 <ArrowRightOutlined /></Link>
             </div>
-          }><Button type="text" size="small" aria-label={`查看 ${s.symbol} 策略配置`}>配置</Button></Popover></Space></div>
+          }><Button type="text" size="small" icon={<EyeOutlined />} aria-label={`查看 ${s.symbol} 策略配置`} /></Popover></Space></div>
           <div className="strategy-price"><span className="muted">标记价格</span><strong>{Number(s.ticker.mark_price) > 0 ? price(s.ticker.mark_price) : '--'}</strong><ModeTag mode={m} /></div>
           <div className="strategy-metrics"><div><span>已实现盈亏 / {quote}</span><strong><Pnl value={s.stats.total_realized_pnl} compact /></strong></div><div><span>未实现盈亏 / {quote}</span><strong><Pnl value={s.position.unrealized_pnl} compact /></strong></div><div><span>持仓金额 / {quote}</span><strong>{number(positionAmount(s))}</strong></div><div><span>持仓数量</span><strong>{price(s.position.size)}</strong></div><div><span>今日成交</span><strong>{todayCount(s) ?? '--'} <small>笔</small></strong></div><div><span>买单 / 卖单</span><strong>{s.stats.active_buy_orders} <small>/</small> {s.stats.active_sell_orders}</strong></div></div>
           <div className="strategy-footer"><PairControls pair={pair} compact stale={stale} /><DeleteStrategyButton pair={pair} /><Link to={`/pairs/${s.symbol}`}><Button type="text" size="small">查看策略 <ArrowRightOutlined /></Button></Link></div>

@@ -57,6 +57,8 @@ it('identifies each strategy direction without opening its configuration', () =>
   render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
   expect(screen.getByRole('img', { name: '策略方向：做多' }).querySelector('.anticon-arrow-up')).toBeInTheDocument();
   expect(screen.getByRole('img', { name: '策略方向：做空' }).querySelector('.anticon-arrow-down')).toBeInTheDocument();
+  expect(screen.getByRole('img', { name: '策略方向：做多' })).toHaveTextContent('做多');
+  expect(screen.getByRole('img', { name: '策略方向：做空' })).toHaveTextContent('做空');
 });
 
 it('summarizes statuses and lets the user clear a search with no results', async () => {

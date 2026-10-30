@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react';
 import { App, Button } from 'antd';
+import { DeleteOutlined } from '@ant-design/icons';
 import { useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api';
 import type { Pair } from '../lib/types';
@@ -39,5 +40,5 @@ export function useDeleteStrategy() {
 
 export function DeleteStrategyButton({ pair }: { pair: Pair }) {
   const { remove, busy } = useDeleteStrategy();
-  return <Button danger type="text" size="small" aria-label={`删除 ${pair.symbol} 策略`} loading={busy} onClick={() => void remove(pair)}>删除策略</Button>;
+  return <Button danger size="small" icon={<DeleteOutlined />} aria-label={`删除 ${pair.symbol} 策略`} loading={busy} onClick={() => void remove(pair)}>删除策略</Button>;
 }
