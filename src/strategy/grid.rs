@@ -718,7 +718,6 @@ impl GridTradingEngine {
         if *self.state.status.read().await == BotStatus::Running {
             self.maintain_grid_window().await;
         }
-        self.state.notify_strategy_started().await;
 
         loop {
             tokio::select! {

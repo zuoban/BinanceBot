@@ -5,7 +5,7 @@ use crate::types::{
     TradingMode,
 };
 use anyhow::{anyhow, Result};
-use chrono::{DateTime, Duration, FixedOffset, Utc};
+use chrono::{DateTime, Duration, Utc};
 use reqwest::Client;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -21,44 +21,6 @@ struct SendMessage<'a> {
 struct TelegramResponse {
     ok: bool,
     description: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum StrategyEvent {
-    Started,
-    Resumed,
-    Paused,
-}
-
-pub struct StrategyNotification {
-    pub event: StrategyEvent,
-    pub symbol: String,
-    pub mode: TradingMode,
-    pub reason: String,
-    pub timestamp: DateTime<Utc>,
-}
-
-pub fn format_strategy_message(notification: &StrategyNotification) -> String {
-    let title = match notification.event {
-        StrategyEvent::Started => "🟢 策略已启动",
-        StrategyEvent::Resumed => "🟢 策略已恢复",
-        StrategyEvent::Paused => "⏸ 策略已暂停",
-    };
-    let mode = match notification.mode {
-        TradingMode::Paper => "模拟盘",
-        TradingMode::Testnet => "测试网",
-        TradingMode::Live => "实盘",
-        TradingMode::Unknown => "未知",
-    };
-    let time = notification
-        .timestamp
-        .with_timezone(&FixedOffset::east_opt(8 * 3600).unwrap())
-        .format("%Y-%m-%d %H:%M:%S");
-    format!(
-        "<b>{title}</b>\n交易对：{}\n运行模式：{mode}\n原因：{}\n时间：{time}（北京时间）",
-        escape_html(&notification.symbol),
-        escape_html(&notification.reason),
-    )
 }
 
 #[derive(Clone)]
@@ -93,12 +55,12 @@ impl TelegramNotifier {
             .await
     }
 
-    pub async fn send_strategy_notification(
+    pub async fn send_global_risk_notification(
         &self,
         config: &TelegramConfig,
-        notification: &StrategyNotification,
+        reason: &str,
     ) -> Result<()> {
-        self.send_message(config, format_strategy_message(notification))
+        self.send_message(config, format_global_risk_message(reason, Utc::now()))
             .await
     }
 
@@ -303,6 +265,16 @@ pub fn format_trade_message(trade: &TradeRecord, context: &TradeNotificationCont
     )
 }
 
+fn format_global_risk_message(reason: &str, now: DateTime<Utc>) -> String {
+    let time = now
+        .with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap())
+        .format("%Y-%m-%d %H:%M:%S");
+    format!(
+        "<b>⚠️ 全局风控已触发</b>\n原因：{}\n时间：{time}（北京时间）",
+        escape_html(reason)
+    )
+}
+
 fn escape_html(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -328,33 +300,14 @@ mod tests {
     use rust_decimal_macros::dec;
 
     #[test]
-    fn strategy_messages_include_event_mode_reason_and_beijing_time() {
-        let mut notification = StrategyNotification {
-            event: StrategyEvent::Started,
-            symbol: "SOLUSDC".into(),
-            mode: TradingMode::Paper,
-            reason: "程序启动后开始运行策略".into(),
-            timestamp: DateTime::parse_from_rfc3339("2026-10-11T18:26:00Z")
-                .unwrap()
-                .with_timezone(&Utc),
-        };
+    fn global_risk_message_escapes_reason_and_uses_beijing_time() {
+        let now = DateTime::parse_from_rfc3339("2026-10-11T18:26:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
         assert_eq!(
-            format_strategy_message(&notification),
-            "<b>🟢 策略已启动</b>\n交易对：SOLUSDC\n运行模式：模拟盘\n原因：程序启动后开始运行策略\n时间：2026-10-12 02:26:00（北京时间）"
+            format_global_risk_message("余额 < 0 & 风控", now),
+            "<b>⚠️ 全局风控已触发</b>\n原因：余额 &lt; 0 &amp; 风控\n时间：2026-10-12 02:26:00（北京时间）"
         );
-        notification.event = StrategyEvent::Resumed;
-        notification.mode = TradingMode::Testnet;
-        assert!(format_strategy_message(&notification).contains("策略已恢复</b>"));
-        assert!(format_strategy_message(&notification).contains("运行模式：测试网"));
-        notification.event = StrategyEvent::Paused;
-        notification.mode = TradingMode::Live;
-        notification.symbol = "<SOL>&USDC".into();
-        notification.reason = "持仓价值 < 2000 & 检查".into();
-        let message = format_strategy_message(&notification);
-        assert!(message.contains("策略已暂停</b>"));
-        assert!(message.contains("运行模式：实盘"));
-        assert!(message.contains("交易对：&lt;SOL&gt;&amp;USDC"));
-        assert!(message.contains("原因：持仓价值 &lt; 2000 &amp; 检查"));
     }
 
     fn trade(side: OrderSide) -> TradeRecord {

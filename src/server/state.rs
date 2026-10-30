@@ -2,9 +2,7 @@ use crate::config::AppConfig;
 use crate::db::Database;
 use crate::fx::CnyRateCache;
 use crate::strategy::precision::SymbolRules;
-use crate::telegram::{
-    StrategyEvent, StrategyNotification, TelegramNotifier, TradeNotificationContext,
-};
+use crate::telegram::{TelegramNotifier, TradeNotificationContext};
 use crate::types::*;
 use anyhow::Context;
 use chrono::Utc;
@@ -173,28 +171,55 @@ impl GlobalPositionLimit {
                 state.global_cancel_pending.store(true, Ordering::SeqCst);
             }
         }
+        let mut reasons = Vec::new();
+        if zero_margin {
+            reasons.push("可用保证金已达到零".to_string());
+        }
+        if incomplete {
+            reasons.push("全局风控数据不可用或已过期".to_string());
+        }
+        if position_limit_reached {
+            reasons.push(format!(
+                "全局持仓名义价值 {} 已达到上限 {}",
+                total,
+                limit.expect("position limit must exist")
+            ));
+        }
+        let reason = if reasons.is_empty() {
+            String::new()
+        } else {
+            format!("{}，需手动恢复", reasons.join("；"))
+        };
         for state in &states {
             if unsafe_now && (first_trigger || *state.status.read().await == BotStatus::Running) {
                 state.global_cancel_pending.store(true, Ordering::SeqCst);
-                let reason = if zero_margin {
-                    "可用保证金已达到零，需手动恢复".to_string()
-                } else if incomplete {
-                    "全局风控数据不可用或已过期，需手动恢复".to_string()
-                } else {
-                    format!(
-                        "全局持仓名义价值 {} 已达到上限 {}，需手动恢复",
-                        total,
-                        limit.expect("position limit must exist")
-                    )
-                };
                 if let Err(error) = Box::pin(state.pause_trading_with_reason(&reason)).await {
                     state
                         .add_log("ERROR", format!("全局风控暂停状态保存失败: {}", error))
                         .await;
                 }
-                state.add_log("WARN", reason).await;
+                state.add_log("WARN", &reason).await;
             }
             state.queue_global_cancel();
+        }
+        if first_trigger && config.telegram.enabled {
+            let telegram = config.telegram.clone();
+            let notifier = first.telegram_notifier.clone();
+            let state = Arc::clone(first);
+            tokio::spawn(async move {
+                if let Err(error) = notifier
+                    .send_global_risk_notification(&telegram, &reason)
+                    .await
+                {
+                    warn!(
+                        "Failed to send Telegram global risk notification: {}",
+                        error
+                    );
+                    state
+                        .add_log("WARN", format!("Telegram 全局风控通知发送失败: {}", error))
+                        .await;
+                }
+            });
         }
         incomplete || position_limit_reached || zero_margin
     }
@@ -813,7 +838,7 @@ impl AppState {
     async fn set_trading_status(
         self: &Arc<Self>,
         status: BotStatus,
-        reason: Option<&str>,
+        _reason: Option<&str>,
     ) -> anyhow::Result<()> {
         let global = if status == BotStatus::Running {
             self.global_position_limit
@@ -836,7 +861,7 @@ impl AppState {
         if status == BotStatus::Paused {
             self.pause_epoch.fetch_add(1, Ordering::SeqCst);
         }
-        let mut notification_status = self.status_update_lock.lock().await;
+        let _update = self.status_update_lock.lock().await;
         anyhow::ensure!(
             status != BotStatus::Running || !self.is_shutting_down(),
             "程序正在退出，不能恢复策略"
@@ -850,55 +875,7 @@ impl AppState {
             *self.status.write().await = status;
             Ok(())
         };
-        if let Some(reason) = reason {
-            if *notification_status != status {
-                *notification_status = status;
-                let event = if status == BotStatus::Paused {
-                    StrategyEvent::Paused
-                } else {
-                    StrategyEvent::Resumed
-                };
-                self.notify_strategy_event(event, reason).await;
-            }
-        }
         saved
-    }
-
-    pub async fn notify_strategy_started(self: &Arc<Self>) {
-        let _update = self.status_update_lock.lock().await;
-        if !self.is_shutting_down() && *self.status.read().await == BotStatus::Running {
-            self.notify_strategy_event(StrategyEvent::Started, "程序启动后开始运行策略")
-                .await;
-        }
-    }
-
-    async fn notify_strategy_event(self: &Arc<Self>, event: StrategyEvent, reason: &str) {
-        let config = self.config.read().await;
-        let telegram = config.telegram.clone();
-        if !telegram.enabled {
-            return;
-        }
-        let notification = StrategyNotification {
-            event,
-            symbol: config.exchange.symbol.clone(),
-            mode: TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet),
-            reason: reason.to_string(),
-            timestamp: Utc::now(),
-        };
-        drop(config);
-        let notifier = self.telegram_notifier.clone();
-        let state = Arc::clone(self);
-        tokio::spawn(async move {
-            if let Err(err) = notifier
-                .send_strategy_notification(&telegram, &notification)
-                .await
-            {
-                warn!("Failed to send Telegram strategy notification: {}", err);
-                state
-                    .add_log("WARN", format!("Telegram 策略启停通知发送失败: {}", err))
-                    .await;
-            }
-        });
     }
 
     pub fn pause_epoch(&self) -> u64 {
@@ -1345,110 +1322,158 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn strategy_notifications_cover_start_pause_resume_without_duplicates() {
-        let mut fixture = notification_fixture(true, false).await;
-        fixture.state.notify_strategy_started().await;
-        assert!(next_notification(&mut fixture).await["text"]
+    async fn global_risk_sends_one_notification_per_trigger_across_pairs() {
+        let mut first = notification_fixture(true, false).await;
+        let mut second = notification_fixture(true, false).await;
+        first
+            .state
+            .config
+            .write()
+            .await
+            .global_max_position_notional = Some(dec!(100));
+        first.state.position.write().await.size = dec!(2);
+        {
+            let mut ticker = first.state.ticker.write().await;
+            ticker.mark_price = dec!(50);
+            ticker.mark_update_time = Utc::now();
+        }
+        let states = Arc::new(RwLock::new(vec![first.state.clone(), second.state.clone()]));
+        let global = GlobalPositionLimit::new(states);
+        global.membership_ready.store(true, Ordering::SeqCst);
+        for state in [&first.state, &second.state] {
+            state
+                .global_position_initialized
+                .store(true, Ordering::SeqCst);
+            state.global_position_ready.store(true, Ordering::SeqCst);
+        }
+        assert!(global.check().await);
+        let message = next_notification(&mut first).await;
+        assert!(message["text"]
             .as_str()
             .unwrap()
-            .contains("策略已启动"));
+            .contains("全局持仓名义价值 100 已达到上限 100"));
+        assert_eq!(*first.state.status.read().await, BotStatus::Paused);
+        assert_eq!(*second.state.status.read().await, BotStatus::Paused);
+        assert!(global.check().await);
+        no_more_notifications(&mut first).await;
+        no_more_notifications(&mut second).await;
+        first.state.position.write().await.size = Decimal::ZERO;
+        assert!(!global.check().await);
+        first.state.position.write().await.size = dec!(2);
+        assert!(global.check().await);
+        next_notification(&mut first).await;
+        no_more_notifications(&mut second).await;
+        first.server.abort();
+        second.server.abort();
+    }
+
+    #[tokio::test]
+    async fn global_risk_notification_reports_limit_when_another_pair_is_initializing() {
+        let mut first = notification_fixture(true, false).await;
+        let second = notification_fixture(true, false).await;
+        first
+            .state
+            .config
+            .write()
+            .await
+            .global_max_position_notional = Some(dec!(100));
+        first.state.position.write().await.size = dec!(2);
+        {
+            let mut ticker = first.state.ticker.write().await;
+            ticker.mark_price = dec!(50);
+            ticker.mark_update_time = Utc::now();
+        }
+        first
+            .state
+            .global_position_initialized
+            .store(true, Ordering::SeqCst);
+        first
+            .state
+            .global_position_ready
+            .store(true, Ordering::SeqCst);
+        let global = GlobalPositionLimit::new(Arc::new(RwLock::new(vec![
+            first.state.clone(),
+            second.state.clone(),
+        ])));
+        global.membership_ready.store(true, Ordering::SeqCst);
+        assert!(global.check().await);
+        let message = next_notification(&mut first).await;
+        let text = message["text"].as_str().unwrap();
+        assert!(text.contains("全局持仓名义价值 100 已达到上限 100"));
+        assert!(text.contains("全局风控数据不可用或已过期"));
+        first.server.abort();
+        second.server.abort();
+    }
+
+    #[tokio::test]
+    async fn global_risk_notification_failure_does_not_prevent_pause() {
+        let mut fixture = notification_fixture(true, true).await;
         fixture
             .state
-            .pause_trading_with_reason("手动暂停策略")
+            .config
+            .write()
             .await
-            .unwrap();
+            .pause_on_zero_available_margin = true;
+        fixture.state.account.write().await.asset = "USDC".into();
+        fixture.state.account.write().await.available_balance = Decimal::ZERO;
         fixture
             .state
-            .pause_trading_with_reason("手动暂停策略")
-            .await
-            .unwrap();
+            .global_position_initialized
+            .store(true, Ordering::SeqCst);
+        fixture
+            .state
+            .global_position_ready
+            .store(true, Ordering::SeqCst);
+        let global = GlobalPositionLimit::new(Arc::new(RwLock::new(vec![fixture.state.clone()])));
+        global.membership_ready.store(true, Ordering::SeqCst);
+        let mut logs = fixture.state.ws_broadcast_tx.subscribe();
+        assert!(global.check().await);
         let message = next_notification(&mut fixture).await;
         assert!(message["text"]
             .as_str()
             .unwrap()
-            .contains("原因：手动暂停策略"));
+            .contains("可用保证金已达到零"));
+        assert_eq!(*fixture.state.status.read().await, BotStatus::Paused);
+        assert!(fixture.state.global_cancel_pending.load(Ordering::SeqCst));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let log = logs.recv().await.unwrap();
+                if log.contains("Telegram 全局风控通知发送失败") {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        fixture.server.abort();
+    }
+
+    #[tokio::test]
+    async fn strategy_status_changes_do_not_send_notifications() {
+        let mut fixture = notification_fixture(true, false).await;
+        fixture
+            .state
+            .pause_trading_with_reason("手动暂停策略")
+            .await
+            .unwrap();
         assert_eq!(
             fixture.state.db.load_bot_status().unwrap(),
             Some(BotStatus::Paused)
         );
         fixture.state.resume_trading().await.unwrap();
-        fixture.state.resume_trading().await.unwrap();
-        assert!(next_notification(&mut fixture).await["text"]
-            .as_str()
-            .unwrap()
-            .contains("策略已恢复"));
-        no_more_notifications(&mut fixture).await;
-        fixture.server.abort();
-    }
-
-    #[tokio::test]
-    async fn maintenance_is_silent_but_an_actual_pause_during_maintenance_notifies() {
-        let mut fixture = notification_fixture(true, false).await;
-        fixture.state.pause_trading_silently().await.unwrap();
-        fixture.state.resume_trading_silently().await.unwrap();
-        no_more_notifications(&mut fixture).await;
         fixture.state.pause_trading_silently().await.unwrap();
         fixture
             .state
             .pause_trading_with_reason("撤单失败")
             .await
             .unwrap();
-        let message = next_notification(&mut fixture).await;
-        assert!(message["text"].as_str().unwrap().contains("原因：撤单失败"));
-        fixture
-            .state
-            .pause_trading_with_reason("重复暂停")
-            .await
-            .unwrap();
-        no_more_notifications(&mut fixture).await;
-        fixture.server.abort();
-    }
-
-    #[tokio::test]
-    async fn disabled_telegram_does_not_send_strategy_notifications() {
-        let mut fixture = notification_fixture(false, false).await;
-        fixture.state.notify_strategy_started().await;
-        fixture
-            .state
-            .pause_trading_with_reason("手动暂停策略")
-            .await
-            .unwrap();
-        fixture.state.resume_trading().await.unwrap();
-        assert_eq!(*fixture.state.status.read().await, BotStatus::Running);
-        no_more_notifications(&mut fixture).await;
-        fixture.server.abort();
-    }
-
-    #[tokio::test]
-    async fn rejected_telegram_notification_logs_warning_without_changing_pause() {
-        let mut fixture = notification_fixture(true, true).await;
-        let mut logs = fixture.state.ws_broadcast_tx.subscribe();
-        fixture
-            .state
-            .pause_trading_with_reason("手动暂停策略")
-            .await
-            .unwrap();
-        next_notification(&mut fixture).await;
-        let log = tokio::time::timeout(Duration::from_secs(1), logs.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        let log: serde_json::Value = serde_json::from_str(&log).unwrap();
-        assert_eq!(log["data"]["level"], "WARN");
-        assert!(log["data"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("Telegram 策略启停通知发送失败"));
         assert_eq!(*fixture.state.status.read().await, BotStatus::Paused);
-        assert_eq!(
-            fixture.state.db.load_bot_status().unwrap(),
-            Some(BotStatus::Paused)
-        );
+        no_more_notifications(&mut fixture).await;
         fixture.server.abort();
     }
 
     #[tokio::test]
-    async fn engine_start_notifies_or_reports_position_limit_pause() {
+    async fn engine_start_and_position_limit_pause_do_not_notify() {
         for at_limit in [false, true] {
             let mut fixture = notification_fixture(true, false).await;
             {
@@ -1482,16 +1507,18 @@ mod tests {
                 ticker_rx,
             );
             let task = tokio::spawn(async move { engine.run().await });
-            let message = next_notification(&mut fixture).await;
-            let text = message["text"].as_str().unwrap();
             if at_limit {
-                assert!(text.contains("策略已暂停"));
-                assert!(text.contains("持仓名义价值 1000 已达到最大持仓名义价值 1000"));
-                assert_eq!(*fixture.state.status.read().await, BotStatus::Paused);
+                tokio::time::timeout(Duration::from_secs(1), async {
+                    while *fixture.state.status.read().await != BotStatus::Paused {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
             } else {
-                assert!(text.contains("策略已启动"));
                 assert_eq!(*fixture.state.status.read().await, BotStatus::Running);
             }
+            no_more_notifications(&mut fixture).await;
             task.abort();
             no_more_notifications(&mut fixture).await;
             fixture.server.abort();
@@ -1526,8 +1553,6 @@ mod tests {
             ticker_rx,
         );
         let task = tokio::spawn(async move { engine.run().await });
-        let start = next_notification(&mut fixture).await;
-        assert!(start["text"].as_str().unwrap().contains("策略已启动"));
         for (price, side, size, amount) in [
             (dec!(99.9), "BUY", dec!(10.5), "1050.00"),
             (dec!(100.1), "SELL", dec!(9.51), "951.00"),
