@@ -44,6 +44,13 @@ export function number(value: unknown, digits = 2) {
 export const price = (value: unknown) => number(value, Math.min(10, Math.max(4, 2 - Math.floor(Math.log10(Math.abs(Number(value)) || 1)))));
 export const trimFractionZeros = (value: string) => value.replace(/(\.\d*?[1-9])0+$|\.0+$/, '$1');
 export const time = (value: string) => new Date(value).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
+export function relativeTime(value: string, now = Date.now()) {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return '--';
+  const seconds = Math.floor(Math.abs(now - timestamp) / 1000);
+  const [amount, unit] = seconds < 60 ? [seconds, '秒'] : seconds < 3600 ? [Math.floor(seconds / 60), '分钟'] : seconds < 86400 ? [Math.floor(seconds / 3600), '小时'] : [Math.floor(seconds / 86400), '天'];
+  return `${amount}${unit}${timestamp > now ? '后' : '前'}`;
+}
 export const beijingDay = (value: number) => new Date(value + 8 * 3600_000).toISOString().slice(0, 10);
 export function todayTradeCounts(s: Snapshot, now = Date.now()) {
   const stats = s.hourly_trade_stats;

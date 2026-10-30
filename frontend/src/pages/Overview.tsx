@@ -11,6 +11,7 @@ import type { Pair } from '../lib/types';
 import { OverviewLoading } from '../components/Loading';
 import { OverviewHistory } from '../components/OverviewHistory';
 import { DeleteStrategyButton } from '../components/DeleteStrategy';
+import { TradesTable } from '../components/DataTables';
 
 const number = (value: unknown, digits?: number) => trimFractionZeros(fixedNumber(value, digits));
 const price = (value: unknown) => trimFractionZeros(fixedPrice(value));
@@ -159,6 +160,9 @@ export default function OverviewPage() {
       {!visible.length && <Col span={24}><Card><Empty description={pairs.length ? '没有符合筛选条件的策略' : '暂无策略数据'}>{pairs.length ? <Button onClick={clearFilters}>清除筛选</Button> : <Link to="/pairs/new"><Button type="primary">新增交易对</Button></Link>}</Empty></Card></Col>}
     </Row>
     </section>
+    <Card className="overview-trades" title="最近成交" extra={<span className="muted">全部策略当前模式 · 最近 20 条</span>}>
+      <TradesTable overview trades={entries.flatMap(entry => entry.snapshot.recent_trades).sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp)).slice(0, 20)} />
+    </Card>
     <OverviewHistory />
     </>}
   </>;

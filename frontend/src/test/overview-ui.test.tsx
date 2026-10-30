@@ -92,6 +92,27 @@ it('shows unavailable trade counts when a strategy has no current-day statistics
   expect(within(screen.getByLabelText('策略运行概览')).getByText('买单 -- 笔 / 卖单 -- 笔')).toBeInTheDocument();
 });
 
+it('shows the 20 newest trades across strategies with their modes', () => {
+  const btc = snapshot('BTCUSDC'), eth = snapshot('ETHUSDC');
+  const trade = (symbol: string, index: number) => ({
+    trade_id: `${symbol}-${index}`, symbol, mode: symbol === 'BTCUSDC' ? 'PAPER' as const : 'LIVE' as const,
+    side: 'BUY' as const, price: '100', quantity: '1', amount_usdc: '100', realized_pnl: '0', commission: '0',
+    pnl_verified: true, is_maker: true, timestamp: new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString(), note: `成交 ${index}`,
+  });
+  btc.recent_trades = Array.from({ length: 11 }, (_, i) => trade('BTCUSDC', i * 2));
+  eth.recent_trades = Array.from({ length: 11 }, (_, i) => trade('ETHUSDC', i * 2 + 1));
+  overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: btc, mode: 'PAPER', scoped: true }, { snapshot: eth, mode: 'LIVE', scoped: true }] };
+  render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+  const table = screen.getByText('最近成交').closest('.ant-card')!;
+  const rows = within(table as HTMLElement).getAllByRole('row').slice(1);
+  expect(rows).toHaveLength(20);
+  expect(within(table as HTMLElement).getByRole('columnheader', { name: '方向' })).not.toHaveClass('ant-table-cell-fix-left');
+  expect(rows[0]).toHaveTextContent('ETHUSDC');
+  expect(rows[0]).toHaveTextContent('成交 21');
+  expect(rows[19]).toHaveTextContent('成交 2');
+  expect(within(table as HTMLElement).queryByText('成交 1')).not.toBeInTheDocument();
+});
+
 it('offers creation when there are no strategies', () => {
   overview.data = { generated_at: new Date().toISOString(), pairs: [] };
   render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);

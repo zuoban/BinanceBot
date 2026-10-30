@@ -1,8 +1,9 @@
+import { useEffect, useState } from 'react';
 import { Table, Tag } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { number, price, time } from '../lib/format';
+import { number, price, relativeTime, time } from '../lib/format';
 import type { Log, Order, Trade } from '../lib/types';
-import { Pnl } from './Common';
+import { ModeTag, Pnl } from './Common';
 
 const side = (value: string) => <Tag color={value === 'BUY' ? 'green' : 'red'}>{value === 'BUY' ? '买入' : '卖出'}</Tag>;
 const purposeLabel: Record<string, string> = { GRID: '网格', TAKE_PROFIT: '止盈', REMAINDER: '余量合并', LEGACY: '历史订单' };
@@ -21,10 +22,18 @@ export function OrdersTable({ orders, mark }: { orders: Order[]; mark?: string }
     pagination={{ pageSize: 15, showSizeChanger: false, hideOnSinglePage: true }}
     expandable={{ rowExpandable: o => !!o.merge_sources?.length, expandedRowRender: o => <ul>{o.merge_sources.map(source => <li key={source.client_order_id}>{source.client_order_id} · {price(source.price)} × {price(source.quantity)}</li>)}</ul> }} /></>;
 }
-export function TradesTable({ trades }: { trades: Trade[] }) {
+export function TradesTable({ trades, overview = false }: { trades: Trade[]; overview?: boolean }) {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    if (!overview || !trades.length) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [overview, trades.length]);
   const columns: ColumnsType<Trade> = [
-    { title: '方向', dataIndex: 'side', render: side, width: 90, fixed: 'left' },
-    { title: '时间（北京）', dataIndex: 'timestamp', render: time, width: 185 },
+    ...(overview ? [{ title: '交易对', dataIndex: 'symbol', className: 'trade-symbol', width: 130 }, { title: '模式', dataIndex: 'mode', render: (mode: Trade['mode']) => <ModeTag mode={mode} />, width: 100 }] : []),
+    { title: '方向', dataIndex: 'side', render: side, width: 90, fixed: overview ? undefined : 'left' },
+    { title: overview ? '成交时间' : '时间（北京）', dataIndex: 'timestamp', className: overview ? 'trade-time' : undefined, render: overview ? (value: string) => <span title={Number.isFinite(Date.parse(value)) ? `${time(value)}（北京时间）` : undefined}>{relativeTime(value, now)}</span> : time, width: overview ? 90 : 185 },
     { title: '成交价格', align: 'right', className: 'table-numeric', dataIndex: 'price', render: price },
     { title: '数量', align: 'right', className: 'table-numeric', dataIndex: 'quantity', render: price },
     { title: '金额', align: 'right', className: 'table-numeric', dataIndex: 'amount_usdc', render: (v: string) => number(v) },
@@ -33,7 +42,7 @@ export function TradesTable({ trades }: { trades: Trade[] }) {
     { title: '成交方式', render: (_, t) => t.is_maker ? 'Maker' : 'Taker' },
     { title: '备注', dataIndex: 'note', ellipsis: true },
   ];
-  return <><p className="table-scroll-hint">左右滑动查看完整成交信息</p><Table<Trade> rowKey="trade_id" columns={columns} dataSource={trades} size="small" scroll={{ x: 1000 }} pagination={{ pageSize: 15, showSizeChanger: false, hideOnSinglePage: true }} /></>;
+  return <div className={overview ? 'overview-trades-table' : undefined}>{!overview && <p className="table-scroll-hint">左右滑动查看完整成交信息</p>}<Table<Trade> rowKey="trade_id" columns={columns} dataSource={trades} size="small" scroll={{ x: 1000 }} pagination={overview ? false : { pageSize: 15, showSizeChanger: false, hideOnSinglePage: true }} /></div>;
 }
 export function LogsTable({ logs }: { logs: Log[] }) {
   return <><p className="table-scroll-hint">左右滑动查看完整日志</p><Table<Log> rowKey={l => `${l.timestamp}-${l.level}-${l.message}`} dataSource={logs} size="small" scroll={{ x: 600 }} pagination={{ pageSize: 30, showSizeChanger: false }} columns={[

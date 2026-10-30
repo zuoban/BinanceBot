@@ -1,10 +1,19 @@
 import { describe, expect, it } from 'vitest';
-import { accountGroups, comparePositionAmount, positionAmount, positionGroups, todayCount, trimFractionZeros } from '../lib/format';
+import { accountGroups, comparePositionAmount, positionAmount, positionGroups, relativeTime, todayCount, trimFractionZeros } from '../lib/format';
 import { snapshot } from './fixtures';
 
 it('removes only insignificant fractional zeros', () => {
   expect(['10,000.00', '99.5400', '0.0000', '0.0010', '-1.20', '--'].map(trimFractionZeros))
     .toEqual(['10,000', '99.54', '0', '0.001', '-1.2', '--']);
+});
+
+it('formats relative trade times across units and handles invalid or future dates', () => {
+  const now = Date.parse('2026-01-02T00:00:00Z');
+  const at = (seconds: number) => new Date(now - seconds * 1000).toISOString();
+  expect([1, 59, 60, 3600, 86400].map(seconds => relativeTime(at(seconds), now)))
+    .toEqual(['1秒前', '59秒前', '1分钟前', '1小时前', '1天前']);
+  expect(relativeTime(at(-2), now)).toBe('2秒后');
+  expect(relativeTime('invalid', now)).toBe('--');
 });
 
 describe('account and trade summaries', () => {

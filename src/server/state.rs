@@ -222,6 +222,26 @@ impl GlobalPositionLimit {
     }
 }
 
+const RECENT_TRADE_LIMIT: usize = 200;
+
+// Oldest first; trades with equal timestamps retain their database insertion order.
+fn cache_recent_trade(trades: &mut VecDeque<TradeRecord>, trade: TradeRecord) {
+    let index = trades.partition_point(|existing| existing.timestamp <= trade.timestamp);
+    trades.insert(index, trade);
+    if trades.len() > RECENT_TRADE_LIMIT {
+        trades.pop_front();
+    }
+}
+
+fn recent_trade_cache(trades: Vec<TradeRecord>) -> VecDeque<TradeRecord> {
+    let mut cache = VecDeque::with_capacity(RECENT_TRADE_LIMIT);
+    // The database returns newest first, with later rowids first for equal timestamps.
+    for trade in trades.into_iter().rev() {
+        cache_recent_trade(&mut cache, trade);
+    }
+    cache
+}
+
 pub struct AppState {
     pub db: Arc<Database>,
     pub config: RwLock<AppConfig>,
@@ -368,12 +388,9 @@ impl AppState {
 
         // Preload recent trades from SQLite database
         let saved_trades = db
-            .get_recent_trades_for(&symbol, mode, 100)
+            .get_recent_trades_for(&symbol, mode, RECENT_TRADE_LIMIT)
             .unwrap_or_default();
-        let mut recent_trades = VecDeque::with_capacity(200);
-        for trade in saved_trades.into_iter().rev() {
-            recent_trades.push_back(trade);
-        }
+        let recent_trades = recent_trade_cache(saved_trades);
 
         // Restore cumulative grid stats from SQLite database if available
         let mut initial_stats = GridStats::default();
@@ -519,10 +536,7 @@ impl AppState {
             // Keep the cache update in the same critical section as persistence
             // so cleanup cannot be followed by an old trade reappearing here.
             let mut trades = self.recent_trades.write().await;
-            if trades.len() >= 200 {
-                trades.pop_front();
-            }
-            trades.push_back(trade.clone());
+            cache_recent_trade(&mut trades, trade.clone());
         }
 
         // Broadcast trade update event to WebSocket clients
@@ -591,7 +605,11 @@ impl AppState {
             .iter_mut()
             .find(|item| item.trade_id == trade.trade_id)
         {
-            *existing = trade;
+            // Verification updates PnL fields only; SQLite retains the original timestamp.
+            existing.realized_pnl = trade.realized_pnl;
+            existing.commission = trade.commission;
+            existing.is_maker = trade.is_maker;
+            existing.pnl_verified = true;
         }
         Ok(())
     }
@@ -609,7 +627,7 @@ impl AppState {
                 Ok((
                     db.load_scoped_stats(&query_symbol, mode)?,
                     db.get_pnl_totals(&query_symbol, mode)?,
-                    db.get_recent_trades_for(&query_symbol, mode, 100)?,
+                    db.get_recent_trades_for(&query_symbol, mode, RECENT_TRADE_LIMIT)?,
                 ))
             })
             .await;
@@ -631,7 +649,7 @@ impl AppState {
         updated.total_commission = commission;
         updated.pending_pnl_trades = pending;
         *self.stats.write().await = updated;
-        *self.recent_trades.write().await = trades.into_iter().rev().collect();
+        *self.recent_trades.write().await = recent_trade_cache(trades);
     }
 
     pub async fn clear_trade_history(&self) -> anyhow::Result<usize> {
@@ -1532,6 +1550,142 @@ mod tests {
         }
         task.abort();
         fixture.server.abort();
+    }
+
+    fn cache_test_trade(id: &str, seconds: i64, mode: TradingMode) -> TradeRecord {
+        TradeRecord {
+            trade_id: id.into(),
+            client_order_id: format!("gb_b_{id}"),
+            symbol: "SOLUSDC".into(),
+            mode,
+            side: OrderSide::Buy,
+            price: dec!(100),
+            quantity: dec!(1),
+            amount_usdc: dec!(100),
+            realized_pnl: Decimal::ZERO,
+            commission: Decimal::ZERO,
+            pnl_verified: false,
+            is_maker: true,
+            timestamp: chrono::DateTime::from_timestamp(1_700_000_000 + seconds, 0).unwrap(),
+            note: String::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn recent_trade_cache_keeps_latest_after_out_of_order_backfill_and_reload() {
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let (action_tx, _) = mpsc::channel(1);
+        let state = AppState::new(AppConfig::default(), db.clone(), action_tx);
+        // A permutation of 0..260 forces old and new fills to arrive in mixed order.
+        for i in 0..260 {
+            let timestamp = (i * 73) % 260;
+            let trade =
+                cache_test_trade(&format!("paper-{timestamp}"), timestamp, TradingMode::Paper);
+            assert!(state.record_trade(trade, None, None, None).await);
+        }
+        // Equal timestamps use insertion order, including at the retention boundary.
+        for id in ["tie-first", "tie-second"] {
+            assert!(
+                state
+                    .record_trade(
+                        cache_test_trade(id, 200, TradingMode::Paper),
+                        None,
+                        None,
+                        None
+                    )
+                    .await
+            );
+        }
+        let cached = state.recent_trades.read().await.clone();
+        assert_eq!(cached.len(), 200);
+        assert_eq!(
+            cached.front().unwrap().timestamp,
+            cache_test_trade("x", 62, TradingMode::Paper).timestamp
+        );
+        assert!(cached
+            .iter()
+            .zip(cached.iter().skip(1))
+            .all(|(a, b)| a.timestamp <= b.timestamp));
+        let ids: Vec<_> = cached.iter().map(|t| t.trade_id.as_str()).collect();
+        assert!(
+            ids.iter().position(|id| *id == "tie-first").unwrap()
+                < ids.iter().position(|id| *id == "tie-second").unwrap()
+        );
+        let snapshot = state.snapshot().await;
+        let expected: Vec<_> = cached
+            .iter()
+            .rev()
+            .take(50)
+            .map(|t| t.trade_id.clone())
+            .collect();
+        assert_eq!(
+            snapshot
+                .recent_trades
+                .iter()
+                .map(|t| t.trade_id.clone())
+                .collect::<Vec<_>>(),
+            expected
+        );
+
+        let (tx, _) = mpsc::channel(1);
+        let restarted = AppState::new(AppConfig::default(), db.clone(), tx);
+        assert_eq!(
+            restarted
+                .recent_trades
+                .read()
+                .await
+                .iter()
+                .map(|t| &t.trade_id)
+                .collect::<Vec<_>>(),
+            cached.iter().map(|t| &t.trade_id).collect::<Vec<_>>()
+        );
+        for i in 0..205 {
+            db.insert_trade(&cache_test_trade(
+                &format!("live-{i}"),
+                i,
+                TradingMode::Live,
+            ))
+            .unwrap();
+        }
+        state.config.write().await.exchange.dry_run = false;
+        state.refresh_current_scope().await;
+        let live = state.recent_trades.read().await;
+        assert_eq!(live.len(), 200);
+        assert_eq!(live.front().unwrap().trade_id, "live-5");
+        assert_eq!(live.back().unwrap().trade_id, "live-204");
+        drop(live);
+        state.config.write().await.exchange.dry_run = true;
+        state.refresh_current_scope().await;
+        assert_eq!(
+            state
+                .recent_trades
+                .read()
+                .await
+                .iter()
+                .map(|t| t.trade_id.clone())
+                .collect::<Vec<_>>(),
+            cached
+                .iter()
+                .map(|t| t.trade_id.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn recent_trade_verification_preserves_cached_timestamp() {
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let (tx, _) = mpsc::channel(1);
+        let state = AppState::new(AppConfig::default(), db, tx);
+        let original = cache_test_trade("verify", 1, TradingMode::Paper);
+        assert!(state.record_trade(original.clone(), None, None, None).await);
+        let mut verified = original.clone();
+        verified.timestamp += chrono::Duration::seconds(100);
+        verified.realized_pnl = dec!(3);
+        state.verify_trade_pnl(verified).await.unwrap();
+        let cached = state.recent_trades.read().await;
+        assert_eq!(cached[0].timestamp, original.timestamp);
+        assert_eq!(cached[0].realized_pnl, dec!(3));
+        assert!(cached[0].pnl_verified);
     }
 
     #[tokio::test]

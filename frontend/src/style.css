@@ -278,9 +278,9 @@ a { color: inherit; }
 }
 
 /* Monitoring hierarchy and readable, responsive data. */
-.overview-banner { min-height: 130px; align-items: center; gap: 22px; padding: 22px 28px; border: 1px solid #ffffff12; }
+.overview-banner { min-height: 148px; align-items: center; gap: 32px; padding: 24px 28px; border: 1px solid #ffffff1f; }
 .overview-summary, .overview-stats { position: relative; z-index: 1; }
-.overview-summary { flex: 1 0 230px; }
+.overview-summary { flex: 1 0 230px; display: flex; flex-direction: column; align-items: flex-start; gap: 5px; }
 .overview-banner h2 { font-size: 21px; margin: 6px 0 3px; }
 .overview-banner h2:first-child, .page-heading h1:first-child { margin-top: 0; }
 .overview-banner p { font-size: 12px; }
@@ -288,14 +288,14 @@ a { color: inherit; }
 .sync-ok::before, .sync-warning::before { content: ''; width: 6px; height: 6px; flex: none; border-radius: 50%; background: #a6dfb8; }
 .sync-warning { color: #ffe0a3; font-weight: 600; }
 .sync-warning::before { background: #ffe0a3; }
-.overview-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 0; flex: 1 1 650px; }
-.overview-stat { min-width: 0; border-left: 1px solid #ffffff30; padding: 0 15px; display: flex; flex-direction: column; gap: 4px; color: #c5dfcf; font-size: 12px; }
-.overview-stat strong { color: #fff; font: 500 27px 'DM Mono', monospace; font-variant-numeric: tabular-nums; line-height: 1.1; overflow-wrap: anywhere; }
+.overview-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px 0; flex: 1 1 650px; }
+.overview-stat { min-width: 0; border-left: 1px solid #ffffff30; padding: 0 20px; display: flex; flex-direction: column; gap: 8px; color: #d0e4d6; font-size: 12px; }
+.overview-stat strong { color: #fff; font: 500 28px 'DM Mono', monospace; font-variant-numeric: tabular-nums; line-height: 1.1; overflow-wrap: anywhere; }
 .overview-stat strong small { font: 12px 'DM Sans', sans-serif; color: #c5dfcf; }
-.overview-trade-breakdown { grid-column: 1 / -1; border-top: 1px solid #ffffff20; padding: 7px 15px 0; color: #c5dfcf; font-size: 11px; line-height: 1.5; font-variant-numeric: tabular-nums; }
-.overview-trade-breakdown { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px; }
-.overview-status-links { display: inline-flex; flex-wrap: wrap; gap: 12px; }
-.overview-status-links button { border: 0; padding: 2px 0; background: transparent; color: #f5f8ed; font: inherit; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
+.overview-trade-breakdown { grid-column: 1 / -1; border-top: 1px solid #ffffff30; padding: 8px 20px 0; color: #d0e4d6; font-size: 12px; line-height: 1.5; font-variant-numeric: tabular-nums; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 0 20px; }
+.overview-status-links { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.overview-status-links button { border: 0; border-radius: 6px; min-height: 40px; padding: 8px 10px; background: transparent; color: #f5f8ed; font: inherit; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
+.overview-status-links button:hover { background: #ffffff18; }
 .overview-status-links button:focus-visible { outline: 2px solid #d5edab; outline-offset: 3px; }
 .strategies-section { scroll-margin-top: 84px; margin-bottom: 32px; }
 .strategies-section:focus { outline: none; }
@@ -311,6 +311,41 @@ a { color: inherit; }
 [data-theme="dark"] .active-filters { color: #b2c6b8; }
 .table-numeric { font-variant-numeric: tabular-nums; }
 .table-scroll-hint { display: none; }
+.overview-trades { margin-bottom: 24px; overflow: hidden; }
+.overview-trades .ant-card-head { border-bottom-color: #e8ede9; }
+.overview-trades .ant-card-head-title { font-size: 16px; font-weight: 700; }
+.overview-trades .ant-card-body { padding: 0 20px 12px; }
+.overview-trades-table .ant-table-thead > tr > th { background: transparent; color: #66796d; font-size: 12px; font-weight: 500; white-space: nowrap; }
+.overview-trades-table .ant-table-thead > tr > th::before { display: none; }
+.overview-trades-table .ant-table-tbody > tr > td { padding-block: 13px; border-bottom-color: #edf1ee; }
+.overview-trades-table .trade-symbol { color: #233e34; font-weight: 700; letter-spacing: .01em; }
+.overview-trades-table .trade-time { color: #66796d; white-space: nowrap; }
+.overview-trades-table .table-numeric { font-family: 'DM Mono', monospace; }
+.overview-trades-table .ant-tag { margin-inline-end: 0; }
+[data-theme="dark"] .overview-trades .ant-card-head { border-bottom-color: #304339; }
+[data-theme="dark"] .overview-trades-table .ant-table-thead > tr > th,
+[data-theme="dark"] .overview-trades-table .trade-time { color: #b2c6b8; }
+[data-theme="dark"] .overview-trades-table .ant-table-tbody > tr > td { border-bottom-color: #304339; }
+[data-theme="dark"] .overview-trades-table .trade-symbol { color: #dce9e1; }
+@media (max-width: 600px) {
+  .overview-trades .ant-card-body { padding: 0 12px 10px; }
+  .overview-trades .ant-card-extra { font-size: 11px; }
+  .overview-trades-table .ant-table-content > table { width: 100% !important; min-width: 0 !important; table-layout: auto; }
+  .overview-trades-table colgroup col:nth-child(2),
+  .overview-trades-table colgroup col:nth-child(5),
+  .overview-trades-table colgroup col:nth-child(6),
+  .overview-trades-table colgroup col:nth-child(n+9),
+  .overview-trades-table tr > :nth-child(2),
+  .overview-trades-table tr > :nth-child(5),
+  .overview-trades-table tr > :nth-child(6),
+  .overview-trades-table tr > :nth-child(n+9) { display: none; }
+  .overview-trades-table .ant-table-cell { padding: 10px 3px !important; font-size: 11px; overflow-wrap: anywhere; }
+  .overview-trades-table .trade-symbol { font-size: 11px; letter-spacing: 0; }
+  .overview-trades-table .ant-tag { padding-inline: 3px; font-size: 11px; line-height: 20px; }
+  .overview-trades-table .table-numeric { overflow-wrap: normal; word-break: normal; }
+  .overview-trades-table .ant-table-cell-fix-left { position: static !important; }
+  .overview-trades-table .ant-tag { margin-inline-end: 0; }
+}
 .config-form, .settings-tabs { max-width: 1050px; }
 .page-heading > div:first-child, .section-heading > :first-child { min-width: 0; }
 .page-heading h1, .section-heading h2, .pair-name { overflow-wrap: anywhere; }
@@ -356,11 +391,13 @@ a { color: inherit; }
   .login-form { justify-items: stretch; }
   .login-form .ant-card, .login-note { width: 100%; }
   .overview-banner { padding: 16px; }
-  .overview-stats { gap: 8px 0; }
+  .overview-stats { gap: 14px 0; }
   .overview-stat { padding: 0 10px; }
   .overview-stat:first-child { border-left: 0; padding-left: 0; }
   .overview-stat strong { font-size: 24px; }
-  .overview-trade-breakdown { padding: 7px 0 0; }
+  .overview-trade-breakdown { padding: 8px 0 0; gap: 2px 12px; }
+  .overview-status-links { margin-left: -10px; }
+  .overview-status-links button { min-height: 44px; }
   .account-row, .position-row { margin-bottom: 16px; }
   .account-card .ant-card-body, .position-summary .ant-card-body { padding: 12px 14px; }
   .account-card .ant-statistic { margin: 7px 0; }
