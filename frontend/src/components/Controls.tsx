@@ -79,7 +79,7 @@ export function PairControls({ pair, compact = false, stale = false }: { pair: P
       { key: 'cancel_all', label: `撤单并暂停 ${pair.symbol}`, danger: true },
       { key: 'rebalance', label: `重建 ${pair.symbol} 网格`, disabled: stale },
     ], onClick: ({ key }) => void run(pair, key as Action) }} disabled={busy.has(pair.symbol)}>
-      <Button size={compact ? 'small' : 'middle'} icon={<MoreOutlined />} aria-label={`${pair.symbol} 更多操作`} />
+      <Button size={compact ? 'small' : 'middle'} icon={<MoreOutlined />} aria-label={`${pair.symbol} 更多操作`}>更多操作</Button>
     </Dropdown>
   </Space>;
 }

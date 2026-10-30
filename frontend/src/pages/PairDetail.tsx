@@ -1,5 +1,6 @@
-import { Link, useParams } from 'react-router-dom';
-import { Alert, Card, Col, Descriptions, Row, Skeleton, Space, Statistic, Tabs, Tag } from 'antd';
+import { useNavigate, useParams } from 'react-router-dom';
+import { Alert, Button, Card, Col, Descriptions, Row, Skeleton, Space, Statistic, Tabs, Tag } from 'antd';
+import { SettingOutlined } from '@ant-design/icons';
 import { usePairSnapshot, usePairs } from '../lib/queries';
 import { accountGroups, number, price, quoteAsset } from '../lib/format';
 import { ErrorNotice, ModeTag, PageTitle, Pnl, StatusTag } from '../components/Common';
@@ -10,6 +11,7 @@ import { HistoryActions } from '../components/HistoryActions';
 
 export default function PairDetail() {
   const { symbol } = useParams();
+  const navigate = useNavigate();
   const pairs = usePairs();
   const pair = pairs.data?.find(p => p.symbol === symbol);
   const query = usePairSnapshot(pair);
@@ -17,13 +19,13 @@ export default function PairDetail() {
   const s = query.data, asset = quoteAsset(symbol ?? '');
   const account = s && accountGroups([{ snapshot: s, mode: pair!.mode, scoped: pair!.scoped }])[0];
   const currentPair = pair && s ? { ...pair, status: s.status, grid_config: s.grid_config, mode: s.dry_run ? 'PAPER' as const : s.grid_config.is_testnet ? 'TESTNET' as const : 'LIVE' as const } : pair;
-  return <>
+  return <div className="pair-detail">
     <PageTitle eyebrow="WORKSPACE / STRATEGY" title={symbol ?? '策略详情'} description="行情、网格与成交，随策略实时更新。"
-      extra={<>{currentPair && <PairControls pair={currentPair} stale={query.stale || !!query.error} />}<Link className="ant-btn" to={`/pairs/${symbol}/config`}>策略参数</Link></>} />
+      extra={<div className="detail-actions">{currentPair && <PairControls pair={currentPair} stale={query.stale || !!query.error} />}<Button icon={<SettingOutlined />} onClick={() => navigate(`/pairs/${symbol}/config`)}>策略参数</Button></div>} />
     <ErrorNotice error={pairs.error || query.error} retry={() => { void pairs.refetch(); void query.refetch(); }} />
     {pairs.data && !pair && <Alert type="warning" title="该交易对不存在或已移除" />}
     {controls.results[symbol ?? ''] && <Alert type="info" title={controls.results[symbol ?? '']} />}
-    {pair && <div className="detail-status"><Space><ModeTag mode={currentPair!.mode} /><StatusTag status={currentPair!.status} /><Tag color={query.live ? 'success' : 'warning'}>{query.live ? '实时连接' : 'HTTP 自动刷新'}</Tag></Space><span className="muted">{query.dataUpdatedAt ? `最近同步 ${new Date(query.dataUpdatedAt).toLocaleTimeString('zh-CN')}` : '等待首次快照'}</span></div>}
+    {pair && <div className="detail-status"><Space wrap><ModeTag mode={currentPair!.mode} /><StatusTag status={currentPair!.status} /><Tag color={query.live ? 'success' : 'warning'}>{query.live ? '实时连接' : 'HTTP 自动刷新'}</Tag></Space><span className="muted">{query.dataUpdatedAt ? `最近同步 ${new Date(query.dataUpdatedAt).toLocaleTimeString('zh-CN')}` : '等待首次快照'}</span></div>}
     {query.stale && s && <Alert type="warning" showIcon title="快照暂未更新，数值可能已过期；仍可撤单并暂停。" />}
     {!s && (pairs.isPending || (pair && query.isPending)) && <Card role="status" aria-label="正在加载策略详情"><Skeleton active /></Card>}
     {s && <>
@@ -35,8 +37,8 @@ export default function PairDetail() {
       </Row>
       <Tabs defaultActiveKey="monitor" items={[
         { key: 'monitor', label: '实时监控', children: <>
-          <Row gutter={[20, 20]}><Col xs={24} xl={14}><Card title="今日成交" extra={<span className="muted">北京时间 · 最新小时在左</span>}><HourlyChart snapshot={s} /></Card></Col>
-            <Col xs={24} xl={10}><Card title="实时网格深度" extra={<span className="muted">横轴：价格 / {asset} · 纵轴：数量</span>}><DepthChart snapshot={s} /></Card></Col></Row>
+          <Row gutter={[20, 20]}><Col xs={24} xl={14}><Card title="今日成交" extra={<span className="muted">北京时间 · 当前小时在左 · 可横向滚动</span>}><HourlyChart snapshot={s} /></Card></Col>
+            <Col xs={24} xl={10}><Card title="实时网格深度" extra={<span className="muted">价格 / {asset} · 数量</span>}><DepthChart snapshot={s} /></Card></Col></Row>
           <Card title="仓位与策略明细" className="detail-card"><Descriptions column={{ xs: 1, sm: 2, lg: 3 }} items={[
             { key: 'direction', label: '方向', children: s.grid_config.direction === 'SHORT' ? '做空' : '做多' },
             { key: 'entry', label: '持仓均价', children: price(s.position.entry_price) },
@@ -57,5 +59,5 @@ export default function PairDetail() {
         { key: 'logs', label: '运行日志', children: <Card><LogsTable logs={s.recent_logs} /></Card> },
       ]} />
     </>}
-  </>;
+  </div>;
 }

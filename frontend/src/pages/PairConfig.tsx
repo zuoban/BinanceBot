@@ -2,6 +2,7 @@ import { useContext, useEffect, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
 import { useNavigate, useParams } from 'react-router-dom';
 import { Alert, App, Button, Card, Checkbox, Col, Form, Input, InputNumber, Row, Select, Space, Switch } from 'antd';
+import { ArrowLeftOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, pairPath, post } from '../lib/api';
 import { usePairs } from '../lib/queries';
@@ -49,13 +50,15 @@ export default function PairConfig() {
       });
     },
     onMutate: () => edit.setSaving(true),
-    onSuccess: async (data, values) => {
-      edit.setDirty(false);
-      edit.setSaving(false);
+    onSuccess: (data, values) => {
+      flushSync(() => { edit.setDirty(false); edit.setSaving(false); });
       if (!adding && typeof data !== 'string') form.setFieldsValue(toForm(data));
       message.success(adding ? '交易对已添加，策略保持暂停，请检查配置后手动恢复' : '策略配置已保存并生效');
-      await Promise.all([client.invalidateQueries({ queryKey: ['pairs'] }), client.invalidateQueries({ queryKey: ['overview'] }), client.invalidateQueries({ queryKey: ['config', symbol] })]);
-      if (adding) navigate(`/pairs/${typeof data === 'string' ? data : values.symbol.toUpperCase()}`, { replace: true });
+      const targetSymbol = adding ? (typeof data === 'string' ? data : values.symbol.trim().toUpperCase()) : symbol;
+      navigate(`/pairs/${targetSymbol}`, { replace: true });
+      void client.invalidateQueries({ queryKey: ['pairs'] });
+      void client.invalidateQueries({ queryKey: ['overview'] });
+      void client.invalidateQueries({ queryKey: ['config', symbol] });
     },
     onError: error => message.error(error.message),
     onSettled: () => edit.setSaving(false),
@@ -82,11 +85,11 @@ export default function PairConfig() {
     mutation.mutate(values);
   };
   return <>
-    <PageTitle eyebrow="WORKSPACE / CONFIGURATION" title={adding ? '新增交易对' : `${symbol} 策略参数`} description={adding ? '新策略创建后保持暂停，检查参数后手动恢复。' : '参数保存后立即生效，请先核对策略设置。'} />
+    <PageTitle title={adding ? '新增交易对' : `${symbol} 策略参数`} description={adding ? '新策略创建后保持暂停，检查参数后手动恢复。' : '参数保存后立即生效，请先核对策略设置。'} extra={!adding && <Button icon={<ArrowLeftOutlined aria-hidden="true" />} disabled={edit.saving} onClick={() => navigate(`/pairs/${symbol}`)}>返回详情</Button>} />
     <ErrorNotice error={pairs.error || config.error || mutation.error} retry={() => { if (!adding) void config.refetch(); }} />
     {pairs.data && !pair && !adding && <Alert type="warning" title="该交易对不存在或已移除" />}
     <Form<FormValues> className="config-form" form={form} layout="vertical" onFinish={values => void submit(values)} onValuesChange={() => edit.setDirty(true)} disabled={!ready || edit.saving || deletion.busy}>
-      <Card title="基本设置" extra={<span className="muted">STRATEGY / 01</span>}>
+      <Card title="基本设置">
         <Row gutter={20}>
           <Col xs={24} md={12}><Form.Item name="symbol" label="合约交易对" rules={[{ required: true, message: '请输入交易对' }, { pattern: /^[a-zA-Z0-9]+$/, message: '仅支持字母和数字' }]}><Input disabled={!adding || edit.saving} placeholder="例如 BTCUSDT" autoComplete="off" /></Form.Item></Col>
           <Col xs={24} md={12}><Form.Item name="direction" label="交易方向" rules={[{ required: true }]}><Select options={[{ value: 'LONG', label: '做多 · 买入开仓 / 卖出平仓' }, { value: 'SHORT', label: '做空 · 卖出开仓 / 买入平仓' }]} /></Form.Item></Col>
@@ -94,7 +97,7 @@ export default function PairConfig() {
         </Row>
         {selectedMode === 'LIVE' && <Alert type="warning" showIcon title="实盘使用真实资金，请核对交易方向和风险限制。" />}
       </Card>
-      <Card title="网格参数" className="form-card" extra={<span className="muted">STRATEGY / 02</span>}>
+      <Card title="网格参数" className="form-card">
         <Row gutter={20}>
           <Col xs={24} md={12}><Form.Item name="grid_interval" label="网格间距" extra="相邻网格价格的固定差值，单位为报价资产。" rules={[{ required: true, message: '请输入网格间距' }]}><InputNumber stringMode min="0.0000000001" style={{ width: '100%' }} /></Form.Item></Col>
           <Col xs={24} md={12}><Form.Item name="order_amount_usdc" label="每格金额（报价资产）" rules={[{ required: true, message: '请输入每格金额' }]}><InputNumber stringMode min="0.0000000001" style={{ width: '100%' }} /></Form.Item></Col>
@@ -102,12 +105,12 @@ export default function PairConfig() {
           <Col xs={24} md={12}><Form.Item name="sell_window" label="卖单窗口" extra="当前价格上方预挂的卖单数量，范围为 1–50。" rules={[{ required: true }]}><InputNumber min={1} max={50} precision={0} style={{ width: '100%' }} /></Form.Item></Col>
         </Row>
       </Card>
-      <Card title="仓位限制" className="form-card" extra={<span className="muted">STRATEGY / 03</span>}><Row gutter={20}>
+      <Card title="仓位限制" className="form-card"><Row gutter={20}>
           <Col xs={24} md={12}><Form.Item name="max_position_usdc" label="最大持仓名义价值" extra="留空表示不设置。"><InputNumber stringMode min="0" style={{ width: '100%' }} /></Form.Item></Col>
           <Col xs={24} md={12}><Form.Item name="pause_on_max_position" label="达到持仓上限时" extra="限制开仓会保留平仓订单；暂停策略会撤销机器人挂单。" valuePropName="checked"><Switch checkedChildren="暂停策略" unCheckedChildren="限制开仓" /></Form.Item></Col>
         </Row>
       </Card>
-      <Card title="价格范围与订单" className="form-card" extra={<span className="muted">STRATEGY / 04</span>}><Row gutter={20}>
+      <Card title="价格范围与订单" className="form-card"><Row gutter={20}>
           <Col xs={24} md={12}><Form.Item name="min_price" label="最低价格（可选）"><InputNumber stringMode min="0" style={{ width: '100%' }} /></Form.Item></Col>
           <Col xs={24} md={12}><Form.Item name="max_price" label="最高价格（可选）"><InputNumber stringMode min="0" style={{ width: '100%' }} /></Form.Item></Col>
           <Col span={24}><Form.Item name="post_only" valuePropName="checked"><Checkbox>仅挂单（Post Only）</Checkbox></Form.Item></Col>
@@ -115,7 +118,7 @@ export default function PairConfig() {
       </Card>
       <div className="save-bar"><span className="muted">{edit.dirty ? '有未保存的修改' : '所有修改已保存'}</span><Space wrap>
         <Button onClick={async () => { if (edit.dirty && !await modal.confirm({ title: '放弃未保存的修改？', okText: '还原', cancelText: '继续编辑' })) return; if (adding) form.setFieldsValue(defaults); else if (config.data) form.setFieldsValue(toForm(config.data)); edit.setDirty(false); }}>还原</Button>
-        <Button type="primary" htmlType="submit" loading={mutation.isPending}>{adding ? '保存并添加' : '保存并立即生效'}</Button>
+        <Button htmlType="submit" loading={mutation.isPending}>{adding ? '保存并添加' : '保存并立即生效'}</Button>
       </Space></div>
       {!adding && <Card className="danger-zone" title="删除策略"><p>删除前请暂停策略并等待挂单撤销；不会自动平仓，已有持仓和历史记录会保留。</p><Button danger disabled={edit.saving} loading={deletion.busy} onClick={() => void remove()}>删除策略</Button></Card>}
     </Form>
