@@ -50,7 +50,7 @@ export default function Shell() {
   return <EditContext.Provider value={context}><AccountsContext.Provider value={accounts}><ControlProvider><Layout className="app-layout">
     <Layout.Header className="topbar">
       <div className="topbar-main">
-        <Link className="topbar-brand" to="/" aria-label="Grid Console 首页"><span className="brand-symbol">G</span><span className="topbar-brand-name"><strong>GRID CONSOLE</strong><small>BINANCE FUTURES</small></span></Link>
+        <Link className="topbar-brand" to="/" aria-label="Grid Console 首页"><img className="brand-symbol" src="/logo.svg" alt="" /><span className="topbar-brand-name"><strong>GRID CONSOLE</strong><small>BINANCE FUTURES</small></span></Link>
       </div>
       <Space className="topbar-actions">{selected === 'pair' && symbol !== 'new' && <Select className="topbar-pair-select" aria-label="切换交易对" title={symbol} popupMatchSelectWidth={false} value={symbol} options={pairs.data?.map(p => ({ value: p.symbol, label: p.symbol }))} onChange={value => navigate(`/pairs/${value}${location.pathname.endsWith('/config') ? '/config' : ''}`)} />}
         <Dropdown placement="bottomRight" trigger={['click']} menu={{

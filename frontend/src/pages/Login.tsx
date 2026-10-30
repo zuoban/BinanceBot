@@ -20,7 +20,7 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
   if (status.isPending) return <LoadingScreen label="正在连接控制台" />;
   return <main className="login-page">
     <div className="login-theme"><ThemeSwitch /></div>
-    <section className="login-story"><div className="brand-mark">G<span> / </span>GRID CONSOLE</div><div>
+    <section className="login-story"><div className="brand-mark"><img className="brand-symbol" src="/logo.svg" alt="" /><span>GRID CONSOLE</span></div><div>
       <h1>让每一格，<br />清晰可见。</h1><p>行情、仓位与策略状态，<br />在一个工作台中掌握。</p>
     </div></section>
     <section className="login-form"><Card variant="borderless">

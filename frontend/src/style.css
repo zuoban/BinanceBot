@@ -5,7 +5,7 @@
 body { margin: 0; min-width: 320px; }
 a { color: inherit; }
 .app-layout { min-height: 100vh; background: #f4f6f3; }
-.brand-symbol { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 10px; background: #174d40; color: #d5edab; font: 700 24px Georgia, serif; }
+.brand-symbol { display: block; width: 38px; height: 38px; flex: none; }
 .eyebrow { color: #7a9084; font: 500 10px 'DM Mono', monospace; letter-spacing: .11em; }
 .online-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #65b688; margin-right: 5px; }
 .topbar { position: sticky; top: 0; z-index: 10; height: 72px; line-height: normal; display: flex; align-items: center; justify-content: space-between; gap: 24px; background: #fff; border-bottom: 1px solid #e3ebe5; padding: 0 max(36px, calc((100% - 1512px) / 2)); font-size: 13px; }
@@ -156,8 +156,7 @@ a { color: inherit; }
 .login-theme { position: absolute; top: 20px; right: 24px; z-index: 1; }
 .login-story { position: relative; overflow: hidden; display: flex; flex-direction: column; justify-content: space-between; min-height: 100vh; padding: 52px 8%; color: #eaf4e7; background: radial-gradient(ellipse at 75% 25%, #3d7d64, transparent 40%), linear-gradient(145deg, #163d32, #1b5848); }
 .login-story > div:last-child { margin-block: auto; }
-.brand-mark { font: 700 13px 'DM Sans', sans-serif; letter-spacing: .14em; }
-.brand-mark span { color: #aad2aa; }
+.brand-mark { display: flex; align-items: center; gap: 12px; color: #eaf4e7; font: 700 13px 'DM Sans', sans-serif; letter-spacing: .14em; }
 .login-story .eyebrow { color: #a6cdb4; }
 .login-story h1 { font-size: clamp(42px, 5vw, 72px); line-height: 1.3; letter-spacing: -.06em; margin: 20px 0; color: #eff5e8; }
 .login-story p { color: #b6d0c0; line-height: 1.9; }
