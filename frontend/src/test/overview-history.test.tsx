@@ -25,6 +25,7 @@ it('keeps missing hours and unavailable metrics as gaps', () => {
   const hour = Math.floor(Date.now() / 3600_000) * 3600;
   history.data = [{ hour: hour - 3600, groups: [{ mode: 'PAPER', asset: 'USDC', equity: '100', long: null, short: '0' }] }];
   render(<OverviewHistory />);
+  expect(screen.getByLabelText('图例')).toHaveTextContent('做多做空');
   expect(chart.data).toHaveLength(24);
   expect(chart.data[22]).toMatchObject({ equity: 100, long: null, short: 0 });
   expect(chart.data[23]).toMatchObject({ equity: null, long: null, short: null });
