@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, Outlet, useBlocker, useLocation, useNavigate } from 'react-router-dom';
-import { App, Button, Drawer, Layout, Menu, Select, Space } from 'antd';
-import { AppstoreOutlined, MenuOutlined, LogoutOutlined, SettingOutlined, PlusOutlined } from '@ant-design/icons';
+import { App, Button, Dropdown, Layout, Select, Space } from 'antd';
+import { AppstoreOutlined, BulbOutlined, LogoutOutlined, MenuOutlined, SettingOutlined } from '@ant-design/icons';
 import { useLiveAccounts, useOverview, usePairs } from '../lib/queries';
 import { AccountsContext, EditContext, useSession } from '../lib/session';
 import { accountGroups, number } from '../lib/format';
 import { ControlProvider } from './Controls';
-import { ThemeSwitch } from './ThemeSwitch';
+import { themeLabels } from './ThemeSwitch';
+import { useTheme, type ThemePreference } from '../lib/theme';
 import { defaultTitle, useDocumentTitle } from '../lib/documentTitle';
 
 export default function Shell() {
@@ -14,9 +15,10 @@ export default function Shell() {
   const pairs = usePairs();
   const overview = useOverview();
   const accounts = useLiveAccounts(overview.data);
-  const [dirty, setDirty] = useState(false), [saving, setSaving] = useState(false), [open, setOpen] = useState(false);
+  const [dirty, setDirty] = useState(false), [saving, setSaving] = useState(false);
   const { modal } = App.useApp();
   const { logout } = useSession();
+  const { preference, setPreference } = useTheme();
   const groups = accountGroups(accounts);
   useDocumentTitle(groups.length ? groups.map(group => `${number(group.equity)} | ${number(group.available)} ${group.asset}`).join(' / ') : defaultTitle);
   const blocker = useBlocker(({ currentLocation, nextLocation }) => (dirty || saving) && currentLocation.pathname !== nextLocation.pathname);
@@ -39,36 +41,37 @@ export default function Shell() {
   }, [dirty, saving]);
   const selected = location.pathname.startsWith('/settings') ? 'settings' : location.pathname.startsWith('/pairs/') ? 'pair' : 'overview';
   const symbol = location.pathname.match(/^\/pairs\/([^/]+)/)?.[1];
-  useEffect(() => {
-    if (symbol && symbol !== 'new' && pairs.data?.some(p => p.symbol === symbol)) sessionStorage.setItem('binance_bot_selected_pair', symbol);
-  }, [symbol, pairs.data]);
-  const lastPair = pairs.data?.find(p => p.symbol === symbol) || pairs.data?.find(p => p.symbol === sessionStorage.getItem('binance_bot_selected_pair')) || pairs.data?.[0];
-  const menu = <Menu mode="inline" selectedKeys={[selected]} items={[
-    { key: 'overview', icon: <AppstoreOutlined />, label: <Link to="/">策略总览</Link> },
-    ...(lastPair ? [{ key: 'pair', icon: <span className="menu-grid-icon">▦</span>, label: <Link to={`/pairs/${lastPair.symbol}`}>策略详情</Link> }] : []),
-    { key: 'settings', icon: <SettingOutlined />, label: <Link to="/settings">全局设置</Link> },
-  ]} onClick={() => setOpen(false)} />;
   const context = useMemo(() => ({ dirty, setDirty, saving, setSaving }), [dirty, saving]);
   const logOut = useCallback(async () => {
     if (saving) return;
     if (dirty && !await modal.confirm({ title: '放弃未保存的修改并退出？', okText: '退出', cancelText: '继续编辑' })) return;
     await logout();
   }, [dirty, saving, logout, modal]);
-  const sidebar = <><div className="sidebar-brand"><div className="brand-symbol">G</div><div><b>GRID CONSOLE</b><small>BINANCE FUTURES</small></div></div>
-    {menu}<div className="sidebar-footer">操作前请核对运行模式</div></>;
   return <EditContext.Provider value={context}><AccountsContext.Provider value={accounts}><ControlProvider><Layout className="app-layout">
-    <Layout.Sider width={232} className="desktop-sider">{sidebar}</Layout.Sider>
-    <Drawer title="GRID CONSOLE" placement="left" open={open} onClose={() => setOpen(false)} styles={{ body: { padding: 0 } }} size={260}>{menu}<div className="drawer-actions"><Link to="/pairs/new" onClick={() => setOpen(false)}><Button icon={<PlusOutlined />}>新增交易对</Button></Link></div></Drawer>
-    <Layout>
-      <Layout.Header className="topbar">
-        <Space><Button className="mobile-menu" icon={<MenuOutlined />} aria-label="打开导航" onClick={() => setOpen(true)} />
-          <span className={selected === 'pair' && symbol !== 'new' ? 'topbar-current topbar-pair-current' : 'topbar-current'}>{selected === 'overview' ? '策略总览' : selected === 'settings' ? '全局设置' : '策略详情'}</span>
-        </Space>
-        <Space>{selected === 'pair' && symbol !== 'new' && <Select className="topbar-pair-select" aria-label="切换交易对" value={symbol} options={pairs.data?.map(p => ({ value: p.symbol, label: p.symbol }))} onChange={value => navigate(`/pairs/${value}${location.pathname.endsWith('/config') ? '/config' : ''}`)} />}
-          <ThemeSwitch /><Button type="text" icon={<LogoutOutlined />} onClick={() => void logOut()}>退出</Button></Space>
-      </Layout.Header>
-      <Layout.Content className="content"><Outlet /></Layout.Content>
-      <Layout.Footer className="footer"><span>所有时间默认显示北京时间</span><span>版本 v{import.meta.env.VITE_APP_VERSION}</span></Layout.Footer>
-    </Layout>
+    <Layout.Header className="topbar">
+      <div className="topbar-main">
+        <Link className="topbar-brand" to="/" aria-label="Grid Console 首页"><span className="brand-symbol">G</span><span className="topbar-brand-name"><strong>GRID CONSOLE</strong><small>BINANCE FUTURES</small></span></Link>
+      </div>
+      <Space className="topbar-actions">{selected === 'pair' && symbol !== 'new' && <Select className="topbar-pair-select" aria-label="切换交易对" title={symbol} popupMatchSelectWidth={false} value={symbol} options={pairs.data?.map(p => ({ value: p.symbol, label: p.symbol }))} onChange={value => navigate(`/pairs/${value}${location.pathname.endsWith('/config') ? '/config' : ''}`)} />}
+        <Dropdown placement="bottomRight" trigger={['click']} menu={{
+          items: [
+            { key: 'overview', icon: <AppstoreOutlined aria-hidden="true" />, label: '策略总览' }, { key: 'settings', icon: <SettingOutlined aria-hidden="true" />, label: '全局设置' },
+            { type: 'divider' },
+            { key: 'theme', icon: <BulbOutlined aria-hidden="true" />, label: `主题：${themeLabels[preference]}`, children: Object.entries(themeLabels).map(([key, label]) => ({ key: `theme-${key}`, label: `${preference === key ? '✓ ' : ''}${label}` })) },
+            { key: 'logout', icon: <LogoutOutlined aria-hidden="true" />, label: '退出', disabled: saving },
+          ],
+          selectedKeys: selected === 'pair' ? [] : [selected],
+          onClick: ({ key }) => {
+            if (key === 'logout') void logOut();
+            else if (key.startsWith('theme-')) setPreference(key.slice(6) as ThemePreference);
+            else navigate(key === 'overview' ? '/' : '/settings');
+          },
+        }}>
+          <Button className="topbar-menu" type="text" icon={<MenuOutlined />} aria-label="打开主导航" />
+        </Dropdown>
+      </Space>
+    </Layout.Header>
+    <Layout.Content className="content"><Outlet /></Layout.Content>
+    <Layout.Footer className="footer"><span>所有时间默认显示北京时间</span><span>版本 v{import.meta.env.VITE_APP_VERSION}</span></Layout.Footer>
   </Layout></ControlProvider></AccountsContext.Provider></EditContext.Provider>;
 }

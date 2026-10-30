@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { createMemoryRouter, RouterProvider } from 'react-router-dom';
@@ -18,7 +18,7 @@ vi.mock('../lib/queries', async () => {
   return { usePairs: () => ({ data: [pair('BTCUSDC'), pair('ETHUSDC')] }), useOverview: () => ({ data: undefined }), useLiveAccounts: () => [] };
 });
 vi.mock('../components/Controls', () => ({ ControlProvider: ({ children }: { children: React.ReactNode }) => children }));
-vi.mock('../components/ThemeSwitch', () => ({ ThemeSwitch: () => null }));
+vi.mock('../components/ThemeSwitch', () => ({ ThemeSwitch: () => null, themeLabels: { system: '跟随系统', light: '浅色', dark: '深色' } }));
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -36,6 +36,22 @@ function setup(request: Promise<unknown>) {
   render(<QueryClientProvider client={client}><RouterProvider router={router} /></QueryClientProvider>);
   return router;
 }
+
+it('shows the navigation menu and pair selector on a strategy page', () => {
+  setup(Promise.resolve());
+  expect(screen.getByRole('button', { name: '打开主导航' })).toBeInTheDocument();
+  expect(screen.getByLabelText('切换交易对')).toBeInTheDocument();
+});
+
+it('opens the mobile navigation menu and navigates to settings', async () => {
+  setup(Promise.resolve());
+  const user = userEvent.setup();
+  await user.click(screen.getByRole('button', { name: '打开主导航' }));
+  const menu = await screen.findByRole('menu');
+  expect(within(menu).getAllByRole('menuitem').map(item => item.textContent)).toEqual(['策略总览', '全局设置', '主题：跟随系统', '退出']);
+  await user.click(within(menu).getByRole('menuitem', { name: '全局设置' }));
+  expect(await screen.findByText('设置页面')).toBeInTheDocument();
+});
 
 it('blocks navigation while deleting and redirects a dirty form without another confirmation', async () => {
   let finish!: () => void;
