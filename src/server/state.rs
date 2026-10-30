@@ -19,6 +19,209 @@ use tracing::{error, warn};
 #[path = "snapshot.rs"]
 mod snapshot;
 
+/// Coordinates the filled-position limit across all currently configured strategies.
+pub(crate) struct GlobalPositionLimit {
+    pub(crate) states: Arc<RwLock<Vec<Arc<AppState>>>>,
+    lock: Mutex<()>,
+    committed_config: std::sync::RwLock<Option<crate::config::GlobalConfig>>,
+    triggered: AtomicBool,
+    blocked: AtomicBool,
+    pub(crate) enabled: AtomicBool,
+    pub(crate) membership_ready: AtomicBool,
+}
+
+impl GlobalPositionLimit {
+    pub(crate) fn new(states: Arc<RwLock<Vec<Arc<AppState>>>>) -> Arc<Self> {
+        Arc::new(Self {
+            states,
+            lock: Mutex::new(()),
+            committed_config: std::sync::RwLock::new(None),
+            triggered: AtomicBool::new(false),
+            blocked: AtomicBool::new(false),
+            enabled: AtomicBool::new(false),
+            membership_ready: AtomicBool::new(false),
+        })
+    }
+
+    async fn check_locked(&self) -> bool {
+        let states = self.states.read().await.clone();
+        let Some(first) = states.first() else {
+            return self.enabled.load(Ordering::SeqCst)
+                && !self.membership_ready.load(Ordering::SeqCst);
+        };
+        let committed = self.committed_config.read().unwrap().clone();
+        let mut config = first.config.read().await.clone();
+        if let Some(ref committed) = committed {
+            committed.apply_to(&mut config);
+        }
+        let limit = config
+            .global_max_position_notional
+            .filter(|v| *v > Decimal::ZERO);
+        let margin_guard = config.pause_on_zero_available_margin;
+        if limit.is_none() && !margin_guard {
+            self.enabled.store(false, Ordering::SeqCst);
+            self.blocked.store(false, Ordering::SeqCst);
+            self.triggered.store(false, Ordering::SeqCst);
+            for state in &states {
+                state.queue_global_cancel();
+            }
+            return false;
+        }
+        self.enabled.store(true, Ordering::SeqCst);
+        let mut total = Decimal::ZERO;
+        let mut incomplete = !self.membership_ready.load(Ordering::SeqCst);
+        let mut initialized_incomplete = false;
+        let mut zero_margin = false;
+        for state in &states {
+            let initialized = state.global_position_initialized.load(Ordering::SeqCst);
+            let mut member_incomplete =
+                !initialized || !state.global_position_ready.load(Ordering::SeqCst);
+            let mut config = state.config.read().await.clone();
+            if let Some(ref committed) = committed {
+                committed.apply_to(&mut config);
+            }
+            if margin_guard {
+                let account = state.account.read().await.clone();
+                let max_age = config
+                    .exchange
+                    .sync_interval_secs
+                    .saturating_mul(3)
+                    .max(30)
+                    .min(i64::MAX as u64) as i64;
+                let age = Utc::now().signed_duration_since(account.update_time);
+                if account.asset.is_empty()
+                    || (!config.exchange.dry_run
+                        && (age < chrono::Duration::zero()
+                            || age > chrono::Duration::seconds(max_age)))
+                {
+                    member_incomplete = true;
+                } else if account.available_balance <= Decimal::ZERO {
+                    zero_margin = true;
+                }
+            }
+            if limit.is_none() {
+                incomplete |= member_incomplete;
+                initialized_incomplete |= initialized && member_incomplete;
+                continue;
+            }
+            let position = state.position.read().await.clone();
+            if !config.exchange.dry_run {
+                let max_age = config
+                    .exchange
+                    .sync_interval_secs
+                    .saturating_mul(3)
+                    .max(30)
+                    .min(i64::MAX as u64) as i64;
+                let fresh = position.update_time.is_some_and(|time| {
+                    let age = Utc::now().signed_duration_since(time);
+                    age >= chrono::Duration::zero() && age <= chrono::Duration::seconds(max_age)
+                });
+                if !fresh {
+                    member_incomplete = true;
+                }
+            }
+            let ticker = state.ticker.read().await.clone();
+            let max_age = config
+                .exchange
+                .sync_interval_secs
+                .saturating_mul(3)
+                .max(30)
+                .min(i64::MAX as u64) as i64;
+            let fresh = |time| {
+                let age = Utc::now().signed_duration_since(time);
+                age >= chrono::Duration::zero() && age <= chrono::Duration::seconds(max_age)
+            };
+            let price = if ticker.mark_price > Decimal::ZERO && fresh(ticker.mark_update_time) {
+                ticker.mark_price
+            } else if position.mark_price > Decimal::ZERO && position.update_time.is_some_and(fresh)
+            {
+                position.mark_price
+            } else if ticker.last_price > Decimal::ZERO && fresh(ticker.update_time) {
+                ticker.last_price
+            } else {
+                Decimal::ZERO
+            };
+            if !position.size.is_zero() && price <= Decimal::ZERO {
+                member_incomplete = true;
+            }
+            if price > Decimal::ZERO {
+                match position
+                    .size
+                    .abs()
+                    .checked_mul(price)
+                    .and_then(|v| total.checked_add(v))
+                {
+                    Some(value) => total = value,
+                    None => member_incomplete = true,
+                }
+            }
+            incomplete |= member_incomplete;
+            initialized_incomplete |= initialized && member_incomplete;
+        }
+        let position_limit_reached = limit.is_some_and(|limit| total >= limit);
+        let unsafe_now = initialized_incomplete || position_limit_reached || zero_margin;
+        self.blocked.store(
+            incomplete || position_limit_reached || zero_margin,
+            Ordering::SeqCst,
+        );
+        let first_trigger = unsafe_now && !self.triggered.swap(true, Ordering::SeqCst);
+        if !unsafe_now {
+            self.triggered.store(false, Ordering::SeqCst);
+        }
+        if first_trigger {
+            for state in &states {
+                state.global_cancel_pending.store(true, Ordering::SeqCst);
+            }
+        }
+        for state in &states {
+            if unsafe_now && (first_trigger || *state.status.read().await == BotStatus::Running) {
+                state.global_cancel_pending.store(true, Ordering::SeqCst);
+                let reason = if zero_margin {
+                    "可用保证金已达到零，需手动恢复".to_string()
+                } else if incomplete {
+                    "全局风控数据不可用或已过期，需手动恢复".to_string()
+                } else {
+                    format!(
+                        "全局持仓名义价值 {} 已达到上限 {}，需手动恢复",
+                        total,
+                        limit.expect("position limit must exist")
+                    )
+                };
+                if let Err(error) = Box::pin(state.pause_trading_with_reason(&reason)).await {
+                    state
+                        .add_log("ERROR", format!("全局风控暂停状态保存失败: {}", error))
+                        .await;
+                }
+                state.add_log("WARN", reason).await;
+            }
+            state.queue_global_cancel();
+        }
+        incomplete || position_limit_reached || zero_margin
+    }
+
+    pub(crate) fn initialize_config(&self, config: crate::config::GlobalConfig) {
+        self.enabled.store(
+            config
+                .global_max_position_notional
+                .is_some_and(|v| v > Decimal::ZERO)
+                || config.pause_on_zero_available_margin,
+            Ordering::SeqCst,
+        );
+        *self.committed_config.write().unwrap() = Some(config);
+    }
+
+    pub(crate) async fn commit_config(&self, config: crate::config::GlobalConfig) {
+        let _guard = self.lock.lock().await;
+        self.initialize_config(config);
+        self.check_locked().await;
+    }
+
+    pub(crate) async fn check(&self) -> bool {
+        let _guard = self.lock.lock().await;
+        self.check_locked().await
+    }
+}
+
 pub struct AppState {
     pub db: Arc<Database>,
     pub config: RwLock<AppConfig>,
@@ -32,6 +235,11 @@ pub struct AppState {
     pub active_orders: RwLock<HashMap<String, GridOrder>>,
     pub recent_trades: RwLock<VecDeque<TradeRecord>>,
     pub recent_logs: RwLock<VecDeque<LogEntry>>,
+    pub(crate) global_position_limit: std::sync::OnceLock<std::sync::Weak<GlobalPositionLimit>>,
+    pub(crate) global_position_ready: AtomicBool,
+    pub(crate) global_position_initialized: AtomicBool,
+    pub(crate) global_cancel_pending: AtomicBool,
+    pub(crate) global_cancel_queued: AtomicBool,
     pause_epoch: AtomicU64,
     shutdown_requested: AtomicBool,
     // Tracks the last non-maintenance status so internal cancellation does not send alerts.
@@ -202,6 +410,11 @@ impl AppState {
             active_orders: RwLock::new(HashMap::new()),
             recent_trades: RwLock::new(recent_trades),
             recent_logs: RwLock::new(VecDeque::with_capacity(300)),
+            global_position_limit: std::sync::OnceLock::new(),
+            global_position_ready: AtomicBool::new(false),
+            global_position_initialized: AtomicBool::new(false),
+            global_cancel_pending: AtomicBool::new(false),
+            global_cancel_queued: AtomicBool::new(false),
             pause_epoch: AtomicU64::new(0),
             shutdown_requested: AtomicBool::new(false),
             status_update_lock: Mutex::new(initial_status),
@@ -584,6 +797,24 @@ impl AppState {
         status: BotStatus,
         reason: Option<&str>,
     ) -> anyhow::Result<()> {
+        let global = if status == BotStatus::Running {
+            self.global_position_limit
+                .get()
+                .and_then(std::sync::Weak::upgrade)
+        } else {
+            None
+        };
+        let _global_guard = if let Some(ref coordinator) = global {
+            let guard = coordinator.lock.lock().await;
+            anyhow::ensure!(
+                !coordinator.check_locked().await
+                    && !self.global_cancel_pending.load(Ordering::SeqCst),
+                "全局持仓限制已达到或持仓数据尚未就绪，无法恢复策略"
+            );
+            Some(guard)
+        } else {
+            None
+        };
         if status == BotStatus::Paused {
             self.pause_epoch.fetch_add(1, Ordering::SeqCst);
         }
@@ -656,9 +887,43 @@ impl AppState {
         self.pause_epoch.load(Ordering::SeqCst)
     }
 
+    fn queue_global_cancel(self: &Arc<Self>) {
+        if !self.global_cancel_pending.load(Ordering::SeqCst)
+            || self.global_cancel_queued.swap(true, Ordering::SeqCst)
+        {
+            return;
+        }
+        let state = self.clone();
+        tokio::spawn(async move {
+            if state
+                .action_tx
+                .send(BotControlAction::GlobalRiskCancel)
+                .await
+                .is_err()
+            {
+                state.global_cancel_queued.store(false, Ordering::SeqCst);
+            }
+        });
+    }
+
     pub(crate) fn try_order_submission(&self) -> Option<OwnedRwLockReadGuard<()>> {
         // Skip replenishment instead of waiting: the engine must stay available for
         // configuration actions and cancellation while the coordinator holds the writer.
+        if self.global_cancel_pending.load(Ordering::SeqCst) {
+            return None;
+        }
+        if self
+            .global_position_limit
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+            .is_some_and(|global| {
+                global.enabled.load(Ordering::SeqCst)
+                    && (global.blocked.load(Ordering::SeqCst)
+                        || !global.membership_ready.load(Ordering::SeqCst))
+            })
+        {
+            return None;
+        }
         self.order_submission_lock.clone().try_read_owned().ok()
     }
 
@@ -760,6 +1025,248 @@ mod tests {
         actions: mpsc::Receiver<BotControlAction>,
         url: String,
         server: tokio::task::JoinHandle<()>,
+    }
+
+    #[tokio::test]
+    async fn global_position_limit_aggregates_and_blocks_resume_until_below_limit() {
+        use rust_decimal_macros::dec;
+        let first = notification_fixture(false, false).await;
+        let second = notification_fixture(false, false).await;
+        first
+            .state
+            .config
+            .write()
+            .await
+            .global_max_position_notional = Some(dec!(100));
+        second
+            .state
+            .config
+            .write()
+            .await
+            .global_max_position_notional = Some(dec!(100));
+        first.state.position.write().await.size = dec!(-2);
+        first.state.position.write().await.mark_price = dec!(20);
+        first.state.ticker.write().await.mark_price = dec!(30);
+        first.state.ticker.write().await.mark_update_time = Utc::now();
+        second.state.position.write().await.size = dec!(2);
+        second.state.ticker.write().await.last_price = dec!(20);
+        second.state.ticker.write().await.update_time = Utc::now();
+        let states = Arc::new(RwLock::new(vec![first.state.clone(), second.state.clone()]));
+        let global = GlobalPositionLimit::new(states);
+        global.membership_ready.store(true, Ordering::SeqCst);
+        for state in [&first.state, &second.state] {
+            state
+                .global_position_initialized
+                .store(true, Ordering::SeqCst);
+            state.global_position_ready.store(true, Ordering::SeqCst);
+            let _ = state.global_position_limit.set(Arc::downgrade(&global));
+        }
+        assert!(global.check().await);
+        assert_eq!(*first.state.status.read().await, BotStatus::Paused);
+        assert_eq!(*second.state.status.read().await, BotStatus::Paused);
+        assert!(first.state.resume_trading().await.is_err());
+        second.state.position.write().await.size = Decimal::ZERO;
+        assert!(!global.check().await);
+        assert!(first.state.resume_trading().await.is_err());
+        first
+            .state
+            .global_cancel_pending
+            .store(false, Ordering::SeqCst);
+        first.state.resume_trading().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn global_position_limit_blocks_until_data_is_ready() {
+        let fixture = notification_fixture(false, false).await;
+        fixture
+            .state
+            .config
+            .write()
+            .await
+            .global_max_position_notional = Some(Decimal::ONE);
+        let global = GlobalPositionLimit::new(Arc::new(RwLock::new(vec![fixture.state.clone()])));
+        global.membership_ready.store(true, Ordering::SeqCst);
+        let _ = fixture
+            .state
+            .global_position_limit
+            .set(Arc::downgrade(&global));
+        assert!(global.check().await);
+        assert!(fixture.state.resume_trading().await.is_err());
+        fixture
+            .state
+            .global_position_ready
+            .store(true, Ordering::SeqCst);
+        fixture.state.position.write().await.size = Decimal::ONE;
+        assert!(global.check().await);
+        fixture.state.position.write().await.mark_price = Decimal::ONE;
+        fixture.state.position.write().await.update_time = Some(Utc::now());
+        assert!(global.check().await);
+        assert_eq!(*fixture.state.status.read().await, BotStatus::Paused);
+    }
+
+    #[tokio::test]
+    async fn initialized_member_failure_pauses_even_while_another_initializes() {
+        let mut first = notification_fixture(false, false).await;
+        let second = notification_fixture(false, false).await;
+        first
+            .state
+            .config
+            .write()
+            .await
+            .global_max_position_notional = Some(Decimal::ONE);
+        first
+            .state
+            .global_position_initialized
+            .store(true, Ordering::SeqCst);
+        first
+            .state
+            .global_position_ready
+            .store(false, Ordering::SeqCst);
+        let global = GlobalPositionLimit::new(Arc::new(RwLock::new(vec![
+            first.state.clone(),
+            second.state.clone(),
+        ])));
+        global.membership_ready.store(true, Ordering::SeqCst);
+        assert!(global.check().await);
+        assert_eq!(*first.state.status.read().await, BotStatus::Paused);
+        assert_eq!(*second.state.status.read().await, BotStatus::Paused);
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), first.actions.recv())
+                .await
+                .unwrap(),
+            Some(BotControlAction::GlobalRiskCancel)
+        ));
+    }
+
+    #[tokio::test]
+    async fn risk_checks_use_committed_config_during_propagation() {
+        let fixture = notification_fixture(false, false).await;
+        let old = crate::config::GlobalConfig::from_app(&*fixture.state.config.read().await);
+        let global = GlobalPositionLimit::new(Arc::new(RwLock::new(vec![fixture.state.clone()])));
+        global.initialize_config(old);
+        global.membership_ready.store(true, Ordering::SeqCst);
+        fixture
+            .state
+            .global_position_initialized
+            .store(true, Ordering::SeqCst);
+        fixture
+            .state
+            .config
+            .write()
+            .await
+            .pause_on_zero_available_margin = true;
+        fixture.state.account.write().await.available_balance = Decimal::ZERO;
+        assert!(!global.check().await);
+        assert_eq!(*fixture.state.status.read().await, BotStatus::Running);
+        let new = crate::config::GlobalConfig::from_app(&*fixture.state.config.read().await);
+        global.commit_config(new).await;
+        assert_eq!(*fixture.state.status.read().await, BotStatus::Paused);
+    }
+
+    #[tokio::test]
+    async fn zero_margin_guard_blocks_failed_initialization_until_full_reconciliation() {
+        let fixture = notification_fixture(false, false).await;
+        fixture
+            .state
+            .config
+            .write()
+            .await
+            .pause_on_zero_available_margin = true;
+        fixture
+            .state
+            .global_position_initialized
+            .store(true, Ordering::SeqCst);
+        let global = GlobalPositionLimit::new(Arc::new(RwLock::new(vec![fixture.state.clone()])));
+        global.membership_ready.store(true, Ordering::SeqCst);
+        assert!(global.check().await);
+        assert_eq!(*fixture.state.status.read().await, BotStatus::Paused);
+        fixture
+            .state
+            .global_position_ready
+            .store(true, Ordering::SeqCst);
+        assert!(!global.check().await);
+    }
+
+    #[tokio::test]
+    async fn zero_margin_pauses_all_and_requires_confirmed_cancellation() {
+        use rust_decimal_macros::dec;
+        let first = notification_fixture(false, false).await;
+        let mut second = notification_fixture(false, false).await;
+        for state in [&first.state, &second.state] {
+            state.config.write().await.pause_on_zero_available_margin = true;
+            state
+                .global_position_initialized
+                .store(true, Ordering::SeqCst);
+            state.global_position_ready.store(true, Ordering::SeqCst);
+        }
+        second.state.account.write().await.available_balance = Decimal::ZERO;
+        let global = GlobalPositionLimit::new(Arc::new(RwLock::new(vec![
+            first.state.clone(),
+            second.state.clone(),
+        ])));
+        global.membership_ready.store(true, Ordering::SeqCst);
+        for state in [&first.state, &second.state] {
+            let _ = state.global_position_limit.set(Arc::downgrade(&global));
+        }
+        assert!(global.check().await);
+        assert_eq!(*first.state.status.read().await, BotStatus::Paused);
+        assert_eq!(*second.state.status.read().await, BotStatus::Paused);
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), second.actions.recv())
+                .await
+                .unwrap(),
+            Some(BotControlAction::GlobalRiskCancel)
+        ));
+        second.state.account.write().await.available_balance = dec!(1);
+        assert!(second.state.resume_trading().await.is_err());
+        second
+            .state
+            .global_cancel_pending
+            .store(false, Ordering::SeqCst);
+        second.state.resume_trading().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn zero_margin_guard_ignores_uninitialized_default_balance() {
+        let fixture = notification_fixture(false, false).await;
+        fixture
+            .state
+            .config
+            .write()
+            .await
+            .pause_on_zero_available_margin = true;
+        fixture.state.config.write().await.exchange.dry_run = false;
+        *fixture.state.account.write().await = AccountInfo::default();
+        let global = GlobalPositionLimit::new(Arc::new(RwLock::new(vec![fixture.state.clone()])));
+        global.membership_ready.store(true, Ordering::SeqCst);
+        assert!(global.check().await);
+        assert!(!fixture.state.global_cancel_pending.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn zero_margin_guard_requires_enabled_switch_and_detects_negative_balance() {
+        let fixture = notification_fixture(false, false).await;
+        fixture
+            .state
+            .global_position_initialized
+            .store(true, Ordering::SeqCst);
+        fixture.state.account.write().await.available_balance = -Decimal::ONE;
+        fixture
+            .state
+            .global_position_ready
+            .store(true, Ordering::SeqCst);
+        let global = GlobalPositionLimit::new(Arc::new(RwLock::new(vec![fixture.state.clone()])));
+        global.membership_ready.store(true, Ordering::SeqCst);
+        assert!(!global.check().await);
+        assert_eq!(*fixture.state.status.read().await, BotStatus::Running);
+        fixture
+            .state
+            .config
+            .write()
+            .await
+            .pause_on_zero_available_margin = true;
+        assert!(global.check().await);
+        assert_eq!(*fixture.state.status.read().await, BotStatus::Paused);
     }
 
     async fn notification_fixture(enabled: bool, reject: bool) -> NotificationFixture {

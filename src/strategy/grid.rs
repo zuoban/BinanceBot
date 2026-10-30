@@ -112,6 +112,30 @@ fn buy_exposure_usdc(position_size: Decimal, mark_price: Decimal, orders: &[Grid
     opening_exposure_usdc(GridDirection::Long, position_size, mark_price, orders)
 }
 
+// Paper accounts have no exchange-provided leverage until one is explicitly set.
+// Treat the default zero as 1x so a missing leverage never understates margin.
+fn update_paper_account(position: &mut PositionInfo, account: &mut AccountInfo, price: Decimal) {
+    if price > Decimal::ZERO {
+        position.mark_price = price;
+    }
+    position.unrealized_pnl = if position.size.is_zero() || position.mark_price <= Decimal::ZERO {
+        Decimal::ZERO
+    } else {
+        (position.mark_price - position.entry_price) * position.size
+    };
+    let margin_price = if position.mark_price > Decimal::ZERO {
+        position.mark_price
+    } else {
+        position.entry_price
+    };
+    let position_margin =
+        position.size.abs() * margin_price / Decimal::from(position.leverage.max(1));
+    account.unrealized_profit = position.unrealized_pnl;
+    account.margin_balance = account.total_wallet_balance + position.unrealized_pnl;
+    account.available_balance = account.margin_balance - position_margin;
+    account.update_time = Utc::now();
+}
+
 fn position_valuation_price(position: &PositionInfo, ticker: &TickerInfo) -> Decimal {
     if ticker.mark_price > Decimal::ZERO {
         ticker.mark_price
@@ -320,6 +344,29 @@ impl GridTradingEngine {
 
     /// Check filled position value independently of opening-order reservations.
     async fn pause_if_position_limit_reached(&mut self) -> bool {
+        let global = self
+            .state
+            .global_position_limit
+            .get()
+            .and_then(std::sync::Weak::upgrade);
+        if let Some(global) = global {
+            if self
+                .state
+                .config
+                .read()
+                .await
+                .global_max_position_notional
+                .is_some()
+                && !global
+                    .membership_ready
+                    .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return true;
+            }
+            if global.check().await {
+                return true;
+            }
+        }
         if *self.state.status.read().await != BotStatus::Running {
             return false;
         }
@@ -438,7 +485,24 @@ impl GridTradingEngine {
         ))
     }
 
+    async fn set_global_reconciliation_ready(&self, ready: bool) {
+        self.state
+            .global_position_ready
+            .store(ready, std::sync::atomic::Ordering::SeqCst);
+        if let Some(global) = self
+            .state
+            .global_position_limit
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+        {
+            global.check().await;
+        }
+    }
+
     async fn report_reconciliation_state(&mut self, blocked: bool) {
+        if blocked {
+            self.set_global_reconciliation_ready(false).await;
+        }
         if self.reconciliation_blocked == blocked {
             return;
         }
@@ -724,6 +788,23 @@ impl GridTradingEngine {
                 } else {
                     self.state.add_log("ERROR", "Trading bot paused, but some managed orders may still be open on Binance").await;
                 }
+            }
+            BotControlAction::GlobalRiskCancel => {
+                // The engine serializes submissions and cancellations. Any order already
+                // in flight when the global gate closed has finished before this runs.
+                let complete = self.cancel_all_orders().await;
+                if complete {
+                    self.state
+                        .global_cancel_pending
+                        .store(false, std::sync::atomic::Ordering::SeqCst);
+                } else {
+                    self.state
+                        .add_log("ERROR", "全局风控撤单未完成，将继续重试")
+                        .await;
+                }
+                self.state
+                    .global_cancel_queued
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
             }
             BotControlAction::Resume => {
                 info!("Bot resumed by user command");
@@ -1043,6 +1124,7 @@ impl GridTradingEngine {
         } else {
             self.sync_live_orders().await && self.sync_account_and_position().await
         };
+        self.set_global_reconciliation_ready(ready).await;
         if !ready {
             self.pause_trading().await;
             return Err(anyhow!(
@@ -1098,6 +1180,10 @@ impl GridTradingEngine {
             ticker.symbol = ticker_update.symbol.clone();
             (last_updated, mark_updated, ticker.grid_reference_price())
         };
+        // Rejected market events cannot change risk inputs or trigger paper fills.
+        if !last_updated && !mark_updated {
+            return;
+        }
         if last_updated {
             self.ticker_retry.reset();
         }
@@ -1109,10 +1195,8 @@ impl GridTradingEngine {
         let is_dry_run = self.state.config.read().await.exchange.dry_run;
         if is_dry_run {
             let mut pos = self.state.position.write().await;
-            if !pos.size.is_zero() && valuation_price > Decimal::ZERO {
-                pos.mark_price = valuation_price;
-                pos.unrealized_pnl = (valuation_price - pos.entry_price) * pos.size;
-            }
+            let mut account = self.state.account.write().await;
+            update_paper_account(&mut pos, &mut account, valuation_price);
         }
 
         if self.pause_if_position_limit_reached().await {
@@ -1224,8 +1308,11 @@ impl GridTradingEngine {
                 return;
             }
             let account_ready = self.sync_account_and_position_inner(true).await;
-            orders_ready && account_ready
+            let ready = orders_ready && account_ready;
+            self.set_global_reconciliation_ready(ready).await;
+            ready
         } else {
+            self.set_global_reconciliation_ready(true).await;
             true
         };
 
@@ -1274,10 +1361,8 @@ impl GridTradingEngine {
 
                 if is_dry_run {
                     let mut pos = self.state.position.write().await;
-                    if !pos.size.is_zero() {
-                        pos.mark_price = price;
-                        pos.unrealized_pnl = (price - pos.entry_price) * pos.size;
-                    }
+                    let mut account = self.state.account.write().await;
+                    update_paper_account(&mut pos, &mut account, price);
                 }
             }
             Ok(_) => {
@@ -1956,6 +2041,9 @@ impl GridTradingEngine {
             false
         };
 
+        if !position_ok {
+            self.set_global_reconciliation_ready(false).await;
+        }
         if self.state.pause_epoch() != pause_epoch {
             return false;
         }
@@ -1993,6 +2081,18 @@ impl GridTradingEngine {
                 false
             }
         };
+        if !account_ok {
+            self.state.account.write().await.update_time = chrono::DateTime::<Utc>::default();
+            self.set_global_reconciliation_ready(false).await;
+        }
+        if let Some(global) = self
+            .state
+            .global_position_limit
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+        {
+            global.check().await;
+        }
         if position_ok && account_ok {
             self.last_account_sync = account_instant
                 .zip(position_instant)
@@ -2117,13 +2217,9 @@ impl GridTradingEngine {
             }
             pos.size = new_size;
             let ticker = self.state.ticker.read().await.clone();
-            pos.mark_price = ticker.grid_reference_price();
-            pos.unrealized_pnl = (pos.mark_price - pos.entry_price) * pos.size;
             let mut acc = self.state.account.write().await;
             acc.total_wallet_balance += simulated_pnl;
-            acc.available_balance += simulated_pnl;
-            acc.unrealized_profit = pos.unrealized_pnl;
-            acc.margin_balance = acc.total_wallet_balance + pos.unrealized_pnl;
+            update_paper_account(&mut pos, &mut acc, ticker.grid_reference_price());
         } else {
             self.sync_account_and_position().await;
         }
@@ -3301,6 +3397,34 @@ mod tests {
         assert_eq!(sell, paired_grid_client_order_id(parent, OrderSide::Sell));
         assert_ne!(sell, paired_grid_client_order_id(parent, OrderSide::Buy));
         assert!(sell.len() <= 36);
+    }
+
+    #[tokio::test]
+    async fn order_reconciliation_failure_revokes_readiness_until_full_recovery() {
+        let (config, db, _intent) = pending_pair_fixture();
+        let fake = PairExchange::default();
+        let (url, server) = pair_exchange_server(fake).await;
+        let mut engine = pair_recovery_engine(&config, db, url).await;
+        let state = engine.state.clone();
+        state
+            .global_position_initialized
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        state
+            .global_position_ready
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        engine.report_reconciliation_state(true).await;
+        assert!(!state
+            .global_position_ready
+            .load(std::sync::atomic::Ordering::SeqCst));
+        engine.report_reconciliation_state(false).await;
+        assert!(!state
+            .global_position_ready
+            .load(std::sync::atomic::Ordering::SeqCst));
+        engine.set_global_reconciliation_ready(true).await;
+        assert!(state
+            .global_position_ready
+            .load(std::sync::atomic::Ordering::SeqCst));
+        server.abort();
     }
 
     #[tokio::test]

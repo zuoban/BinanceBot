@@ -438,6 +438,8 @@ async fn get_global_config_handler(
             Json(ApiResponse {
                 success: true,
                 data: Some(WebGlobalConfigView {
+                    global_max_position_notional: config.global_max_position_notional,
+                    pause_on_zero_available_margin: config.pause_on_zero_available_margin,
                     recv_window: view.recv_window,
                     sync_interval_secs: view.sync_interval_secs,
                     has_api_key: view.has_api_key,
@@ -462,6 +464,14 @@ async fn post_global_config_handler(
     State(handle): State<RuntimeHandle>,
     Json(payload): Json<UpdateGlobalConfigPayload>,
 ) -> Json<ApiResponse<WebGlobalConfigView>> {
+    if matches!(payload.global_max_position_notional, Some(Some(value)) if value <= rust_decimal::Decimal::ZERO)
+    {
+        return Json(ApiResponse {
+            success: false,
+            data: None,
+            message: Some("全局最大持仓金额必须大于 0".into()),
+        });
+    }
     if let Err(error) = handle.update_global_config(payload).await {
         return Json(ApiResponse {
             success: false,

@@ -56,7 +56,7 @@ export interface HourlySnapshot {
   groups: { mode: Mode; asset: string; equity: Decimal | null; long: Decimal | null; short: Decimal | null }[];
 }
 export interface GlobalConfig {
-  recv_window: number; sync_interval_secs: number; has_api_key: boolean; has_api_secret: boolean;
+  recv_window: number; sync_interval_secs: number; global_max_position_notional: Decimal | null; pause_on_zero_available_margin: boolean; has_api_key: boolean; has_api_secret: boolean;
   api_key_preview: string; telegram_enabled: boolean; has_telegram_bot_token: boolean; telegram_chat_id: string;
 }
 export interface ServerConfig { saved: { host: string; port: number }; active: { host: string; port: number } }

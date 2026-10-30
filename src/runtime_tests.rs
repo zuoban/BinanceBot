@@ -90,7 +90,7 @@ fn fixture_with_database(
                             BotControlAction::Resume => {
                                 engine_state.resume_trading().await.unwrap();
                             }
-                            BotControlAction::Rebalance => {}
+                            BotControlAction::Rebalance | BotControlAction::GlobalRiskCancel => {}
                         }
                     }
                 });
@@ -103,7 +103,13 @@ fn fixture_with_database(
             }
         })
         .collect();
-    TradingRuntime::from_pairs(pairs, db, lock, config.server)
+    TradingRuntime::from_pairs(
+        pairs,
+        db,
+        lock,
+        config.server.clone(),
+        GlobalConfig::from_app(&config),
+    )
 }
 
 #[tokio::test]
@@ -540,6 +546,118 @@ async fn managed_websockets_accept_protocol_tokens_without_bearer_headers() {
 }
 
 #[tokio::test]
+async fn global_position_limit_api_persists_validates_and_supports_legacy_updates() {
+    let mut runtime = fixture();
+    let handle = runtime.handle();
+    let router = create_managed_router(handle.clone()).await;
+    let manager = tokio::spawn(async move { runtime.run().await });
+    let path = "/api/global/config";
+
+    let (_, initial) = request(&router, path, "GET", Value::Null, true).await;
+    assert!(initial["data"]["global_max_position_notional"].is_null());
+    let (_, updated) = request(
+        &router,
+        path,
+        "POST",
+        json!({"global_max_position_notional":"1234.50"}),
+        true,
+    )
+    .await;
+    assert_eq!(updated["success"], true);
+    assert_eq!(updated["data"]["global_max_position_notional"], "1234.50");
+    assert_eq!(
+        handle
+            .db
+            .load_config()
+            .unwrap()
+            .unwrap()
+            .global_max_position_notional
+            .unwrap()
+            .to_string(),
+        "1234.50"
+    );
+
+    for value in ["0", "-1"] {
+        let (_, rejected) = request(
+            &router,
+            path,
+            "POST",
+            json!({ "global_max_position_notional": value }),
+            true,
+        )
+        .await;
+        assert_eq!(rejected["success"], false);
+        assert_eq!(
+            handle
+                .db
+                .load_config()
+                .unwrap()
+                .unwrap()
+                .global_max_position_notional
+                .unwrap()
+                .to_string(),
+            "1234.50"
+        );
+    }
+    let (_, legacy) = request(&router, path, "POST", json!({"recv_window":8000}), true).await;
+    assert_eq!(legacy["data"]["global_max_position_notional"], "1234.50");
+    let (_, cleared) = request(
+        &router,
+        path,
+        "POST",
+        json!({ "global_max_position_notional": null }),
+        true,
+    )
+    .await;
+    assert_eq!(cleared["success"], true);
+    assert!(cleared["data"]["global_max_position_notional"].is_null());
+    assert!(handle
+        .db
+        .load_config()
+        .unwrap()
+        .unwrap()
+        .global_max_position_notional
+        .is_none());
+    manager.abort();
+    let _ = manager.await;
+}
+
+#[tokio::test]
+async fn zero_available_margin_pause_global_api_preserves_legacy_updates() {
+    let mut runtime = fixture();
+    let handle = runtime.handle();
+    let router = create_managed_router(handle.clone()).await;
+    let manager = tokio::spawn(async move { runtime.run().await });
+    let path = "/api/global/config";
+
+    let (_, initial) = request(&router, path, "GET", Value::Null, true).await;
+    assert_eq!(initial["data"]["pause_on_zero_available_margin"], false);
+    for (payload, expected) in [
+        (json!({"pause_on_zero_available_margin": true}), true),
+        (json!({"recv_window": 8000}), true),
+        (json!({"pause_on_zero_available_margin": false}), false),
+        (json!({"recv_window": 9000}), false),
+    ] {
+        let (_, updated) = request(&router, path, "POST", payload, true).await;
+        assert_eq!(updated["success"], true);
+        assert_eq!(updated["data"]["pause_on_zero_available_margin"], expected);
+        let (_, fetched) = request(&router, path, "GET", Value::Null, true).await;
+        assert_eq!(fetched["data"]["pause_on_zero_available_margin"], expected);
+        assert_eq!(
+            handle
+                .db
+                .load_config()
+                .unwrap()
+                .unwrap()
+                .pause_on_zero_available_margin,
+            expected
+        );
+    }
+    manager.abort();
+    let _ = manager.await;
+}
+
+#[tokio::test]
 async fn global_settings_reach_every_engine_and_new_pairs_inherit_without_overrides() {
     let mut runtime = fixture();
     let handle = runtime.handle();
@@ -793,6 +911,37 @@ async fn global_update_drains_old_submissions_before_switching_and_releases_only
 }
 
 #[tokio::test]
+async fn enabling_global_guard_blocks_submissions_before_commit_returns() {
+    let runtime = fixture();
+    runtime
+        .global_position_limit
+        .membership_ready
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    for state in runtime.states() {
+        state
+            .global_position_initialized
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        state.account.write().await.available_balance = rust_decimal::Decimal::ZERO;
+    }
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        runtime
+            .handle()
+            .update_global_config(crate::types::UpdateGlobalConfigPayload {
+                pause_on_zero_available_margin: Some(true),
+                ..Default::default()
+            }),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    for state in runtime.states() {
+        assert!(state.try_order_submission().is_none());
+        assert_eq!(*state.status.read().await, BotStatus::Paused);
+    }
+}
+
+#[tokio::test]
 async fn global_persistence_failure_rolls_back_before_allowing_new_submissions() {
     let path =
         std::env::temp_dir().join(format!("global-commit-failure-{}.db", uuid::Uuid::new_v4()));
@@ -811,10 +960,15 @@ async fn global_persistence_failure_rolls_back_before_allowing_new_submissions()
         .handle()
         .update_global_config(crate::types::UpdateGlobalConfigPayload {
             recv_window: Some(9000),
+            pause_on_zero_available_margin: Some(true),
             ..Default::default()
         })
         .await
         .unwrap_err();
+    assert!(!runtime
+        .global_position_limit
+        .enabled
+        .load(std::sync::atomic::Ordering::SeqCst));
     assert!(error.to_string().contains("已恢复原配置"));
     assert_eq!(
         db.load_config().unwrap().unwrap().exchange.recv_window,

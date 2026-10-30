@@ -88,6 +88,115 @@ async fn empty_short_starts_with_only_opening_sells_then_reserves_closing_buys()
 }
 
 #[tokio::test]
+async fn paper_balance_tracks_margin_and_market_pnl_for_both_directions() {
+    for (direction, opening, closing, mark, expected_pnl, expected_available) in [
+        (
+            GridDirection::Long,
+            OrderSide::Buy,
+            OrderSide::Sell,
+            dec!(110),
+            dec!(20),
+            dec!(9998),
+        ),
+        (
+            GridDirection::Short,
+            OrderSide::Sell,
+            OrderSide::Buy,
+            dec!(110),
+            dec!(-20),
+            dec!(9958),
+        ),
+    ] {
+        let mut engine = engine(direction).await;
+        engine.state.position.write().await.leverage = 10;
+        assert!(
+            engine
+                .on_order_filled(&mut order("balance_open", opening, dec!(100), dec!(2)))
+                .await
+        );
+        let account = engine.state.account.read().await.clone();
+        assert_eq!(
+            account.unrealized_profit,
+            if direction == GridDirection::Long {
+                dec!(1)
+            } else {
+                dec!(-1)
+            }
+        );
+        assert_eq!(
+            account.available_balance,
+            account.margin_balance - dec!(20.1)
+        );
+
+        engine
+            .handle_ticker_update(TickerInfo {
+                symbol: "SOLUSDC".into(),
+                mark_price: mark,
+                mark_update_time: Utc::now(),
+                ..Default::default()
+            })
+            .await;
+        let account = engine.state.account.read().await.clone();
+        assert_eq!(account.unrealized_profit, expected_pnl);
+        assert_eq!(account.margin_balance, dec!(10000) + expected_pnl);
+        assert_eq!(account.available_balance, expected_available);
+
+        assert!(
+            engine
+                .on_order_filled(&mut order("balance_partial", closing, mark, dec!(1)))
+                .await
+        );
+        let account = engine.state.account.read().await.clone();
+        assert_eq!(
+            account.total_wallet_balance,
+            dec!(10000) + expected_pnl / dec!(2)
+        );
+        assert_eq!(account.available_balance, expected_available + dec!(11));
+        assert!(
+            engine
+                .on_order_filled(&mut order("balance_close", closing, mark, dec!(1)))
+                .await
+        );
+        let account = engine.state.account.read().await.clone();
+        assert_eq!(account.available_balance, dec!(10000) + expected_pnl);
+        assert_eq!(account.margin_balance, account.available_balance);
+        assert_eq!(account.unrealized_profit, Decimal::ZERO);
+    }
+}
+
+#[tokio::test]
+async fn paper_balance_defaults_to_one_times_leverage_and_can_be_negative() {
+    let mut engine = engine(GridDirection::Short).await;
+    engine.state.ticker.write().await.mark_price = dec!(100);
+    assert!(
+        engine
+            .on_order_filled(&mut order(
+                "large_short",
+                OrderSide::Sell,
+                dec!(100),
+                dec!(100)
+            ))
+            .await
+    );
+    assert_eq!(
+        engine.state.account.read().await.available_balance,
+        Decimal::ZERO
+    );
+    engine
+        .handle_ticker_update(TickerInfo {
+            symbol: "SOLUSDC".into(),
+            mark_price: dec!(110),
+            mark_update_time: Utc::now(),
+            ..Default::default()
+        })
+        .await;
+    let account = engine.state.account.read().await.clone();
+    assert_eq!(account.unrealized_profit, dec!(-1000));
+    assert_eq!(account.margin_balance, dec!(9000));
+    assert_eq!(account.available_balance, dec!(-2000));
+}
+
+#[tokio::test]
 async fn paper_short_average_entry_and_partial_closes_record_profit_and_loss() {
     let mut engine = engine(GridDirection::Short).await;
     let wallet = engine.state.account.read().await.total_wallet_balance;

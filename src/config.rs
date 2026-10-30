@@ -14,6 +14,10 @@ pub struct AppConfig {
     pub server: ServerConfig,
     #[serde(default)]
     pub telegram: TelegramConfig,
+    #[serde(default)]
+    pub global_max_position_notional: Option<Decimal>,
+    #[serde(default)]
+    pub pause_on_zero_available_margin: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,6 +99,8 @@ pub struct GlobalConfig {
     pub recv_window: u64,
     pub sync_interval_secs: u64,
     pub telegram: TelegramConfig,
+    pub global_max_position_notional: Option<Decimal>,
+    pub pause_on_zero_available_margin: bool,
 }
 
 impl GlobalConfig {
@@ -105,6 +111,8 @@ impl GlobalConfig {
             recv_window: config.exchange.recv_window,
             sync_interval_secs: config.exchange.sync_interval_secs,
             telegram: config.telegram.clone(),
+            global_max_position_notional: config.global_max_position_notional,
+            pause_on_zero_available_margin: config.pause_on_zero_available_margin,
         }
     }
 
@@ -114,6 +122,8 @@ impl GlobalConfig {
         config.exchange.recv_window = self.recv_window;
         config.exchange.sync_interval_secs = self.sync_interval_secs;
         config.telegram = self.telegram.clone();
+        config.global_max_position_notional = self.global_max_position_notional;
+        config.pause_on_zero_available_margin = self.pause_on_zero_available_margin;
     }
 }
 
@@ -269,6 +279,8 @@ impl Default for AppConfig {
                 port: 8080,
             },
             telegram: TelegramConfig::default(),
+            global_max_position_notional: None,
+            pause_on_zero_available_margin: false,
         }
     }
 }
@@ -349,6 +361,9 @@ impl AppConfig {
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
+        if let Some(limit) = self.global_max_position_notional {
+            anyhow::ensure!(limit > Decimal::ZERO, "全局最大持仓金额必须大于 0");
+        }
         if !self.pairs.is_empty() {
             for config in self.strategy_configs()? {
                 config
@@ -540,6 +555,46 @@ mod tests {
             .unwrap()
             .iter()
             .all(|c| c.exchange.api_key == "new-global-key"));
+    }
+
+    #[test]
+    fn global_position_limit_defaults_and_validates() {
+        let mut legacy = serde_json::to_value(AppConfig::default()).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("global_max_position_notional");
+        let mut config: AppConfig = serde_json::from_value(legacy).unwrap();
+        assert_eq!(config.global_max_position_notional, None);
+        assert!(config.validate().is_ok());
+        for value in [Decimal::ZERO, Decimal::NEGATIVE_ONE] {
+            config.global_max_position_notional = Some(value);
+            assert!(config.validate().is_err());
+        }
+        config.global_max_position_notional = Some(Decimal::ONE);
+        assert!(config.validate().is_ok());
+        let restored: AppConfig =
+            serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert_eq!(restored.global_max_position_notional, Some(Decimal::ONE));
+    }
+
+    #[test]
+    fn zero_available_margin_pause_defaults_and_round_trips() {
+        let mut legacy = serde_json::to_value(AppConfig::default()).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("pause_on_zero_available_margin");
+        let mut config: AppConfig = serde_json::from_value(legacy).unwrap();
+        assert!(!config.pause_on_zero_available_margin);
+        config.pause_on_zero_available_margin = true;
+        let global = super::GlobalConfig::from_app(&config);
+        let mut restored = AppConfig::default();
+        global.apply_to(&mut restored);
+        assert!(restored.pause_on_zero_available_margin);
+        let restored: AppConfig =
+            serde_json::from_str(&serde_json::to_string(&restored).unwrap()).unwrap();
+        assert!(restored.pause_on_zero_available_margin);
     }
 
     #[test]

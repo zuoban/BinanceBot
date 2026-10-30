@@ -14,12 +14,14 @@ function GlobalSettings() {
   const { message, modal } = App.useApp();
   const client = useQueryClient();
   const query = useQuery({ queryKey: ['global-config'], queryFn: ({ signal }) => api<GlobalConfig>('/api/global/config', { signal }), refetchOnWindowFocus: false });
-  const fill = (data: GlobalConfig) => form.setFieldsValue({ ...data, api_key: '', api_secret: '', telegram_bot_token: '', clear_api_credentials: false, clear_telegram_credentials: false });
+  const fill = (data: GlobalConfig) => form.setFieldsValue({ ...data, pause_on_zero_available_margin: data.pause_on_zero_available_margin ?? false, api_key: '', api_secret: '', telegram_bot_token: '', clear_api_credentials: false, clear_telegram_credentials: false });
   useEffect(() => { if (query.data && !ready) { fill(query.data); setReady(true); } }, [query.data, ready]);
   useEffect(() => () => { edit.setDirty(false); edit.setSaving(false); }, [edit.setDirty, edit.setSaving]);
   const mutation = useMutation({
     mutationFn: (v: GlobalForm) => post<GlobalConfig>('/api/global/config', {
       recv_window: v.recv_window, sync_interval_secs: v.sync_interval_secs,
+      global_max_position_notional: v.global_max_position_notional ?? null,
+      pause_on_zero_available_margin: v.pause_on_zero_available_margin ?? false,
       api_key: v.api_key?.trim() || null, api_secret: v.api_secret?.trim() || null,
       telegram_bot_token: v.telegram_bot_token?.trim() || null, telegram_chat_id: v.telegram_chat_id?.trim() || '',
       telegram_enabled: !!v.telegram_enabled, clear_api_credentials: !!v.clear_api_credentials, clear_telegram_credentials: !!v.clear_telegram_credentials,
@@ -41,6 +43,10 @@ function GlobalSettings() {
           <Col span={24}><Form.Item name="clear_api_credentials" valuePropName="checked"><Checkbox>清除已保存的 API Key 和 Secret（所有交易对须为模拟盘）</Checkbox></Form.Item></Col>
         </Row>
       </Card>
+      <Card title="全局风控" className="form-card"><Row gutter={20}>
+        <Col xs={24} md={12}><Form.Item name="global_max_position_notional" label="全局最大持仓金额" extra="留空表示关闭；所有已配置策略的持仓绝对金额直接相加（包括不同模式和计价资产，不进行汇率换算），达到后暂停所有策略。" rules={[{ validator: (_, value: string | null | undefined) => !value || (/^\d+(\.\d+)?$/.test(value) && /[1-9]/.test(value)) ? Promise.resolve() : Promise.reject(new Error('请输入大于 0 的金额')) }]}><InputNumber stringMode min="0" style={{ width: '100%' }} /></Form.Item></Col>
+        <Col xs={24} md={12}><Form.Item name="pause_on_zero_available_margin" label="可用保证金不足时暂停" valuePropName="checked" extra="开启后，任意已配置策略的可用保证金小于或等于零时，暂停所有策略、撤销机器人挂单并保留持仓。"><Switch checkedChildren="开启" unCheckedChildren="关闭" /></Form.Item></Col>
+      </Row></Card>
       <Card title="Telegram 通知" className="form-card"><Row gutter={20}>
         <Col span={24}><Form.Item name="telegram_enabled" label="通知开关" valuePropName="checked"><Switch checkedChildren="开启" unCheckedChildren="关闭" /></Form.Item></Col>
         <Col xs={24} md={12}><Form.Item name="telegram_bot_token" label="Bot Token" extra={query.data?.has_telegram_bot_token ? '已保存 Token，留空保持不变。' : '尚未配置 Token。'}><Input.Password autoComplete="new-password" /></Form.Item></Col>

@@ -38,6 +38,7 @@ enum RuntimeCommand {
 pub struct RuntimeHandle {
     pub(crate) states: Arc<RwLock<Vec<Arc<AppState>>>>,
     pub(crate) membership_lock: Arc<Mutex<()>>,
+    global_position_limit: Arc<crate::server::state::GlobalPositionLimit>,
     pub(crate) db: Arc<Database>,
     pub(crate) active_server: crate::config::ServerConfig,
     commands: mpsc::Sender<RuntimeCommand>,
@@ -147,6 +148,7 @@ impl RuntimeHandle {
             }
             anyhow::bail!("全局配置更新失败，已恢复原配置: {}", error);
         }
+        self.global_position_limit.commit_config(config).await;
         Ok(())
     }
 
@@ -189,6 +191,7 @@ pub struct TradingRuntime {
     position_cache: Arc<PositionCache>,
     market_cache: Arc<MarketCache>,
     rate_limiter: Arc<RateLimiter>,
+    global_position_limit: Arc<crate::server::state::GlobalPositionLimit>,
 }
 
 impl TradingRuntime {
@@ -197,16 +200,26 @@ impl TradingRuntime {
         db: Arc<Database>,
         trade_lock: Arc<Mutex<()>>,
         active_server: crate::config::ServerConfig,
+        global_config: GlobalConfig,
     ) -> Self {
         let (commands, command_rx) = mpsc::channel(16);
         let states = Arc::new(RwLock::new(
             pairs.iter().map(|pair| pair.state.clone()).collect(),
         ));
+        let global_position_limit = crate::server::state::GlobalPositionLimit::new(states.clone());
+        global_position_limit.initialize_config(global_config);
+        for state in pairs.iter().map(|pair| &pair.state) {
+            let _ = state
+                .global_position_limit
+                .set(Arc::downgrade(&global_position_limit));
+        }
         Self {
             pairs,
+            global_position_limit: global_position_limit.clone(),
             handle: RuntimeHandle {
                 states,
                 membership_lock: Arc::new(Mutex::new(())),
+                global_position_limit,
                 db,
                 active_server,
                 commands,
@@ -228,6 +241,7 @@ impl TradingRuntime {
             db.clone(),
             trade_lock.clone(),
             config.server.clone(),
+            GlobalConfig::from_app(config),
         );
         for strategy in config.strategy_configs()? {
             let pair = runtime
@@ -236,6 +250,23 @@ impl TradingRuntime {
             runtime.pairs.push(pair);
         }
         *runtime.handle.states.write().await = runtime.states();
+        runtime
+            .global_position_limit
+            .membership_ready
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        runtime.global_position_limit.check().await;
+        let weak = Arc::downgrade(&runtime.global_position_limit);
+        tokio::spawn(async move {
+            let mut timer = tokio::time::interval(Duration::from_millis(250));
+            loop {
+                timer.tick().await;
+                let Some(global) = weak.upgrade() else {
+                    break;
+                };
+                global.check().await;
+                drop(global);
+            }
+        });
         Ok(runtime)
     }
 
@@ -272,6 +303,9 @@ impl TradingRuntime {
                 self.cny_rates.clone(),
             )
         };
+        let _ = state
+            .global_position_limit
+            .set(Arc::downgrade(&self.global_position_limit));
         if let Err(error) = strategy.validate() {
             state
                 .pause_trading_with_reason("启动时发现策略配置无效，请检查系统运行日志")
@@ -308,7 +342,7 @@ impl TradingRuntime {
                 result = engine.initialize() => result,
                 _ = shutdown_rx.changed() => Ok(()),
             };
-            if let Err(error) = initialized {
+            if let Err(ref error) = initialized {
                 let _ = engine_state
                     .pause_trading_with_reason("策略启动时账户或挂单对账失败，请检查系统运行日志")
                     .await;
@@ -318,6 +352,19 @@ impl TradingRuntime {
                         format!("Startup reconciliation failed; trading paused: {}", error),
                     )
                     .await;
+            }
+            engine_state
+                .global_position_initialized
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            engine_state
+                .global_position_ready
+                .store(initialized.is_ok(), std::sync::atomic::Ordering::SeqCst);
+            if let Some(global) = engine_state
+                .global_position_limit
+                .get()
+                .and_then(std::sync::Weak::upgrade)
+            {
+                global.check().await;
             }
             engine.reconcile_initial_pause().await;
             engine.run().await;
@@ -357,9 +404,23 @@ impl TradingRuntime {
             .db
             .run_blocking(move |db| db.add_pair_config(&saved))
             .await?;
-        let pair = self.prepare_pair(config, true).await?;
-        self.pairs.push(pair);
-        *self.handle.states.write().await = self.states();
+        self.global_position_limit
+            .membership_ready
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        let result = self.prepare_pair(config, true).await;
+        if let Ok(pair) = result {
+            self.pairs.push(pair);
+            *self.handle.states.write().await = self.states();
+        } else {
+            self.global_position_limit
+                .membership_ready
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            return result.map(|_| ());
+        }
+        self.global_position_limit
+            .membership_ready
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.global_position_limit.check().await;
         Ok(())
     }
 
@@ -550,8 +611,13 @@ mod tests {
                 }
             })
             .collect();
-        let mut runtime =
-            TradingRuntime::from_pairs(pairs, db.clone(), commit, config.server.clone());
+        let mut runtime = TradingRuntime::from_pairs(
+            pairs,
+            db.clone(),
+            commit,
+            config.server.clone(),
+            GlobalConfig::from_app(&config),
+        );
         runtime.shutdown(Duration::from_secs(2)).await.unwrap();
         for state in states {
             let symbol = state.config.read().await.exchange.symbol.clone();

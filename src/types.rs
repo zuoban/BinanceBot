@@ -375,6 +375,7 @@ pub struct OverviewSnapshot {
 #[derive(Debug)]
 pub enum BotControlAction {
     Pause,
+    GlobalRiskCancel,
     Resume,
     CancelAll,
     Rebalance,
@@ -404,10 +405,32 @@ pub struct UpdateGlobalConfigPayload {
     pub telegram_enabled: Option<bool>,
     pub telegram_bot_token: Option<String>,
     pub telegram_chat_id: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_decimal_update",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub global_max_position_notional: Option<Option<Decimal>>,
+    pub pause_on_zero_available_margin: Option<bool>,
+}
+
+fn deserialize_optional_decimal_update<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<Decimal>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<Decimal>::deserialize(deserializer).map(Some)
 }
 
 impl UpdateGlobalConfigPayload {
     pub fn apply_to(self, config: &mut crate::config::GlobalConfig) {
+        if let Some(value) = self.pause_on_zero_available_margin {
+            config.pause_on_zero_available_margin = value;
+        }
+        if let Some(value) = self.global_max_position_notional {
+            config.global_max_position_notional = value;
+        }
         if let Some(value) = self.recv_window {
             config.recv_window = value;
         }
@@ -449,6 +472,8 @@ impl UpdateGlobalConfigPayload {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WebGlobalConfigView {
+    pub pause_on_zero_available_margin: bool,
+    pub global_max_position_notional: Option<Decimal>,
     pub recv_window: u64,
     pub sync_interval_secs: u64,
     pub has_api_key: bool,
