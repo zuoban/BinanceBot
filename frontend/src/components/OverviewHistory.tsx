@@ -36,11 +36,9 @@ export function OverviewHistory() {
   const ticks = data.filter(point => point.hour % (4 * 3600) === 0).map(point => point.hour);
   const tooltip = { labelFormatter: (value: unknown) => `${formatDate(Number(value))} · 北京时间`, formatter: (value: unknown) => `${formatValue(value)} ${asset ?? ''}`, cursor: { stroke: '#8aa99b', strokeDasharray: '3 4' } };
   return <Card className="overview-history" size="small">
-    <div className="history-heading"><div><h2>账户权益趋势</h2><span>近 24 小时 · 每小时记录 · 北京时间</span></div>{options.length > 0 && <Select aria-label="选择趋势账户" value={key} options={options} onChange={setSelected} />}</div>
+    <div className="history-heading"><div><h2>账户权益趋势</h2><span>近 24 小时 · 每小时记录 · 北京时间</span></div>{options.length > 0 && !history.isPending && !history.error && <div className="history-metric history-equity" aria-label="最近一次快照"><span>账户权益</span><strong>{formatValue(latest?.equity)}</strong></div>}</div>
+    {options.length > 0 && <div className="history-account-row"><Select aria-label="选择趋势账户" value={key} options={options} onChange={setSelected} /></div>}
     {history.isPending ? <div className="history-empty">正在加载快照…</div> : history.error ? <div className="history-empty" role="alert">快照加载失败，请稍后重试</div> : !options.length ? <div className="history-empty">暂无快照数据，整点后开始记录</div> : <>
-      <div className="history-metrics" aria-label="最近一次快照">
-        <div className="history-metric history-equity"><span>账户权益</span><strong>{formatValue(latest?.equity)}</strong></div>
-      </div>
       <div className="history-caption"><span>单位 {asset}</span><span>最近记录 {latest ? formatDate(latest.hour) : '--'}</span></div>
       <div className="history-plot chart" aria-label="近24小时账户权益折线图"><div className="history-plot-label">账户权益</div><ResponsiveContainer width="100%" height={135}>
         <LineChart data={data} margin={{ top: 9, right: 8, bottom: 0, left: 0 }}>
