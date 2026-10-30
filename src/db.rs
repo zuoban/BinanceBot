@@ -26,18 +26,18 @@ pub(crate) fn beijing_midnight(now: DateTime<Utc>) -> DateTime<Utc> {
         .with_timezone(&Utc)
 }
 
+type TodayPnlCacheEntry = (
+    u64,
+    DateTime<Utc>,
+    std::time::Instant,
+    Option<crate::types::TodayPnl>,
+);
+
 pub struct Database {
     conn: Mutex<Connection>,
     path: String,
     trade_revision: AtomicU64,
-    today_pnl_cache: tokio::sync::Mutex<
-        Option<(
-            u64,
-            DateTime<Utc>,
-            std::time::Instant,
-            Option<crate::types::TodayPnl>,
-        )>,
-    >,
+    today_pnl_cache: tokio::sync::Mutex<Option<TodayPnlCacheEntry>>,
     #[cfg(test)]
     hourly_stats_queries: AtomicU64,
 }
