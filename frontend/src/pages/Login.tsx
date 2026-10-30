@@ -29,11 +29,11 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
       <ErrorNotice error={status.error} retry={() => void status.refetch()} /><ErrorNotice error={error} />
       {setup && <Alert type="info" showIcon title="首次启动默认使用模拟盘" />}
       <Form layout="vertical" onFinish={values => { setError(null); mutation.mutate(values); }} disabled={mutation.isPending || !status.data}>
-        {setup && <Form.Item name="setup_code" label="初始化码" rules={[{ required: true, message: '请输入初始化码' }]}><Input autoComplete="off" /></Form.Item>}
+        {setup && <Form.Item name="setup_code" label="初始化码" rules={[{ required: true, message: '请输入初始化码' }]}><Input size="large" autoComplete="off" /></Form.Item>}
         <Form.Item name="password" label="管理员密码" rules={[{ required: true, message: '请输入密码' }, ...(setup ? [{ min: 6, message: '至少 6 个字符' }] : [])]}>
           <Input.Password prefix={<LockOutlined />} size="large" autoComplete={setup ? 'new-password' : 'current-password'} />
         </Form.Item>
-        {setup && <Form.Item name="confirm" label="确认密码" dependencies={['password']} rules={[{ required: true, message: '请再次输入密码' }, ({ getFieldValue }) => ({ validator: (_, value) => value === getFieldValue('password') ? Promise.resolve() : Promise.reject(new Error('两次密码不一致')) })]}><Input.Password autoComplete="new-password" /></Form.Item>}
+        {setup && <Form.Item name="confirm" label="确认密码" dependencies={['password']} rules={[{ required: true, message: '请再次输入密码' }, ({ getFieldValue }) => ({ validator: (_, value) => value === getFieldValue('password') ? Promise.resolve() : Promise.reject(new Error('两次密码不一致')) })]}><Input.Password size="large" autoComplete="new-password" /></Form.Item>}
         <Button type="primary" size="large" htmlType="submit" block loading={mutation.isPending}>{setup ? '创建并进入控制台' : '进入控制台'}</Button>
       </Form>
     </Card><p className="login-note">会话仅保存在当前浏览器标签页</p></section>

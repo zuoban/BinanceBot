@@ -420,3 +420,27 @@ a { color: inherit; }
   .position-summary-metrics .position-total strong { font-size: 19px; }
   .strategy-footer { gap: 8px 4px; }
 }
+
+/* Login keeps the form readable and within reach on short screens. */
+.login-story h1 { line-height: 1.2; }
+.login-form .ant-typography-secondary { color: #596d61; line-height: 1.6; }
+.login-form .ant-form-item-label > label { font-weight: 500; }
+.login-form .ant-input-affix-wrapper,
+.login-form .ant-input { min-height: 40px; }
+.login-form .ant-input-affix-wrapper .ant-input { min-height: 0; }
+.login-form .ant-btn-primary { min-height: 40px; font-weight: 600; }
+.login-note { color: #66796d; line-height: 1.5; }
+.login-page ::selection { background: #b9d9c7; color: #173c32; }
+[data-theme="dark"] .login-form .ant-typography-secondary,
+[data-theme="dark"] .login-note { color: #b2c6b8; }
+[data-theme="dark"] .login-page ::selection { background: #3b6b53; color: #f5f8ed; }
+@media (max-width: 600px) {
+  .login-page .login-theme .ant-btn { color: #dce9e1; }
+  .login-story { min-height: 0; padding: 24px 25px 26px; gap: 28px; }
+  .login-story > div:last-child { margin-block: 0; }
+  .login-story h1 { margin: 0; font-size: 30px; }
+  .login-form { padding: 30px 25px 36px; }
+  .login-icon { margin-bottom: 18px; }
+  .login-form .ant-form { margin-top: 24px; }
+  .login-note { margin-top: 20px; }
+}
