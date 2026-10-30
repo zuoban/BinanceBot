@@ -101,7 +101,7 @@ export default function OverviewPage() {
         {positionGroups(entries).map(group => <Col xs={24} xl={12} key={group.key}>
           <Card className="position-summary" size="small">
             <div className="position-summary-metrics">
-              <div><span>总持仓金额 / {group.asset}</span><strong>{number(group.total)}</strong></div>
+              <div className="position-total"><span>总持仓金额 / {group.asset}</span><strong>{number(group.total)}</strong></div>
               <div><span>做多持仓金额</span><strong className="position-long">{number(group.long)}</strong></div>
               <div><span>做空持仓金额</span><strong className="position-short">{number(group.short)}</strong></div>
               <div><span>多空比（金额占比）</span><strong>{group.total !== null && group.total > 0 && group.long !== null && group.short !== null ? `${number(group.long / group.total * 100, 1)}% / ${number(group.short / group.total * 100, 1)}%` : '--'}</strong></div>
