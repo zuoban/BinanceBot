@@ -270,7 +270,8 @@ a { color: inherit; }
   .login-theme .ant-btn { color: inherit; }
 }
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+  /* Even a tiny transition can move a popup while its position is measured. */
+  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: 0s !important; }
   .skeleton-line, .skeleton-block { animation: none !important; background: #e8ede8 !important; }
   [data-theme="dark"] .skeleton-line, [data-theme="dark"] .skeleton-block { background: #24372d !important; }
   .loading-indicator span { animation: none !important; opacity: .6 !important; transform: none !important; }
