@@ -94,33 +94,23 @@ a { color: inherit; }
 .metric-row .muted { margin-top: 12px; }
 .detail-card, .form-card { margin-top: 20px; }
 .chart { width: 100%; min-width: 0; }
-.overview-history { --history-equity: #b58430; --history-long: #238367; --history-short: #c26b55; margin: 0 0 24px; overflow: hidden; }
+.overview-history { --history-equity: #b58430; margin: 0 0 24px; overflow: hidden; }
 .overview-history .ant-card-body { padding: 24px; }
 .history-heading { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 18px; }
 .history-heading h2 { margin: 0 0 4px; font-size: 17px; letter-spacing: -.02em; }
 .history-heading > div:first-child > span { color: #66796d; font-size: 12px; }
 .history-heading .ant-select { min-width: 126px; }
-.history-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; padding: 18px 0; border-block: 1px solid #e8efea; }
+.history-metrics { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; padding: 18px 0; border-block: 1px solid #e8efea; }
 .history-metric { min-width: 0; }
-.history-metric + .history-metric { padding-left: 14px; border-left: 1px solid #e8efea; }
 .history-metric span { display: flex; align-items: center; gap: 6px; color: #73897c; font-size: 12px; }
 .history-metric span::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--metric-color); flex: none; }
 .history-metric strong { display: block; margin-top: 6px; color: #284437; font: 500 18px 'DM Mono', monospace; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .history-equity { --metric-color: var(--history-equity); }
-.history-long { --metric-color: var(--history-long); }
-.history-short { --metric-color: var(--history-short); }
 .history-caption { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; padding: 14px 0 6px; color: #66796d; font-size: 11px; }
 .history-plot { position: relative; }
-.history-plot + .history-plot { border-top: 1px solid #e8efea; padding-top: 8px; }
 .history-plot-label { position: absolute; top: 8px; right: 4px; color: #8a9c91; font-size: 10px; pointer-events: none; }
-.history-plot + .history-plot .history-plot-label { top: 16px; }
-.history-plot-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; color: #66796d; font-size: 11px; padding: 2px 4px 6px 52px; }
-.history-legend { display: flex; align-items: center; gap: 16px; }
-.history-legend span { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
-.history-legend i { width: 18px; border-top: 2px solid var(--history-long); }
-.history-legend .history-legend-short { border-top: 2px solid var(--history-short); }
 [data-theme="dark"] .history-heading > div:first-child > span,
-[data-theme="dark"] .history-caption, [data-theme="dark"] .history-plot-heading { color: #b2c6b8; }
+[data-theme="dark"] .history-caption { color: #b2c6b8; }
 .history-empty { min-height: 140px; display: grid; place-items: center; color: #8b9c91; font-size: 13px; }
 .log-message { white-space: pre-wrap; word-break: break-word; }
 .settings-fields { margin-top: 24px; }
@@ -193,7 +183,6 @@ a { color: inherit; }
   .history-heading h2 { font-size: 16px; }
   .history-heading .ant-select { min-width: 112px; }
   .history-metrics { gap: 6px; padding: 12px 0; }
-  .history-metric + .history-metric { padding-left: 8px; }
   .history-metric span { font-size: 11px; gap: 4px; }
   .history-metric strong { font-size: 14px; }
   .history-point-hourly { display: none; }
@@ -261,8 +250,8 @@ a { color: inherit; }
 [data-theme="dark"] .login-page { background: #101a17; }
 [data-theme="dark"] .login-icon { background: #284c39; color: #a2e3bd; }
 [data-theme="dark"] .chart .recharts-cartesian-grid line { stroke: #34483d; }
-[data-theme="dark"] .overview-history { --history-equity: #e5bc70; --history-long: #78d4a6; --history-short: #f29b85; }
-[data-theme="dark"] .history-metrics, [data-theme="dark"] .history-metric + .history-metric, [data-theme="dark"] .history-plot + .history-plot { border-color: #34483d; }
+[data-theme="dark"] .overview-history { --history-equity: #e5bc70; }
+[data-theme="dark"] .history-metrics { border-color: #34483d; }
 [data-theme="dark"] .history-metric strong { color: #e0eee4; }
 [data-theme="dark"] .history-metric span, [data-theme="dark"] .history-heading > div:first-child > span { color: #b2c6b8; }
 [data-theme="dark"] .chart .recharts-cartesian-axis-tick text, [data-theme="dark"] .chart .recharts-reference-line .recharts-label { fill: #c1d4c7; }

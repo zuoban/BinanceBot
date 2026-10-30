@@ -4,7 +4,7 @@ import { OverviewHistory } from '../components/OverviewHistory';
 import type { HourlySnapshot } from '../lib/types';
 
 const history = vi.hoisted(() => ({ data: [] as HourlySnapshot[], isPending: false, error: null }));
-const chart = vi.hoisted(() => ({ data: [] as { hour: number; equity: number | null; long: number | null; short: number | null }[] }));
+const chart = vi.hoisted(() => ({ data: [] as { hour: number; equity: number | null }[] }));
 vi.mock('../lib/queries', () => ({ useOverviewHistory: () => history }));
 vi.mock('recharts', () => ({
   ResponsiveContainer: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
@@ -25,8 +25,10 @@ it('keeps missing hours and unavailable metrics as gaps', () => {
   const hour = Math.floor(Date.now() / 3600_000) * 3600;
   history.data = [{ hour: hour - 3600, groups: [{ mode: 'PAPER', asset: 'USDC', equity: '100', long: null, short: '0' }] }];
   render(<OverviewHistory />);
-  expect(screen.getByLabelText('图例')).toHaveTextContent('做多做空');
+  expect(screen.getByRole('heading', { name: '账户权益趋势' })).toBeInTheDocument();
+  expect(screen.queryByText('做多持仓')).not.toBeInTheDocument();
+  expect(screen.queryByText('做空持仓')).not.toBeInTheDocument();
   expect(chart.data).toHaveLength(24);
-  expect(chart.data[22]).toMatchObject({ equity: 100, long: null, short: 0 });
-  expect(chart.data[23]).toMatchObject({ equity: null, long: null, short: null });
+  expect(chart.data[22]).toMatchObject({ equity: 100 });
+  expect(chart.data[23]).toMatchObject({ equity: null });
 });
