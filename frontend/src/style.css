@@ -388,6 +388,30 @@ a { color: inherit; }
   [data-theme="dark"] .trade-list-time, [data-theme="dark"] .trade-list dt, [data-theme="dark"] .trade-list-empty { color: #b2c6b8; }
 }
 .config-form, .settings-tabs { max-width: 1050px; }
+.settings-tabs .ant-card { border-color: #e5ebe6; border-radius: 12px; box-shadow: none; }
+.settings-tabs .ant-card-head { padding: 0 24px; border-bottom: 0; }
+.settings-tabs .ant-card-head-title { font-size: 16px; font-weight: 600; }
+.settings-tabs .ant-card-body { padding: 24px; }
+.settings-tabs .ant-form-item-label > label { font-weight: 500; }
+.settings-tabs .ant-form-item-extra { max-width: 65ch; color: #66796d; line-height: 1.55; overflow-wrap: anywhere; }
+.settings-tabs .ant-checkbox-wrapper { align-items: baseline; }
+.settings-tabs .ant-alert-message { overflow-wrap: anywhere; }
+.settings-tabs .ant-tabs-tab { min-height: 44px; }
+.settings-tabs .ant-input-affix-wrapper, .settings-tabs .ant-input-number, .settings-tabs input.ant-input { min-height: 40px; }
+.settings-tabs .ant-input-number-input { min-height: 38px; }
+.settings-tabs .ant-btn { min-height: 40px; }
+.settings-tabs .save-bar { gap: 12px 20px; box-shadow: 0 4px 16px #2a403212; }
+[data-theme="dark"] .settings-tabs .ant-card { border-color: #34483d; }
+[data-theme="dark"] .settings-tabs .ant-form-item-extra { color: #b2c6b8; }
+[data-theme="dark"] .settings-tabs .save-bar { box-shadow: 0 4px 16px #0003; }
+@media (max-width: 600px) {
+  .settings-tabs .ant-card-head { padding: 0 16px; }
+  .settings-tabs .ant-card-body { padding: 18px 16px; }
+  .settings-tabs .save-bar { padding: 12px 16px; }
+}
+@media (max-height: 500px) {
+  .settings-tabs .save-bar { position: static; }
+}
 .config-form > .ant-card { border-color: #e5ebe6; border-radius: 12px; box-shadow: none; }
 .config-form > .ant-card .ant-card-head { padding: 0 24px; border-bottom: 0; }
 .config-form > .ant-card .ant-card-head-title { font-size: 16px; font-weight: 600; }

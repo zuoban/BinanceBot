@@ -468,6 +468,53 @@ async fn settings_validation_and_server_changes_preserve_independent_pair_update
 }
 
 #[tokio::test]
+async fn configuration_versions_reject_concurrent_stale_forms() {
+    let mut runtime = fixture();
+    let handle = runtime.handle();
+    let router = create_managed_router(handle).await;
+    let manager = tokio::spawn(async move { runtime.run().await });
+    for (path, field, first, second) in [
+        (
+            "/api/global/config",
+            "sync_interval_secs",
+            json!(11),
+            json!(12),
+        ),
+        ("/api/server/config", "port", json!(9001), json!(9002)),
+    ] {
+        let (_, initial) = request(&router, path, "GET", json!({}), true).await;
+        let version = initial["data"]["version"].as_str().unwrap();
+        let mut a = if field == "port" {
+            json!({"host":"127.0.0.1"})
+        } else {
+            json!({})
+        };
+        let mut b = a.clone();
+        a[field] = first;
+        b[field] = second;
+        a["baseline_version"] = json!(version);
+        b["baseline_version"] = json!(version);
+        let (a, b) = tokio::join!(
+            request(&router, path, "POST", a, true),
+            request(&router, path, "POST", b, true)
+        );
+        let (success, conflict) = if a.1["success"] == true {
+            (a.1, b.1)
+        } else {
+            (b.1, a.1)
+        };
+        assert_eq!(success["success"], true);
+        assert_eq!(conflict["success"], false);
+        assert!(conflict["message"].as_str().unwrap().contains("刷新"));
+        let (_, current) = request(&router, path, "GET", json!({}), true).await;
+        assert_eq!(success["data"]["version"], current["data"]["version"]);
+        assert_ne!(success["data"]["version"], version);
+    }
+    manager.abort();
+    let _ = manager.await;
+}
+
+#[tokio::test]
 async fn managed_account_stream_tracks_current_pair_membership() {
     use futures_util::StreamExt;
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;

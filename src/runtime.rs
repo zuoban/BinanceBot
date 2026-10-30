@@ -48,7 +48,7 @@ impl RuntimeHandle {
     pub async fn update_global_config(
         &self,
         payload: crate::types::UpdateGlobalConfigPayload,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<GlobalConfig> {
         // Finish propagation/rollback even if the HTTP client disconnects.
         let handle = self.clone();
         tokio::spawn(async move { handle.apply_global_config(payload).await }).await?
@@ -76,7 +76,7 @@ impl RuntimeHandle {
     async fn apply_global_config(
         &self,
         payload: crate::types::UpdateGlobalConfigPayload,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<GlobalConfig> {
         let _membership = self.membership_lock.lock().await;
         let saved = self
             .db
@@ -84,6 +84,13 @@ impl RuntimeHandle {
             .await?
             .ok_or_else(|| anyhow::anyhow!("无法读取全局配置"))?;
         let mut config = GlobalConfig::from_app(&saved);
+        if payload
+            .baseline_version
+            .as_deref()
+            .is_some_and(|version| version != crate::db::config_version(&config))
+        {
+            anyhow::bail!("全局设置已被其他请求修改，请刷新后重试");
+        }
         payload.apply_to(&mut config);
         let states = self.states.read().await.clone();
         // Validate every mode before changing any engine (including credential clearing).
@@ -148,8 +155,10 @@ impl RuntimeHandle {
             }
             anyhow::bail!("全局配置更新失败，已恢复原配置: {}", error);
         }
-        self.global_position_limit.commit_config(config).await;
-        Ok(())
+        self.global_position_limit
+            .commit_config(config.clone())
+            .await;
+        Ok(config)
     }
 
     pub async fn add_pair(&self, config: AppConfig) -> anyhow::Result<()> {

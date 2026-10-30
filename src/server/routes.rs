@@ -438,6 +438,9 @@ async fn get_global_config_handler(
             Json(ApiResponse {
                 success: true,
                 data: Some(WebGlobalConfigView {
+                    version: crate::db::config_version(&crate::config::GlobalConfig::from_app(
+                        &config,
+                    )),
                     global_max_position_notional: config.global_max_position_notional,
                     pause_on_zero_available_margin: config.pause_on_zero_available_margin,
                     recv_window: view.recv_window,
@@ -472,16 +475,35 @@ async fn post_global_config_handler(
             message: Some("全局最大持仓金额必须大于 0".into()),
         });
     }
-    if let Err(error) = handle.update_global_config(payload).await {
-        return Json(ApiResponse {
+    match handle.update_global_config(payload).await {
+        Ok(global) => {
+            let mut config = AppConfig::default();
+            global.apply_to(&mut config);
+            let view = web_config_view(&config);
+            Json(ApiResponse {
+                success: true,
+                data: Some(WebGlobalConfigView {
+                    version: crate::db::config_version(&global),
+                    global_max_position_notional: global.global_max_position_notional,
+                    pause_on_zero_available_margin: global.pause_on_zero_available_margin,
+                    recv_window: view.recv_window,
+                    sync_interval_secs: view.sync_interval_secs,
+                    has_api_key: view.has_api_key,
+                    has_api_secret: view.has_api_secret,
+                    api_key_preview: view.api_key_preview,
+                    telegram_enabled: view.telegram_enabled,
+                    has_telegram_bot_token: view.has_telegram_bot_token,
+                    telegram_chat_id: view.telegram_chat_id,
+                }),
+                message: Some("全局设置已保存，所有交易对立即生效".into()),
+            })
+        }
+        Err(error) => Json(ApiResponse {
             success: false,
             data: None,
             message: Some(error.to_string()),
-        });
+        }),
     }
-    let mut response = get_global_config_handler(State(handle)).await;
-    response.0.message = Some("全局设置已保存，所有交易对立即生效".into());
-    response
 }
 
 async fn remove_pair_handler(
@@ -525,6 +547,7 @@ async fn clear_managed_history_handler(
 
 #[derive(serde::Serialize)]
 struct ServerConfigView {
+    version: String,
     saved: ServerConfig,
     active: ServerConfig,
 }
@@ -536,6 +559,7 @@ async fn get_server_config_handler(
         Ok(Some(config)) => Json(ApiResponse {
             success: true,
             data: Some(ServerConfigView {
+                version: crate::db::config_version(&config.server),
                 saved: config.server,
                 active: handle.active_server,
             }),
@@ -549,20 +573,35 @@ async fn get_server_config_handler(
     }
 }
 
+#[derive(serde::Deserialize)]
+struct UpdateServerConfigPayload {
+    #[serde(flatten)]
+    server: ServerConfig,
+    baseline_version: Option<String>,
+}
+
 async fn post_server_config_handler(
     State(handle): State<RuntimeHandle>,
-    Json(server): Json<ServerConfig>,
+    Json(payload): Json<UpdateServerConfigPayload>,
 ) -> Json<ApiResponse<ServerConfigView>> {
+    let server = payload.server;
+    let submitted = server.clone();
     let result = handle
         .db
-        .run_blocking(move |db| db.save_server_config(&server))
+        .run_blocking(move |db| {
+            db.save_server_config_checked(&server, payload.baseline_version.as_deref())
+        })
         .await;
     match result {
-        Ok(()) => {
-            let mut response = get_server_config_handler(State(handle)).await;
-            response.0.message = Some("服务设置已保存，重启程序后生效".into());
-            response
-        }
+        Ok(()) => Json(ApiResponse {
+            success: true,
+            data: Some(ServerConfigView {
+                version: crate::db::config_version(&submitted),
+                saved: submitted,
+                active: handle.active_server,
+            }),
+            message: Some("服务设置已保存，重启程序后生效".into()),
+        }),
         Err(error) => Json(ApiResponse {
             success: false,
             data: None,
@@ -895,7 +934,7 @@ async fn post_change_password_handler(
             )
         }
         Ok(false) => (
-            StatusCode::UNAUTHORIZED,
+            StatusCode::BAD_REQUEST,
             Json(ApiResponse {
                 success: false,
                 data: None,

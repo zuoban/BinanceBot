@@ -259,6 +259,75 @@ async fn test_full_auth_lifecycle() {
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 }
 
+#[tokio::test]
+async fn change_password_distinguishes_invalid_password_from_invalid_session() {
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    db.set_admin_password("original-password").unwrap();
+    db.create_session("valid-token").unwrap();
+    let (action_tx, _action_rx) = mpsc::channel(16);
+    let app = create_router(AppState::new(AppConfig::default(), db.clone(), action_tx));
+
+    let change_password = |token: &str, old_password: &str| {
+        Request::builder()
+            .method("POST")
+            .uri("/api/auth/change_password")
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                serde_json::json!({"old_password": old_password, "new_password": "new-password"})
+                    .to_string(),
+            ))
+            .unwrap()
+    };
+
+    let response = app
+        .clone()
+        .oneshot(change_password("valid-token", "wrong-password"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["success"], false);
+    assert_eq!(json["message"], "原密码校验失败，请重新输入");
+    assert!(db.verify_admin_password("original-password").unwrap());
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/config")
+                .header("Authorization", "Bearer valid-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app
+        .clone()
+        .oneshot(change_password("invalid-token", "original-password"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(db.verify_admin_password("original-password").unwrap());
+
+    let response = app
+        .clone()
+        .oneshot(change_password("valid-token", "original-password"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(db.verify_admin_password("new-password").unwrap());
+
+    let response = app
+        .oneshot(change_password("valid-token", "new-password"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
 #[test]
 fn test_default_server_binding_is_all_interfaces() {
     let config = AppConfig::default();

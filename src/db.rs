@@ -607,6 +607,26 @@ impl Database {
         save_config_on(&conn, &saved)
     }
 
+    pub fn save_server_config_checked(
+        &self,
+        server: &crate::config::ServerConfig,
+        baseline_version: Option<&str>,
+    ) -> Result<()> {
+        server.socket_addr()?;
+        let conn = self.conn.lock().unwrap();
+        let json: String = conn.query_row(
+            "SELECT config_json FROM app_config WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        let mut saved: AppConfig = serde_json::from_str(&json)?;
+        if baseline_version.is_some_and(|version| version != config_version(&saved.server)) {
+            anyhow::bail!("服务设置已被其他请求修改，请刷新后重试");
+        }
+        saved.server = server.clone();
+        save_config_on(&conn, &saved)
+    }
+
     /// A new configuration must never become durable without its current execution status.
     pub fn save_runtime_config(
         &self,
@@ -1124,6 +1144,26 @@ fn save_config_on(conn: &Connection, config: &AppConfig) -> Result<()> {
     )
     .context("Failed to save config to SQLite database")?;
     Ok(())
+}
+
+/// Process-local keyed version: configuration secrets cannot be guessed from this value.
+pub(crate) fn config_version<T: serde::Serialize>(value: &T) -> String {
+    use hmac::{Hmac, Mac};
+    use rand::RngCore;
+    use sha2::Sha256;
+    static KEY: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+    let key = KEY.get_or_init(|| {
+        let mut key = [0; 32];
+        rand::rngs::OsRng.fill_bytes(&mut key);
+        key
+    });
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("valid HMAC key");
+    mac.update(&serde_json::to_vec(value).expect("config serialization must succeed"));
+    mac.finalize()
+        .into_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 fn save_pair_config_on(conn: &Connection, symbol: &str, config: &AppConfig) -> Result<()> {

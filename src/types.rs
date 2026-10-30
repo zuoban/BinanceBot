@@ -394,6 +394,7 @@ pub enum BotControlAction {
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct UpdateGlobalConfigPayload {
+    pub baseline_version: Option<String>,
     pub recv_window: Option<u64>,
     pub sync_interval_secs: Option<u64>,
     pub api_key: Option<String>,
@@ -472,6 +473,7 @@ impl UpdateGlobalConfigPayload {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WebGlobalConfigView {
+    pub version: String,
     pub pause_on_zero_available_margin: bool,
     pub global_max_position_notional: Option<Decimal>,
     pub recv_window: u64,

@@ -92,7 +92,7 @@ pub struct TelegramConfig {
 }
 
 /// Shared connection and notification settings, without a pair's symbol or mode.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct GlobalConfig {
     pub api_key: String,
     pub api_secret: String,
