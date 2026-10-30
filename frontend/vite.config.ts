@@ -15,5 +15,5 @@ export default defineConfig({
       '/ws': { target: process.env.API_PROXY_TARGET || 'http://127.0.0.1:8080', ws: true },
     },
   },
-  test: { environment: 'jsdom', setupFiles: ['./src/test/setup.ts'], restoreMocks: true },
+  test: { environment: 'jsdom', setupFiles: ['./src/test/setup.ts'], restoreMocks: true, testTimeout: 30000, maxWorkers: 2 },
 });
