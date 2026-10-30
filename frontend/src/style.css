@@ -304,10 +304,13 @@ a { color: inherit; }
 .sync-ok::before, .sync-warning::before { content: ''; width: 6px; height: 6px; flex: none; border-radius: 50%; background: #a6dfb8; }
 .sync-warning { color: #ffe0a3; font-weight: 600; }
 .sync-warning::before { background: #ffe0a3; }
-.overview-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px 0; flex: 1 1 650px; }
+.overview-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px 0; flex: 1 1 650px; }
 .overview-stat { min-width: 0; border-left: 1px solid #ffffff30; padding: 0 20px; display: flex; flex-direction: column; gap: 8px; color: #d0e4d6; font-size: 12px; }
 .overview-stat strong { color: #fff; font: 500 28px 'DM Mono', monospace; font-variant-numeric: tabular-nums; line-height: 1.1; overflow-wrap: anywhere; }
 .overview-stat strong small { font: 12px 'DM Sans', sans-serif; color: #c5dfcf; }
+.overview-pnl { gap: 6px; }
+.overview-pnl-group { display: flex; flex-direction: column; gap: 3px; }
+.overview-pnl-group strong { font-size: 20px; }
 .overview-trade-breakdown { grid-column: 1 / -1; border-top: 1px solid #ffffff30; padding: 8px 20px 0; color: #d0e4d6; font-size: 12px; line-height: 1.5; font-variant-numeric: tabular-nums; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 0 20px; }
 .overview-status-links { display: inline-flex; flex-wrap: wrap; gap: 16px; }
 .overview-banner { background: #f0f5f1; border-color: #dce8df; color: #233d32; }
@@ -480,9 +483,9 @@ a { color: inherit; }
   .login-form { justify-items: stretch; }
   .login-form .ant-card, .login-note { width: 100%; }
   .overview-banner { padding: 16px; }
-  .overview-stats { gap: 14px 0; }
+  .overview-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 0; }
   .overview-stat { padding: 0 10px; }
-  .overview-stat:first-child { border-left: 0; padding-left: 0; }
+  .overview-stat:nth-child(odd) { border-left: 0; padding-left: 0; }
   .overview-stat strong { font-size: 24px; }
   .overview-trade-breakdown { padding: 8px 0 0; gap: 2px 12px; }
   .overview-status-links { margin-left: 0; }

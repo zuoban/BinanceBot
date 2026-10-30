@@ -10,7 +10,7 @@ export function snapshot(symbol = 'SOLUSDC', mode: 'PAPER' | 'LIVE' = 'PAPER'): 
     position: { size: '0', entry_price: '0', mark_price: '101', unrealized_pnl: '5', liquidation_price: '0', leverage: 1 },
     account: { asset: 'USDC', total_wallet_balance: '100', available_balance: '80', margin_balance: '105', unrealized_profit: '5', update_time: now },
     account_cny_rate: null, active_orders: [], recent_trades: [], recent_logs: [],
-    hourly_trade_stats: { window_start: now, window_end: now, buckets: [{ hour_start: now, buy_count: 2, sell_count: 3 }] },
+    hourly_trade_stats: { window_start: now, window_end: now, realized_pnl: '0', pending_pnl_count: 0, buckets: [{ hour_start: now, buy_count: 2, sell_count: 3 }] },
   };
 }
 export function pair(symbol = 'SOLUSDC'): Pair {

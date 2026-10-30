@@ -328,6 +328,8 @@ pub struct HourlyTradeStats {
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
     pub buckets: Vec<HourlyTradeCount>,
+    pub realized_pnl: Decimal,
+    pub pending_pnl_count: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -370,6 +372,22 @@ pub struct OverviewSnapshot {
     /// Each account belongs to its pair snapshot and may represent the same wallet.
     /// Consumers must not sum account balances across pairs.
     pub pairs: Vec<OverviewPairView>,
+    pub today_pnl: Option<TodayPnl>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TodayPnlGroup {
+    pub symbol: String,
+    pub mode: TradingMode,
+    pub realized_pnl: Decimal,
+    pub pending_pnl_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TodayPnl {
+    pub window_start: DateTime<Utc>,
+    pub window_end: DateTime<Utc>,
+    pub groups: Vec<TodayPnlGroup>,
 }
 
 #[derive(Debug)]

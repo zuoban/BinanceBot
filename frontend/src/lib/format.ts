@@ -57,6 +57,19 @@ export function todayTradeCounts(s: Snapshot, now = Date.now()) {
   if (!stats || !Number.isFinite(Date.parse(stats.window_end)) || beijingDay(Date.parse(stats.window_end)) !== beijingDay(now)) return null;
   return stats.buckets.reduce((counts, b) => ({ buy: counts.buy + b.buy_count, sell: counts.sell + b.sell_count }), { buy: 0, sell: 0 });
 }
+export function todayPnlGroups(stats: Overview['today_pnl'], now = Date.now()) {
+  if (!stats || !Number.isFinite(Date.parse(stats.window_end)) || beijingDay(Date.parse(stats.window_end)) !== beijingDay(now)) return null;
+  const groups = new Map<string, { mode: Mode; asset: string; total: number; pending: number; available: boolean }>();
+  for (const row of stats.groups) {
+    const asset = quoteAsset(row.symbol) || row.symbol, key = `${row.mode}:${asset}`;
+    const group = groups.get(key) ?? { mode: row.mode, asset, total: 0, pending: 0, available: true };
+    const pnl = numeric(row.realized_pnl);
+    if (pnl === null || !Number.isInteger(row.pending_pnl_count) || row.pending_pnl_count < 0) group.available = false;
+    else { group.total += pnl; group.pending += row.pending_pnl_count; }
+    groups.set(key, group);
+  }
+  return [...groups.entries()].map(([key, group]) => ({ ...group, key, total: group.available && !group.pending && Number.isFinite(group.total) ? group.total : null }));
+}
 export function todayCount(s: Snapshot, now = Date.now()) {
   const counts = todayTradeCounts(s, now);
   return counts ? counts.buy + counts.sell : null;

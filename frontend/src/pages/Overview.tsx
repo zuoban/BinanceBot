@@ -4,7 +4,7 @@ import { App, Button, Card, Col, Dropdown, Empty, Input, Popover, Row, Select, S
 import { ArrowDownOutlined, ArrowRightOutlined, ArrowUpOutlined, EyeOutlined, PlusOutlined, SearchOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { useOverview } from '../lib/queries';
 import { AccountsContext } from '../lib/session';
-import { accountGroups, comparePositionAmount, modeLabel, number as fixedNumber, positionAmount, positionGroups, price as fixedPrice, quoteAsset, todayCount, todayTradeCounts, trimFractionZeros } from '../lib/format';
+import { accountGroups, comparePositionAmount, modeLabel, number as fixedNumber, positionAmount, positionGroups, price as fixedPrice, quoteAsset, todayCount, todayPnlGroups, todayTradeCounts, trimFractionZeros } from '../lib/format';
 import { ErrorNotice, ModeTag, PageTitle, Pnl, StatusTag } from '../components/Common';
 import { runBatchControls, useControls } from '../components/Controls';
 import type { Pair } from '../lib/types';
@@ -52,6 +52,7 @@ export default function OverviewPage() {
   const clearFilters = () => { setSearch(''); setSort('position'); };
   const counts = entries.map(e => todayTradeCounts(e.snapshot));
   const today = counts.every(c => c !== null) ? counts.reduce<{ buy: number; sell: number }>((sum, c) => ({ buy: sum.buy + c!.buy, sell: sum.sell + c!.sell }), { buy: 0, sell: 0 }) : null;
+  const pnlGroups = todayPnlGroups(overview.data?.today_pnl);
   return <>
     <PageTitle title="策略总览"
       extra={<Link to="/pairs/new"><Button icon={<PlusOutlined />}>新增交易对</Button></Link>} />
@@ -62,6 +63,13 @@ export default function OverviewPage() {
         <div className="overview-stat"><span>运行中</span><strong>{overview.data ? pairs.filter(p => p.status === 'RUNNING').length : '--'}</strong></div>
         <div className="overview-stat"><span>策略总数</span><strong>{overview.data ? pairs.length : '--'}</strong></div>
         <div className="overview-stat"><span>今日成交</span><strong>{overview.data && today ? today.buy + today.sell : '--'}<small> 笔</small></strong></div>
+        <div className="overview-stat overview-pnl" aria-label="今日已实现盈亏">
+          <span>今日已实现盈亏</span>
+          {!pnlGroups ? <strong>--</strong> : !pnlGroups.length ? <strong>0</strong> : pnlGroups.map(group => <div className="overview-pnl-group" key={group.key}>
+            <strong>{group.total === null ? '--' : <Pnl value={group.total} compact />} <small>{group.asset}</small></strong>
+            {group.pending > 0 && <span>盈亏待同步</span>}
+          </div>)}
+        </div>
         <div className="overview-trade-breakdown"><span>买单 {overview.data && today ? today.buy : '--'} 笔 / 卖单 {overview.data && today ? today.sell : '--'} 笔</span>{overview.data && <span className="overview-status-links"><span>已暂停 {pairs.filter(p => p.status === 'PAUSED').length}</span><span>异常 {pairs.filter(p => p.status === 'ERROR').length}</span></span>}</div>
       </div>
     </div>

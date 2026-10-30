@@ -35,6 +35,85 @@ fn trade(id: &str, symbol: &str, mode: TradingMode, time: DateTime<Utc>) -> Trad
     }
 }
 
+#[tokio::test]
+async fn overview_today_pnl_covers_history_modes_boundaries_and_cache_invalidation() {
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    let now = test_time();
+    let start = crate::db::beijing_midnight(now);
+    assert!(db.cached_today_pnl(now).await.unwrap().groups.is_empty());
+    let mut first = trade("aggregate-1", "DELETEDUSDT", TradingMode::Live, start);
+    first.realized_pnl = dec!(0.123456789);
+    db.insert_trade(&first).unwrap();
+    let mut second = trade("aggregate-2", "DELETEDUSDT", TradingMode::Live, now);
+    second.realized_pnl = dec!(0.000000001);
+    db.insert_trade(&second).unwrap();
+    let mut pending = trade("aggregate-3", "DELETEDUSDT", TradingMode::Live, now);
+    pending.pnl_verified = false;
+    pending.realized_pnl = dec!(999);
+    db.insert_trade(&pending).unwrap();
+    db.insert_trade(&trade("aggregate-4", "BTCUSDC", TradingMode::Paper, now))
+        .unwrap();
+    db.insert_trade(&trade("aggregate-5", "BTCUSDC", TradingMode::Testnet, now))
+        .unwrap();
+    db.insert_trade(&trade("aggregate-6", "BTCUSDC", TradingMode::Unknown, now))
+        .unwrap();
+    db.insert_trade(&trade(
+        "aggregate-old",
+        "OLD",
+        TradingMode::Live,
+        start - chrono::Duration::nanoseconds(1),
+    ))
+    .unwrap();
+    db.insert_trade(&trade(
+        "aggregate-future",
+        "FUTURE",
+        TradingMode::Live,
+        now + chrono::Duration::seconds(1),
+    ))
+    .unwrap();
+    let result = db.cached_today_pnl(now).await.unwrap();
+    assert_eq!(result.window_start, start);
+    assert_eq!(result.window_end, now);
+    assert_eq!(result.groups.len(), 4);
+    let group = result
+        .groups
+        .iter()
+        .find(|g| g.symbol == "DELETEDUSDT")
+        .unwrap();
+    assert_eq!(group.realized_pnl, dec!(0.123456790));
+    assert_eq!(group.pending_pnl_count, 1);
+    assert!(result.groups.iter().any(|g| g.mode == TradingMode::Unknown));
+    assert!(db
+        .cached_today_pnl(start - chrono::Duration::seconds(1))
+        .await
+        .unwrap()
+        .groups
+        .iter()
+        .all(|g| g.symbol != "DELETEDUSDT"));
+}
+
+#[tokio::test]
+async fn overview_today_pnl_failed_query_returns_none_and_recovers() {
+    let directory = std::env::temp_dir().join(format!("overview-pnl-{}", uuid::Uuid::new_v4()));
+    let path = directory.join("test.db");
+    let db = Arc::new(Database::open(&path).unwrap());
+    let editor = rusqlite::Connection::open(&path).unwrap();
+    editor
+        .execute("ALTER TABLE trades RENAME TO unavailable_trades", [])
+        .unwrap();
+    let now = test_time();
+    assert!(db.cached_today_pnl(now).await.is_none());
+    editor
+        .execute("ALTER TABLE unavailable_trades RENAME TO trades", [])
+        .unwrap();
+    assert!(db.cached_today_pnl(now).await.is_none());
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    assert!(db.cached_today_pnl(now).await.unwrap().groups.is_empty());
+    drop(editor);
+    drop(db);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
 fn total(snapshot: &BotSnapshot) -> u64 {
     snapshot
         .hourly_trade_stats
@@ -153,6 +232,31 @@ async fn confirmed_trades_and_cleanup_invalidate_only_trade_counts() {
     assert_eq!(cleared.stats.total_trades, 0);
     assert!(cleared.recent_trades.is_empty());
     assert_eq!(state.db.hourly_stats_query_count(), 3);
+}
+
+#[tokio::test]
+async fn pnl_verification_invalidates_cached_today_stats() {
+    let state = fixture();
+    let now = test_time();
+    let mut fill = trade("pending", "SOLUSDC", TradingMode::Paper, now);
+    fill.pnl_verified = false;
+    fill.realized_pnl = dec!(100);
+    assert!(state.db.insert_trade(&fill).unwrap());
+    let before = state.snapshot_at(now).await.hourly_trade_stats.unwrap();
+    assert_eq!(before.realized_pnl, dec!(0));
+    assert_eq!(before.pending_pnl_count, 1);
+    assert_eq!(state.db.hourly_stats_query_count(), 1);
+
+    fill.realized_pnl = dec!(-1.23456789);
+    assert!(state.db.verify_trade_pnl(&fill).unwrap());
+    let after = state.snapshot_at(now).await.hourly_trade_stats.unwrap();
+    assert_eq!(after.realized_pnl, dec!(-1.23456789));
+    assert_eq!(after.pending_pnl_count, 0);
+    assert_eq!(after.buckets.iter().map(|b| b.buy_count).sum::<u64>(), 1);
+    assert_eq!(state.db.hourly_stats_query_count(), 2);
+    assert!(!state.db.verify_trade_pnl(&fill).unwrap());
+    state.snapshot_at(now).await;
+    assert_eq!(state.db.hourly_stats_query_count(), 2);
 }
 
 #[tokio::test]

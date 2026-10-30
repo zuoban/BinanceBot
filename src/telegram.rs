@@ -347,6 +347,8 @@ mod tests {
         let stats = HourlyTradeStats {
             window_start: start,
             window_end: trade.timestamp,
+            realized_pnl: Decimal::ZERO,
+            pending_pnl_count: 0,
             buckets: vec![
                 HourlyTradeCount {
                     hour_start: start,

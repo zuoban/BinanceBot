@@ -30,6 +30,14 @@ pub struct Database {
     conn: Mutex<Connection>,
     path: String,
     trade_revision: AtomicU64,
+    today_pnl_cache: tokio::sync::Mutex<
+        Option<(
+            u64,
+            DateTime<Utc>,
+            std::time::Instant,
+            Option<crate::types::TodayPnl>,
+        )>,
+    >,
     #[cfg(test)]
     hourly_stats_queries: AtomicU64,
 }
@@ -70,6 +78,7 @@ impl Database {
             conn: Mutex::new(conn),
             path: path_str,
             trade_revision: AtomicU64::new(0),
+            today_pnl_cache: tokio::sync::Mutex::new(None),
             #[cfg(test)]
             hourly_stats_queries: AtomicU64::new(0),
         };
@@ -936,6 +945,9 @@ impl Database {
                 trade.mode.as_str(),
             ],
         )?;
+        if updated == 1 {
+            self.trade_revision.fetch_add(1, Ordering::Release);
+        }
         Ok(updated == 1)
     }
 
@@ -996,11 +1008,13 @@ impl Database {
             })
             .collect();
 
+        let mut realized_pnl = Decimal::ZERO;
+        let mut pending_pnl_count = 0;
         let conn = self.conn.lock().unwrap();
         // Stored timestamps are UTC RFC3339. Coarse day bounds use the scope index;
         // parse before the exact comparison to preserve fractional-second precision.
         let mut stmt = conn.prepare(
-            "SELECT timestamp, side FROM trades
+            "SELECT timestamp, side, realized_pnl, pnl_verified FROM trades
              WHERE symbol = ?1 AND mode = ?2 AND timestamp >= ?3 AND timestamp < ?4;",
         )?;
         let rows = stmt.query_map(
@@ -1010,12 +1024,24 @@ impl Database {
                 window_start.date_naive().to_string(),
                 (now + ChronoDuration::days(1)).date_naive().to_string(),
             ],
-            |row| Ok((row.get::<_, DateTime<Utc>>(0)?, row.get::<_, String>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, DateTime<Utc>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, bool>(3)?,
+                ))
+            },
         )?;
         for row in rows {
-            let (timestamp, side) = row?;
+            let (timestamp, side, pnl, verified) = row?;
             if timestamp < window_start || timestamp > now {
                 continue;
+            }
+            if verified {
+                realized_pnl += Decimal::from_str(&pnl)?;
+            } else {
+                pending_pnl_count += 1;
             }
             let index = ((timestamp.timestamp() - first_hour) / 3600) as usize;
             match side.as_str() {
@@ -1028,7 +1054,89 @@ impl Database {
             window_start,
             window_end: now,
             buckets,
+            realized_pnl,
+            pending_pnl_count,
         })
+    }
+
+    /// Aggregate persisted trades across all modes and symbols for the Beijing day.
+    pub fn get_today_pnl(&self, now: DateTime<Utc>) -> Result<crate::types::TodayPnl> {
+        let window_start = beijing_midnight(now);
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT symbol, mode, timestamp, realized_pnl, pnl_verified FROM trades
+             WHERE timestamp >= ?1 AND timestamp < ?2 ORDER BY mode, symbol",
+        )?;
+        let rows = stmt.query_map(
+            params![
+                window_start.date_naive().to_string(),
+                (now + ChronoDuration::days(1)).date_naive().to_string()
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, DateTime<Utc>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, bool>(4)?,
+                ))
+            },
+        )?;
+        let mut groups = std::collections::BTreeMap::new();
+        for row in rows {
+            let (symbol, mode, timestamp, pnl, verified) = row?;
+            if timestamp < window_start || timestamp > now {
+                continue;
+            }
+            let group = groups
+                .entry((mode.clone(), symbol.clone()))
+                .or_insert_with(|| crate::types::TodayPnlGroup {
+                    symbol,
+                    mode: TradingMode::from_db(&mode),
+                    realized_pnl: Decimal::ZERO,
+                    pending_pnl_count: 0,
+                });
+            if verified {
+                group.realized_pnl += Decimal::from_str(&pnl)?;
+            } else {
+                group.pending_pnl_count += 1;
+            }
+        }
+        Ok(crate::types::TodayPnl {
+            window_start,
+            window_end: now,
+            groups: groups.into_values().collect(),
+        })
+    }
+
+    pub async fn cached_today_pnl(
+        self: &std::sync::Arc<Self>,
+        now: DateTime<Utc>,
+    ) -> Option<crate::types::TodayPnl> {
+        let mut cache = self.today_pnl_cache.lock().await;
+        let revision = self.trade_data_revision();
+        let day = beijing_midnight(now);
+        if let Some((cached_revision, cached_day, loaded, value)) = cache.as_ref() {
+            let ttl = if value.is_some() {
+                std::time::Duration::from_secs(2)
+            } else {
+                std::time::Duration::from_secs(1)
+            };
+            if *cached_revision == revision
+                && *cached_day == day
+                && loaded.elapsed() < ttl
+                && value.as_ref().is_none_or(|v| v.window_end <= now)
+            {
+                return value.clone();
+            }
+        }
+        let value = self
+            .run_blocking(move |db| db.get_today_pnl(now))
+            .await
+            .map_err(|error| tracing::warn!("Failed to load overview today PnL: {}", error))
+            .ok();
+        *cache = Some((revision, day, std::time::Instant::now(), value.clone()));
+        value
     }
 
     pub fn get_unverified_trades(
@@ -1786,6 +1894,8 @@ mod tests {
         let empty = db
             .get_hourly_trade_stats("SOLUSDC", TradingMode::Paper, now)
             .unwrap();
+        assert_eq!(empty.realized_pnl, Decimal::ZERO);
+        assert_eq!(empty.pending_pnl_count, 0);
         assert_eq!(empty.buckets.len(), 19);
         assert!(empty
             .buckets
@@ -1856,6 +1966,12 @@ mod tests {
             trade.side = side;
             trade.symbol = symbol.into();
             trade.mode = mode;
+            trade.pnl_verified = true;
+            trade.realized_pnl = match id {
+                "last" => dec!(1.23456789),
+                "utc-midnight" => dec!(-0.23456788),
+                _ => dec!(999),
+            };
             assert!(db.insert_trade(&trade).unwrap());
         }
         let stats = db
@@ -1863,6 +1979,8 @@ mod tests {
             .unwrap();
         assert_eq!(stats.window_start, start);
         assert_eq!(stats.window_end, now);
+        assert_eq!(stats.realized_pnl, dec!(1.00000001));
+        assert_eq!(stats.pending_pnl_count, 250);
         assert_eq!(stats.buckets[0].buy_count, 250);
         assert_eq!(stats.buckets[8].sell_count, 1);
         assert_eq!(stats.buckets[18].sell_count, 1);
@@ -1904,6 +2022,8 @@ mod tests {
             .unwrap();
         assert_eq!(next_day.window_start, next_midnight);
         assert_eq!(next_day.window_end, next_midnight);
+        assert_eq!(next_day.realized_pnl, dec!(999));
+        assert_eq!(next_day.pending_pnl_count, 0);
         assert_eq!(next_day.buckets.len(), 1);
         assert_eq!(next_day.buckets[0].hour_start, next_midnight);
         assert_eq!(next_day.buckets[0].buy_count, 1);
@@ -2257,6 +2377,7 @@ mod tests {
             conn: Mutex::new(conn),
             path: ":memory:".into(),
             trade_revision: AtomicU64::new(0),
+            today_pnl_cache: tokio::sync::Mutex::new(None),
             hourly_stats_queries: AtomicU64::new(0),
         };
         db.init_tables().unwrap();

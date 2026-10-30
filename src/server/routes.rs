@@ -230,6 +230,10 @@ async fn get_overview_handler(
     State(states): State<Arc<Vec<Arc<AppState>>>>,
 ) -> Json<ApiResponse<OverviewSnapshot>> {
     let generated_at = chrono::Utc::now();
+    let today_pnl = match states.first() {
+        Some(state) => state.db.cached_today_pnl(generated_at).await,
+        None => None,
+    };
     let pairs = futures_util::future::join_all(states.iter().map(|state| async move {
         // Reuse the per-pair chart cache and in-memory live fields used by WebSockets.
         let snapshot = state.snapshot().await;
@@ -245,6 +249,7 @@ async fn get_overview_handler(
         data: Some(OverviewSnapshot {
             generated_at,
             pairs,
+            today_pnl,
         }),
         message: None,
     })
@@ -356,6 +361,18 @@ async fn get_managed_overview_handler(
     // Release the registry lock before collecting snapshots so dashboard reads
     // do not hold up pair additions or removals during database work.
     let states = handle.states.read().await.clone();
+    if states.is_empty() {
+        let generated_at = chrono::Utc::now();
+        return Json(ApiResponse {
+            success: true,
+            data: Some(OverviewSnapshot {
+                generated_at,
+                pairs: Vec::new(),
+                today_pnl: handle.db.cached_today_pnl(generated_at).await,
+            }),
+            message: None,
+        });
+    }
     get_overview_handler(State(Arc::new(states))).await
 }
 
@@ -1700,6 +1717,12 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(response["success"], true);
         assert_eq!(response["data"]["pairs"].as_array().unwrap().len(), 1);
+        assert!(response["data"]["today_pnl"]["window_start"].is_string());
+        assert!(response["data"]["today_pnl"]["window_end"].is_string());
+        assert!(response["data"]["today_pnl"]["groups"]
+            .as_array()
+            .unwrap()
+            .is_empty());
         assert_eq!(response["data"]["pairs"][0]["scoped"], false);
         assert_eq!(
             response["data"]["pairs"][0]["snapshot"]["symbol"],

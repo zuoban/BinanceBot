@@ -48,9 +48,10 @@ export interface Snapshot {
   account: Account;
   account_cny_rate: { asset: string; cny_per_unit: Decimal; updated_at: string } | null;
   active_orders: Order[]; recent_trades: Trade[]; recent_logs: Log[];
-  hourly_trade_stats: { window_start: string; window_end: string; buckets: { hour_start: string; buy_count: number; sell_count: number }[] } | null;
+  hourly_trade_stats: { window_start: string; window_end: string; realized_pnl: Decimal; pending_pnl_count: number; buckets: { hour_start: string; buy_count: number; sell_count: number }[] } | null;
 }
-export interface Overview { generated_at: string; pairs: { scoped: boolean; mode: Mode; snapshot: Snapshot }[] }
+export interface TodayPnl { window_start: string; window_end: string; groups: { symbol: string; mode: Mode; realized_pnl: Decimal; pending_pnl_count: number }[] }
+export interface Overview { generated_at: string; pairs: { scoped: boolean; mode: Mode; snapshot: Snapshot }[]; today_pnl?: TodayPnl | null }
 export interface HourlySnapshot {
   hour: number;
   groups: { mode: Mode; asset: string; equity: Decimal | null; long: Decimal | null; short: Decimal | null }[];

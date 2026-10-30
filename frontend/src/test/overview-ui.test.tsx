@@ -69,6 +69,22 @@ it('summarizes statuses and lets the user clear a search with no results', async
   expect(screen.getByText('BTCUSDC')).toBeInTheDocument();
 });
 
+it('shows grouped today pnl and pending trades across all strategies', () => {
+  const a = snapshot('BTCUSDC');
+  const now = new Date().toISOString();
+  overview.data = { generated_at: now, pairs: [{ snapshot: a, mode: 'PAPER', scoped: true }], today_pnl: { window_start: now, window_end: now, groups: [
+    { symbol: 'BTCUSDC', mode: 'PAPER', realized_pnl: '8', pending_pnl_count: 1 },
+    { symbol: 'DELETEDUSDT', mode: 'LIVE', realized_pnl: '-3', pending_pnl_count: 0 },
+  ] } };
+  render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+  const summary = screen.getByLabelText('策略运行概览');
+  const section = within(summary).getByLabelText('今日已实现盈亏');
+  expect(within(section).getByText('--')).toBeInTheDocument();
+  expect(within(section).getByText('盈亏待同步')).toBeInTheDocument();
+  expect(within(section).getByText('-3')).toBeInTheDocument();
+  expect(within(section).getByText('USDT')).toBeInTheDocument();
+});
+
 it('shows unavailable trade counts when a strategy has no current-day statistics', () => {
   const s = snapshot('BTCUSDC');
   s.hourly_trade_stats = null;

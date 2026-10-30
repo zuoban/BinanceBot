@@ -5,6 +5,7 @@ it('shows all Beijing hours and leaves future hours without counts', () => {
   const data = todayHourlyData({
     window_start: '2026-10-30T16:00:00Z',
     window_end: '2026-10-30T17:30:00Z',
+    realized_pnl: '0', pending_pnl_count: 0,
     buckets: [
       { hour_start: '2026-10-30T16:00:00Z', buy_count: 0, sell_count: 0 },
       { hour_start: '2026-10-30T17:00:00Z', buy_count: 2, sell_count: 1 },

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { accountGroups, comparePositionAmount, positionAmount, positionGroups, relativeTime, todayCount, trimFractionZeros } from '../lib/format';
+import { accountGroups, comparePositionAmount, positionAmount, positionGroups, relativeTime, todayCount, todayPnlGroups, trimFractionZeros } from '../lib/format';
 import { snapshot } from './fixtures';
 
 it('removes only insignificant fractional zeros', () => {
@@ -36,6 +36,26 @@ describe('account and trade summaries', () => {
     s.hourly_trade_stats!.window_end = new Date(Date.now() - 86_400_000).toISOString();
     expect(accountGroups([{ snapshot: s, mode: 'LIVE', scoped: true }])[0].equity).toBeNull();
     expect(todayCount(s)).toBeNull();
+  });
+});
+
+describe('today realized pnl', () => {
+  it('groups historical trades and hides incomplete totals', () => {
+    const now = new Date().toISOString();
+    const groups = todayPnlGroups({ window_start: now, window_end: now, groups: [
+      { symbol: 'BTCUSDC', mode: 'PAPER', realized_pnl: '10.25', pending_pnl_count: 0 },
+      { symbol: 'ETHUSDC', mode: 'PAPER', realized_pnl: '-3.5', pending_pnl_count: 2 },
+      { symbol: 'SOLUSDC', mode: 'LIVE', realized_pnl: '-1', pending_pnl_count: 0 },
+      { symbol: 'BTCUSDT', mode: 'PAPER', realized_pnl: '0', pending_pnl_count: 0 },
+    ] })!;
+    expect(groups.find(g => g.key === 'PAPER:USDC')).toMatchObject({ total: null, pending: 2 });
+    expect(groups.find(g => g.key === 'LIVE:USDC')).toMatchObject({ total: -1, pending: 0 });
+    expect(groups.find(g => g.key === 'PAPER:USDT')).toMatchObject({ total: 0 });
+  });
+  it('does not display missing or previous-day data', () => {
+    const now = Date.parse('2026-01-01T16:00:00Z');
+    expect(todayPnlGroups({ window_start: '', window_end: new Date(now - 1).toISOString(), groups: [] }, now)).toBeNull();
+    expect(todayPnlGroups(null, now)).toBeNull();
   });
 });
 
