@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Alert, Button, Card, Form, Input, Typography } from 'antd';
-import { LockOutlined, SafetyCertificateOutlined } from '@ant-design/icons';
+import { LockOutlined } from '@ant-design/icons';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { api, post, tokenStore } from '../lib/api';
 import type { AuthStatus } from '../lib/types';
@@ -20,11 +20,8 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
   if (status.isPending) return <LoadingScreen label="正在连接控制台" />;
   return <main className="login-page">
     <div className="login-theme"><ThemeSwitch /></div>
-    <section className="login-story"><div className="brand-mark"><img className="brand-symbol" src="/logo.svg" alt="" /><span>GRID CONSOLE</span></div><div>
-      <h1>让每一格，<br />清晰可见。</h1><p>行情、仓位与策略状态，<br />在一个工作台中掌握。</p>
-    </div></section>
     <section className="login-form"><Card variant="borderless">
-      <SafetyCertificateOutlined className="login-icon" /><Typography.Title level={2}>{setup ? '初始化控制台' : '欢迎回来'}</Typography.Title>
+      <Typography.Title level={2}>{setup ? '初始化控制台' : '欢迎回来'}</Typography.Title>
       <Typography.Paragraph type="secondary">{setup ? '使用启动日志中的初始化码，创建管理员密码。' : '输入管理员密码，进入你的策略工作台。'}</Typography.Paragraph>
       <ErrorNotice error={status.error} retry={() => void status.refetch()} /><ErrorNotice error={error} />
       {setup && <Alert type="info" showIcon title="首次启动默认使用模拟盘" />}

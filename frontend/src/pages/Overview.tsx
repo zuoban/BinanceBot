@@ -54,7 +54,7 @@ export default function OverviewPage() {
   const today = counts.every(c => c !== null) ? counts.reduce<{ buy: number; sell: number }>((sum, c) => ({ buy: sum.buy + c!.buy, sell: sum.sell + c!.sell }), { buy: 0, sell: 0 }) : null;
   return <>
     <PageTitle title="策略总览"
-      extra={<Link to="/pairs/new"><Button type="primary" icon={<PlusOutlined />}>新增交易对</Button></Link>} />
+      extra={<Link to="/pairs/new"><Button icon={<PlusOutlined />}>新增交易对</Button></Link>} />
     <ErrorNotice error={overview.error} retry={() => void overview.refetch()} />
     <div className="overview-banner" aria-label="策略运行概览">
       <div className="overview-summary"><h2>策略运行概览</h2><p>{overview.dataUpdatedAt ? `最近同步 ${new Date(overview.dataUpdatedAt).toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })} · 北京时间` : '等待首次同步'}</p><span className={stale ? 'sync-warning' : 'sync-ok'}>{stale ? '数据暂未更新，请检查连接' : '自动刷新 / 3 秒'}</span></div>
@@ -97,7 +97,7 @@ export default function OverviewPage() {
     </section>}
     </div>
     <section className="strategies-section" aria-labelledby="strategies-heading">
-    <div className="section-heading"><h2 id="strategies-heading">交易策略 <span>{pairs.length.toString().padStart(2, '0')}</span></h2>
+    <div className="section-heading"><h2 id="strategies-heading">交易策略</h2>
       <Dropdown trigger={['click']} disabled={batchBusy || controls.busy.size > 0 || !pairs.length} menu={{ items: [{ key: 'resume', label: '全部恢复', disabled: stale }, { key: 'pause', label: '全部暂停' }], onClick: ({ key }) => void batch(key as 'pause' | 'resume') }}>
         <Button loading={batchBusy} icon={<ThunderboltOutlined />}>全部策略操作</Button>
       </Dropdown>

@@ -40,11 +40,11 @@ export function OverviewHistory() {
     {options.length > 0 && <div className="history-account-row"><Select aria-label="选择趋势账户" value={key} options={options} onChange={setSelected} /></div>}
     {history.isPending ? <div className="history-empty">正在加载快照…</div> : history.error ? <div className="history-empty" role="alert">快照加载失败，请稍后重试</div> : !options.length ? <div className="history-empty">暂无快照数据，整点后开始记录</div> : <>
       <div className="history-caption"><span>单位 {asset}</span><span>最近记录 {latest ? formatDate(latest.hour) : '--'}</span></div>
-      <div className="history-plot chart" aria-label="近24小时账户权益折线图"><div className="history-plot-label">账户权益</div><ResponsiveContainer width="100%" height={135}>
+      <div className="history-plot chart" aria-label="近24小时账户权益折线图"><ResponsiveContainer width="100%" height={135}>
         <LineChart data={data} margin={{ top: 9, right: 8, bottom: 0, left: 0 }}>
           <CartesianGrid vertical={false} stroke="#e7ece9" />
-          <XAxis dataKey="hour" ticks={ticks} tickFormatter={formatHour} tickLine={false} axisLine={false} minTickGap={10} tick={{ fontSize: 10 }} />
-          <YAxis width={52} domain={['auto', 'auto']} tickFormatter={axisValue} tickLine={false} axisLine={false} tick={{ fontSize: 10 }} tickCount={3} />
+          <XAxis dataKey="hour" ticks={ticks} tickFormatter={formatHour} tickLine={false} axisLine={false} minTickGap={10} tick={{ fontSize: 11 }} />
+          <YAxis width={52} domain={['auto', 'auto']} tickFormatter={axisValue} tickLine={false} axisLine={false} tick={{ fontSize: 11 }} tickCount={3} />
           <Tooltip {...tooltip} />
           <Line name="账户权益" dataKey="equity" stroke="var(--history-equity)" strokeWidth={2} dot={<HistoryDot data={data} />} activeDot={{ r: 4 }} connectNulls={false} isAnimationActive={false} />
         </LineChart>
