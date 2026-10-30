@@ -14,6 +14,7 @@ beforeEach(() => {
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
 });
 vi.mock('../lib/queries', () => ({ useOverview: () => overview, useOverviewHistory: () => ({ data: [], isPending: false, error: null }) }));
+vi.mock('../components/DeleteStrategy', () => ({ DeleteStrategyButton: ({ pair }: { pair: { symbol: string } }) => <button>删除 {pair.symbol} 策略</button> }));
 vi.mock('../components/Controls', () => ({ useControls: () => ({ busy: new Set(), results: {}, run: vi.fn() }), PairControls: () => null, runBatchControls: vi.fn() }));
 
 it('keeps the refresh icon stable during polling and disables it only during a manual refresh', async () => {
@@ -45,6 +46,7 @@ it('opens the selected strategy configuration from its card', async () => {
   expect(screen.getByText('2000 USDC')).toBeInTheDocument();
   expect(screen.getByText('暂停策略')).toBeInTheDocument();
   expect(screen.getByRole('link', { name: /查看完整配置/ })).toHaveAttribute('href', '/pairs/BTCUSDC/config');
+  expect(screen.getByRole('button', { name: '删除 BTCUSDC 策略' })).toBeInTheDocument();
 });
 
 it('identifies each strategy direction without opening its configuration', () => {

@@ -10,6 +10,7 @@ import { PairControls, runBatchControls, useControls } from '../components/Contr
 import type { Pair } from '../lib/types';
 import { OverviewLoading } from '../components/Loading';
 import { OverviewHistory } from '../components/OverviewHistory';
+import { DeleteStrategyButton } from '../components/DeleteStrategy';
 
 const number = (value: unknown, digits?: number) => trimFractionZeros(fixedNumber(value, digits));
 const price = (value: unknown) => trimFractionZeros(fixedPrice(value));
@@ -151,7 +152,7 @@ export default function OverviewPage() {
           }><Button type="text" size="small" aria-label={`查看 ${s.symbol} 策略配置`}>配置</Button></Popover></Space></div>
           <div className="strategy-price"><span className="muted">标记价格</span><strong>{Number(s.ticker.mark_price) > 0 ? price(s.ticker.mark_price) : '--'}</strong><ModeTag mode={m} /></div>
           <div className="strategy-metrics"><div><span>已实现盈亏 / {quote}</span><strong><Pnl value={s.stats.total_realized_pnl} compact /></strong></div><div><span>未实现盈亏 / {quote}</span><strong><Pnl value={s.position.unrealized_pnl} compact /></strong></div><div><span>持仓金额 / {quote}</span><strong>{number(positionAmount(s))}</strong></div><div><span>持仓数量</span><strong>{price(s.position.size)}</strong></div><div><span>今日成交</span><strong>{todayCount(s) ?? '--'} <small>笔</small></strong></div><div><span>买单 / 卖单</span><strong>{s.stats.active_buy_orders} <small>/</small> {s.stats.active_sell_orders}</strong></div></div>
-          <div className="strategy-footer"><PairControls pair={pair} compact stale={stale} /><Link to={`/pairs/${s.symbol}`}><Button type="text" size="small">查看策略 <ArrowRightOutlined /></Button></Link></div>
+          <div className="strategy-footer"><PairControls pair={pair} compact stale={stale} /><DeleteStrategyButton pair={pair} /><Link to={`/pairs/${s.symbol}`}><Button type="text" size="small">查看策略 <ArrowRightOutlined /></Button></Link></div>
           {result && <div className={result.startsWith('失败') ? 'negative operation-result' : 'muted operation-result'} role="status">{result}</div>}
         </Card></Col>;
       })}

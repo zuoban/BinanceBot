@@ -1,4 +1,5 @@
-import { useContext, useEffect, useState } from 'react';
+import { useContext, useEffect, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import { useNavigate, useParams } from 'react-router-dom';
 import { Alert, App, Button, Card, Checkbox, Col, Form, Input, InputNumber, Row, Select, Space, Switch } from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -7,6 +8,7 @@ import { usePairs } from '../lib/queries';
 import { EditContext } from '../lib/session';
 import type { GridConfig } from '../lib/types';
 import { ErrorNotice, PageTitle } from '../components/Common';
+import { useDeleteStrategy } from '../components/DeleteStrategy';
 
 type FormValues = Omit<GridConfig, 'dry_run' | 'is_testnet'> & { mode: 'PAPER' | 'TESTNET' | 'LIVE' };
 const defaults: FormValues = { symbol: '', direction: 'LONG', grid_interval: '0.1', order_amount_usdc: '100', buy_window: 5, sell_window: 5, post_only: true, mode: 'PAPER', min_price: null, max_price: null, max_position_usdc: '2000', pause_on_max_position: false };
@@ -24,6 +26,8 @@ export default function PairConfig() {
   const client = useQueryClient();
   const { message, modal } = App.useApp();
   const [ready, setReady] = useState(adding);
+  const deletion = useDeleteStrategy();
+  const removing = useRef(false);
   const selectedMode = Form.useWatch('mode', form);
   const config = useQuery({ queryKey: ['config', symbol, pair?.scoped], queryFn: ({ signal }) => api<GridConfig>(pairPath(pair!, 'config'), { signal }), enabled: !!pair, refetchOnWindowFocus: false });
   useEffect(() => {
@@ -57,18 +61,21 @@ export default function PairConfig() {
     onSettled: () => edit.setSaving(false),
   });
   const remove = async () => {
-    if (!pair) return;
-    if (edit.dirty && !await modal.confirm({ title: '放弃未保存的修改？', content: '移除交易对会放弃当前表单修改。', okText: '继续', cancelText: '取消' })) return;
-    if (!await modal.confirm({ title: `移除 ${symbol}？`, content: '请先暂停策略并等待挂单撤销。已有持仓、成交历史和恢复数据会保留；至少需要保留一个交易对。', okText: '确认移除', okButtonProps: { danger: true }, cancelText: '取消' })) return;
+    if (!pair || removing.current) return;
+    removing.current = true;
     edit.setSaving(true);
+    let removed = false;
     try {
-      await api(`/api/pairs/${encodeURIComponent(pair.symbol)}`, { method: 'DELETE', body: JSON.stringify({ confirm: true }) });
-      edit.setDirty(false);
-      edit.setSaving(false);
-      await Promise.all([client.invalidateQueries({ queryKey: ['pairs'] }), client.invalidateQueries({ queryKey: ['overview'] })]);
-      message.success('交易对已移除，持仓和历史记录保留'); navigate('/');
-    } catch (error) { message.error((error as Error).message); }
-    finally { edit.setSaving(false); }
+      removed = await deletion.remove(pair, async () => !edit.dirty || await modal.confirm({ title: '放弃未保存的修改？', content: '删除策略会放弃当前表单修改。', okText: '继续', cancelText: '取消' }));
+    } finally {
+      removing.current = false;
+      // Update the shell's blocker before navigating away from a deleted strategy.
+      flushSync(() => {
+        if (removed) edit.setDirty(false);
+        edit.setSaving(false);
+      });
+    }
+    if (removed) navigate('/');
   };
   const submit = async (values: FormValues) => {
     if (values.mode === 'LIVE' && !await modal.confirm({ title: '保存实盘配置？', content: '请核对交易对、方向、网格和持仓限制。实盘使用真实资金。', okText: '确认保存', cancelText: '取消' })) return;
@@ -78,7 +85,7 @@ export default function PairConfig() {
     <PageTitle eyebrow="WORKSPACE / CONFIGURATION" title={adding ? '新增交易对' : `${symbol} 策略参数`} description={adding ? '新策略创建后保持暂停，检查参数后手动恢复。' : '参数保存后立即生效，请先核对策略设置。'} />
     <ErrorNotice error={pairs.error || config.error || mutation.error} retry={() => { if (!adding) void config.refetch(); }} />
     {pairs.data && !pair && !adding && <Alert type="warning" title="该交易对不存在或已移除" />}
-    <Form<FormValues> className="config-form" form={form} layout="vertical" onFinish={values => void submit(values)} onValuesChange={() => edit.setDirty(true)} disabled={!ready || edit.saving}>
+    <Form<FormValues> className="config-form" form={form} layout="vertical" onFinish={values => void submit(values)} onValuesChange={() => edit.setDirty(true)} disabled={!ready || edit.saving || deletion.busy}>
       <Card title="基本设置" extra={<span className="muted">STRATEGY / 01</span>}>
         <Row gutter={20}>
           <Col xs={24} md={12}><Form.Item name="symbol" label="合约交易对" rules={[{ required: true, message: '请输入交易对' }, { pattern: /^[a-zA-Z0-9]+$/, message: '仅支持字母和数字' }]}><Input disabled={!adding || edit.saving} placeholder="例如 BTCUSDT" autoComplete="off" /></Form.Item></Col>
@@ -110,7 +117,7 @@ export default function PairConfig() {
         <Button onClick={async () => { if (edit.dirty && !await modal.confirm({ title: '放弃未保存的修改？', okText: '还原', cancelText: '继续编辑' })) return; if (adding) form.setFieldsValue(defaults); else if (config.data) form.setFieldsValue(toForm(config.data)); edit.setDirty(false); }}>还原</Button>
         <Button type="primary" htmlType="submit" loading={mutation.isPending}>{adding ? '保存并添加' : '保存并立即生效'}</Button>
       </Space></div>
-      {!adding && <Card className="danger-zone" title="移除交易对"><p>移除前请暂停策略并等待挂单撤销；已有持仓和历史记录会保留。</p><Button danger disabled={edit.saving} onClick={() => void remove()}>移除交易对</Button></Card>}
+      {!adding && <Card className="danger-zone" title="删除策略"><p>删除前请暂停策略并等待挂单撤销；不会自动平仓，已有持仓和历史记录会保留。</p><Button danger disabled={edit.saving} loading={deletion.busy} onClick={() => void remove()}>删除策略</Button></Card>}
     </Form>
   </>;
 }
