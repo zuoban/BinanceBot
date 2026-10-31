@@ -112,7 +112,8 @@ pub struct TradeNotificationContext {
     pub today_count: Option<u64>,
     pub hour_count: Option<u64>,
     pub account_equity: Option<Decimal>,
-    pub available_margin: Option<Decimal>,
+    pub wallet_balance: Option<Decimal>,
+    pub available_balance: Option<Decimal>,
     pub position_amount: Option<Decimal>,
     pub cny_per_unit: Option<Decimal>,
 }
@@ -142,7 +143,8 @@ impl TradeNotificationContext {
             } else {
                 account.margin_balance
             });
-        let available_margin = (fresh && matching_asset).then_some(account.available_balance);
+        let wallet_balance = (fresh && matching_asset).then_some(account.total_wallet_balance);
+        let available_balance = (fresh && matching_asset).then_some(account.available_balance);
         let cny_per_unit = cny_rate
             .filter(|rate| {
                 rate.asset == account.asset
@@ -155,7 +157,8 @@ impl TradeNotificationContext {
             today_count,
             hour_count,
             account_equity,
-            available_margin,
+            wallet_balance,
+            available_balance,
             position_amount: None,
             cny_per_unit,
         }
@@ -212,7 +215,6 @@ pub fn format_trade_message(trade: &TradeRecord, context: &TradeNotificationCont
         OrderSide::Sell => "🔴",
     };
     let quote = quote_asset(&trade.symbol);
-    let base = trade.symbol.strip_suffix(quote).unwrap_or("");
     let average_price = trade.price.normalize();
     let count = |value: Option<u64>| value.map_or_else(|| "--".to_string(), |n| n.to_string());
     let money = |value: Option<Decimal>| {
@@ -230,10 +232,10 @@ pub fn format_trade_message(trade: &TradeRecord, context: &TradeNotificationCont
             |value| format!("≈ ¥{:.2}", value.round_dp(2)),
         );
     let ratio = context
-        .available_margin
-        .zip(context.account_equity)
-        .filter(|(_, equity)| *equity > Decimal::ZERO)
-        .and_then(|(available, equity)| available.checked_div(equity))
+        .available_balance
+        .zip(context.wallet_balance)
+        .filter(|(_, wallet)| *wallet > Decimal::ZERO)
+        .and_then(|(available, wallet)| available.checked_div(wallet))
         .and_then(|ratio| ratio.checked_mul(Decimal::ONE_HUNDRED))
         .map_or_else(
             || "--".to_string(),
@@ -252,15 +254,13 @@ pub fn format_trade_message(trade: &TradeRecord, context: &TradeNotificationCont
         String::new()
     };
     format!(
-        "<b>{icon} {direction}｜{average_price}｜{quantity} {base}｜{amount:.2} {quote}｜{today}｜{hour}</b>\n<b>账户权益：{equity}｜</b>{cny}\n持仓金额：{position_amount}\n可用保证金：{available}｜{ratio}{pnl_line}",
+        "<b>{icon} {direction}｜{average_price}｜{amount:.2} {quote}｜{today}D｜{hour}H</b>\n<b>账户权益：{equity}｜</b>{cny}\n持仓金额：{position_amount}\n可用余额：{available}｜{ratio}{pnl_line}",
         direction = trade.side.as_str(),
-        quantity = trade.quantity.normalize(),
-        base = escape_html(base),
         amount = trade.amount_usdc.round_dp(2),
         today = count(context.today_count),
         hour = count(context.hour_count),
         equity = money(context.account_equity),
-        available = money(context.available_margin),
+        available = money(context.available_balance),
         position_amount = money(context.position_amount),
     )
 }
@@ -392,7 +392,7 @@ mod tests {
         let trade = trade(OrderSide::Buy);
         assert_eq!(
             format_trade_message(&trade, &context(&trade)),
-            "<b>🟢 BUY｜123.45｜2 SOL｜246.90 USDC｜7｜2</b>\n<b>账户权益：11254.48 USDC｜</b>≈ ¥75453.41\n持仓金额：2469.00 USDC\n可用保证金：3878.03 USDC｜34.46%"
+            "<b>🟢 BUY｜123.45｜246.90 USDC｜7D｜2H</b>\n<b>账户权益：11254.48 USDC｜</b>≈ ¥75453.41\n持仓金额：2469.00 USDC\n可用余额：3878.03 USDC｜38.78%"
         );
     }
 
@@ -509,7 +509,7 @@ mod tests {
         trade.commission = dec!(0.80);
         assert_eq!(
             format_trade_message(&trade, &context(&trade)),
-            "<b>🔴 SELL｜123.45｜2 SOL｜246.90 USDC｜4｜1</b>\n<b>账户权益：11254.48 USDC｜</b>≈ ¥75453.41\n持仓金额：2469.00 USDC\n可用保证金：3878.03 USDC｜34.46%\n已实现盈亏：-3.2500 USDC"
+            "<b>🔴 SELL｜123.45｜246.90 USDC｜4D｜1H</b>\n<b>账户权益：11254.48 USDC｜</b>≈ ¥75453.41\n持仓金额：2469.00 USDC\n可用余额：3878.03 USDC｜38.78%\n已实现盈亏：-3.2500 USDC"
     );
         trade.realized_pnl = dec!(1.25);
         assert!(
@@ -535,7 +535,7 @@ mod tests {
                     "🔴"
                 };
                 assert!(message.starts_with(&format!(
-                    "<b>{icon} {}｜117.123456｜4.27 SOL｜500.12 USDC｜--｜--</b>",
+                    "<b>{icon} {}｜117.123456｜500.12 USDC｜--D｜--H</b>",
                     side.as_str()
                 )));
             }
@@ -569,11 +569,11 @@ mod tests {
                 trade.timestamp,
             );
             assert_eq!(context.account_equity, None);
-            assert_eq!(context.available_margin, None);
+            assert_eq!(context.available_balance, None);
             let message = format_trade_message(&trade, &context);
-            assert!(message.contains("｜--｜--</b>"));
+            assert!(message.contains("｜--D｜--H</b>"));
             assert!(message.contains("账户权益：-- USDC｜</b>--"));
-            assert!(message.ends_with("可用保证金：-- USDC｜--"));
+            assert!(message.ends_with("可用余额：-- USDC｜--"));
         }
     }
 
@@ -592,18 +592,18 @@ mod tests {
         assert_eq!(context.account_equity, Some(dec!(10500)));
         let message = format_trade_message(&trade, &context);
         assert!(message.contains("账户权益：10500.00 USDC｜</b>--"));
-        assert!(message.ends_with("可用保证金：3878.03 USDC｜36.93%"));
+        assert!(message.ends_with("可用余额：3878.03 USDC｜38.78%"));
     }
 
     #[test]
-    fn ratio_handles_zero_equity_and_zero_available_margin() {
+    fn ratio_handles_zero_wallet_and_zero_available_balance() {
         let trade = trade(OrderSide::Buy);
         let mut context = context(&trade);
-        context.account_equity = Some(Decimal::ZERO);
-        assert!(format_trade_message(&trade, &context).ends_with("可用保证金：3878.03 USDC｜--"));
-        context.account_equity = Some(dec!(10000));
-        context.available_margin = Some(Decimal::ZERO);
-        assert!(format_trade_message(&trade, &context).ends_with("可用保证金：0.00 USDC｜0.00%"));
+        context.wallet_balance = Some(Decimal::ZERO);
+        assert!(format_trade_message(&trade, &context).ends_with("可用余额：3878.03 USDC｜--"));
+        context.wallet_balance = Some(dec!(10000));
+        context.available_balance = Some(Decimal::ZERO);
+        assert!(format_trade_message(&trade, &context).ends_with("可用余额：0.00 USDC｜0.00%"));
     }
 
     #[test]
@@ -634,12 +634,13 @@ mod tests {
     }
 
     #[test]
-    fn notification_escapes_quantity_asset() {
+    fn notification_does_not_include_base_asset() {
         let mut trade = trade(OrderSide::Buy);
         trade.symbol = "<SOL>&USDC".into();
         let message = format_trade_message(&trade, &context(&trade));
-        assert!(!message.contains("&lt;SOL&gt;&amp;USDC"));
-        assert!(message.contains("2 &lt;SOL&gt;&amp;"));
+        assert!(!message.contains("<SOL>"));
+        assert!(!message.contains("&lt;SOL&gt;"));
+        assert!(message.contains("246.90 USDC"));
     }
 
     #[test]
