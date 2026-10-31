@@ -21,8 +21,8 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
   return <main className="login-page">
     <div className="login-theme"><ThemeSwitch /></div>
     <section className="login-form"><Card variant="borderless">
-      <Typography.Title level={2}>{setup ? '初始化控制台' : '欢迎回来'}</Typography.Title>
-      <Typography.Paragraph type="secondary">{setup ? '使用启动日志中的初始化码，创建管理员密码。' : '输入管理员密码，进入你的策略工作台。'}</Typography.Paragraph>
+      <Typography.Title level={2}>{setup ? '初始化控制台' : '登录交易控制台'}</Typography.Title>
+      <Typography.Paragraph type="secondary">{setup ? '使用启动日志中的初始化码创建管理员密码' : '输入管理员密码，进入策略工作台'}</Typography.Paragraph>
       <ErrorNotice error={status.error} retry={() => void status.refetch()} /><ErrorNotice error={error} />
       {setup && <Alert type="info" showIcon title="首次启动默认使用模拟盘" />}
       <Form layout="vertical" onFinish={values => { setError(null); mutation.mutate(values); }} disabled={mutation.isPending || !status.data}>
