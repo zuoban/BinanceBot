@@ -200,16 +200,13 @@ a { color: inherit; }
 .placeholder-filters .skeleton-line { width: 130px; height: 32px; }
 .placeholder-strategies { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .placeholder-strategies .skeleton-block { min-height: 300px; }
-.login-page { position: relative; min-height: 100vh; display: grid; background: #f5f7f2; }
+.login-page { position: relative; min-height: 100vh; display: grid; background: #f6f7f6; }
 .login-theme { position: absolute; top: 20px; right: 24px; z-index: 1; }
 .login-form { display: grid; align-content: center; justify-items: center; padding: 40px; }
-.login-form .ant-card { width: min(440px, 100%); background: #fff; border: 1px solid #dce7de; border-radius: 16px; box-shadow: 0 12px 36px rgba(28, 61, 45, .07); }
-.login-form .ant-card-body { padding: 36px; }
-[data-theme="dark"] .login-form .ant-card { background: #192923; border-color: #30483a; box-shadow: 0 12px 36px rgba(0, 0, 0, .18); }
-.login-form .ant-typography { margin-bottom: 12px; }
-.login-form .ant-form { margin-top: 30px; }
+.login-form .ant-card { width: min(440px, 100%); background: #fff; border: 1px solid #dfe5e1; border-radius: 16px; box-shadow: 0 4px 20px rgba(20, 35, 27, .05); }
+.login-form .ant-card-body { min-width: 0; padding: 32px; }
 .login-form .ant-alert { margin-top: 12px; }
-.login-note { width: min(440px, 100%); color: #9ba99f; font-size: 11px; margin-top: 25px; }
+.login-note { width: min(440px, 100%); margin-top: 16px; padding: 0 4px; color: #66796d; font-size: 12px; line-height: 1.5; }
 @media (max-width: 991px) {
   .topbar { padding: 0 20px; }
   .content { padding: 28px 20px 45px; }
@@ -246,7 +243,6 @@ a { color: inherit; }
   .strategy-price { margin: 11px 0; align-items: baseline; gap: 5px 8px; }
   .strategy-price > span:first-child { flex-basis: auto; }
   .strategy-price strong { font-size: 21px; }
-  .strategy-metrics { gap: 9px 10px; padding: 10px 0; }
   .strategy-metrics div { gap: 3px; min-width: 0; }
   .strategy-metrics strong { overflow-wrap: anywhere; }
 
@@ -293,7 +289,7 @@ a { color: inherit; }
 [data-theme="dark"] .loading-brand small, [data-theme="dark"] .loading-screen p { color: #b2c6b8; }
 [data-theme="dark"] .loading-indicator span { background: #69bb98; }
 [data-theme="dark"] .skeleton-line, [data-theme="dark"] .skeleton-block { background: linear-gradient(90deg, #24372d 25%, #344c3d 37%, #24372d 63%); background-size: 400% 100%; border-color: #334b3d; }
-[data-theme="dark"] .login-page { background: #101a17; }
+[data-theme="dark"] .login-page { background: #141715; }
 [data-theme="dark"] .chart .recharts-cartesian-grid line { stroke: #34483d; }
 [data-theme="dark"] .overview-history { --history-equity: #e5bc70; }
 [data-theme="dark"] .history-account-row { border-color: #34483d; }
@@ -587,29 +583,28 @@ a { color: inherit; }
 @media (max-width: 600px) {
   .overview-finance-group .section-heading { min-height: 0; }
   .strategy-card .ant-card-body { padding: 16px; }
+  .strategy-card .strategy-metrics { gap: 9px 10px; padding: 10px 0; }
   .strategy-card .strategy-price strong { font-size: 22px; }
   .position-summary-metrics .position-total strong { font-size: 19px; }
 
 }
 
 /* Login keeps the form readable and within reach on short screens. */
-.login-form .ant-card { border-color: #dfe5e1; box-shadow: 0 4px 20px rgba(20, 35, 27, .05); }
-.login-form .ant-card-body { padding: 32px; }
 .login-form h2.ant-typography { margin-bottom: 8px; font-size: 24px; font-weight: 600; }
 .login-form .ant-typography-secondary { margin-bottom: 0; color: #596d61; line-height: 1.6; }
 .login-form .ant-form { margin-top: 24px; }
-[data-theme="dark"] .login-form .ant-card { background: #18201d; border-color: #303a34; box-shadow: none; }
+[data-theme="dark"] .login-form .ant-card { background: #1b1f1d; border-color: #343b37; box-shadow: none; }
 .login-form .ant-form-item-label > label { font-weight: 500; }
 .login-theme .ant-btn { min-width: 44px; min-height: 44px; }
 .login-theme .ant-btn:focus-visible { outline: 2px solid #238367; outline-offset: 2px; }
 [data-theme="dark"] .login-theme .ant-btn:focus-visible { outline-color: #69bb98; }
-.login-form .ant-card-body { min-width: 0; }
 .login-form .ant-typography-secondary, .login-note { overflow-wrap: anywhere; }
 .login-form .ant-input-affix-wrapper,
 .login-form .ant-input { min-height: 40px; }
 .login-form .ant-input-affix-wrapper .ant-input { min-height: 0; }
 .login-form .ant-btn-primary { min-height: 40px; font-weight: 600; }
-.login-note { margin-top: 16px; padding: 0 4px; color: #66796d; font-size: 12px; line-height: 1.5; }
+[data-theme="dark"] .login-form .ant-btn-primary:not(:disabled) { color: #102019; background: #80c6a7; border-color: #80c6a7; }
+[data-theme="dark"] .login-form .ant-btn-primary:not(:disabled):hover { color: #102019; background: #a0d7bc; border-color: #a0d7bc; }
 .login-page ::selection { background: #b9d9c7; color: #173c32; }
 [data-theme="dark"] .login-form .ant-typography-secondary,
 [data-theme="dark"] .login-note { color: #b2c6b8; }
