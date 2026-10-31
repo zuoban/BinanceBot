@@ -225,6 +225,14 @@ fn payload(symbol: &str) -> Value {
     json!({ "symbol": symbol, "grid_interval": "0.1", "order_amount_usdc": "100", "buy_window": 5, "sell_window": 5 })
 }
 
+async fn versioned_payload(router: &Router, symbol: &str) -> Value {
+    let path = format!("/api/pairs/{symbol}/config");
+    let (_, current) = request(router, &path, "GET", Value::Null, true).await;
+    let mut result = payload(symbol);
+    result["baseline_version"] = current["data"]["config_version"].clone();
+    result
+}
+
 #[tokio::test]
 async fn management_authenticates_add_remove_server_settings_and_pair_resources() {
     let runtime = fixture();
@@ -450,7 +458,7 @@ async fn settings_validation_and_server_changes_preserve_independent_pair_update
         &router,
         "/api/pairs/BTCUSDT/config",
         "POST",
-        payload("BTCUSDT"),
+        versioned_payload(&router, "BTCUSDT").await,
         true,
     )
     .await;
@@ -465,6 +473,37 @@ async fn settings_validation_and_server_changes_preserve_independent_pair_update
     assert!(configs[0].exchange.api_key.is_empty());
     manager.abort();
     let _ = manager.await;
+}
+
+#[tokio::test]
+async fn managed_pair_updates_require_a_current_version() {
+    let runtime = fixture();
+    let router = create_managed_router(runtime.handle()).await;
+    for path in ["/api/pairs/BTCUSDT/config", "/api/config"] {
+        let symbol = if path == "/api/config" {
+            "SOLUSDC"
+        } else {
+            "BTCUSDT"
+        };
+        for baseline in [None, Some(json!(null)), Some(json!("")), Some(json!("  "))] {
+            let mut body = payload(symbol);
+            if let Some(baseline) = baseline {
+                body["baseline_version"] = baseline;
+            }
+            let (status, result) = request(&router, path, "POST", body, true).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(result["message"]
+                .as_str()
+                .unwrap()
+                .contains("baseline_version"));
+        }
+        let mut stale = payload(symbol);
+        stale["baseline_version"] = json!("stale");
+        assert_eq!(
+            request(&router, path, "POST", stale, true).await.0,
+            StatusCode::CONFLICT
+        );
+    }
 }
 
 #[tokio::test]
@@ -710,7 +749,7 @@ async fn global_settings_reach_every_engine_and_new_pairs_inherit_without_overri
     let handle = runtime.handle();
     let router = create_managed_router(handle.clone()).await;
     let manager = tokio::spawn(async move { runtime.run().await });
-    let mut btc = payload("BTCUSDT");
+    let mut btc = versioned_payload(&router, "BTCUSDT").await;
     btc["grid_interval"] = json!("10");
     request(&router, "/api/pairs/BTCUSDT/config", "POST", btc, true).await;
     let (_, global) = request(
@@ -781,7 +820,7 @@ async fn global_settings_reach_every_engine_and_new_pairs_inherit_without_overri
     assert!(strategies
         .iter()
         .all(|config| config.exchange.api_key == "shared-key"));
-    let mut override_payload = payload("SOLUSDC");
+    let mut override_payload = versioned_payload(&router, "SOLUSDC").await;
     override_payload["api_key"] = json!("pair-key");
     let (_, rejected) = request(
         &router,
@@ -816,7 +855,7 @@ async fn global_clearing_validates_all_pair_modes_and_notification_credentials()
     )
     .await;
     assert_eq!(applied["success"], true);
-    let mut live = payload("BTCUSDT");
+    let mut live = versioned_payload(&router, "BTCUSDT").await;
     live["dry_run"] = json!(false);
     assert_eq!(
         request(&router, "/api/pairs/BTCUSDT/config", "POST", live, true)
@@ -837,7 +876,7 @@ async fn global_clearing_validates_all_pair_modes_and_notification_credentials()
         .await
         .iter()
         .all(|state| !state.is_shutting_down()));
-    let mut paper = payload("BTCUSDT");
+    let mut paper = versioned_payload(&router, "BTCUSDT").await;
     paper["dry_run"] = json!(true);
     request(&router, "/api/pairs/BTCUSDT/config", "POST", paper, true).await;
     let (_, cleared) = request(&router, "/api/global/config", "POST", json!({
@@ -1035,7 +1074,7 @@ async fn concurrent_global_patches_and_pair_updates_preserve_shared_and_independ
     let runtime = fixture();
     let handle = runtime.handle();
     let router = create_managed_router(handle.clone()).await;
-    let mut pair = payload("BTCUSDT");
+    let mut pair = versioned_payload(&router, "BTCUSDT").await;
     pair["buy_window"] = json!(3);
     let (recv, sync, pair) = tokio::join!(
         request(
@@ -1056,7 +1095,16 @@ async fn concurrent_global_patches_and_pair_updates_preserve_shared_and_independ
     );
     assert_eq!(recv.1["success"], true);
     assert_eq!(sync.1["success"], true);
-    assert_eq!(pair.1["success"], true);
+    if pair.0 == StatusCode::CONFLICT {
+        assert_eq!(pair.1["success"], false);
+        let mut retry = versioned_payload(&router, "BTCUSDT").await;
+        retry["buy_window"] = json!(3);
+        let retried = request(&router, "/api/pairs/BTCUSDT/config", "POST", retry, true).await;
+        assert_eq!(retried.1["success"], true);
+    } else {
+        assert_eq!(pair.0, StatusCode::OK);
+        assert_eq!(pair.1["success"], true);
+    }
     let saved = handle.db.load_config().unwrap().unwrap();
     assert_eq!(saved.exchange.recv_window, 9000);
     assert_eq!(saved.exchange.sync_interval_secs, 9);

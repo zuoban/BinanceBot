@@ -441,9 +441,29 @@ async fn post_managed_config_handler(
     State(state): State<Arc<AppState>>,
     Extension(handle): Extension<RuntimeHandle>,
     Json(payload): Json<UpdateConfigPayload>,
-) -> Json<ApiResponse<WebConfigView>> {
-    let _membership = handle.membership_lock.lock().await;
-    post_config_handler(State(state), Json(payload)).await
+) -> (StatusCode, Json<ApiResponse<WebConfigView>>) {
+    tokio::spawn(async move {
+        let _membership = handle.membership_lock.lock().await;
+        if !handle
+            .states
+            .read()
+            .await
+            .iter()
+            .any(|current| Arc::ptr_eq(current, &state))
+        {
+            return (
+                StatusCode::CONFLICT,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    message: Some("交易对已被删除或替换，请刷新后重试".into()),
+                }),
+            );
+        }
+        apply_pair_config(state, payload).await
+    })
+    .await
+    .expect("配置更新任务异常退出")
 }
 
 async fn get_global_config_handler(
@@ -715,11 +735,20 @@ async fn post_auth_setup_handler(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<AuthSetupPayload>,
 ) -> (StatusCode, Json<ApiResponse<AuthTokenResponse>>) {
-    let is_set = state
-        .db
-        .run_blocking(|db| db.is_admin_password_set())
-        .await
-        .unwrap_or(false);
+    let is_set = match state.db.run_blocking(|db| db.is_admin_password_set()).await {
+        Ok(is_set) => is_set,
+        Err(error) => {
+            error!("Failed to check admin initialization: {}", error);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    message: Some("认证服务异常，请稍后重试".into()),
+                }),
+            );
+        }
+    };
     if is_set {
         return (
             StatusCode::BAD_REQUEST,
@@ -767,9 +796,11 @@ async fn post_auth_setup_handler(
     }
 
     let password = password.to_string();
+    let token = crate::auth::generate_session_token();
+    let session_token = token.clone();
     match state
         .db
-        .run_blocking(move |db| db.initialize_admin_password(&password))
+        .run_blocking(move |db| db.initialize_admin_session(&password, &session_token))
         .await
     {
         Ok(true) => {}
@@ -790,15 +821,13 @@ async fn post_auth_setup_handler(
                 Json(ApiResponse {
                     success: false,
                     data: None,
-                    message: Some(format!("保存管理员密码失败: {}", e)),
+                    message: Some("初始化失败，请稍后重试或查看服务器日志".into()),
                 }),
             );
         }
     }
 
-    let token = crate::auth::generate_session_token();
     state.clear_login_attempts().await;
-    let _ = state.create_session(&token).await;
     info!("Admin password successfully initialized and initial session created");
 
     (
@@ -825,11 +854,20 @@ async fn post_auth_login_handler(
             }),
         );
     }
-    let is_set = state
-        .db
-        .run_blocking(|db| db.is_admin_password_set())
-        .await
-        .unwrap_or(false);
+    let is_set = match state.db.run_blocking(|db| db.is_admin_password_set()).await {
+        Ok(is_set) => is_set,
+        Err(error) => {
+            error!("Failed to check admin initialization: {}", error);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    message: Some("认证服务异常，请稍后重试".into()),
+                }),
+            );
+        }
+    };
     if !is_set {
         return (
             StatusCode::BAD_REQUEST,
@@ -842,15 +880,15 @@ async fn post_auth_login_handler(
     }
 
     let password = payload.password;
+    let token = crate::auth::generate_session_token();
+    let session_token = token.clone();
     match state
         .db
-        .run_blocking(move |db| db.verify_admin_password(&password))
+        .run_blocking(move |db| db.authenticate_and_create_session(&password, &session_token))
         .await
     {
         Ok(true) => {
             state.clear_login_attempts().await;
-            let token = crate::auth::generate_session_token();
-            let _ = state.create_session(&token).await;
             info!("Admin authentication successful");
             (
                 StatusCode::OK,
@@ -879,7 +917,7 @@ async fn post_auth_login_handler(
                 Json(ApiResponse {
                     success: false,
                     data: None,
-                    message: Some(format!("认证服务异常: {}", e)),
+                    message: Some("认证服务异常，请稍后重试".into()),
                 }),
             )
         }
@@ -889,15 +927,28 @@ async fn post_auth_login_handler(
 async fn post_auth_logout_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-) -> Json<ApiResponse<()>> {
+) -> (StatusCode, Json<ApiResponse<()>>) {
     if let Some(token) = extract_token(&headers) {
-        let _ = state.delete_session(&token).await;
+        if let Err(error) = state.delete_session(&token).await {
+            error!("Failed to delete session during logout: {}", error);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    message: Some("退出登录失败，请重试或查看服务器日志".to_string()),
+                }),
+            );
+        }
     }
-    Json(ApiResponse {
-        success: true,
-        data: None,
-        message: Some("已安全退出登录".to_string()),
-    })
+    (
+        StatusCode::OK,
+        Json(ApiResponse {
+            success: true,
+            data: None,
+            message: Some("已安全退出登录".to_string()),
+        }),
+    )
 }
 
 async fn post_change_password_handler(
@@ -917,29 +968,13 @@ async fn post_change_password_handler(
     }
 
     let old_password = payload.old_password;
+    let new_password = new_password.to_string();
     match state
         .db
-        .run_blocking(move |db| db.verify_admin_password(&old_password))
+        .run_blocking(move |db| db.change_admin_password(&old_password, &new_password))
         .await
     {
         Ok(true) => {
-            let new_password = new_password.to_string();
-            if let Err(e) = state
-                .db
-                .run_blocking(move |db| db.set_admin_password(&new_password))
-                .await
-            {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ApiResponse {
-                        success: false,
-                        data: None,
-                        message: Some(format!("修改密码失败: {}", e)),
-                    }),
-                );
-            }
-            // Clear other sessions to enforce re-login
-            let _ = state.clear_all_sessions().await;
             info!("Admin password changed successfully, all sessions cleared");
             (
                 StatusCode::OK,
@@ -958,14 +993,17 @@ async fn post_change_password_handler(
                 message: Some("原密码校验失败，请重新输入".to_string()),
             }),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiResponse {
-                success: false,
-                data: None,
-                message: Some(format!("系统异常: {}", e)),
-            }),
-        ),
+        Err(error) => {
+            error!("Failed to change admin password: {}", error);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    message: Some("修改密码失败，请稍后重试或查看服务器日志".into()),
+                }),
+            )
+        }
     }
 }
 
@@ -1132,11 +1170,24 @@ async fn get_config_handler(
     State(state): State<Arc<AppState>>,
 ) -> Json<ApiResponse<WebConfigView>> {
     let config = state.config.read().await;
+    let mut view = web_config_view(&config);
+    view.config_version = pair_config_version(&config, state.config_instance);
     Json(ApiResponse {
         success: true,
-        data: Some(web_config_view(&config)),
+        data: Some(view),
         message: None,
     })
+}
+
+fn pair_config_version(config: &AppConfig, instance: u128) -> String {
+    crate::db::config_version(&(
+        instance,
+        &config.exchange,
+        &config.grid,
+        &config.telegram,
+        config.global_max_position_notional,
+        config.pause_on_zero_available_margin,
+    ))
 }
 
 fn web_config_view(config: &AppConfig) -> WebConfigView {
@@ -1165,6 +1216,7 @@ fn web_config_view(config: &AppConfig) -> WebConfigView {
     };
 
     let view = WebConfigView {
+        config_version: String::new(),
         symbol: config.exchange.symbol.clone(),
         direction: config.grid.direction,
         grid_interval: config.grid.grid_interval,
@@ -1276,6 +1328,52 @@ fn apply_config_payload(
 async fn post_config_handler(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<UpdateConfigPayload>,
+) -> (StatusCode, Json<ApiResponse<WebConfigView>>) {
+    tokio::spawn(async move { apply_pair_config(state, payload).await })
+        .await
+        .expect("配置更新任务异常退出")
+}
+
+async fn apply_pair_config(
+    state: Arc<AppState>,
+    payload: UpdateConfigPayload,
+) -> (StatusCode, Json<ApiResponse<WebConfigView>>) {
+    let _update = state.config_update_lock.lock().await;
+    let current = state.config.read().await.clone();
+    let Some(version) = payload
+        .baseline_version
+        .as_deref()
+        .filter(|version| !version.trim().is_empty())
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some("更新交易对设置时必须提供 baseline_version".into()),
+            }),
+        );
+    };
+    if version != pair_config_version(&current, state.config_instance) {
+        return (
+            StatusCode::CONFLICT,
+            Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some("交易对设置已被其他请求修改，请刷新后重试".into()),
+            }),
+        );
+    }
+    (
+        StatusCode::OK,
+        apply_pair_config_inner(state.clone(), current, payload).await,
+    )
+}
+
+async fn apply_pair_config_inner(
+    state: Arc<AppState>,
+    current: AppConfig,
+    payload: UpdateConfigPayload,
 ) -> Json<ApiResponse<WebConfigView>> {
     if state.pair_scope().is_some() && payload.has_global_updates() {
         return Json(ApiResponse {
@@ -1284,7 +1382,7 @@ async fn post_config_handler(
             message: Some("连接和 Telegram 通知请在全局设置中保存".into()),
         });
     }
-    let current_config = match apply_config_payload(state.config.read().await.clone(), payload) {
+    let current_config = match apply_config_payload(current, payload) {
         Ok(config) => config,
         Err(error) => {
             return Json(ApiResponse {
@@ -1865,11 +1963,16 @@ mod tests {
             "sell_window": 5,
             "pause_on_max_position": true
         });
+        payload["baseline_version"] = serde_json::json!(pair_config_version(
+            &*state.config.read().await,
+            state.config_instance
+        ));
         let response = post_config_handler(
             State(state.clone()),
             Json(serde_json::from_value(payload.clone()).unwrap()),
         )
-        .await;
+        .await
+        .1;
         assert!(!response.0.success);
         assert!(db.load_config().unwrap().is_none());
 
@@ -1883,11 +1986,16 @@ mod tests {
                     .unwrap()
                     .remove("pause_on_max_position");
             }
+            payload["baseline_version"] = serde_json::json!(pair_config_version(
+                &*state.config.read().await,
+                state.config_instance
+            ));
             let response = post_config_handler(
                 State(state.clone()),
                 Json(serde_json::from_value(payload.clone()).unwrap()),
             )
-            .await;
+            .await
+            .1;
             assert!(response.0.success);
             assert_eq!(response.0.data.unwrap().pause_on_max_position, expected);
             let response = get_config_handler(State(state.clone())).await;

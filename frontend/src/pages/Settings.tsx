@@ -145,7 +145,7 @@ function SecuritySettings() {
   const mutation = useMutation({
     mutationFn: (values: { old_password: string; new_password: string }) => post('/api/auth/change_password', values),
     onMutate: () => edit.setSaving(true),
-    onSuccess: () => { form.resetFields(); edit.setDirty(false); message.success('密码已更新，请重新登录'); client.clear(); void session.logout(); },
+    onSuccess: () => { form.resetFields(); edit.setDirty(false); message.success('密码已更新，请重新登录'); client.clear(); void session.logout(true); },
     onError: error => message.error(error.message),
     onSettled: () => edit.setSaving(false),
   });

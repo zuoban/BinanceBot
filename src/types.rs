@@ -506,6 +506,8 @@ pub struct WebGlobalConfigView {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateConfigPayload {
+    #[serde(default)]
+    pub baseline_version: Option<String>,
     pub symbol: String,
     #[serde(default)]
     pub direction: Option<GridDirection>,
@@ -554,6 +556,7 @@ impl UpdateConfigPayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebConfigView {
+    pub config_version: String,
     pub symbol: String,
     pub direction: GridDirection,
     pub grid_interval: Decimal,

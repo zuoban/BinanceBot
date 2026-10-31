@@ -140,6 +140,8 @@ async fn test_full_auth_lifecycle() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
+    let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let config: Value = serde_json::from_slice(&body).unwrap();
 
     // Telegram credentials are required when enabled and are never echoed by the API.
     let mut config_payload = serde_json::json!({
@@ -148,6 +150,7 @@ async fn test_full_auth_lifecycle() {
         "order_amount_usdc": "100",
         "buy_window": 5,
         "sell_window": 5,
+        "baseline_version": config["data"]["config_version"],
         "telegram_enabled": true
     });
     let post_config = |payload: &Value| {
@@ -326,6 +329,222 @@ async fn change_password_distinguishes_invalid_password_from_invalid_session() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+struct AuthTestDatabase {
+    db: Arc<Database>,
+    external: rusqlite::Connection,
+    _directory: AuthTempDir,
+}
+
+struct AuthTempDir(std::path::PathBuf);
+
+impl Drop for AuthTempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+impl AuthTestDatabase {
+    fn new() -> Self {
+        let directory = std::env::temp_dir().join(format!("auth-api-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("auth.db");
+        let db = Arc::new(Database::open(path.to_str().unwrap()).unwrap());
+        let external = rusqlite::Connection::open(&path).unwrap();
+        external
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let mode: String = external
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode.to_lowercase(), "wal");
+        Self {
+            db,
+            external,
+            _directory: AuthTempDir(directory),
+        }
+    }
+
+    fn fail_session_writes(&self, operation: &str) {
+        assert!(matches!(operation, "INSERT" | "DELETE"));
+        self.external
+            .execute_batch(&format!(
+                "CREATE TRIGGER fail_session_write BEFORE {operation} ON auth_sessions \
+             BEGIN SELECT RAISE(ABORT, 'injected session failure'); END;"
+            ))
+            .unwrap();
+    }
+
+    fn session_count(&self) -> i64 {
+        self.external
+            .query_row("SELECT COUNT(*) FROM auth_sessions", [], |row| row.get(0))
+            .unwrap()
+    }
+}
+
+fn auth_request(path: &str, body: serde_json::Value, token: Option<&str>) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("Content-Type", "application/json");
+    if let Some(token) = token {
+        builder = builder.header("Authorization", format!("Bearer {token}"));
+    }
+    builder.body(Body::from(body.to_string())).unwrap()
+}
+
+#[tokio::test]
+async fn setup_session_insert_failure_rolls_back_password_and_session() {
+    let fixture = AuthTestDatabase::new();
+    let (action_tx, _action_rx) = mpsc::channel(16);
+    let state = AppState::new(AppConfig::default(), fixture.db.clone(), action_tx);
+    let setup_code = state.setup_code().unwrap().to_string();
+    let app = create_router(state);
+    fixture.fail_session_writes("INSERT");
+
+    let response = app
+        .clone()
+        .oneshot(auth_request(
+            "/api/auth/setup",
+            serde_json::json!({
+                "password": "original-password", "setup_code": setup_code
+            }),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(!fixture.db.is_admin_password_set().unwrap());
+    assert_eq!(fixture.session_count(), 0);
+
+    fixture
+        .external
+        .execute_batch("DROP TRIGGER fail_session_write")
+        .unwrap();
+    let response = app
+        .oneshot(auth_request(
+            "/api/auth/setup",
+            serde_json::json!({
+                "password": "original-password", "setup_code": setup_code
+            }),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(fixture.session_count(), 1);
+}
+
+#[tokio::test]
+async fn login_session_insert_failure_returns_error_without_token() {
+    let fixture = AuthTestDatabase::new();
+    fixture.db.set_admin_password("original-password").unwrap();
+    let (action_tx, _action_rx) = mpsc::channel(16);
+    let app = create_router(AppState::new(
+        AppConfig::default(),
+        fixture.db.clone(),
+        action_tx,
+    ));
+    fixture.fail_session_writes("INSERT");
+
+    let response = app
+        .oneshot(auth_request(
+            "/api/auth/login",
+            serde_json::json!({
+                "password": concat!("original", "-password")
+            }),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert!(json.get("token").is_none());
+    assert!(json["data"].get("token").is_none());
+    assert_eq!(fixture.session_count(), 0);
+}
+
+#[tokio::test]
+async fn password_change_session_delete_failure_rolls_back_and_preserves_session() {
+    let fixture = AuthTestDatabase::new();
+    fixture.db.set_admin_password("original-password").unwrap();
+    fixture.db.create_session("valid-token").unwrap();
+    let (action_tx, _action_rx) = mpsc::channel(16);
+    let app = create_router(AppState::new(
+        AppConfig::default(),
+        fixture.db.clone(),
+        action_tx,
+    ));
+    fixture.fail_session_writes("DELETE");
+
+    let response = app
+        .clone()
+        .oneshot(auth_request(
+            "/api/auth/change_password",
+            serde_json::json!({
+                "old_password": concat!("original", "-password"), "new_password": "new-password"
+            }),
+            Some("valid-token"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(fixture
+        .db
+        .verify_admin_password("original-password")
+        .unwrap());
+    assert!(!fixture.db.verify_admin_password("new-password").unwrap());
+    assert_eq!(fixture.session_count(), 1);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/config")
+                .header("Authorization", "Bearer valid-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn logout_session_delete_failure_returns_error() {
+    let fixture = AuthTestDatabase::new();
+    fixture.db.set_admin_password("original-password").unwrap();
+    fixture.db.create_session("valid-token").unwrap();
+    let (action_tx, _action_rx) = mpsc::channel(16);
+    let app = create_router(AppState::new(
+        AppConfig::default(),
+        fixture.db.clone(),
+        action_tx,
+    ));
+    fixture.fail_session_writes("DELETE");
+
+    let response = app
+        .clone()
+        .oneshot(auth_request(
+            "/api/auth/logout",
+            serde_json::json!({}),
+            Some("valid-token"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(fixture.session_count(), 1);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/config")
+                .header("Authorization", "Bearer valid-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 #[test]
