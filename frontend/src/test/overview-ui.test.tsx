@@ -65,6 +65,43 @@ it('identifies each strategy direction without opening its configuration', () =>
   expect(screen.getByRole('img', { name: '策略方向：做多' })).toHaveTextContent('做多');
   expect(screen.getByRole('img', { name: '策略方向：做空' })).toHaveTextContent('做空');
 });
+it.each([
+  ['long rising', '1', '100', '101', '100', '+1%', 'positive'],
+  ['short falling', '-1', '100', '99', '100', '-1%', 'negative'],
+  ['short rising', '-1', '100', '101', '100', '+1%', 'positive'],
+  ['long falling', '1', '100', '99', '100', '-1%', 'negative'],
+  ['unchanged', '1', '100', '100', '100', '0%', ''],
+  ['rounded negative zero', '1', '100', '99.999', '100', '0%', ''],
+  ['rounded positive zero', '1', '100', '100.001', '100', '0%', ''],
+  ['zero position', '0', '100', '101', '--', '--', ''],
+  ['invalid position', 'invalid', '100', '101', '--', '--', ''],
+  ['infinite position', 'Infinity', '100', '101', '--', '--', ''],
+  ['zero entry', '1', '0', '101', '--', '--', ''],
+  ['negative entry', '1', '-1', '101', '--', '--', ''],
+  ['invalid entry', '1', 'invalid', '101', '--', '--', ''],
+  ['infinite entry', '1', 'Infinity', '101', '--', '--', ''],
+  ['zero mark', '1', '100', '0', '100', '--', ''],
+  ['negative mark', '1', '100', '-1', '100', '--', ''],
+  ['invalid mark', '1', '100', 'invalid', '100', '--', ''],
+  ['infinite mark', '1', '100', 'Infinity', '100', '--', ''],
+  ['overflowing change', '1', '1e-308', '1e308', '0', '--', ''],
+])('shows entry and mark change for %s', (_case, size, entry, mark, expectedEntry, expectedChange, color) => {
+  const s = snapshot('BTCUSDC');
+  s.position.size = size;
+  s.position.entry_price = entry;
+  s.position.mark_price = '123';
+  s.ticker.mark_price = mark;
+  s.grid_config.direction = size === '-1' ? 'SHORT' : 'LONG';
+  overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: s, mode: 'PAPER', scoped: true }] };
+  render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+  const card = screen.getByRole('link', { name: 'BTCUSDC' }).closest('.strategy-card') as HTMLElement;
+  const entryMetric = within(card).getByText('开仓价格').nextElementSibling as HTMLElement;
+  const changeMetric = within(card).getByText('涨跌幅').nextElementSibling as HTMLElement;
+  expect(entryMetric.textContent).toBe(expectedEntry);
+  expect(changeMetric.textContent).toBe(expectedChange);
+  expect(changeMetric.className).toBe(color);
+});
+
 
 it('summarizes statuses and lets the user clear a search with no results', async () => {
   const running = snapshot('BTCUSDC'); running.status = 'RUNNING';

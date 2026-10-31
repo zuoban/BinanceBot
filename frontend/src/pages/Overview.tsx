@@ -139,6 +139,11 @@ export default function OverviewPage() {
       {visible.map(({ snapshot: s, mode: m, scoped }) => {
         const pair: Pair = { symbol: s.symbol, status: s.status, mode: m, grid_config: s.grid_config, scoped };
         const quote = quoteAsset(s.symbol), result = controls.results[s.symbol];
+        const size = numeric(s.position.size), entry = numeric(s.position.entry_price), mark = numeric(s.ticker.mark_price);
+        const validEntry = size !== null && size !== 0 && entry !== null && entry > 0;
+        const change = validEntry && mark !== null && mark > 0 ? (mark / entry - 1) * 100 : null;
+        const formattedChange = change !== null && Number.isFinite(change) ? number(change, 2) : null;
+        const roundedChange = formattedChange === null ? null : Number(formattedChange.replaceAll(',', ''));
         return <Col xs={24} lg={12} xxl={8} key={s.symbol}><Card className={`strategy-card ${s.grid_config.direction === 'SHORT' ? 'strategy-short' : 'strategy-long'}`}>
           <div className="section-line"><div className="strategy-identity"><Link className="pair-name" to={`/pairs/${s.symbol}`}>{s.symbol}</Link><span className="strategy-direction" role="img" aria-label={s.grid_config.direction === 'SHORT' ? '策略方向：做空' : '策略方向：做多'}>{s.grid_config.direction === 'SHORT' ? <><ArrowDownOutlined />做空</> : <><ArrowUpOutlined />做多</>}</span><ModeTag mode={m} /></div><Space size={2}><StatusTag status={s.status} /><Popover trigger="click" placement="bottomRight" title={`${s.symbol} 策略配置`} content={
             <div className="strategy-config-popover">
@@ -158,7 +163,16 @@ export default function OverviewPage() {
             </div>
           }><Button type="text" size="small" icon={<EyeOutlined />} aria-label={`查看 ${s.symbol} 策略配置`} /></Popover><StrategyMenu pair={pair} stale={stale} /></Space></div>
           <div className="strategy-price"><span className="muted">标记价格</span><strong>{Number(s.ticker.mark_price) > 0 ? price(s.ticker.mark_price) : '--'}</strong></div>
-          <div className="strategy-metrics"><div><span>已实现盈亏 / {quote}</span><strong><Pnl value={s.stats.total_realized_pnl} compact /></strong></div><div><span>未实现盈亏 / {quote}</span><strong><Pnl value={s.position.unrealized_pnl} compact /></strong></div><div><span>持仓金额 / {quote}</span><strong>{number(positionAmount(s))}</strong></div><div><span>持仓数量</span><strong>{price(s.position.size)}</strong></div><div><span>今日成交</span><strong>{todayCount(s) ?? '--'} <small>笔</small></strong></div><div><span>买单 / 卖单</span><strong>{s.stats.active_buy_orders} <small>/</small> {s.stats.active_sell_orders}</strong></div></div>
+          <div className="strategy-metrics">
+            <div><span>持仓金额 / {quote}</span><strong>{number(positionAmount(s))}</strong></div>
+            <div><span>持仓数量</span><strong>{price(s.position.size)}</strong></div>
+            <div><span>开仓价格</span><strong>{validEntry ? price(entry) : '--'}</strong></div>
+            <div><span>涨跌幅</span><strong className={roundedChange === null || roundedChange === 0 ? undefined : roundedChange > 0 ? 'positive' : 'negative'}>{roundedChange === null ? '--' : roundedChange === 0 ? '0%' : `${roundedChange > 0 ? '+' : ''}${formattedChange}%`}</strong></div>
+            <div><span>已实现盈亏 / {quote}</span><strong><Pnl value={s.stats.total_realized_pnl} compact /></strong></div>
+            <div><span>未实现盈亏 / {quote}</span><strong><Pnl value={s.position.unrealized_pnl} compact /></strong></div>
+            <div><span>今日成交</span><strong>{todayCount(s) ?? '--'} <small>笔</small></strong></div>
+            <div><span>买单 / 卖单</span><strong>{s.stats.active_buy_orders} <small>/</small> {s.stats.active_sell_orders}</strong></div>
+          </div>
           {result && <div className={result.startsWith('失败') ? 'negative operation-result' : 'muted operation-result'} role="status">{result}</div>}
         </Card></Col>;
       })}
