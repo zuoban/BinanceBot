@@ -2721,6 +2721,83 @@ mod tests {
     }
 
     #[test]
+    fn legacy_running_status_is_inherited_only_by_the_original_symbol_and_mode() {
+        let db = Database::open(":memory:").unwrap();
+        db.save_config(&AppConfig::default()).unwrap();
+        db.save_bot_status(BotStatus::Running).unwrap();
+
+        assert_eq!(
+            db.load_pair_status("SOLUSDC", TradingMode::Paper).unwrap(),
+            Some(BotStatus::Running)
+        );
+        assert_eq!(
+            db.load_pair_status("SOLUSDC", TradingMode::Testnet)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            db.load_pair_status("SOLUSDC", TradingMode::Live).unwrap(),
+            None
+        );
+        assert_eq!(
+            db.load_pair_status("BTCUSDT", TradingMode::Paper).unwrap(),
+            None
+        );
+
+        db.save_pair_status("SOLUSDC", TradingMode::Paper, BotStatus::Paused)
+            .unwrap();
+        assert_eq!(
+            db.load_pair_status("SOLUSDC", TradingMode::Paper).unwrap(),
+            Some(BotStatus::Paused)
+        );
+        assert_eq!(db.load_bot_status().unwrap(), Some(BotStatus::Running));
+    }
+
+    #[test]
+    fn adding_and_readding_a_pair_persists_paused_status() {
+        let db = Database::open(":memory:").unwrap();
+        let original = AppConfig::default();
+        db.save_config(&original).unwrap();
+        db.save_runtime_status("SOLUSDC", TradingMode::Paper, BotStatus::Running, true)
+            .unwrap();
+
+        let mut added = original.clone();
+        added.exchange.symbol = "BTCUSDT".into();
+        db.add_pair_config(&added).unwrap();
+        assert_eq!(
+            db.load_pair_status("BTCUSDT", TradingMode::Paper).unwrap(),
+            Some(BotStatus::Paused)
+        );
+
+        db.save_pair_status("BTCUSDT", TradingMode::Paper, BotStatus::Running)
+            .unwrap();
+        db.remove_pair_config("BTCUSDT").unwrap();
+        assert!(!db
+            .load_config()
+            .unwrap()
+            .unwrap()
+            .pairs
+            .iter()
+            .any(|pair| pair.symbol == "BTCUSDT"));
+        db.add_pair_config(&added).unwrap();
+        assert!(db
+            .load_config()
+            .unwrap()
+            .unwrap()
+            .pairs
+            .iter()
+            .any(|pair| pair.symbol == "BTCUSDT"));
+        assert_eq!(
+            db.load_pair_status("BTCUSDT", TradingMode::Paper).unwrap(),
+            Some(BotStatus::Paused)
+        );
+        assert_eq!(
+            db.load_pair_status("SOLUSDC", TradingMode::Paper).unwrap(),
+            Some(BotStatus::Running)
+        );
+    }
+
+    #[test]
     fn analysis_export_removes_credentials_from_pair_overrides() {
         let db = Database::open(":memory:").unwrap();
         let mut config = AppConfig::default();

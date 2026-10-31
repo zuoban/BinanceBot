@@ -6,7 +6,7 @@ use crate::exchange::position_cache::PositionCache;
 use crate::exchange::rate_limit::RateLimiter;
 use crate::exchange::{BinanceFuturesClient, BinanceWsStream};
 use crate::fx::CnyRateCache;
-use crate::lifecycle::stop_engine;
+use crate::lifecycle::{remove_engine, stop_engine};
 use crate::server::AppState;
 use crate::strategy::GridTradingEngine;
 use crate::types::TickerInfo;
@@ -201,6 +201,8 @@ pub struct TradingRuntime {
     market_cache: Arc<MarketCache>,
     rate_limiter: Arc<RateLimiter>,
     global_position_limit: Arc<crate::server::state::GlobalPositionLimit>,
+    #[cfg(test)]
+    test_exchange_url: Option<String>,
 }
 
 impl TradingRuntime {
@@ -240,10 +242,35 @@ impl TradingRuntime {
             position_cache: Arc::new(PositionCache::default()),
             market_cache: Arc::new(MarketCache::default()),
             rate_limiter: Arc::new(RateLimiter::default()),
+            #[cfg(test)]
+            test_exchange_url: None,
         }
     }
 
     pub async fn start(config: &AppConfig, db: Arc<Database>) -> anyhow::Result<Self> {
+        Self::start_impl(
+            config,
+            db,
+            #[cfg(test)]
+            None,
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    async fn start_with_test_exchange(
+        config: &AppConfig,
+        db: Arc<Database>,
+        url: String,
+    ) -> anyhow::Result<Self> {
+        Self::start_impl(config, db, Some(url)).await
+    }
+
+    async fn start_impl(
+        config: &AppConfig,
+        db: Arc<Database>,
+        #[cfg(test)] test_exchange_url: Option<String>,
+    ) -> anyhow::Result<Self> {
         let trade_lock = Arc::new(Mutex::new(()));
         let mut runtime = Self::from_pairs(
             Vec::new(),
@@ -252,6 +279,10 @@ impl TradingRuntime {
             config.server.clone(),
             GlobalConfig::from_app(config),
         );
+        #[cfg(test)]
+        {
+            runtime.test_exchange_url = test_exchange_url;
+        }
         for strategy in config.strategy_configs()? {
             let pair = runtime
                 .prepare_pair(strategy, !config.pairs.is_empty())
@@ -292,6 +323,19 @@ impl TradingRuntime {
             strategy.exchange.symbol.clone(),
             strategy.exchange.is_testnet,
         ));
+        #[cfg(test)]
+        let client = if let Some(url) = &self.test_exchange_url {
+            Arc::new(BinanceFuturesClient::with_base_url(
+                &strategy.exchange,
+                url.clone(),
+            ))
+        } else {
+            Arc::new(BinanceFuturesClient::new_with_limiter(
+                &strategy.exchange,
+                self.rate_limiter.clone(),
+            ))
+        };
+        #[cfg(not(test))]
         let client = Arc::new(BinanceFuturesClient::new_with_limiter(
             &strategy.exchange,
             self.rate_limiter.clone(),
@@ -348,10 +392,10 @@ impl TradingRuntime {
         let engine_task = tokio::spawn(async move {
             // Shutdown may arrive while an exchange request is still initializing.
             let initialized = tokio::select! {
-                result = engine.initialize() => result,
-                _ = shutdown_rx.changed() => Ok(()),
+                result = engine.initialize() => Some(result),
+                _ = shutdown_rx.changed() => None,
             };
-            if let Err(ref error) = initialized {
+            if let Some(Err(error)) = &initialized {
                 let _ = engine_state
                     .pause_trading_with_reason("策略启动时账户或挂单对账失败，请检查系统运行日志")
                     .await;
@@ -365,9 +409,10 @@ impl TradingRuntime {
             engine_state
                 .global_position_initialized
                 .store(true, std::sync::atomic::Ordering::SeqCst);
-            engine_state
-                .global_position_ready
-                .store(initialized.is_ok(), std::sync::atomic::Ordering::SeqCst);
+            engine_state.global_position_ready.store(
+                matches!(initialized, Some(Ok(()))),
+                std::sync::atomic::Ordering::SeqCst,
+            );
             if let Some(global) = engine_state
                 .global_position_limit
                 .get()
@@ -378,6 +423,17 @@ impl TradingRuntime {
             engine.reconcile_initial_pause().await;
             engine.run().await;
         });
+        #[cfg(test)]
+        let background = if self.test_exchange_url.is_some() {
+            Vec::new()
+        } else {
+            vec![
+                tokio::spawn(stream.run()),
+                tokio::spawn(state.clone().run_cny_rate_refresh()),
+                tokio::spawn(state.clone().run_snapshot_broadcast()),
+            ]
+        };
+        #[cfg(not(test))]
         let background = vec![
             tokio::spawn(stream.run()),
             tokio::spawn(state.clone().run_cny_rate_refresh()),
@@ -452,7 +508,7 @@ impl TradingRuntime {
         );
         pair.state.request_shutdown();
         let _ = pair.shutdown_tx.send(true);
-        stop_engine(&pair.state, &mut pair.engine, Duration::from_secs(30)).await?;
+        remove_engine(&pair.state, &mut pair.engine, Duration::from_secs(30)).await?;
         let symbol = symbol.to_string();
         self.handle
             .db

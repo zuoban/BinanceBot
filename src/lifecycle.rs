@@ -35,12 +35,33 @@ pub async fn stop_engine(
     engine: &mut JoinHandle<()>,
     limit: Duration,
 ) -> Result<()> {
+    stop_engine_inner(state, engine, limit, true).await
+}
+
+pub(crate) async fn remove_engine(
+    state: &Arc<AppState>,
+    engine: &mut JoinHandle<()>,
+    limit: Duration,
+) -> Result<()> {
+    stop_engine_inner(state, engine, limit, false).await
+}
+
+async fn stop_engine_inner(
+    state: &Arc<AppState>,
+    engine: &mut JoinHandle<()>,
+    limit: Duration,
+    recover: bool,
+) -> Result<()> {
     state.request_shutdown();
     let deadline = Instant::now() + limit;
     let requested = timeout_at(deadline, async {
-        state
-            .pause_trading_with_reason("程序退出，暂停策略并撤销机器人挂单")
-            .await?;
+        if recover {
+            state.pause_for_shutdown().await?;
+        } else {
+            state
+                .pause_trading_with_reason("删除交易对，暂停策略并撤销机器人挂单")
+                .await?;
+        }
         let (reply, response) = oneshot::channel();
         state
             .action_tx
@@ -60,21 +81,38 @@ pub async fn stop_engine(
             limit.as_secs()
         )),
     };
-    if outcome.is_err() {
-        engine.abort();
-        let _ = engine.await;
-        return outcome;
-    }
-    match timeout_at(deadline, &mut *engine).await {
-        Ok(result) => result.context("Strategy engine failed during shutdown"),
-        Err(_) => {
+    let outcome = match outcome {
+        Err(error) => {
             engine.abort();
             let _ = engine.await;
-            Err(anyhow!(
-                "Strategy engine did not exit before the shutdown deadline"
-            ))
+            Err(error)
         }
+        Ok(()) => match timeout_at(deadline, &mut *engine).await {
+            Ok(result) => result.context("Strategy engine failed during shutdown"),
+            Err(_) => {
+                engine.abort();
+                let _ = engine.await;
+                Err(anyhow!(
+                    "Strategy engine did not exit before the shutdown deadline"
+                ))
+            }
+        },
+    };
+    if let Err(error) = outcome {
+        // The deadline may have cancelled the shutdown pause before it obtained
+        // the global lock or before its database worker finished. Persist the
+        // failure pause outside that deadline and await the actual write.
+        return match state.pause_trading().await {
+            Ok(()) => Err(error),
+            Err(persist_error) => Err(error.context(format!(
+                "Failed to persist paused status after shutdown failure: {persist_error:#}"
+            ))),
+        };
     }
+    if recover {
+        state.commit_shutdown_recovery().await?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -267,6 +267,14 @@ fn recent_trade_cache(trades: Vec<TradeRecord>) -> VecDeque<TradeRecord> {
     cache
 }
 
+struct PendingSafetyPause<'a>(&'a AtomicU64);
+
+impl Drop for PendingSafetyPause<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 pub struct AppState {
     pub db: Arc<Database>,
     pub config: RwLock<AppConfig>,
@@ -288,9 +296,11 @@ pub struct AppState {
     pub(crate) global_cancel_pending: AtomicBool,
     pub(crate) global_cancel_queued: AtomicBool,
     pause_epoch: AtomicU64,
+    safety_pause_epoch: AtomicU64,
+    safety_pauses_pending: AtomicU64,
     shutdown_requested: AtomicBool,
-    // Tracks the last non-maintenance status so internal cancellation does not send alerts.
-    status_update_lock: Mutex<BotStatus>,
+    // Serializes status updates and protects the shutdown recovery eligibility.
+    status_update_lock: Mutex<Option<u64>>,
     trade_commit_lock: Arc<Mutex<()>>,
     /// A global configuration transition holds the writer until commit or rollback completes.
     pub(crate) order_submission_lock: Arc<RwLock<()>>,
@@ -462,8 +472,10 @@ impl AppState {
             global_cancel_pending: AtomicBool::new(false),
             global_cancel_queued: AtomicBool::new(false),
             pause_epoch: AtomicU64::new(0),
+            safety_pause_epoch: AtomicU64::new(0),
+            safety_pauses_pending: AtomicU64::new(0),
             shutdown_requested: AtomicBool::new(false),
-            status_update_lock: Mutex::new(initial_status),
+            status_update_lock: Mutex::new(None),
             trade_commit_lock,
             order_submission_lock: Arc::new(RwLock::new(())),
             pair_scope,
@@ -714,7 +726,12 @@ impl AppState {
         self.pair_scope.as_deref()
     }
 
-    pub async fn save_runtime_config(&self, config: AppConfig) -> anyhow::Result<()> {
+    pub async fn save_runtime_config(self: &Arc<Self>, config: AppConfig) -> anyhow::Result<()> {
+        let state = self.clone();
+        tokio::spawn(async move { state.save_runtime_config_inner(config).await }).await?
+    }
+
+    async fn save_runtime_config_inner(&self, config: AppConfig) -> anyhow::Result<()> {
         // An immediate HTTP pause cannot slip between saving a new mode and installing it.
         let _update = self.status_update_lock.lock().await;
         let status = *self.status.read().await;
@@ -821,9 +838,23 @@ impl AppState {
             .await
     }
 
-    pub async fn pause_trading_with_reason(self: &Arc<Self>, reason: &str) -> anyhow::Result<()> {
-        self.set_trading_status(BotStatus::Paused, Some(reason))
-            .await
+    pub async fn pause_trading_with_reason(self: &Arc<Self>, _reason: &str) -> anyhow::Result<()> {
+        self.safety_pauses_pending.fetch_add(1, Ordering::SeqCst);
+        self.safety_pause_epoch.fetch_add(1, Ordering::SeqCst);
+        self.pause_epoch.fetch_add(1, Ordering::SeqCst);
+        let state = self.clone();
+        tokio::spawn(async move {
+            let _pending = PendingSafetyPause(&state.safety_pauses_pending);
+            state.persist_safety_pause().await
+        })
+        .await?
+    }
+
+    async fn persist_safety_pause(self: &Arc<Self>) -> anyhow::Result<()> {
+        let mut update = self.status_update_lock.lock().await;
+        *update = None;
+        *self.status.write().await = BotStatus::Paused;
+        self.persist_status(BotStatus::Paused).await
     }
 
     pub async fn resume_trading(self: &Arc<Self>) -> anyhow::Result<()> {
@@ -831,18 +862,121 @@ impl AppState {
             .await
     }
 
+    pub(crate) async fn pause_for_shutdown(self: &Arc<Self>) -> anyhow::Result<()> {
+        let state = self.clone();
+        tokio::spawn(async move { state.pause_for_shutdown_inner().await }).await?
+    }
+
+    async fn pause_for_shutdown_inner(self: &Arc<Self>) -> anyhow::Result<()> {
+        let global = self
+            .global_position_limit
+            .get()
+            .and_then(std::sync::Weak::upgrade);
+        let _global_guard = if let Some(coordinator) = &global {
+            let guard = coordinator.lock.lock().await;
+            coordinator.check_locked().await;
+            Some(guard)
+        } else {
+            None
+        };
+        self.pause_epoch.fetch_add(1, Ordering::SeqCst);
+        let mut eligibility = self.status_update_lock.lock().await;
+        if *self.status.read().await == BotStatus::Running {
+            let blocked = global.as_ref().is_some_and(|coordinator| {
+                coordinator.blocked.load(Ordering::SeqCst)
+                    || (coordinator.enabled.load(Ordering::SeqCst)
+                        && !coordinator.membership_ready.load(Ordering::SeqCst))
+            });
+            *eligibility = if self.global_position_initialized.load(Ordering::SeqCst)
+                && self.global_position_ready.load(Ordering::SeqCst)
+                && self.safety_pauses_pending.load(Ordering::SeqCst) == 0
+                && !blocked
+                && !self.global_cancel_pending.load(Ordering::SeqCst)
+            {
+                Some(self.safety_pause_epoch.load(Ordering::SeqCst))
+            } else {
+                None
+            };
+        }
+        *self.status.write().await = BotStatus::Paused;
+        if let Err(error) = self.persist_status(BotStatus::Paused).await {
+            *eligibility = None;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn commit_shutdown_recovery(self: &Arc<Self>) -> anyhow::Result<()> {
+        let state = self.clone();
+        tokio::spawn(async move { state.commit_shutdown_recovery_inner().await }).await?
+    }
+
+    async fn commit_shutdown_recovery_inner(self: &Arc<Self>) -> anyhow::Result<()> {
+        let global = self
+            .global_position_limit
+            .get()
+            .and_then(std::sync::Weak::upgrade);
+        let _global_guard = if let Some(coordinator) = &global {
+            let guard = coordinator.lock.lock().await;
+            coordinator.check_locked().await;
+            Some(guard)
+        } else {
+            None
+        };
+        let mut eligibility = self.status_update_lock.lock().await;
+        let blocked = global.as_ref().is_some_and(|coordinator| {
+            coordinator.blocked.load(Ordering::SeqCst)
+                || (coordinator.enabled.load(Ordering::SeqCst)
+                    && !coordinator.membership_ready.load(Ordering::SeqCst))
+        });
+        if let Some(epoch) = eligibility.take().filter(|epoch| {
+            *epoch == self.safety_pause_epoch.load(Ordering::SeqCst)
+                && self.safety_pauses_pending.load(Ordering::SeqCst) == 0
+                && !blocked
+                && !self.global_cancel_pending.load(Ordering::SeqCst)
+                && self.global_position_initialized.load(Ordering::SeqCst)
+                && self.global_position_ready.load(Ordering::SeqCst)
+        }) {
+            self.persist_status(BotStatus::Running).await?;
+            // A pause may have started and been cancelled while the database
+            // worker was writing Running. Its epoch still requires a durable pause.
+            if epoch != self.safety_pause_epoch.load(Ordering::SeqCst) {
+                self.persist_status(BotStatus::Paused).await?;
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) async fn pause_trading_silently(self: &Arc<Self>) -> anyhow::Result<()> {
         self.set_trading_status(BotStatus::Paused, None).await
     }
 
-    pub(crate) async fn resume_trading_silently(self: &Arc<Self>) -> anyhow::Result<()> {
-        self.set_trading_status(BotStatus::Running, None).await
+    pub(crate) async fn resume_trading_silently(
+        self: &Arc<Self>,
+        expected_epoch: u64,
+    ) -> anyhow::Result<()> {
+        let state = self.clone();
+        tokio::spawn(async move {
+            state
+                .set_trading_status_inner(BotStatus::Running, Some(expected_epoch))
+                .await
+        })
+        .await?
     }
 
     async fn set_trading_status(
         self: &Arc<Self>,
         status: BotStatus,
         _reason: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let state = self.clone();
+        tokio::spawn(async move { state.set_trading_status_inner(status, None).await }).await?
+    }
+
+    async fn set_trading_status_inner(
+        self: &Arc<Self>,
+        status: BotStatus,
+        expected_epoch: Option<u64>,
     ) -> anyhow::Result<()> {
         let global = if status == BotStatus::Running {
             self.global_position_limit
@@ -866,6 +1000,14 @@ impl AppState {
             self.pause_epoch.fetch_add(1, Ordering::SeqCst);
         }
         let _update = self.status_update_lock.lock().await;
+        anyhow::ensure!(
+            expected_epoch.is_none_or(|epoch| self.pause_epoch.load(Ordering::SeqCst) == epoch),
+            "策略暂停状态已改变，无法恢复策略"
+        );
+        anyhow::ensure!(
+            status != BotStatus::Running || self.safety_pauses_pending.load(Ordering::SeqCst) == 0,
+            "策略暂停正在处理中，无法恢复策略"
+        );
         anyhow::ensure!(
             status != BotStatus::Running || !self.is_shutting_down(),
             "程序正在退出，不能恢复策略"
@@ -952,6 +1094,216 @@ mod tests {
     use rust_decimal_macros::dec;
 
     #[tokio::test]
+    async fn shutdown_global_lock_timeout_persists_pause_after_database_write_finishes() {
+        let directory =
+            std::env::temp_dir().join(format!("shutdown-lock-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("bot.db");
+        {
+            let db = Arc::new(Database::open(&path).unwrap());
+            let (tx, _rx) = mpsc::channel(1);
+            let state = AppState::new(AppConfig::default(), db.clone(), tx);
+            state.resume_trading().await.unwrap();
+            let global = GlobalPositionLimit::new(Arc::new(RwLock::new(vec![state.clone()])));
+            state
+                .global_position_limit
+                .set(Arc::downgrade(&global))
+                .ok()
+                .unwrap();
+            let guard = global.lock.lock().await;
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+            let shutdown_state = state.clone();
+            let mut shutdown = tokio::spawn(async move {
+                let mut engine = tokio::spawn(std::future::pending::<()>());
+                crate::lifecycle::stop_engine(
+                    &shutdown_state,
+                    &mut engine,
+                    Duration::from_millis(30),
+                )
+                .await
+            });
+            assert!(
+                tokio::time::timeout(Duration::from_millis(150), &mut shutdown)
+                    .await
+                    .is_err()
+            );
+            connection.execute_batch("COMMIT").unwrap();
+            assert!(shutdown.await.unwrap().is_err());
+            drop(guard);
+        }
+        let db = Database::open(&path).unwrap();
+        assert_eq!(db.load_bot_status().unwrap(), Some(BotStatus::Paused));
+        drop(db);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_timeout_waits_for_inflight_pause_before_failure_returns() {
+        let directory =
+            std::env::temp_dir().join(format!("shutdown-write-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("bot.db");
+        {
+            let db = Arc::new(Database::open(&path).unwrap());
+            let (tx, _rx) = mpsc::channel(1);
+            let state = AppState::new(AppConfig::default(), db, tx);
+            state.resume_trading().await.unwrap();
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+            let shutdown_state = state.clone();
+            let mut shutdown = tokio::spawn(async move {
+                let mut engine = tokio::spawn(std::future::pending::<()>());
+                crate::lifecycle::stop_engine(
+                    &shutdown_state,
+                    &mut engine,
+                    Duration::from_millis(30),
+                )
+                .await
+            });
+            while state.status_update_lock.try_lock().is_ok() {
+                tokio::task::yield_now().await;
+            }
+            assert!(
+                tokio::time::timeout(Duration::from_millis(150), &mut shutdown)
+                    .await
+                    .is_err()
+            );
+            connection.execute_batch("COMMIT").unwrap();
+            assert!(shutdown.await.unwrap().is_err());
+        }
+        let db = Database::open(&path).unwrap();
+        assert_eq!(db.load_bot_status().unwrap(), Some(BotStatus::Paused));
+        drop(db);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_recovery_commit_finishes_before_safety_pause() {
+        let directory =
+            std::env::temp_dir().join(format!("cancelled-commit-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("bot.db");
+        {
+            let db = Arc::new(Database::open(&path).unwrap());
+            let (tx, _rx) = mpsc::channel(1);
+            let state = AppState::new(AppConfig::default(), db, tx);
+            state
+                .global_position_initialized
+                .store(true, Ordering::SeqCst);
+            state.global_position_ready.store(true, Ordering::SeqCst);
+            state.resume_trading().await.unwrap();
+            state.pause_for_shutdown().await.unwrap();
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+            let commit_state = state.clone();
+            let commit = tokio::spawn(async move { commit_state.commit_shutdown_recovery().await });
+            while state.status_update_lock.try_lock().is_ok() {
+                tokio::task::yield_now().await;
+            }
+            commit.abort();
+            assert!(commit.await.unwrap_err().is_cancelled());
+            let pause_state = state.clone();
+            let pause = tokio::spawn(async move { pause_state.pause_trading().await });
+            while state.safety_pauses_pending.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+            connection.execute_batch("COMMIT").unwrap();
+            pause.await.unwrap().unwrap();
+        }
+        let db = Database::open(&path).unwrap();
+        assert_eq!(db.load_bot_status().unwrap(), Some(BotStatus::Paused));
+        drop(db);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_pause_during_recovery_write_remains_paused_after_reopen() {
+        let directory =
+            std::env::temp_dir().join(format!("shutdown-cancelled-pause-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("bot.db");
+        {
+            let db = Arc::new(Database::open(&path).unwrap());
+            let (tx, _rx) = mpsc::channel(1);
+            let state = AppState::new(AppConfig::default(), db.clone(), tx);
+            state
+                .global_position_initialized
+                .store(true, Ordering::SeqCst);
+            state.global_position_ready.store(true, Ordering::SeqCst);
+            state.resume_trading().await.unwrap();
+            state.pause_for_shutdown().await.unwrap();
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+            let commit_state = state.clone();
+            let commit = tokio::spawn(async move { commit_state.commit_shutdown_recovery().await });
+            // Acquiring the update lock precedes spawning the blocked write without yielding.
+            while state.status_update_lock.try_lock().is_ok() {
+                tokio::task::yield_now().await;
+            }
+            let pause_state = state.clone();
+            let pause = tokio::spawn(async move { pause_state.pause_trading().await });
+            while state.safety_pauses_pending.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+            pause.abort();
+            assert!(pause.await.unwrap_err().is_cancelled());
+            connection.execute_batch("COMMIT").unwrap();
+            commit.await.unwrap().unwrap();
+        }
+        let db = Database::open(&path).unwrap();
+        assert_eq!(db.load_bot_status().unwrap(), Some(BotStatus::Paused));
+        drop(db);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_recovery_obeys_safety_pause_ordering() {
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let (tx, _) = mpsc::channel(8);
+        let state = AppState::new(AppConfig::default(), db.clone(), tx);
+        state
+            .global_position_initialized
+            .store(true, Ordering::SeqCst);
+        state.global_position_ready.store(true, Ordering::SeqCst);
+
+        state.request_shutdown();
+        state.pause_for_shutdown().await.unwrap();
+        state.commit_shutdown_recovery().await.unwrap();
+        assert_eq!(*state.status.read().await, BotStatus::Paused);
+        assert_eq!(db.load_bot_status().unwrap(), Some(BotStatus::Running));
+        state.pause_trading().await.unwrap();
+        assert_eq!(db.load_bot_status().unwrap(), Some(BotStatus::Paused));
+
+        let (tx, _) = mpsc::channel(8);
+        let state = AppState::new(AppConfig::default(), db.clone(), tx);
+        state
+            .global_position_initialized
+            .store(true, Ordering::SeqCst);
+        state.global_position_ready.store(true, Ordering::SeqCst);
+        state.resume_trading().await.unwrap();
+        state.request_shutdown();
+        state.pause_for_shutdown().await.unwrap();
+        state.pause_trading().await.unwrap();
+        state.commit_shutdown_recovery().await.unwrap();
+        assert_eq!(db.load_bot_status().unwrap(), Some(BotStatus::Paused));
+    }
+
+    #[tokio::test]
+    async fn interrupted_initialization_cannot_restore_running() {
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let (tx, _) = mpsc::channel(8);
+        let state = AppState::new(AppConfig::default(), db.clone(), tx);
+        state
+            .global_position_initialized
+            .store(true, Ordering::SeqCst);
+        state.request_shutdown();
+        state.pause_for_shutdown().await.unwrap();
+        state.commit_shutdown_recovery().await.unwrap();
+        assert_eq!(db.load_bot_status().unwrap(), Some(BotStatus::Paused));
+    }
+
+    #[tokio::test]
     async fn legacy_and_multi_pair_formats_preserve_pause_and_manual_resume() {
         let db = Arc::new(Database::open(":memory:").unwrap());
         let mut config = AppConfig::default();
@@ -985,6 +1337,85 @@ mod tests {
         assert_eq!(*multi.status.read().await, BotStatus::Running);
         multi.pause_trading().await.unwrap();
         assert_eq!(*multi.status.read().await, BotStatus::Paused);
+    }
+
+    #[tokio::test]
+    async fn pending_safety_pause_prevents_silent_resume() {
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let (tx, _rx) = mpsc::channel(1);
+        let state = AppState::new(AppConfig::default(), db.clone(), tx);
+        state.resume_trading().await.unwrap();
+        state.pause_trading_silently().await.unwrap();
+        let epoch = state.pause_epoch();
+        let guard = state.status_update_lock.lock().await;
+        let pause_state = state.clone();
+        let pause = tokio::spawn(async move { pause_state.pause_trading().await });
+        while state.safety_pauses_pending.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        assert_ne!(state.pause_epoch(), epoch);
+        let resume_state = state.clone();
+        let resume = tokio::spawn(async move { resume_state.resume_trading_silently(epoch).await });
+        drop(guard);
+        pause.await.unwrap().unwrap();
+        assert!(resume.await.unwrap().is_err());
+        assert_eq!(db.load_bot_status().unwrap(), Some(BotStatus::Paused));
+    }
+
+    #[tokio::test]
+    async fn cancelled_running_writes_finish_before_shutdown_pause() {
+        for operation in 0..3 {
+            let directory =
+                std::env::temp_dir().join(format!("cancelled-running-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&directory).unwrap();
+            let path = directory.join("bot.db");
+            {
+                let db = Arc::new(Database::open(&path).unwrap());
+                let (tx, _rx) = mpsc::channel(1);
+                let state = AppState::new(AppConfig::default(), db, tx);
+                if operation == 2 {
+                    state.resume_trading().await.unwrap();
+                }
+                let connection = rusqlite::Connection::open(&path).unwrap();
+                connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+                let operation_state = state.clone();
+                let task = tokio::spawn(async move {
+                    match operation {
+                        0 => operation_state.resume_trading().await,
+                        1 => {
+                            operation_state
+                                .resume_trading_silently(operation_state.pause_epoch())
+                                .await
+                        }
+                        _ => {
+                            let config = operation_state.config.read().await.clone();
+                            operation_state.save_runtime_config(config).await
+                        }
+                    }
+                });
+                while state.status_update_lock.try_lock().is_ok() {
+                    tokio::task::yield_now().await;
+                }
+                task.abort();
+                assert!(task.await.unwrap_err().is_cancelled());
+                state.request_shutdown();
+                let pause_state = state.clone();
+                let pause = tokio::spawn(async move { pause_state.pause_trading().await });
+                while state.safety_pauses_pending.load(Ordering::SeqCst) == 0 {
+                    tokio::task::yield_now().await;
+                }
+                connection.execute_batch("COMMIT").unwrap();
+                pause.await.unwrap().unwrap();
+            }
+            let db = Database::open(&path).unwrap();
+            assert_eq!(
+                db.load_bot_status().unwrap(),
+                Some(BotStatus::Paused),
+                "operation {operation}"
+            );
+            drop(db);
+            std::fs::remove_dir_all(directory).unwrap();
+        }
     }
 
     #[tokio::test]

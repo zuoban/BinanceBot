@@ -900,10 +900,7 @@ impl GridTradingEngine {
 
     pub async fn shutdown(&mut self) -> Result<()> {
         self.state.request_shutdown();
-        let paused = self
-            .state
-            .pause_trading_with_reason("程序退出，暂停策略并撤销机器人挂单")
-            .await;
+        let paused = self.state.pause_for_shutdown().await;
         // Shutdown can interrupt initialization before durable orders have been
         // installed in memory. Restore them before canceling so racing fills
         // are recorded rather than discarded with the recovery metadata.
@@ -3209,7 +3206,7 @@ impl GridTradingEngine {
             }
         }
         if was_running && self.state.pause_epoch() == pause_epoch + 1 {
-            if let Err(e) = self.state.resume_trading_silently().await {
+            if let Err(e) = self.state.resume_trading_silently(pause_epoch + 1).await {
                 error!("Failed to restore running status after cancellation: {}", e);
                 self.pause_trading_with_reason("撤单后恢复策略状态失败")
                     .await;
