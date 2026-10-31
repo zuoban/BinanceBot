@@ -373,7 +373,7 @@ a { color: inherit; }
 .overview-trades .ant-card-body { padding: 0 20px 12px; }
 .overview-trades-table .ant-table-thead > tr > th { background: transparent; color: #66796d; font-size: 12px; font-weight: 500; white-space: nowrap; }
 .overview-trades-table .ant-table-thead > tr > th::before { display: none; }
-.overview-trades-table .ant-table-tbody > tr > td { padding-block: 13px; border-bottom-color: #edf1ee; }
+.overview-trades-table .ant-table-tbody > tr > td { padding-block: 8px; border-bottom-color: #edf1ee; }
 .overview-trades-table .trade-symbol { color: #233e34; font-weight: 700; letter-spacing: .01em; }
 .overview-trades-table .trade-time { color: #66796d; white-space: nowrap; }
 .overview-trades-table .table-numeric { font-family: 'DM Mono', monospace; }
@@ -393,17 +393,17 @@ a { color: inherit; }
   .overview-trades-desktop { display: none; }
   .overview-trades-mobile { display: block; }
   .trade-list { margin: 0; padding: 0; list-style: none; }
-  .trade-list-item { padding: 16px 0; border-bottom: 1px solid #edf1ee; }
+  .trade-list-item { padding: 12px 0; border-bottom: 1px solid #edf1ee; }
   .trade-list-item:last-child { border-bottom: 0; }
   .trade-list-heading { display: flex; align-items: center; gap: 8px; min-width: 0; }
   .trade-list-heading strong { min-width: 0; color: #233e34; font-size: 13px; overflow-wrap: anywhere; }
   .trade-list-heading .ant-tag { flex: none; border: 0; padding: 1px 7px; font-size: 11px; line-height: 20px; }
   .trade-list-time { margin-left: auto; color: #66796d; font-size: 12px; white-space: nowrap; flex: none; }
-  .trade-list dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin: 14px 0 0; }
+  .trade-list dl { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 8px 0 0; }
   .trade-list dl > div { min-width: 0; }
   .trade-list dl > div:last-child { text-align: right; }
-  .trade-list dt { color: #66796d; font-size: 12px; line-height: 1.45; }
-  .trade-list dd { margin: 5px 0 0; font: 500 14px/1.35 'DM Mono', monospace; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  .trade-list dt { color: #66796d; font-size: 12px; line-height: 1.4; }
+  .trade-list dd { margin: 2px 0 0; font: 500 13px/1.4 'DM Mono', monospace; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
   .trade-list dd .ant-tag { margin: 0; }
   .trade-list-empty { padding: 28px 0; text-align: center; color: #66796d; }
   [data-theme="dark"] .trade-list-item { border-color: #304339; }

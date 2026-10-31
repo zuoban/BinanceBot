@@ -13,6 +13,7 @@ export function StrategyMenu({ pair, stale }: { pair: Pair; stale: boolean }) {
   return <Dropdown trigger={['click']} disabled={busy.has(pair.symbol) || deletion.busy} menu={{
     items: [
       { key: 'view', label: '查看策略' },
+      { key: 'edit', label: '编辑策略' },
       { type: 'divider' },
       { key: running ? 'pause' : 'resume', label: running ? '暂停策略' : stale ? '恢复策略（状态过期）' : '恢复策略', disabled: stale && !running },
       { key: 'cancel_all', label: `撤单并暂停 ${pair.symbol}`, danger: true },
@@ -22,6 +23,7 @@ export function StrategyMenu({ pair, stale }: { pair: Pair; stale: boolean }) {
     ],
     onClick: ({ key }) => {
       if (key === 'view') { navigate(`/pairs/${pair.symbol}`); return; }
+      if (key === 'edit') { navigate(`/pairs/${pair.symbol}/config`); return; }
       if (key === 'delete') void deletion.remove(pair);
       else void run(pair, key as Action);
     },

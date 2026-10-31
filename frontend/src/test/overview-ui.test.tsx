@@ -49,6 +49,9 @@ it('navigates when the strategy menu item is activated', async () => {
   await user.click(screen.getByRole('button', { name: 'BTCUSDC 更多操作' }));
   await user.click(screen.getByRole('menuitem', { name: '查看策略' }));
   expect(screen.getByTestId('location')).toHaveTextContent('/pairs/BTCUSDC');
+  await user.click(screen.getByRole('button', { name: 'BTCUSDC 更多操作' }));
+  await user.click(screen.getByRole('menuitem', { name: '编辑策略' }));
+  expect(screen.getByTestId('location')).toHaveTextContent('/pairs/BTCUSDC/config');
 });
 
 it('identifies each strategy direction without opening its configuration', () => {
@@ -125,7 +128,7 @@ it('shows five newest trades and expands to twenty across strategies', async () 
   const btc = snapshot('BTCUSDC'), eth = snapshot('ETHUSDC');
   const trade = (symbol: string, index: number) => ({
     trade_id: `${symbol}-${index}`, symbol, mode: symbol === 'BTCUSDC' ? 'PAPER' as const : 'LIVE' as const,
-    side: 'BUY' as const, price: '100', quantity: '1', amount_usdc: '100', realized_pnl: '0', commission: '0',
+    side: 'BUY' as const, price: '123.456789', quantity: '1', amount_usdc: '100', realized_pnl: '0', commission: '0',
     pnl_verified: true, is_maker: true, timestamp: new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString(), note: `成交 ${index}`,
   });
   btc.recent_trades = Array.from({ length: 11 }, (_, i) => trade('BTCUSDC', i * 2));
@@ -138,6 +141,9 @@ it('shows five newest trades and expands to twenty across strategies', async () 
   expect(card.getByRole('columnheader', { name: '方向' })).not.toHaveClass('ant-table-cell-fix-left');
   expect(card.getAllByRole('row')[1]).toHaveTextContent('ETHUSDC');
   expect(card.getAllByRole('row')[1]).toHaveTextContent('成交 21');
+  const mobileTrades = table.querySelector('.overview-trades-mobile') as HTMLElement;
+  const firstTrade = within(mobileTrades).getAllByRole('listitem')[0];
+  expect(within(firstTrade).getByText('成交均价').nextElementSibling).toHaveTextContent('123.4568');
   const user = userEvent.setup();
   await user.click(card.getByRole('button', { name: '展开最近 20 条' }));
   expect(card.getAllByRole('row').slice(1)).toHaveLength(20);
