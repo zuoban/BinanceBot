@@ -84,7 +84,7 @@ export default function OverviewPage() {
           <span className="account-cny muted">{group.cny !== null ? `≈ ¥${number(group.cny)}` : '人民币估值待更新'}</span></div>
         <div className="account-availability">
           <div><span>可用余额</span><strong>{number(group.available)} <small>{group.asset}</small></strong></div>
-          <div><span>可用比例</span><strong>{group.available !== null && group.wallet !== null && group.wallet > 0 ? `${number(group.available / group.wallet * 100)}%` : '--'}</strong></div>
+          <div><span>可用比例</span><strong>{group.ratio !== null ? `${number(group.ratio)}%` : '--'}</strong></div>
         </div>
         <div className="account-assets" aria-label={`${group.asset}账户资产`}>
           <div><span>钱包余额</span><strong>{number(group.wallet)}</strong></div>

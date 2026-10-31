@@ -74,6 +74,10 @@ export function todayCount(s: Snapshot, now = Date.now()) {
   const counts = todayTradeCounts(s, now);
   return counts ? counts.buy + counts.sell : null;
 }
+export function availableRatio(available: number | null, wallet: number | null): number | null {
+  return available !== null && wallet !== null && wallet > 0 ? available / wallet * 100 : null;
+}
+
 export function accountGroups(entries: Overview['pairs'], now = Date.now()) {
   const groups = new Map<string, { mode: Mode; asset: string; snapshots: Snapshot[] }>();
   for (const { snapshot: s } of entries) {
@@ -93,6 +97,6 @@ export function accountGroups(entries: Overview['pairs'], now = Date.now()) {
     const wallet = mode === 'PAPER' ? sum(snapshots.map(s => numeric(s.account.total_wallet_balance))) : fresh ? numeric(latest.account.total_wallet_balance) : null;
     const unrealized = mode === 'PAPER' ? sum(snapshots.map(s => numeric(s.position.unrealized_pnl))) : fresh ? numeric(latest.account.unrealized_profit) : null;
     const rate = latest.account_cny_rate?.asset === asset ? numeric(latest.account_cny_rate.cny_per_unit) : null;
-    return { key: `${mode}:${asset}`, mode, asset, count: snapshots.length, equity, available, wallet, unrealized, cny: equity !== null && rate !== null ? equity * rate : null };
+    return { key: `${mode}:${asset}`, mode, asset, count: snapshots.length, equity, available, wallet, unrealized, ratio: availableRatio(available, wallet), cny: equity !== null && rate !== null ? equity * rate : null };
   });
 }

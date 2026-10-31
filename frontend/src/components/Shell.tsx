@@ -4,7 +4,7 @@ import { App, Button, Dropdown, Layout, Select, Space } from 'antd';
 import { AppstoreOutlined, BulbOutlined, LogoutOutlined, MenuOutlined, SettingOutlined } from '@ant-design/icons';
 import { useLiveAccounts, useOverview, usePairs } from '../lib/queries';
 import { AccountsContext, EditContext, useSession } from '../lib/session';
-import { accountGroups, number } from '../lib/format';
+import { accountGroups, number, trimFractionZeros } from '../lib/format';
 import { ControlProvider } from './Controls';
 import { themeLabels } from './ThemeSwitch';
 import { useTheme, type ThemePreference } from '../lib/theme';
@@ -20,7 +20,9 @@ export default function Shell() {
   const { logout } = useSession();
   const { preference, setPreference } = useTheme();
   const groups = accountGroups(accounts);
-  useDocumentTitle(groups.length ? groups.map(group => `${number(group.equity)} | ${number(group.available)} ${group.asset}`).join(' / ') : defaultTitle);
+  useDocumentTitle(location.pathname.match(/^\/pairs\/(?!new\/?$)[^/]+\/?$/) ? null : groups.length ? groups.map(group => {
+    return `${trimFractionZeros(number(group.equity))} | ${group.ratio === null ? '--' : `${trimFractionZeros(number(group.ratio))}%`}`;
+  }).join(' / ') : defaultTitle);
   const blocker = useBlocker(({ currentLocation, nextLocation }) => (dirty || saving) && currentLocation.pathname !== nextLocation.pathname);
   useEffect(() => {
     if (blocker.state !== 'blocked') return;

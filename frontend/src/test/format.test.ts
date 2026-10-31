@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { accountGroups, comparePositionAmount, positionAmount, positionGroups, relativeTime, todayCount, todayPnlGroups, trimFractionZeros } from '../lib/format';
+import { accountGroups, availableRatio, comparePositionAmount, positionAmount, positionGroups, relativeTime, todayCount, todayPnlGroups, trimFractionZeros } from '../lib/format';
 import { snapshot } from './fixtures';
 
 it('removes only insignificant fractional zeros', () => {
@@ -17,6 +17,11 @@ it('formats relative trade times across units and handles invalid or future date
 });
 
 describe('account and trade summaries', () => {
+  it('calculates available ratio from wallet balance', () => {
+    expect(availableRatio(80, 100)).toBe(80);
+    expect(availableRatio(80, 0)).toBeNull();
+    expect(availableRatio(null, 100)).toBeNull();
+  });
   it('sums independent paper accounts but deduplicates shared live accounts', () => {
     const paperA = snapshot('SOLUSDC'), paperB = snapshot('BTCUSDC');
     const liveA = snapshot('ETHUSDC', 'LIVE'), liveB = snapshot('XRPUSDC', 'LIVE');

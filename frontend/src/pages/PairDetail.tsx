@@ -8,6 +8,7 @@ import { PairControls, useControls } from '../components/Controls';
 import { DepthChart, HourlyChart } from '../components/Charts';
 import { LogsTable, OrdersTable, TradesTable } from '../components/DataTables';
 import { HistoryActions } from '../components/HistoryActions';
+import { useDocumentTitle } from '../lib/documentTitle';
 
 export default function PairDetail() {
   const { symbol } = useParams();
@@ -19,6 +20,7 @@ export default function PairDetail() {
   const s = query.data, asset = quoteAsset(symbol ?? '');
   const account = s && accountGroups([{ snapshot: s, mode: pair!.mode, scoped: pair!.scoped }])[0];
   const today = s ? todayTradeCounts(s) : null;
+  useDocumentTitle(`${s && Number(s.ticker.mark_price) > 0 ? price(s.ticker.mark_price) : '--'} | ${today?.buy ?? '--'}B | ${today?.sell ?? '--'}S`);
   const todayPnl = today && s?.hourly_trade_stats && s.hourly_trade_stats.pending_pnl_count === 0 ? s.hourly_trade_stats.realized_pnl : null;
   const currentPair = pair && s ? { ...pair, status: s.status, grid_config: s.grid_config, mode: s.dry_run ? 'PAPER' as const : s.grid_config.is_testnet ? 'TESTNET' as const : 'LIVE' as const } : pair;
   return <div className="pair-detail">
