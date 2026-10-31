@@ -4,7 +4,6 @@ use crate::fx::CnyRateCache;
 use crate::strategy::precision::SymbolRules;
 use crate::telegram::{TelegramNotifier, TradeNotificationContext};
 use crate::types::*;
-use anyhow::Context;
 use chrono::Utc;
 use rust_decimal::Decimal;
 use std::collections::{HashMap, VecDeque};
@@ -693,21 +692,80 @@ impl AppState {
         *self.recent_trades.write().await = recent_trade_cache(trades);
     }
 
-    pub async fn clear_trade_history(&self) -> anyhow::Result<usize> {
-        let _commit = self.trade_commit_lock.lock().await;
-        let deleted = self.db.run_blocking(Database::clear_trade_history).await?;
-        self.reset_trade_history_cache().await;
-        Ok(deleted)
+    pub async fn clear_trade_history(self: &Arc<Self>) -> anyhow::Result<usize> {
+        let state = Arc::clone(self);
+        tokio::spawn(async move {
+            let _commit = state.trade_commit_lock.lock().await;
+            let deleted = state.db.run_blocking(Database::clear_trade_history).await?;
+            state.reset_trade_history_cache().await;
+            Ok(deleted)
+        })
+        .await?
+    }
+
+    pub async fn clear_symbol_trade_history(
+        self: &Arc<Self>,
+        symbol: String,
+    ) -> anyhow::Result<(usize, BotSnapshot)> {
+        let state = Arc::clone(self);
+        tokio::spawn(async move {
+            let deleted = {
+                let _commit = state.trade_commit_lock.lock().await;
+                let db_symbol = symbol.clone();
+                let deleted = state
+                    .db
+                    .run_blocking(move |db| db.clear_trade_history_for_symbol(&db_symbol))
+                    .await?;
+                let config = state.config.read().await;
+                if config.exchange.symbol == symbol {
+                    state.reset_trade_history_cache().await;
+                }
+                deleted
+            };
+            let snapshot = state.broadcast_snapshot().await;
+            Ok((deleted, snapshot))
+        })
+        .await?
     }
 
     pub async fn clear_trade_history_for(states: &[Arc<Self>]) -> anyhow::Result<usize> {
-        let first = states.first().context("没有运行中的交易对")?;
-        let _commit = first.trade_commit_lock.lock().await;
-        let deleted = first.db.run_blocking(Database::clear_trade_history).await?;
-        for state in states {
-            state.reset_trade_history_cache().await;
-        }
-        Ok(deleted)
+        Ok(Self::clear_selected_database_for(states, true, false, None)
+            .await?
+            .0)
+    }
+
+    pub async fn clear_selected_database_for(
+        states: &[Arc<Self>],
+        trades: bool,
+        snapshots: bool,
+        membership_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+    ) -> anyhow::Result<(usize, usize)> {
+        let states = states.to_vec();
+        anyhow::ensure!(!states.is_empty(), "没有运行中的交易对");
+        tokio::spawn(async move {
+            let _guard = membership_guard;
+            let deleted = {
+                let first = &states[0];
+                let _commit = first.trade_commit_lock.lock().await;
+                let deleted = first
+                    .db
+                    .run_blocking(move |db| db.clear_selected_database(trades, snapshots))
+                    .await?;
+                if trades {
+                    for state in &states {
+                        state.reset_trade_history_cache().await;
+                    }
+                }
+                deleted
+            };
+            if trades {
+                for state in &states {
+                    state.broadcast_snapshot().await;
+                }
+            }
+            Ok(deleted)
+        })
+        .await?
     }
 
     async fn reset_trade_history_cache(&self) {
@@ -1092,6 +1150,99 @@ impl AppState {
 mod tests {
     use super::*;
     use rust_decimal_macros::dec;
+
+    #[tokio::test]
+    async fn cancelled_cleanup_finishes_all_cache_resets_before_releasing_commit_lock() {
+        for cleanup_kind in 0..3 {
+            let db = Arc::new(Database::open(":memory:").unwrap());
+            let lock = Arc::new(Mutex::new(()));
+            let mut config = AppConfig::default();
+            config.exchange.symbol = "SOLUSDC".into();
+            let (tx, _rx) = mpsc::channel(1);
+            let first =
+                AppState::new_for_pair(config.clone(), db.clone(), tx.clone(), lock.clone());
+            config.exchange.symbol = "BTCUSDC".into();
+            let second = AppState::new_for_pair(config, db.clone(), tx, lock);
+            let trade = cache_test_trade("cancel-cleanup", 1, TradingMode::Paper);
+            assert!(db.insert_trade(&trade).unwrap());
+            first.stats.write().await.total_trades = 1;
+            first.recent_trades.write().await.push_back(trade);
+            second.stats.write().await.total_trades = 2;
+            let stats_guard = first.stats.write().await;
+            let revision = db.trade_data_revision();
+            let states = vec![first.clone(), second.clone()];
+            let cleanup = tokio::spawn(async move {
+                match cleanup_kind {
+                    0 => {
+                        states[0]
+                            .clear_symbol_trade_history("SOLUSDC".into())
+                            .await
+                            .unwrap();
+                    }
+                    1 => {
+                        states[0].clear_trade_history().await.unwrap();
+                    }
+                    _ => {
+                        AppState::clear_selected_database_for(&states, true, false, None)
+                            .await
+                            .unwrap();
+                    }
+                }
+            });
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while db.trade_data_revision() == revision {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            cleanup.abort();
+            assert!(cleanup.await.unwrap_err().is_cancelled());
+            assert!(first.trade_commit_lock.try_lock().is_err());
+            drop(stats_guard);
+            let _commit =
+                tokio::time::timeout(Duration::from_secs(5), first.trade_commit_lock.lock())
+                    .await
+                    .unwrap();
+            assert!(db.get_recent_trades(10).unwrap().is_empty());
+            assert_eq!(first.stats.read().await.total_trades, 0);
+            assert!(first.recent_trades.read().await.is_empty());
+            assert_eq!(
+                second.stats.read().await.total_trades,
+                if cleanup_kind == 2 { 0 } else { 2 }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn clearing_previous_symbol_preserves_current_symbol_cache() {
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let mut config = AppConfig::default();
+        config.exchange.symbol = "BTCUSDC".into();
+        let (tx, _rx) = mpsc::channel(1);
+        let state = AppState::new(config, db.clone(), tx);
+        let old = cache_test_trade("old-symbol", 1, TradingMode::Paper);
+        let mut current = cache_test_trade("current-symbol", 2, TradingMode::Paper);
+        current.symbol = "BTCUSDC".into();
+        assert!(db.insert_trade(&old).unwrap());
+        assert!(db.insert_trade(&current).unwrap());
+        state.stats.write().await.total_trades = 1;
+        state.recent_trades.write().await.push_back(current);
+        assert_eq!(
+            state
+                .clear_symbol_trade_history("SOLUSDC".into())
+                .await
+                .unwrap()
+                .0,
+            1
+        );
+        assert_eq!(state.stats.read().await.total_trades, 1);
+        assert_eq!(
+            state.recent_trades.read().await[0].trade_id,
+            "current-symbol"
+        );
+        assert_eq!(db.get_recent_trades(10).unwrap()[0].symbol, "BTCUSDC");
+    }
 
     #[tokio::test]
     async fn shutdown_global_lock_timeout_persists_pause_after_database_write_finishes() {

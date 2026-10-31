@@ -200,9 +200,14 @@ cargo run --release -- --host 127.0.0.1 --port 8080
 | `GET /api/pairs/{symbol}/orders`、`/trades`、`/logs` | 指定交易对的订单、成交、日志 |
 | `GET / POST /api/pairs/{symbol}/config` | 查看和在线修改指定交易对的网格与运行模式；全局字段请使用 `/api/global/config` |
 | `POST /api/pairs/{symbol}/control` | 对指定交易对执行 `pause`、`resume`、`cancel_all`、`rebalance` |
+| `GET /api/pairs/{symbol}/database/export` | 导出指定交易对所有运行模式的成交分析数据库 |
+| `POST /api/pairs/{symbol}/trades/clear` | 使用 `{"confirm":true}` 清理该交易对所有模式的成交及统计 |
+| `GET /api/database/export` | 导出脱敏的全库分析快照 |
+| `POST /api/database/export` | 使用 `{"targets":["trade_history","account_hourly_snapshots"]}` 导出选定数据 |
+| `POST /api/database/clear` | 指定相同 `targets` 和 `"confirm":true` 清理选定数据 |
 | `/api/pairs/{symbol}/ws` | 指定交易对的快照、日志和控制通道，认证方式同 `/ws` |
 
-原 `/api/status`、`/api/config`、`/api/control` 和 `/ws` 在多交易对模式下指向列表中的第一个交易对。数据库导出及历史清理仍为全局操作，历史清理会同步重置全部交易对的内存统计。
+原 `/api/status`、`/api/config`、`/api/control` 和 `/ws` 在多交易对模式下指向列表中的第一个交易对。全局数据库操作支持选择成交历史及统计、账户小时快照；币种操作覆盖该币种所有运行模式。成交清理保留交易去重标识及执行前沿，避免历史回放和策略恢复受到影响。导出文件用于分析，并非完整恢复备份。
 
 修改已有交易对配置时，先通过对应的 `GET /api/pairs/{symbol}/config`（或旧版 `GET /api/config`）读取 `data.config_version`，再在对应 POST 请求中提供 `baseline_version`。缺少版本的更新会被拒绝；版本过期时返回 HTTP 409，需重新读取配置并检查修改后再提交。版本在服务重启或交易对重建后也会失效。添加交易对的 `POST /api/pairs` 不需要版本。升级后，直接调用配置 API 的旧客户端需增加上述版本字段。
 
@@ -258,19 +263,23 @@ BENCH_PAIRS=50 BENCH_SECONDS=65 BENCH_OUTAGE_SECS=40 BENCH_FAIL_MARK=1 cargo tes
 
 ### 在线导出分析数据库
 
-登录控制台后，打开「成交历史」，点击「导出数据库」，下载带北京时间戳的 `binancebot-analysis-YYYYMMDD-HHMMSS.db` 文件。导出覆盖全部交易对与运行模式的完整成交记录、策略配置、机器人订单、配对补单意图、余量合并计划和统计，不受页面最近 50 条成交的限制。
+登录控制台后，在交易对详情的「成交历史」下载当前币种全部运行模式的成交分析快照，不受页面最近 50 条成交的限制。在「全局设置 → 数据库操作」可导出全库快照，或选择成交历史及统计、账户小时快照导出。
 
 导出使用 SQLite 一致性快照，包含已提交的 WAL 数据，无需暂停策略或手工复制 `.db-wal`。副本中的 Binance API Key / Secret、Telegram Bot Token / Chat ID、管理员密码哈希和登录会话均被移除，原数据库保持不变。文件用于离线分析，不是包含凭证的恢复备份；系统运行日志仅保存在内存中，不包含在数据库导出里。
 
-接口为 `GET /api/database/export`，须携带有效的管理员 `Authorization: Bearer <token>`；成功返回 SQLite 附件，失败返回 JSON 错误。
+当前币种接口为 `GET /api/pairs/{symbol}/database/export`，全库接口为 `GET /api/database/export`，选择数据使用 `POST /api/database/export`；均需有效的管理员 `Authorization: Bearer <token>`。
 
 ### 清理历史交易记录
 
-在「成交历史」点击「清理历史记录」，确认后删除**全部交易对及运行模式**的历史成交记录（包括旧版 `UNKNOWN` 记录），并重置累计成交笔数、成交量、已实现盈亏、手续费和历史循环统计。页面列表及今日成交图同步更新，之后的新成交从零开始累计。清理无法撤销，建议先导出数据库保存。
+在交易对详情的「成交历史」清理当前币种全部运行模式的历史成交（包括旧版 `UNKNOWN` 记录）及对应统计；在全局设置可选择清理所有币种的成交历史及统计、账户小时快照。页面数据同步更新，清理无法撤销，建议先导出。
 
-清理保留当前持仓、账户余额、挂单、配置和登录信息，策略可继续运行。数据库仅保留必要的已处理成交 ID 和各交易对、模式的最近成交边界，供订单防重复入账和重启恢复使用；清理不会删除币安交易所的成交记录，也不承诺立即缩小 SQLite 文件大小。
+清理保留当前持仓、账户余额、挂单、配置和登录信息，策略可继续运行。数据库保留已处理成交 ID、各交易对及模式的最近成交边界，以及已清理订单的方向、价格和数量，供防重复入账、重启恢复及存续配对订单的周期计算使用；这些恢复数据不显示在成交历史中。清理不会删除币安交易所的成交记录，也不承诺立即缩小 SQLite 文件大小。
 
-接口为 `POST /api/trades/clear`，须携带有效的管理员 `Authorization: Bearer <token>` 和 JSON 请求体 `{"confirm":true}`。成功返回删除笔数及最新页面快照；未确认返回 `400`，未登录返回 `401`，清理失败返回 `500`，事务失败时保留原数据。
+旧版 `grid_stats` 表没有币种标识，无法可靠归属到某个交易对，按币种清理时保留该表；选择性成交历史导出不包含此表，全库分析快照仍包含它。全局清理成交历史会删除该表的数据。
+
+在数据库设置中同时清理成交历史和账户小时快照时，两类数据在同一个事务中删除；任一删除失败时均回滚。
+
+当前币种接口为 `POST /api/pairs/{symbol}/trades/clear`，请求体为 `{"confirm":true}`；全局操作使用 `POST /api/database/clear` 并指定 `targets` 和 `confirm`。接口须携带有效的管理员 `Authorization: Bearer <token>`；未确认返回 `400`，未登录返回 `401`，事务失败时保留原数据。
 
 ---
 

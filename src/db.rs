@@ -210,6 +210,83 @@ impl Database {
         Ok(snapshot.serialize(rusqlite::DatabaseName::Main)?.to_vec())
     }
 
+    /// Export only rows that can be attributed to this symbol.
+    pub fn export_analysis_snapshot_for_symbol(&self, symbol: &str) -> Result<Vec<u8>> {
+        let snapshot = self.analysis_snapshot_with_tables(&[
+            "trades",
+            "scoped_grid_stats",
+            "execution_frontiers",
+        ])?;
+        for table in ["trades", "scoped_grid_stats", "execution_frontiers"] {
+            snapshot.execute(
+                &format!("DELETE FROM {table} WHERE symbol != ?1"),
+                params![symbol],
+            )?;
+        }
+        snapshot.execute_batch("VACUUM;")?;
+        Ok(snapshot.serialize(rusqlite::DatabaseName::Main)?.to_vec())
+    }
+
+    /// Export only the selected analysis data categories.
+    pub fn export_selected_analysis_snapshot(
+        &self,
+        trade_history: bool,
+        account_hourly_snapshots: bool,
+    ) -> Result<Vec<u8>> {
+        let mut tables = Vec::new();
+        if trade_history {
+            // Legacy grid_stats has no symbol or mode and cannot be attributed
+            // to history retained after a per-symbol cleanup.
+            tables.extend(["trades", "scoped_grid_stats"]);
+        }
+        if account_hourly_snapshots {
+            tables.push("account_hourly_snapshots");
+        }
+        let snapshot = self.analysis_snapshot_with_tables(&tables)?;
+        snapshot.execute_batch("VACUUM;")?;
+        Ok(snapshot.serialize(rusqlite::DatabaseName::Main)?.to_vec())
+    }
+
+    fn analysis_snapshot_with_tables(&self, tables: &[&str]) -> Result<Connection> {
+        let mut snapshot = Connection::open_in_memory()?;
+        {
+            let source = self.conn.lock().unwrap();
+            let backup = rusqlite::backup::Backup::new(&source, &mut snapshot)?;
+            anyhow::ensure!(
+                backup.step(-1)? == rusqlite::backup::StepResult::Done,
+                "Database is busy; retry the export"
+            );
+        }
+        // Remove triggers and views before clearing unselected tables so their
+        // contents cannot affect the export or reveal data through a view.
+        let objects = {
+            let mut statement = snapshot.prepare(
+                "SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' \
+                 AND type IN ('table', 'view', 'trigger') \
+                 ORDER BY CASE type WHEN 'trigger' THEN 0 WHEN 'view' THEN 1 ELSE 2 END",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (kind, name) in objects {
+            let quoted = name.replace('"', "\"\"");
+            if kind == "table" {
+                if !tables.contains(&name.as_str()) {
+                    snapshot.execute_batch(&format!("DELETE FROM \"{}\";", quoted))?;
+                }
+            } else {
+                snapshot.execute_batch(&format!(
+                    "DROP {} IF EXISTS \"{}\";",
+                    kind.to_ascii_uppercase(),
+                    quoted
+                ))?;
+            }
+        }
+        Ok(snapshot)
+    }
+
     pub fn load_bot_status(&self) -> Result<Option<BotStatus>> {
         let conn = self.conn.lock().unwrap();
         let value: Option<String> = conn
@@ -313,6 +390,18 @@ impl Database {
             );
             CREATE INDEX IF NOT EXISTS idx_cleared_trade_order
                 ON cleared_trade_ids (client_order_id, mode);
+
+            -- A paired order can remain only in memory, so preserve the fields
+            -- needed to complete a cycle for every cleared order.
+            CREATE TABLE IF NOT EXISTS cleared_pair_openings (
+                symbol TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                client_order_id TEXT NOT NULL,
+                side TEXT NOT NULL,
+                price TEXT NOT NULL,
+                quantity TEXT NOT NULL,
+                PRIMARY KEY (symbol, mode, client_order_id)
+            );
 
             CREATE TABLE IF NOT EXISTS execution_frontiers (
                 symbol TEXT NOT NULL,
@@ -808,25 +897,76 @@ impl Database {
     /// Delete analysis history atomically while preserving order deduplication
     /// and the execution frontier needed by a running or restarted strategy.
     pub fn clear_trade_history(&self) -> Result<usize> {
+        Ok(self.clear_selected_database(true, false)?.0)
+    }
+
+    pub fn clear_selected_database(&self, trades: bool, snapshots: bool) -> Result<(usize, usize)> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
-        tx.execute_batch(
+        let deleted_trades = if trades {
+            tx.execute_batch(
+                "INSERT INTO execution_frontiers (symbol, mode, side, price, timestamp)
+                 SELECT symbol, mode, side, price, timestamp FROM (
+                     SELECT symbol, mode, side, price, timestamp,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY symbol, mode ORDER BY timestamp DESC, rowid DESC
+                            ) AS rank
+                     FROM trades
+                 ) WHERE rank = 1
+                 ON CONFLICT(symbol, mode) DO UPDATE SET
+                     side = excluded.side, price = excluded.price, timestamp = excluded.timestamp
+                 WHERE excluded.timestamp >= execution_frontiers.timestamp;
+                 INSERT OR IGNORE INTO cleared_trade_ids (trade_id, client_order_id, mode)
+                     SELECT trade_id, client_order_id, mode FROM trades;",
+            )?;
+            preserve_pair_openings_on(&tx, None)?;
+            let deleted = tx.execute("DELETE FROM trades", [])?;
+            tx.execute_batch("DELETE FROM scoped_grid_stats; DELETE FROM grid_stats;")?;
+            deleted
+        } else {
+            0
+        };
+        let deleted_snapshots = if snapshots {
+            tx.execute("DELETE FROM account_hourly_snapshots", [])?
+        } else {
+            0
+        };
+        tx.commit()?;
+        if trades {
+            self.trade_revision.fetch_add(1, Ordering::Release);
+        }
+        Ok((deleted_trades, deleted_snapshots))
+    }
+
+    /// Clear every mode for one symbol while retaining recovery metadata.
+    pub fn clear_trade_history_for_symbol(&self, symbol: &str) -> Result<usize> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute(
             "INSERT INTO execution_frontiers (symbol, mode, side, price, timestamp)
              SELECT symbol, mode, side, price, timestamp FROM (
                  SELECT symbol, mode, side, price, timestamp,
                         ROW_NUMBER() OVER (
                             PARTITION BY symbol, mode ORDER BY timestamp DESC, rowid DESC
                         ) AS rank
-                 FROM trades
+                 FROM trades WHERE symbol = ?1
              ) WHERE rank = 1
              ON CONFLICT(symbol, mode) DO UPDATE SET
                  side = excluded.side, price = excluded.price, timestamp = excluded.timestamp
-             WHERE excluded.timestamp >= execution_frontiers.timestamp;
-             INSERT OR IGNORE INTO cleared_trade_ids (trade_id, client_order_id, mode)
-                 SELECT trade_id, client_order_id, mode FROM trades;",
+             WHERE excluded.timestamp >= execution_frontiers.timestamp",
+            params![symbol],
         )?;
-        let deleted = tx.execute("DELETE FROM trades", [])?;
-        tx.execute_batch("DELETE FROM scoped_grid_stats; DELETE FROM grid_stats;")?;
+        tx.execute(
+            "INSERT OR IGNORE INTO cleared_trade_ids (trade_id, client_order_id, mode)
+             SELECT trade_id, client_order_id, mode FROM trades WHERE symbol = ?1",
+            params![symbol],
+        )?;
+        preserve_pair_openings_on(&tx, Some(symbol))?;
+        let deleted = tx.execute("DELETE FROM trades WHERE symbol = ?1", params![symbol])?;
+        tx.execute(
+            "DELETE FROM scoped_grid_stats WHERE symbol = ?1",
+            params![symbol],
+        )?;
         tx.commit()?;
         self.trade_revision.fetch_add(1, Ordering::Release);
         Ok(deleted)
@@ -1007,6 +1147,41 @@ impl Database {
             .map(trade_from_row)
             .transpose()
             .map_err(Into::into)
+    }
+
+    /// Look up the data required by a paired cycle, including cleared history.
+    pub fn get_pair_opening(
+        &self,
+        symbol: &str,
+        client_order_id: &str,
+        mode: TradingMode,
+    ) -> Result<Option<(OrderSide, Decimal, Decimal)>> {
+        let conn = self.conn.lock().unwrap();
+        let value: Option<(String, String, String)> = conn.query_row(
+            "SELECT side, price, quantity FROM (
+                 SELECT side, price, quantity, 0 AS priority, timestamp FROM trades
+                 WHERE symbol = ?1 AND client_order_id = ?2 AND mode = ?3
+                 UNION ALL
+                 SELECT side, price, quantity, 1 AS priority, '' AS timestamp FROM cleared_pair_openings
+                 WHERE symbol = ?1 AND client_order_id = ?2 AND mode = ?3
+             ) ORDER BY priority, timestamp DESC LIMIT 1",
+            params![symbol, client_order_id, mode.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).optional()?;
+        value
+            .map(|(side, price, quantity)| {
+                let side = match side.as_str() {
+                    "BUY" => OrderSide::Buy,
+                    "SELL" => OrderSide::Sell,
+                    _ => anyhow::bail!("Invalid paired opening side: {}", side),
+                };
+                Ok((
+                    side,
+                    Decimal::from_str(&price)?,
+                    Decimal::from_str(&quantity)?,
+                ))
+            })
+            .transpose()
     }
 
     pub fn has_recorded_order(&self, client_order_id: &str, mode: TradingMode) -> Result<bool> {
@@ -1441,6 +1616,20 @@ fn save_bot_status_on(conn: &Connection, status: BotStatus) -> Result<()> {
     Ok(())
 }
 
+fn preserve_pair_openings_on(conn: &Connection, symbol: Option<&str>) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO cleared_pair_openings (symbol, mode, client_order_id, side, price, quantity)
+         SELECT symbol, mode, client_order_id, side, price, quantity FROM (
+             SELECT symbol, mode, client_order_id, side, price, quantity,
+                    ROW_NUMBER() OVER (PARTITION BY symbol, mode, client_order_id
+                                       ORDER BY timestamp DESC, rowid DESC) AS rank
+             FROM trades WHERE (?1 IS NULL OR symbol = ?1)
+         ) WHERE rank = 1",
+        params![symbol],
+    )?;
+    Ok(())
+}
+
 fn insert_trade_on(conn: &Connection, trade: &TradeRecord) -> Result<bool> {
     let cleared: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM cleared_trade_ids WHERE trade_id = ?1)
@@ -1582,6 +1771,62 @@ mod tests {
     }
 
     #[test]
+    fn symbol_cleanup_preserves_unattributed_legacy_stats_but_selected_export_omits_them() {
+        let db = Database::open(":memory:").unwrap();
+        db.conn.lock().unwrap().execute_batch(
+            "INSERT INTO grid_stats VALUES (1, 7, 3, '4', '500', '2026-10-10');
+             INSERT INTO scoped_grid_stats VALUES ('SOLUSDC', 'LIVE', 1, 0, '0', '100', '2026-10-10');
+             INSERT INTO scoped_grid_stats VALUES ('BTCUSDC', 'LIVE', 2, 1, '4', '400', '2026-10-10');"
+        ).unwrap();
+        assert_eq!(db.clear_trade_history_for_symbol("SOLUSDC").unwrap(), 0);
+        assert!(db
+            .load_scoped_stats("SOLUSDC", TradingMode::Live)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            db.load_scoped_stats("BTCUSDC", TradingMode::Live)
+                .unwrap()
+                .unwrap()
+                .0,
+            2
+        );
+        assert_eq!(db.load_stats().unwrap().unwrap().0, 7);
+
+        let directory =
+            std::env::temp_dir().join(format!("legacy-export-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        for (name, bytes, expected) in [
+            (
+                "selected.db",
+                db.export_selected_analysis_snapshot(true, false).unwrap(),
+                0,
+            ),
+            ("full.db", db.export_analysis_snapshot().unwrap(), 1),
+        ] {
+            let path = directory.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            let snapshot =
+                Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                    .unwrap();
+            let legacy: i64 = snapshot
+                .query_row("SELECT COUNT(*) FROM grid_stats", [], |row| row.get(0))
+                .unwrap();
+            let other: i64 = snapshot
+                .query_row(
+                    "SELECT COUNT(*) FROM scoped_grid_stats WHERE symbol = 'BTCUSDC'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(legacy, expected);
+            assert_eq!(other, 1);
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+        db.clear_trade_history().unwrap();
+        assert!(db.load_stats().unwrap().is_none());
+    }
+
+    #[test]
     fn cleanup_preserves_frontiers_and_deduplication_across_restarts() {
         let path = std::env::temp_dir().join(format!("cleanup-{}.db", uuid::Uuid::new_v4()));
         let db = Database::open(&path).unwrap();
@@ -1613,6 +1858,22 @@ mod tests {
         drop(db);
         let db = Database::open(&path).unwrap();
         assert_eq!(
+            db.get_pair_opening("SOLUSDC", "gb_b_cleanup", TradingMode::Live)
+                .unwrap(),
+            Some((OrderSide::Buy, dec!(119.2), dec!(1)))
+        );
+        assert_eq!(
+            db.get_pair_opening("BTCUSDC", "gb_b_cleanup", TradingMode::Live)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            db.get_pair_opening("SOLUSDC", "gb_b_cleanup", TradingMode::Paper)
+                .unwrap(),
+            None
+        );
+        assert!(db.get_recent_trades(10).unwrap().is_empty());
+        assert_eq!(
             db.last_fill_for("SOLUSDC", TradingMode::Live).unwrap(),
             Some((OrderSide::Sell, dec!(119.3)))
         );
@@ -1633,6 +1894,11 @@ mod tests {
         trade.pnl_verified = true;
         assert!(!db.verify_trade_pnl(&trade).unwrap());
         assert_eq!(db.clear_trade_history().unwrap(), 0);
+        assert_eq!(
+            db.get_pair_opening("SOLUSDC", "gb_b_cleanup", TradingMode::Live)
+                .unwrap(),
+            Some((OrderSide::Buy, dec!(119.2), dec!(1)))
+        );
         assert_eq!(
             db.last_fill_for("SOLUSDC", TradingMode::Live).unwrap(),
             Some((OrderSide::Sell, dec!(119.3)))
@@ -1682,13 +1948,56 @@ mod tests {
             1
         );
         let conn = db.conn.lock().unwrap();
-        for table in ["cleared_trade_ids", "execution_frontiers"] {
+        for table in [
+            "cleared_trade_ids",
+            "execution_frontiers",
+            "cleared_pair_openings",
+        ] {
             let count: i64 = conn
                 .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
                     row.get(0)
                 })
                 .unwrap();
             assert_eq!(count, 0);
+        }
+    }
+
+    #[test]
+    fn selected_cleanup_rolls_back_trade_changes_when_snapshot_deletion_fails() {
+        let db = Database::open(":memory:").unwrap();
+        db.conn.lock().unwrap().execute_batch(
+            "INSERT INTO trades (trade_id, client_order_id, symbol, mode, side, price, quantity,
+                 amount_usdc, realized_pnl, commission, is_maker, timestamp, note)
+             VALUES ('t1', 'gb_b_1', 'SOLUSDC', 'LIVE', 'BUY', '100', '1', '100', '0', '0', 1, '2026-10-10T00:00:00Z', 'test');
+             INSERT INTO scoped_grid_stats VALUES ('SOLUSDC', 'LIVE', 1, 0, '0', '100', '2026-10-10');
+             INSERT INTO account_hourly_snapshots (hour, payload) VALUES (1, '[]');
+             CREATE TRIGGER reject_snapshot_cleanup BEFORE DELETE ON account_hourly_snapshots
+                 BEGIN SELECT RAISE(ABORT, 'snapshot cleanup test failure'); END;"
+        ).unwrap();
+
+        let revision = db.trade_revision.load(Ordering::Acquire);
+        assert!(db.clear_selected_database(true, true).is_err());
+        assert_eq!(db.trade_revision.load(Ordering::Acquire), revision);
+        assert_eq!(db.get_recent_trades(10).unwrap().len(), 1);
+        assert_eq!(
+            db.load_scoped_stats("SOLUSDC", TradingMode::Live)
+                .unwrap()
+                .unwrap()
+                .0,
+            1
+        );
+        let conn = db.conn.lock().unwrap();
+        for (table, expected) in [
+            ("account_hourly_snapshots", 1),
+            ("cleared_trade_ids", 0),
+            ("execution_frontiers", 0),
+        ] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, expected, "{table}");
         }
     }
 

@@ -37,6 +37,19 @@ pub struct ClearTradeHistoryResponse {
     pub snapshot: BotSnapshot,
 }
 
+#[derive(Debug, Deserialize)]
+struct DatabaseTargetsRequest {
+    targets: Vec<String>,
+    #[serde(default)]
+    confirm: bool,
+}
+
+#[derive(serde::Serialize)]
+struct DatabaseClearResponse {
+    deleted_trades: usize,
+    deleted_account_hourly_snapshots: usize,
+}
+
 #[derive(Debug, serde::Serialize)]
 pub struct ApiResponse<T> {
     pub success: bool,
@@ -100,6 +113,15 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     let pairs = Router::new()
         .route("/api/pairs", get(get_single_pair_handler))
         .route("/api/overview", get(get_single_overview_handler))
+        .route(
+            "/api/pairs/:symbol/database/export",
+            get(single_pair_export_handler),
+        )
+        .route(
+            "/api/pairs/:symbol/trades/clear",
+            post(single_pair_clear_handler),
+        )
+        .route("/api/database/clear", post(single_database_clear_handler))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_auth_middleware,
@@ -132,6 +154,8 @@ fn pair_resource_routes() -> Router<Arc<AppState>> {
         .route("/trades", get(get_trades_handler))
         .route("/logs", get(get_logs_handler))
         .route("/control", post(post_control_handler))
+        .route("/database/export", get(scoped_export_handler))
+        .route("/trades/clear", post(scoped_clear_handler))
 }
 
 fn create_base_router(state: Arc<AppState>, history_clear: bool) -> Router {
@@ -140,7 +164,10 @@ fn create_base_router(state: Arc<AppState>, history_clear: bool) -> Router {
         .route("/api/orders", get(get_orders_handler))
         .route("/api/trades", get(get_trades_handler))
         .route("/api/logs", get(get_logs_handler))
-        .route("/api/database/export", get(export_database_handler))
+        .route(
+            "/api/database/export",
+            get(export_database_handler).post(export_selected_database_handler),
+        )
         .route(
             "/api/config",
             get(get_config_handler).post(post_config_handler),
@@ -196,6 +223,7 @@ pub fn create_multi_router(states: Vec<Arc<AppState>>) -> Router {
         .route("/api/pairs", get(get_pairs_handler))
         .route("/api/overview", get(get_overview_handler))
         .route("/api/trades/clear", post(clear_multi_trade_history_handler))
+        .route("/api/database/clear", post(multi_database_clear_handler))
         .route_layer(middleware::from_fn_with_state(
             primary,
             require_auth_middleware,
@@ -267,6 +295,15 @@ pub async fn create_managed_router(handle: RuntimeHandle) -> Router {
         .route("/api/overview/history", get(get_overview_history_handler))
         .route("/api/pairs/:symbol", delete(remove_pair_handler))
         .route(
+            "/api/pairs/:symbol/database/export",
+            get(dispatch_managed_database_pair),
+        )
+        .route(
+            "/api/pairs/:symbol/trades/clear",
+            post(dispatch_managed_database_pair),
+        )
+        .route("/api/database/clear", post(managed_database_clear_handler))
+        .route(
             "/api/pairs/:symbol/:resource",
             get(dispatch_pair).post(dispatch_pair),
         )
@@ -294,7 +331,10 @@ pub async fn create_managed_router(handle: RuntimeHandle) -> Router {
         .route("/api/accounts/ws", get(managed_accounts_ws_handler))
         .with_state(handle);
     let account = Router::new()
-        .route("/api/database/export", get(export_database_handler))
+        .route(
+            "/api/database/export",
+            get(export_database_handler).post(export_selected_database_handler),
+        )
         .route(
             "/api/auth/change_password",
             post(post_change_password_handler),
@@ -307,6 +347,218 @@ pub async fn create_managed_router(handle: RuntimeHandle) -> Router {
         .merge(account)
         .with_state(primary)
         .merge(protected)
+}
+
+async fn single_pair_export_handler(
+    State(state): State<Arc<AppState>>,
+    Path(symbol): Path<String>,
+) -> Response {
+    if state.config.read().await.exchange.symbol != symbol {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    export_symbol(&state, symbol).await
+}
+
+async fn single_pair_clear_handler(
+    State(state): State<Arc<AppState>>,
+    Path(symbol): Path<String>,
+    payload: Json<ClearTradeHistoryRequest>,
+) -> Response {
+    if state.config.read().await.exchange.symbol != symbol {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    clear_symbol(&state, symbol, payload.0)
+        .await
+        .into_response()
+}
+
+async fn dispatch_managed_database_pair(
+    State(handle): State<RuntimeHandle>,
+    Path(symbol): Path<String>,
+    req: axum::extract::Request,
+) -> Response {
+    let _membership = handle.membership_lock.lock().await;
+    let state = handle
+        .states
+        .read()
+        .await
+        .iter()
+        .find(|state| state.pair_scope() == Some(symbol.as_str()))
+        .cloned();
+    let Some(state) = state else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let resource = if req.uri().path().ends_with("/database/export") {
+        "/database/export"
+    } else {
+        "/trades/clear"
+    };
+    let mut req = req;
+    *req.uri_mut() = resource.parse().unwrap();
+    pair_resource_routes()
+        .with_state(state)
+        .oneshot(req)
+        .await
+        .unwrap()
+}
+
+async fn scoped_export_handler(State(state): State<Arc<AppState>>) -> Response {
+    let symbol = state.config.read().await.exchange.symbol.clone();
+    export_symbol(&state, symbol).await
+}
+
+async fn export_symbol(state: &AppState, symbol: String) -> Response {
+    database_export_response(
+        state
+            .db
+            .run_blocking(move |db| db.export_analysis_snapshot_for_symbol(&symbol))
+            .await,
+    )
+}
+
+async fn scoped_clear_handler(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<ClearTradeHistoryRequest>,
+) -> (StatusCode, Json<ApiResponse<ClearTradeHistoryResponse>>) {
+    let symbol = state.config.read().await.exchange.symbol.clone();
+    clear_symbol(&state, symbol, payload).await
+}
+
+async fn clear_symbol(
+    state: &Arc<AppState>,
+    symbol: String,
+    payload: ClearTradeHistoryRequest,
+) -> (StatusCode, Json<ApiResponse<ClearTradeHistoryResponse>>) {
+    if !payload.confirm {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some("请确认清理当前币种所有模式的成交历史".into()),
+            }),
+        );
+    }
+    match state.clear_symbol_trade_history(symbol).await {
+        Ok((deleted_trades, snapshot)) => (
+            StatusCode::OK,
+            Json(ApiResponse {
+                success: true,
+                data: Some(ClearTradeHistoryResponse {
+                    deleted_trades,
+                    snapshot,
+                }),
+                message: None,
+            }),
+        ),
+        Err(error) => {
+            error!("Scoped trade cleanup failed: {}", error);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    message: Some("历史记录清理失败".into()),
+                }),
+            )
+        }
+    }
+}
+
+fn selected_targets(payload: &DatabaseTargetsRequest) -> Option<(bool, bool)> {
+    if payload.targets.is_empty()
+        || payload
+            .targets
+            .iter()
+            .any(|target| target != "trade_history" && target != "account_hourly_snapshots")
+    {
+        return None;
+    }
+    Some((
+        payload
+            .targets
+            .iter()
+            .any(|target| target == "trade_history"),
+        payload
+            .targets
+            .iter()
+            .any(|target| target == "account_hourly_snapshots"),
+    ))
+}
+
+async fn export_selected_database_handler(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<DatabaseTargetsRequest>,
+) -> Response {
+    let Some((trades, snapshots)) = selected_targets(&payload) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    database_export_response(
+        state
+            .db
+            .run_blocking(move |db| db.export_selected_analysis_snapshot(trades, snapshots))
+            .await,
+    )
+}
+
+async fn single_database_clear_handler(
+    State(state): State<Arc<AppState>>,
+    payload: Json<DatabaseTargetsRequest>,
+) -> Response {
+    database_clear(&[state], payload.0).await
+}
+
+async fn multi_database_clear_handler(
+    State(states): State<Arc<Vec<Arc<AppState>>>>,
+    payload: Json<DatabaseTargetsRequest>,
+) -> Response {
+    database_clear(&states, payload.0).await
+}
+
+async fn managed_database_clear_handler(
+    State(handle): State<RuntimeHandle>,
+    payload: Json<DatabaseTargetsRequest>,
+) -> Response {
+    let membership = handle.membership_lock.clone().lock_owned().await;
+    let states = handle.states.read().await.clone();
+    database_clear_with_guard(&states, payload.0, Some(membership)).await
+}
+
+async fn database_clear(states: &[Arc<AppState>], payload: DatabaseTargetsRequest) -> Response {
+    database_clear_with_guard(states, payload, None).await
+}
+
+async fn database_clear_with_guard(
+    states: &[Arc<AppState>],
+    payload: DatabaseTargetsRequest,
+    guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+) -> Response {
+    let Some((trades, snapshots)) = selected_targets(&payload) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    if !payload.confirm {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    if states.is_empty() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let (deleted_trades, deleted_account_hourly_snapshots) =
+        match AppState::clear_selected_database_for(states, trades, snapshots, guard).await {
+            Ok(counts) => counts,
+            Err(error) => {
+                error!("Database cleanup failed: {}", error);
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        };
+    Json(ApiResponse {
+        success: true,
+        data: Some(DatabaseClearResponse {
+            deleted_trades,
+            deleted_account_hourly_snapshots,
+        }),
+        message: None,
+    })
+    .into_response()
 }
 
 async fn dispatch_pair(
@@ -1119,11 +1371,16 @@ async fn clear_trade_history_handler(
 }
 
 async fn export_database_handler(State(state): State<Arc<AppState>>) -> Response {
-    match state
-        .db
-        .run_blocking(|db| db.export_analysis_snapshot())
-        .await
-    {
+    database_export_response(
+        state
+            .db
+            .run_blocking(|db| db.export_analysis_snapshot())
+            .await,
+    )
+}
+
+fn database_export_response(result: anyhow::Result<Vec<u8>>) -> Response {
+    match result {
         Ok(bytes) => {
             let filename = format!(
                 "binancebot-analysis-{}.db",

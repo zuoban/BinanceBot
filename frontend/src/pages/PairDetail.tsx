@@ -64,7 +64,7 @@ export default function PairDetail() {
           ]} /></Card>
         </> },
         { key: 'orders', label: `挂单 (${s.active_orders.length})`, children: <Card><OrdersTable orders={s.active_orders} mark={s.ticker.mark_price} /></Card> },
-        { key: 'trades', label: '成交历史', children: <Card title="最近成交" extra={<HistoryActions />}><Alert type="info" title="此处展示最近成交；导出数据库包含全部交易对、全部模式的完整记录。" /><TradesTable trades={s.recent_trades} /></Card> },
+        { key: 'trades', label: '成交历史', children: <Card title="最近成交" extra={<HistoryActions symbol={pair!.symbol} />}><Alert type="info" title={`此处展示当前模式的最近成交；导出和清理作用于 ${pair!.symbol} 的全部模式。`} /><TradesTable trades={s.recent_trades} /></Card> },
         { key: 'logs', label: '运行日志', children: <Card><LogsTable logs={s.recent_logs} /></Card> },
       ]} />
     </>}

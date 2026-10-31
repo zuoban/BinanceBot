@@ -57,6 +57,301 @@ async fn response_json(response: axum::response::Response) -> Value {
     serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap()
 }
 
+fn cleanup_trade(id: &str, symbol: &str, mode: TradingMode) -> TradeRecord {
+    TradeRecord {
+        trade_id: format!("scoped-{id}"),
+        client_order_id: format!("gb_b_scoped_{id}"),
+        symbol: symbol.into(),
+        mode,
+        side: OrderSide::Buy,
+        price: dec!(100),
+        quantity: dec!(1),
+        amount_usdc: dec!(100),
+        realized_pnl: dec!(2),
+        commission: dec!(0.1),
+        pnl_verified: true,
+        is_maker: true,
+        timestamp: Utc::now(),
+        note: String::new(),
+    }
+}
+
+#[tokio::test]
+async fn pair_cleanup_and_export_cover_all_modes_without_affecting_other_pairs() {
+    let (db, states, _) = fixture();
+    let sol = cleanup_trade("sol-paper", "SOLUSDC", TradingMode::Paper);
+    let btc = cleanup_trade("btc-paper", "BTCUSDT", TradingMode::Paper);
+    assert!(states[0].record_trade(sol.clone(), None, None, None).await);
+    assert!(states[1].record_trade(btc.clone(), None, None, None).await);
+    for (id, mode) in [
+        ("sol-live", TradingMode::Live),
+        ("sol-testnet", TradingMode::Testnet),
+        ("sol-unknown", TradingMode::Unknown),
+    ] {
+        assert!(db
+            .insert_trade_with_stats(&cleanup_trade(id, "SOLUSDC", mode), &Default::default())
+            .unwrap());
+    }
+    let other_before = serde_json::to_value(states[1].snapshot().await).unwrap();
+    let router = create_multi_router(states.clone());
+    for (path, body) in [
+        ("/api/pairs/SOLUSDC/database/export", None),
+        (
+            "/api/pairs/SOLUSDC/trades/clear",
+            Some(json!({"confirm":true})),
+        ),
+    ] {
+        assert_eq!(
+            router
+                .clone()
+                .oneshot(request(path, body, false))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    for body in [json!({}), json!({"confirm":false})] {
+        assert_eq!(
+            router
+                .clone()
+                .oneshot(request("/api/pairs/SOLUSDC/trades/clear", Some(body), true))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    for path in [
+        "/api/pairs/UNKNOWN/database/export",
+        "/api/pairs/UNKNOWN/trades/clear",
+    ] {
+        let body = path.ends_with("clear").then(|| json!({"confirm":true}));
+        assert_eq!(
+            router
+                .clone()
+                .oneshot(request(path, body, true))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+    let response = router
+        .clone()
+        .oneshot(request("/api/pairs/SOLUSDC/database/export", None, true))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let path = std::env::temp_dir().join(format!("pair-export-{}.db", uuid::Uuid::new_v4()));
+    std::fs::write(&path, bytes).unwrap();
+    let exported = rusqlite::Connection::open(&path).unwrap();
+    let rows: Vec<(String, String)> = exported
+        .prepare("SELECT symbol, mode FROM trades ORDER BY mode")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(rows.len(), 4);
+    assert!(rows.iter().all(|(symbol, _)| symbol == "SOLUSDC"));
+    for mode in ["PAPER", "LIVE", "TESTNET", "UNKNOWN"] {
+        assert!(rows.iter().any(|(_, value)| value == mode));
+    }
+    drop(exported);
+    std::fs::remove_file(path).unwrap();
+    let response = router
+        .oneshot(request(
+            "/api/pairs/SOLUSDC/trades/clear",
+            Some(json!({"confirm":true})),
+            true,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let result = response_json(response).await;
+    assert_eq!(result["data"]["deleted_trades"], 4);
+    let remaining = db.get_recent_trades(100).unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].trade_id, btc.trade_id);
+    let other_after = serde_json::to_value(states[1].snapshot().await).unwrap();
+    assert_eq!(other_after["stats"], other_before["stats"]);
+    assert_eq!(other_after["recent_trades"], other_before["recent_trades"]);
+    assert!(states[0].record_trade(sol, None, None, None).await);
+    assert!(states[1].record_trade(btc, None, None, None).await);
+    assert_eq!(db.get_recent_trades(100).unwrap().len(), 1);
+    for mode in [
+        TradingMode::Paper,
+        TradingMode::Live,
+        TradingMode::Testnet,
+        TradingMode::Unknown,
+    ] {
+        assert_eq!(
+            db.last_fill_for("SOLUSDC", mode).unwrap(),
+            Some((OrderSide::Buy, dec!(100)))
+        );
+    }
+    assert_eq!(
+        db.last_fill_for("BTCUSDT", TradingMode::Paper).unwrap(),
+        Some((OrderSide::Buy, dec!(100)))
+    );
+}
+
+#[tokio::test]
+async fn global_database_targets_are_whitelisted_and_preserve_recovery_data() {
+    let (db, states, _) = fixture();
+    let sol = cleanup_trade("global-sol", "SOLUSDC", TradingMode::Paper);
+    let btc = cleanup_trade("global-btc", "BTCUSDT", TradingMode::Paper);
+    assert!(states[0].record_trade(sol.clone(), None, None, None).await);
+    assert!(states[1].record_trade(btc.clone(), None, None, None).await);
+    db.save_hourly_account_snapshot(Utc::now().timestamp(), &[])
+        .unwrap();
+    let router = create_multi_router(states.clone());
+    let targets = json!(["trade_history", "account_hourly_snapshots"]);
+    for path in ["/api/database/export", "/api/database/clear"] {
+        assert_eq!(
+            router
+                .clone()
+                .oneshot(request(
+                    path,
+                    Some(json!({"targets": targets, "confirm":true})),
+                    false
+                ))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        for invalid in [
+            json!([]),
+            json!(["app_config"]),
+            json!(["trade_history", "auth_sessions"]),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(request(
+                    path,
+                    Some(json!({"targets":invalid,"confirm":true})),
+                    true,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(db.get_recent_trades(100).unwrap().len(), 2);
+            assert_eq!(db.hourly_account_snapshots(0).unwrap().len(), 1);
+        }
+    }
+    for body in [
+        json!({"targets":targets}),
+        json!({"targets":targets,"confirm":false}),
+    ] {
+        assert_eq!(
+            router
+                .clone()
+                .oneshot(request("/api/database/clear", Some(body), true))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    let response = router
+        .clone()
+        .oneshot(request(
+            "/api/database/export",
+            Some(json!({"targets":["account_hourly_snapshots"]})),
+            true,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let path =
+        std::env::temp_dir().join(format!("single-target-export-{}.db", uuid::Uuid::new_v4()));
+    std::fs::write(&path, bytes).unwrap();
+    let exported = rusqlite::Connection::open(&path).unwrap();
+    let trade_count: i64 = exported
+        .query_row("SELECT COUNT(*) FROM trades", [], |row| row.get(0))
+        .unwrap();
+    let snapshot_count: i64 = exported
+        .query_row("SELECT COUNT(*) FROM account_hourly_snapshots", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!((trade_count, snapshot_count), (0, 1));
+    drop(exported);
+    std::fs::remove_file(path).unwrap();
+    let response = router
+        .clone()
+        .oneshot(request(
+            "/api/database/clear",
+            Some(json!({"targets":["account_hourly_snapshots"],"confirm":true})),
+            true,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(db.get_recent_trades(100).unwrap().len(), 2);
+    assert!(db.hourly_account_snapshots(0).unwrap().is_empty());
+    db.save_hourly_account_snapshot(Utc::now().timestamp(), &[])
+        .unwrap();
+    let response = router
+        .clone()
+        .oneshot(request(
+            "/api/database/export",
+            Some(json!({"targets":targets})),
+            true,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let path = std::env::temp_dir().join(format!("target-export-{}.db", uuid::Uuid::new_v4()));
+    std::fs::write(&path, bytes).unwrap();
+    let exported = rusqlite::Connection::open(&path).unwrap();
+    for (table, expected) in [
+        ("trades", 2),
+        ("account_hourly_snapshots", 1),
+        ("app_config", 0),
+        ("auth_sessions", 0),
+    ] {
+        let count: i64 = exported
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, expected, "{table}");
+    }
+    drop(exported);
+    std::fs::remove_file(path).unwrap();
+    let response = router
+        .oneshot(request(
+            "/api/database/clear",
+            Some(json!({"targets":targets,"confirm":true})),
+            true,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let result = response_json(response).await;
+    assert_eq!(result["data"]["deleted_trades"], 2);
+    assert_eq!(result["data"]["deleted_account_hourly_snapshots"], 1);
+    assert!(db.get_recent_trades(100).unwrap().is_empty());
+    assert!(db.hourly_account_snapshots(0).unwrap().is_empty());
+    assert!(db.load_config().unwrap().is_some());
+    assert!(states[0].is_token_valid("multi-pair-token").await);
+    for (state, trade) in states.iter().zip([sol, btc]) {
+        assert_eq!(
+            db.last_fill_for(&trade.symbol, trade.mode).unwrap(),
+            Some((OrderSide::Buy, dec!(100)))
+        );
+        assert!(state.record_trade(trade, None, None, None).await);
+        assert!(state.snapshot().await.recent_trades.is_empty());
+    }
+    assert!(db.get_recent_trades(100).unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn api_routes_authenticate_and_dispatch_to_the_selected_pair_only() {
     let (db, states, mut actions) = fixture();

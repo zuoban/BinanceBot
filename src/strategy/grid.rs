@@ -2167,22 +2167,35 @@ impl GridTradingEngine {
         if order.side == config.grid.direction.closing_side() {
             if let Some(paired_id) = &order.paired_client_order_id {
                 let paired_id = paired_id.clone();
-                let opening_trade = self
+                let symbol = order.symbol.clone();
+                let opening = match self
                     .state
                     .db
-                    .run_blocking(move |db| db.get_trade_by_client_id(&paired_id, mode))
+                    .run_blocking(move |db| db.get_pair_opening(&symbol, &paired_id, mode))
                     .await
-                    .ok()
-                    .flatten()
-                    .filter(|trade| trade.side == config.grid.direction.opening_side());
-                if let Some(opening) = opening_trade {
-                    cycle_profit = (order.price - opening.price)
+                {
+                    Ok(opening) => opening,
+                    Err(error) => {
+                        error!("Could not load paired opening: {}", error);
+                        self.state
+                            .active_orders
+                            .write()
+                            .await
+                            .insert(order.client_order_id.clone(), order.clone());
+                        self.pause_trading().await;
+                        return false;
+                    }
+                };
+                if let Some((_, price, quantity)) =
+                    opening.filter(|(side, _, _)| *side == config.grid.direction.opening_side())
+                {
+                    cycle_profit = (order.price - price)
                         * config.grid.direction.sign()
-                        * order.quantity.min(opening.quantity);
+                        * order.quantity.min(quantity);
                     is_completed_cycle = true;
                     note = format!(
                         "Completed Grid Cycle! {} at {} (Paired Entry: {}, Spread Estimate: {} USDC)",
-                        order.side.as_str(), order.price, opening.price, cycle_profit
+                        order.side.as_str(), order.price, price, cycle_profit
                     );
                     self.state.add_log("SUCCESS", note.clone()).await;
                 }

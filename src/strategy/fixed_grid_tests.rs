@@ -640,6 +640,119 @@ async fn history_cleanup_keeps_the_window_boundary_and_does_not_reapply_fills() 
 }
 
 #[tokio::test]
+async fn paired_paper_close_after_history_cleanup_records_the_cycle_spread() {
+    for symbol_only in [true, false] {
+        for (direction, opening_side, closing_side, opening_price) in [
+            (
+                GridDirection::Long,
+                OrderSide::Buy,
+                OrderSide::Sell,
+                dec!(100),
+            ),
+            (
+                GridDirection::Short,
+                OrderSide::Sell,
+                OrderSide::Buy,
+                dec!(110),
+            ),
+        ] {
+            let mut engine = paper_engine().await;
+            engine.state.config.write().await.grid.direction = direction;
+            let mut opening = order("paired_cleanup_open", opening_side, opening_price, dec!(2));
+            assert!(engine.on_order_filled(&mut opening).await);
+
+            let mut closing = new_pair_intent(&opening, closing_side, dec!(105), dec!(2));
+            engine
+                .state
+                .active_orders
+                .write()
+                .await
+                .insert(closing.client_order_id.clone(), closing.clone());
+
+            // Paper orders exist in memory; they are not saved as managed live orders.
+            assert!(engine
+                .state
+                .db
+                .load_managed_orders("SOLUSDC")
+                .unwrap()
+                .is_empty());
+            let mut other_trade = engine
+                .state
+                .db
+                .get_trade_by_client_id(&opening.client_order_id, TradingMode::Paper)
+                .unwrap()
+                .unwrap();
+            other_trade.trade_id = "other_symbol_trade".into();
+            other_trade.client_order_id = "other_symbol_order".into();
+            other_trade.symbol = "BTCUSDC".into();
+            assert!(engine.state.db.insert_trade(&other_trade).unwrap());
+
+            let deleted = if symbol_only {
+                engine
+                    .state
+                    .clear_symbol_trade_history("SOLUSDC".into())
+                    .await
+                    .unwrap()
+                    .0
+            } else {
+                engine.state.clear_trade_history().await.unwrap()
+            };
+            assert_eq!(deleted, if symbol_only { 1 } else { 2 });
+            assert!(engine
+                .state
+                .db
+                .get_recent_trades_for("SOLUSDC", TradingMode::Paper, 10)
+                .unwrap()
+                .is_empty());
+            assert_eq!(
+                engine.state.db.get_recent_trades(10).unwrap().len(),
+                if symbol_only { 1 } else { 0 }
+            );
+            assert!(engine.state.recent_trades.read().await.is_empty());
+            assert_eq!(engine.state.stats.read().await.total_trades, 0);
+            assert_eq!(orders(&engine).await.len(), 1);
+
+            assert!(engine.on_order_filled(&mut closing).await);
+            assert!(orders(&engine).await.is_empty());
+            assert_eq!(engine.state.position.read().await.size, Decimal::ZERO);
+            let stats = engine.state.stats.read().await.clone();
+            assert_eq!(stats.total_trades, 1);
+            assert_eq!(stats.completed_cycles, 1);
+            assert_eq!(stats.total_realized_profit, dec!(10));
+            assert_eq!(stats.total_realized_pnl, dec!(10));
+            let trades = engine
+                .state
+                .db
+                .get_recent_trades_for("SOLUSDC", TradingMode::Paper, 10)
+                .unwrap();
+            assert_eq!(trades.len(), 1);
+            assert_eq!(trades[0].client_order_id, closing.client_order_id);
+            assert_eq!(trades[0].realized_pnl, dec!(10));
+            assert_eq!(
+                engine
+                    .state
+                    .db
+                    .load_scoped_stats("SOLUSDC", TradingMode::Paper)
+                    .unwrap()
+                    .unwrap()
+                    .1,
+                1
+            );
+            assert_eq!(
+                engine
+                    .state
+                    .db
+                    .load_scoped_stats("SOLUSDC", TradingMode::Paper)
+                    .unwrap()
+                    .unwrap()
+                    .2,
+                dec!(10)
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn sell_window_follows_market_and_prunes_stale_orders_without_a_historical_floor() {
     let mut engine = paper_engine().await;
     engine.state.config.write().await.grid.order_amount_usdc = dec!(300);

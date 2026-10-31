@@ -32,6 +32,92 @@ fn trade(id: usize, symbol: &str, mode: TradingMode) -> TradeRecord {
 }
 
 #[tokio::test]
+async fn single_pair_routes_export_and_clear_only_the_requested_symbol() {
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    let mut config = AppConfig::default();
+    config.exchange.symbol = "SOLUSDC".into();
+    db.save_config(&config).unwrap();
+    for (id, symbol) in [(1, "SOLUSDC"), (2, "BTCUSDT")] {
+        db.insert_trade_with_stats(
+            &trade(id, symbol, TradingMode::Paper),
+            &GridStats::default(),
+        )
+        .unwrap();
+    }
+    let (action_tx, _action_rx) = mpsc::channel(1);
+    let state = AppState::new(config, db.clone(), action_tx);
+    state.create_session("pair-cleanup-token").await.unwrap();
+    let app = create_router(state);
+
+    for (path, method) in [
+        ("/api/pairs/BTCUSDT/database/export", "GET"),
+        ("/api/pairs/BTCUSDT/trades/clear", "POST"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header("Authorization", "Bearer pair-cleanup-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"confirm":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/pairs/SOLUSDC/database/export")
+                .header("Authorization", "Bearer pair-cleanup-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let path = std::env::temp_dir().join(format!("single-pair-export-{}.db", uuid::Uuid::new_v4()));
+    std::fs::write(&path, bytes).unwrap();
+    let exported = rusqlite::Connection::open(&path).unwrap();
+    let symbols: Vec<String> = exported
+        .prepare("SELECT symbol FROM trades")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(symbols, vec!["SOLUSDC"]);
+    drop(exported);
+    std::fs::remove_file(path).unwrap();
+
+    for (confirm, expected) in [(false, StatusCode::BAD_REQUEST), (true, StatusCode::OK)] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/pairs/SOLUSDC/trades/clear")
+                    .header("Authorization", "Bearer pair-cleanup-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(json!({"confirm": confirm}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+    }
+    let remaining = db.get_recent_trades(100).unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].symbol, "BTCUSDT");
+}
+
+#[tokio::test]
 async fn cleanup_requires_auth_and_confirmation_then_clears_every_scope() {
     let db = Arc::new(Database::open(":memory:").unwrap());
     let mut stats = GridStats::default();
