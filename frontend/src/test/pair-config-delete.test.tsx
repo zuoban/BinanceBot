@@ -5,6 +5,7 @@ import { createMemoryRouter, RouterProvider } from 'react-router-dom';
 import { beforeEach, expect, it, vi } from 'vitest';
 import Shell from '../components/Shell';
 import PairConfig from '../pages/PairConfig';
+import { ApiError } from '../lib/api';
 import { pair } from './fixtures';
 
 const mocks = vi.hoisted(() => ({ confirm: vi.fn(), success: vi.fn(), error: vi.fn(), api: vi.fn(), post: vi.fn() }));
@@ -26,7 +27,7 @@ beforeEach(() => {
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
 });
 function setup(request: Promise<unknown>) {
-  mocks.api.mockImplementation((_: string, init?: RequestInit) => init?.method === 'DELETE' ? request : Promise.resolve(pair('BTCUSDC').grid_config));
+  mocks.api.mockImplementation((_: string, init?: RequestInit) => init?.method === 'DELETE' ? request : Promise.resolve({ ...pair('BTCUSDC').grid_config, config_version: 'version-1' }));
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const router = createMemoryRouter([{ element: <Shell />, children: [
     { path: '/', element: <div>总览页面</div> },
@@ -78,8 +79,32 @@ it('returns to detail after saving changed parameters', async () => {
   await user.click(screen.getByRole('button', { name: '保存并立即生效' }));
   expect(await screen.findByText('策略详情页面')).toBeInTheDocument();
   expect(router.state.location.pathname).toBe('/pairs/BTCUSDC');
+  expect(mocks.post).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ baseline_version: 'version-1' }));
   expect(mocks.confirm).not.toHaveBeenCalled();
 }, 15000);
+
+it('保留冲突时的输入，并在确认后重新加载版本', async () => {
+  setup(Promise.resolve());
+  mocks.post.mockRejectedValueOnce(new ApiError('策略配置已被其他请求修改', 409));
+  const user = userEvent.setup();
+  const input = await screen.findByLabelText('网格间距');
+  await waitFor(() => expect(input).toBeEnabled());
+  await user.clear(input);
+  await user.type(input, '0.2');
+  await user.click(screen.getByRole('button', { name: '保存并立即生效' }));
+  const reload = await screen.findByRole('button', { name: '重新加载策略配置' });
+  expect(input).toHaveValue('0.2');
+  expect(mocks.post).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ baseline_version: 'version-1' }));
+  mocks.confirm.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+  await user.click(reload);
+  expect(input).toHaveValue('0.2');
+  mocks.api.mockResolvedValue({ ...pair('BTCUSDC').grid_config, grid_interval: '0.3', config_version: 'version-2' });
+  await user.click(reload);
+  await waitFor(() => expect(input).toHaveValue('0.3'));
+  mocks.post.mockResolvedValue(pair('BTCUSDC').grid_config);
+  await user.click(screen.getByRole('button', { name: '保存并立即生效' }));
+  await waitFor(() => expect(mocks.post).toHaveBeenLastCalledWith(expect.any(String), expect.objectContaining({ baseline_version: 'version-2' })));
+}, 20000);
 
 it('does not redirect again after the user navigates while queries refresh', async () => {
   let finish!: () => void;

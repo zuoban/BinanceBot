@@ -71,8 +71,24 @@ impl Database {
         let conn = Connection::open(path_ref)
             .with_context(|| format!("Failed to open SQLite database at {:?}", path_ref))?;
 
-        // Enable WAL mode and normal synchronous for better write throughput and concurrency
-        let _ = conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;");
+        // Persist committed order intents across power loss before sending orders.
+        let journal_mode: String = conn
+            .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+            .context("Failed to enable SQLite WAL journal mode")?;
+        anyhow::ensure!(
+            journal_mode.eq_ignore_ascii_case(if path_str == ":memory:" {
+                "memory"
+            } else {
+                "wal"
+            }),
+            "SQLite journal mode is {journal_mode}, expected WAL"
+        );
+        conn.execute_batch("PRAGMA synchronous = FULL;")
+            .context("Failed to configure SQLite synchronous mode")?;
+        let synchronous: i64 = conn
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .context("Failed to read SQLite synchronous mode")?;
+        anyhow::ensure!(synchronous == 2, "SQLite synchronous mode is not FULL");
 
         let db = Self {
             conn: Mutex::new(conn),
@@ -444,6 +460,104 @@ impl Database {
         Ok(inserted == 1)
     }
 
+    pub fn initialize_admin_session(&self, password: &str, token: &str) -> Result<bool> {
+        let hash = auth::hash_password_argon2(password)?;
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let inserted = tx.execute(
+            "INSERT OR IGNORE INTO admin_auth (id, password_hash, salt, updated_at) VALUES (1, ?1, '', ?2)",
+            params![hash, Utc::now().to_rfc3339()],
+        )?;
+        if inserted == 0 {
+            return Ok(false);
+        }
+        tx.execute(
+            "INSERT INTO auth_sessions (token, created_at) VALUES (?1, ?2)",
+            params![token, Utc::now().to_rfc3339()],
+        )
+        .context("Failed to create initial session")?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    fn password_record(&self) -> Result<Option<(String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn
+            .query_row(
+                "SELECT password_hash, salt FROM admin_auth WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?)
+    }
+
+    fn password_matches(password: &str, hash: &str, salt: &str) -> bool {
+        if hash.starts_with("$argon2") {
+            auth::verify_password_argon2(password, hash)
+        } else {
+            auth::hash_password(password, salt) == hash
+        }
+    }
+
+    pub fn authenticate_and_create_session(&self, password: &str, token: &str) -> Result<bool> {
+        let Some((hash, salt)) = self.password_record()? else {
+            return Ok(false);
+        };
+        if !Self::password_matches(password, &hash, &salt) {
+            return Ok(false);
+        }
+        let upgraded = if hash.starts_with("$argon2") {
+            None
+        } else {
+            Some(auth::hash_password_argon2(password)?)
+        };
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let unchanged: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM admin_auth WHERE id = 1 AND password_hash = ?1 AND salt = ?2)",
+            params![hash, salt], |row| row.get(0),
+        )?;
+        if !unchanged {
+            return Ok(false);
+        }
+        if let Some(upgraded) = upgraded {
+            tx.execute(
+                "UPDATE admin_auth SET password_hash = ?1, salt = '', updated_at = ?2 WHERE id = 1",
+                params![upgraded, Utc::now().to_rfc3339()],
+            )?;
+        }
+        tx.execute(
+            "INSERT INTO auth_sessions (token, created_at) VALUES (?1, ?2)",
+            params![token, Utc::now().to_rfc3339()],
+        )
+        .context("Failed to create session")?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    pub fn change_admin_password(&self, old_password: &str, new_password: &str) -> Result<bool> {
+        let Some((hash, salt)) = self.password_record()? else {
+            return Ok(false);
+        };
+        if !Self::password_matches(old_password, &hash, &salt) {
+            return Ok(false);
+        }
+        let new_hash = auth::hash_password_argon2(new_password)?;
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let updated = tx.execute(
+            "UPDATE admin_auth SET password_hash = ?1, salt = '', updated_at = ?2 WHERE id = 1 AND password_hash = ?3 AND salt = ?4",
+            params![new_hash, Utc::now().to_rfc3339(), hash, salt],
+        )?;
+        if updated == 0 {
+            return Ok(false);
+        }
+        tx.execute("DELETE FROM auth_sessions", [])
+            .context("Failed to clear sessions")?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     pub fn verify_admin_password(&self, password: &str) -> Result<bool> {
         let stored: Option<(String, String)> = {
             let conn = self.conn.lock().unwrap();
@@ -462,9 +576,15 @@ impl Database {
         }
         let valid = auth::hash_password(password, &salt) == stored_hash;
         if valid {
-            self.set_admin_password(password)?;
+            let upgraded = auth::hash_password_argon2(password)?;
+            let conn = self.conn.lock().unwrap();
+            let updated = conn.execute(
+                "UPDATE admin_auth SET password_hash = ?1, salt = '', updated_at = ?2 WHERE id = 1 AND password_hash = ?3 AND salt = ?4",
+                params![upgraded, Utc::now().to_rfc3339(), stored_hash, salt],
+            )?;
+            return Ok(updated == 1);
         }
-        Ok(valid)
+        Ok(false)
     }
 
     pub fn create_session(&self, token: &str) -> Result<()> {
@@ -1434,6 +1554,32 @@ fn trade_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TradeRecord> {
 mod tests {
     use super::*;
     use rust_decimal_macros::dec;
+
+    #[test]
+    fn database_uses_durable_journal_settings() {
+        let path = std::env::temp_dir().join(format!("durable-{}.db", uuid::Uuid::new_v4()));
+        let db = Database::open(&path).unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            let journal: String = conn
+                .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+                .unwrap();
+            let synchronous: i64 = conn
+                .query_row("PRAGMA synchronous", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(journal, "wal");
+            assert_eq!(synchronous, 2);
+        }
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+
+        let memory = Database::open(":memory:").unwrap();
+        let conn = memory.conn.lock().unwrap();
+        let journal: String = conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal, "memory");
+    }
 
     #[test]
     fn cleanup_preserves_frontiers_and_deduplication_across_restarts() {

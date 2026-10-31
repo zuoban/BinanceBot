@@ -4,7 +4,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { Alert, App, Button, Card, Checkbox, Col, Form, Input, InputNumber, Row, Select, Space, Switch } from 'antd';
 import { ArrowLeftOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { api, pairPath, post } from '../lib/api';
+import { api, ApiError, pairPath, post } from '../lib/api';
 import { usePairs } from '../lib/queries';
 import { EditContext } from '../lib/session';
 import type { GridConfig } from '../lib/types';
@@ -29,22 +29,25 @@ export default function PairConfig() {
   const [ready, setReady] = useState(adding);
   const deletion = useDeleteStrategy();
   const removing = useRef(false);
+  const baseline = useRef<{ symbol: string; config: GridConfig & { config_version: string } } | null>(null);
   const selectedMode = Form.useWatch('mode', form);
-  const config = useQuery({ queryKey: ['config', symbol, pair?.scoped], queryFn: ({ signal }) => api<GridConfig>(pairPath(pair!, 'config'), { signal }), enabled: !!pair, refetchOnWindowFocus: false });
+  const config = useQuery({ queryKey: ['config', symbol, pair?.scoped], queryFn: ({ signal }) => api<GridConfig & { config_version: string }>(pairPath(pair!, 'config'), { signal }), enabled: !!pair, refetchOnWindowFocus: false });
   useEffect(() => {
     setReady(adding);
+    baseline.current = null;
     form.resetFields();
     if (adding) form.setFieldsValue(defaults);
   }, [symbol, adding, form]);
   useEffect(() => {
-    if (config.data && !ready && !adding) { form.setFieldsValue(toForm(config.data)); setReady(true); }
-  }, [config.data, ready, adding, form]);
+    if (config.data && !ready && !adding && symbol) { baseline.current = { symbol, config: config.data }; form.setFieldsValue(toForm(config.data)); setReady(true); }
+  }, [config.data, ready, adding, form, symbol]);
   useEffect(() => () => { edit.setDirty(false); edit.setSaving(false); }, [edit.setDirty, edit.setSaving]);
   const mutation = useMutation({
     mutationFn: (values: FormValues) => {
       const { mode, ...fields } = values;
+      if (!adding && (typeof baseline.current?.config.config_version !== 'string' || !baseline.current.config.config_version || baseline.current.symbol !== symbol)) throw new Error('无法确认配置版本，请重新加载策略配置');
       return post<GridConfig | string>(adding ? '/api/pairs' : pairPath(pair!, 'config'), {
-        ...fields, symbol: fields.symbol.trim().toUpperCase(),
+        ...fields, ...(!adding && { baseline_version: baseline.current?.config.config_version }), symbol: fields.symbol.trim().toUpperCase(),
         dry_run: mode === 'PAPER', is_testnet: mode === 'TESTNET',
         min_price: fields.min_price || null, max_price: fields.max_price || null, max_position_usdc: fields.max_position_usdc || null,
       });
@@ -86,7 +89,13 @@ export default function PairConfig() {
   };
   return <>
     <PageTitle title={adding ? '新增交易对' : `${symbol} 策略参数`} description={adding ? '新策略创建后保持暂停，检查参数后手动恢复。' : '参数保存后立即生效，请先核对策略设置。'} extra={!adding && <Button icon={<ArrowLeftOutlined aria-hidden="true" />} disabled={edit.saving} onClick={() => navigate(`/pairs/${symbol}`)}>返回详情</Button>} />
-    <ErrorNotice error={pairs.error || config.error || mutation.error} retry={() => { if (!adding) void config.refetch(); }} />
+    <ErrorNotice error={pairs.error || config.error} retry={() => { if (!adding) void config.refetch(); }} />
+    <ErrorNotice error={mutation.error} />
+    {!adding && (mutation.error instanceof ApiError && mutation.error.status === 409 || mutation.error?.message.includes('无法确认配置版本')) && <Button onClick={async () => {
+      if (!await modal.confirm({ title: '重新加载策略配置？', content: '重新加载会放弃当前未保存的修改，请先记录需要保留的内容。', okText: '重新加载', cancelText: '继续编辑' })) return;
+      const result = await config.refetch();
+      if (!result.error && result.data && symbol) { baseline.current = { symbol, config: result.data }; form.setFieldsValue(toForm(result.data)); edit.setDirty(false); mutation.reset(); }
+    }}>重新加载策略配置</Button>}
     {pairs.data && !pair && !adding && <Alert type="warning" title="该交易对不存在或已移除" />}
     <Form<FormValues> className="config-form" form={form} layout="vertical" onFinish={values => void submit(values)} onValuesChange={() => edit.setDirty(true)} disabled={!ready || edit.saving || deletion.busy}>
       <Card title="基本设置">
@@ -117,7 +126,7 @@ export default function PairConfig() {
         </Row>
       </Card>
       <div className="save-bar"><span className="muted">{edit.dirty ? '有未保存的修改' : '所有修改已保存'}</span><Space wrap>
-        <Button onClick={async () => { if (edit.dirty && !await modal.confirm({ title: '放弃未保存的修改？', okText: '还原', cancelText: '继续编辑' })) return; if (adding) form.setFieldsValue(defaults); else if (config.data) form.setFieldsValue(toForm(config.data)); edit.setDirty(false); }}>还原</Button>
+        <Button onClick={async () => { if (edit.dirty && !await modal.confirm({ title: '放弃未保存的修改？', okText: '还原', cancelText: '继续编辑' })) return; if (adding) form.setFieldsValue(defaults); else if (baseline.current?.symbol === symbol) form.setFieldsValue(toForm(baseline.current.config)); edit.setDirty(false); }}>还原</Button>
         <Button htmlType="submit" loading={mutation.isPending}>{adding ? '保存并添加' : '保存并立即生效'}</Button>
       </Space></div>
       {!adding && <Card className="danger-zone" title="删除策略"><p>删除前请暂停策略并等待挂单撤销；不会自动平仓，已有持仓和历史记录会保留。</p><Button danger disabled={edit.saving} loading={deletion.busy} onClick={() => void remove()}>删除策略</Button></Card>}

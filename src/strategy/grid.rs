@@ -560,6 +560,24 @@ impl GridTradingEngine {
             )
             .await;
 
+        // Restore managed metadata before any exchange request can fail. A
+        // subsequent initial pause must reconcile these orders before clearing them.
+        if !config.exchange.dry_run {
+            let restore_symbol = symbol.clone();
+            let restored = self
+                .state
+                .db
+                .run_blocking(move |db| db.load_managed_orders(&restore_symbol))
+                .await?;
+            let mut active = self.state.active_orders.write().await;
+            for order in restored
+                .into_iter()
+                .filter(|order| is_grid_order(&order.client_order_id))
+            {
+                active.insert(order.client_order_id.clone(), order);
+            }
+        }
+
         // Synchronize server time
         if let Err(e) = self.client.sync_server_time().await {
             warn!("Failed to synchronize Binance server time: {}", e);
@@ -624,27 +642,13 @@ impl GridTradingEngine {
             ticker.volume_24h = t24.volume;
         }
 
-        // If not dry-run, load existing open orders
-        if !config.exchange.dry_run {
-            let restored = self
-                .state
-                .db
-                .run_blocking(move |db| db.load_managed_orders(&symbol))
-                .await?;
-            {
-                let mut active_map = self.state.active_orders.write().await;
-                for order in restored
-                    .into_iter()
-                    .filter(|order| is_grid_order(&order.client_order_id))
-                {
-                    active_map.insert(order.client_order_id.clone(), order);
-                }
-            }
-            if !self.sync_account_and_position().await || !self.sync_live_orders().await {
-                return Err(anyhow!(
-                    "Could not reconcile Binance account and managed orders at startup"
-                ));
-            }
+        // Reconcile restored orders only after the exchange prerequisites are ready.
+        if !config.exchange.dry_run
+            && (!self.sync_account_and_position().await || !self.sync_live_orders().await)
+        {
+            return Err(anyhow!(
+                "Could not reconcile Binance account and managed orders at startup"
+            ));
         }
 
         Ok(())
@@ -3063,11 +3067,12 @@ impl GridTradingEngine {
         let mode = TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
         let pause_epoch = self.state.pause_epoch();
         let was_running = *self.state.status.read().await == BotStatus::Running;
+        let mut recovery_failed = false;
         if let Err(e) = self.state.pause_trading_silently().await {
             error!("Failed to persist paused status before cancellation: {}", e);
             self.pause_trading_with_reason("撤单前保存策略状态失败")
                 .await;
-            return false;
+            recovery_failed = true;
         }
 
         if let Err(e) = self.cancel_remainder_plan().await {
@@ -3077,18 +3082,70 @@ impl GridTradingEngine {
             );
             self.pause_trading_with_reason("未能确认余量挂单撤销，策略已暂停")
                 .await;
-            return false;
+            recovery_failed = true;
         }
 
         if !is_dry_run {
+            // Initialization may have failed while loading recovery metadata.
+            // Never clear persisted orders without first restoring and reconciling them.
+            let restore_symbol = symbol.clone();
+            let restored = match self
+                .state
+                .db
+                .run_blocking(move |db| db.load_managed_orders(&restore_symbol))
+                .await
+            {
+                Ok(orders) => orders,
+                Err(e) => {
+                    error!("Failed to load managed orders before cancellation: {}", e);
+                    self.pause_trading().await;
+                    recovery_failed = true;
+                    Vec::new()
+                }
+            };
+            {
+                let mut active = self.state.active_orders.write().await;
+                for order in restored
+                    .into_iter()
+                    .filter(|order| is_grid_order(&order.client_order_id))
+                {
+                    active.entry(order.client_order_id.clone()).or_insert(order);
+                }
+            }
             let live_orders = match self.client.get_open_orders(&symbol).await {
                 Ok(orders) => orders,
                 Err(e) => {
                     error!("Failed to list managed orders before cancellation: {}", e);
                     self.pause_trading().await;
+                    // The exchange listing is incomplete, but known orders can still
+                    // be canceled individually. Preserve all recovery metadata.
+                    let known: Vec<_> = self
+                        .state
+                        .active_orders
+                        .read()
+                        .await
+                        .values()
+                        .cloned()
+                        .collect();
+                    for order in known
+                        .iter()
+                        .filter(|order| is_grid_order(&order.client_order_id))
+                    {
+                        if let Err(error) = self
+                            .client
+                            .cancel_order(&symbol, order.order_id, Some(&order.client_order_id))
+                            .await
+                        {
+                            warn!(
+                                "Failed to cancel known managed order {}: {}",
+                                order.client_order_id, error
+                            );
+                        }
+                    }
                     return false;
                 }
             };
+            let mut cancellation_failed = false;
             for order in live_orders
                 .into_iter()
                 .filter(|order| is_grid_order(&order.client_order_id))
@@ -3117,8 +3174,13 @@ impl GridTradingEngine {
                         order.client_order_id, e
                     );
                     self.pause_trading().await;
-                    return false;
+                    cancellation_failed = true;
                 }
+            }
+            // Without the complete recovery metadata, even a terminal exchange
+            // response cannot safely account for fills or justify clearing records.
+            if recovery_failed || cancellation_failed {
+                return false;
             }
             if !self.sync_live_orders().await || !self.state.active_orders.read().await.is_empty() {
                 error!("Managed orders could not be fully reconciled after cancellation");
@@ -3127,6 +3189,9 @@ impl GridTradingEngine {
             }
         }
 
+        if recovery_failed {
+            return false;
+        }
         self.state.active_orders.write().await.clear();
         if !is_dry_run {
             if let Err(e) = self
@@ -3216,6 +3281,7 @@ mod tests {
         orders: Arc<Mutex<HashMap<String, BinanceOrderResponse>>>,
         posts: Arc<Mutex<Vec<String>>>,
         fail_lookup: Arc<AtomicUsize>,
+        fail_open_orders: Arc<AtomicUsize>,
         lose_response: Arc<AtomicUsize>,
     }
 
@@ -3235,11 +3301,14 @@ mod tests {
             .route(
                 "/fapi/v1/openOrders",
                 get(|State(fake): State<PairExchange>| async move {
+                    if consume_failure(&fake.fail_open_orders) {
+                        return (axum::http::StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"code": -1000})));
+                    }
                     let orders: Vec<_> = fake.orders.lock().unwrap().values()
                         .filter(|order| matches!(order.status.as_str(), "NEW" | "PARTIALLY_FILLED"))
                         .cloned()
                         .collect();
-                    Json(orders)
+                    (axum::http::StatusCode::OK, Json(serde_json::to_value(orders).unwrap()))
                 }),
             )
             .route(
@@ -3252,6 +3321,13 @@ mod tests {
                         Some(order) => (axum::http::StatusCode::OK, Json(serde_json::to_value(order).unwrap())),
                         None => (axum::http::StatusCode::BAD_REQUEST, Json(serde_json::json!({"code": -2013, "msg": "Order does not exist"}))),
                     }
+                })
+                .delete(|State(fake): State<PairExchange>, Query(query): Query<HashMap<String, String>>| async move {
+                    let id: i64 = query["orderId"].parse().unwrap();
+                    let mut orders = fake.orders.lock().unwrap();
+                    let order = orders.values_mut().find(|order| order.order_id == id).unwrap();
+                    order.status = "CANCELED".into();
+                    Json(order.clone())
                 })
                 .post(|State(fake): State<PairExchange>, Query(query): Query<HashMap<String, String>>| async move {
                     let id = query["newClientOrderId"].clone();
@@ -3358,6 +3434,250 @@ mod tests {
         engine.last_account_sync = Some(Instant::now());
         engine.last_orders_sync = Some(Instant::now());
         engine
+    }
+
+    #[tokio::test]
+    async fn cancellation_continues_when_managed_metadata_cannot_be_read() {
+        let (config, _, mut order) = pending_pair_fixture();
+        let path = std::env::temp_dir().join(format!(
+            "grid-cancel-fault-{}-{}.db",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let db = Arc::new(Database::open(&path).unwrap());
+        db.save_bot_status(BotStatus::Running).unwrap();
+        order.client_order_id = "gb_b_partial_fault".into();
+        order.order_id = Some(777);
+        db.save_managed_order(&order).unwrap();
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute(
+            "UPDATE managed_orders SET order_json = 'invalid' WHERE client_order_id = ?1",
+            [&order.client_order_id],
+        )
+        .unwrap();
+        let fake = PairExchange::default();
+        let exchange_order = BinanceOrderResponse {
+            order_id: 777,
+            client_order_id: order.client_order_id.clone(),
+            symbol: order.symbol.clone(),
+            status: "PARTIALLY_FILLED".into(),
+            price: order.price,
+            avg_price: Some(order.price),
+            orig_qty: order.quantity,
+            executed_qty: dec!(0.5),
+            side: order.side.as_str().into(),
+            order_type: "LIMIT".into(),
+            time_in_force: "GTX".into(),
+            update_time: None,
+        };
+        fake.orders
+            .lock()
+            .unwrap()
+            .insert(order.client_order_id.clone(), exchange_order.clone());
+        let mut manual = exchange_order;
+        manual.order_id = 778;
+        manual.client_order_id = "manual_order".into();
+        fake.orders
+            .lock()
+            .unwrap()
+            .insert(manual.client_order_id.clone(), manual);
+        let (url, server) = pair_exchange_server(fake.clone()).await;
+        let mut engine = pair_recovery_engine(&config, db.clone(), url).await;
+        engine
+            .state
+            .active_orders
+            .write()
+            .await
+            .insert(order.client_order_id.clone(), order.clone());
+
+        assert!(!engine.cancel_all_orders().await);
+        assert_eq!(*engine.state.status.read().await, BotStatus::Paused);
+        assert!(engine
+            .state
+            .active_orders
+            .read()
+            .await
+            .contains_key(&order.client_order_id));
+        assert_eq!(
+            fake.orders.lock().unwrap()[&order.client_order_id].status,
+            "CANCELED"
+        );
+        assert_eq!(
+            fake.orders.lock().unwrap()["manual_order"].status,
+            "PARTIALLY_FILLED"
+        );
+        let json: String = conn
+            .query_row(
+                "SELECT order_json FROM managed_orders WHERE client_order_id = ?1",
+                [&order.client_order_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(json, "invalid");
+        assert!(db
+            .get_trade_by_client_id(&order.client_order_id, TradingMode::Live)
+            .unwrap()
+            .is_none());
+        server.abort();
+        drop(engine);
+        drop(db);
+        drop(conn);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn cancellation_continues_when_exchange_listing_fails() {
+        let (config, _, mut order) = pending_pair_fixture();
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        db.save_bot_status(BotStatus::Running).unwrap();
+        order.client_order_id = "gb_b_listing_fault".into();
+        order.order_id = Some(779);
+        db.save_managed_order(&order).unwrap();
+        let fake = PairExchange::default();
+        fake.fail_open_orders.store(100, Ordering::SeqCst);
+        fake.orders.lock().unwrap().insert(
+            order.client_order_id.clone(),
+            BinanceOrderResponse {
+                order_id: 779,
+                client_order_id: order.client_order_id.clone(),
+                symbol: order.symbol.clone(),
+                status: "PARTIALLY_FILLED".into(),
+                price: order.price,
+                avg_price: Some(order.price),
+                orig_qty: order.quantity,
+                executed_qty: dec!(0.5),
+                side: order.side.as_str().into(),
+                order_type: "LIMIT".into(),
+                time_in_force: "GTX".into(),
+                update_time: None,
+            },
+        );
+        let (url, server) = pair_exchange_server(fake.clone()).await;
+        let mut engine = pair_recovery_engine(&config, db.clone(), url).await;
+        assert!(!engine.cancel_all_orders().await);
+        assert_eq!(*engine.state.status.read().await, BotStatus::Paused);
+        assert_eq!(
+            fake.orders.lock().unwrap()[&order.client_order_id].status,
+            "CANCELED"
+        );
+        assert!(engine
+            .state
+            .active_orders
+            .read()
+            .await
+            .contains_key(&order.client_order_id));
+        assert!(db
+            .load_managed_orders(&order.symbol)
+            .unwrap()
+            .iter()
+            .any(|saved| saved.client_order_id == order.client_order_id));
+        assert!(db
+            .get_trade_by_client_id(&order.client_order_id, TradingMode::Live)
+            .unwrap()
+            .is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn failed_initialization_restores_orders_before_initial_cancellation() {
+        let (config, db, mut order) = pending_pair_fixture();
+        order.client_order_id = "gb_b_startup_unknown".into();
+        order.order_id = None;
+        order.created_at = Utc::now();
+        db.save_managed_order(&order).unwrap();
+        let (url, server) = pair_exchange_server(PairExchange::default()).await;
+        let mut engine = pair_recovery_engine(&config, db.clone(), url).await;
+
+        assert!(engine.initialize().await.is_err());
+        assert!(engine
+            .state
+            .active_orders
+            .read()
+            .await
+            .contains_key(&order.client_order_id));
+        assert!(!engine.cancel_all_orders().await);
+        assert!(db
+            .load_managed_orders("SOLUSDC")
+            .unwrap()
+            .iter()
+            .any(|saved| saved.client_order_id == order.client_order_id));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn cancellation_restores_orders_even_if_initial_recovery_was_skipped() {
+        let (config, db, mut order) = pending_pair_fixture();
+        order.client_order_id = "gb_b_cancel_unknown".into();
+        order.order_id = None;
+        order.created_at = Utc::now();
+        db.save_managed_order(&order).unwrap();
+        let (url, server) = pair_exchange_server(PairExchange::default()).await;
+        let mut engine = pair_recovery_engine(&config, db.clone(), url).await;
+
+        assert!(!engine.cancel_all_orders().await);
+        assert!(engine
+            .state
+            .active_orders
+            .read()
+            .await
+            .contains_key(&order.client_order_id));
+        assert!(db
+            .load_managed_orders("SOLUSDC")
+            .unwrap()
+            .iter()
+            .any(|saved| saved.client_order_id == order.client_order_id));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn unresolved_order_keeps_confirmed_fill_behind_reconciliation_barrier() {
+        let (config, db, mut unresolved) = pending_pair_fixture();
+        unresolved.client_order_id = "gb_b_unknown_frontier".into();
+        unresolved.order_id = None;
+        unresolved.created_at = Utc::now();
+        let mut filled = unresolved.clone();
+        filled.client_order_id = "gb_b_confirmed_frontier".into();
+        db.save_managed_order(&unresolved).unwrap();
+        db.save_managed_order(&filled).unwrap();
+        let fake = PairExchange::default();
+        fake.orders.lock().unwrap().insert(
+            filled.client_order_id.clone(),
+            BinanceOrderResponse {
+                order_id: 777,
+                client_order_id: filled.client_order_id.clone(),
+                symbol: filled.symbol.clone(),
+                status: "FILLED".into(),
+                price: filled.price,
+                avg_price: None,
+                orig_qty: filled.quantity,
+                executed_qty: filled.quantity,
+                side: filled.side.as_str().into(),
+                order_type: "LIMIT".into(),
+                time_in_force: "GTX".into(),
+                update_time: Some(Utc::now().timestamp_millis()),
+            },
+        );
+        let (url, server) = pair_exchange_server(fake).await;
+        let mut engine = pair_recovery_engine(&config, db.clone(), url).await;
+        {
+            let mut active = engine.state.active_orders.write().await;
+            active.insert(unresolved.client_order_id.clone(), unresolved);
+            active.insert(filled.client_order_id.clone(), filled.clone());
+        }
+        assert!(!engine.sync_live_orders().await);
+        assert!(engine.last_orders_sync.is_none());
+        assert!(engine
+            .state
+            .active_orders
+            .read()
+            .await
+            .contains_key(&filled.client_order_id));
+        assert!(db
+            .load_managed_orders("SOLUSDC")
+            .unwrap()
+            .iter()
+            .any(|saved| saved.client_order_id == filled.client_order_id));
+        server.abort();
     }
 
     #[test]

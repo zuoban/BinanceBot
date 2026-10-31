@@ -16,7 +16,7 @@ export default function Shell() {
   const overview = useOverview();
   const accounts = useLiveAccounts(overview.data);
   const [dirty, setDirty] = useState(false), [saving, setSaving] = useState(false);
-  const { modal } = App.useApp();
+  const { modal, message } = App.useApp();
   const { logout } = useSession();
   const { preference, setPreference } = useTheme();
   const groups = accountGroups(accounts);
@@ -47,8 +47,8 @@ export default function Shell() {
   const logOut = useCallback(async () => {
     if (saving) return;
     if (dirty && !await modal.confirm({ title: '放弃未保存的修改并退出？', okText: '退出', cancelText: '继续编辑' })) return;
-    await logout();
-  }, [dirty, saving, logout, modal]);
+    try { await logout(); } catch { message.error('退出失败，会话可能仍然有效，请重试'); }
+  }, [dirty, saving, logout, modal, message]);
   return <EditContext.Provider value={context}><AccountsContext.Provider value={accounts}><ControlProvider><Layout className="app-layout">
     <Layout.Header className="topbar">
       <div className="topbar-main">

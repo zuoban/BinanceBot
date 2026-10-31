@@ -270,6 +270,8 @@ fn recent_trade_cache(trades: Vec<TradeRecord>) -> VecDeque<TradeRecord> {
 pub struct AppState {
     pub db: Arc<Database>,
     pub config: RwLock<AppConfig>,
+    pub(crate) config_update_lock: Mutex<()>,
+    pub(crate) config_instance: u128,
     pub rules: RwLock<SymbolRules>,
     pub status: RwLock<BotStatus>,
     pub ticker: RwLock<TickerInfo>,
@@ -439,6 +441,8 @@ impl AppState {
         Arc::new(Self {
             db,
             config: RwLock::new(config),
+            config_update_lock: Mutex::new(()),
+            config_instance: rand::random(),
             rules: RwLock::new(SymbolRules::default()),
             status: RwLock::new(initial_status),
             ticker: RwLock::new(TickerInfo {

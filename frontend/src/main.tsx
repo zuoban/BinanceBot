@@ -29,8 +29,10 @@ const router = createBrowserRouter([{ element: <Shell />, children: [
 function Root() {
   const [loggedIn, setLoggedIn] = useState(!!tokenStore.get());
   const status = useQuery({ queryKey: ['verify-session', loggedIn], queryFn: () => api<AuthStatus>('/api/auth/status'), enabled: loggedIn, retry: false });
-  const logout = useCallback(async () => {
-    try { if (tokenStore.get()) await post('/api/auth/logout', {}); } catch { /* Local logout still succeeds when offline. */ }
+  const logout = useCallback(async (revoked = false) => {
+    const token = tokenStore.get();
+    if (!revoked && token) await post('/api/auth/logout', {});
+    if (tokenStore.get() !== token) return;
     tokenStore.clear(); client.clear(); setLoggedIn(false);
   }, []);
   useEffect(() => {

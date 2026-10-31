@@ -114,7 +114,7 @@ it('提交期间阻止切换，失败后保留修改并要求确认，成功后�
   expect(screen.getByLabelText('当前密码')).toHaveValue('oldsecret');
   mocks.post.mockResolvedValueOnce({});
   await user.click(screen.getByRole('button', { name: '更新密码' }));
-  await waitFor(() => expect(mocks.logout).toHaveBeenCalled());
+  await waitFor(() => expect(mocks.logout).toHaveBeenCalledWith(true));
   expect(screen.getByLabelText('当前密码')).toHaveValue('');
   await user.click(screen.getByRole('tab', { name: '连接与通知' }));
   expect(mocks.confirm).toHaveBeenCalledTimes(1);
