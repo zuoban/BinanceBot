@@ -4,7 +4,7 @@ import { App, Button, Card, Col, Dropdown, Empty, Input, Popover, Row, Select, S
 import { ArrowDownOutlined, ArrowRightOutlined, ArrowUpOutlined, EyeOutlined, PlusOutlined, SearchOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { useOverview } from '../lib/queries';
 import { AccountsContext } from '../lib/session';
-import { accountGroups, comparePositionAmount, modeLabel, number as fixedNumber, positionAmount, positionGroups, price as fixedPrice, quoteAsset, todayCount, todayPnlGroups, todayTradeCounts, trimFractionZeros } from '../lib/format';
+import { accountGroups, comparePositionAmount, modeLabel, numeric, number as fixedNumber, positionAmount, positionGroups, price as fixedPrice, quoteAsset, todayCount, todayPnlGroups, todayTradeCounts, trimFractionZeros } from '../lib/format';
 import { ErrorNotice, ModeTag, PageTitle, Pnl, StatusTag } from '../components/Common';
 import { runBatchControls, useControls } from '../components/Controls';
 import type { Pair } from '../lib/types';
@@ -28,6 +28,19 @@ export default function OverviewPage() {
   const batchLock = useRef(false);
   const entries = overview.data?.pairs ?? [];
   const recentTrades = entries.flatMap(entry => entry.snapshot.recent_trades).sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp)).slice(0, 20);
+  const displayedTrades = recentTrades.slice(0, tradesExpanded ? 20 : 5);
+  const buyTrades = displayedTrades.filter(trade => trade.side === 'BUY').length;
+  const sellTrades = displayedTrades.filter(trade => trade.side === 'SELL').length;
+  const tradePnlGroups = new Map<string, { mode: typeof displayedTrades[number]['mode']; asset: string; total: number; available: boolean }>();
+  for (const trade of displayedTrades) {
+    const asset = quoteAsset(trade.symbol) || trade.symbol;
+    const key = `${trade.mode}:${asset}`;
+    const group = tradePnlGroups.get(key) ?? { mode: trade.mode, asset, total: 0, available: true };
+    const pnl = numeric(trade.realized_pnl);
+    if (!trade.pnl_verified || pnl === null) group.available = false;
+    else group.total += pnl;
+    tradePnlGroups.set(key, group);
+  }
   const stale = !!overview.error || Date.now() - overview.dataUpdatedAt > 10_000;
   const pairs = entries.map(e => ({ symbol: e.snapshot.symbol, status: e.snapshot.status, mode: e.mode, grid_config: e.snapshot.grid_config, scoped: e.scoped } satisfies Pair));
   const batch = async (action: 'pause' | 'resume') => {
@@ -153,7 +166,13 @@ export default function OverviewPage() {
     </Row>
     </section>
     <Card className="overview-trades" title="最近成交" extra={<span className="muted">全部策略当前模式 · 最近 20 条</span>}>
-      <div id="recent-trades-list"><TradesTable overview trades={recentTrades.slice(0, tradesExpanded ? 20 : 5)} /></div>
+      <div className="recent-trades-summary" aria-label="当前显示成交汇总">
+        <span>当前显示 <strong>{displayedTrades.length}</strong> 笔</span>
+        <span>买入 <strong>{buyTrades}</strong> 笔</span>
+        <span>卖出 <strong>{sellTrades}</strong> 笔</span>
+        <span>合计盈亏 {tradePnlGroups.size === 0 ? <strong>--</strong> : [...tradePnlGroups.entries()].map(([key, group]) => <span key={key}> {modeLabel[group.mode]} <strong>{group.available && Number.isFinite(group.total) ? Math.abs(group.total) > 0 && Math.abs(group.total) < 0.01 ? <span className={group.total < 0 ? 'negative numeric' : 'positive numeric'}>{group.total.toLocaleString('en-US', { maximumSignificantDigits: 3 })}</span> : <Pnl value={group.total} compact /> : '待核实'}</strong> {group.asset}</span>)}</span>
+      </div>
+      <div id="recent-trades-list"><TradesTable overview trades={displayedTrades} /></div>
       {recentTrades.length > 5 && <div className="overview-trades-toggle"><Button type="text" aria-expanded={tradesExpanded} aria-controls="recent-trades-list" onClick={() => setTradesExpanded(value => !value)}>{tradesExpanded ? '收起' : '展开最近 20 条'}</Button></div>}
     </Card>
     <OverviewHistory />

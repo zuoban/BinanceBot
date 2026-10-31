@@ -128,16 +128,23 @@ it('shows five newest trades and expands to twenty across strategies', async () 
   const btc = snapshot('BTCUSDC'), eth = snapshot('ETHUSDC');
   const trade = (symbol: string, index: number) => ({
     trade_id: `${symbol}-${index}`, symbol, mode: symbol === 'BTCUSDC' ? 'PAPER' as const : 'LIVE' as const,
-    side: 'BUY' as const, price: '123.456789', quantity: '1', amount_usdc: '100', realized_pnl: '0', commission: '0',
+    side: 'BUY' as const, price: '123.456789', quantity: '1', amount_usdc: '100', realized_pnl: index === 20 ? '-0.004' : '0', commission: '0',
     pnl_verified: true, is_maker: true, timestamp: new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString(), note: `成交 ${index}`,
   });
   btc.recent_trades = Array.from({ length: 11 }, (_, i) => trade('BTCUSDC', i * 2));
-  eth.recent_trades = Array.from({ length: 11 }, (_, i) => trade('ETHUSDC', i * 2 + 1));
+  eth.recent_trades = Array.from({ length: 11 }, (_, i) => ({ ...trade('ETHUSDC', i * 2 + 1), side: 'SELL' as const, pnl_verified: i !== 10 }));
   overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: btc, mode: 'PAPER', scoped: true }, { snapshot: eth, mode: 'LIVE', scoped: true }] };
   render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
   const table = screen.getByText('最近成交').closest('.ant-card')!;
   const card = within(table as HTMLElement);
   expect(card.getAllByRole('row').slice(1)).toHaveLength(5);
+  const summary = within(card.getByLabelText('当前显示成交汇总'));
+  expect(summary.getByText(/当前显示/)).toHaveTextContent('当前显示 5 笔');
+  expect(summary.getByText(/买入/)).toHaveTextContent('买入 2 笔');
+  expect(summary.getByText(/卖出/)).toHaveTextContent('卖出 3 笔');
+  expect(summary.getByText(/合计盈亏/)).toHaveTextContent('模拟盘 -0.004 USDC');
+  expect(summary.getByText(/合计盈亏/)).toHaveTextContent('实盘 待核实 USDC');
+
   expect(card.getByRole('columnheader', { name: '方向' })).not.toHaveClass('ant-table-cell-fix-left');
   expect(card.getAllByRole('row')[1]).toHaveTextContent('ETHUSDC');
   expect(card.getAllByRole('row')[1]).toHaveTextContent('成交 21');
@@ -147,6 +154,9 @@ it('shows five newest trades and expands to twenty across strategies', async () 
   const user = userEvent.setup();
   await user.click(card.getByRole('button', { name: '展开最近 20 条' }));
   expect(card.getAllByRole('row').slice(1)).toHaveLength(20);
+  expect(summary.getByText(/当前显示/)).toHaveTextContent('当前显示 20 笔');
+  expect(summary.getByText(/买入/)).toHaveTextContent('买入 10 笔');
+  expect(summary.getByText(/卖出/)).toHaveTextContent('卖出 10 笔');
   expect(card.getAllByRole('row')[20]).toHaveTextContent('成交 2');
   expect(card.queryByText('成交 1')).not.toBeInTheDocument();
   await user.click(card.getByRole('button', { name: '收起' }));
