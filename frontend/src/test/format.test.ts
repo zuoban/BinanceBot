@@ -22,19 +22,21 @@ describe('account and trade summaries', () => {
     const liveA = snapshot('ETHUSDC', 'LIVE'), liveB = snapshot('XRPUSDC', 'LIVE');
     liveB.account.margin_balance = '200';
     liveB.account.available_balance = '175';
+    liveB.account.total_wallet_balance = '250';
+    liveB.account.unrealized_profit = '-50';
     liveB.account.update_time = new Date(Date.now() + 1000).toISOString();
     const groups = accountGroups([
       { snapshot: paperA, mode: 'PAPER', scoped: true }, { snapshot: paperB, mode: 'PAPER', scoped: true },
       { snapshot: liveA, mode: 'LIVE', scoped: true }, { snapshot: liveB, mode: 'LIVE', scoped: true },
     ]);
-    expect(groups.find(g => g.mode === 'PAPER')).toMatchObject({ equity: 210, available: 160 });
-    expect(groups.find(g => g.mode === 'LIVE')).toMatchObject({ equity: 200, available: 175 });
+    expect(groups.find(g => g.mode === 'PAPER')).toMatchObject({ equity: 210, available: 160, wallet: 200, unrealized: 10 });
+    expect(groups.find(g => g.mode === 'LIVE')).toMatchObject({ equity: 200, available: 175, wallet: 250, unrealized: -50 });
   });
   it('does not display a stale live account or yesterday’s trade total', () => {
     const s = snapshot('SOLUSDC', 'LIVE');
     s.account.update_time = new Date(Date.now() - 60_000).toISOString();
     s.hourly_trade_stats!.window_end = new Date(Date.now() - 86_400_000).toISOString();
-    expect(accountGroups([{ snapshot: s, mode: 'LIVE', scoped: true }])[0].equity).toBeNull();
+    expect(accountGroups([{ snapshot: s, mode: 'LIVE', scoped: true }])[0]).toMatchObject({ equity: null, wallet: null, unrealized: null });
     expect(todayCount(s)).toBeNull();
   });
 });

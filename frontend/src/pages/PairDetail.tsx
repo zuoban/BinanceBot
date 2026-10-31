@@ -2,7 +2,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { Alert, Button, Card, Col, Descriptions, Row, Skeleton, Space, Statistic, Tabs, Tag } from 'antd';
 import { SettingOutlined } from '@ant-design/icons';
 import { usePairSnapshot, usePairs } from '../lib/queries';
-import { accountGroups, number, price, quoteAsset } from '../lib/format';
+import { accountGroups, number, price, quoteAsset, todayTradeCounts } from '../lib/format';
 import { ErrorNotice, ModeTag, PageTitle, Pnl, StatusTag } from '../components/Common';
 import { PairControls, useControls } from '../components/Controls';
 import { DepthChart, HourlyChart } from '../components/Charts';
@@ -18,6 +18,8 @@ export default function PairDetail() {
   const controls = useControls();
   const s = query.data, asset = quoteAsset(symbol ?? '');
   const account = s && accountGroups([{ snapshot: s, mode: pair!.mode, scoped: pair!.scoped }])[0];
+  const today = s ? todayTradeCounts(s) : null;
+  const todayPnl = today && s?.hourly_trade_stats && s.hourly_trade_stats.pending_pnl_count === 0 ? s.hourly_trade_stats.realized_pnl : null;
   const currentPair = pair && s ? { ...pair, status: s.status, grid_config: s.grid_config, mode: s.dry_run ? 'PAPER' as const : s.grid_config.is_testnet ? 'TESTNET' as const : 'LIVE' as const } : pair;
   return <div className="pair-detail">
     <PageTitle eyebrow="WORKSPACE / STRATEGY" title={symbol ?? '策略详情'} description="行情、网格与成交，随策略实时更新。"
@@ -37,7 +39,12 @@ export default function PairDetail() {
       </Row>
       <Tabs defaultActiveKey="monitor" items={[
         { key: 'monitor', label: '实时监控', children: <>
-          <Row gutter={[20, 20]}><Col xs={24} xl={14}><Card title="今日成交" extra={<span className="muted">北京时间 · 当前小时在左 · 可横向滚动</span>}><HourlyChart snapshot={s} /></Card></Col>
+          <Row gutter={[20, 20]}><Col xs={24} xl={14}><Card title="今日成交"><div className="today-trade-summary" aria-label="今日成交汇总">
+            <div><span>成交总数</span><strong>{today ? today.buy + today.sell : '--'} <small>笔</small></strong></div>
+            <div><span>买入</span><strong>{today?.buy ?? '--'} <small>笔</small></strong></div>
+            <div><span>卖出</span><strong>{today?.sell ?? '--'} <small>笔</small></strong></div>
+            <div><span>已实现盈亏 / {asset}</span><strong>{todayPnl === null ? '--' : <Pnl value={todayPnl} compact />}</strong>{today && s.hourly_trade_stats!.pending_pnl_count > 0 && <small>盈亏待同步</small>}</div>
+          </div><HourlyChart snapshot={s} /></Card></Col>
             <Col xs={24} xl={10}><Card title="实时网格深度" extra={<span className="muted">价格 / {asset} · 数量</span>}><DepthChart snapshot={s} /></Card></Col></Row>
           <Card title="仓位与策略明细" className="detail-card"><Descriptions column={{ xs: 1, sm: 2, lg: 3 }} items={[
             { key: 'direction', label: '方向', children: s.grid_config.direction === 'SHORT' ? '做空' : '做多' },

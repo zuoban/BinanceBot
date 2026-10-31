@@ -1,7 +1,7 @@
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { App } from 'antd';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useLocation } from 'react-router-dom';
 import { beforeEach, expect, it, vi } from 'vitest';
 import OverviewPage from '../pages/Overview';
 import { snapshot } from './fixtures';
@@ -32,11 +32,23 @@ it('opens the selected strategy configuration from its card', async () => {
   expect(screen.getByText('暂停策略')).toBeInTheDocument();
   expect(screen.getByRole('link', { name: /查看完整配置/ })).toHaveAttribute('href', '/pairs/BTCUSDC/config');
   await userEvent.setup().click(screen.getByRole('button', { name: 'BTCUSDC 更多操作' }));
+  expect(screen.getByRole('menuitem', { name: '查看策略' })).toBeInTheDocument();
   await userEvent.setup().click(screen.getByRole('menuitem', { name: '暂停策略' }));
   expect(actions.run).toHaveBeenCalledWith(expect.objectContaining({ symbol: 'BTCUSDC' }), 'pause');
   await userEvent.setup().click(screen.getByRole('button', { name: 'BTCUSDC 更多操作' }));
   await userEvent.setup().click(screen.getByRole('menuitem', { name: '删除策略' }));
   expect(actions.remove).toHaveBeenCalledWith(expect.objectContaining({ symbol: 'BTCUSDC' }));
+});
+
+it('navigates when the strategy menu item is activated', async () => {
+  const s = snapshot('BTCUSDC');
+  overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: s, mode: 'PAPER', scoped: true }] };
+  function Location() { return <output data-testid="location">{useLocation().pathname}</output>; }
+  render(<MemoryRouter><App><OverviewPage /><Location /></App></MemoryRouter>);
+  const user = userEvent.setup();
+  await user.click(screen.getByRole('button', { name: 'BTCUSDC 更多操作' }));
+  await user.click(screen.getByRole('menuitem', { name: '查看策略' }));
+  expect(screen.getByTestId('location')).toHaveTextContent('/pairs/BTCUSDC');
 });
 
 it('identifies each strategy direction without opening its configuration', () => {
@@ -67,6 +79,22 @@ it('summarizes statuses and lets the user clear a search with no results', async
   expect(screen.getByText('没有符合筛选条件的策略')).toBeInTheDocument();
   await user.click(screen.getAllByRole('button', { name: '清除筛选' })[0]);
   expect(screen.getByText('BTCUSDC')).toBeInTheDocument();
+});
+
+it('shows exchange asset balances and available balance', () => {
+  const s = snapshot('BTCUSDC', 'LIVE');
+  s.account.total_wallet_balance = '1289.95';
+  s.account.unrealized_profit = '-525.02';
+  s.account.margin_balance = '764.93';
+  s.account.available_balance = '300';
+  overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: s, mode: 'LIVE', scoped: true }] };
+  render(<MemoryRouter><AccountsContext.Provider value={overview.data.pairs}><App><OverviewPage /></App></AccountsContext.Provider></MemoryRouter>);
+  const assets = screen.getByLabelText('USDC账户资产');
+  expect(within(assets).getByText('钱包余额').parentElement).toHaveTextContent('1,289.95');
+  expect(within(assets).getByText('未实现盈亏').parentElement).toHaveTextContent('-525.02');
+  expect(screen.getByText('保证金余额').closest('.account-card')).toHaveTextContent('764.93');
+  expect(screen.getByText('可用余额').parentElement).toHaveTextContent('300 USDC');
+  expect(within(assets).queryByText('可转出')).not.toBeInTheDocument();
 });
 
 it('shows grouped today pnl and pending trades across all strategies', () => {
@@ -140,20 +168,20 @@ it('shows position amounts and their long/short shares for all strategies', asyn
   expect(screen.getByText('总持仓金额 / USDC').parentElement).toHaveTextContent('404');
 });
 
-it('shows available margin as a percentage of account equity', () => {
+it('shows available balance as a percentage of wallet balance', () => {
   const s = snapshot('BTCUSDC');
   const pairs = [{ snapshot: s, mode: 'PAPER' as const, scoped: true }];
   overview.data = { generated_at: new Date().toISOString(), pairs };
   render(<MemoryRouter><App><AccountsContext.Provider value={pairs}><OverviewPage /></AccountsContext.Provider></App></MemoryRouter>);
-  expect(screen.getByText(/可用保证金比例/)).toHaveTextContent('76.19%');
+  expect(screen.getByText('可用比例').parentElement).toHaveTextContent('80%');
 });
 
-it('does not calculate an available margin ratio for zero equity', () => {
+it('does not calculate an available ratio for zero wallet balance', () => {
   const s = snapshot('BTCUSDC');
   s.account.total_wallet_balance = '0';
   s.position.unrealized_pnl = '0';
   const pairs = [{ snapshot: s, mode: 'PAPER' as const, scoped: true }];
   overview.data = { generated_at: new Date().toISOString(), pairs };
   render(<MemoryRouter><App><AccountsContext.Provider value={pairs}><OverviewPage /></AccountsContext.Provider></App></MemoryRouter>);
-  expect(screen.getByText(/可用保证金比例/)).toHaveTextContent('--');
+  expect(screen.getByText('可用比例').parentElement).toHaveTextContent('--');
 });

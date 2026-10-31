@@ -90,7 +90,9 @@ export function accountGroups(entries: Overview['pairs'], now = Date.now()) {
       return wallet === null || pnl === null ? null : wallet + pnl;
     })) : fresh ? numeric(latest.account.margin_balance) : null;
     const available = mode === 'PAPER' ? sum(snapshots.map(s => numeric(s.account.available_balance))) : fresh ? numeric(latest.account.available_balance) : null;
+    const wallet = mode === 'PAPER' ? sum(snapshots.map(s => numeric(s.account.total_wallet_balance))) : fresh ? numeric(latest.account.total_wallet_balance) : null;
+    const unrealized = mode === 'PAPER' ? sum(snapshots.map(s => numeric(s.position.unrealized_pnl))) : fresh ? numeric(latest.account.unrealized_profit) : null;
     const rate = latest.account_cny_rate?.asset === asset ? numeric(latest.account_cny_rate.cny_per_unit) : null;
-    return { key: `${mode}:${asset}`, mode, asset, count: snapshots.length, equity, available, cny: equity !== null && rate !== null ? equity * rate : null };
+    return { key: `${mode}:${asset}`, mode, asset, count: snapshots.length, equity, available, wallet, unrealized, cny: equity !== null && rate !== null ? equity * rate : null };
   });
 }

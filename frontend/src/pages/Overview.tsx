@@ -79,11 +79,18 @@ export default function OverviewPage() {
     <div className="section-heading"><h2 id="accounts-heading">账户概览</h2></div>
     <Row gutter={[16, 16]} className="account-row">
       {accountGroups(accounts).map(group => <Col xs={24} xl={12} key={group.key}><Card className="account-card" size="small">
-        <div className="section-line account-card-heading"><span>账户权益</span><ModeTag mode={group.mode} /></div>
-        <Statistic value={group.equity ?? '--'} formatter={() => number(group.equity)} suffix={group.asset} />
-        <div className="section-line account-bottom"><span>可用 {number(group.available)}</span><span>{group.cny !== null ? `≈ ¥${number(group.cny)}` : '人民币估值待更新'}</span></div>
-        <div className="account-margin-ratio">可用保证金比例 <strong>{group.available !== null && group.equity !== null && group.equity > 0 ? `${number(group.available / group.equity * 100)}%` : '--'}</strong></div>
-        <div className="muted">{group.mode === 'PAPER' ? `${group.count} 个独立模拟账户合计` : `${group.count} 个策略共用账户 · 去重展示`}</div>
+        <div className="section-line account-card-heading"><span>保证金余额</span><ModeTag mode={group.mode} /></div>
+        <div className="account-equity-line"><Statistic value={group.equity ?? '--'} formatter={() => number(group.equity)} suffix={group.asset} />
+          <span className="account-cny muted">{group.cny !== null ? `≈ ¥${number(group.cny)}` : '人民币估值待更新'}</span></div>
+        <div className="account-availability">
+          <div><span>可用余额</span><strong>{number(group.available)} <small>{group.asset}</small></strong></div>
+          <div><span>可用比例</span><strong>{group.available !== null && group.wallet !== null && group.wallet > 0 ? `${number(group.available / group.wallet * 100)}%` : '--'}</strong></div>
+        </div>
+        <div className="account-assets" aria-label={`${group.asset}账户资产`}>
+          <div><span>钱包余额</span><strong>{number(group.wallet)}</strong></div>
+          <div><span>未实现盈亏</span><strong>{group.unrealized === null ? '--' : <Pnl value={group.unrealized} />}</strong></div>
+        </div>
+        {group.mode !== 'PAPER' && <div className="muted">{group.count} 个策略共用账户 · 去重展示</div>}
       </Card></Col>)}
     </Row>
     </section>
@@ -120,7 +127,7 @@ export default function OverviewPage() {
         const pair: Pair = { symbol: s.symbol, status: s.status, mode: m, grid_config: s.grid_config, scoped };
         const quote = quoteAsset(s.symbol), result = controls.results[s.symbol];
         return <Col xs={24} lg={12} xxl={8} key={s.symbol}><Card className={`strategy-card ${s.grid_config.direction === 'SHORT' ? 'strategy-short' : 'strategy-long'}`}>
-          <div className="section-line"><div className="strategy-identity"><Link className="pair-name" to={`/pairs/${s.symbol}`}>{s.symbol}</Link><span className="strategy-direction" role="img" aria-label={s.grid_config.direction === 'SHORT' ? '策略方向：做空' : '策略方向：做多'}>{s.grid_config.direction === 'SHORT' ? <><ArrowDownOutlined />做空</> : <><ArrowUpOutlined />做多</>}</span></div><Space size={2}><StatusTag status={s.status} /><Popover trigger="click" placement="bottomRight" title={`${s.symbol} 策略配置`} content={
+          <div className="section-line"><div className="strategy-identity"><Link className="pair-name" to={`/pairs/${s.symbol}`}>{s.symbol}</Link><span className="strategy-direction" role="img" aria-label={s.grid_config.direction === 'SHORT' ? '策略方向：做空' : '策略方向：做多'}>{s.grid_config.direction === 'SHORT' ? <><ArrowDownOutlined />做空</> : <><ArrowUpOutlined />做多</>}</span><ModeTag mode={m} /></div><Space size={2}><StatusTag status={s.status} /><Popover trigger="click" placement="bottomRight" title={`${s.symbol} 策略配置`} content={
             <div className="strategy-config-popover">
               <dl>
                 <div><dt>交易方向</dt><dd>{s.grid_config.direction === 'SHORT' ? '做空' : '做多'}</dd></div>
@@ -136,10 +143,9 @@ export default function OverviewPage() {
               </dl>
               <Link to={`/pairs/${s.symbol}/config`}>查看完整配置 <ArrowRightOutlined /></Link>
             </div>
-          }><Button type="text" size="small" icon={<EyeOutlined />} aria-label={`查看 ${s.symbol} 策略配置`} /></Popover></Space></div>
-          <div className="strategy-price"><span className="muted">标记价格</span><strong>{Number(s.ticker.mark_price) > 0 ? price(s.ticker.mark_price) : '--'}</strong><ModeTag mode={m} /></div>
+          }><Button type="text" size="small" icon={<EyeOutlined />} aria-label={`查看 ${s.symbol} 策略配置`} /></Popover><StrategyMenu pair={pair} stale={stale} /></Space></div>
+          <div className="strategy-price"><span className="muted">标记价格</span><strong>{Number(s.ticker.mark_price) > 0 ? price(s.ticker.mark_price) : '--'}</strong></div>
           <div className="strategy-metrics"><div><span>已实现盈亏 / {quote}</span><strong><Pnl value={s.stats.total_realized_pnl} compact /></strong></div><div><span>未实现盈亏 / {quote}</span><strong><Pnl value={s.position.unrealized_pnl} compact /></strong></div><div><span>持仓金额 / {quote}</span><strong>{number(positionAmount(s))}</strong></div><div><span>持仓数量</span><strong>{price(s.position.size)}</strong></div><div><span>今日成交</span><strong>{todayCount(s) ?? '--'} <small>笔</small></strong></div><div><span>买单 / 卖单</span><strong>{s.stats.active_buy_orders} <small>/</small> {s.stats.active_sell_orders}</strong></div></div>
-          <div className="strategy-footer"><StrategyMenu pair={pair} stale={stale} /><Link to={`/pairs/${s.symbol}`}><Button type="text" size="small">查看策略 <ArrowRightOutlined /></Button></Link></div>
           {result && <div className={result.startsWith('失败') ? 'negative operation-result' : 'muted operation-result'} role="status">{result}</div>}
         </Card></Col>;
       })}
