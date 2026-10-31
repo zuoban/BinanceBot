@@ -254,8 +254,9 @@ pub fn format_trade_message(trade: &TradeRecord, context: &TradeNotificationCont
         String::new()
     };
     format!(
-        "<b>{icon} {direction}｜{average_price}｜{amount:.2} {quote}｜{today}D｜{hour}H</b>\n<b>账户权益：{equity}｜</b>{cny}\n持仓金额：{position_amount}\n可用余额：{available}｜{ratio}{pnl_line}",
+        "<b>{icon} {direction}｜{symbol}｜{average_price}｜{amount:.2} {quote}｜{today}D｜{hour}H</b>\n<b>账户权益：{equity}｜</b>{cny}\n持仓金额：{position_amount}\n可用余额：{available}｜{ratio}{pnl_line}",
         direction = trade.side.as_str(),
+        symbol = escape_html(&trade.symbol),
         amount = trade.amount_usdc.round_dp(2),
         today = count(context.today_count),
         hour = count(context.hour_count),
@@ -392,7 +393,7 @@ mod tests {
         let trade = trade(OrderSide::Buy);
         assert_eq!(
             format_trade_message(&trade, &context(&trade)),
-            "<b>🟢 BUY｜123.45｜246.90 USDC｜7D｜2H</b>\n<b>账户权益：11254.48 USDC｜</b>≈ ¥75453.41\n持仓金额：2469.00 USDC\n可用余额：3878.03 USDC｜38.78%"
+            "<b>🟢 BUY｜SOLUSDC｜123.45｜246.90 USDC｜7D｜2H</b>\n<b>账户权益：11254.48 USDC｜</b>≈ ¥75453.41\n持仓金额：2469.00 USDC\n可用余额：3878.03 USDC｜38.78%"
         );
     }
 
@@ -509,7 +510,7 @@ mod tests {
         trade.commission = dec!(0.80);
         assert_eq!(
             format_trade_message(&trade, &context(&trade)),
-            "<b>🔴 SELL｜123.45｜246.90 USDC｜4D｜1H</b>\n<b>账户权益：11254.48 USDC｜</b>≈ ¥75453.41\n持仓金额：2469.00 USDC\n可用余额：3878.03 USDC｜38.78%\n已实现盈亏：-3.2500 USDC"
+            "<b>🔴 SELL｜SOLUSDC｜123.45｜246.90 USDC｜4D｜1H</b>\n<b>账户权益：11254.48 USDC｜</b>≈ ¥75453.41\n持仓金额：2469.00 USDC\n可用余额：3878.03 USDC｜38.78%\n已实现盈亏：-3.2500 USDC"
     );
         trade.realized_pnl = dec!(1.25);
         assert!(
@@ -535,7 +536,7 @@ mod tests {
                     "🔴"
                 };
                 assert!(message.starts_with(&format!(
-                    "<b>{icon} {}｜117.123456｜500.12 USDC｜--D｜--H</b>",
+                    "<b>{icon} {}｜SOLUSDC｜117.123456｜500.12 USDC｜--D｜--H</b>",
                     side.as_str()
                 )));
             }
@@ -547,7 +548,7 @@ mod tests {
         let mut trade = trade(OrderSide::Buy);
         trade.price = dec!(0.0000123400);
         let message = format_trade_message(&trade, &TradeNotificationContext::default());
-        assert!(message.starts_with("<b>🟢 BUY｜0.00001234｜"));
+        assert!(message.starts_with("<b>🟢 BUY｜SOLUSDC｜0.00001234｜"));
     }
 
     #[test]
@@ -634,12 +635,12 @@ mod tests {
     }
 
     #[test]
-    fn notification_does_not_include_base_asset() {
+    fn notification_escapes_symbol_in_title() {
         let mut trade = trade(OrderSide::Buy);
         trade.symbol = "<SOL>&USDC".into();
         let message = format_trade_message(&trade, &context(&trade));
         assert!(!message.contains("<SOL>"));
-        assert!(!message.contains("&lt;SOL&gt;"));
+        assert!(message.starts_with("<b>🟢 BUY｜&lt;SOL&gt;&amp;USDC｜"));
         assert!(message.contains("246.90 USDC"));
     }
 
