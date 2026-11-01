@@ -8,7 +8,7 @@ import type { AuthStatus } from './lib/types';
 import { SessionContext } from './lib/session';
 import Shell from './components/Shell';
 import Login from './pages/Login';
-import { LoadingScreen, PageLoading } from './components/Loading';
+import { DetailPageLoading, LoadingScreen, OverviewPageLoading, PageLoading } from './components/Loading';
 import { ThemeProvider } from './lib/theme';
 import './style.css';
 
@@ -19,9 +19,9 @@ const Settings = lazy(() => import('./pages/Settings'));
 const page = (component: React.ReactNode) => <Suspense fallback={<PageLoading />}>{component}</Suspense>;
 const client = new QueryClient({ defaultOptions: { queries: { retry: 1, refetchOnWindowFocus: true }, mutations: { retry: false } } });
 const router = createBrowserRouter([{ element: <Shell />, children: [
-  { path: '/', element: page(<Overview />) },
+  { path: '/', element: <Suspense fallback={<OverviewPageLoading />}><Overview /></Suspense> },
   { path: '/pairs/new', element: page(<PairConfig />) },
-  { path: '/pairs/:symbol', element: page(<PairDetail />) },
+  { path: '/pairs/:symbol', element: <Suspense fallback={<DetailPageLoading />}><PairDetail /></Suspense> },
   { path: '/pairs/:symbol/config', element: page(<PairConfig />) },
   { path: '/settings', element: page(<Settings />) },
 ] }]);

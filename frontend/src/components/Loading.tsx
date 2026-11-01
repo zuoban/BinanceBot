@@ -29,6 +29,19 @@ export function PageLoading() {
     <span className="sr-only">正在加载页面</span>
   </div>;
 }
+export function OverviewPageLoading() {
+  return <div className="page-placeholder" role="status" aria-label="正在加载页面">
+    <div className="skeleton-section-heading"><SkeletonLine width="110px" /></div>
+    <div className="overview-banner skeleton-overview-banner" aria-hidden="true">
+      <div className="overview-stats">
+        {[0, 1, 2, 3].map(item => <div className="overview-stat" key={item}><SkeletonLine width="72px" size="small" /><SkeletonLine width="48px" size="large" /></div>)}
+        <div className="overview-trade-breakdown"><SkeletonLine width="150px" size="small" /><SkeletonLine width="90px" size="small" /></div>
+      </div>
+    </div>
+    <OverviewLoading />
+  </div>;
+}
+
 
 export function OverviewLoading() {
   return <div className="overview-placeholder" role="status" aria-label="正在同步策略数据">
@@ -41,11 +54,24 @@ export function OverviewLoading() {
   </div>;
 }
 
+export function DetailPageLoading() {
+  return <div className="pair-detail" role="status" aria-label="正在加载页面">
+    <div className="skeleton-detail-breadcrumb"><SkeletonLine width="160px" size="small" /></div>
+    <div className="skeleton-detail-heading"><div className="skeleton-page-heading"><SkeletonLine width="170px" size="large" /><SkeletonLine width="240px" /></div><SkeletonLine width="100px" size="large" /></div>
+    <div className="skeleton-card skeleton-detail-status"><SkeletonLine width="200px" /><SkeletonLine width="100px" size="small" /></div>
+    <DetailLoading />
+  </div>;
+}
+
 export function DetailLoading() {
   return <div className="detail-placeholder" role="status" aria-label="正在加载策略详情">
     <div className="skeleton-grid skeleton-grid-metrics">{[0, 1, 2, 3].map(item => <SkeletonCard key={item} />)}</div>
-    <div className="skeleton-tabs"><SkeletonLine width="72px" /><SkeletonLine width="64px" /><SkeletonLine width="64px" /></div>
-    <div className="skeleton-grid skeleton-grid-charts">{[0, 1].map(item => <SkeletonCard key={item} variant="chart" />)}</div>
+    <div className="skeleton-tabs"><SkeletonLine width="72px" /><SkeletonLine width="64px" /><SkeletonLine width="64px" /><SkeletonLine width="64px" /></div>
+    <div className="skeleton-grid skeleton-grid-charts">
+      <div className="skeleton-card skeleton-detail-chart"><div className="skeleton-card-heading"><SkeletonLine width="100px" /></div><div className="skeleton-detail-summary">{[0, 1, 2, 3].map(item => <div key={item}><SkeletonLine width="70%" size="small" /><SkeletonLine width="55%" size="large" /></div>)}</div><div className="skeleton-detail-plot" /></div>
+      <div className="skeleton-card skeleton-detail-chart"><div className="skeleton-card-heading"><SkeletonLine width="120px" /><SkeletonLine width="100px" size="small" /></div><div className="skeleton-detail-depth">{[0, 1, 2, 3, 4, 5, 6].map(item => <SkeletonLine key={item} width="100%" size="small" />)}</div></div>
+    </div>
+    <div className="skeleton-card skeleton-detail-info"><div className="skeleton-card-heading"><SkeletonLine width="120px" /></div><div className="skeleton-detail-info-grid">{[0, 1, 2, 3, 4, 5].map(item => <SkeletonLine key={item} width="80%" />)}</div></div>
     <span className="sr-only">正在加载策略详情</span>
   </div>;
 }

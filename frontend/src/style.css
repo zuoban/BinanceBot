@@ -216,9 +216,24 @@ a { color: inherit; }
 .skeleton-section-heading { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin: 32px 0 16px; }
 .skeleton-section-heading:first-child { margin-top: 0; }
 .skeleton-section-heading .skeleton-line { height: 18px; }
+.skeleton-overview-banner .overview-stat { display: grid; align-content: start; gap: 10px; }
 .skeleton-filters, .skeleton-tabs { display: flex; gap: 12px; margin-bottom: 20px; }
 .skeleton-filters .skeleton-line { height: 32px; }
 .skeleton-tabs { margin: 28px 0 20px; padding-bottom: 16px; border-bottom: 1px solid #e3e6e3; }
+.skeleton-detail-breadcrumb { margin-bottom: 20px; }
+.skeleton-detail-heading { display: flex; justify-content: space-between; gap: 16px; }
+.skeleton-detail-status { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 14px 16px; margin-bottom: 20px; }
+.skeleton-detail-chart { min-height: 360px; }
+.skeleton-detail-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.skeleton-detail-summary > div { display: grid; gap: 8px; }
+.skeleton-detail-plot { height: 200px; margin-top: 20px; border-bottom: 1px solid #e3e6e3; }
+.skeleton-detail-depth { display: grid; gap: 20px; padding-top: 8px; }
+.skeleton-detail-info { margin-top: 20px; }
+.skeleton-detail-info-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; }
+[data-theme="dark"] .skeleton-detail-plot { border-color: #3c3f3d; }
+@media (max-width: 991px) { .skeleton-detail-info-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 600px) { .skeleton-detail-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); } .skeleton-detail-heading { flex-wrap: wrap; margin-bottom: 16px; } .skeleton-detail-heading .skeleton-page-heading { margin-bottom: 0; } .skeleton-detail-chart, .skeleton-detail-info { padding: 16px; } }
+@media (max-width: 575px) { .skeleton-detail-info-grid { grid-template-columns: 1fr; } }
 @media (max-width: 1599px) { .skeleton-grid-strategies { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 1199px) {
   .skeleton-grid-finances, .skeleton-grid-charts { grid-template-columns: 1fr; }
