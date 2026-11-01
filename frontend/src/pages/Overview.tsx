@@ -206,7 +206,7 @@ export default function OverviewPage() {
         <span>当前显示 <strong>{displayedTrades.length}</strong> 笔</span>
         <span>买入 <strong>{buyTrades}</strong> 笔</span>
         <span>卖出 <strong>{sellTrades}</strong> 笔</span>
-        <span>合计盈亏 {tradePnlGroups.size === 0 ? <strong>--</strong> : [...tradePnlGroups.entries()].map(([key, group]) => <span key={key}> {modeLabel[group.mode]} <strong>{group.available && Number.isFinite(group.total) ? Math.abs(group.total) > 0 && Math.abs(group.total) < 0.01 ? <span className={group.total < 0 ? 'negative numeric' : 'positive numeric'}>{group.total.toLocaleString('en-US', { maximumSignificantDigits: 3 })}</span> : <Pnl value={group.total} compact /> : '待核实'}</strong> {group.asset}</span>)}</span>
+        <span className="recent-trades-pnl">合计盈亏 {tradePnlGroups.size === 0 ? <strong>--</strong> : [...tradePnlGroups.entries()].map(([key, group]) => <span key={key}> {modeLabel[group.mode]} <strong>{group.available && Number.isFinite(group.total) ? Math.abs(group.total) > 0 && Math.abs(group.total) < 0.01 ? <span className={group.total < 0 ? 'negative numeric' : 'positive numeric'}>{group.total.toLocaleString('en-US', { maximumSignificantDigits: 3 })}</span> : <Pnl value={group.total} compact /> : '待核实'}</strong> {group.asset}</span>)}</span>
       </div>
       <div id="recent-trades-list"><TradesTable overview trades={displayedTrades} /></div>
       {recentTrades.length > 5 && <div className="overview-trades-toggle"><Button type="text" aria-expanded={tradesExpanded} aria-controls="recent-trades-list" onClick={() => setTradesExpanded(value => !value)}>{tradesExpanded ? '收起' : '展开最近 20 条'}</Button></div>}

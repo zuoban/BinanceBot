@@ -277,10 +277,13 @@ it('shows five newest trades and expands to twenty across strategies', async () 
   const mobileTrades = table.querySelector('.overview-trades-mobile') as HTMLElement;
   const firstTrade = within(mobileTrades).getAllByRole('listitem')[0];
   expect(within(firstTrade).getByText('成交均价').nextElementSibling).toHaveTextContent('123.4568');
-  expect(within(firstTrade).getByText('手续费').nextElementSibling).toHaveTextContent('待同步');
-  expect(within(firstTrade).getByText('成交方式').nextElementSibling).toHaveTextContent('待同步');
-  const verifiedTrade = within(mobileTrades).getAllByRole('listitem')[1];
-  expect(within(verifiedTrade).getByText('成交方式').nextElementSibling).toHaveTextContent('Maker');
+  expect(within(firstTrade).queryByText('模式')).not.toBeInTheDocument();
+  expect(within(firstTrade).queryByText('数量')).not.toBeInTheDocument();
+  expect(within(firstTrade).queryByText('手续费')).not.toBeInTheDocument();
+  expect(within(firstTrade).queryByText('成交方式')).not.toBeInTheDocument();
+  expect(within(firstTrade).queryByText('成交时间（北京）')).not.toBeInTheDocument();
+  expect(within(firstTrade).queryByText('备注')).not.toBeInTheDocument();
+  expect(firstTrade.querySelector('.trade-list-time')).toHaveTextContent(/前|后/);
   expect(card.getAllByRole('row')[1]).not.toHaveTextContent('Maker');
   const user = userEvent.setup();
   await user.click(card.getByRole('button', { name: '展开最近 20 条' }));
