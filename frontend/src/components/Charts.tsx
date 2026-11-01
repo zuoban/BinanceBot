@@ -1,3 +1,4 @@
+import { theme } from 'antd';
 import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import type { Snapshot } from '../lib/types';
 import { price, todayCount } from '../lib/format';
@@ -15,14 +16,21 @@ export function todayHourlyData(stats: NonNullable<Snapshot['hourly_trade_stats'
 }
 
 export function HourlyChart({ snapshot }: { snapshot: Snapshot }) {
+  const { token } = theme.useToken();
   if (todayCount(snapshot) === null) return <NoData />;
   const data = todayHourlyData(snapshot.hourly_trade_stats!);
-  return <div className="hourly-chart-scroll" role="region" tabIndex={0} aria-label="北京时间今日每小时成交笔数，可横向滚动"><div className="chart hourly-chart"><ResponsiveContainer width="100%" height={270}>
-    <BarChart data={data} barGap={3} margin={{ top: 15, right: 5, bottom: 5, left: -20 }}>
-      <CartesianGrid strokeDasharray="3 5" vertical={false} stroke="#e7ece9" /><XAxis dataKey="hour" interval={0} tickLine={false} axisLine={false} tick={{ fontSize: 11 }} /><YAxis allowDecimals={false} axisLine={false} tickLine={false} />
-      <Legend /><Tooltip cursor={{ fill: '#f3f6f4' }} /><Bar dataKey="买入" fill="#17745e" radius={[3, 3, 0, 0]} /><Bar dataKey="卖出" fill="#d2825c" radius={[3, 3, 0, 0]} />
-    </BarChart>
-  </ResponsiveContainer></div></div>;
+  return <>
+    <div className="muted" style={{ marginBottom: 8 }}>北京时间 · 最近时段在左侧 · 可横向滚动查看</div>
+    <div className="hourly-chart-scroll" role="region" tabIndex={0} aria-label="北京时间今日每小时成交笔数，可横向滚动"><div className="chart hourly-chart"><ResponsiveContainer width="100%" height={270}>
+      <BarChart data={data} barGap={3} margin={{ top: 15, right: 12, bottom: 5, left: -12 }}>
+        <CartesianGrid strokeDasharray="3 5" vertical={false} stroke={token.colorBorderSecondary} />
+        <XAxis dataKey="hour" interval={0} tickLine={false} axisLine={false} tick={{ fontSize: 11, fill: token.colorTextSecondary }} />
+        <YAxis allowDecimals={false} axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: token.colorTextSecondary }} />
+        <Legend /><Tooltip cursor={{ fill: token.colorFillSecondary }} contentStyle={{ background: token.colorBgElevated, borderColor: token.colorBorder, color: token.colorText }} labelStyle={{ color: token.colorText }} />
+        <Bar dataKey="买入" fill={token.colorSuccess} radius={[3, 3, 0, 0]} /><Bar dataKey="卖出" fill={token.colorError} radius={[3, 3, 0, 0]} />
+      </BarChart>
+    </ResponsiveContainer></div></div>
+  </>;
 }
 export function DepthChart({ snapshot }: { snapshot: Snapshot }) {
   const orders = [...snapshot.active_orders].sort((a, b) => Number(b.price) - Number(a.price));

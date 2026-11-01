@@ -127,9 +127,9 @@ export default function PairConfig() {
           <Col span={24}><Form.Item name="post_only" valuePropName="checked"><Checkbox>仅挂单（Post Only）</Checkbox></Form.Item></Col>
         </Row>
       </Card>
-      <div className="save-bar"><span className="muted">{edit.dirty ? '有未保存的修改' : '所有修改已保存'}</span><Space wrap>
+      <div className="save-bar"><span className="muted" role="status">{edit.dirty ? '有未保存的修改' : '所有修改已保存'}</span><Space wrap>
         <Button onClick={async () => { if (edit.dirty && !await modal.confirm({ title: '放弃未保存的修改？', okText: '还原', cancelText: '继续编辑' })) return; if (adding) form.setFieldsValue(defaults); else if (baseline.current?.symbol === symbol) form.setFieldsValue(toForm(baseline.current.config)); edit.setDirty(false); }}>还原</Button>
-        <Button htmlType="submit" loading={mutation.isPending}>{adding ? '保存并添加' : '保存并立即生效'}</Button>
+        <Button type="primary" htmlType="submit" loading={mutation.isPending}>{adding ? '保存并添加' : '保存并立即生效'}</Button>
       </Space></div>
       {!adding && <Card className="danger-zone" title="删除策略"><p>删除前请暂停策略并等待挂单撤销；不会自动平仓，已有持仓和历史记录会保留。</p><Button danger disabled={edit.saving} loading={deletion.busy} onClick={() => void remove()}>删除策略</Button></Card>}
     </Form>

@@ -101,7 +101,7 @@ function GlobalSettings() {
         <Col xs={24} md={12}><Form.Item name="telegram_chat_id" label="Chat ID" extra="向机器人发送消息后，可通过 Telegram Bot API 的 getUpdates 获取会话 ID。"><Input /></Form.Item></Col>
         <Col span={24}><Form.Item name="clear_telegram_credentials" valuePropName="checked"><Checkbox>清除 Telegram 凭证（请先关闭通知）</Checkbox></Form.Item></Col>
       </Row></Card>
-      <div className="save-bar"><span className="muted">{edit.dirty ? '有未保存的修改' : '所有修改已保存'}</span><Space wrap><Button onClick={async () => { if (edit.dirty && !await modal.confirm({ title: '放弃未保存的修改？', okText: '还原', cancelText: '继续编辑' })) return; if (query.data) fill(query.data); edit.setDirty(false); }}>还原</Button><Button htmlType="submit" loading={mutation.isPending}>保存全局设置</Button></Space></div>
+      <div className="save-bar"><span className="muted" role="status">{edit.dirty ? '有未保存的修改' : '所有修改已保存'}</span><Space wrap><Button onClick={async () => { if (edit.dirty && !await modal.confirm({ title: '放弃未保存的修改？', okText: '还原', cancelText: '继续编辑' })) return; if (query.data) fill(query.data); edit.setDirty(false); }}>还原</Button><Button type="primary" htmlType="submit" loading={mutation.isPending}>保存全局设置</Button></Space></div>
     </Form>
   </>;
 }
@@ -131,7 +131,7 @@ function ServerSettings() {
       <Form form={form} layout="vertical" className="settings-fields" disabled={!ready || edit.saving} onValuesChange={() => edit.setDirty(true)} onFinish={v => mutation.mutate(v)}>
         <Row gutter={20}><Col xs={24} md={12}><Form.Item name="host" label="监听地址" rules={[{ required: true }]}><Input /></Form.Item></Col>
           <Col xs={24} md={12}><Form.Item name="port" label="端口" rules={[{ required: true }]}><InputNumber min={1} max={65535} precision={0} style={{ width: '100%' }} /></Form.Item></Col></Row>
-        <Button htmlType="submit" loading={mutation.isPending}>保存监听设置</Button>
+        <Button type="primary" htmlType="submit" loading={mutation.isPending}>保存监听设置</Button>
       </Form>
     </Card>
   </>;
@@ -154,7 +154,7 @@ function SecuritySettings() {
     <Form.Item name="old_password" label="当前密码" rules={[{ required: true }]}><Input.Password autoComplete="current-password" /></Form.Item>
     <Form.Item name="new_password" label="新密码" rules={[{ required: true }, { min: 6, message: '至少 6 个字符' }]}><Input.Password autoComplete="new-password" /></Form.Item>
     <Form.Item name="confirm" label="确认新密码" dependencies={['new_password']} rules={[{ required: true }, ({ getFieldValue }) => ({ validator: (_, value) => value === getFieldValue('new_password') ? Promise.resolve() : Promise.reject(new Error('两次密码不一致')) })]}><Input.Password autoComplete="new-password" /></Form.Item>
-    <Button htmlType="submit" loading={mutation.isPending}>更新密码</Button>
+    <Button type="primary" htmlType="submit" loading={mutation.isPending}>更新密码</Button>
   </Form></Card>;
 }
 export default function Settings() {

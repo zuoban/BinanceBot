@@ -51,8 +51,8 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   return <ThemeContext.Provider value={{ preference, setPreference }}>
     <ConfigProvider locale={zhCN} theme={{
       algorithm: dark ? antdTheme.darkAlgorithm : antdTheme.defaultAlgorithm,
-      token: { colorPrimary: dark ? '#69bb98' : '#176e59', colorInfo: dark ? '#69bb98' : '#176e59', colorSuccess: dark ? '#69bb98' : '#17745e', colorError: dark ? '#ed907a' : '#bd5c4b', borderRadius: 8, fontFamily: '"DM Sans", "PingFang SC", "Microsoft YaHei", sans-serif', colorBgLayout: dark ? '#090f0d' : '#f4f6f3', ...(dark ? { colorBgContainer: '#111b17', colorBgElevated: '#18251f', colorBorderSecondary: '#293a30' } : {}) },
-      components: { Card: { borderRadiusLG: 12 }, Menu: { itemSelectedBg: dark ? '#203b2e' : '#e5f0eb', itemSelectedColor: dark ? '#a2dfbb' : '#176e59' } },
+      token: { colorPrimary: dark ? '#8cc9ae' : '#176e59', colorInfo: dark ? '#8cc9ae' : '#176e59', colorSuccess: dark ? '#8cc9ae' : '#17745e', colorError: dark ? '#ed907a' : '#bd5c4b', borderRadius: 8, fontFamily: '"DM Sans", "PingFang SC", "Microsoft YaHei", sans-serif', colorBgLayout: dark ? '#141415' : '#f7f7f6', ...(dark ? { colorBgContainer: '#1c1d1d', colorBgElevated: '#252626', colorBorderSecondary: '#363838' } : {}) },
+      components: { Card: { borderRadiusLG: 12 }, Menu: { itemSelectedBg: dark ? '#303332' : '#edf1ee', itemSelectedColor: dark ? '#c4dfd1' : '#176e59' } },
     }}>{children}</ConfigProvider>
   </ThemeContext.Provider>;
 }
