@@ -63,13 +63,12 @@ it('does not steal focus when loading completes', () => {
 });
 
 
-it.each(['loading', 'error'])('keeps the title add link available during initial %s', state => {
+it.each(['loading', 'error'])('keeps the add link available during initial %s', state => {
   overview.data = undefined;
   overview.isPending = state === 'loading';
   overview.error = state === 'error' ? new Error('请求失败') : null;
   render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
-  const heading = screen.getByRole('heading', { name: '策略总览' }).closest('.page-heading') as HTMLElement;
-  expect(within(heading).getByRole('link', { name: /新增交易对/ })).toHaveAttribute('href', '/pairs/new');
+  expect(screen.getByRole('link', { name: /新增交易对/ })).toHaveAttribute('href', '/pairs/new');
   expect(screen.getAllByRole('link', { name: /新增交易对/ })).toHaveLength(1);
 });
 

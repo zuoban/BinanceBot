@@ -5,7 +5,7 @@ import { ArrowDownOutlined, ArrowRightOutlined, ArrowUpOutlined, EyeOutlined, Pl
 import { useOverview } from '../lib/queries';
 import { AccountsContext } from '../lib/session';
 import { accountGroups, comparePositionAmount, modeLabel, numeric, number as fixedNumber, positionAmount, positionGroups, price as fixedPrice, quoteAsset, todayCount, todayPnlGroups, todayTradeCounts, trimFractionZeros } from '../lib/format';
-import { ErrorNotice, ModeTag, PageTitle, Pnl, StatusTag } from '../components/Common';
+import { ErrorNotice, ModeTag, Pnl, StatusTag } from '../components/Common';
 import { runBatchControls, useControls } from '../components/Controls';
 import type { Pair } from '../lib/types';
 import { OverviewLoading } from '../components/Loading';
@@ -85,11 +85,10 @@ export default function OverviewPage() {
   const today = counts.every(c => c !== null) ? counts.reduce<{ buy: number; sell: number }>((sum, c) => ({ buy: sum.buy + c!.buy, sell: sum.sell + c!.sell }), { buy: 0, sell: 0 }) : null;
   const pnlGroups = todayPnlGroups(overview.data?.today_pnl);
   return <>
-    <PageTitle title="策略总览"
-      extra={!overview.data && addPairLink} />
+    <div className="section-heading"><h2>策略运行概览</h2>{!overview.data && addPairLink}</div>
     <ErrorNotice error={overview.error} retry={() => void overview.refetch()} />
     <div className="overview-banner" aria-label="策略运行概览">
-      <div className="overview-summary"><h2>策略运行概览</h2>{stale && <span className="sync-warning">数据暂未更新，请检查连接</span>}</div>
+      {stale && <div className="overview-summary"><span className="sync-warning">数据暂未更新，请检查连接</span></div>}
       <div className="overview-stats">
         <div className="overview-stat"><span>运行中</span><strong>{overview.data ? pairs.filter(p => p.status === 'RUNNING').length : '--'}</strong></div>
         <div className="overview-stat"><span>策略总数</span><strong>{overview.data ? pairs.length : '--'}</strong></div>
