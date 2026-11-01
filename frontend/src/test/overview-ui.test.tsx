@@ -8,8 +8,11 @@ import { snapshot } from './fixtures';
 import type { Overview } from '../lib/types';
 import { AccountsContext } from '../lib/session';
 
-const overview = vi.hoisted(() => ({ data: undefined as Overview | undefined, error: null, dataUpdatedAt: Date.now(), isPending: false, refetch: vi.fn() }));
+const overview = vi.hoisted(() => ({ data: undefined as Overview | undefined, error: null as Error | null, dataUpdatedAt: Date.now(), isPending: false, refetch: vi.fn() }));
 beforeEach(() => {
+  overview.data = undefined;
+  overview.isPending = false;
+  overview.error = null;
   vi.stubGlobal('matchMedia', vi.fn().mockImplementation(query => ({ matches: false, media: query, addListener: vi.fn(), removeListener: vi.fn(), addEventListener: vi.fn(), removeEventListener: vi.fn() })));
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
 });
@@ -17,6 +20,78 @@ vi.mock('../lib/queries', () => ({ useOverview: () => overview, useOverviewHisto
 const actions = vi.hoisted(() => ({ run: vi.fn(), remove: vi.fn(), busy: new Set<string>(), deleting: false }));
 vi.mock('../components/DeleteStrategy', () => ({ useDeleteStrategy: () => ({ remove: actions.remove, busy: actions.deleting }) }));
 vi.mock('../components/Controls', () => ({ useControls: () => ({ busy: actions.busy, results: {}, run: actions.run }), runBatchControls: vi.fn() }));
+
+it('places the add link in the strategy section and navigates to it', async () => {
+  overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: snapshot('BTCUSDC'), mode: 'PAPER', scoped: true }] };
+  overview.isPending = false;
+  overview.error = null;
+  function Location() { return <output data-testid="location">{useLocation().pathname}</output>; }
+  render(<MemoryRouter><App><OverviewPage /><Location /></App></MemoryRouter>);
+  const section = screen.getByRole('region', { name: '交易策略' });
+  const link = within(section).getByRole('link', { name: /新增交易对/ });
+  expect(link).toHaveAttribute('href', '/pairs/new');
+  expect(screen.getAllByRole('link', { name: /新增交易对/ })).toHaveLength(1);
+  await userEvent.setup().click(link);
+  expect(screen.getByTestId('location')).toHaveTextContent('/pairs/new');
+});
+it('transfers focus to the strategy add link when loading completes', async () => {
+  overview.data = undefined;
+  overview.isPending = true;
+  overview.error = null;
+  const { rerender } = render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+  screen.getByRole('link', { name: /新增交易对/ }).focus();
+  overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: snapshot('BTCUSDC'), mode: 'PAPER', scoped: true }] };
+  overview.isPending = false;
+  rerender(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+  const section = screen.getByRole('region', { name: '交易策略' });
+  expect(within(section).getByRole('link', { name: /新增交易对/ })).toHaveFocus();
+  await userEvent.setup().tab();
+  expect(screen.getByRole('textbox', { name: '搜索交易对' })).toHaveFocus();
+});
+
+it('does not steal focus when loading completes', () => {
+  overview.data = undefined;
+  overview.isPending = true;
+  overview.error = null;
+  const { rerender } = render(<MemoryRouter><App><OverviewPage /><button>其他操作</button></App></MemoryRouter>);
+  const other = screen.getByRole('button', { name: '其他操作' });
+  other.focus();
+  overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: snapshot('BTCUSDC'), mode: 'PAPER', scoped: true }] };
+  overview.isPending = false;
+  rerender(<MemoryRouter><App><OverviewPage /><button>其他操作</button></App></MemoryRouter>);
+  expect(other).toHaveFocus();
+});
+
+
+it.each(['loading', 'error'])('keeps the title add link available during initial %s', state => {
+  overview.data = undefined;
+  overview.isPending = state === 'loading';
+  overview.error = state === 'error' ? new Error('请求失败') : null;
+  render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+  const heading = screen.getByRole('heading', { name: '策略总览' }).closest('.page-heading') as HTMLElement;
+  expect(within(heading).getByRole('link', { name: /新增交易对/ })).toHaveAttribute('href', '/pairs/new');
+  expect(screen.getAllByRole('link', { name: /新增交易对/ })).toHaveLength(1);
+});
+
+it('keeps both add links available when there are no strategies', () => {
+  overview.data = { generated_at: new Date().toISOString(), pairs: [] };
+  overview.isPending = false;
+  overview.error = null;
+  render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+  const section = screen.getByRole('region', { name: '交易策略' });
+  expect(within(section).getAllByRole('link', { name: /新增交易对/ })).toHaveLength(2);
+  expect(within(section).getByRole('button', { name: /全部策略操作/ })).toBeDisabled();
+  for (const link of within(section).getAllByRole('link', { name: /新增交易对/ })) expect(link).toHaveAttribute('href', '/pairs/new');
+});
+
+it('keeps the strategy add link after a refresh error', () => {
+  overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: snapshot('BTCUSDC'), mode: 'PAPER', scoped: true }] };
+  overview.isPending = false;
+  overview.error = new Error('刷新失败');
+  render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+  expect(within(screen.getByRole('region', { name: '交易策略' })).getByRole('link', { name: /新增交易对/ })).toHaveAttribute('href', '/pairs/new');
+  expect(screen.getAllByRole('link', { name: /新增交易对/ })).toHaveLength(1);
+});
 
 it('opens the selected strategy configuration from its card', async () => {
   const s = snapshot('BTCUSDC');

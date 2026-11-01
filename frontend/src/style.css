@@ -359,6 +359,8 @@ a { color: inherit; }
 
 
 .strategies-section { scroll-margin-top: 84px; margin-bottom: 32px; }
+.strategies-section .section-heading { gap: 8px; }
+.strategy-heading-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 
 .filter-bar { align-items: flex-start; flex-wrap: wrap; gap: 8px; }
 

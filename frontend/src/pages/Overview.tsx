@@ -1,5 +1,5 @@
-import { useContext, useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useCallback, useContext, useLayoutEffect, useRef, useState } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
 import { App, Button, Card, Col, Dropdown, Empty, Input, Popover, Row, Select, Space, Statistic } from 'antd';
 import { ArrowDownOutlined, ArrowRightOutlined, ArrowUpOutlined, EyeOutlined, PlusOutlined, SearchOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { useOverview } from '../lib/queries';
@@ -18,6 +18,24 @@ const price = (value: unknown) => trimFractionZeros(fixedPrice(value));
 
 export default function OverviewPage() {
   const overview = useOverview();
+  const navigate = useNavigate();
+  const addLink = useRef<HTMLAnchorElement>(null);
+  const restoreAddFocus = useRef(false);
+  const setAddLink = useCallback((node: HTMLAnchorElement | null) => {
+    if (!node && addLink.current === document.activeElement) restoreAddFocus.current = true;
+    addLink.current = node;
+  }, []);
+  const hasOverview = !!overview.data;
+  useLayoutEffect(() => {
+    if (restoreAddFocus.current && document.activeElement === document.body) addLink.current?.focus();
+    restoreAddFocus.current = false;
+  }, [hasOverview]);
+  const addPairLink = <Button href="/pairs/new" ref={setAddLink} icon={<PlusOutlined />} onClick={event => {
+    if (event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) {
+      event.preventDefault();
+      navigate('/pairs/new');
+    }
+  }}>新增交易对</Button>;
   const accounts = useContext(AccountsContext);
   const { modal, message } = App.useApp();
   const controls = useControls();
@@ -68,7 +86,7 @@ export default function OverviewPage() {
   const pnlGroups = todayPnlGroups(overview.data?.today_pnl);
   return <>
     <PageTitle title="策略总览"
-      extra={<Link to="/pairs/new"><Button icon={<PlusOutlined />}>新增交易对</Button></Link>} />
+      extra={!overview.data && addPairLink} />
     <ErrorNotice error={overview.error} retry={() => void overview.refetch()} />
     <div className="overview-banner" aria-label="策略运行概览">
       <div className="overview-summary"><h2>策略运行概览</h2><p>{overview.dataUpdatedAt ? `最近同步 ${new Date(overview.dataUpdatedAt).toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })} · 北京时间` : '等待首次同步'}</p><span className={stale ? 'sync-warning' : 'sync-ok'}>{stale ? '数据暂未更新，请检查连接' : '自动刷新 / 3 秒'}</span></div>
@@ -126,9 +144,12 @@ export default function OverviewPage() {
     </div>
     <section className="strategies-section" aria-labelledby="strategies-heading">
     <div className="section-heading"><h2 id="strategies-heading">交易策略</h2>
-      <Dropdown trigger={['click']} disabled={batchBusy || controls.busy.size > 0 || !pairs.length} menu={{ items: [{ key: 'resume', label: '全部恢复', disabled: stale }, { key: 'pause', label: '全部暂停' }], onClick: ({ key }) => void batch(key as 'pause' | 'resume') }}>
-        <Button loading={batchBusy} icon={<ThunderboltOutlined />}>全部策略操作</Button>
-      </Dropdown>
+      <div className="strategy-heading-actions">
+        <Dropdown trigger={['click']} disabled={batchBusy || controls.busy.size > 0 || !pairs.length} menu={{ items: [{ key: 'resume', label: '全部恢复', disabled: stale }, { key: 'pause', label: '全部暂停' }], onClick: ({ key }) => void batch(key as 'pause' | 'resume') }}>
+          <Button loading={batchBusy} icon={<ThunderboltOutlined />}>全部策略操作</Button>
+        </Dropdown>
+        {addPairLink}
+      </div>
     </div>
     <div className="filter-bar">
       <Input prefix={<SearchOutlined />} placeholder="搜索交易对" aria-label="搜索交易对" allowClear value={search} onChange={e => setSearch(e.target.value)} />
