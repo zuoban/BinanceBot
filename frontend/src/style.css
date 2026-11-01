@@ -265,16 +265,16 @@ a { color: inherit; }
   .topbar-actions { margin-left: auto; min-width: 0; }
   .topbar-pair-select { width: min(180px, calc(100vw - 190px)); min-width: 0; }
 }
-[data-theme="dark"] { color: #dce9e1; background: #101a17; }
-[data-theme="dark"] .app-layout { background: #101a17; }
+[data-theme="dark"] { color: #dce9e1; background: #090f0d; }
+[data-theme="dark"] .app-layout { background: #090f0d; }
 [data-theme="dark"] .loading-brand, [data-theme="dark"] .topbar-brand { color: #d8e9db; }
 [data-theme="dark"] .topbar-brand-name small { color: #a8bdaf; }
-[data-theme="dark"] .topbar { background: rgba(22, 35, 30, .96); border-color: #2a3c33; }
+[data-theme="dark"] .topbar { background: rgba(13, 22, 17, .98); border-color: #293a30; }
 [data-theme="dark"] .topbar-separator { color: #526a5d; }
 [data-theme="dark"] .page-heading h1, [data-theme="dark"] .section-heading h2, [data-theme="dark"] .pair-name,
 [data-theme="dark"] .strategy-price strong, [data-theme="dark"] .account-card .ant-statistic-content { color: #e0eee4; }
 [data-theme="dark"] .strategy-metrics strong { color: #d5e6db; }
-[data-theme="dark"] .strategy-card { border-color: #34483d; background: #192723; }
+[data-theme="dark"] .strategy-card { border-color: #293a30; background: #111b17; }
 [data-theme="dark"] .strategy-long { --direction-color: #69bb98; }
 [data-theme="dark"] .strategy-short { --direction-color: #e08a72; }
 [data-theme="dark"] .strategy-metrics, [data-theme="dark"] .account-bottom { border-color: #34483d; }
@@ -285,8 +285,8 @@ a { color: inherit; }
 [data-theme="dark"] .position-summary-metrics .position-short { color: #f29b85; }
 [data-theme="dark"] .positive { color: #78d4a6 !important; }
 [data-theme="dark"] .negative { color: #f29b85 !important; }
-[data-theme="dark"] .save-bar { background: #1b2a24f2; border-color: #35493e; box-shadow: 0 8px 28px #0005; }
-[data-theme="dark"] .loading-screen { background: #101a17; }
+[data-theme="dark"] .save-bar { background: #18251ff2; border-color: #35493e; box-shadow: 0 8px 28px #0005; }
+[data-theme="dark"] .loading-screen { background: #090f0d; }
 [data-theme="dark"] .loading-brand small, [data-theme="dark"] .loading-screen p { color: #b2c6b8; }
 [data-theme="dark"] .loading-indicator span { background: #69bb98; }
 [data-theme="dark"] .skeleton-line, [data-theme="dark"] .skeleton-block { background: linear-gradient(90deg, #24372d 25%, #344c3d 37%, #24372d 63%); background-size: 400% 100%; border-color: #334b3d; }
@@ -296,7 +296,7 @@ a { color: inherit; }
 [data-theme="dark"] .history-metric strong { color: #e0eee4; }
 [data-theme="dark"] .history-metric span, [data-theme="dark"] .history-heading > div:first-child > span { color: #b2c6b8; }
 [data-theme="dark"] .chart .recharts-cartesian-axis-tick text, [data-theme="dark"] .chart .recharts-reference-line .recharts-label { fill: #c1d4c7; }
-[data-theme="dark"] .chart .recharts-tooltip-wrapper .recharts-default-tooltip { background: #20312b !important; border-color: #40574a !important; }
+[data-theme="dark"] .chart .recharts-tooltip-wrapper .recharts-default-tooltip { background: #18251f !important; border-color: #40574a !important; }
 [data-theme="dark"] .chart .recharts-tooltip-wrapper .recharts-tooltip-label { color: #dce9e1; }
 [data-theme="dark"] .chart .recharts-tooltip-cursor { fill: #2b4034; }
 @media (max-width: 600px) {
@@ -339,7 +339,7 @@ a { color: inherit; }
 .sync-ok::before { background: #438f67; }
 .sync-warning { color: #875000; }
 .sync-warning::before { background: #ad700d; }
-[data-theme="dark"] .overview-banner { background: #1b2c25; border-color: #34483d; color: #dce9e1; }
+[data-theme="dark"] .overview-banner { background: #14221b; border-color: #293a30; color: #dce9e1; }
 [data-theme="dark"] .overview-banner h2, [data-theme="dark"] .overview-stat strong { color: #e0eee4; }
 [data-theme="dark"] .overview-banner p, [data-theme="dark"] .overview-stat, [data-theme="dark"] .overview-trade-breakdown, [data-theme="dark"] .overview-stat strong small { color: #b2c6b8; }
 [data-theme="dark"] .overview-stat, [data-theme="dark"] .overview-trade-breakdown { border-color: #405449; }
@@ -612,8 +612,8 @@ a { color: inherit; }
 .login-note { margin: 20px 0 0; color: #596d61; font-size: 12px; line-height: 1.5; }
 .login-form .ant-typography-secondary, .login-note { overflow-wrap: anywhere; }
 .login-page ::selection { background: #b9d9c7; color: #173c32; }
-[data-theme="dark"] .login-page { background: #101a17; }
-[data-theme="dark"] .login-brand { background: #192f27; }
+[data-theme="dark"] .login-page { background: #090f0d; }
+[data-theme="dark"] .login-brand { background: #102019; }
 [data-theme="dark"] .login-form .ant-typography-secondary, [data-theme="dark"] .login-note { color: #b2c6b8; }
 [data-theme="dark"] .login-theme .ant-btn:focus-visible { outline-color: #69bb98; }
 [data-theme="dark"] .login-form .ant-btn-primary:not(:disabled) { color: #102019; background: #80c6a7; border-color: #80c6a7; }

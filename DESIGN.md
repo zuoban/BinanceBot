@@ -11,8 +11,8 @@ colors:
   border: "#e8ede9"
   long: "#238367"
   short: "#c26b55"
-  dark-background: "#101a17"
-  dark-surface: "#192723"
+  dark-background: "#090f0d"
+  dark-surface: "#111b17"
   dark-text: "#dce9e1"
   dark-primary: "#69bb98"
 typography:
@@ -57,7 +57,7 @@ spacing:
 
 ## Colors
 
-深松绿用于主要操作和品牌，雾灰绿与白色构成浅色界面，暖陶红表达做空及负值。深色主题使用深绿黑背景与较亮的绿色、珊瑚色，保持语义区分。状态同时配合文字、图标或标签表达。
+深松绿用于主要操作和品牌，雾灰绿与白色构成浅色界面，暖陶红表达做空及负值。深色主题以近黑的绿灰色作为背景，依次用深绿面板和更亮的浮层区分层级；较亮的绿色、珊瑚色保持语义区分。状态同时配合文字、图标或标签表达。
 
 ## Typography
 
