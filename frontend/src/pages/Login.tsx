@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Alert, Button, Card, Form, Input, Typography } from 'antd';
+import { Alert, Button, Form, Input, Typography } from 'antd';
 import { LockOutlined } from '@ant-design/icons';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { api, post, tokenStore } from '../lib/api';
@@ -20,7 +20,14 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
   if (status.isPending) return <LoadingScreen label="正在连接控制台" />;
   return <main className="login-page">
     <div className="login-theme"><ThemeSwitch /></div>
-    <section className="login-form"><Card variant="borderless">
+    <aside className="login-brand">
+      <div className="login-grid" aria-hidden="true" />
+      <div className="login-brand-content">
+        <img src="/logo.svg" alt="" className="login-logo" />
+        <div><strong>GRID CONSOLE</strong><span>BINANCE FUTURES</span></div>
+      </div>
+    </aside>
+    <section className="login-form"><div className="login-form-content">
       <Typography.Title level={2}>{setup ? '初始化控制台' : '登录交易控制台'}</Typography.Title>
       <Typography.Paragraph type="secondary">{setup ? '使用启动日志中的初始化码创建管理员密码' : '输入管理员密码，进入策略工作台'}</Typography.Paragraph>
       <ErrorNotice error={status.error} retry={() => void status.refetch()} /><ErrorNotice error={error} />
@@ -33,6 +40,7 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
         {setup && <Form.Item name="confirm" label="确认密码" dependencies={['password']} rules={[{ required: true, message: '请再次输入密码' }, ({ getFieldValue }) => ({ validator: (_, value) => value === getFieldValue('password') ? Promise.resolve() : Promise.reject(new Error('两次密码不一致')) })]}><Input.Password size="large" autoComplete="new-password" /></Form.Item>}
         <Button type="primary" size="large" htmlType="submit" block loading={mutation.isPending}>{setup ? '创建并进入控制台' : '进入控制台'}</Button>
       </Form>
-    </Card><p className="login-note">会话仅保存在当前浏览器标签页</p></section>
+      <p className="login-note">会话仅保存在当前浏览器标签页</p>
+    </div></section>
   </main>;
 }
