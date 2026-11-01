@@ -160,6 +160,7 @@ export default function OverviewPage() {
       {visible.map(({ snapshot: s, mode: m, scoped }) => {
         const pair: Pair = { symbol: s.symbol, status: s.status, mode: m, grid_config: s.grid_config, scoped };
         const quote = quoteAsset(s.symbol), result = controls.results[s.symbol];
+        const tradeCounts = todayTradeCounts(s);
         const size = numeric(s.position.size), entry = numeric(s.position.entry_price), mark = numeric(s.ticker.mark_price);
         const validEntry = size !== null && size !== 0 && entry !== null && entry > 0;
         const change = validEntry && mark !== null && mark > 0 ? (mark / entry - 1) * 100 : null;
@@ -191,8 +192,8 @@ export default function OverviewPage() {
             <div><span>涨跌幅</span><strong className={roundedChange === null || roundedChange === 0 ? undefined : roundedChange > 0 ? 'positive' : 'negative'}>{roundedChange === null ? '--' : roundedChange === 0 ? '0%' : `${roundedChange > 0 ? '+' : ''}${formattedChange}%`}</strong></div>
             <div><span>已实现盈亏 / {quote}</span><strong><Pnl value={s.stats.total_realized_pnl} compact /></strong></div>
             <div><span>未实现盈亏 / {quote}</span><strong><Pnl value={s.position.unrealized_pnl} compact /></strong></div>
-            <div><span>今日成交</span><strong>{todayCount(s) ?? '--'} <small>笔</small></strong></div>
-            <div><span>买单 / 卖单</span><strong>{s.stats.active_buy_orders} <small>/</small> {s.stats.active_sell_orders}</strong></div>
+            <div><span>今日成交</span><strong>{tradeCounts ? tradeCounts.buy + tradeCounts.sell : '--'} <small>笔</small></strong></div>
+            <div><span>买单 / 卖单</span><strong>{tradeCounts?.buy ?? '--'} <small>/</small> {tradeCounts?.sell ?? '--'}</strong></div>
           </div>
           {result && <div className={result.startsWith('失败') ? 'negative operation-result' : 'muted operation-result'} role="status">{result}</div>}
         </Card></Col>;

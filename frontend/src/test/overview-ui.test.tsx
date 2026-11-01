@@ -195,6 +195,17 @@ it('summarizes statuses and lets the user clear a search with no results', async
   await user.click(screen.getAllByRole('button', { name: '清除筛选' })[0]);
   expect(screen.getByText('BTCUSDC')).toBeInTheDocument();
 });
+it('shows today’s executed buy and sell counts instead of active orders on the strategy card', () => {
+  const s = snapshot('BTCUSDC');
+  s.stats.active_buy_orders = 7;
+  s.stats.active_sell_orders = 9;
+  overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: s, mode: 'PAPER', scoped: true }] };
+  render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+  const card = screen.getByRole('link', { name: 'BTCUSDC' }).closest('.strategy-card') as HTMLElement;
+  expect(within(card).getByText('今日成交').parentElement).toHaveTextContent('5 笔');
+  expect(within(card).getByText('买单 / 卖单').parentElement).toHaveTextContent('2 / 3');
+});
+
 
 it('shows exchange asset balances and available balance', () => {
   const s = snapshot('BTCUSDC', 'LIVE');
@@ -233,6 +244,9 @@ it('shows unavailable trade counts when a strategy has no current-day statistics
   s.hourly_trade_stats = null;
   overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: s, mode: 'PAPER', scoped: true }] };
   render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+  const card = screen.getByRole('link', { name: 'BTCUSDC' }).closest('.strategy-card') as HTMLElement;
+  expect(within(card).getByText('今日成交').parentElement).toHaveTextContent('-- 笔');
+  expect(within(card).getByText('买单 / 卖单').parentElement).toHaveTextContent('-- / --');
   expect(within(screen.getByLabelText('策略运行概览')).getByText('买单 -- 笔 / 卖单 -- 笔')).toBeInTheDocument();
 });
 
