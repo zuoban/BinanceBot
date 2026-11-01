@@ -20,6 +20,15 @@ a { color: inherit; }
 .topbar-brand:focus-visible { outline: 2px solid #238367; outline-offset: 3px; }
 .topbar-pair-select { min-width: 135px; }
 .content { width: 100%; max-width: 1600px; padding: 40px 44px 60px; margin: 0 auto; }
+.page-breadcrumb { margin-bottom: 12px; color: #66796d; font-size: 13px; }
+.page-breadcrumb ol { display: flex; flex-wrap: wrap; gap: 4px 0; margin: 0; padding: 0; list-style: none; }
+.page-breadcrumb li { min-width: 0; overflow-wrap: anywhere; }
+.page-breadcrumb-separator { margin: 0 8px; }
+.page-breadcrumb a { color: #176e59; text-decoration: underline; text-underline-offset: 3px; }
+.page-breadcrumb a:focus-visible { outline: 2px solid #238367; outline-offset: 3px; border-radius: 2px; }
+[data-theme="dark"] .page-breadcrumb { color: #b2c6b8; }
+[data-theme="dark"] .page-breadcrumb a { color: #a2dfbb; }
+[data-theme="dark"] .page-breadcrumb a:focus-visible { outline-color: #69bb98; }
 .page-heading { display: flex; justify-content: space-between; align-items: flex-end; gap: 20px; margin-bottom: 28px; }
 .page-heading h1 { font-size: 30px; letter-spacing: -.035em; margin: 9px 0 6px; color: #183b30; font-weight: 700; }
 .page-heading p { margin: 0; color: #83938a; font-size: 13px; }

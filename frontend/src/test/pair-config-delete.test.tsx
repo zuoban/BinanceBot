@@ -5,20 +5,25 @@ import { createMemoryRouter, RouterProvider } from 'react-router-dom';
 import { beforeEach, expect, it, vi } from 'vitest';
 import Shell from '../components/Shell';
 import PairConfig from '../pages/PairConfig';
+import PairDetail from '../pages/PairDetail';
 import { ApiError } from '../lib/api';
+import type { GridConfig } from '../lib/types';
 import { pair } from './fixtures';
 
-const mocks = vi.hoisted(() => ({ confirm: vi.fn(), success: vi.fn(), error: vi.fn(), api: vi.fn(), post: vi.fn() }));
+const mocks = vi.hoisted(() => {
+  const confirm = vi.fn(), success = vi.fn(), error = vi.fn();
+  return { confirm, success, error, api: vi.fn(), post: vi.fn(), app: { modal: { confirm }, message: { success, error } } };
+});
 vi.mock('antd', async importOriginal => {
   const antd = await importOriginal<typeof import('antd')>();
-  return { ...antd, App: { useApp: () => ({ modal: { confirm: mocks.confirm }, message: { success: mocks.success, error: mocks.error } }) } };
+  return { ...antd, App: { useApp: () => mocks.app } };
 });
 vi.mock('../lib/api', async importOriginal => ({ ...await importOriginal<typeof import('../lib/api')>(), api: mocks.api, post: mocks.post }));
 vi.mock('../lib/queries', async () => {
   const { pair } = await import('./fixtures');
-  return { usePairs: () => ({ data: [pair('BTCUSDC'), pair('ETHUSDC')] }), useOverview: () => ({ data: undefined }), useLiveAccounts: () => [] };
+  return { usePairs: () => ({ data: [pair('BTCUSDC'), pair('ETHUSDC')] }), useOverview: () => ({ data: undefined }), useLiveAccounts: () => [], usePairSnapshot: () => ({ data: undefined, isPending: false, refetch: vi.fn() }) };
 });
-vi.mock('../components/Controls', () => ({ ControlProvider: ({ children }: { children: React.ReactNode }) => children }));
+vi.mock('../components/Controls', () => ({ ControlProvider: ({ children }: { children: React.ReactNode }) => children, PairControls: () => null, useControls: () => ({ results: {} }) }));
 vi.mock('../components/ThemeSwitch', () => ({ ThemeSwitch: () => null, themeLabels: { system: '跟随系统', light: '浅色', dark: '深色' } }));
 
 beforeEach(() => {
@@ -26,18 +31,108 @@ beforeEach(() => {
   vi.stubGlobal('matchMedia', vi.fn().mockImplementation(query => ({ matches: false, media: query, addListener: vi.fn(), removeListener: vi.fn(), addEventListener: vi.fn(), removeEventListener: vi.fn() })));
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
 });
-function setup(request: Promise<unknown>) {
-  mocks.api.mockImplementation((_: string, init?: RequestInit) => init?.method === 'DELETE' ? request : Promise.resolve({ ...pair('BTCUSDC').grid_config, config_version: 'version-1' }));
+function setup(request: Promise<unknown>, initialPath = '/pairs/BTCUSDC/config', configError?: Error) {
+  mocks.api.mockImplementation((_: string, init?: RequestInit) => init?.method === 'DELETE' ? request : configError ? Promise.reject(configError) : Promise.resolve({ ...pair('BTCUSDC').grid_config, config_version: 'version-1' }));
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const router = createMemoryRouter([{ element: <Shell />, children: [
     { path: '/', element: <div>总览页面</div> },
     { path: '/settings', element: <div>设置页面</div> },
-    { path: '/pairs/:symbol', element: <div>策略详情页面</div> },
+    { path: '/pairs/new', element: <PairConfig /> },
+    { path: '/pairs/:symbol', element: <PairDetail /> },
     { path: '/pairs/:symbol/config', element: <PairConfig /> },
-  ] }], { initialEntries: ['/pairs/BTCUSDC/config'] });
+  ] }], { initialEntries: [initialPath] });
   render(<QueryClientProvider client={client}><RouterProvider router={router} /></QueryClientProvider>);
   return router;
 }
+
+function breadcrumb() {
+  return within(screen.getByRole('navigation', { name: '面包屑' }));
+}
+
+function expectBreadcrumb(items: { label: string; href?: string }[]) {
+  const nav = breadcrumb();
+  const entries = nav.getAllByRole('listitem');
+  expect(entries.map(entry => entry.textContent?.replace(/^\//, ''))).toEqual(items.map(item => item.label));
+  items.forEach(({ label, href }, index) => {
+    if (href) expect(within(entries[index]).getByRole('link', { name: label })).toHaveAttribute('href', href);
+    else {
+      expect(within(entries[index]).queryByRole('link')).not.toBeInTheDocument();
+      expect(within(entries[index]).getByText(label)).toHaveAttribute('aria-current', 'page');
+    }
+  });
+}
+
+function expectDisabledAncestors(labels: string[]) {
+  const nav = breadcrumb();
+  for (const label of labels) {
+    const item = nav.getByText(label);
+    expect(item).toHaveAttribute('aria-disabled', 'true');
+    expect(item.tagName).not.toBe('A');
+    expect(nav.queryByRole('link', { name: label })).not.toBeInTheDocument();
+  }
+}
+
+it.each([
+  ['/pairs/new', [{ label: '策略总览', href: '/' }, { label: '新增交易对' }]],
+  ['/pairs/BTCUSDC', [{ label: '策略总览', href: '/' }, { label: 'BTCUSDC' }]],
+  ['/pairs/BTCUSDC/config', [{ label: '策略总览', href: '/' }, { label: 'BTCUSDC', href: '/pairs/BTCUSDC' }, { label: '策略参数' }]],
+])('shows the breadcrumb hierarchy for %s', (path, items) => {
+  setup(Promise.resolve(), path);
+  expectBreadcrumb(items);
+});
+
+it.each(['/pairs/UNKNOWN', '/pairs/UNKNOWN/config'])('keeps the breadcrumb available for a missing pair at %s', path => {
+  setup(Promise.resolve(), path);
+  expect(screen.getByText('该交易对不存在或已移除')).toBeInTheDocument();
+  expectBreadcrumb(path.endsWith('/config')
+    ? [{ label: '策略总览', href: '/' }, { label: 'UNKNOWN', href: '/pairs/UNKNOWN' }, { label: '策略参数' }]
+    : [{ label: '策略总览', href: '/' }, { label: 'UNKNOWN' }]);
+});
+
+it('keeps the breadcrumb available when configuration loading fails', async () => {
+  setup(Promise.resolve(), '/pairs/BTCUSDC/config', new Error('配置加载失败'));
+  await screen.findByText('配置加载失败');
+  expectBreadcrumb([{ label: '策略总览', href: '/' }, { label: 'BTCUSDC', href: '/pairs/BTCUSDC' }, { label: '策略参数' }]);
+});
+
+it.each(['/pairs/BTCUSDC/config', '/pairs/new'])('confirms before leaving a dirty form for the overview at %s', async path => {
+  mocks.confirm.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+  const router = setup(Promise.resolve(), path);
+  const user = userEvent.setup();
+  const input = await screen.findByLabelText('网格间距');
+  await waitFor(() => expect(input).toBeEnabled());
+  await user.clear(input);
+  await user.type(input, '0.2');
+  await user.click(breadcrumb().getByRole('link', { name: '策略总览' }));
+  await waitFor(() => expect(mocks.confirm).toHaveBeenCalledTimes(1));
+  expect(router.state.location.pathname).toBe(path);
+  expect(input).toHaveValue('0.2');
+  await user.click(breadcrumb().getByRole('link', { name: '策略总览' }));
+  await screen.findByText('总览页面');
+  expect(router.state.location.pathname).toBe('/');
+  expect(mocks.confirm).toHaveBeenCalledTimes(2);
+});
+
+it.each(['/pairs/BTCUSDC/config', '/pairs/new'])('disables breadcrumb ancestors during save at %s', async path => {
+  let finish!: (value: string | GridConfig) => void;
+  mocks.post.mockReturnValue(new Promise<string | GridConfig>(resolve => { finish = resolve; }));
+  const router = setup(Promise.resolve(), path);
+  const user = userEvent.setup();
+  const input = await screen.findByLabelText('网格间距');
+  await waitFor(() => expect(input).toBeEnabled());
+  if (path === '/pairs/new') await user.type(screen.getByLabelText('合约交易对'), 'BTCUSDC');
+  await user.clear(input);
+  await user.type(input, '0.2');
+  await user.click(screen.getByRole('button', { name: path === '/pairs/new' ? '保存并添加' : '保存并立即生效' }));
+  await waitFor(() => expect(mocks.post).toHaveBeenCalled());
+  const labels = path === '/pairs/new' ? ['策略总览'] : ['策略总览', 'BTCUSDC'];
+  expectDisabledAncestors(labels);
+  for (const label of labels) await user.click(breadcrumb().getByText(label));
+  expect(router.state.location.pathname).toBe(path);
+  await act(async () => { finish(path === '/pairs/new' ? 'BTCUSDC' : pair('BTCUSDC').grid_config); });
+  expect(await screen.findByRole('heading', { name: 'BTCUSDC' })).toBeInTheDocument();
+  expect(router.state.location.pathname).toBe('/pairs/BTCUSDC');
+}, 15000);
 
 it('shows the navigation menu and pair selector on a strategy page', () => {
   setup(Promise.resolve());
@@ -47,8 +142,8 @@ it('shows the navigation menu and pair selector on a strategy page', () => {
 
 it('returns to the strategy detail page', async () => {
   const router = setup(Promise.resolve());
-  await userEvent.setup().click(screen.getByRole('button', { name: '返回详情' }));
-  expect(await screen.findByText('策略详情页面')).toBeInTheDocument();
+  await userEvent.setup().click(within(screen.getByRole('navigation', { name: '面包屑' })).getByRole('link', { name: 'BTCUSDC' }));
+  expect(await screen.findByRole('heading', { name: 'BTCUSDC' })).toBeInTheDocument();
   expect(router.state.location.pathname).toBe('/pairs/BTCUSDC');
 });
 
@@ -60,11 +155,11 @@ it('confirms before returning with unsaved changes', async () => {
   await waitFor(() => expect(input).toBeEnabled());
   await user.clear(input);
   await user.type(input, '0.2');
-  await user.click(screen.getByRole('button', { name: '返回详情' }));
+  await user.click(within(screen.getByRole('navigation', { name: '面包屑' })).getByRole('link', { name: 'BTCUSDC' }));
   await waitFor(() => expect(mocks.confirm).toHaveBeenCalledTimes(1));
   expect(router.state.location.pathname).toBe('/pairs/BTCUSDC/config');
-  await user.click(screen.getByRole('button', { name: '返回详情' }));
-  expect(await screen.findByText('策略详情页面')).toBeInTheDocument();
+  await user.click(within(screen.getByRole('navigation', { name: '面包屑' })).getByRole('link', { name: 'BTCUSDC' }));
+  expect(await screen.findByRole('heading', { name: 'BTCUSDC' })).toBeInTheDocument();
   expect(router.state.location.pathname).toBe('/pairs/BTCUSDC');
 });
 
@@ -77,7 +172,7 @@ it('returns to detail after saving changed parameters', async () => {
   await user.clear(input);
   await user.type(input, '0.2');
   await user.click(screen.getByRole('button', { name: '保存并立即生效' }));
-  expect(await screen.findByText('策略详情页面')).toBeInTheDocument();
+  expect(await screen.findByRole('heading', { name: 'BTCUSDC' })).toBeInTheDocument();
   expect(router.state.location.pathname).toBe('/pairs/BTCUSDC');
   expect(mocks.post).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ baseline_version: 'version-1' }));
   expect(mocks.confirm).not.toHaveBeenCalled();
@@ -119,7 +214,7 @@ it('does not redirect again after the user navigates while queries refresh', asy
     await user.clear(input);
     await user.type(input, '0.2');
     await user.click(screen.getByRole('button', { name: '保存并立即生效' }));
-    expect(await screen.findByText('策略详情页面')).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'BTCUSDC' })).toBeInTheDocument();
     await act(async () => { await router.navigate('/settings'); });
     expect(router.state.location.pathname).toBe('/settings');
     await act(async () => { finish(); await refresh; });
@@ -151,6 +246,10 @@ it('blocks navigation while deleting and redirects a dirty form without another 
   await user.type(input, '0.2');
   await user.click(screen.getByRole('button', { name: '删除策略' }));
   await waitFor(() => expect(mocks.api).toHaveBeenCalledWith('/api/pairs/BTCUSDC', expect.objectContaining({ method: 'DELETE' })));
+  expectDisabledAncestors(['策略总览', 'BTCUSDC']);
+  await user.click(breadcrumb().getByText('策略总览'));
+  await user.click(breadcrumb().getByText('BTCUSDC'));
+  expect(router.state.location.pathname).toBe('/pairs/BTCUSDC/config');
   await act(async () => { await router.navigate('/settings'); });
   expect(router.state.location.pathname).toBe('/pairs/BTCUSDC/config');
   expect(mocks.confirm).toHaveBeenCalledTimes(2);

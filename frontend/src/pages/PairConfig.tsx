@@ -2,13 +2,12 @@ import { useContext, useEffect, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
 import { useNavigate, useParams } from 'react-router-dom';
 import { Alert, App, Button, Card, Checkbox, Col, Form, Input, InputNumber, Row, Select, Space, Switch } from 'antd';
-import { ArrowLeftOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, ApiError, pairPath, post } from '../lib/api';
 import { usePairs } from '../lib/queries';
 import { EditContext } from '../lib/session';
 import type { GridConfig } from '../lib/types';
-import { ErrorNotice, PageTitle } from '../components/Common';
+import { ErrorNotice, PageBreadcrumb, PageTitle } from '../components/Common';
 import { useDeleteStrategy } from '../components/DeleteStrategy';
 
 type FormValues = Omit<GridConfig, 'dry_run' | 'is_testnet'> & { mode: 'PAPER' | 'TESTNET' | 'LIVE' };
@@ -88,7 +87,10 @@ export default function PairConfig() {
     mutation.mutate(values);
   };
   return <>
-    <PageTitle title={adding ? '新增交易对' : `${symbol} 策略参数`} description={adding ? '新策略创建后保持暂停，检查参数后手动恢复。' : '参数保存后立即生效，请先核对策略设置。'} extra={!adding && <Button icon={<ArrowLeftOutlined aria-hidden="true" />} disabled={edit.saving} onClick={() => navigate(`/pairs/${symbol}`)}>返回详情</Button>} />
+    <PageBreadcrumb disabled={edit.saving} items={adding
+      ? [{ label: '策略总览', to: '/' }, { label: '新增交易对' }]
+      : [{ label: '策略总览', to: '/' }, { label: symbol, to: `/pairs/${symbol}` }, { label: '策略参数' }]} />
+    <PageTitle title={adding ? '新增交易对' : `${symbol} 策略参数`} description={adding ? '新策略创建后保持暂停，检查参数后手动恢复。' : '参数保存后立即生效，请先核对策略设置。'} />
     <ErrorNotice error={pairs.error || config.error} retry={() => { if (!adding) void config.refetch(); }} />
     <ErrorNotice error={mutation.error} />
     {!adding && (mutation.error instanceof ApiError && mutation.error.status === 409 || mutation.error?.message.includes('无法确认配置版本')) && <Button onClick={async () => {

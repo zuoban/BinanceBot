@@ -1,5 +1,6 @@
 import { Alert, Button, Empty, Space, Tag } from 'antd';
 import { ReloadOutlined } from '@ant-design/icons';
+import { Link } from 'react-router-dom';
 import type { Mode, Status } from '../lib/types';
 import { modeLabel, number, statusLabel, trimFractionZeros } from '../lib/format';
 
@@ -11,6 +12,12 @@ export const ModeTag = ({ mode }: { mode: Mode }) => <Tag color={mode === 'LIVE'
 export const StatusTag = ({ status }: { status: Status }) => <Tag color={status === 'RUNNING' ? 'success' : status === 'ERROR' ? 'error' : 'default'}>{statusLabel[status]}</Tag>;
 export const Pnl = ({ value, compact = false }: { value: unknown; compact?: boolean }) => <span className={Number(value) < 0 ? 'negative numeric' : 'positive numeric'}>{compact ? trimFractionZeros(number(value)) : number(value)}</span>;
 export const NoData = () => <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无数据" />;
+export function PageBreadcrumb({ items, disabled = false }: { items: { label: string; to?: string }[]; disabled?: boolean }) {
+  return <nav className="page-breadcrumb" aria-label="面包屑"><ol>{items.map((item, index) => {
+    const current = index === items.length - 1;
+    return <li key={index}>{index > 0 && <span className="page-breadcrumb-separator" aria-hidden="true">/</span>}{current ? <span aria-current="page">{item.label}</span> : item.to && !disabled ? <Link to={item.to}>{item.label}</Link> : <span aria-disabled={disabled || undefined}>{item.label}</span>}</li>;
+  })}</ol></nav>;
+}
 export function PageTitle({ eyebrow, title, description, extra }: { eyebrow?: string; title: string; description?: string; extra?: React.ReactNode }) {
   return <div className="page-heading"><div>{eyebrow && <div className="eyebrow">{eyebrow}</div>}<h1>{title}</h1>{description && <p>{description}</p>}</div><Space wrap>{extra}</Space></div>;
 }
