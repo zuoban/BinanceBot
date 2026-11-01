@@ -87,7 +87,7 @@ impl SnapshotCache {
     ) -> SnapshotCharts {
         // Serialize only dashboard readers; trading never takes this mutex.
         let mut cache = self.trades.lock().await;
-        let revision = db.trade_data_revision();
+        let revision = db.symbol_trade_revision(&scope.symbol);
         let key = TradeKey {
             symbol: scope.symbol.clone(),
             mode: scope.mode,
@@ -117,6 +117,26 @@ impl SnapshotCache {
 }
 
 impl AppState {
+    pub(crate) async fn account_snapshot(&self) -> serde_json::Value {
+        // Match the full snapshot's lock order so a scope transition or trade
+        // commit cannot expose a partially updated account view.
+        let _scope = self.snapshot_scope_lock.read().await;
+        let _commit = self.trade_commit_lock.lock().await;
+        let config = self.config.read().await;
+        let unrealized_pnl = self.position.read().await.unrealized_pnl;
+        let account = self.account.read().await.clone();
+        serde_json::json!({
+            "mode": TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet),
+            "snapshot": {
+                "symbol": config.exchange.symbol,
+                "dry_run": config.exchange.dry_run,
+                "grid_config": { "is_testnet": config.exchange.is_testnet },
+                "position": { "unrealized_pnl": unrealized_pnl },
+                "account": account,
+            }
+        })
+    }
+
     pub async fn snapshot(&self) -> BotSnapshot {
         self.snapshot_at(Utc::now()).await
     }
@@ -148,7 +168,7 @@ impl AppState {
         let config = self.config.read().await;
         if charts.as_ref().is_some_and(|charts| {
             charts.scope != SnapshotScope::from_config(&config)
-                || charts.revision != self.db.trade_data_revision()
+                || charts.revision != self.db.symbol_trade_revision(&charts.scope.symbol)
         }) {
             return None;
         }

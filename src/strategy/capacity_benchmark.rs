@@ -12,14 +12,108 @@ fn parameter(name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+// The directory owns the database and its SQLite sidecars; it is removed after
+// all engines and database handles have been dropped, including during unwinding.
+struct BenchmarkDatabase {
+    directory: Option<std::path::PathBuf>,
+}
+
+impl BenchmarkDatabase {
+    fn new(disk: bool) -> Self {
+        if !disk {
+            return Self { directory: None };
+        }
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        loop {
+            let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let directory = std::env::temp_dir()
+                .join(format!("binancebot-benchmark-{}-{id}", std::process::id()));
+            match std::fs::create_dir(&directory) {
+                Ok(()) => {
+                    return Self {
+                        directory: Some(directory),
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("cannot create benchmark database directory: {error}"),
+            }
+        }
+    }
+
+    fn open(&self) -> Database {
+        match &self.directory {
+            Some(directory) => Database::open(directory.join("benchmark.sqlite")).unwrap(),
+            None => Database::open(":memory:").unwrap(),
+        }
+    }
+}
+
+impl Drop for BenchmarkDatabase {
+    fn drop(&mut self) {
+        if let Some(directory) = &self.directory {
+            if let Err(error) = std::fs::remove_dir_all(directory) {
+                eprintln!(
+                    "failed to remove benchmark directory {}: {error}",
+                    directory.display()
+                );
+            }
+        }
+    }
+}
+
+fn database_mode() -> bool {
+    match std::env::var("BENCH_DB").as_deref() {
+        Err(std::env::VarError::NotPresent) | Ok("memory") => false,
+        Ok("disk") => true,
+        _ => panic!("BENCH_DB must be memory or disk"),
+    }
+}
+
+// Nearest-rank quantiles are descriptive only; small samples cannot resolve
+// tail percentiles (p99 needs at least 100 observations).
+fn print_percentiles(label: &str, samples: &mut [f64]) {
+    if samples.is_empty() {
+        println!("{label}: n=0 (no samples)");
+        return;
+    }
+    samples.sort_by(f64::total_cmp);
+    let quantile = |percent: usize| samples[(samples.len() * percent).div_ceil(100) - 1];
+    println!(
+        "{label}: n={} p50={:.3} p95={:.3} p99={:.3} max={:.3}",
+        samples.len(),
+        quantile(50),
+        quantile(95),
+        quantile(99),
+        samples[samples.len() - 1]
+    );
+}
+
+#[test]
+fn benchmark_disk_database_is_isolated_and_cleaned_up() {
+    let directory;
+    {
+        let owner = BenchmarkDatabase::new(true);
+        directory = owner.directory.as_ref().unwrap().clone();
+        let db = owner.open();
+        assert!(directory.join("benchmark.sqlite").exists());
+        drop(db);
+    }
+    assert!(!directory.exists());
+}
+
 // This is a burst workload, not a production-capacity or exchange-limit test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "explicit local capacity benchmark"]
 async fn simulated_pair_burst() {
     let pairs = parameter("BENCH_PAIRS", 50);
     let rounds = parameter("BENCH_ROUNDS", 6);
+    let buy_window = parameter("BENCH_BUY_WINDOW", 2);
+    let sell_window = parameter("BENCH_SELL_WINDOW", 2);
     assert!(pairs > 0 && rounds >= 2);
-    let db = Arc::new(Database::open(":memory:").unwrap());
+    assert!((1..=50).contains(&buy_window) && (1..=50).contains(&sell_window));
+    let disk = database_mode();
+    let database = BenchmarkDatabase::new(disk);
+    let db = Arc::new(database.open());
     let trade_lock = Arc::new(tokio::sync::Mutex::new(()));
     let mut engines = Vec::with_capacity(pairs);
     let start = Instant::now();
@@ -27,8 +121,8 @@ async fn simulated_pair_burst() {
         let mut config = AppConfig::default();
         config.exchange.symbol = format!("BENCH{i}USDT");
         config.grid.grid_interval = dec!(1);
-        config.grid.buy_window = 2;
-        config.grid.sell_window = 2;
+        config.grid.buy_window = buy_window;
+        config.grid.sell_window = sell_window;
         let (action_tx, action_rx) = mpsc::channel(8);
         let (_, ticker_rx) = broadcast::channel(8);
         let state =
@@ -41,6 +135,8 @@ async fn simulated_pair_burst() {
     }
     let setup_ms = start.elapsed().as_secs_f64() * 1000.0;
     let mut samples = Vec::with_capacity(pairs * rounds);
+    let mut ticker_ms = Vec::with_capacity(pairs * rounds);
+    let mut maintenance_ms = Vec::with_capacity(pairs * rounds);
     let mut batch_ms = Vec::with_capacity(rounds);
     for round in 0..rounds {
         let price = match round % 3 {
@@ -61,34 +157,65 @@ async fn simulated_pair_burst() {
                     mark_update_time: Utc::now(),
                     ..Default::default()
                 };
+                let ticker_start = Instant::now();
                 engine.handle_ticker_update(update).await;
+                let ticker_elapsed = ticker_start.elapsed().as_secs_f64() * 1000.0;
+                let maintenance_start = Instant::now();
                 engine.maintain_grid_window().await;
-                (engine, start.elapsed().as_secs_f64() * 1000.0)
+                let maintenance_elapsed = maintenance_start.elapsed().as_secs_f64() * 1000.0;
+                (
+                    engine,
+                    start.elapsed().as_secs_f64() * 1000.0,
+                    ticker_elapsed,
+                    maintenance_elapsed,
+                )
             })
         });
         for result in join_all(tasks).await {
-            let (engine, elapsed) = result.unwrap();
+            let (engine, elapsed, ticker_elapsed, maintenance_elapsed) = result.unwrap();
             engines.push(engine);
             samples.push(elapsed);
+            ticker_ms.push(ticker_elapsed);
+            maintenance_ms.push(maintenance_elapsed);
         }
         batch_ms.push(start.elapsed().as_secs_f64() * 1000.0);
     }
     let start = Instant::now();
-    let snapshots = join_all(engines.iter().map(|engine| engine.state.snapshot())).await;
-    let snapshot_ms = start.elapsed().as_secs_f64() * 1000.0;
-    let fills: usize = snapshots
-        .iter()
-        .map(|snapshot| snapshot.stats.total_trades)
-        .sum();
+    let mut full_snapshot_ms = Vec::with_capacity(pairs);
+    let snapshots = join_all(engines.iter().map(|engine| async {
+        let start = Instant::now();
+        let snapshot = engine.state.snapshot().await;
+        (snapshot, start.elapsed().as_secs_f64() * 1000.0)
+    }))
+    .await;
+    let full_snapshot_batch_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let mut fills = 0;
+    let mut active_orders = 0;
+    for (snapshot, elapsed) in snapshots {
+        fills += snapshot.stats.total_trades;
+        active_orders += snapshot.active_orders.len();
+        full_snapshot_ms.push(elapsed);
+    }
+    let start = Instant::now();
+    let mut account_snapshot_ms = join_all(engines.iter().map(|engine| async {
+        let start = Instant::now();
+        let _ = engine.state.account_snapshot().await;
+        start.elapsed().as_secs_f64() * 1000.0
+    }))
+    .await;
+    let account_snapshot_batch_ms = start.elapsed().as_secs_f64() * 1000.0;
     assert!(fills > 0, "benchmark must exercise simulated fills");
-    samples.sort_by(f64::total_cmp);
-    let percentile = |percent: usize| samples[(samples.len() - 1) * percent / 100];
+    assert!(active_orders > 0, "benchmark must retain active orders");
+    println!("pairs={pairs} rounds={rounds} buy_window={buy_window} sell_window={sell_window} db={} setup_ms={setup_ms:.1} fills={fills} active_orders={active_orders} full_snapshot_batch_ms={full_snapshot_batch_ms:.3} account_snapshot_batch_ms={account_snapshot_batch_ms:.3}", if disk { "disk" } else { "memory" });
     println!(
-        "pairs={pairs} rounds={rounds} setup_ms={setup_ms:.1} pair_ms_p50={:.2} pair_ms_p95={:.2} pair_ms_p99={:.2} batch_ms={batch_ms:?} snapshot_ms={snapshot_ms:.1} fills={fills}",
-        percentile(50),
-        percentile(95),
-        percentile(99)
+        "nearest-rank percentiles; p95/p99 are coarse for fewer than 20/100 samples; times in ms"
     );
+    print_percentiles("pair_total_ms", &mut samples);
+    print_percentiles("ticker_ms", &mut ticker_ms);
+    print_percentiles("maintenance_ms", &mut maintenance_ms);
+    print_percentiles("batch_ms", &mut batch_ms);
+    print_percentiles("full_snapshot_ms", &mut full_snapshot_ms);
+    print_percentiles("account_snapshot_ms", &mut account_snapshot_ms);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -241,7 +368,9 @@ async fn simulated_live_reconciliation() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let db = Arc::new(Database::open(":memory:").unwrap());
+    let disk = database_mode();
+    let database = BenchmarkDatabase::new(disk);
+    let db = Arc::new(database.open());
     let trade_lock = Arc::new(tokio::sync::Mutex::new(()));
     let account_cache = Arc::new(AccountCache::default());
     let position_cache = Arc::new(PositionCache::default());
@@ -287,9 +416,19 @@ async fn simulated_live_reconciliation() {
         engine.set_market_cache(market_cache.clone());
         tasks.push(tokio::spawn(async move {
             let offset = Duration::from_millis((i as u64 * 3000) / pairs as u64);
-            let mut timer = tokio::time::interval_at(start + offset, Duration::from_secs(3));
+            let period = Duration::from_secs(3);
+            let planned = usize::try_from(
+                deadline
+                    .saturating_duration_since(start + offset)
+                    .as_nanos()
+                    .div_ceil(period.as_nanos()),
+            )
+            .expect("planned cycle count exceeds usize");
+            let mut timer = tokio::time::interval_at(start + offset, period);
             timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut samples = Vec::new();
+            let mut schedule_ms = Vec::new();
+            let mut ticker_ms = Vec::new();
             let mut orders_ok = 0;
             let mut account_ok = 0;
             let mut outage_fresh = 0;
@@ -300,9 +439,16 @@ async fn simulated_live_reconciliation() {
                 if scheduled >= deadline || tokio::time::Instant::now() >= deadline {
                     break;
                 }
+                schedule_ms.push(
+                    tokio::time::Instant::now()
+                        .duration_since(scheduled)
+                        .as_secs_f64()
+                        * 1000.0,
+                );
                 let elapsed = start.elapsed();
                 let in_outage = outage_secs > 0 && elapsed >= outage_start && elapsed < outage_end;
                 if !in_outage {
+                    let ticker_start = Instant::now();
                     let now = Utc::now();
                     engine
                         .handle_ticker_update(TickerInfo {
@@ -314,6 +460,7 @@ async fn simulated_live_reconciliation() {
                             ..Default::default()
                         })
                         .await;
+                    ticker_ms.push(ticker_start.elapsed().as_secs_f64() * 1000.0);
                 }
                 engine.last_orders_sync = None;
                 engine.last_account_sync = None;
@@ -336,7 +483,10 @@ async fn simulated_live_reconciliation() {
                 }
             }
             (
+                planned,
                 samples,
+                schedule_ms,
+                ticker_ms,
                 orders_ok,
                 account_ok,
                 outage_fresh,
@@ -346,14 +496,30 @@ async fn simulated_live_reconciliation() {
         }));
     }
     let mut samples = Vec::new();
+    let mut schedule_ms = Vec::new();
+    let mut ticker_ms = Vec::new();
+    let mut planned = 0;
     let mut orders_ok = 0;
     let mut account_ok = 0;
     let mut outage_fresh = 0;
     let mut outage_stale = 0;
     let mut recovery_fresh = 0;
     for result in join_all(tasks).await {
-        let (cycle_samples, orders, account, fresh, stale, recovered) = result.unwrap();
+        let (
+            pair_planned,
+            cycle_samples,
+            schedule_samples,
+            ticker_samples,
+            orders,
+            account,
+            fresh,
+            stale,
+            recovered,
+        ) = result.unwrap();
+        planned += pair_planned;
         samples.extend(cycle_samples);
+        schedule_ms.extend(schedule_samples);
+        ticker_ms.extend(ticker_samples);
         orders_ok += orders;
         account_ok += account;
         outage_fresh += fresh;
@@ -363,9 +529,8 @@ async fn simulated_live_reconciliation() {
     let (emergency_list_ok, emergency_cancel_ok) = emergency.await.unwrap();
     server.abort();
     let cycles = samples.len();
+    let skipped = planned - cycles;
     assert!(cycles > 0 && orders_ok > 0 && account_ok > 0);
-    samples.sort_by(f64::total_cmp);
-    let percentile = |percent: usize| samples[(cycles - 1) * percent / 100];
     let marks = mark_calls.load(Ordering::Relaxed);
     let bulk_marks = bulk_mark_calls.load(Ordering::Relaxed);
     if outage_secs == 0 {
@@ -389,10 +554,13 @@ async fn simulated_live_reconciliation() {
         usize::from(emergency_cancel_ok)
     );
     println!(
-        "pairs={pairs} seconds={seconds} outage_secs={outage_secs} fail_mark={fail_mark} cycles={cycles} orders_ok={orders_ok} account_position_ok={account_ok} mark_sent={marks} mark_bulk_sent={bulk_marks} ticker_sent={tickers} orders_sent={orders} account_sent={accounts} position_sent={positions} outage_fresh={outage_fresh} outage_stale={outage_stale} recovery_fresh={recovery_fresh} emergency_list_ok={emergency_list_ok} emergency_cancel_ok={emergency_cancel_ok} estimated_weight={} cycle_ms_p50={:.2} cycle_ms_p95={:.2} cycle_ms_p99={:.2}",
+        "pairs={pairs} seconds={seconds} db={} outage_secs={outage_secs} fail_mark={fail_mark} planned_cycles={planned} cycles={cycles} skipped_cycles={skipped} orders_ok={orders_ok} orders_not_ok={} account_position_ok={account_ok} account_position_not_ok={} mark_sent={marks} mark_bulk_sent={bulk_marks} ticker_sent={tickers} orders_sent={orders} account_sent={accounts} position_sent={positions} outage_fresh={outage_fresh} outage_stale={outage_stale} recovery_fresh={recovery_fresh} emergency_list_ok={emergency_list_ok} emergency_cancel_ok={emergency_cancel_ok} estimated_weight={}",
+        if disk { "disk" } else { "memory" }, cycles - orders_ok, cycles - account_ok,
         marks + 9 * bulk_marks + tickers + orders + 5 * (accounts + positions),
-        percentile(50),
-        percentile(95),
-        percentile(99)
     );
+    println!("planned cycles have scheduled times in [start, deadline); skipped cycles are planned cycles not started before deadline, including ticks skipped during an overrun or remaining at deadline");
+    println!("nearest-rank percentiles; p95/p99 are coarse for fewer than 20/100 samples; times in ms; not_ok means sync did not report success, not necessarily a rate-limit rejection");
+    print_percentiles("schedule_delay_ms", &mut schedule_ms);
+    print_percentiles("ticker_ms", &mut ticker_ms);
+    print_percentiles("sync_cycle_ms", &mut samples);
 }

@@ -10,7 +10,7 @@ use rust_decimal::Decimal;
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{debug, info};
 
 #[derive(Debug, thiserror::Error)]
@@ -227,7 +227,36 @@ impl BinanceFuturesClient {
         &self,
         request: reqwest::RequestBuilder,
     ) -> Result<reqwest::Response, reqwest::Error> {
-        let response = request.send().await?;
+        let started = tracing::enabled!(tracing::Level::DEBUG).then(Instant::now);
+        let request = match request.build() {
+            Ok(request) => request,
+            Err(error) => {
+                if let Some(started) = started {
+                    debug!(
+                        stage = "build",
+                        result = "error",
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "Exchange request finished"
+                    );
+                }
+                return Err(error);
+            }
+        };
+        // Only retain the path, never the signed query or the full URL.
+        let request_info =
+            started.map(|_| (request.method().clone(), request.url().path().to_owned()));
+        let response = self.client.execute(request).await;
+        if let (Some(started), Some((method, path))) = (started, request_info) {
+            match &response {
+                Ok(response) => {
+                    debug!(%method, %path, status = response.status().as_u16(), result = if response.status().is_success() { "success" } else { "http_error" }, elapsed_ms = started.elapsed().as_millis() as u64, "Exchange request finished")
+                }
+                Err(_) => {
+                    debug!(%method, %path, result = "transport_error", elapsed_ms = started.elapsed().as_millis() as u64, "Exchange request finished")
+                }
+            }
+        }
+        let response = response?;
         self.limiter.observe(
             &self.base_url,
             self.rate_account_key(),

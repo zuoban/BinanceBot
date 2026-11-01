@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Duration as ChronoDuration, FixedOffset, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use rust_decimal::Decimal;
+use std::collections::HashMap;
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -33,13 +34,48 @@ type TodayPnlCacheEntry = (
     Option<crate::types::TodayPnl>,
 );
 
+#[derive(Default)]
+struct TradeRevisions {
+    cleared: u64,
+    symbols: HashMap<String, u64>,
+}
+
+impl TradeRevisions {
+    fn for_symbol(&self, symbol: &str) -> u64 {
+        self.symbols.get(symbol).copied().unwrap_or(self.cleared)
+    }
+
+    fn changed(&mut self, symbol: &str, revision: u64) {
+        self.symbols.insert(symbol.to_owned(), revision);
+    }
+
+    fn clear_all(&mut self, revision: u64) {
+        self.cleared = revision;
+        self.symbols.clear();
+    }
+}
+
+// Enabled only by the local benchmark; no global collector or production overhead.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct DatabaseWaitSamples {
+    pub(crate) queue: Mutex<Vec<f64>>,
+    pub(crate) connection: Mutex<Vec<f64>>,
+}
+
 pub struct Database {
     conn: Mutex<Connection>,
     path: String,
     trade_revision: AtomicU64,
+    trade_revisions: Mutex<TradeRevisions>,
+    #[cfg(test)]
+    revision_publish_hook:
+        Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
     today_pnl_cache: tokio::sync::Mutex<Option<TodayPnlCacheEntry>>,
     #[cfg(test)]
     hourly_stats_queries: AtomicU64,
+    #[cfg(test)]
+    benchmark_wait_samples: std::sync::OnceLock<std::sync::Arc<DatabaseWaitSamples>>,
 }
 
 impl Database {
@@ -49,9 +85,75 @@ impl Database {
         F: FnOnce(&Database) -> Result<T> + Send + 'static,
     {
         let db = std::sync::Arc::clone(self);
-        tokio::task::spawn_blocking(move || operation(&db))
-            .await
-            .context("Database worker stopped")?
+        #[cfg(test)]
+        let benchmark_wait = self
+            .benchmark_wait_samples
+            .get()
+            .cloned()
+            .map(|samples| (samples, std::time::Instant::now()));
+        let queued_at = tracing::enabled!(tracing::Level::DEBUG).then(std::time::Instant::now);
+        tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            if let Some((samples, queued_at)) = benchmark_wait {
+                let elapsed = queued_at.elapsed().as_secs_f64() * 1000.0;
+                samples.queue.lock().unwrap().push(elapsed);
+            }
+            if let Some(queued_at) = queued_at {
+                tracing::debug!(
+                    queue_wait_us = queued_at.elapsed().as_micros() as u64,
+                    "SQLite blocking worker started"
+                );
+            }
+            operation(&db)
+        })
+        .await
+        .context("Database worker stopped")?
+    }
+
+    fn lock_connection(&self, operation: &'static str) -> std::sync::MutexGuard<'_, Connection> {
+        let waiting_since = tracing::enabled!(tracing::Level::DEBUG).then(std::time::Instant::now);
+        #[cfg(test)]
+        let benchmark_wait = self
+            .benchmark_wait_samples
+            .get()
+            .map(|samples| (samples, std::time::Instant::now()));
+        let conn = self.conn.lock().unwrap();
+        #[cfg(test)]
+        if let Some((samples, waiting_since)) = benchmark_wait {
+            let elapsed = waiting_since.elapsed().as_secs_f64() * 1000.0;
+            samples.connection.lock().unwrap().push(elapsed);
+        }
+        if let Some(waiting_since) = waiting_since {
+            tracing::debug!(
+                operation,
+                lock_wait_us = waiting_since.elapsed().as_micros() as u64,
+                "SQLite connection lock acquired"
+            );
+        }
+        conn
+    }
+    // These methods already lock the connection directly in production; the test
+    // build routes them through the benchmark collector when enabled.
+    fn lock_reconciliation_connection(
+        &self,
+        operation: &'static str,
+    ) -> std::sync::MutexGuard<'_, Connection> {
+        #[cfg(test)]
+        {
+            self.lock_connection(operation)
+        }
+        #[cfg(not(test))]
+        {
+            let _ = operation;
+            self.conn.lock().unwrap()
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn enable_benchmark_wait_samples(&self) -> std::sync::Arc<DatabaseWaitSamples> {
+        let samples = std::sync::Arc::new(DatabaseWaitSamples::default());
+        assert!(self.benchmark_wait_samples.set(samples.clone()).is_ok());
+        samples
     }
 
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
@@ -94,9 +196,14 @@ impl Database {
             conn: Mutex::new(conn),
             path: path_str,
             trade_revision: AtomicU64::new(0),
+            trade_revisions: Mutex::new(TradeRevisions::default()),
+            #[cfg(test)]
+            revision_publish_hook: Mutex::new(None),
             today_pnl_cache: tokio::sync::Mutex::new(None),
             #[cfg(test)]
             hourly_stats_queries: AtomicU64::new(0),
+            #[cfg(test)]
+            benchmark_wait_samples: std::sync::OnceLock::new(),
         };
 
         db.init_tables()?;
@@ -158,6 +265,18 @@ impl Database {
 
     pub(crate) fn trade_data_revision(&self) -> u64 {
         self.trade_revision.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    fn before_revision_publish(&self) {
+        if let Some((reached, resume)) = self.revision_publish_hook.lock().unwrap().as_ref() {
+            reached.send(()).unwrap();
+            resume.recv().unwrap();
+        }
+    }
+
+    pub(crate) fn symbol_trade_revision(&self, symbol: &str) -> u64 {
+        self.trade_revisions.lock().unwrap().for_symbol(symbol)
     }
 
     #[cfg(test)]
@@ -861,10 +980,14 @@ impl Database {
     }
 
     pub fn insert_trade(&self, trade: &TradeRecord) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_connection("insert_trade");
         let inserted = insert_trade_on(&conn, trade)?;
         if inserted {
-            self.trade_revision.fetch_add(1, Ordering::Release);
+            #[cfg(test)]
+            self.before_revision_publish();
+            let mut revisions = self.trade_revisions.lock().unwrap();
+            let revision = self.trade_revision.fetch_add(1, Ordering::Release) + 1;
+            revisions.changed(&trade.symbol, revision);
         }
         Ok(inserted)
     }
@@ -876,7 +999,7 @@ impl Database {
     }
 
     pub fn clear_selected_database(&self, trades: bool, snapshots: bool) -> Result<(usize, usize)> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_connection("clear_selected_database");
         let tx = conn.transaction()?;
         let deleted_trades = if trades {
             tx.execute_batch(
@@ -908,14 +1031,18 @@ impl Database {
         };
         tx.commit()?;
         if trades {
-            self.trade_revision.fetch_add(1, Ordering::Release);
+            #[cfg(test)]
+            self.before_revision_publish();
+            let mut revisions = self.trade_revisions.lock().unwrap();
+            let revision = self.trade_revision.fetch_add(1, Ordering::Release) + 1;
+            revisions.clear_all(revision);
         }
         Ok((deleted_trades, deleted_snapshots))
     }
 
     /// Clear every mode for one symbol while retaining recovery metadata.
     pub fn clear_trade_history_for_symbol(&self, symbol: &str) -> Result<usize> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_connection("clear_trade_history_for_symbol");
         let tx = conn.transaction()?;
         tx.execute(
             "INSERT INTO execution_frontiers (symbol, mode, side, price, timestamp)
@@ -943,7 +1070,11 @@ impl Database {
             params![symbol],
         )?;
         tx.commit()?;
-        self.trade_revision.fetch_add(1, Ordering::Release);
+        #[cfg(test)]
+        self.before_revision_publish();
+        let mut revisions = self.trade_revisions.lock().unwrap();
+        let revision = self.trade_revision.fetch_add(1, Ordering::Release) + 1;
+        revisions.changed(symbol, revision);
         Ok(deleted)
     }
 
@@ -958,7 +1089,7 @@ impl Database {
         pair_intent: Option<&GridOrder>,
         consumed_pair_source: Option<&str>,
     ) -> Result<bool> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_connection("insert_trade_with_recovery");
         let tx = conn.transaction()?;
         let inserted = insert_trade_on(&tx, trade)?;
         if inserted {
@@ -988,13 +1119,17 @@ impl Database {
         }
         tx.commit()?;
         if inserted {
-            self.trade_revision.fetch_add(1, Ordering::Release);
+            #[cfg(test)]
+            self.before_revision_publish();
+            let mut revisions = self.trade_revisions.lock().unwrap();
+            let revision = self.trade_revision.fetch_add(1, Ordering::Release) + 1;
+            revisions.changed(&trade.symbol, revision);
         }
         Ok(inserted)
     }
 
     pub fn load_pair_intents(&self, symbol: &str, mode: TradingMode) -> Result<Vec<GridOrder>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_reconciliation_connection("load_pair_intents");
         let mut stmt = conn.prepare(
             "SELECT order_json FROM pair_intents WHERE symbol = ?1 AND mode = ?2 ORDER BY created_at;",
         )?;
@@ -1005,7 +1140,7 @@ impl Database {
     }
 
     pub fn delete_pair_intent(&self, parent_client_order_id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_reconciliation_connection("delete_pair_intent");
         conn.execute(
             "DELETE FROM pair_intents WHERE parent_client_order_id = ?1;",
             params![parent_client_order_id],
@@ -1027,7 +1162,7 @@ impl Database {
             plan.phase,
             crate::types::RemainderPhase::Canceling | crate::types::RemainderPhase::Submitting
         );
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_reconciliation_connection("save_remainder_plan");
         conn.execute(
             "INSERT INTO remainder_plans (target_client_order_id, symbol, mode, active, plan_json, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(target_client_order_id) DO UPDATE SET active = excluded.active, plan_json = excluded.plan_json, updated_at = excluded.updated_at;",
             params![plan.target.client_order_id, plan.symbol, plan.mode.as_str(), active, serde_json::to_string(plan)?, Utc::now().to_rfc3339()],
@@ -1040,7 +1175,7 @@ impl Database {
         symbol: &str,
         mode: TradingMode,
     ) -> Result<Option<RemainderPlan>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_reconciliation_connection("load_remainder_plan");
         let json: Option<String> = conn.query_row(
             "SELECT plan_json FROM remainder_plans WHERE symbol = ?1 AND mode = ?2 AND active = 1;",
             params![symbol, mode.as_str()], |row| row.get(0),
@@ -1051,7 +1186,7 @@ impl Database {
 
     pub fn save_managed_order(&self, order: &GridOrder) -> Result<()> {
         let json = serde_json::to_string(order)?;
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_reconciliation_connection("save_managed_order");
         conn.execute(
             "INSERT INTO managed_orders (client_order_id, symbol, order_json, updated_at) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(client_order_id) DO UPDATE SET symbol = excluded.symbol, order_json = excluded.order_json, updated_at = excluded.updated_at;",
             params![order.client_order_id, order.symbol, json, Utc::now().to_rfc3339()],
@@ -1060,7 +1195,7 @@ impl Database {
     }
 
     pub fn save_managed_orders(&self, orders: &[GridOrder]) -> Result<()> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_reconciliation_connection("save_managed_orders");
         let tx = conn.transaction()?;
         {
             let mut statement = tx.prepare(
@@ -1091,7 +1226,7 @@ impl Database {
     }
 
     pub fn delete_managed_order(&self, client_order_id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_reconciliation_connection("delete_managed_order");
         conn.execute(
             "DELETE FROM managed_orders WHERE client_order_id = ?1;",
             params![client_order_id],
@@ -1131,7 +1266,7 @@ impl Database {
         client_order_id: &str,
         mode: TradingMode,
     ) -> Result<Option<(OrderSide, Decimal, Decimal)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_reconciliation_connection("get_pair_opening");
         let value: Option<(String, String, String)> = conn.query_row(
             "SELECT side, price, quantity FROM (
                  SELECT side, price, quantity, 0 AS priority, timestamp FROM trades
@@ -1160,7 +1295,7 @@ impl Database {
     }
 
     pub fn has_recorded_order(&self, client_order_id: &str, mode: TradingMode) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_reconciliation_connection("has_recorded_order");
         Ok(conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM trades WHERE client_order_id = ?1 AND mode = ?2)
                  OR EXISTS(SELECT 1 FROM cleared_trade_ids WHERE client_order_id = ?1 AND mode = ?2);",
@@ -1204,21 +1339,35 @@ impl Database {
 
     /// Return true only for the first successful PnL verification of a saved trade.
     pub fn verify_trade_pnl(&self, trade: &TradeRecord) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
-        let updated = conn.execute(
-            "UPDATE trades SET realized_pnl = ?1, commission = ?2, is_maker = ?3, pnl_verified = 1 WHERE trade_id = ?4 AND mode = ?5 AND pnl_verified = 0;",
-            params![
+        let mut conn = self.lock_connection("verify_trade_pnl");
+        let tx = conn.transaction()?;
+        let updated_symbol: Option<String> = {
+            let mut statement = tx.prepare(
+                "UPDATE trades SET realized_pnl = ?1, commission = ?2, is_maker = ?3, pnl_verified = 1 WHERE trade_id = ?4 AND mode = ?5 AND pnl_verified = 0 RETURNING symbol;",
+            )?;
+            let mut rows = statement.query(params![
                 trade.realized_pnl.to_string(),
                 trade.commission.to_string(),
                 if trade.is_maker { 1 } else { 0 },
                 trade.trade_id,
                 trade.mode.as_str(),
-            ],
-        )?;
-        if updated == 1 {
-            self.trade_revision.fetch_add(1, Ordering::Release);
+            ])?;
+            let symbol = rows.next()?.map(|row| row.get(0)).transpose()?;
+            // Step through completion so errors after RETURNING are propagated.
+            while rows.next()?.is_some() {}
+            symbol
+        };
+        tx.commit()?;
+        if let Some(symbol) = updated_symbol {
+            #[cfg(test)]
+            self.before_revision_publish();
+            let mut revisions = self.trade_revisions.lock().unwrap();
+            let revision = self.trade_revision.fetch_add(1, Ordering::Release) + 1;
+            revisions.changed(&symbol, revision);
+            Ok(true)
+        } else {
+            Ok(false)
         }
-        Ok(updated == 1)
     }
 
     pub fn get_recent_trades(&self, limit: usize) -> Result<Vec<TradeRecord>> {
@@ -1280,7 +1429,7 @@ impl Database {
 
         let mut realized_pnl = Decimal::ZERO;
         let mut pending_pnl_count = 0;
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_reconciliation_connection("get_hourly_trade_stats");
         // Stored timestamps are UTC RFC3339. Coarse day bounds use the scope index;
         // parse before the exact comparison to preserve fractional-second precision.
         let mut stmt = conn.prepare(
@@ -1722,6 +1871,182 @@ fn trade_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TradeRecord> {
 mod tests {
     use super::*;
     use rust_decimal_macros::dec;
+
+    fn revision_test_trade() -> TradeRecord {
+        TradeRecord {
+            trade_id: "revision-trade".into(),
+            client_order_id: "revision-order".into(),
+            symbol: "SOLUSDC".into(),
+            mode: TradingMode::Paper,
+            side: OrderSide::Buy,
+            price: dec!(100),
+            quantity: dec!(1),
+            amount_usdc: dec!(100),
+            realized_pnl: Decimal::ZERO,
+            commission: Decimal::ZERO,
+            pnl_verified: false,
+            is_maker: true,
+            timestamp: Utc::now(),
+            note: String::new(),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn revision_read_does_not_block_runtime_during_sql_write() {
+        use std::sync::{mpsc, Arc, LazyLock};
+        use std::time::Duration;
+
+        type BusyHandshake = (tokio::sync::oneshot::Sender<()>, mpsc::Receiver<()>);
+        static BUSY: LazyLock<Mutex<Option<BusyHandshake>>> = LazyLock::new(|| Mutex::new(None));
+        fn busy_handler(_: i32) -> bool {
+            let (reached, resume) = BUSY.lock().unwrap().take().unwrap();
+            reached.send(()).unwrap();
+            resume.recv().unwrap();
+            true
+        }
+
+        let path = std::env::temp_dir().join(format!("revision-lock-{}.db", uuid::Uuid::new_v4()));
+        let db = Arc::new(Database::open(&path).unwrap());
+        let external = Connection::open(&path).unwrap();
+        external.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let (busy_tx, busy_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        *BUSY.lock().unwrap() = Some((busy_tx, resume_rx));
+        db.conn
+            .lock()
+            .unwrap()
+            .busy_handler(Some(busy_handler))
+            .unwrap();
+        let writer_db = Arc::clone(&db);
+        let writer =
+            tokio::task::spawn_blocking(move || writer_db.insert_trade(&revision_test_trade()));
+        busy_rx.await.unwrap();
+
+        // Release SQLite even if a regression blocks the runtime thread.
+        let (read_tx, read_rx) = mpsc::channel();
+        let watchdog = std::thread::spawn(move || {
+            let completed = read_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+            external.execute_batch("ROLLBACK").unwrap();
+            resume_tx.send(()).unwrap();
+            completed
+        });
+        assert_eq!(db.symbol_trade_revision("SOLUSDC"), 0);
+        read_tx.send(()).unwrap();
+        assert!(
+            watchdog.join().unwrap(),
+            "revision read blocked the Tokio thread"
+        );
+        assert!(writer.await.unwrap().unwrap());
+        assert_eq!(db.symbol_trade_revision("SOLUSDC"), 1);
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn committed_write_publishes_revision_before_releasing_connection() {
+        use std::sync::{mpsc, Arc};
+
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let (reached_tx, reached_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        *db.revision_publish_hook.lock().unwrap() = Some((reached_tx, resume_rx));
+        let writer_db = Arc::clone(&db);
+        let writer = std::thread::spawn(move || writer_db.insert_trade(&revision_test_trade()));
+        reached_rx.recv().unwrap();
+        assert_eq!(db.symbol_trade_revision("SOLUSDC"), 0);
+        assert_eq!(db.trade_data_revision(), 0);
+        assert!(db.conn.try_lock().is_err());
+        resume_tx.send(()).unwrap();
+        assert!(writer.join().unwrap().unwrap());
+        let conn = db.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM trades", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(db.symbol_trade_revision("SOLUSDC"), 1);
+        assert_eq!(db.trade_data_revision(), 1);
+    }
+
+    #[test]
+    fn pnl_commit_failure_rolls_back_without_publishing_revision() {
+        let db = Database::open(":memory:").unwrap();
+        let trade = revision_test_trade();
+        assert!(db.insert_trade(&trade).unwrap());
+        db.conn.lock().unwrap().execute_batch(
+            "PRAGMA foreign_keys = ON;
+             CREATE TABLE revision_parent (id INTEGER PRIMARY KEY);
+             CREATE TABLE revision_child (parent_id INTEGER REFERENCES revision_parent(id) DEFERRABLE INITIALLY DEFERRED);
+             CREATE TRIGGER reject_pnl_commit AFTER UPDATE ON trades BEGIN
+                 INSERT INTO revision_child VALUES (1);
+             END;"
+        ).unwrap();
+        assert!(db.verify_trade_pnl(&trade).is_err());
+        assert_eq!(db.trade_data_revision(), 1);
+        assert_eq!(db.symbol_trade_revision("SOLUSDC"), 1);
+        assert!(!db.get_recent_trades(1).unwrap()[0].pnl_verified);
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER reject_pnl_commit")
+            .unwrap();
+        assert!(db.verify_trade_pnl(&trade).unwrap());
+        assert_eq!(db.trade_data_revision(), 2);
+    }
+
+    #[test]
+    fn revisions_follow_successful_trade_changes_and_rollback_failures() {
+        let db = Database::open(":memory:").unwrap();
+        let trade = revision_test_trade();
+        let stats = GridStats::default();
+        db.conn.lock().unwrap().execute_batch(
+            "CREATE TRIGGER reject_insert BEFORE INSERT ON trades BEGIN SELECT RAISE(ABORT, 'reject'); END;"
+        ).unwrap();
+        assert!(db.insert_trade(&trade).is_err());
+        assert!(db.insert_trade_with_stats(&trade, &stats).is_err());
+        assert_eq!(db.trade_data_revision(), 0);
+        assert_eq!(db.symbol_trade_revision("SOLUSDC"), 0);
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER reject_insert")
+            .unwrap();
+        assert!(db.insert_trade_with_stats(&trade, &stats).unwrap());
+        assert!(!db.insert_trade(&trade).unwrap());
+        assert!(!db.insert_trade_with_stats(&trade, &stats).unwrap());
+        assert_eq!(db.trade_data_revision(), 1);
+
+        db.conn.lock().unwrap().execute_batch(
+            "CREATE TRIGGER reject_update BEFORE UPDATE ON trades BEGIN SELECT RAISE(ABORT, 'reject'); END;
+             CREATE TRIGGER reject_delete BEFORE DELETE ON trades BEGIN SELECT RAISE(ABORT, 'reject'); END;"
+        ).unwrap();
+        assert!(db.verify_trade_pnl(&trade).is_err());
+        assert!(db.clear_trade_history_for_symbol("SOLUSDC").is_err());
+        assert!(db.clear_selected_database(true, false).is_err());
+        assert_eq!(db.trade_data_revision(), 1);
+        assert_eq!(db.symbol_trade_revision("SOLUSDC"), 1);
+        assert_eq!(db.get_recent_trades(10).unwrap().len(), 1);
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER reject_update; DROP TRIGGER reject_delete;")
+            .unwrap();
+
+        let mut other_symbol = trade.clone();
+        other_symbol.symbol = "BTCUSDC".into();
+        assert!(db.verify_trade_pnl(&other_symbol).unwrap());
+        assert!(!db.verify_trade_pnl(&other_symbol).unwrap());
+        assert_eq!(db.symbol_trade_revision("SOLUSDC"), 2);
+        assert_eq!(db.symbol_trade_revision("BTCUSDC"), 0);
+        db.clear_trade_history_for_symbol("SOLUSDC").unwrap();
+        assert_eq!(db.symbol_trade_revision("SOLUSDC"), 3);
+        assert_eq!(db.symbol_trade_revision("BTCUSDC"), 0);
+        db.clear_selected_database(false, true).unwrap();
+        assert_eq!(db.trade_data_revision(), 3);
+        db.clear_selected_database(true, false).unwrap();
+        assert_eq!(db.trade_data_revision(), 4);
+        assert_eq!(db.symbol_trade_revision("SOLUSDC"), 4);
+        assert_eq!(db.symbol_trade_revision("BTCUSDC"), 4);
+    }
 
     #[test]
     fn database_uses_durable_journal_settings() {
@@ -2811,8 +3136,11 @@ mod tests {
             conn: Mutex::new(conn),
             path: ":memory:".into(),
             trade_revision: AtomicU64::new(0),
+            trade_revisions: Mutex::new(TradeRevisions::default()),
+            revision_publish_hook: Mutex::new(None),
             today_pnl_cache: tokio::sync::Mutex::new(None),
             hourly_stats_queries: AtomicU64::new(0),
+            benchmark_wait_samples: std::sync::OnceLock::new(),
         };
         db.init_tables().unwrap();
 

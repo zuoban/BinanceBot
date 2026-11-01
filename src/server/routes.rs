@@ -1827,21 +1827,11 @@ async fn upgrade_accounts_socket(
                 _ = ticks.tick() => {
                     if !primary.is_token_valid(&token).await { break; }
                     // Resolve current membership without keeping the registry locked.
-                    // Reuse coherent pair snapshots, but send only account fields.
+                    // Collect only account fields under the pair's snapshot locks.
                     let states = source.states().await;
-                    let pairs = futures_util::future::join_all(states.iter().map(|state| async move {
-                        let snapshot = state.snapshot().await;
-                        serde_json::json!({
-                            "mode": TradingMode::from_exchange(snapshot.dry_run, snapshot.grid_config.is_testnet),
-                            "snapshot": {
-                                "symbol": snapshot.symbol,
-                                "dry_run": snapshot.dry_run,
-                                "grid_config": { "is_testnet": snapshot.grid_config.is_testnet },
-                                "position": { "unrealized_pnl": snapshot.position.unrealized_pnl },
-                                "account": snapshot.account,
-                            }
-                        })
-                    })).await;
+                    let pairs = futures_util::future::join_all(
+                        states.iter().map(|state| state.account_snapshot())
+                    ).await;
                     let message = Message::Text(serde_json::json!({
                         "type": "accounts", "data": { "pairs": pairs }
                     }).to_string());

@@ -1282,17 +1282,45 @@ impl GridTradingEngine {
 
     /// Periodic sync cycle
     async fn sync_cycle(&mut self) {
+        let started = tracing::enabled!(tracing::Level::DEBUG).then(Instant::now);
+        macro_rules! finish_sync {
+            ($result:expr) => {
+                if let Some(started) = started {
+                    debug!(
+                        result = $result,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "Periodic sync finished"
+                    );
+                }
+            };
+        }
         let pause_epoch = self.state.pause_epoch();
         let config = self.state.config.read().await.clone();
         let is_dry_run = config.exchange.dry_run;
 
         self.refresh_mark_price(&config.exchange.symbol, is_dry_run)
             .await;
+        if let Some(started) = started {
+            debug!(
+                stage = "mark_price",
+                cycle_elapsed_ms = started.elapsed().as_millis() as u64,
+                "Periodic sync stage finished"
+            );
+        }
         if self.state.pause_epoch() != pause_epoch {
+            finish_sync!("paused_after_mark_price");
             return;
         }
         self.refresh_stale_ticker(&config.exchange.symbol).await;
+        if let Some(started) = started {
+            debug!(
+                stage = "ticker",
+                cycle_elapsed_ms = started.elapsed().as_millis() as u64,
+                "Periodic sync stage finished"
+            );
+        }
         if self.state.pause_epoch() != pause_epoch {
+            finish_sync!("paused_after_ticker");
             return;
         }
 
@@ -1300,13 +1328,30 @@ impl GridTradingEngine {
             let orders_ready = self
                 .sync_live_orders_with_priority(ReconciliationPriority::Periodic)
                 .await;
+            if let Some(started) = started {
+                debug!(
+                    stage = "orders",
+                    ready = orders_ready,
+                    cycle_elapsed_ms = started.elapsed().as_millis() as u64,
+                    "Periodic sync stage finished"
+                );
+            }
             if !orders_ready {
                 self.last_orders_sync = None;
             }
             if self.state.pause_epoch() != pause_epoch {
+                finish_sync!("paused_after_orders");
                 return;
             }
             let account_ready = self.sync_account_and_position_inner(true).await;
+            if let Some(started) = started {
+                debug!(
+                    stage = "account_position",
+                    ready = account_ready,
+                    cycle_elapsed_ms = started.elapsed().as_millis() as u64,
+                    "Periodic sync stage finished"
+                );
+            }
             let ready = orders_ready && account_ready;
             self.set_global_reconciliation_ready(ready).await;
             ready
@@ -1316,16 +1361,32 @@ impl GridTradingEngine {
         };
 
         if self.state.pause_epoch() != pause_epoch {
+            finish_sync!("paused_after_reconciliation");
             return;
         }
 
         if self.pause_if_position_limit_reached().await {
+            finish_sync!("position_limit");
             return;
         }
         self.trim_closing_orders_to_position().await;
 
-        if *self.state.status.read().await == BotStatus::Running && account_ready {
+        let maintain_window =
+            *self.state.status.read().await == BotStatus::Running && account_ready;
+        if maintain_window {
             self.maintain_grid_window().await;
+        }
+        if let Some(started) = started {
+            debug!(
+                result = if account_ready {
+                    "complete"
+                } else {
+                    "reconciliation_failed"
+                },
+                window_maintained = maintain_window,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "Periodic sync finished"
+            );
         }
     }
 
@@ -2075,17 +2136,14 @@ impl GridTradingEngine {
             self.pause_trading().await;
             return;
         }
-        let existing: Vec<_> = self
+        let misaligned: Vec<_> = self
             .state
             .active_orders
             .read()
             .await
             .values()
-            .cloned()
-            .collect();
-        let misaligned: Vec<_> = existing
-            .into_iter()
             .filter(|o| is_window_order(o) && !rules.is_grid_price(o.price, grid_interval))
+            .cloned()
             .collect();
         if !misaligned.is_empty() {
             for order in misaligned {
@@ -2108,36 +2166,23 @@ impl GridTradingEngine {
             .values()
             .cloned()
             .collect();
-        let mut active_buy_prices: Vec<Decimal> = active_orders
-            .iter()
-            .filter(|o| o.side == OrderSide::Buy)
-            .map(|o| o.price)
-            .collect();
-        let mut active_sell_prices: Vec<Decimal> = active_orders
-            .iter()
-            .filter(|o| o.side == OrderSide::Sell)
-            .map(|o| o.price)
-            .collect();
-
-        active_buy_prices.sort();
-        active_sell_prices.sort();
-
-        // Preserve partial executions. Their remaining quantity still reserves
-        // funds or inventory without displacing the nearest window.
-        let preserved: Vec<_> = active_orders
-            .iter()
-            .filter(|o| !is_window_order(o))
-            .collect();
-        let reserved_buys: Vec<_> = preserved
-            .iter()
-            .filter(|o| o.side == OrderSide::Buy)
-            .map(|o| o.price)
-            .collect();
-        let reserved_sells: Vec<_> = preserved
-            .iter()
-            .filter(|o| o.side == OrderSide::Sell)
-            .map(|o| o.price)
-            .collect();
+        let mut active_buy_prices = Vec::new();
+        let mut active_sell_prices = Vec::new();
+        let mut reserved_buys = Vec::new();
+        let mut reserved_sells = Vec::new();
+        for order in &active_orders {
+            let (active, reserved) = if order.side == OrderSide::Buy {
+                (&mut active_buy_prices, &mut reserved_buys)
+            } else {
+                (&mut active_sell_prices, &mut reserved_sells)
+            };
+            active.push(order.price);
+            // Partial executions still reserve funds or inventory without
+            // displacing the nearest window.
+            if !is_window_order(order) {
+                reserved.push(order.price);
+            }
+        }
         let (mut desired_buy_prices, mut desired_sell_prices) =
             match self.window_prices(&config, &rules, current_price).await {
                 Ok(prices) => prices,
@@ -4929,6 +4974,14 @@ mod multi_pair_tests;
 #[cfg(test)]
 #[path = "capacity_benchmark.rs"]
 mod capacity_benchmark;
+
+#[cfg(test)]
+#[path = "capacity_orders_benchmark.rs"]
+mod capacity_orders_benchmark;
+
+#[cfg(test)]
+#[path = "event_loop_latency_benchmark.rs"]
+mod event_loop_latency_benchmark;
 
 #[cfg(test)]
 #[path = "short_tests.rs"]

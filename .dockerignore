@@ -1,6 +1,7 @@
 .git
 .gitignore
 .DS_Store
+._*
 target
 data
 config.toml

@@ -87,8 +87,17 @@ export function useLiveAccounts(overview: Overview | undefined) {
   const [frame, setFrame] = useState<AccountFrame>();
   const stream = useSocket<AccountFrame>('/api/accounts/ws', setFrame);
   if (Date.now() - stream.lastReceived > SOCKET_LIVE_MS) return overview?.pairs ?? [];
+  const accounts = new Map<AccountFrame['pairs'][number]['mode'], Map<string, AccountFrame['pairs'][number]>>();
+  for (const account of frame?.pairs ?? []) {
+    let symbols = accounts.get(account.mode);
+    if (!symbols) {
+      symbols = new Map();
+      accounts.set(account.mode, symbols);
+    }
+    if (!symbols.has(account.snapshot.symbol)) symbols.set(account.snapshot.symbol, account);
+  }
   return overview?.pairs.map(entry => {
-    const account = frame?.pairs.find(p => p.snapshot.symbol === entry.snapshot.symbol && p.mode === entry.mode);
+    const account = accounts.get(entry.mode)?.get(entry.snapshot.symbol);
     if (!account) return entry;
     return { ...entry, snapshot: { ...entry.snapshot, account: account.snapshot.account, position: { ...entry.snapshot.position, ...account.snapshot.position } } };
   }) ?? [];

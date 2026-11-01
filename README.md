@@ -221,9 +221,11 @@ cargo run --release -- --host 127.0.0.1 --port 8080
 BENCH_PAIRS=50 BENCH_ROUNDS=6 cargo test --release --lib simulated_pair_burst -- --ignored --nocapture
 ```
 
-`BENCH_PAIRS` 是合成交易对数量，`BENCH_ROUNDS` 是突发行情轮数（至少 2）。测试使用内存 SQLite 和 4 个 Tokio 工作线程，每轮同时处理所有交易对的合成行情、模拟成交和网格维护；最后并发生成一次全部交易对的快照。输出包括初始化时间、单交易对处理耗时的 p50/p95/p99、每轮总耗时、快照耗时和模拟成交数。单交易对耗时从其任务开始执行时计时，排队时间体现在每轮总耗时中。
+`BENCH_PAIRS` 是合成交易对数量，`BENCH_ROUNDS` 是突发行情轮数（至少 2）；`BENCH_BUY_WINDOW` 和 `BENCH_SELL_WINDOW` 分别控制窗口大小（1–50，默认均为 2）。`BENCH_DB=memory`（默认）使用内存 SQLite，`BENCH_DB=disk` 使用独立临时目录中的磁盘 SQLite，结束后清理数据库及附属文件。测试使用 4 个 Tokio 工作线程，每轮并发处理合成行情、模拟成交和网格维护。
 
-该测试用于比较代码或机器之间的表现，不包括真实 WebSocket、网络、持久化磁盘、交易所限流、实盘下单和长时间运行，也不能直接换算安全的实盘交易对数量。生产容量还需要在目标环境逐步增加交易对，观察行情新鲜度、对账延迟、请求限流、CPU 和内存。
+输出成交数、剩余活跃订单数，以及行情处理、外层网格维护、单交易对总耗时、批次耗时和完整及账户快照耗时的样本数和分位数。行情处理可能包含成交及其触发的网格维护；完整快照耗时不含广播序列化和发送。单交易对耗时从任务开始执行计时，调度排队体现在批次总耗时中。分位数使用最近秩法，样本不足 20 或 100 时 p95 或 p99 的分辨率有限。
+
+该测试用于比较相同参数下的代码或机器表现，不包括真实 WebSocket、交易所网络及限流、实盘下单和长时间运行，也不能直接换算安全的实盘交易对数量。磁盘结果依赖文件系统及缓存。
 
 本地模拟交易所的同步路径测试可通过以下命令单独运行：
 
@@ -231,9 +233,9 @@ BENCH_PAIRS=50 BENCH_ROUNDS=6 cargo test --release --lib simulated_pair_burst --
 BENCH_PAIRS=30 BENCH_SECONDS=65 cargo test --release --lib simulated_live_reconciliation -- --ignored --nocapture
 ```
 
-该测试使用暂停状态的实盘引擎、合成行情、内存 SQLite 和本地 HTTP 服务，每 3 秒模拟一次新鲜标记价格推送，并错峰执行实际的挂单、账户及持仓同步，共用缓存和本地请求预算。`cycles` 是完成的同步轮次，`orders_ok` 和 `account_position_ok` 分别是挂单对账、账户与持仓同步成功的轮次；`*_sent` 是模拟服务收到的请求数，`estimated_weight` 按当前代码的本地权重累计，并非交易所实测权重。新鲜标记价格下 `mark_sent` 应为 0，其余成功轮次在未触及限流时应与 `cycles` 相同。测试结束时还向模拟服务执行一次关键挂单查询和撤单请求，分别用 `emergency_list_ok`、`emergency_cancel_ok` 记录结果；该探测不计入周期请求数或估算权重。
+该测试使用暂停状态的实盘引擎、合成行情和本地 HTTP 服务，每 3 秒错峰执行实际的挂单、账户及持仓同步，共用缓存和本地请求预算；同样支持 `BENCH_DB=memory|disk`。输出包括调度延迟、行情处理及同步周期耗时分位数、跳过的计划周期数、同步成功与未成功次数和模拟服务收到的请求数。未成功不等同于限流拒绝；快速失败可能降低耗时分位数，应结合成功率判断。`estimated_weight` 按本地权重累计，并非交易所实测权重。结束时还执行一次关键挂单查询和撤单探测，不计入周期请求数或估算权重。
 
-该测试不会发送订单，模拟服务也不会主动返回 429，无法覆盖真实网络延迟、其他进程共享 IP、交易所响应头、活跃挂单与成交、磁盘数据库、行情连接或长时间稳定性。建议至少运行 65 秒，以覆盖本地 60 秒滚动权重窗口；实际生产容量仍需在目标环境验证。
+该测试不会发送订单，模拟服务不主动返回 429，也不提供活跃挂单或成交；它无法覆盖真实网络延迟、其他进程共享 IP、交易所响应头、行情连接或长时间稳定性。建议至少运行 65 秒以覆盖本地 60 秒滚动权重窗口。
 
 可在同一测试中模拟所有交易对的行情推送在启动 6 秒后同时中断 40 秒，再恢复：
 
@@ -243,7 +245,31 @@ BENCH_PAIRS=50 BENCH_SECONDS=65 BENCH_OUTAGE_SECS=40 BENCH_FAIL_MARK=1 cargo tes
 
 `BENCH_FAIL_MARK=1` 让模拟标记价格 REST 接口在断流期间返回 503；设为 `0` 则允许 REST 兜底。`ticker_sent` 和 `mark_sent` 分别统计模拟服务收到的成交价和标记价格请求，其中 `mark_bulk_sent` 是全市场标记请求数，其余为单对请求；估算权重分别按 10 和 1 计。`outage_fresh`、`outage_stale` 统计断流期间同步后行情有效和过期的次数，`recovery_fresh` 统计恢复推送后行情有效的次数。这些次数是同步轮次，不是交易对数；模拟引擎处于暂停状态，不发送真实订单。
 
+模拟活跃挂单及成交对账的独立场景：
+
+```bash
+BENCH_ORDERS_DB=disk BENCH_ORDERS_PAIRS=4 BENCH_ORDERS_PER_PAIR=8 BENCH_ORDERS_ROUNDS=3 BENCH_ORDERS_FILLS_PER_ROUND=1 cargo test --release --lib simulated_live_orders_and_fills -- --ignored --nocapture
+```
+
+该场景使用暂停的实盘引擎、虚构凭据及本地模拟交易所；订单先出现在挂单列表，再通过单订单查询确认成交，测试核对成交持久化和剩余活跃订单。每对每轮成交数乘以轮数必须小于每对初始订单数。`BENCH_ORDERS_DB` 可选 `memory`（默认）或独立临时磁盘数据库 `disk`。输出订单对账和账户持仓阶段、交易对总耗时及批次耗时、成功次数和模拟接口请求数；订单阶段包含成交触发的其他请求和持久化。该合成突发场景不代表交易所限流响应或实盘容量。
+
+基准按交易对、轮次和订单或账户持仓阶段输出警告及失败日志，并按客户端预留时的警告统计本地权重、订单速率和冷却拒绝；这些拒绝数不等于失败阶段数，也不是交易所响应数。成功与失败耗时分别统计，诊断开销包含在耗时中；无法从日志解释的失败标记为原因未知。默认断言要求所有同步成功，超过预算造成失败时测试会失败并保留诊断输出。
+
+订单场景可通过 `BENCH_ORDERS_DELAY_OPEN_MS`、`BENCH_ORDERS_DELAY_LOOKUP_MS`、`BENCH_ORDERS_DELAY_TRADE_MS`、`BENCH_ORDERS_DELAY_POSITION_MS` 和 `BENCH_ORDERS_DELAY_ACCOUNT_MS` 分别配置模拟服务端延迟，默认均为 0；这是服务端延迟，不是网络 RTT。输出还包含 blocking 线程排队和已埋点数据库连接互斥锁的等待分布；不包括 SQL、SQLite 文件锁或外层成交锁等待，采样本身也会增加开销。
+
+真实引擎循环在行情请求期间处理控制消息的本地场景：
+
+```bash
+BENCH_LOOP_ROUNDS=10 BENCH_LOOP_DELAY_MS=100 cargo test --release --lib control_during_market_request -- --ignored --nocapture
+```
+
+该场景在独立内存数据库和暂停的模拟盘引擎中运行，通过回环服务保证控制命令在标记价格请求期间入队，输出配置更新从入队到确认、独立请求往返及模拟服务处理耗时。配置确认不代表撤单完成，场景也不测量行情丢失。`BENCH_LOOP_TIMEOUT_MS` 默认 10000；模拟延迟必须小于客户端的 10000 毫秒请求超时，接近超时时限仍可能因调度或连接耗时失败。
+
 一轮本机测试的数据及适用范围见 [多交易对容量测试记录](docs/multi-pair-capacity.md)。
+
+运行时可以通过 `RUST_LOG` 启用性能诊断日志，例如
+`RUST_LOG=binance_grid_bot=info,binance_grid_bot::exchange::client=debug,binance_grid_bot::strategy::grid=debug,binance_grid_bot::db=debug`。
+日志包括交易所请求到响应头的耗时、周期同步各阶段的累计耗时、SQLite 阻塞线程排队时间，以及部分关键写操作的连接锁等待时间。调试日志在多交易对场景下可能较多；限流拒绝仍记录为警告。请求耗时不包含响应体解析，数据库锁指标也不覆盖所有操作。
 
 ---
 
@@ -258,6 +284,8 @@ BENCH_PAIRS=50 BENCH_SECONDS=65 BENCH_OUTAGE_SECS=40 BENCH_FAIL_MARK=1 cargo tes
 - **`pair_intents` 表**：保留旧版恢复元数据；升级后先查询交易所核实可能已接受的订单，确认不存在时结束旧意图，不生成新配对单。
 - **`bot_runtime` 表**：单交易对配置继续同步运行或暂停状态，兼容旧版本。
 - **`pair_runtime` 表**：按交易对及运行模式独立保存启停状态，单交易对与多交易对配置均优先读取该表，缺失时兼容旧状态。在线切换运行模式时，配置与当前启停状态在同一事务中保存，重启后保持暂停状态。
+
+成交统计缓存的版本在数据库写入成功后、释放数据库连接前更新，避免快照读取在磁盘提交期间等待版本锁；写入期间快照仍可能异步等待成交提交或数据库查询。
 
 已实现盈亏统计仅覆盖本程序保存的已确认订单，扣费后金额扣除同一报价资产的成交手续费；资金费和手工交易不计入。
 

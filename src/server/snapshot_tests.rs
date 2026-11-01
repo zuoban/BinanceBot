@@ -235,6 +235,54 @@ async fn confirmed_trades_and_cleanup_invalidate_only_trade_counts() {
 }
 
 #[tokio::test]
+async fn other_symbols_do_not_invalidate_charts_but_global_cleanup_does() {
+    let state = fixture();
+    let now = test_time();
+    assert_eq!(total(&state.snapshot_at(now).await), 0);
+    let mut other = trade("other", "BTCUSDT", TradingMode::Paper, now);
+    other.pnl_verified = false;
+    assert!(state.db.insert_trade(&other).unwrap());
+    assert_eq!(total(&state.snapshot_at(now).await), 0);
+    assert_eq!(state.db.hourly_stats_query_count(), 1);
+
+    // Verification must use the saved row's symbol, not the caller's symbol.
+    other.symbol = "SOLUSDC".into();
+    assert!(state.db.verify_trade_pnl(&other).unwrap());
+    assert_eq!(total(&state.snapshot_at(now).await), 0);
+    assert_eq!(state.db.hourly_stats_query_count(), 1);
+    assert_eq!(
+        state.db.clear_trade_history_for_symbol("BTCUSDT").unwrap(),
+        1
+    );
+    assert_eq!(total(&state.snapshot_at(now).await), 0);
+    assert_eq!(state.db.hourly_stats_query_count(), 1);
+
+    state.db.clear_trade_history().unwrap();
+    assert_eq!(total(&state.snapshot_at(now).await), 0);
+    assert_eq!(state.db.hourly_stats_query_count(), 2);
+}
+
+#[tokio::test]
+async fn other_symbol_commit_does_not_reject_a_cached_chart() {
+    let state = fixture();
+    let now = test_time();
+    let charts = state
+        .snapshot_cache
+        .get(
+            &state.db,
+            SnapshotScope::from_config(&AppConfig::default()),
+            now,
+        )
+        .await;
+    state
+        .db
+        .insert_trade(&trade("other-race", "BTCUSDT", TradingMode::Paper, now))
+        .unwrap();
+    assert!(state.collect_snapshot(Some(charts), now).await.is_some());
+    assert_eq!(state.db.hourly_stats_query_count(), 1);
+}
+
+#[tokio::test]
 async fn pnl_verification_invalidates_cached_today_stats() {
     let state = fixture();
     let now = test_time();
@@ -248,6 +296,8 @@ async fn pnl_verification_invalidates_cached_today_stats() {
     assert_eq!(state.db.hourly_stats_query_count(), 1);
 
     fill.realized_pnl = dec!(-1.23456789);
+    // The row's persisted symbol determines which chart is invalidated.
+    fill.symbol = "BTCUSDT".into();
     assert!(state.db.verify_trade_pnl(&fill).unwrap());
     let after = state.snapshot_at(now).await.hourly_trade_stats.unwrap();
     assert_eq!(after.realized_pnl, dec!(-1.23456789));
@@ -480,4 +530,65 @@ async fn snapshot_push_continues_while_the_trading_engine_waits_for_rest() {
     let _ = trading.await;
     let _ = snapshots.await;
     let _ = server.await;
+}
+
+#[tokio::test]
+async fn account_snapshot_matches_full_snapshot_without_chart_queries() {
+    let state = fixture();
+    for (dry_run, is_testnet) in [(true, false), (false, true), (false, false)] {
+        {
+            let mut config = state.config.write().await;
+            config.exchange.dry_run = dry_run;
+            config.exchange.is_testnet = is_testnet;
+        }
+        state.position.write().await.unrealized_pnl = dec!(-12.34);
+        state.account.write().await.available_balance = dec!(567.89);
+        let queries = state.db.hourly_stats_query_count();
+        let account = state.account_snapshot().await;
+        assert_eq!(state.db.hourly_stats_query_count(), queries);
+        let full = state.snapshot().await;
+        assert_eq!(
+            account,
+            serde_json::json!({
+                "mode": TradingMode::from_exchange(full.dry_run, full.grid_config.is_testnet),
+                "snapshot": {
+                    "symbol": full.symbol,
+                    "dry_run": full.dry_run,
+                    "grid_config": { "is_testnet": full.grid_config.is_testnet },
+                    "position": { "unrealized_pnl": full.position.unrealized_pnl },
+                    "account": full.account,
+                }
+            })
+        );
+    }
+}
+
+#[tokio::test]
+async fn account_snapshot_waits_for_scope_transitions_and_trade_commits() {
+    let state = fixture();
+    let scope = state.snapshot_scope_lock.write().await;
+    let reading = state.clone();
+    let mut task = tokio::spawn(async move { reading.account_snapshot().await });
+    assert!(tokio::time::timeout(Duration::from_millis(50), &mut task)
+        .await
+        .is_err());
+    state.config.write().await.exchange.is_testnet = true;
+    drop(scope);
+    assert_eq!(
+        task.await.unwrap()["snapshot"]["grid_config"]["is_testnet"],
+        true
+    );
+
+    let commit = state.trade_commit_lock.lock().await;
+    let reading = state.clone();
+    let mut task = tokio::spawn(async move { reading.account_snapshot().await });
+    assert!(tokio::time::timeout(Duration::from_millis(50), &mut task)
+        .await
+        .is_err());
+    state.account.write().await.available_balance = dec!(42);
+    drop(commit);
+    assert_eq!(
+        task.await.unwrap()["snapshot"]["account"]["available_balance"],
+        "42"
+    );
 }
