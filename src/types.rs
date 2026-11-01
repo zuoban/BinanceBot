@@ -398,6 +398,7 @@ pub enum BotControlAction {
     CancelAll,
     Rebalance,
     Shutdown {
+        removing: bool,
         reply: tokio::sync::oneshot::Sender<Result<(), String>>,
     },
     UpdateConfig {

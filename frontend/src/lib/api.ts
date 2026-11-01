@@ -18,7 +18,7 @@ export async function authenticatedFetch(path: string, init: RequestInit = {}) {
   try {
     response = await fetch(path, { ...init, headers, signal: init.signal ?? AbortSignal.timeout(15_000) });
   } catch (error) {
-    if (init.signal?.aborted) throw error;
+    if (init.signal?.aborted && init.signal.reason?.name !== 'TimeoutError') throw error;
     throw new ApiError(init.method && init.method !== 'GET'
       ? '请求未完成，操作可能已生效；请刷新状态或查看日志后再操作'
       : '无法连接后端服务，请检查网络后重试', 0);

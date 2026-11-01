@@ -65,7 +65,10 @@ async fn stop_engine_inner(
         let (reply, response) = oneshot::channel();
         state
             .action_tx
-            .send(BotControlAction::Shutdown { reply })
+            .send(BotControlAction::Shutdown {
+                removing: !recover,
+                reply,
+            })
             .await
             .context("Strategy engine stopped before shutdown was requested")?;
         response

@@ -36,6 +36,12 @@ fn fixture_with_database(
         ..Default::default()
     };
     db.save_config(&config).unwrap();
+    for strategy in config.strategy_configs().unwrap() {
+        let mode =
+            TradingMode::from_exchange(strategy.exchange.dry_run, strategy.exchange.is_testnet);
+        db.arm_execution_guard(&strategy.exchange.symbol, mode)
+            .unwrap();
+    }
     let lock = Arc::new(Mutex::new(()));
     let pairs = config
         .strategy_configs()
@@ -75,7 +81,7 @@ fn fixture_with_database(
                                     result
                                 });
                             }
-                            BotControlAction::Shutdown { reply } => {
+                            BotControlAction::Shutdown { reply, .. } => {
                                 let result = if fail_shutdown {
                                     Err("撤单结果仍未确认".into())
                                 } else {
@@ -98,6 +104,7 @@ fn fixture_with_database(
             PairTask {
                 state,
                 engine,
+                recovery_failed: false,
                 shutdown_tx,
                 background: vec![],
             }
@@ -112,10 +119,57 @@ fn fixture_with_database(
     )
 }
 
+async fn seed_paper_account_and_position(
+    state: &AppState,
+) -> (crate::types::AccountInfo, crate::types::PositionInfo) {
+    assert!(state.config.read().await.exchange.dry_run);
+    let account = {
+        let mut account = state.account.write().await;
+        account.asset = "USDC".into();
+        account.total_wallet_balance = rust_decimal_macros::dec!(9123.45);
+        account.available_balance = rust_decimal_macros::dec!(8765.43);
+        account.margin_balance = rust_decimal_macros::dec!(9135.45);
+        account.unrealized_profit = rust_decimal_macros::dec!(12);
+        account.clone()
+    };
+    let position = {
+        let mut position = state.position.write().await;
+        position.symbol = "SOLUSDC".into();
+        position.size = rust_decimal_macros::dec!(2.5);
+        position.entry_price = rust_decimal_macros::dec!(100);
+        position.mark_price = rust_decimal_macros::dec!(104.8);
+        position.unrealized_pnl = rust_decimal_macros::dec!(12);
+        position.liquidation_price = rust_decimal_macros::dec!(70);
+        position.leverage = 10;
+        position.clone()
+    };
+    (account, position)
+}
+
+async fn assert_paper_account_and_position_preserved(
+    state: &AppState,
+    account: &crate::types::AccountInfo,
+    position: &crate::types::PositionInfo,
+) {
+    assert_eq!(
+        serde_json::to_value(&*state.account.read().await).unwrap(),
+        serde_json::to_value(account).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(&*state.position.read().await).unwrap(),
+        serde_json::to_value(position).unwrap()
+    );
+}
+
 #[tokio::test]
-async fn failed_removal_keeps_durable_configuration_and_does_not_repoll_joined_engine() {
+async fn failed_removal_keeps_configuration_and_restarts_paused_engine() {
     let mut runtime = fixture_with_shutdown_failure(true);
     let state = runtime.states()[0].clone();
+    let (account, position) = seed_paper_account_and_position(&state).await;
+    let mut retirement = state.subscribe_retirement();
+    assert!(!*retirement.borrow());
+    let other_state = runtime.states()[1].clone();
+    let other_retirement = other_state.subscribe_retirement();
     state.pause_trading().await.unwrap();
     assert!(runtime
         .remove_pair("SOLUSDC")
@@ -136,7 +190,307 @@ async fn failed_removal_keeps_durable_configuration_and_does_not_repoll_joined_e
     );
     assert_eq!(runtime.handle.states.read().await.len(), 2);
     assert!(state.is_shutting_down());
-    assert!(runtime.run().await.contains("stopped"));
+    let replacement = runtime.states()[0].clone();
+    assert!(!Arc::ptr_eq(&state, &replacement));
+    tokio::time::timeout(Duration::from_secs(2), retirement.changed())
+        .await
+        .expect("旧 state 应通知订阅者退休")
+        .unwrap();
+    assert!(*retirement.borrow());
+    assert!(!*replacement.subscribe_retirement().borrow());
+    assert!(!*other_retirement.borrow());
+    assert_paper_account_and_position_preserved(&replacement, &account, &position).await;
+    assert!(!replacement.is_shutting_down());
+    assert_eq!(*replacement.status.read().await, BotStatus::Paused);
+    assert!(!runtime.pairs[0].engine.is_finished());
+}
+
+#[tokio::test]
+async fn failed_removal_persistence_restarts_paused_engine() {
+    let path =
+        std::env::temp_dir().join(format!("remove-commit-failure-{}.db", uuid::Uuid::new_v4()));
+    let db = Arc::new(Database::open(&path).unwrap());
+    let mut runtime = fixture_with_database(db.clone(), false, false);
+    let state = runtime.states()[0].clone();
+    let (account, position) = seed_paper_account_and_position(&state).await;
+    let mut retirement = state.subscribe_retirement();
+    assert!(!*retirement.borrow());
+    state.pause_trading().await.unwrap();
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection.execute_batch("CREATE TRIGGER reject_remove BEFORE UPDATE ON app_config BEGIN SELECT RAISE(ABORT, 'simulated removal failure'); END;").unwrap();
+    drop(connection);
+    assert!(runtime.remove_pair("SOLUSDC").await.is_err());
+    assert_eq!(db.load_config().unwrap().unwrap().pairs.len(), 2);
+    let replacement = runtime.states()[0].clone();
+    assert!(!Arc::ptr_eq(&state, &replacement));
+    tokio::time::timeout(Duration::from_secs(2), retirement.changed())
+        .await
+        .expect("旧 state 应通知订阅者退休")
+        .unwrap();
+    assert!(*retirement.borrow());
+    assert!(!*replacement.subscribe_retirement().borrow());
+    assert_paper_account_and_position_preserved(&replacement, &account, &position).await;
+    assert!(!replacement.is_shutting_down());
+    assert_eq!(*replacement.status.read().await, BotStatus::Paused);
+    assert!(!runtime.pairs[0].engine.is_finished());
+    drop(runtime);
+    drop(replacement);
+    drop(state);
+    drop(db);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn failed_removal_rebuilds_with_configuration_committed_during_shutdown() {
+    let mut runtime = fixture();
+    let old = runtime.pairs.remove(0);
+    old.engine.abort();
+    let config = old.state.config.read().await.clone();
+    let (tx, mut rx) = mpsc::channel(8);
+    let state = AppState::new_for_pair(
+        config,
+        runtime.handle.db.clone(),
+        tx,
+        runtime.trade_lock.clone(),
+    );
+    state.pause_trading().await.unwrap();
+    let engine = tokio::spawn(async move {
+        if let Some(BotControlAction::Shutdown { reply, .. }) = rx.recv().await {
+            let _ = reply.send(Err("模拟停机失败".into()));
+        }
+    });
+    let (shutdown_tx, _) = watch::channel(false);
+    runtime.pairs.insert(
+        0,
+        PairTask {
+            state: state.clone(),
+            engine,
+            recovery_failed: false,
+            shutdown_tx,
+            background: vec![],
+        },
+    );
+    *runtime.handle.states.write().await = runtime.states();
+
+    let mut updated = state.config.read().await.clone();
+    updated.grid.grid_interval = rust_decimal_macros::dec!(12.5);
+    // The writer has already acquired the status lock and committed to SQLite,
+    // but cannot publish its configuration until this read guard is released.
+    let config_guard = state.config.read().await;
+    let writer_state = state.clone();
+    let writer = tokio::spawn(async move { writer_state.save_runtime_config(updated).await });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let saved = runtime.handle.db.load_config().unwrap().unwrap();
+            if saved.strategy_configs().unwrap()[0].grid.grid_interval
+                == rust_decimal_macros::dec!(12.5)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("配置写入应在退休前提交");
+    let mut retirement = state.subscribe_retirement();
+    let removal = async move {
+        let result = runtime.remove_pair("SOLUSDC").await;
+        (runtime, result)
+    };
+    let removal = tokio::spawn(removal);
+    tokio::time::timeout(Duration::from_secs(2), retirement.changed())
+        .await
+        .expect("删除应在配置发布前退休旧实例")
+        .unwrap();
+    drop(config_guard);
+    writer.await.unwrap().unwrap();
+    let (runtime, result) = removal.await.unwrap();
+    assert!(result.is_err());
+    let replacement = runtime.states()[0].clone();
+    assert!(!Arc::ptr_eq(&state, &replacement));
+    assert_eq!(
+        replacement.config.read().await.grid.grid_interval,
+        rust_decimal_macros::dec!(12.5)
+    );
+    assert_eq!(
+        runtime
+            .handle
+            .db
+            .load_config()
+            .unwrap()
+            .unwrap()
+            .strategy_configs()
+            .unwrap()[0]
+            .grid
+            .grid_interval,
+        rust_decimal_macros::dec!(12.5)
+    );
+    assert_eq!(*replacement.status.read().await, BotStatus::Paused);
+}
+
+#[tokio::test]
+async fn failed_removal_with_unpersisted_pause_rebuilds_paused() {
+    let path =
+        std::env::temp_dir().join(format!("remove-pause-failure-{}.db", uuid::Uuid::new_v4()));
+    let db = Arc::new(Database::open(&path).unwrap());
+    let mut runtime = fixture_with_database(db.clone(), false, false);
+    let state = runtime.states()[0].clone();
+    state.pause_trading().await.unwrap();
+    db.save_pair_status("SOLUSDC", TradingMode::Paper, BotStatus::Running)
+        .unwrap();
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection.execute_batch("CREATE TRIGGER reject_pause_insert BEFORE INSERT ON pair_runtime WHEN NEW.symbol = 'SOLUSDC' BEGIN SELECT RAISE(ABORT, 'simulated pause failure'); END; CREATE TRIGGER reject_pause_update BEFORE UPDATE ON pair_runtime WHEN NEW.symbol = 'SOLUSDC' BEGIN SELECT RAISE(ABORT, 'simulated pause failure'); END;").unwrap();
+    drop(connection);
+
+    assert!(runtime.remove_pair("SOLUSDC").await.is_err());
+    let replacement = runtime.states()[0].clone();
+    assert!(!Arc::ptr_eq(&state, &replacement));
+    assert_eq!(
+        db.load_pair_status("SOLUSDC", TradingMode::Paper).unwrap(),
+        Some(BotStatus::Running)
+    );
+    assert_eq!(*replacement.status.read().await, BotStatus::Paused);
+    assert!(!replacement.is_shutting_down());
+    assert!(!runtime.pairs[0].engine.is_finished());
+    drop(runtime);
+    let config = db.load_config().unwrap().unwrap();
+    let reopened = Arc::new(Database::open(&path).unwrap());
+    let restarted =
+        TradingRuntime::start_with_test_exchange(&config, reopened, "http://127.0.0.1:1".into())
+            .await
+            .unwrap();
+    assert_eq!(
+        *restarted.states()[0].status.read().await,
+        BotStatus::Paused
+    );
+    drop(restarted);
+    drop(replacement);
+    drop(state);
+    drop(db);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn failed_removal_and_rebuild_keeps_member_in_global_risk() {
+    let path = std::env::temp_dir().join(format!(
+        "remove-rebuild-failure-{}.db",
+        uuid::Uuid::new_v4()
+    ));
+    let db = Arc::new(Database::open(&path).unwrap());
+    let mut runtime = fixture_with_database(db.clone(), true, false);
+    let state = runtime.states()[0].clone();
+    let other = runtime.states()[1].clone();
+    let mut global = GlobalConfig::from_app(&*state.config.read().await);
+    global.global_max_position_notional = Some(rust_decimal_macros::dec!(100));
+    runtime.global_position_limit.initialize_config(global);
+    runtime
+        .global_position_limit
+        .membership_ready
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    for member in [&state, &other] {
+        member
+            .global_position_initialized
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        member
+            .global_position_ready
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = member
+            .global_position_limit
+            .set(Arc::downgrade(&runtime.global_position_limit));
+    }
+    state.position.write().await.size = rust_decimal_macros::dec!(1);
+    state.ticker.write().await.mark_price = rust_decimal_macros::dec!(200);
+    state.ticker.write().await.mark_update_time = chrono::Utc::now();
+    state.pause_trading().await.unwrap();
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection.execute_batch("DROP TABLE admin_auth;").unwrap();
+    drop(connection);
+
+    let handle = runtime.handle();
+    let global_limit = runtime.global_position_limit.clone();
+    let other_engine = runtime.pairs[1].engine.abort_handle();
+    let router = create_managed_router(handle.clone()).await;
+    let manager = tokio::spawn(async move { runtime.run().await });
+    let error = tokio::time::timeout(Duration::from_secs(2), handle.remove_pair("SOLUSDC".into()))
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("删除失败后无法重启策略"));
+    assert_eq!(db.load_config().unwrap().unwrap().pairs.len(), 2);
+    assert!(state.is_shutting_down());
+    assert!(*state.subscribe_retirement().borrow());
+    let published = handle.states.read().await.clone();
+    assert_eq!(published.len(), 2);
+    assert!(Arc::ptr_eq(&published[0], &state));
+    assert!(Arc::ptr_eq(&published[1], &other));
+    assert!(!state
+        .global_position_ready
+        .load(std::sync::atomic::Ordering::SeqCst));
+    assert!(global_limit.check().await);
+    assert!(other.try_order_submission().is_none());
+    assert!(other.resume_trading().await.is_err());
+    assert!(!other.is_shutting_down());
+    assert!(!*other.subscribe_retirement().borrow());
+    let updated = tokio::time::timeout(
+        Duration::from_secs(2),
+        handle.update_global_config(crate::types::UpdateGlobalConfigPayload {
+            recv_window: Some(9000),
+            global_max_position_notional: Some(Some(rust_decimal_macros::dec!(100))),
+            ..Default::default()
+        }),
+    )
+    .await
+    .expect("隔离成员不能阻止全局配置更新")
+    .unwrap();
+    assert_eq!(updated.recv_window, 9000);
+    assert_eq!(
+        db.load_config().unwrap().unwrap().exchange.recv_window,
+        9000
+    );
+    assert_eq!(other.config.read().await.exchange.recv_window, 9000);
+    assert_eq!(state.config.read().await.exchange.recv_window, 5000);
+    let members = handle.states.read().await.clone();
+    assert_eq!(members.len(), 2);
+    assert!(Arc::ptr_eq(&members[0], &state));
+    assert!(global_limit.check().await);
+    assert!(other.try_order_submission().is_none());
+    assert!(other.resume_trading().await.is_err());
+    drop(members);
+    let (status, body) = request(
+        &router,
+        "/api/pairs/BTCUSDT/status",
+        "GET",
+        Value::Null,
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["success"], true);
+    let error = tokio::time::timeout(Duration::from_secs(2), handle.remove_pair("UNKNOWN".into()))
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(error.to_string().contains("交易对不存在"));
+    let error = tokio::time::timeout(Duration::from_secs(2), handle.remove_pair("SOLUSDC".into()))
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(error.to_string().contains("策略重建失败"));
+    other.pause_trading().await.unwrap();
+    assert_eq!(*other.status.read().await, BotStatus::Paused);
+    other_engine.abort();
+    let reason = tokio::time::timeout(Duration::from_secs(2), manager)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(reason.contains("BTCUSDT"));
+    drop(published);
+    drop(router);
+    drop(handle);
+    drop(other);
+    drop(state);
+    drop(db);
+    std::fs::remove_file(path).unwrap();
 }
 
 #[tokio::test]
@@ -221,8 +575,82 @@ async fn request(
     )
 }
 
+#[tokio::test]
+async fn symbols_route_shares_runtime_limiter_and_isolates_environments() {
+    use crate::exchange::rate_limit::RequestClass;
+
+    let runtime = fixture();
+    let handle = runtime.handle();
+    let mainnet = "https://fapi.binance.com";
+    let testnet = "https://testnet.binancefuture.com";
+    let config = AppConfig::default().exchange;
+    let trading_client = runtime.exchange_client(&config);
+    assert!(Arc::ptr_eq(&trading_client.limiter(), &handle.rate_limiter));
+    handle
+        .rate_limiter
+        .reserve(mainnet, [7; 32], 1800, RequestClass::Normal)
+        .unwrap();
+    let router = create_managed_router(handle.clone()).await;
+    let (status, _) = request(
+        &router,
+        "/api/exchange/symbols?environment=mainnet",
+        "GET",
+        Value::Null,
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert!(handle
+        .rate_limiter
+        .reserve(testnet, [7; 32], 1, RequestClass::Normal)
+        .is_ok());
+
+    handle
+        .rate_limiter
+        .reserve(testnet, [7; 32], 1799, RequestClass::Normal)
+        .unwrap();
+    let (status, _) = request(
+        &router,
+        "/api/exchange/symbols?environment=testnet",
+        "GET",
+        Value::Null,
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+}
+
 fn payload(symbol: &str) -> Value {
     json!({ "symbol": symbol, "grid_interval": "0.1", "order_amount_usdc": "100", "buy_window": 5, "sell_window": 5 })
+}
+
+fn exchange_info(status: &str, filters: Value) -> Value {
+    json!({"symbols": [{
+        "symbol": "ETHUSDT", "status": status, "pricePrecision": 2,
+        "quantityPrecision": 3, "filters": filters
+    }]})
+}
+
+fn valid_filters() -> Value {
+    json!([
+        {"filterType":"PRICE_FILTER", "minPrice":"0.01", "maxPrice":"1000000", "tickSize":"0.01"},
+        {"filterType":"LOT_SIZE", "minQty":"0.001", "maxQty":"1000000", "stepSize":"0.001"},
+        {"filterType":"MIN_NOTIONAL", "notional":"5"}
+    ])
+}
+
+async fn mock_exchange(status: StatusCode, body: Value) -> (String, tokio::task::JoinHandle<()>) {
+    let app = Router::new().route(
+        "/fapi/v1/exchangeInfo",
+        axum::routing::get(move || {
+            let body = body.clone();
+            async move { (status, axum::Json(body)) }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (url, server)
 }
 
 async fn versioned_payload(router: &Router, symbol: &str) -> Value {
@@ -231,6 +659,194 @@ async fn versioned_payload(router: &Router, symbol: &str) -> Value {
     let mut result = payload(symbol);
     result["baseline_version"] = current["data"]["config_version"].clone();
     result
+}
+
+#[tokio::test]
+async fn adding_pair_rolls_back_when_guard_write_fails_and_can_be_retried() {
+    let path = std::env::temp_dir().join(format!("add-guard-failure-{}.db", uuid::Uuid::new_v4()));
+    let db = Arc::new(Database::open(&path).unwrap());
+    let mut runtime = fixture_with_database(db.clone(), false, false);
+    let (url, server) =
+        mock_exchange(StatusCode::OK, exchange_info("TRADING", valid_filters())).await;
+    runtime.test_exchange_url = Some(url);
+    let handle = runtime.handle();
+    let router = create_managed_router(handle.clone()).await;
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection.execute_batch("CREATE TRIGGER reject_new_guard BEFORE INSERT ON pair_execution_guard WHEN NEW.symbol = 'ETHUSDT' BEGIN SELECT RAISE(ABORT, 'guard write failed'); END;").unwrap();
+    let manager = tokio::spawn(async move { runtime.run().await });
+
+    let (_, response) = request(&router, "/api/pairs", "POST", payload("ETHUSDT"), true).await;
+    assert_eq!(response["success"], false);
+    assert!(!db
+        .load_config()
+        .unwrap()
+        .unwrap()
+        .pairs
+        .iter()
+        .any(|pair| pair.symbol == "ETHUSDT"));
+    assert_eq!(
+        db.load_pair_status("ETHUSDT", TradingMode::Paper).unwrap(),
+        None
+    );
+    assert_eq!(handle.states.read().await.len(), 2);
+
+    connection
+        .execute_batch("DROP TRIGGER reject_new_guard;")
+        .unwrap();
+    let (_, response) = request(&router, "/api/pairs", "POST", payload("ETHUSDT"), true).await;
+    assert_eq!(response["success"], true, "{response}");
+    assert!(db
+        .load_config()
+        .unwrap()
+        .unwrap()
+        .pairs
+        .iter()
+        .any(|pair| pair.symbol == "ETHUSDT"));
+    assert_eq!(
+        db.load_pair_status("ETHUSDT", TradingMode::Paper).unwrap(),
+        Some(BotStatus::Paused)
+    );
+    assert_eq!(handle.states.read().await.len(), 3);
+    manager.abort();
+    server.abort();
+    drop(connection);
+    drop(db);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn adding_pairs_requires_valid_exchange_rules_before_saving() {
+    let valid = valid_filters();
+    let mut no_price = valid.clone();
+    no_price.as_array_mut().unwrap().remove(0);
+    let mut no_lot = valid.clone();
+    no_lot.as_array_mut().unwrap().remove(1);
+    let mut zero_tick = valid.clone();
+    zero_tick[0]["tickSize"] = json!("0");
+    let mut negative_tick = valid.clone();
+    negative_tick[0]["tickSize"] = json!("-0.01");
+    let mut zero_step = valid.clone();
+    zero_step[1]["stepSize"] = json!("0");
+    let mut negative_step = valid.clone();
+    negative_step[1]["stepSize"] = json!("-0.001");
+    let mut mismatched_tick = valid.clone();
+    mismatched_tick[0]["tickSize"] = json!("0.03");
+
+    for (name, status, body) in [
+        ("missing symbol", StatusCode::OK, json!({"symbols": []})),
+        (
+            "wrong symbol",
+            StatusCode::OK,
+            json!({"symbols": [{"symbol":"OTHER", "status":"TRADING", "pricePrecision":2, "quantityPrecision":3, "filters":valid.clone()}]}),
+        ),
+        (
+            "not trading",
+            StatusCode::OK,
+            exchange_info("BREAK", valid.clone()),
+        ),
+        (
+            "missing price filter",
+            StatusCode::OK,
+            exchange_info("TRADING", no_price),
+        ),
+        (
+            "missing lot filter",
+            StatusCode::OK,
+            exchange_info("TRADING", no_lot),
+        ),
+        (
+            "zero tick",
+            StatusCode::OK,
+            exchange_info("TRADING", zero_tick),
+        ),
+        (
+            "negative tick",
+            StatusCode::OK,
+            exchange_info("TRADING", negative_tick),
+        ),
+        (
+            "zero step",
+            StatusCode::OK,
+            exchange_info("TRADING", zero_step),
+        ),
+        (
+            "negative step",
+            StatusCode::OK,
+            exchange_info("TRADING", negative_step),
+        ),
+        (
+            "grid mismatch",
+            StatusCode::OK,
+            exchange_info("TRADING", mismatched_tick),
+        ),
+        (
+            "invalid response",
+            StatusCode::OK,
+            json!({"symbols": "invalid"}),
+        ),
+        (
+            "API error",
+            StatusCode::BAD_REQUEST,
+            json!({"code":-1121,"msg":"Invalid symbol."}),
+        ),
+        (
+            "other API error",
+            StatusCode::BAD_REQUEST,
+            json!({"code":-1000,"msg":"Internal error"}),
+        ),
+    ] {
+        let (url, server) = mock_exchange(status, body).await;
+        let mut runtime = fixture();
+        runtime.test_exchange_url = Some(url);
+        let handle = runtime.handle();
+        let router = create_managed_router(handle.clone()).await;
+        let manager = tokio::spawn(async move { runtime.run().await });
+        let (_, response) = request(&router, "/api/pairs", "POST", payload("ETHUSDT"), true).await;
+        assert_eq!(response["success"], false, "{name}: {response}");
+        if name == "API error" {
+            assert!(response["message"]
+                .as_str()
+                .unwrap()
+                .contains("交易对 ETHUSDT 不存在"));
+        } else if name == "other API error" || name == "invalid response" {
+            assert!(response["message"]
+                .as_str()
+                .unwrap()
+                .contains("暂时无法验证交易对"));
+        }
+        let saved = handle.db.load_config().unwrap().unwrap();
+        assert_eq!(saved.pairs.len(), 2, "{name}");
+        assert!(
+            !saved.pairs.iter().any(|pair| pair.symbol == "ETHUSDT"),
+            "{name}"
+        );
+        assert_eq!(handle.states.read().await.len(), 2, "{name}");
+        manager.abort();
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn adding_pair_rejects_network_failure_without_saving() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    let mut runtime = fixture();
+    runtime.test_exchange_url = Some(url);
+    let handle = runtime.handle();
+    let router = create_managed_router(handle.clone()).await;
+    let manager = tokio::spawn(async move { runtime.run().await });
+    let (_, response) = request(&router, "/api/pairs", "POST", payload("ETHUSDT"), true).await;
+    assert_eq!(response["success"], false);
+    assert!(response["message"]
+        .as_str()
+        .unwrap()
+        .contains("暂时无法验证交易对"));
+    let saved = handle.db.load_config().unwrap().unwrap();
+    assert_eq!(saved.pairs.len(), 2);
+    assert!(!saved.pairs.iter().any(|pair| pair.symbol == "ETHUSDT"));
+    assert_eq!(handle.states.read().await.len(), 2);
+    manager.abort();
 }
 
 #[tokio::test]
@@ -315,7 +931,10 @@ async fn overview_reads_current_managed_membership_without_restarting_router() {
 
 #[tokio::test]
 async fn dashboard_membership_commands_update_routes_without_restarting_and_preserve_pause() {
+    let (url, server) =
+        mock_exchange(StatusCode::OK, exchange_info("TRADING", valid_filters())).await;
     let mut runtime = fixture();
+    runtime.test_exchange_url = Some(url);
     let handle = runtime.handle();
     let router = create_managed_router(handle.clone()).await;
     let manager = tokio::spawn(async move { runtime.run().await });
@@ -397,6 +1016,7 @@ async fn dashboard_membership_commands_update_routes_without_restarting_and_pres
     );
     manager.abort();
     let _ = manager.await;
+    server.abort();
 }
 
 #[tokio::test]
@@ -745,7 +1365,10 @@ async fn zero_available_margin_pause_global_api_preserves_legacy_updates() {
 
 #[tokio::test]
 async fn global_settings_reach_every_engine_and_new_pairs_inherit_without_overrides() {
+    let (url, server) =
+        mock_exchange(StatusCode::OK, exchange_info("TRADING", valid_filters())).await;
     let mut runtime = fixture();
+    runtime.test_exchange_url = Some(url);
     let handle = runtime.handle();
     let router = create_managed_router(handle.clone()).await;
     let manager = tokio::spawn(async move { runtime.run().await });
@@ -835,6 +1458,7 @@ async fn global_settings_reach_every_engine_and_new_pairs_inherit_without_overri
     assert_eq!(rejected_add["success"], false);
     manager.abort();
     let _ = manager.await;
+    server.abort();
 }
 
 #[tokio::test]
@@ -1117,6 +1741,27 @@ async fn concurrent_global_patches_and_pair_updates_preserve_shared_and_independ
     assert_eq!(saved.strategy_configs().unwrap()[1].grid.buy_window, 3);
 }
 
+#[tokio::test]
+async fn engine_start_fails_when_execution_guard_cannot_be_written() {
+    let path =
+        std::env::temp_dir().join(format!("guard-write-failure-{}.db", uuid::Uuid::new_v4()));
+    let db = Arc::new(Database::open(&path).unwrap());
+    let config = AppConfig::default();
+    db.save_config(&config).unwrap();
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection.execute_batch("CREATE TRIGGER reject_guard BEFORE INSERT ON pair_execution_guard BEGIN SELECT RAISE(ABORT, 'guard write failed'); END;").unwrap();
+    drop(connection);
+    assert!(TradingRuntime::start_with_test_exchange(
+        &config,
+        db.clone(),
+        "http://127.0.0.1:1".into()
+    )
+    .await
+    .is_err());
+    drop(db);
+    std::fs::remove_file(path).unwrap();
+}
+
 async fn wait_for_runtime_initialization(runtime: &TradingRuntime) {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -1227,7 +1872,7 @@ async fn failed_runtime_shutdown_keeps_running_pairs_paused_after_reopen() {
 }
 
 #[tokio::test]
-async fn manual_pause_before_or_after_recovery_commit_remains_paused_after_reopen() {
+async fn manual_pause_before_recovery_commit_remains_paused_after_reopen() {
     for pause_before_commit in [true, false] {
         let directory =
             std::env::temp_dir().join(format!("runtime-pause-order-{}", uuid::Uuid::new_v4()));
@@ -1252,12 +1897,19 @@ async fn manual_pause_before_or_after_recovery_commit_remains_paused_after_reope
             }
             state.commit_shutdown_recovery().await.unwrap();
             if !pause_before_commit {
-                state.pause_trading().await.unwrap();
+                assert!(state.pause_trading().await.is_err());
             }
         }
         {
             let db = Database::open(&path).unwrap();
-            assert_eq!(db.load_bot_status().unwrap(), Some(BotStatus::Paused));
+            assert_eq!(
+                db.load_bot_status().unwrap(),
+                Some(if pause_before_commit {
+                    BotStatus::Paused
+                } else {
+                    BotStatus::Running
+                })
+            );
         }
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -1327,7 +1979,7 @@ async fn concurrent_safety_pause_prevents_shutdown_recovery() {
         let (received_tx, received_rx) = oneshot::channel();
         let (release_tx, release_rx) = oneshot::channel();
         let engine = tokio::spawn(async move {
-            let BotControlAction::Shutdown { reply } = rx.recv().await.unwrap() else {
+            let BotControlAction::Shutdown { reply, .. } = rx.recv().await.unwrap() else {
                 panic!("expected shutdown")
             };
             received_tx.send(()).unwrap();
@@ -1338,6 +1990,7 @@ async fn concurrent_safety_pause_prevents_shutdown_recovery() {
         let pair = PairTask {
             state: state.clone(),
             engine,
+            recovery_failed: false,
             shutdown_tx,
             background: vec![],
         };

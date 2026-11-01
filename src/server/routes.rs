@@ -1,4 +1,6 @@
 use crate::config::{AppConfig, ServerConfig};
+use crate::exchange::rate_limit::RateLimiter;
+use crate::exchange::BinanceFuturesClient;
 use crate::runtime::RuntimeHandle;
 use crate::server::state::AppState;
 use crate::types::{
@@ -8,7 +10,7 @@ use crate::types::{
     WebConfigView, WebGlobalConfigView,
 };
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -55,6 +57,72 @@ pub struct ApiResponse<T> {
     pub success: bool,
     pub data: Option<T>,
     pub message: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SymbolsQuery {
+    environment: String,
+}
+
+async fn exchange_symbols_handler(
+    Extension(limiter): Extension<Arc<RateLimiter>>,
+    query: Result<Query<SymbolsQuery>, axum::extract::rejection::QueryRejection>,
+) -> (StatusCode, Json<ApiResponse<Vec<String>>>) {
+    let is_testnet = match query {
+        Ok(Query(SymbolsQuery { environment })) if environment == "mainnet" => false,
+        Ok(Query(SymbolsQuery { environment })) if environment == "testnet" => true,
+        _ => {
+            return symbols_error(
+                StatusCode::BAD_REQUEST,
+                "无效的交易所环境，请使用 mainnet 或 testnet",
+            )
+        }
+    };
+    let mut config = AppConfig::default().exchange;
+    config.is_testnet = is_testnet;
+    fetch_exchange_symbols(&BinanceFuturesClient::new_with_limiter(&config, limiter)).await
+}
+
+fn symbols_error(
+    status: StatusCode,
+    message: &str,
+) -> (StatusCode, Json<ApiResponse<Vec<String>>>) {
+    (
+        status,
+        Json(ApiResponse {
+            success: false,
+            data: None,
+            message: Some(message.to_string()),
+        }),
+    )
+}
+
+async fn fetch_exchange_symbols(
+    client: &BinanceFuturesClient,
+) -> (StatusCode, Json<ApiResponse<Vec<String>>>) {
+    match client.get_exchange_info(None).await {
+        Ok(info) => {
+            let mut symbols: Vec<String> = info
+                .symbols
+                .into_iter()
+                .filter(|symbol| symbol.status == "TRADING")
+                .map(|symbol| symbol.symbol)
+                .collect();
+            symbols.sort_unstable();
+            (
+                StatusCode::OK,
+                Json(ApiResponse {
+                    success: true,
+                    data: Some(symbols),
+                    message: None,
+                }),
+            )
+        }
+        Err(error) => {
+            warn!(%error, "获取交易所交易对失败");
+            symbols_error(StatusCode::BAD_GATEWAY, "获取交易所交易对失败，请稍后重试")
+        }
+    }
 }
 
 fn extract_token(headers: &HeaderMap) -> Option<String> {
@@ -160,6 +228,10 @@ fn pair_resource_routes() -> Router<Arc<AppState>> {
 
 fn create_base_router(state: Arc<AppState>, history_clear: bool) -> Router {
     let mut api_protected = Router::new()
+        .route(
+            "/api/exchange/symbols",
+            get(exchange_symbols_handler).layer(Extension(Arc::new(RateLimiter::default()))),
+        )
         .route("/api/status", get(get_status_handler))
         .route("/api/orders", get(get_orders_handler))
         .route("/api/trades", get(get_trades_handler))
@@ -287,6 +359,10 @@ async fn get_overview_handler(
 pub async fn create_managed_router(handle: RuntimeHandle) -> Router {
     let primary = handle.states.read().await[0].clone();
     let protected = Router::new()
+        .route(
+            "/api/exchange/symbols",
+            get(exchange_symbols_handler).layer(Extension(handle.rate_limiter.clone())),
+        )
         .route(
             "/api/pairs",
             get(get_managed_pairs_handler).post(add_pair_handler),
@@ -1718,6 +1794,29 @@ async fn post_control_handler(
             });
         }
     };
+    let result = tokio::spawn(dispatch_control(state, action)).await;
+    match result {
+        Ok(response) => response,
+        Err(error) => Json(ApiResponse {
+            success: false,
+            data: None,
+            message: Some(format!("控制任务失败: {}", error)),
+        }),
+    }
+}
+
+async fn dispatch_control(
+    state: Arc<AppState>,
+    action: BotControlAction,
+) -> Json<ApiResponse<String>> {
+    let _control = state.socket_control_lock.read().await;
+    if state.is_retired() {
+        return Json(ApiResponse {
+            success: false,
+            data: None,
+            message: Some("交易对已移除，无法执行操作".into()),
+        });
+    }
 
     let action_name = format!("{:?}", action);
     if matches!(
@@ -1870,7 +1969,29 @@ async fn ws_handler(
         .on_upgrade(move |socket| handle_socket(socket, state, token))
 }
 
+async fn send_until_retired<S>(
+    sender: &mut S,
+    message: Message,
+    retired: &mut tokio::sync::watch::Receiver<bool>,
+) -> Option<Result<(), S::Error>>
+where
+    S: futures_util::Sink<Message> + Unpin,
+{
+    if *retired.borrow() {
+        return None;
+    }
+    tokio::select! {
+        biased;
+        _ = retired.changed() => None,
+        result = sender.send(message) => Some(result),
+    }
+}
+
 async fn handle_socket(socket: WebSocket, state: Arc<AppState>, token: String) {
+    let mut retired = state.subscribe_retirement();
+    if *retired.borrow() {
+        return;
+    }
     let (mut sender, mut receiver) = socket.split();
     let mut rx = state.ws_broadcast_tx.subscribe();
 
@@ -1880,7 +2001,12 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, token: String) {
         "type": "snapshot",
         "data": initial_snapshot
     })) {
-        let _ = sender.send(Message::Text(json)).await;
+        if send_until_retired(&mut sender, Message::Text(json), &mut retired)
+            .await
+            .is_none()
+        {
+            return;
+        }
     }
 
     let send_state = state.clone();
@@ -1889,13 +2015,17 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, token: String) {
         let mut check_auth = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
             tokio::select! {
+                _ = retired.changed() => break,
                 _ = check_auth.tick() => {
                     if !send_state.is_token_valid(&send_token).await { break; }
                 }
                 message = rx.recv() => {
                     match message {
                         Ok(msg) => {
-                            if sender.send(Message::Text(msg)).await.is_err() { break; }
+                            if !matches!(
+                                send_until_retired(&mut sender, Message::Text(msg), &mut retired).await,
+                                Some(Ok(()))
+                            ) { break; }
                         }
                         Err(_) => break,
                     }
@@ -1920,17 +2050,10 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, token: String) {
                         _ => None,
                     };
                     if let Some(act) = action {
-                        if matches!(act, BotControlAction::Pause | BotControlAction::CancelAll) {
-                            let reason = if matches!(act, BotControlAction::CancelAll) {
-                                "手动撤销全部策略挂单并暂停策略"
-                            } else {
-                                "手动暂停策略"
-                            };
-                            if state_clone.pause_trading_with_reason(reason).await.is_err() {
-                                break;
-                            }
+                        let dispatch = tokio::spawn(dispatch_control(state_clone.clone(), act));
+                        if !matches!(dispatch.await, Ok(Json(ApiResponse { success: true, .. }))) {
+                            break;
                         }
-                        let _ = state_clone.action_tx.send(act).await;
                     }
                 }
             }
@@ -1950,6 +2073,149 @@ mod tests {
     use crate::config::AppConfig;
     use crate::db::Database;
     use crate::types::BotStatus;
+
+    #[tokio::test]
+    async fn symbols_consumer_filters_sorts_and_reports_upstream_errors() {
+        use axum::{routing::get, Json, Router};
+        use serde_json::json;
+
+        let app = Router::new().route(
+            "/fapi/v1/exchangeInfo",
+            get(|| async {
+                Json(json!({"symbols": [
+                    {"symbol":"ZUSDT", "status":"TRADING", "pricePrecision":2, "quantityPrecision":2, "filters":[]},
+                    {"symbol":"BUSDT", "status":"BREAK", "pricePrecision":2, "quantityPrecision":2, "filters":[]},
+                    {"symbol":"AUSDT", "status":"TRADING", "pricePrecision":2, "quantityPrecision":2, "filters":[]}
+                ]}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = BinanceFuturesClient::with_base_url(&AppConfig::default().exchange, url);
+        let (status, Json(response)) = fetch_exchange_symbols(&client).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(response.success);
+        assert_eq!(response.data.unwrap(), vec!["AUSDT", "ZUSDT"]);
+        assert!(response.message.is_none());
+        server.abort();
+
+        let app = Router::new().route(
+            "/fapi/v1/exchangeInfo",
+            get(|| async { StatusCode::SERVICE_UNAVAILABLE }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = BinanceFuturesClient::with_base_url(&AppConfig::default().exchange, url);
+        let (status, Json(response)) = fetch_exchange_symbols(&client).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert!(!response.success);
+        assert!(response.data.is_none());
+        assert!(response.message.is_some());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn symbols_route_requires_auth_and_rejects_invalid_environment() {
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        db.create_session("symbols-test-token").unwrap();
+        let (tx, _) = tokio::sync::mpsc::channel(1);
+        let router = create_router(AppState::new(AppConfig::default(), db, tx));
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/exchange/symbols?environment=mainnet")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        for uri in [
+            "/api/exchange/symbols",
+            "/api/exchange/symbols?environment=invalid",
+            "/api/exchange/symbols?environment=mainnet&environment=testnet",
+        ] {
+            let response = router
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(uri)
+                        .header("Authorization", "Bearer symbols-test-token")
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let bytes = axum::body::to_bytes(response.into_body(), 1_000_000)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["success"], false);
+            assert!(body["data"].is_null());
+            assert!(body["message"].is_string());
+        }
+    }
+
+    struct BlockedSocketSink(Option<tokio::sync::oneshot::Sender<()>>);
+
+    impl futures_util::Sink<Message> for BlockedSocketSink {
+        type Error = ();
+
+        fn poll_ready(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            if let Some(started) = self.0.take() {
+                let _ = started.send(());
+            }
+            std::task::Poll::Pending
+        }
+
+        fn start_send(self: std::pin::Pin<&mut Self>, _item: Message) -> Result<(), Self::Error> {
+            unreachable!("blocked sink cannot accept a message")
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Pending
+        }
+
+        fn poll_close(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Pending
+        }
+    }
+
+    #[tokio::test]
+    async fn retirement_interrupts_blocked_snapshot_and_broadcast_sends() {
+        for message in ["snapshot", "broadcast"] {
+            let (retire, mut retired) = tokio::sync::watch::channel(false);
+            let (started, waiting) = tokio::sync::oneshot::channel();
+            let mut sender = BlockedSocketSink(Some(started));
+            let send = tokio::spawn(async move {
+                send_until_retired(&mut sender, Message::Text(message.into()), &mut retired)
+                    .await
+                    .is_none()
+            });
+            waiting.await.expect("send must reach the blocked sink");
+            retire.send_replace(true);
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_secs(3), send)
+                    .await
+                    .expect("retirement must interrupt a blocked send")
+                    .unwrap()
+            );
+        }
+    }
 
     async fn overview_response(
         router: &Router,
@@ -2040,6 +2306,74 @@ mod tests {
             server.abort();
             let _ = server.await;
         }
+    }
+
+    #[tokio::test]
+    async fn retired_state_closes_connected_pair_socket() {
+        use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
+
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        db.create_session("retirement-test-token").unwrap();
+        let (tx, _) = tokio::sync::mpsc::channel(1);
+        let state = AppState::new(AppConfig::default(), db, tx);
+        let router = create_router(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let mut request = format!("ws://{address}/ws").into_client_request().unwrap();
+        request.headers_mut().insert(
+            "Sec-WebSocket-Protocol",
+            "auth, token.retirement-test-token".parse().unwrap(),
+        );
+        let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+        let initial = tokio::time::timeout(std::time::Duration::from_secs(3), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let snapshot: serde_json::Value = serde_json::from_str(initial.to_text().unwrap()).unwrap();
+        assert_eq!(snapshot["type"], "snapshot");
+
+        state.retire();
+        let closed = tokio::time::timeout(std::time::Duration::from_secs(3), socket.next())
+            .await
+            .expect("retired state must close its socket");
+        assert!(matches!(
+            closed,
+            None | Some(Ok(Message::Close(_))) | Some(Err(_))
+        ));
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn already_retired_state_does_not_send_socket_snapshot() {
+        use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
+
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        db.create_session("retirement-test-token").unwrap();
+        let (tx, _) = tokio::sync::mpsc::channel(1);
+        let state = AppState::new(AppConfig::default(), db, tx);
+        state.retire();
+        let router = create_router(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let mut request = format!("ws://{address}/ws").into_client_request().unwrap();
+        request.headers_mut().insert(
+            "Sec-WebSocket-Protocol",
+            "auth, token.retirement-test-token".parse().unwrap(),
+        );
+        let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+        let closed = tokio::time::timeout(std::time::Duration::from_secs(3), socket.next())
+            .await
+            .expect("retired state must close its socket");
+        assert!(matches!(
+            closed,
+            None | Some(Ok(Message::Close(_))) | Some(Err(_))
+        ));
+        server.abort();
+        let _ = server.await;
     }
 
     #[tokio::test]
@@ -2257,6 +2591,114 @@ mod tests {
             );
         }
         engine.abort();
+    }
+
+    #[tokio::test]
+    async fn retired_control_cannot_change_recreated_pair() {
+        for action in ["pause", "cancel_all"] {
+            let db = Arc::new(Database::open(":memory:").unwrap());
+            let config = AppConfig::default();
+            let trade_lock = Arc::new(tokio::sync::Mutex::new(()));
+            let (old_tx, mut old_rx) = tokio::sync::mpsc::channel(1);
+            let old =
+                AppState::new_for_pair(config.clone(), db.clone(), old_tx, trade_lock.clone());
+            let retirement = old.socket_control_lock.write().await;
+            let request_state = old.clone();
+            let request = tokio::spawn(async move {
+                post_control_handler(
+                    State(request_state),
+                    Json(ControlRequest {
+                        action: action.into(),
+                    }),
+                )
+                .await
+            });
+            tokio::task::yield_now().await;
+            old.retire();
+            drop(retirement);
+
+            let (new_tx, _new_rx) = tokio::sync::mpsc::channel(1);
+            let new = AppState::new_for_pair(config.clone(), db.clone(), new_tx, trade_lock);
+            new.resume_trading().await.unwrap();
+            assert!(!request.await.unwrap().0.success);
+            assert!(old_rx.try_recv().is_err());
+            assert_eq!(*new.status.read().await, BotStatus::Running);
+            assert_eq!(
+                db.load_pair_status(&config.exchange.symbol, TradingMode::Paper)
+                    .unwrap(),
+                Some(BotStatus::Running)
+            );
+
+            let response = post_control_handler(
+                State(old),
+                Json(ControlRequest {
+                    action: action.into(),
+                }),
+            )
+            .await;
+            assert!(!response.0.success);
+            assert!(old_rx.try_recv().is_err());
+            assert_eq!(
+                db.load_pair_status(&config.exchange.symbol, TradingMode::Paper)
+                    .unwrap(),
+                Some(BotStatus::Running)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_control_finishes_before_retirement_and_recreation() {
+        for action in ["pause", "cancel_all"] {
+            let db = Arc::new(Database::open(":memory:").unwrap());
+            let config = AppConfig::default();
+            let trade_lock = Arc::new(tokio::sync::Mutex::new(()));
+            let (old_tx, mut old_rx) = tokio::sync::mpsc::channel(1);
+            let old =
+                AppState::new_for_pair(config.clone(), db.clone(), old_tx, trade_lock.clone());
+            let status = old.status.write().await;
+            let request_state = old.clone();
+            let request = tokio::spawn(async move {
+                post_control_handler(
+                    State(request_state),
+                    Json(ControlRequest {
+                        action: action.into(),
+                    }),
+                )
+                .await
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while old.socket_control_lock.try_write().is_ok() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            request.abort();
+            assert!(matches!(request.await, Err(error) if error.is_cancelled()));
+            let retiring = old.clone();
+            let retirement = tokio::spawn(async move {
+                let _guard = retiring.socket_control_lock.write().await;
+                retiring.retire();
+            });
+            tokio::task::yield_now().await;
+            assert!(!retirement.is_finished());
+            drop(status);
+            retirement.await.unwrap();
+            assert!(matches!(
+                old_rx.try_recv(),
+                Ok(BotControlAction::Pause | BotControlAction::CancelAll)
+            ));
+
+            let (new_tx, _new_rx) = tokio::sync::mpsc::channel(1);
+            let new = AppState::new_for_pair(config.clone(), db.clone(), new_tx, trade_lock);
+            new.resume_trading().await.unwrap();
+            assert_eq!(*new.status.read().await, BotStatus::Running);
+            assert_eq!(
+                db.load_pair_status(&config.exchange.symbol, TradingMode::Paper)
+                    .unwrap(),
+                Some(BotStatus::Running)
+            );
+        }
     }
 
     #[tokio::test]

@@ -1,5 +1,6 @@
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import type { UserEvent } from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { createMemoryRouter, RouterProvider } from 'react-router-dom';
 import { beforeEach, expect, it, vi } from 'vitest';
@@ -31,8 +32,8 @@ beforeEach(() => {
   vi.stubGlobal('matchMedia', vi.fn().mockImplementation(query => ({ matches: false, media: query, addListener: vi.fn(), removeListener: vi.fn(), addEventListener: vi.fn(), removeEventListener: vi.fn() })));
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
 });
-function setup(request: Promise<unknown>, initialPath = '/pairs/BTCUSDC/config', configError?: Error) {
-  mocks.api.mockImplementation((_: string, init?: RequestInit) => init?.method === 'DELETE' ? request : configError ? Promise.reject(configError) : Promise.resolve({ ...pair('BTCUSDC').grid_config, config_version: 'version-1' }));
+function setup(request: Promise<unknown>, initialPath = '/pairs/BTCUSDC/config', configError?: Error, symbols = (path: string): Promise<string[]> => Promise.resolve(path.includes('testnet') ? ['ETHUSDT'] : ['BTCUSDC', 'SOLUSDC'])) {
+  mocks.api.mockImplementation((path: string, init?: RequestInit) => path.startsWith('/api/exchange/symbols?') ? symbols(path) : init?.method === 'DELETE' ? request : configError ? Promise.reject(configError) : Promise.resolve({ ...pair('BTCUSDC').grid_config, config_version: 'version-1' }));
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const router = createMemoryRouter([{ element: <Shell />, children: [
     { path: '/', element: <div>总览页面</div> },
@@ -44,6 +45,85 @@ function setup(request: Promise<unknown>, initialPath = '/pairs/BTCUSDC/config',
   render(<QueryClientProvider client={client}><RouterProvider router={router} /></QueryClientProvider>);
   return router;
 }
+
+async function selectSymbol(user: UserEvent, symbol: string) {
+  const input = screen.getByLabelText('合约交易对');
+  await waitFor(() => expect(input).toBeEnabled());
+  await user.click(input);
+  await user.type(input, symbol);
+  await user.click(await screen.findByTitle(symbol));
+}
+
+async function selectMode(user: UserEvent, label: string) {
+  await user.click(screen.getByLabelText('运行模式'));
+  await user.click(await screen.findByTitle(label));
+}
+
+it('loads symbols for the selected environment and clears the selection across environments', async () => {
+  setup(Promise.resolve(), '/pairs/new');
+  const user = userEvent.setup();
+  await waitFor(() => expect(mocks.api).toHaveBeenCalledWith('/api/exchange/symbols?environment=mainnet', expect.anything()));
+  await selectSymbol(user, 'SOLUSDC');
+  await selectMode(user, '实盘 / Live');
+  expect(screen.getByLabelText('合约交易对').closest('.ant-select-content')).toHaveAttribute('title', 'SOLUSDC');
+  await selectMode(user, '测试网 / Testnet');
+  await waitFor(() => expect(mocks.api).toHaveBeenCalledWith('/api/exchange/symbols?environment=testnet', expect.anything()));
+  expect(screen.getByLabelText('合约交易对').closest('.ant-select-content')).not.toHaveAttribute('title', 'SOLUSDC');
+  await selectSymbol(user, 'ETHUSDT');
+  await selectMode(user, '模拟盘 / Paper Trading');
+  expect(screen.getByLabelText('合约交易对').closest('.ant-select-content')).not.toHaveAttribute('title', 'ETHUSDT');
+  await user.click(screen.getByLabelText('合约交易对'));
+  expect(await screen.findByTitle('SOLUSDC')).toBeInTheDocument();
+  expect(screen.queryByTitle('ETHUSDT')).not.toBeInTheDocument();
+});
+
+it('shows loading, retries a failed symbol request and searches the returned symbols', async () => {
+  let reject!: (reason?: unknown) => void;
+  const pending = new Promise<string[]>((_, rejectPromise) => { reject = rejectPromise; });
+  const symbols = vi.fn().mockReturnValueOnce(pending).mockResolvedValue(['SOLUSDC']);
+  setup(Promise.resolve(), '/pairs/new', undefined, symbols);
+  const user = userEvent.setup();
+  expect(screen.getByText('正在加载交易对...')).toBeInTheDocument();
+  expect(screen.getByLabelText('合约交易对')).toBeDisabled();
+  await act(async () => { reject(new Error('网络错误')); });
+  expect(await screen.findByText('交易对加载失败')).toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: '重试' }));
+  await waitFor(() => expect(symbols).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(screen.getByLabelText('合约交易对')).toBeEnabled());
+  await user.click(screen.getByLabelText('合约交易对'));
+  await user.type(screen.getByLabelText('合约交易对'), 'NO-SUCH-SYMBOL');
+  expect(await screen.findByText('没有匹配的交易对')).toBeInTheDocument();
+  await user.clear(screen.getByLabelText('合约交易对'));
+  await user.type(screen.getByLabelText('合约交易对'), 'sol');
+  expect(await screen.findByTitle('SOLUSDC')).toBeInTheDocument();
+});
+
+it('locks the symbol while adding a pair and unlocks it if saving fails', async () => {
+  let fail!: (error: Error) => void;
+  const request = new Promise<never>((_, reject) => { fail = reject; });
+  mocks.post.mockReturnValueOnce(request);
+  setup(Promise.resolve(), '/pairs/new');
+  const user = userEvent.setup();
+  await selectSymbol(user, 'SOLUSDC');
+  const symbol = screen.getByLabelText('合约交易对');
+  await user.click(screen.getByRole('button', { name: '保存并添加' }));
+  await waitFor(() => expect(mocks.post).toHaveBeenCalledWith('/api/pairs', expect.objectContaining({ symbol: 'SOLUSDC' })));
+  await waitFor(() => expect(symbol).toBeDisabled());
+  expect(screen.getByLabelText('运行模式')).toBeDisabled();
+  await act(async () => { fail(new Error('保存失败')); });
+  await waitFor(() => expect(mocks.error).toHaveBeenCalledWith('保存失败'));
+  await waitFor(() => expect(symbol).toBeEnabled());
+  await selectSymbol(user, 'BTCUSDC');
+  expect(symbol.closest('.ant-select-content')).toHaveAttribute('title', 'BTCUSDC');
+}, 15000);
+
+it('keeps the symbol read-only on the edit form without requesting exchange symbols', async () => {
+  setup(Promise.resolve());
+  const symbol = await screen.findByLabelText('合约交易对');
+  await waitFor(() => expect(symbol).toHaveValue('BTCUSDC'));
+  expect(symbol).toBeDisabled();
+  expect(mocks.api.mock.calls.some(([path]) => String(path).startsWith('/api/exchange/symbols?'))).toBe(false);
+});
 
 function breadcrumb() {
   return within(screen.getByRole('navigation', { name: '面包屑' }));
@@ -76,7 +156,7 @@ it('submits the new strategy defaults', async () => {
   mocks.post.mockResolvedValue('SOLUSDC');
   setup(Promise.resolve(), '/pairs/new');
   const user = userEvent.setup();
-  await user.type(screen.getByLabelText('合约交易对'), 'SOLUSDC');
+  await selectSymbol(user, 'SOLUSDC');
   await user.click(screen.getByRole('button', { name: '保存并添加' }));
   await waitFor(() => expect(mocks.post).toHaveBeenCalledWith('/api/pairs', expect.objectContaining({
     symbol: 'SOLUSDC', buy_window: 3, sell_window: 3, max_position_usdc: '1000', pause_on_max_position: true,
@@ -87,7 +167,7 @@ it('requires a position limit when pause is enabled and allows clearing it when 
   mocks.post.mockResolvedValue('SOLUSDC');
   setup(Promise.resolve(), '/pairs/new');
   const user = userEvent.setup();
-  await user.type(screen.getByLabelText('合约交易对'), 'SOLUSDC');
+  await selectSymbol(user, 'SOLUSDC');
   await user.clear(screen.getByLabelText('最大持仓名义价值'));
   await user.click(screen.getByRole('button', { name: '保存并添加' }));
   expect(await screen.findByText('暂停策略需要大于 0 的持仓上限')).toBeInTheDocument();
@@ -147,7 +227,7 @@ it.each(['/pairs/BTCUSDC/config', '/pairs/new'])('disables breadcrumb ancestors 
   const user = userEvent.setup();
   const input = await screen.findByLabelText('网格间距');
   await waitFor(() => expect(input).toBeEnabled());
-  if (path === '/pairs/new') await user.type(screen.getByLabelText('合约交易对'), 'BTCUSDC');
+  if (path === '/pairs/new') await selectSymbol(user, 'BTCUSDC');
   await user.clear(input);
   await user.type(input, '0.2');
   await user.click(screen.getByRole('button', { name: path === '/pairs/new' ? '保存并添加' : '保存并立即生效' }));

@@ -22,7 +22,8 @@ export function useDeleteStrategy() {
         okText: '确认删除', okButtonProps: { danger: true }, cancelText: '取消',
       });
       if (!accepted) return false;
-      await api(`/api/pairs/${encodeURIComponent(pair.symbol)}`, { method: 'DELETE', body: JSON.stringify({ confirm: true }) });
+      // Engine shutdown can take 30 seconds, with additional time for failure recovery and persistence.
+      await api(`/api/pairs/${encodeURIComponent(pair.symbol)}`, { method: 'DELETE', body: JSON.stringify({ confirm: true }), signal: AbortSignal.timeout(90_000) });
       message.success('策略已删除，持仓和历史记录保留');
       void client.invalidateQueries({ queryKey: ['pairs'] });
       void client.invalidateQueries({ queryKey: ['overview'] });

@@ -480,6 +480,13 @@ impl Database {
                 PRIMARY KEY (symbol, mode)
             );
 
+            CREATE TABLE IF NOT EXISTS pair_execution_guard (
+                symbol TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                dirty INTEGER NOT NULL,
+                PRIMARY KEY (symbol, mode)
+            );
+
             CREATE TABLE IF NOT EXISTS trades (
                 trade_id TEXT PRIMARY KEY,
                 client_order_id TEXT NOT NULL,
@@ -879,8 +886,9 @@ impl Database {
         save_config_on(&conn, &saved)
     }
 
-    /// Membership changes merge with concurrent engine writes under one transaction.
-    pub fn add_pair_config(&self, config: &AppConfig) -> Result<()> {
+    /// Add a paused pair and arm its guard atomically; returns whether it was already dirty.
+    /// The caller must use this result for startup recovery and must not arm it again.
+    pub fn add_pair_config(&self, config: &AppConfig) -> Result<bool> {
         config.validate()?;
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
@@ -899,8 +907,9 @@ impl Database {
         save_config_on(&tx, &saved)?;
         let mode = TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
         save_pair_status_on(&tx, &config.exchange.symbol, mode, BotStatus::Paused)?;
+        let was_dirty = arm_execution_guard_on(&tx, &config.exchange.symbol, mode)?;
         tx.commit()?;
-        Ok(())
+        Ok(was_dirty)
     }
 
     pub fn remove_pair_config(&self, symbol: &str) -> Result<()> {
@@ -945,7 +954,8 @@ impl Database {
         config: &AppConfig,
         pair_scope: Option<&str>,
         status: BotStatus,
-    ) -> Result<()> {
+        previous_scope: (&str, TradingMode),
+    ) -> Result<(BotStatus, bool)> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         match pair_scope {
@@ -953,12 +963,22 @@ impl Database {
             None => save_config_on(&tx, config)?,
         }
         let mode = TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
+        let switching = previous_scope != (config.exchange.symbol.as_str(), mode);
+        let was_dirty = arm_execution_guard_on(&tx, &config.exchange.symbol, mode)?;
+        let guarded = switching && was_dirty;
+        if switching {
+            tx.execute(
+                "UPDATE pair_execution_guard SET dirty = 0 WHERE symbol = ?1 AND mode = ?2",
+                params![previous_scope.0, previous_scope.1.as_str()],
+            )?;
+        }
+        let status = if guarded { BotStatus::Paused } else { status };
         save_pair_status_on(&tx, &config.exchange.symbol, mode, status)?;
         if pair_scope.is_none() {
             save_bot_status_on(&tx, status)?;
         }
         tx.commit()?;
-        Ok(())
+        Ok((status, guarded))
     }
 
     /// Legacy writers also update the scoped row so switching configuration formats is reversible.
@@ -976,6 +996,25 @@ impl Database {
             save_bot_status_on(&tx, status)?;
         }
         tx.commit()?;
+        Ok(())
+    }
+
+    /// Arm before starting an engine. An armed guard means the previous engine
+    /// did not finish a clean shutdown, so its saved Running state is unsafe.
+    pub fn arm_execution_guard(&self, symbol: &str, mode: TradingMode) -> Result<bool> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let dirty = arm_execution_guard_on(&tx, symbol, mode)?;
+        tx.commit()?;
+        Ok(dirty)
+    }
+
+    pub fn clear_execution_guard(&self, symbol: &str, mode: TradingMode) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE pair_execution_guard SET dirty = 0 WHERE symbol = ?1 AND mode = ?2",
+            params![symbol, mode.as_str()],
+        )?;
         Ok(())
     }
 
@@ -1715,6 +1754,22 @@ fn save_pair_config_on(conn: &Connection, symbol: &str, config: &AppConfig) -> R
         .with_context(|| format!("交易对 {} 不在已保存的配置中", symbol))?;
     pair.update_from(config);
     save_config_on(conn, &saved)
+}
+
+fn arm_execution_guard_on(conn: &Connection, symbol: &str, mode: TradingMode) -> Result<bool> {
+    let dirty: Option<bool> = conn
+        .query_row(
+            "SELECT dirty FROM pair_execution_guard WHERE symbol = ?1 AND mode = ?2",
+            params![symbol, mode.as_str()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    conn.execute(
+        "INSERT INTO pair_execution_guard (symbol, mode, dirty) VALUES (?1, ?2, 1)
+         ON CONFLICT(symbol, mode) DO UPDATE SET dirty = 1",
+        params![symbol, mode.as_str()],
+    )?;
+    Ok(dirty.unwrap_or(false))
 }
 
 fn save_pair_status_on(
@@ -3279,7 +3334,12 @@ mod tests {
             )
             .unwrap();
         assert!(db
-            .save_runtime_config(&candidate, Some("SOLUSDC"), BotStatus::Paused)
+            .save_runtime_config(
+                &candidate,
+                Some("SOLUSDC"),
+                BotStatus::Paused,
+                ("SOLUSDC", TradingMode::Paper)
+            )
             .is_err());
         assert_eq!(
             serde_json::to_value(db.load_config().unwrap().unwrap()).unwrap(),
@@ -3288,6 +3348,97 @@ mod tests {
         assert_eq!(
             db.load_pair_status("SOLUSDC", TradingMode::Live).unwrap(),
             Some(BotStatus::Running)
+        );
+    }
+
+    #[test]
+    fn switching_modes_clears_only_the_previous_guard_and_rolls_back_on_failure() {
+        let db = Database::open(":memory:").unwrap();
+        let paper = AppConfig::default();
+        db.save_config(&paper).unwrap();
+        let symbol = &paper.exchange.symbol;
+        assert!(!db.arm_execution_guard(symbol, TradingMode::Paper).unwrap());
+        assert!(!db.arm_execution_guard(symbol, TradingMode::Live).unwrap());
+        let mut live = paper.clone();
+        live.exchange.dry_run = false;
+
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER reject_old_guard BEFORE UPDATE ON pair_execution_guard
+             WHEN OLD.mode = 'PAPER' AND NEW.dirty = 0
+             BEGIN SELECT RAISE(ABORT, 'guard clear failed'); END;",
+            )
+            .unwrap();
+        assert!(db
+            .save_runtime_config(
+                &live,
+                None,
+                BotStatus::Running,
+                (symbol, TradingMode::Paper)
+            )
+            .is_err());
+        assert!(db.load_config().unwrap().unwrap().exchange.dry_run);
+        assert!(db.arm_execution_guard(symbol, TradingMode::Paper).unwrap());
+        assert!(db.arm_execution_guard(symbol, TradingMode::Live).unwrap());
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER reject_old_guard")
+            .unwrap();
+
+        assert_eq!(
+            db.save_runtime_config(
+                &live,
+                None,
+                BotStatus::Running,
+                (symbol, TradingMode::Paper)
+            )
+            .unwrap(),
+            (BotStatus::Paused, true)
+        );
+        assert!(!db.arm_execution_guard(symbol, TradingMode::Paper).unwrap());
+        assert!(db.arm_execution_guard(symbol, TradingMode::Live).unwrap());
+        db.clear_execution_guard(symbol, TradingMode::Paper)
+            .unwrap();
+        assert_eq!(
+            db.save_runtime_config(
+                &paper,
+                None,
+                BotStatus::Running,
+                (symbol, TradingMode::Live)
+            )
+            .unwrap(),
+            (BotStatus::Running, false)
+        );
+        assert!(!db.arm_execution_guard(symbol, TradingMode::Live).unwrap());
+        assert!(db.arm_execution_guard(symbol, TradingMode::Paper).unwrap());
+    }
+
+    #[test]
+    fn adding_pair_rolls_back_config_and_status_when_guard_write_fails() {
+        let db = Database::open(":memory:").unwrap();
+        let original = AppConfig::default();
+        db.save_config(&original).unwrap();
+        let mut added = original.clone();
+        added.exchange.symbol = "BTCUSDT".into();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER reject_guard BEFORE INSERT ON pair_execution_guard
+             BEGIN SELECT RAISE(ABORT, 'guard write failed'); END;",
+            )
+            .unwrap();
+        assert!(db.add_pair_config(&added).is_err());
+        assert_eq!(
+            serde_json::to_value(db.load_config().unwrap().unwrap()).unwrap(),
+            serde_json::to_value(original).unwrap()
+        );
+        assert_eq!(
+            db.load_pair_status("BTCUSDT", TradingMode::Paper).unwrap(),
+            None
         );
     }
 
@@ -3379,7 +3530,7 @@ mod tests {
 
         let mut added = original.clone();
         added.exchange.symbol = "BTCUSDT".into();
-        db.add_pair_config(&added).unwrap();
+        assert!(!db.add_pair_config(&added).unwrap());
         assert_eq!(
             db.load_pair_status("BTCUSDT", TradingMode::Paper).unwrap(),
             Some(BotStatus::Paused)
@@ -3395,7 +3546,7 @@ mod tests {
             .pairs
             .iter()
             .any(|pair| pair.symbol == "BTCUSDT"));
-        db.add_pair_config(&added).unwrap();
+        assert!(db.add_pair_config(&added).unwrap());
         assert!(db
             .load_config()
             .unwrap()

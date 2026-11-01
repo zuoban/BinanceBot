@@ -30,6 +30,8 @@ export default function PairConfig() {
   const removing = useRef(false);
   const baseline = useRef<{ symbol: string; config: GridConfig & { config_version: string } } | null>(null);
   const selectedMode = Form.useWatch('mode', form);
+  const environment = selectedMode === 'TESTNET' ? 'testnet' : 'mainnet';
+  const symbols = useQuery({ queryKey: ['exchange-symbols', environment], queryFn: ({ signal }) => api<string[]>(`/api/exchange/symbols?environment=${environment}`, { signal }), enabled: adding, retry: false, refetchOnWindowFocus: false });
   const config = useQuery({ queryKey: ['config', symbol, pair?.scoped], queryFn: ({ signal }) => api<GridConfig & { config_version: string }>(pairPath(pair!, 'config'), { signal }), enabled: !!pair, refetchOnWindowFocus: false });
   useEffect(() => {
     setReady(adding);
@@ -86,6 +88,7 @@ export default function PairConfig() {
     if (values.mode === 'LIVE' && !await modal.confirm({ title: '保存实盘配置？', content: '请核对交易对、方向、网格和持仓限制。实盘使用真实资金。', okText: '确认保存', cancelText: '取消' })) return;
     mutation.mutate(values);
   };
+  const formDisabled = !ready || edit.saving || deletion.busy;
   return <>
     <PageBreadcrumb disabled={edit.saving} items={adding
       ? [{ label: '策略总览', to: '/' }, { label: '新增交易对' }]
@@ -99,10 +102,10 @@ export default function PairConfig() {
       if (!result.error && result.data && symbol) { baseline.current = { symbol, config: result.data }; form.setFieldsValue(toForm(result.data)); edit.setDirty(false); mutation.reset(); }
     }}>重新加载策略配置</Button>}
     {pairs.data && !pair && !adding && <Alert type="warning" title="该交易对不存在或已移除" />}
-    <Form<FormValues> className="config-form" form={form} layout="vertical" onFinish={values => void submit(values)} onValuesChange={() => edit.setDirty(true)} disabled={!ready || edit.saving || deletion.busy}>
+    <Form<FormValues> className="config-form" form={form} layout="vertical" onFinish={values => void submit(values)} onValuesChange={changed => { if (adding && changed.mode && (changed.mode === 'TESTNET' ? 'testnet' : 'mainnet') !== environment) form.setFieldValue('symbol', undefined); edit.setDirty(true); }} disabled={formDisabled}>
       <Card title="基本设置">
         <Row gutter={20}>
-          <Col xs={24} md={12}><Form.Item name="symbol" label="合约交易对" rules={[{ required: true, message: '请输入交易对' }, { pattern: /^[a-zA-Z0-9]+$/, message: '仅支持字母和数字' }]}><Input disabled={!adding || edit.saving} placeholder="例如 BTCUSDT" autoComplete="off" /></Form.Item></Col>
+          <Col xs={24} md={12}><Form.Item name="symbol" label="合约交易对" rules={[{ required: true, message: '请选择交易对' }]} getValueProps={value => ({ value: value || undefined })} extra={adding && symbols.isError ? <span>交易对加载失败 <Button type="link" onClick={() => void symbols.refetch()}>重试</Button></span> : undefined}>{adding ? <Select showSearch optionFilterProp="label" placeholder={symbols.isFetching ? '正在加载交易对...' : '搜索并选择交易对'} loading={symbols.isFetching} disabled={formDisabled || symbols.isFetching || symbols.isError} notFoundContent="没有匹配的交易对" options={(symbols.data ?? []).map(value => ({ value, label: value }))} /> : <Input disabled />}</Form.Item></Col>
           <Col xs={24} md={12}><Form.Item name="direction" label="交易方向" rules={[{ required: true }]}><Select options={[{ value: 'LONG', label: '做多 · 买入开仓 / 卖出平仓' }, { value: 'SHORT', label: '做空 · 卖出开仓 / 买入平仓' }]} /></Form.Item></Col>
           <Col xs={24} md={12}><Form.Item name="mode" label="运行模式" rules={[{ required: true }]} extra="模拟盘使用真实行情进行本地撮合。"><Select options={[{ value: 'PAPER', label: '模拟盘 / Paper Trading' }, { value: 'TESTNET', label: '测试网 / Testnet' }, { value: 'LIVE', label: '实盘 / Live' }]} /></Form.Item></Col>
         </Row>

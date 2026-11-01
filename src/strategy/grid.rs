@@ -776,8 +776,11 @@ impl GridTradingEngine {
             return;
         }
         match action {
-            BotControlAction::Shutdown { reply } => {
-                let result = self.shutdown().await.map_err(|error| error.to_string());
+            BotControlAction::Shutdown { removing, reply } => {
+                let result = self
+                    .shutdown_inner(removing)
+                    .await
+                    .map_err(|error| error.to_string());
                 let _ = reply.send(result);
             }
             BotControlAction::Pause => {
@@ -898,12 +901,60 @@ impl GridTradingEngine {
     }
 
     pub async fn shutdown(&mut self) -> Result<()> {
+        self.shutdown_inner(false).await
+    }
+
+    async fn shutdown_inner(&mut self, removing: bool) -> Result<()> {
         self.state.request_shutdown();
         let paused = self.state.pause_for_shutdown().await;
         // Shutdown can interrupt initialization before durable orders have been
         // installed in memory. Restore them before canceling so racing fills
         // are recorded rather than discarded with the recovery metadata.
         let config = self.state.config.read().await.clone();
+        if removing && !config.exchange.dry_run {
+            if let Err(error) = self.client.get_open_orders(&config.exchange.symbol).await {
+                if matches!(
+                    error.downcast_ref::<crate::exchange::client::ExchangeError>(),
+                    Some(crate::exchange::client::ExchangeError::ApiError { code: -1121, .. })
+                ) {
+                    paused?;
+                    anyhow::ensure!(
+                        self.state.active_orders.read().await.is_empty(),
+                        "无效交易对仍有内存挂单，请核实恢复数据"
+                    );
+                    let symbol = config.exchange.symbol.clone();
+                    let clear = self
+                        .state
+                        .db
+                        .run_blocking(move |db| {
+                            if !db.load_managed_orders(&symbol)?.is_empty() {
+                                return Ok(false);
+                            }
+                            for mode in [
+                                TradingMode::Unknown,
+                                TradingMode::Paper,
+                                TradingMode::Testnet,
+                                TradingMode::Live,
+                            ] {
+                                if !db.load_pair_intents(&symbol, mode)?.is_empty()
+                                    || db.load_remainder_plan(&symbol, mode)?.is_some()
+                                {
+                                    return Ok(false);
+                                }
+                            }
+                            Ok(true)
+                        })
+                        .await?;
+                    anyhow::ensure!(clear, "无效交易对仍有待恢复订单或意图，请核实恢复数据");
+                    if let Some(task) = self.pnl_reconcile_task.take() {
+                        task.abort();
+                        let _ = task.await;
+                    }
+                    return Ok(());
+                }
+                return Err(error.context("无法确认删除交易对的交易所挂单"));
+            }
+        }
         if !config.exchange.dry_run {
             let restored = self
                 .state
@@ -1123,6 +1174,22 @@ impl GridTradingEngine {
         } else {
             self.sync_live_orders().await && self.sync_account_and_position().await
         };
+        // A dirty target scope is installed paused, but reconciliation can have
+        // recovered its live orders. Apply the same cancellation as startup.
+        let cancellation_complete = if (market_changed || mode_changed)
+            && !new_config.exchange.dry_run
+            && *self.state.status.read().await == BotStatus::Paused
+        {
+            self.cancel_all_orders().await
+        } else {
+            true
+        };
+        if !cancellation_complete {
+            self.set_global_reconciliation_ready(false).await;
+            return Err(anyhow!(
+                "Configuration saved, but paused target order cancellation failed; bot paused"
+            ));
+        }
         self.set_global_reconciliation_ready(ready).await;
         if !ready {
             self.pause_trading().await;
@@ -3039,6 +3106,10 @@ mod tests {
         posts: Arc<Mutex<Vec<String>>>,
         fail_lookup: Arc<AtomicUsize>,
         fail_open_orders: Arc<AtomicUsize>,
+        fail_cancel: Arc<AtomicUsize>,
+        block_cancel: Arc<AtomicUsize>,
+        cancel_started: Arc<tokio::sync::Notify>,
+        release_cancel: Arc<tokio::sync::Notify>,
         lose_response: Arc<AtomicUsize>,
     }
 
@@ -3055,6 +3126,21 @@ mod tests {
 
     async fn pair_exchange_server(fake: PairExchange) -> (String, tokio::task::JoinHandle<()>) {
         let app = Router::new()
+            .route("/fapi/v1/time", get(|| async {
+                Json(serde_json::json!({"serverTime": Utc::now().timestamp_millis()}))
+            }))
+            .route("/fapi/v1/exchangeInfo", get(|| async {
+                Json(serde_json::json!({"symbols":[{"symbol":"SOLUSDC","status":"TRADING","pricePrecision":2,"quantityPrecision":2,"filters":[{"filterType":"PRICE_FILTER","minPrice":"0.01","maxPrice":"100000","tickSize":"0.01"},{"filterType":"LOT_SIZE","minQty":"0.01","maxQty":"100000","stepSize":"0.01"},{"filterType":"MIN_NOTIONAL","notional":"5"}]}]}))
+            }))
+            .route("/fapi/v1/ticker/price", get(|| async {
+                Json(serde_json::json!({"symbol":"SOLUSDC","price":"100","time":0}))
+            }))
+            .route("/fapi/v2/positionRisk", get(|| async {
+                Json(serde_json::json!([{"symbol":"SOLUSDC","positionAmt":"0","entryPrice":"0","markPrice":"100","unRealizedProfit":"0","liquidationPrice":"0","leverage":"1"}]))
+            }))
+            .route("/fapi/v2/account", get(|| async {
+                Json(serde_json::json!({"totalWalletBalance":"10000","totalMarginBalance":"10000","totalUnrealizedProfit":"0","availableBalance":"10000","assets":[{"asset":"USDC","walletBalance":"10000","marginBalance":"10000","availableBalance":"10000","unrealizedProfit":"0"}]}))
+            }))
             .route(
                 "/fapi/v1/openOrders",
                 get(|State(fake): State<PairExchange>| async move {
@@ -3074,17 +3160,30 @@ mod tests {
                     if consume_failure(&fake.fail_lookup) {
                         return (axum::http::StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"code": -1000})));
                     }
-                    match fake.orders.lock().unwrap().get(&query["origClientOrderId"]).cloned() {
+                    let orders = fake.orders.lock().unwrap();
+                    let order = if let Some(client_id) = query.get("origClientOrderId") {
+                        orders.get(client_id).cloned()
+                    } else {
+                        query.get("orderId").and_then(|id| id.parse::<i64>().ok()).and_then(|id| orders.values().find(|order| order.order_id == id).cloned())
+                    };
+                    match order {
                         Some(order) => (axum::http::StatusCode::OK, Json(serde_json::to_value(order).unwrap())),
                         None => (axum::http::StatusCode::BAD_REQUEST, Json(serde_json::json!({"code": -2013, "msg": "Order does not exist"}))),
                     }
                 })
                 .delete(|State(fake): State<PairExchange>, Query(query): Query<HashMap<String, String>>| async move {
+                    if fake.block_cancel.load(Ordering::SeqCst) != 0 {
+                        fake.cancel_started.notify_one();
+                        fake.release_cancel.notified().await;
+                    }
+                    if consume_failure(&fake.fail_cancel) {
+                        return (axum::http::StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"code": -1000})));
+                    }
                     let id: i64 = query["orderId"].parse().unwrap();
                     let mut orders = fake.orders.lock().unwrap();
                     let order = orders.values_mut().find(|order| order.order_id == id).unwrap();
                     order.status = "CANCELED".into();
-                    Json(order.clone())
+                    (axum::http::StatusCode::OK, Json(serde_json::to_value(order.clone()).unwrap()))
                 })
                 .post(|State(fake): State<PairExchange>, Query(query): Query<HashMap<String, String>>| async move {
                     let id = query["newClientOrderId"].clone();
@@ -3170,6 +3269,99 @@ mod tests {
         .unwrap();
         (config, db, intent)
     }
+    #[tokio::test]
+    async fn invalid_symbol_removal_requires_empty_recovery_state() {
+        let app = Router::new().fallback(|| async {
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"code": -1121, "msg": "Invalid symbol."})),
+            )
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (config, db, order) = pending_pair_fixture();
+        let mut engine = pair_recovery_engine(&config, db.clone(), url.clone()).await;
+        assert!(engine.shutdown_inner(true).await.is_err());
+        assert_eq!(
+            db.load_pair_intents("SOLUSDC", TradingMode::Live)
+                .unwrap()
+                .len(),
+            1
+        );
+        db.clear_pair_intents("SOLUSDC", TradingMode::Live).unwrap();
+        db.save_managed_order(&order).unwrap();
+        assert!(engine.shutdown_inner(true).await.is_err());
+        assert_eq!(db.load_managed_orders("SOLUSDC").unwrap().len(), 1);
+        db.delete_managed_order(&order.client_order_id).unwrap();
+        engine
+            .state
+            .active_orders
+            .write()
+            .await
+            .insert(order.client_order_id.clone(), order.clone());
+        assert!(engine.shutdown_inner(true).await.is_err());
+        engine.state.active_orders.write().await.clear();
+        db.save_remainder_plan(&crate::types::RemainderPlan {
+            symbol: "SOLUSDC".into(),
+            mode: TradingMode::Testnet,
+            sources: vec![order.clone()],
+            target: order,
+            phase: crate::types::RemainderPhase::Canceling,
+        })
+        .unwrap();
+        assert!(engine.shutdown_inner(true).await.is_err());
+        let empty_db = Arc::new(Database::open(":memory:").unwrap());
+        let mut empty = pair_recovery_engine(&config, empty_db, url).await;
+        assert!(empty.shutdown_inner(true).await.is_ok());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn invalid_symbol_removal_blocks_unreadable_recovery_state() {
+        let app = Router::new().fallback(|| async {
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"code": -1121, "msg": "Invalid symbol."})),
+            )
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let path =
+            std::env::temp_dir().join(format!("invalid-symbol-db-{}.db", uuid::Uuid::new_v4()));
+        let db = Arc::new(Database::open(&path).unwrap());
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection.execute_batch("DROP TABLE pair_intents").unwrap();
+        drop(connection);
+        let mut config = AppConfig::default();
+        config.exchange.dry_run = false;
+        let mut engine = pair_recovery_engine(&config, db.clone(), url).await;
+        assert!(engine.shutdown_inner(true).await.is_err());
+        drop(engine);
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn removal_does_not_accept_other_exchange_errors() {
+        let app = Router::new().fallback(|| async {
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"code": -1000, "msg": "Unknown error"})),
+            )
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut config = AppConfig::default();
+        config.exchange.dry_run = false;
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let mut engine = pair_recovery_engine(&config, db, url).await;
+        assert!(engine.shutdown_inner(true).await.is_err());
+        server.abort();
+    }
 
     async fn pair_recovery_engine(
         config: &AppConfig,
@@ -3191,6 +3383,131 @@ mod tests {
         engine.last_account_sync = Some(Instant::now());
         engine.last_orders_sync = Some(Instant::now());
         engine
+    }
+
+    async fn dirty_live_switch_fixture() -> (
+        GridTradingEngine,
+        Arc<Database>,
+        PairExchange,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let mut paper = AppConfig::default();
+        paper.grid.grid_interval = dec!(1);
+        paper.exchange.api_key = "test-key".into();
+        paper.exchange.api_secret = "test-secret".into();
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        db.save_config(&paper).unwrap();
+        db.arm_execution_guard("SOLUSDC", TradingMode::Paper)
+            .unwrap();
+        db.arm_execution_guard("SOLUSDC", TradingMode::Live)
+            .unwrap();
+        let fake = PairExchange::default();
+        let order = BinanceOrderResponse {
+            order_id: 777,
+            client_order_id: "gb_b_dirty_target".into(),
+            symbol: "SOLUSDC".into(),
+            status: "NEW".into(),
+            price: dec!(99),
+            avg_price: None,
+            orig_qty: dec!(1),
+            executed_qty: dec!(0),
+            side: "BUY".into(),
+            order_type: "LIMIT".into(),
+            time_in_force: "GTX".into(),
+            update_time: None,
+        };
+        fake.orders
+            .lock()
+            .unwrap()
+            .insert(order.client_order_id.clone(), order);
+        let (url, server) = pair_exchange_server(fake.clone()).await;
+        let engine = pair_recovery_engine(&paper, db.clone(), url).await;
+        engine.state.resume_trading().await.unwrap();
+        (engine, db, fake, server)
+    }
+
+    #[tokio::test]
+    async fn switching_to_dirty_live_cancels_recovered_orders_and_stays_paused() {
+        let (mut engine, db, fake, server) = dirty_live_switch_fixture().await;
+        let mut live = engine.state.config.read().await.clone();
+        live.exchange.dry_run = false;
+        engine.apply_config(live).await.unwrap();
+
+        assert!(!engine.state.config.read().await.exchange.dry_run);
+        assert_eq!(*engine.state.status.read().await, BotStatus::Paused);
+        assert_eq!(
+            db.load_pair_status("SOLUSDC", TradingMode::Live).unwrap(),
+            Some(BotStatus::Paused)
+        );
+        assert_eq!(
+            fake.orders.lock().unwrap()["gb_b_dirty_target"].status,
+            "CANCELED"
+        );
+        assert!(engine.state.active_orders.read().await.is_empty());
+        assert!(db.load_managed_orders("SOLUSDC").unwrap().is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn dirty_live_cancellation_failure_keeps_pause_and_recovery_record() {
+        let (mut engine, db, fake, server) = dirty_live_switch_fixture().await;
+        fake.fail_cancel.store(100, Ordering::SeqCst);
+        let mut live = engine.state.config.read().await.clone();
+        live.exchange.dry_run = false;
+        assert!(engine.apply_config(live).await.is_err());
+
+        assert!(!engine.state.config.read().await.exchange.dry_run);
+        assert_eq!(*engine.state.status.read().await, BotStatus::Paused);
+        assert_eq!(
+            db.load_pair_status("SOLUSDC", TradingMode::Live).unwrap(),
+            Some(BotStatus::Paused)
+        );
+        assert_eq!(
+            fake.orders.lock().unwrap()["gb_b_dirty_target"].status,
+            "NEW"
+        );
+        assert!(engine
+            .state
+            .active_orders
+            .read()
+            .await
+            .contains_key("gb_b_dirty_target"));
+        assert!(db
+            .load_managed_orders("SOLUSDC")
+            .unwrap()
+            .iter()
+            .any(|order| order.client_order_id == "gb_b_dirty_target"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn concurrent_pause_during_dirty_live_cancellation_stays_paused() {
+        let (mut engine, db, fake, server) = dirty_live_switch_fixture().await;
+        fake.block_cancel.store(1, Ordering::SeqCst);
+        let state = engine.state.clone();
+        let mut live = state.config.read().await.clone();
+        live.exchange.dry_run = false;
+        let switching = tokio::spawn(async move { engine.apply_config(live).await });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            fake.cancel_started.notified(),
+        )
+        .await
+        .unwrap();
+        state.pause_trading().await.unwrap();
+        fake.release_cancel.notify_one();
+        switching.await.unwrap().unwrap();
+
+        assert_eq!(*state.status.read().await, BotStatus::Paused);
+        assert_eq!(
+            db.load_pair_status("SOLUSDC", TradingMode::Live).unwrap(),
+            Some(BotStatus::Paused)
+        );
+        assert_eq!(
+            fake.orders.lock().unwrap()["gb_b_dirty_target"].status,
+            "CANCELED"
+        );
+        server.abort();
     }
 
     #[tokio::test]

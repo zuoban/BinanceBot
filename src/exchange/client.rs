@@ -78,6 +78,21 @@ fn order_response_error(status: reqwest::StatusCode, body: String) -> ExchangeEr
         None => ExchangeError::Other(format!("HTTP error {}: {}", status, body)),
     }
 }
+async fn checked_response(response: reqwest::Response) -> Result<reqwest::Response> {
+    if response.status().is_success() {
+        return Ok(response);
+    }
+    let status = response.status();
+    let body = response.text().await?;
+    match serde_json::from_str::<BinanceApiError>(&body) {
+        Ok(error) => Err(ExchangeError::ApiError {
+            code: error.code,
+            msg: error.msg,
+        }
+        .into()),
+        Err(_) => Err(ExchangeError::Other(format!("HTTP error {}: {}", status, body)).into()),
+    }
+}
 
 pub struct NewOrderRequest<'a> {
     pub symbol: &'a str,
@@ -275,7 +290,7 @@ impl BinanceFuturesClient {
             format!("{}/fapi/v1/exchangeInfo", self.base_url)
         };
 
-        let resp = self.send(self.client.get(&url)).await?.error_for_status()?;
+        let resp = checked_response(self.send(self.client.get(&url)).await?).await?;
         let info: BinanceExchangeInfo = resp.json().await?;
         self.limiter
             .update_exchange_limits(&self.base_url, &info.rate_limits);
@@ -382,12 +397,7 @@ impl BinanceFuturesClient {
         let signed_query = self.sign_params(&query);
         let url = format!("{}/fapi/v1/openOrders?{}", self.base_url, signed_query);
 
-        let resp = self.send(self.client.get(&url)).await?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("Failed to get open orders: {} - {}", status, text));
-        }
+        let resp = checked_response(self.send(self.client.get(&url)).await?).await?;
 
         let orders: Vec<BinanceOrderResponse> = resp.json().await?;
         Ok(orders)
@@ -702,6 +712,61 @@ pub(crate) fn one_way_position_ref<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exchange_environment_follows_pair_configuration() {
+        let mut config = crate::config::AppConfig::default().exchange;
+        for (testnet, expected) in [
+            (false, "https://fapi.binance.com"),
+            (true, "https://testnet.binancefuture.com"),
+        ] {
+            config.is_testnet = testnet;
+            assert_eq!(
+                BinanceFuturesClient::new(&config).market_cache_key(),
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn exchange_info_and_open_orders_preserve_binance_error_codes() {
+        use axum::{http::StatusCode, routing::get, Json, Router};
+        use serde_json::json;
+
+        let app = Router::new()
+            .route(
+                "/fapi/v1/exchangeInfo",
+                get(|| async {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"code": -1121, "msg": "Invalid symbol."})),
+                    )
+                }),
+            )
+            .route(
+                "/fapi/v1/openOrders",
+                get(|| async {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"code": -1121, "msg": "Invalid symbol."})),
+                    )
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let config = crate::config::AppConfig::default().exchange;
+        let client = BinanceFuturesClient::with_base_url(&config, url);
+        for error in [
+            client.get_exchange_info(Some("INVALID")).await.unwrap_err(),
+            client.get_open_orders("INVALID").await.unwrap_err(),
+        ] {
+            assert!(
+                matches!(error.downcast_ref::<ExchangeError>(), Some(ExchangeError::ApiError { code: -1121, msg }) if msg == "Invalid symbol.")
+            );
+        }
+        server.abort();
+    }
 
     #[tokio::test]
     async fn rate_limit_response_blocks_shared_clients_then_recovers() {

@@ -189,7 +189,10 @@ async fn control_during_market_request() {
         assert!(mock.requests.load(Ordering::SeqCst) >= 1);
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         action_tx
-            .send(BotControlAction::Shutdown { reply: shutdown_tx })
+            .send(BotControlAction::Shutdown {
+                removing: false,
+                reply: shutdown_tx,
+            })
             .await
             .unwrap();
         tokio::time::timeout(timeout, shutdown_rx)

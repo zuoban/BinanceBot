@@ -10,7 +10,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{broadcast, mpsc, Mutex, OwnedRwLockReadGuard, RwLock};
+use tokio::sync::{broadcast, mpsc, watch, Mutex, OwnedRwLockReadGuard, RwLock};
 use tracing::{error, warn};
 
 #[path = "snapshot.rs"]
@@ -297,7 +297,11 @@ pub struct AppState {
     pause_epoch: AtomicU64,
     safety_pause_epoch: AtomicU64,
     safety_pauses_pending: AtomicU64,
+    safety_pause_admission: Mutex<()>,
+    shutdown_guard_cleared: AtomicBool,
     shutdown_requested: AtomicBool,
+    retired: watch::Sender<bool>,
+    pub(crate) socket_control_lock: Arc<RwLock<()>>,
     // Serializes status updates and protects the shutdown recovery eligibility.
     status_update_lock: Mutex<Option<u64>>,
     trade_commit_lock: Arc<Mutex<()>>,
@@ -473,7 +477,11 @@ impl AppState {
             pause_epoch: AtomicU64::new(0),
             safety_pause_epoch: AtomicU64::new(0),
             safety_pauses_pending: AtomicU64::new(0),
+            safety_pause_admission: Mutex::new(()),
             shutdown_requested: AtomicBool::new(false),
+            shutdown_guard_cleared: AtomicBool::new(false),
+            retired: watch::channel(false).0,
+            socket_control_lock: Arc::new(RwLock::new(())),
             status_update_lock: Mutex::new(None),
             trade_commit_lock,
             order_submission_lock: Arc::new(RwLock::new(())),
@@ -791,13 +799,37 @@ impl AppState {
 
     async fn save_runtime_config_inner(&self, config: AppConfig) -> anyhow::Result<()> {
         // An immediate HTTP pause cannot slip between saving a new mode and installing it.
-        let _update = self.status_update_lock.lock().await;
+        let mut update = self.status_update_lock.lock().await;
+        anyhow::ensure!(!self.is_retired(), "交易对已移除，无法更新配置");
+        anyhow::ensure!(
+            !self.shutdown_guard_cleared.load(Ordering::SeqCst),
+            "策略已完成停机，无法更新配置"
+        );
         let status = *self.status.read().await;
+        let previous = self.config.read().await;
+        let previous_symbol = previous.exchange.symbol.clone();
+        let previous_mode =
+            TradingMode::from_exchange(previous.exchange.dry_run, previous.exchange.is_testnet);
+        drop(previous);
         let scope = self.pair_scope.clone();
         let saved = config.clone();
-        self.db
-            .run_blocking(move |db| db.save_runtime_config(&saved, scope.as_deref(), status))
+        let (saved_status, guarded) = self
+            .db
+            .run_blocking(move |db| {
+                db.save_runtime_config(
+                    &saved,
+                    scope.as_deref(),
+                    status,
+                    (&previous_symbol, previous_mode),
+                )
+            })
             .await?;
+        if guarded {
+            self.pause_epoch.fetch_add(1, Ordering::SeqCst);
+            self.safety_pause_epoch.fetch_add(1, Ordering::SeqCst);
+            *update = None;
+            *self.status.write().await = saved_status;
+        }
         *self.config.write().await = config;
         Ok(())
     }
@@ -897,9 +929,15 @@ impl AppState {
     }
 
     pub async fn pause_trading_with_reason(self: &Arc<Self>, _reason: &str) -> anyhow::Result<()> {
+        let admission = self.safety_pause_admission.lock().await;
+        anyhow::ensure!(
+            !self.shutdown_guard_cleared.load(Ordering::SeqCst),
+            "策略已完成停机，无法修改暂停状态"
+        );
         self.safety_pauses_pending.fetch_add(1, Ordering::SeqCst);
         self.safety_pause_epoch.fetch_add(1, Ordering::SeqCst);
         self.pause_epoch.fetch_add(1, Ordering::SeqCst);
+        drop(admission);
         let state = self.clone();
         tokio::spawn(async move {
             let _pending = PendingSafetyPause(&state.safety_pauses_pending);
@@ -981,12 +1019,18 @@ impl AppState {
         } else {
             None
         };
+        let _admission = self.safety_pause_admission.lock().await;
         let mut eligibility = self.status_update_lock.lock().await;
         let blocked = global.as_ref().is_some_and(|coordinator| {
             coordinator.blocked.load(Ordering::SeqCst)
                 || (coordinator.enabled.load(Ordering::SeqCst)
                     && !coordinator.membership_ready.load(Ordering::SeqCst))
         });
+        // A pending pause must finish durably before a clean restart can be allowed.
+        anyhow::ensure!(
+            self.safety_pauses_pending.load(Ordering::SeqCst) == 0,
+            "安全暂停仍在处理中，无法确认停机恢复状态"
+        );
         if let Some(epoch) = eligibility.take().filter(|epoch| {
             *epoch == self.safety_pause_epoch.load(Ordering::SeqCst)
                 && self.safety_pauses_pending.load(Ordering::SeqCst) == 0
@@ -1002,6 +1046,14 @@ impl AppState {
                 self.persist_status(BotStatus::Paused).await?;
             }
         }
+        let config = self.config.read().await;
+        let symbol = config.exchange.symbol.clone();
+        let mode = TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
+        drop(config);
+        self.db
+            .run_blocking(move |db| db.clear_execution_guard(&symbol, mode))
+            .await?;
+        self.shutdown_guard_cleared.store(true, Ordering::SeqCst);
         Ok(())
     }
 
@@ -1058,6 +1110,10 @@ impl AppState {
             self.pause_epoch.fetch_add(1, Ordering::SeqCst);
         }
         let _update = self.status_update_lock.lock().await;
+        anyhow::ensure!(
+            !self.shutdown_guard_cleared.load(Ordering::SeqCst),
+            "策略已完成停机，无法修改运行状态"
+        );
         anyhow::ensure!(
             expected_epoch.is_none_or(|epoch| self.pause_epoch.load(Ordering::SeqCst) == epoch),
             "策略暂停状态已改变，无法恢复策略"
@@ -1124,6 +1180,18 @@ impl AppState {
             return None;
         }
         self.order_submission_lock.clone().try_read_owned().ok()
+    }
+
+    pub(crate) fn subscribe_retirement(&self) -> watch::Receiver<bool> {
+        self.retired.subscribe()
+    }
+
+    pub(crate) fn retire(&self) {
+        self.retired.send_replace(true);
+    }
+
+    pub(crate) fn is_retired(&self) -> bool {
+        *self.retired.borrow()
     }
 
     pub fn request_shutdown(&self) {
@@ -1356,14 +1424,12 @@ mod tests {
             assert!(commit.await.unwrap_err().is_cancelled());
             let pause_state = state.clone();
             let pause = tokio::spawn(async move { pause_state.pause_trading().await });
-            while state.safety_pauses_pending.load(Ordering::SeqCst) == 0 {
-                tokio::task::yield_now().await;
-            }
+            tokio::task::yield_now().await;
             connection.execute_batch("COMMIT").unwrap();
-            pause.await.unwrap().unwrap();
+            assert!(pause.await.unwrap().is_err());
         }
         let db = Database::open(&path).unwrap();
-        assert_eq!(db.load_bot_status().unwrap(), Some(BotStatus::Paused));
+        assert_eq!(db.load_bot_status().unwrap(), Some(BotStatus::Running));
         drop(db);
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -1394,16 +1460,14 @@ mod tests {
             }
             let pause_state = state.clone();
             let pause = tokio::spawn(async move { pause_state.pause_trading().await });
-            while state.safety_pauses_pending.load(Ordering::SeqCst) == 0 {
-                tokio::task::yield_now().await;
-            }
+            tokio::task::yield_now().await;
             pause.abort();
             assert!(pause.await.unwrap_err().is_cancelled());
             connection.execute_batch("COMMIT").unwrap();
             commit.await.unwrap().unwrap();
         }
         let db = Database::open(&path).unwrap();
-        assert_eq!(db.load_bot_status().unwrap(), Some(BotStatus::Paused));
+        assert_eq!(db.load_bot_status().unwrap(), Some(BotStatus::Running));
         drop(db);
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -1423,8 +1487,7 @@ mod tests {
         state.commit_shutdown_recovery().await.unwrap();
         assert_eq!(*state.status.read().await, BotStatus::Paused);
         assert_eq!(db.load_bot_status().unwrap(), Some(BotStatus::Running));
-        state.pause_trading().await.unwrap();
-        assert_eq!(db.load_bot_status().unwrap(), Some(BotStatus::Paused));
+        assert!(state.pause_trading().await.is_err());
 
         let (tx, _) = mpsc::channel(8);
         let state = AppState::new(AppConfig::default(), db.clone(), tx);
@@ -1598,6 +1661,63 @@ mod tests {
             db.load_pair_status("SOLUSDC", TradingMode::Live).unwrap(),
             Some(BotStatus::Paused)
         );
+    }
+
+    #[tokio::test]
+    async fn dirty_target_mode_pauses_until_manual_resume_without_self_guarding() {
+        for legacy in [false, true] {
+            let db = Arc::new(Database::open(":memory:").unwrap());
+            let mut config = AppConfig::default();
+            config.exchange.api_key = "test-key".into();
+            config.exchange.api_secret = "test-secret".into();
+            if !legacy {
+                config.pairs = vec![crate::config::TradingPairConfig::new("SOLUSDC".into())];
+            }
+            db.save_config(&config).unwrap();
+            let config = if legacy {
+                config
+            } else {
+                config.strategy_configs().unwrap().remove(0)
+            };
+            assert!(!db
+                .arm_execution_guard("SOLUSDC", TradingMode::Paper)
+                .unwrap());
+            assert!(!db
+                .arm_execution_guard("SOLUSDC", TradingMode::Live)
+                .unwrap());
+            let (tx, _) = mpsc::channel(8);
+            let state = if legacy {
+                AppState::new(config.clone(), db.clone(), tx)
+            } else {
+                AppState::new_for_pair(config.clone(), db.clone(), tx, Arc::new(Mutex::new(())))
+            };
+            state.resume_trading().await.unwrap();
+            let epoch = state.pause_epoch();
+            state.save_runtime_config(config.clone()).await.unwrap();
+            assert_eq!(*state.status.read().await, BotStatus::Running);
+            assert_eq!(state.pause_epoch(), epoch);
+
+            let mut live = config;
+            live.exchange.dry_run = false;
+            state.save_runtime_config(live.clone()).await.unwrap();
+            assert_eq!(*state.status.read().await, BotStatus::Paused);
+            assert_eq!(
+                db.load_pair_status("SOLUSDC", TradingMode::Live).unwrap(),
+                Some(BotStatus::Paused)
+            );
+            if legacy {
+                assert_eq!(db.load_bot_status().unwrap(), Some(BotStatus::Paused));
+            }
+            assert!(state.resume_trading_silently(epoch).await.is_err());
+            state.save_runtime_config(live).await.unwrap();
+            assert_eq!(*state.status.read().await, BotStatus::Paused);
+            state.resume_trading().await.unwrap();
+            assert_eq!(*state.status.read().await, BotStatus::Running);
+            assert_eq!(
+                db.load_pair_status("SOLUSDC", TradingMode::Live).unwrap(),
+                Some(BotStatus::Running)
+            );
+        }
     }
 
     struct NotificationFixture {

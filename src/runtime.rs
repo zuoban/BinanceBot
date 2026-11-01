@@ -8,7 +8,7 @@ use crate::exchange::{BinanceFuturesClient, BinanceWsStream};
 use crate::fx::CnyRateCache;
 use crate::lifecycle::{remove_engine, stop_engine};
 use crate::server::AppState;
-use crate::strategy::GridTradingEngine;
+use crate::strategy::{GridTradingEngine, SymbolRules};
 use crate::types::TickerInfo;
 use futures_util::future::{join_all, select_all};
 use std::sync::Arc;
@@ -19,6 +19,7 @@ use tokio::task::JoinHandle;
 struct PairTask {
     state: Arc<AppState>,
     engine: JoinHandle<()>,
+    recovery_failed: bool,
     shutdown_tx: watch::Sender<bool>,
     background: Vec<JoinHandle<()>>,
 }
@@ -41,6 +42,7 @@ pub struct RuntimeHandle {
     global_position_limit: Arc<crate::server::state::GlobalPositionLimit>,
     pub(crate) db: Arc<Database>,
     pub(crate) active_server: crate::config::ServerConfig,
+    pub(crate) rate_limiter: Arc<RateLimiter>,
     commands: mpsc::Sender<RuntimeCommand>,
 }
 
@@ -92,8 +94,17 @@ impl RuntimeHandle {
             anyhow::bail!("全局设置已被其他请求修改，请刷新后重试");
         }
         payload.apply_to(&mut config);
-        let states = self.states.read().await.clone();
-        // Validate every mode before changing any engine (including credential clearing).
+        // Retired members remain published for risk accounting, but their engines
+        // are no longer available to validate or apply configuration changes.
+        let states: Vec<_> = self
+            .states
+            .read()
+            .await
+            .iter()
+            .filter(|state| !state.is_retired())
+            .cloned()
+            .collect();
+        // Validate every active mode before changing any engine (including credential clearing).
         for state in &states {
             let mut strategy = state.config.read().await.clone();
             config.apply_to(&mut strategy);
@@ -224,6 +235,7 @@ impl TradingRuntime {
                 .global_position_limit
                 .set(Arc::downgrade(&global_position_limit));
         }
+        let rate_limiter = Arc::new(RateLimiter::default());
         Self {
             pairs,
             global_position_limit: global_position_limit.clone(),
@@ -233,6 +245,7 @@ impl TradingRuntime {
                 global_position_limit,
                 db,
                 active_server,
+                rate_limiter: rate_limiter.clone(),
                 commands,
             },
             command_rx,
@@ -241,7 +254,7 @@ impl TradingRuntime {
             account_cache: Arc::new(AccountCache::default()),
             position_cache: Arc::new(PositionCache::default()),
             market_cache: Arc::new(MarketCache::default()),
-            rate_limiter: Arc::new(RateLimiter::default()),
+            rate_limiter,
             #[cfg(test)]
             test_exchange_url: None,
         }
@@ -314,32 +327,52 @@ impl TradingRuntime {
         self.handle.clone()
     }
 
+    fn exchange_client(&self, config: &crate::config::ExchangeConfig) -> BinanceFuturesClient {
+        #[cfg(test)]
+        if let Some(url) = &self.test_exchange_url {
+            return BinanceFuturesClient::with_base_url_and_limiter(
+                config,
+                url.clone(),
+                self.rate_limiter.clone(),
+            );
+        }
+        BinanceFuturesClient::new_with_limiter(config, self.rate_limiter.clone())
+    }
+
     async fn prepare_pair(&self, strategy: AppConfig, multi: bool) -> anyhow::Result<PairTask> {
+        self.prepare_pair_with_paper_state(strategy, multi, None, false, None)
+            .await
+    }
+
+    async fn prepare_pair_with_paper_state(
+        &self,
+        strategy: AppConfig,
+        multi: bool,
+        paper_state: Option<(crate::types::PositionInfo, crate::types::AccountInfo)>,
+        force_paused: bool,
+        prearmed: Option<(bool, bool)>,
+    ) -> anyhow::Result<PairTask> {
         let db = self.handle.db.clone();
-        let has_admin = db.is_admin_password_set()?;
+        let (previous_unclean, has_admin) = if let Some(prearmed) = prearmed {
+            prearmed
+        } else {
+            let symbol = strategy.exchange.symbol.clone();
+            let mode = crate::types::TradingMode::from_exchange(
+                strategy.exchange.dry_run,
+                strategy.exchange.is_testnet,
+            );
+            let previous_unclean = db
+                .run_blocking(move |db| db.arm_execution_guard(&symbol, mode))
+                .await?;
+            (previous_unclean, db.is_admin_password_set()?)
+        };
         let (action_tx, action_rx) = mpsc::channel(32);
         let (ticker_tx, ticker_rx) = broadcast::channel::<TickerInfo>(64);
         let (market_tx, market_rx) = watch::channel((
             strategy.exchange.symbol.clone(),
             strategy.exchange.is_testnet,
         ));
-        #[cfg(test)]
-        let client = if let Some(url) = &self.test_exchange_url {
-            Arc::new(BinanceFuturesClient::with_base_url(
-                &strategy.exchange,
-                url.clone(),
-            ))
-        } else {
-            Arc::new(BinanceFuturesClient::new_with_limiter(
-                &strategy.exchange,
-                self.rate_limiter.clone(),
-            ))
-        };
-        #[cfg(not(test))]
-        let client = Arc::new(BinanceFuturesClient::new_with_limiter(
-            &strategy.exchange,
-            self.rate_limiter.clone(),
-        ));
+        let client = Arc::new(self.exchange_client(&strategy.exchange));
         let state = if multi {
             AppState::new_for_pair_with_rates(
                 strategy.clone(),
@@ -356,6 +389,13 @@ impl TradingRuntime {
                 self.cny_rates.clone(),
             )
         };
+        if force_paused || previous_unclean {
+            *state.status.write().await = crate::types::BotStatus::Paused;
+        }
+        if let Some((position, account)) = paper_state {
+            *state.position.write().await = position;
+            *state.account.write().await = account;
+        }
         let _ = state
             .global_position_limit
             .set(Arc::downgrade(&self.global_position_limit));
@@ -371,9 +411,11 @@ impl TradingRuntime {
                 .await;
         }
         if !has_admin && !strategy.exchange.dry_run {
-            state
-                .pause_trading_with_reason("实盘策略等待管理员完成初始化")
-                .await?;
+            if prearmed.is_none() {
+                state
+                    .pause_trading_with_reason("实盘策略等待管理员完成初始化")
+                    .await?;
+            }
             state
                 .add_log(
                     "WARN",
@@ -442,6 +484,7 @@ impl TradingRuntime {
         Ok(PairTask {
             state,
             engine: engine_task,
+            recovery_failed: false,
             shutdown_tx,
             background,
         })
@@ -464,15 +507,53 @@ impl TradingRuntime {
                 .any(|pair| pair.state.pair_scope() == Some(config.exchange.symbol.as_str())),
             "交易对已存在"
         );
+        let symbol = &config.exchange.symbol;
+        let info = self
+            .exchange_client(&config.exchange)
+            .get_exchange_info(Some(symbol))
+            .await
+            .map_err(|error| {
+                if matches!(
+                    error.downcast_ref::<crate::exchange::client::ExchangeError>(),
+                    Some(crate::exchange::client::ExchangeError::ApiError { code: -1121, .. })
+                ) {
+                    anyhow::anyhow!("币安交易对 {} 不存在", symbol)
+                } else {
+                    anyhow::anyhow!("暂时无法验证交易对 {}: {}", symbol, error)
+                }
+            })?;
+        let symbol_info = info
+            .symbols
+            .iter()
+            .find(|item| item.symbol.eq_ignore_ascii_case(symbol))
+            .ok_or_else(|| anyhow::anyhow!("币安交易对 {} 不存在", symbol))?;
+        anyhow::ensure!(
+            symbol_info.status == "TRADING",
+            "币安交易对 {} 未处于交易状态",
+            symbol
+        );
+        let rules = SymbolRules::from_exchange_info(&info, symbol)
+            .ok_or_else(|| anyhow::anyhow!("币安交易对 {} 的交易规则缺失或无效", symbol))?;
+        rules.validate_grid_interval(config.grid.grid_interval)?;
+        let has_admin = self.handle.db.is_admin_password_set()?;
         let saved = config.clone();
-        self.handle
+        let previous_unclean = self
+            .handle
             .db
             .run_blocking(move |db| db.add_pair_config(&saved))
             .await?;
         self.global_position_limit
             .membership_ready
             .store(false, std::sync::atomic::Ordering::SeqCst);
-        let result = self.prepare_pair(config, true).await;
+        let result = self
+            .prepare_pair_with_paper_state(
+                config,
+                true,
+                None,
+                false,
+                Some((previous_unclean, has_admin)),
+            )
+            .await;
         if let Ok(pair) = result {
             self.pairs.push(pair);
             *self.handle.states.write().await = self.states();
@@ -497,7 +578,13 @@ impl TradingRuntime {
             .iter()
             .position(|pair| pair.state.pair_scope() == Some(symbol))
             .ok_or_else(|| anyhow::anyhow!("交易对不存在"))?;
+        anyhow::ensure!(
+            !self.pairs[index].recovery_failed,
+            "策略重建失败，请重启程序并核实交易所状态"
+        );
         let pair = &mut self.pairs[index];
+        let control_lock = pair.state.socket_control_lock.clone();
+        let control = control_lock.write().await;
         anyhow::ensure!(
             *pair.state.status.read().await == crate::types::BotStatus::Paused,
             "请先暂停该策略并等待挂单撤销完成"
@@ -506,14 +593,62 @@ impl TradingRuntime {
             pair.state.active_orders.read().await.is_empty(),
             "仍有挂单，请先撤单并等待交易所确认"
         );
+        pair.state.retire();
+        drop(control);
         pair.state.request_shutdown();
         let _ = pair.shutdown_tx.send(true);
-        remove_engine(&pair.state, &mut pair.engine, Duration::from_secs(30)).await?;
-        let symbol = symbol.to_string();
-        self.handle
-            .db
-            .run_blocking(move |db| db.remove_pair_config(&symbol))
-            .await?;
+        let mut result =
+            remove_engine(&pair.state, &mut pair.engine, Duration::from_secs(30)).await;
+        if result.is_ok() {
+            let symbol = symbol.to_string();
+            result = self
+                .handle
+                .db
+                .run_blocking(move |db| db.remove_pair_config(&symbol))
+                .await;
+        }
+        if let Err(error) = result {
+            // The engine may have committed a configuration update while stopping.
+            let config = self.pairs[index].state.config.read().await.clone();
+            let paper_state = if config.exchange.dry_run {
+                Some((
+                    self.pairs[index].state.position.read().await.clone(),
+                    self.pairs[index].state.account.read().await.clone(),
+                ))
+            } else {
+                None
+            };
+            for task in self.pairs[index].background.drain(..) {
+                task.abort();
+                let _ = task.await;
+            }
+            match self
+                .prepare_pair_with_paper_state(config, true, paper_state, true, None)
+                .await
+            {
+                Ok(replacement) => {
+                    self.pairs[index] = replacement;
+                    *self.handle.states.write().await = self.states();
+                    self.global_position_limit.check().await;
+                    return Err(error);
+                }
+                Err(restart_error) => {
+                    self.pairs[index].recovery_failed = true;
+                    // Keep the retired member in the risk set. Its position can
+                    // still exist, but its stopped engine can no longer refresh it.
+                    self.pairs[index]
+                        .state
+                        .global_position_initialized
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    self.pairs[index]
+                        .state
+                        .global_position_ready
+                        .store(false, std::sync::atomic::Ordering::SeqCst);
+                    self.global_position_limit.check().await;
+                    return Err(error.context(format!("删除失败后无法重启策略: {restart_error:#}")));
+                }
+            }
+        }
         let pair = self.pairs.remove(index);
         for task in pair.background {
             task.abort();
@@ -525,14 +660,18 @@ impl TradingRuntime {
 
     pub async fn run(&mut self) -> String {
         loop {
-            // Cleanup may already have consumed a finished JoinHandle on an unsuccessful removal.
-            if let Some(pair) = self.pairs.iter().find(|pair| pair.engine.is_finished()) {
+            // A failed recovery keeps the retired state for risk accounting, but
+            // its already-joined engine must not terminate the remaining runtime.
+            if let Some(pair) = self
+                .pairs
+                .iter()
+                .find(|pair| !pair.recovery_failed && pair.engine.is_finished())
+            {
                 return format!("Strategy engine {:?} stopped", pair.state.pair_scope());
             }
             tokio::select! {
-                (result, index, _) = select_all(self.pairs.iter_mut().map(|pair| &mut pair.engine)) => {
-                    let symbol = self.pairs[index].state.config.read().await.exchange.symbol.clone();
-                    return format!("Strategy engine {} stopped: {:?}", symbol, result);
+                reason = Self::wait_for_active_exit(&mut self.pairs) => {
+                    return reason;
                 }
                 command = self.command_rx.recv() => {
                     let Some(command) = command else { return "Runtime command channel closed".into(); };
@@ -555,18 +694,25 @@ impl TradingRuntime {
         self.pairs.iter().map(|pair| pair.state.clone()).collect()
     }
 
-    pub async fn wait_for_exit(&mut self) -> String {
-        let (result, index, _) =
-            select_all(self.pairs.iter_mut().map(|pair| &mut pair.engine)).await;
-        let symbol = self.pairs[index]
-            .state
-            .config
-            .read()
-            .await
-            .exchange
-            .symbol
-            .clone();
+    async fn wait_for_active_exit(pairs: &mut [PairTask]) -> String {
+        let active: Vec<_> = pairs
+            .iter_mut()
+            .filter(|pair| !pair.recovery_failed)
+            .collect();
+        if active.is_empty() {
+            return std::future::pending().await;
+        }
+        let futures = active.into_iter().map(|pair| async move {
+            let result = (&mut pair.engine).await;
+            let symbol = pair.state.config.read().await.exchange.symbol.clone();
+            (symbol, result)
+        });
+        let ((symbol, result), _, _) = select_all(futures.map(Box::pin)).await;
         format!("Strategy engine {} stopped: {:?}", symbol, result)
+    }
+
+    pub async fn wait_for_exit(&mut self) -> String {
+        Self::wait_for_active_exit(&mut self.pairs).await
     }
 
     pub async fn shutdown(&mut self, limit: Duration) -> anyhow::Result<()> {
@@ -660,7 +806,7 @@ mod tests {
                 let all_states = states.clone();
                 let barrier = barrier.clone();
                 let engine = tokio::spawn(async move {
-                    let BotControlAction::Shutdown { reply } = rx.recv().await.unwrap() else {
+                    let BotControlAction::Shutdown { reply, .. } = rx.recv().await.unwrap() else {
                         panic!("Expected shutdown");
                     };
                     assert!(all_states.iter().all(|state| state.is_shutting_down()));
@@ -671,6 +817,7 @@ mod tests {
                 PairTask {
                     state: state.clone(),
                     engine,
+                    recovery_failed: false,
                     shutdown_tx,
                     background: vec![],
                 }
