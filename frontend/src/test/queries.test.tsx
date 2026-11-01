@@ -54,3 +54,47 @@ it('does not let a slow HTTP response replace a newer socket snapshot', async ()
   expect(result.current.data?.ticker.last_price).toBe('123');
   client.clear();
 });
+
+it('falls back at five seconds, marks old data stale, and recovers on a new frame', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2025-01-01T00:00:00Z'));
+  tokenStore.set('test-token');
+  vi.stubGlobal('WebSocket', FakeSocket);
+  const fetchMock = vi.fn().mockImplementation(() => new Promise<Response>(() => {}));
+  vi.stubGlobal('fetch', fetchMock);
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const wrapper = ({ children }: { children: React.ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+  const { result, unmount } = renderHook(() => usePairSnapshot(pair()), { wrapper });
+  try {
+    act(() => FakeSocket.instances[0].sendSnapshot('SOLUSDC', '123'));
+    expect(result.current.live).toBe(true);
+    expect(result.current.stale).toBe(false);
+    expect(result.current.data?.ticker.last_price).toBe('123');
+    const initialRequests = fetchMock.mock.calls.length;
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(4999); });
+    expect(result.current.live).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(initialRequests);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(result.current.live).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(initialRequests + 1);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(result.current.stale).toBe(false);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(result.current.stale).toBe(true);
+    act(() => FakeSocket.instances[0].sendSnapshot('SOLUSDC', '456'));
+    expect(result.current.live).toBe(true);
+    expect(result.current.stale).toBe(false);
+    expect(result.current.data?.ticker.last_price).toBe('456');
+
+    unmount();
+    const requestsAtUnmount = fetchMock.mock.calls.length;
+    await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+    expect(fetchMock).toHaveBeenCalledTimes(requestsAtUnmount);
+  } finally {
+    unmount();
+    client.clear();
+    vi.useRealTimers();
+  }
+});

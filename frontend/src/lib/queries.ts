@@ -3,6 +3,10 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, pairPath, socketUrl, tokenStore } from './api';
 import type { HourlySnapshot, Overview, Pair, Snapshot } from './types';
 
+const SOCKET_LIVE_MS = 5000;
+const HTTP_FALLBACK_MS = 3000;
+const SNAPSHOT_STALE_MS = 10_000;
+
 export function usePairs() {
   return useQuery({ queryKey: ['pairs'], queryFn: ({ signal }) => api<Pair[]>('/api/pairs', { signal }), refetchInterval: 10_000 });
 }
@@ -53,35 +57,36 @@ export function usePairSnapshot(pair: Pair | undefined) {
   const client = useQueryClient();
   const lastFallback = useRef(0);
   const key = ['snapshot', pair?.symbol, pair?.scoped];
-  const socket = useSocket<Snapshot>(pair && pairPath(pair, 'ws'), data => {
+  const acceptSnapshot = (data: Snapshot) => {
     if (data.symbol !== pair?.symbol) return;
     // Cancel a pre-frame HTTP read before publishing the newer socket observation.
     void client.cancelQueries({ queryKey: key });
     client.setQueryData(key, data);
-  });
+  };
+  const socket = useSocket<Snapshot>(pair && pairPath(pair, 'ws'), acceptSnapshot);
   const query = useQuery({
     queryKey: key,
     queryFn: ({ signal }) => api<Snapshot>(pairPath(pair!, 'status'), { signal }),
     enabled: !!pair,
-    refetchInterval: () => socket.connected && Date.now() - socket.lastReceived < 5000 ? false : 3000,
+    refetchInterval: () => socket.connected && Date.now() - socket.lastReceived < SOCKET_LIVE_MS ? false : HTTP_FALLBACK_MS,
   });
   const [now, setNow] = useState(Date.now());
   useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(timer); }, []);
   // The clock also restarts polling when an open socket silently stops sending.
   useEffect(() => {
-    if (pair && now - socket.lastReceived >= 5000 && now - query.dataUpdatedAt >= 3000 && now - lastFallback.current >= 3000 && !query.isFetching) {
+    if (pair && now - socket.lastReceived >= SOCKET_LIVE_MS && now - query.dataUpdatedAt >= HTTP_FALLBACK_MS && now - lastFallback.current >= HTTP_FALLBACK_MS && !query.isFetching) {
       lastFallback.current = now;
       void query.refetch();
     }
   }, [now, socket.lastReceived, pair, query]);
-  return { ...query, live: socket.connected && now - socket.lastReceived < 5000, stale: now - query.dataUpdatedAt > 10_000 };
+  return { ...query, live: socket.connected && now - socket.lastReceived < SOCKET_LIVE_MS, stale: now - query.dataUpdatedAt > SNAPSHOT_STALE_MS };
 }
 
 type AccountFrame = { pairs: { mode: Overview['pairs'][number]['mode']; snapshot: Pick<Snapshot, 'symbol' | 'dry_run' | 'account'> & { position: Pick<Snapshot['position'], 'unrealized_pnl'> } }[] };
 export function useLiveAccounts(overview: Overview | undefined) {
   const [frame, setFrame] = useState<AccountFrame>();
   const stream = useSocket<AccountFrame>('/api/accounts/ws', setFrame);
-  if (Date.now() - stream.lastReceived > 5000) return overview?.pairs ?? [];
+  if (Date.now() - stream.lastReceived > SOCKET_LIVE_MS) return overview?.pairs ?? [];
   return overview?.pairs.map(entry => {
     const account = frame?.pairs.find(p => p.snapshot.symbol === entry.snapshot.symbol && p.mode === entry.mode);
     if (!account) return entry;

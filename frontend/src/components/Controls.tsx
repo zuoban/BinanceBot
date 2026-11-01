@@ -5,6 +5,17 @@ import { useQueryClient } from '@tanstack/react-query';
 import { api, pairPath, post } from '../lib/api';
 import type { Action, Pair, Snapshot } from '../lib/types';
 
+async function confirmControlState(pair: Pair, action: Action): Promise<boolean> {
+  if (action === 'rebalance') return true;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 800));
+    const snapshot = await api<Snapshot>(pairPath(pair, 'status'));
+    const matches = action === 'resume' ? snapshot.status === 'RUNNING' : snapshot.status === 'PAUSED' && snapshot.active_orders.length === 0;
+    if (matches) return true;
+  }
+  return false;
+}
+
 interface ControlState { busy: Set<string>; results: Record<string, string>; run: (pair: Pair, action: Action, confirmed?: boolean) => Promise<boolean> }
 export async function runBatchControls(pairs: Pair[], action: 'pause' | 'resume', run: ControlState['run']) {
   if (action === 'pause') {
@@ -38,15 +49,7 @@ export function ControlProvider({ children }: { children: React.ReactNode }) {
       }
       setResults(r => ({ ...r, [pair.symbol]: '正在提交…' }));
       await post(pairPath(pair, 'control'), { action });
-      let confirmedState = action === 'rebalance';
-      if (!confirmedState) {
-        for (let attempt = 0; attempt < 5; attempt++) {
-          await new Promise(resolve => setTimeout(resolve, 800));
-          const snapshot = await api<Snapshot>(pairPath(pair, 'status'));
-          const matches = action === 'resume' ? snapshot.status === 'RUNNING' : snapshot.status === 'PAUSED' && snapshot.active_orders.length === 0;
-          if (matches) { confirmedState = true; break; }
-        }
-      }
+      const confirmedState = await confirmControlState(pair, action);
       const result = confirmedState ? (action === 'rebalance' ? '重建请求已提交，请查看挂单及日志' : '已确认') : '已提交，状态尚未确认，请查看日志';
       setResults(r => ({ ...r, [pair.symbol]: result }));
       if (!confirmedState) message.warning(`${pair.symbol}：${result}`);

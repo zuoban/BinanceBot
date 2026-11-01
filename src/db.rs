@@ -753,12 +753,7 @@ impl Database {
 
     pub fn save_global_config(&self, global: &crate::config::GlobalConfig) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        let json: String = conn.query_row(
-            "SELECT config_json FROM app_config WHERE id = 1",
-            [],
-            |row| row.get(0),
-        )?;
-        let mut saved: AppConfig = serde_json::from_str(&json)?;
+        let mut saved = load_required_config_on(&conn)?;
         saved.ensure_pair_list()?;
         global.apply_to(&mut saved);
         saved.validate()?;
@@ -770,12 +765,7 @@ impl Database {
         config.validate()?;
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
-        let json: String = tx.query_row(
-            "SELECT config_json FROM app_config WHERE id = 1",
-            [],
-            |row| row.get(0),
-        )?;
-        let mut saved: AppConfig = serde_json::from_str(&json)?;
+        let mut saved = load_required_config_on(&tx)?;
         saved.ensure_pair_list()?;
         anyhow::ensure!(
             !saved
@@ -796,12 +786,7 @@ impl Database {
 
     pub fn remove_pair_config(&self, symbol: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        let json: String = conn.query_row(
-            "SELECT config_json FROM app_config WHERE id = 1",
-            [],
-            |row| row.get(0),
-        )?;
-        let mut saved: AppConfig = serde_json::from_str(&json)?;
+        let mut saved = load_required_config_on(&conn)?;
         anyhow::ensure!(saved.pairs.len() > 1, "至少保留一个交易对");
         let index = saved
             .pairs
@@ -815,12 +800,7 @@ impl Database {
     pub fn save_server_config(&self, server: &crate::config::ServerConfig) -> Result<()> {
         server.socket_addr()?;
         let conn = self.conn.lock().unwrap();
-        let json: String = conn.query_row(
-            "SELECT config_json FROM app_config WHERE id = 1",
-            [],
-            |row| row.get(0),
-        )?;
-        let mut saved: AppConfig = serde_json::from_str(&json)?;
+        let mut saved = load_required_config_on(&conn)?;
         saved.server = server.clone();
         save_config_on(&conn, &saved)
     }
@@ -832,12 +812,7 @@ impl Database {
     ) -> Result<()> {
         server.socket_addr()?;
         let conn = self.conn.lock().unwrap();
-        let json: String = conn.query_row(
-            "SELECT config_json FROM app_config WHERE id = 1",
-            [],
-            |row| row.get(0),
-        )?;
-        let mut saved: AppConfig = serde_json::from_str(&json)?;
+        let mut saved = load_required_config_on(&conn)?;
         if baseline_version.is_some_and(|version| version != config_version(&saved.server)) {
             anyhow::bail!("服务设置已被其他请求修改，请刷新后重试");
         }
@@ -1536,6 +1511,15 @@ impl Database {
     }
 }
 
+fn load_required_config_on(conn: &Connection) -> Result<AppConfig> {
+    let json: String = conn.query_row(
+        "SELECT config_json FROM app_config WHERE id = 1",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(serde_json::from_str(&json)?)
+}
+
 fn save_config_on(conn: &Connection, config: &AppConfig) -> Result<()> {
     let json =
         serde_json::to_string_pretty(config).context("Failed to serialize AppConfig to JSON")?;
@@ -1574,12 +1558,7 @@ fn save_pair_config_on(conn: &Connection, symbol: &str, config: &AppConfig) -> R
         symbol == config.exchange.symbol,
         "交易对不能直接重命名，请在页面中添加新交易对"
     );
-    let json: String = conn.query_row(
-        "SELECT config_json FROM app_config WHERE id = 1",
-        [],
-        |row| row.get(0),
-    )?;
-    let mut saved: AppConfig = serde_json::from_str(&json)?;
+    let mut saved = load_required_config_on(conn)?;
     let pair = saved
         .pairs
         .iter_mut()
