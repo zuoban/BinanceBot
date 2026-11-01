@@ -1,5 +1,5 @@
 import { useNavigate, useParams } from 'react-router-dom';
-import { Alert, Button, Card, Col, Descriptions, Row, Skeleton, Space, Statistic, Tabs, Tag } from 'antd';
+import { Alert, Button, Card, Col, Descriptions, Row, Space, Statistic, Tabs, Tag } from 'antd';
 import { SettingOutlined } from '@ant-design/icons';
 import { usePairSnapshot, usePairs } from '../lib/queries';
 import { accountGroups, number, price, quoteAsset, todayTradeCounts } from '../lib/format';
@@ -8,6 +8,7 @@ import { PairControls, useControls } from '../components/Controls';
 import { DepthChart, HourlyChart } from '../components/Charts';
 import { LogsTable, OrdersTable, TradesTable } from '../components/DataTables';
 import { HistoryActions } from '../components/HistoryActions';
+import { DetailLoading } from '../components/Loading';
 import { useDocumentTitle } from '../lib/documentTitle';
 
 export default function PairDetail() {
@@ -32,7 +33,7 @@ export default function PairDetail() {
     {controls.results[symbol ?? ''] && <Alert type="info" title={controls.results[symbol ?? '']} />}
     {pair && <div className="detail-status"><Space wrap><ModeTag mode={currentPair!.mode} /><StatusTag status={currentPair!.status} /><Tag color={query.live ? 'success' : 'warning'}>{query.live ? '实时连接' : 'HTTP 自动刷新'}</Tag></Space><span className="muted">{query.dataUpdatedAt ? `最近同步 ${new Date(query.dataUpdatedAt).toLocaleTimeString('zh-CN')}` : '等待首次快照'}</span></div>}
     {query.stale && s && <Alert type="warning" showIcon title="快照暂未更新，数值可能已过期；仍可撤单并暂停。" />}
-    {!s && (pairs.isPending || (pair && query.isPending)) && <Card role="status" aria-label="正在加载策略详情"><Skeleton active /></Card>}
+    {!s && (pairs.isPending || (pair && query.isPending)) && <DetailLoading />}
     {s && <>
       <Row gutter={[16, 16]} className="metric-row">
         <Col xs={24} sm={12} xl={6}><Card><Statistic title={`标记价格 / ${asset}`} value={Number(s.ticker.mark_price) > 0 ? price(s.ticker.mark_price) : '--'} /><div className="muted">最新成交 {price(s.ticker.last_price)}</div></Card></Col>
