@@ -89,7 +89,7 @@ export default function OverviewPage() {
       extra={!overview.data && addPairLink} />
     <ErrorNotice error={overview.error} retry={() => void overview.refetch()} />
     <div className="overview-banner" aria-label="策略运行概览">
-      <div className="overview-summary"><h2>策略运行概览</h2><p>{overview.dataUpdatedAt ? `最近同步 ${new Date(overview.dataUpdatedAt).toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })} · 北京时间` : '等待首次同步'}</p><span className={stale ? 'sync-warning' : 'sync-ok'}>{stale ? '数据暂未更新，请检查连接' : '自动刷新 / 3 秒'}</span></div>
+      <div className="overview-summary"><h2>策略运行概览</h2>{stale && <span className="sync-warning">数据暂未更新，请检查连接</span>}</div>
       <div className="overview-stats">
         <div className="overview-stat"><span>运行中</span><strong>{overview.data ? pairs.filter(p => p.status === 'RUNNING').length : '--'}</strong></div>
         <div className="overview-stat"><span>策略总数</span><strong>{overview.data ? pairs.length : '--'}</strong></div>

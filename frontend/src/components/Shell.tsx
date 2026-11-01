@@ -53,10 +53,6 @@ export default function Shell() {
     <Layout.Header className="topbar">
       <div className="topbar-main">
         <Link className="topbar-brand" to="/" aria-label="Grid Console 首页"><span className="topbar-brand-name"><strong>GRID CONSOLE</strong><small>BINANCE FUTURES</small></span></Link>
-        <nav className="topbar-nav" aria-label="主导航">
-          <Link to="/" aria-current={selected === 'overview' ? 'page' : undefined}>策略总览</Link>
-          <Link to="/settings" aria-current={selected === 'settings' ? 'page' : undefined}>全局设置</Link>
-        </nav>
       </div>
       <Space className="topbar-actions">{selected === 'pair' && symbol !== 'new' && <Select className="topbar-pair-select" aria-label="切换交易对" title={symbol} popupMatchSelectWidth={false} value={symbol} options={pairs.data?.map(p => ({ value: p.symbol, label: p.symbol }))} onChange={value => navigate(`/pairs/${value}${location.pathname.endsWith('/config') ? '/config' : ''}`)} />}
         <Dropdown placement="bottomRight" trigger={['click']} menu={{
@@ -78,6 +74,6 @@ export default function Shell() {
       </Space>
     </Layout.Header>
     <Layout.Content className="content"><Outlet /></Layout.Content>
-    <Layout.Footer className="footer"><span>所有时间默认显示北京时间</span><span>版本 v{import.meta.env.VITE_APP_VERSION}</span></Layout.Footer>
+    <Layout.Footer className="footer"><span>版本 v{import.meta.env.VITE_APP_VERSION}</span></Layout.Footer>
   </Layout></ControlProvider></AccountsContext.Provider></EditContext.Provider>;
 }
