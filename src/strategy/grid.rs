@@ -79,10 +79,10 @@ enum PairPlacementDecision {
     Skip(&'static str),
 }
 
-#[path = "remainder.rs"]
-mod remainder;
 #[path = "reconciliation.rs"]
 mod reconciliation;
+#[path = "remainder.rs"]
+mod remainder;
 
 const GRID_ORDER_PREFIX: &str = "gb_";
 
@@ -166,9 +166,9 @@ fn grid_level_occupied(
     interval: Decimal,
     tick_size: Decimal,
 ) -> bool {
-    orders.iter().any(|order| {
-        order.side == side && (order.price - price).abs() < interval.max(tick_size)
-    })
+    orders
+        .iter()
+        .any(|order| order.side == side && (order.price - price).abs() < interval.max(tick_size))
 }
 
 fn reserved_closing_quantity(direction: GridDirection, orders: &[GridOrder]) -> Decimal {
@@ -3412,12 +3412,48 @@ mod tests {
             merge_sources: Vec::new(),
         };
         let orders = [order];
-        assert!(grid_level_occupied(&orders, OrderSide::Buy, dec!(100.99), dec!(1), dec!(0.01)));
-        assert!(!grid_level_occupied(&orders, OrderSide::Buy, dec!(101), dec!(1), dec!(0.01)));
-        assert!(!grid_level_occupied(&orders, OrderSide::Sell, dec!(100), dec!(1), dec!(0.01)));
-        assert!(!grid_level_occupied(&[], OrderSide::Buy, dec!(100), dec!(1), dec!(0.01)));
-        assert!(grid_level_occupied(&orders, OrderSide::Buy, dec!(100.99), dec!(0.01), dec!(1)));
-        assert!(!grid_level_occupied(&orders, OrderSide::Buy, dec!(101), dec!(0.01), dec!(1)));
+        assert!(grid_level_occupied(
+            &orders,
+            OrderSide::Buy,
+            dec!(100.99),
+            dec!(1),
+            dec!(0.01)
+        ));
+        assert!(!grid_level_occupied(
+            &orders,
+            OrderSide::Buy,
+            dec!(101),
+            dec!(1),
+            dec!(0.01)
+        ));
+        assert!(!grid_level_occupied(
+            &orders,
+            OrderSide::Sell,
+            dec!(100),
+            dec!(1),
+            dec!(0.01)
+        ));
+        assert!(!grid_level_occupied(
+            &[],
+            OrderSide::Buy,
+            dec!(100),
+            dec!(1),
+            dec!(0.01)
+        ));
+        assert!(grid_level_occupied(
+            &orders,
+            OrderSide::Buy,
+            dec!(100.99),
+            dec!(0.01),
+            dec!(1)
+        ));
+        assert!(!grid_level_occupied(
+            &orders,
+            OrderSide::Buy,
+            dec!(101),
+            dec!(0.01),
+            dec!(1)
+        ));
     }
 
     #[test]

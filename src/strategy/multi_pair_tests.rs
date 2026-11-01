@@ -339,12 +339,21 @@ async fn running_engine_reschedules_sync_after_global_updates_and_keeps_rejected
                 seconds
             );
             if seconds == 30 {
-                assert!(
-                    tokio::time::timeout(Duration::from_millis(1500), sync_rx.recv())
-                        .await
-                        .is_err(),
-                    "the old one-second timer must stop after saving a longer interval"
-                );
+                // The replacement timer has a random initial offset and may fire
+                // immediately. If it does, the following tick must still use
+                // the longer interval rather than the old one-second period.
+                if tokio::time::timeout(Duration::from_millis(1500), sync_rx.recv())
+                    .await
+                    .is_ok()
+                {
+                    expire_mark_after_response(&state).await;
+                    assert!(
+                        tokio::time::timeout(Duration::from_millis(1500), sync_rx.recv())
+                            .await
+                            .is_err(),
+                        "the old one-second timer must stop after saving a longer interval"
+                    );
+                }
             } else {
                 tokio::time::timeout(Duration::from_secs(2), sync_rx.recv())
                     .await

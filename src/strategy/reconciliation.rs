@@ -7,7 +7,10 @@ impl GridTradingEngine {
             .await
     }
 
-    pub(super) async fn sync_live_orders_with_priority(&mut self, priority: ReconciliationPriority) -> bool {
+    pub(super) async fn sync_live_orders_with_priority(
+        &mut self,
+        priority: ReconciliationPriority,
+    ) -> bool {
         let pause_epoch = self.state.pause_epoch();
         let config = self.state.config.read().await.clone();
         let symbol = config.exchange.symbol.clone();
