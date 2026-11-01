@@ -72,6 +72,33 @@ function expectDisabledAncestors(labels: string[]) {
   }
 }
 
+it('submits the new strategy defaults', async () => {
+  mocks.post.mockResolvedValue('SOLUSDC');
+  setup(Promise.resolve(), '/pairs/new');
+  const user = userEvent.setup();
+  await user.type(screen.getByLabelText('合约交易对'), 'SOLUSDC');
+  await user.click(screen.getByRole('button', { name: '保存并添加' }));
+  await waitFor(() => expect(mocks.post).toHaveBeenCalledWith('/api/pairs', expect.objectContaining({
+    symbol: 'SOLUSDC', buy_window: 3, sell_window: 3, max_position_usdc: '1000', pause_on_max_position: true,
+  })));
+});
+
+it('requires a position limit when pause is enabled and allows clearing it when disabled', async () => {
+  mocks.post.mockResolvedValue('SOLUSDC');
+  setup(Promise.resolve(), '/pairs/new');
+  const user = userEvent.setup();
+  await user.type(screen.getByLabelText('合约交易对'), 'SOLUSDC');
+  await user.clear(screen.getByLabelText('最大持仓名义价值'));
+  await user.click(screen.getByRole('button', { name: '保存并添加' }));
+  expect(await screen.findByText('暂停策略需要大于 0 的持仓上限')).toBeInTheDocument();
+  expect(mocks.post).not.toHaveBeenCalled();
+  await user.click(screen.getByRole('switch', { name: '达到持仓上限时' }));
+  await user.click(screen.getByRole('button', { name: '保存并添加' }));
+  await waitFor(() => expect(mocks.post).toHaveBeenCalledWith('/api/pairs', expect.objectContaining({
+    max_position_usdc: null, pause_on_max_position: false,
+  })));
+});
+
 it.each([
   ['/pairs/new', [{ label: '策略总览', href: '/' }, { label: '新增交易对' }]],
   ['/pairs/BTCUSDC', [{ label: '策略总览', href: '/' }, { label: 'BTCUSDC' }]],

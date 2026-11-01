@@ -11,7 +11,7 @@ import { ErrorNotice, PageBreadcrumb, PageTitle } from '../components/Common';
 import { useDeleteStrategy } from '../components/DeleteStrategy';
 
 type FormValues = Omit<GridConfig, 'dry_run' | 'is_testnet'> & { mode: 'PAPER' | 'TESTNET' | 'LIVE' };
-const defaults: FormValues = { symbol: '', direction: 'LONG', grid_interval: '0.1', order_amount_usdc: '100', buy_window: 5, sell_window: 5, post_only: true, mode: 'PAPER', min_price: null, max_price: null, max_position_usdc: '2000', pause_on_max_position: false };
+const defaults: FormValues = { symbol: '', direction: 'LONG', grid_interval: '0.1', order_amount_usdc: '100', buy_window: 3, sell_window: 3, post_only: true, mode: 'PAPER', min_price: null, max_price: null, max_position_usdc: '1000', pause_on_max_position: true };
 function toForm(c: GridConfig): FormValues {
   return { ...c, mode: c.dry_run ? 'PAPER' : c.is_testnet ? 'TESTNET' : 'LIVE' };
 }
@@ -117,7 +117,7 @@ export default function PairConfig() {
         </Row>
       </Card>
       <Card title="仓位限制" className="form-card"><Row gutter={20}>
-          <Col xs={24} md={12}><Form.Item name="max_position_usdc" label="最大持仓名义价值" extra="留空表示不设置。"><InputNumber stringMode min="0" style={{ width: '100%' }} /></Form.Item></Col>
+          <Col xs={24} md={12}><Form.Item name="max_position_usdc" label="最大持仓名义价值" extra="留空表示不设置；选择暂停策略时须填写大于 0 的上限。" dependencies={['pause_on_max_position']} rules={[({ getFieldValue }) => ({ validator: (_, value) => !getFieldValue('pause_on_max_position') || (value != null && value !== '' && Number(value) > 0) ? Promise.resolve() : Promise.reject(new Error('暂停策略需要大于 0 的持仓上限')) })]}><InputNumber stringMode min="0" style={{ width: '100%' }} /></Form.Item></Col>
           <Col xs={24} md={12}><Form.Item name="pause_on_max_position" label="达到持仓上限时" extra="限制开仓会保留平仓订单；暂停策略会撤销机器人挂单。" valuePropName="checked"><Switch checkedChildren="暂停策略" unCheckedChildren="限制开仓" /></Form.Item></Col>
         </Row>
       </Card>
