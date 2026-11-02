@@ -1,7 +1,7 @@
 import { useRef, useState } from 'react';
 import { App } from 'antd';
 import { useQueryClient } from '@tanstack/react-query';
-import { api } from '../lib/api';
+import { api, ApiError } from '../lib/api';
 import type { Pair } from '../lib/types';
 
 export function useDeleteStrategy() {
@@ -13,6 +13,7 @@ export function useDeleteStrategy() {
     if (locked.current) return false;
     locked.current = true;
     setBusy(true);
+    let deleteStarted = false;
     try {
       if (beforeConfirm && !await beforeConfirm()) return false;
       const accepted = await modal.confirm({
@@ -22,13 +23,19 @@ export function useDeleteStrategy() {
       });
       if (!accepted) return false;
       // Engine shutdown can take 30 seconds, with additional time for failure recovery and persistence.
-      await api(`/api/pairs/${encodeURIComponent(pair.symbol)}`, { method: 'DELETE', body: JSON.stringify({ confirm: true }), signal: AbortSignal.timeout(90_000) });
+      deleteStarted = true;
+      await api(`/api/pairs/${encodeURIComponent(pair.symbol)}`, { method: 'DELETE', body: JSON.stringify({ confirm: true }), timeoutMs: 90_000 });
       message.success('策略已删除，历史记录保留');
       void client.invalidateQueries({ queryKey: ['pairs'] });
       void client.invalidateQueries({ queryKey: ['overview'] });
       return true;
     } catch (error) {
-      message.error((error as Error).message);
+      if (deleteStarted) {
+        void client.invalidateQueries({ queryKey: ['pairs'] });
+        void client.invalidateQueries({ queryKey: ['overview'] });
+      }
+      const uncertain = deleteStarted && error instanceof ApiError && error.kind === 'invalid-response';
+      message.error(`${(error as Error).message}${uncertain ? '；删除结果可能已生效，请刷新状态或查看日志后再操作' : ''}`);
       return false;
     } finally {
       locked.current = false;

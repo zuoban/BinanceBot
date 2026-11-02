@@ -72,8 +72,13 @@ export default function OverviewPage() {
     if (batchLock.current) return;
     batchLock.current = true; setBatchBusy(true);
     try {
-      const targets = action === 'resume' ? pairs.filter(p => p.status !== 'RUNNING') : pairs;
-      if (action === 'resume' && !targets.length) return;
+      let targets: Pair[] = [];
+      if (action === 'resume') {
+        const refreshed = await overview.refetch();
+        if (refreshed.error || !refreshed.data) throw refreshed.error ?? new Error('无法刷新策略列表');
+        targets = refreshed.data.pairs.filter(e => e.snapshot.status !== 'RUNNING').map(e => ({ symbol: e.snapshot.symbol, status: e.snapshot.status, mode: e.mode, grid_config: e.snapshot.grid_config, scoped: e.scoped } satisfies Pair));
+        if (!targets.length) { message.info('当前没有可恢复的策略'); return; }
+      }
       const accepted = await modal.confirm({
         title: `${action === 'resume' ? '恢复' : '暂停'}全部策略`,
         content: action === 'pause' ? '将刷新策略列表并暂停全部交易对，不受当前筛选影响。' : `将操作 ${targets.length} 个交易对，不受当前筛选影响。${targets.some(p => p.mode === 'LIVE') ? '其中包含实盘策略，恢复后会使用真实资金下单。' : ''}`,
@@ -87,8 +92,18 @@ export default function OverviewPage() {
         selected = refreshed.data.pairs.map(e => ({ symbol: e.snapshot.symbol, status: e.snapshot.status, mode: e.mode, grid_config: e.snapshot.grid_config, scoped: e.scoped } satisfies Pair));
         if (!selected.length) { message.info('当前没有可暂停的策略'); return; }
       }
-      const unconfirmed = await runBatchControls(selected, action, controls.run);
-      if (unconfirmed.length) message.warning(`以下策略未确认操作成功：${unconfirmed.map(pair => pair.symbol).join('、')}，请检查状态和日志`);
+      const outcomes = await runBatchControls(selected, action, controls.run);
+      const groups = [
+        { result: 'failed', label: '提交失败或结果不明，请检查后再操作' },
+        { result: 'not_submitted', label: '操作进行中，未提交' },
+        { result: 'state_unconfirmed', label: action === 'pause' ? '暂停状态及撤单结果未确认' : '恢复状态未确认' },
+        { result: 'cancellation_unconfirmed', label: '已暂停，撤单结果未确认' },
+      ];
+      const details = groups.flatMap(({ result, label }) => {
+        const symbols = outcomes.filter(outcome => outcome.result === result).map(outcome => outcome.pair.symbol);
+        return symbols.length ? [`${label}：${symbols.join('、')}`] : [];
+      });
+      if (details.length) message.warning(`${details.join('；')}。请检查状态、交易所挂单和日志`);
     } catch (error) {
       message.error(`批量操作失败：${error instanceof Error ? error.message : String(error)}`);
     } finally { batchLock.current = false; setBatchBusy(false); }
@@ -159,7 +174,7 @@ export default function OverviewPage() {
     <section className="strategies-section" aria-labelledby="strategies-heading">
     <div className="section-heading"><h2 id="strategies-heading">交易策略</h2>
       <div className="strategy-heading-actions">
-        <Dropdown trigger={['click']} disabled={batchBusy || controls.busy.size > 0} menu={{ items: [{ key: 'resume', label: '全部恢复', disabled: stale || !pairs.length }, { key: 'pause', label: '全部暂停' }], onClick: ({ key }) => void batch(key as 'pause' | 'resume') }}>
+        <Dropdown trigger={['click']} disabled={batchBusy || controls.busy.size > 0} menu={{ items: [{ key: 'resume', label: '全部恢复' }, { key: 'pause', label: '全部暂停' }], onClick: ({ key }) => void batch(key as 'pause' | 'resume') }}>
           <Button loading={batchBusy} icon={<ThunderboltOutlined />}>全部策略操作</Button>
         </Dropdown>
         {addPairLink}

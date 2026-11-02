@@ -3573,22 +3573,39 @@ mod tests {
         live.exchange.dry_run = false;
         engine.apply_config(live).await.unwrap();
         assert_eq!(engine.state.position.read().await.size, dec!(0));
-        assert!(
-            fake.orders
-                .lock()
-                .unwrap()
-                .values()
-                .filter(|order| order.status == "NEW")
-                .count()
-                > 1
-        );
-        engine.apply_config(config).await.unwrap();
-        assert!(fake
+        assert_eq!(*engine.state.status.read().await, BotStatus::Paused);
+        assert!(fake.orders.lock().unwrap().is_empty());
+        {
+            let mut ticker = engine.state.ticker.write().await;
+            ticker.mark_price = dec!(100);
+            ticker.mark_update_time = Utc::now();
+        }
+        let (reply, response) = tokio::sync::oneshot::channel();
+        engine
+            .handle_control_action(BotControlAction::Resume {
+                expected_mode: TradingMode::from_exchange(false, config.exchange.is_testnet),
+                expected_epoch: engine.state.pause_epoch(),
+                reply,
+            })
+            .await;
+        response.await.unwrap().unwrap();
+        let live_order_ids: Vec<_> = fake
             .orders
             .lock()
             .unwrap()
             .values()
-            .all(|order| order.status != "NEW"));
+            .filter(|order| order.status == "NEW")
+            .map(|order| order.client_order_id.clone())
+            .collect();
+        assert!(live_order_ids.len() > 1);
+        engine.apply_config(config).await.unwrap();
+        {
+            let orders = fake.orders.lock().unwrap();
+            assert!(live_order_ids.iter().all(|id| orders
+                .get(id)
+                .is_some_and(|order| order.status == "CANCELED")));
+            assert!(orders.values().all(|order| order.status != "NEW"));
+        }
         assert_eq!(engine.state.position.read().await.size, dec!(1));
         let account = engine.state.account.read().await;
         assert_eq!(account.total_wallet_balance, dec!(900));

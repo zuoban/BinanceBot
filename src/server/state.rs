@@ -313,6 +313,7 @@ pub struct AppState {
     shutdown_requested: AtomicBool,
     retired: watch::Sender<bool>,
     pub(crate) socket_control_lock: Arc<RwLock<()>>,
+    pub(crate) pending_control_pauses: watch::Sender<usize>,
     // Serializes status updates and protects the shutdown recovery eligibility.
     status_update_lock: Mutex<Option<u64>>,
     trade_commit_lock: Arc<Mutex<()>>,
@@ -513,6 +514,7 @@ impl AppState {
             shutdown_guard_cleared: AtomicBool::new(false),
             retired: watch::channel(false).0,
             socket_control_lock: Arc::new(RwLock::new(())),
+            pending_control_pauses: watch::channel(0).0,
             status_update_lock: Mutex::new(None),
             trade_commit_lock,
             order_submission_lock: Arc::new(RwLock::new(())),
@@ -2573,6 +2575,33 @@ mod tests {
             ticker_rx,
         );
         let task = tokio::spawn(async move { engine.run().await });
+        // The engine constructs its initial window asynchronously. Start the
+        // notification deadline only after both fillable orders exist.
+        let ready = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let orders = fixture.state.active_orders.read().await;
+                let buy = orders
+                    .values()
+                    .any(|order| order.side == OrderSide::Buy && order.price == dec!(99.9));
+                let sell = orders
+                    .values()
+                    .any(|order| order.side == OrderSide::Sell && order.price == dec!(100.1));
+                if buy && sell {
+                    break;
+                }
+                drop(orders);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(
+            ready.is_ok(),
+            "initial orders missing; engine_finished={}; status={:?}; orders={:?}; logs={:?}",
+            task.is_finished(),
+            fixture.state.status.try_read(),
+            fixture.state.active_orders.try_read(),
+            fixture.state.recent_logs.try_read(),
+        );
         for (price, side, size, amount) in [
             (dec!(99.9), "BUY", dec!(10.5), "1050.00"),
             (dec!(100.1), "SELL", dec!(9.51), "951.00"),
@@ -2587,7 +2616,21 @@ mod tests {
                     ..Default::default()
                 })
                 .unwrap();
-            let message = next_notification(&mut fixture).await;
+            let message = match tokio::time::timeout(Duration::from_secs(1), fixture.requests.recv())
+                .await
+            {
+                Ok(Some(message)) => message,
+                result => panic!(
+                    "{side} notification missing: {result:?}; engine_finished={}; status={:?}; orders={:?}; trades={:?}; logs={:?}",
+                    task.is_finished(),
+                    fixture.state.status.try_read(),
+                    fixture.state.active_orders.try_read(),
+                    fixture.state.recent_trades.try_read(),
+                    fixture.state.recent_logs.try_read(),
+                ),
+            };
+            assert_eq!(message["chat_id"], "12345");
+            assert_eq!(message["parse_mode"], "HTML");
             let text = message["text"].as_str().unwrap();
             assert!(text.contains(side));
             assert!(text.contains(&format!("持仓金额：{amount} USDC")));

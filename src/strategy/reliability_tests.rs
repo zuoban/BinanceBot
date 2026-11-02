@@ -401,6 +401,61 @@ async fn submit(engine: &mut GridTradingEngine) -> bool {
 }
 
 #[tokio::test]
+async fn switching_to_exchange_modes_requires_manual_resume_before_orders() {
+    for (source, target, previously_running) in [
+        (TradingMode::Paper, TradingMode::Testnet, false),
+        (TradingMode::Paper, TradingMode::Testnet, true),
+        (TradingMode::Paper, TradingMode::Live, false),
+        (TradingMode::Paper, TradingMode::Live, true),
+        (TradingMode::Testnet, TradingMode::Live, false),
+        (TradingMode::Live, TradingMode::Testnet, false),
+    ] {
+        let fake = Exchange::default();
+        let (url, server) = exchange_server(fake.clone()).await;
+        let db = database();
+        let mut engine = engine(db.clone(), &url).await;
+        let mut initial = engine.state.config.read().await.clone();
+        initial.exchange.dry_run = source == TradingMode::Paper;
+        initial.exchange.is_testnet = source == TradingMode::Testnet;
+        db.save_config(&initial).unwrap();
+        engine
+            .state
+            .save_runtime_config(initial.clone())
+            .await
+            .unwrap();
+        engine.state.resume_trading().await.unwrap();
+        if previously_running {
+            db.save_pair_status("SOLUSDC", target, BotStatus::Running)
+                .unwrap();
+        }
+        let epoch = engine.state.pause_epoch();
+        let mut exchange = initial;
+        exchange.exchange.dry_run = false;
+        exchange.exchange.is_testnet = target == TradingMode::Testnet;
+        let (committed, _) = tokio::join!(
+            engine.state.save_runtime_config(exchange.clone()),
+            engine.state.resume_trading_silently(epoch)
+        );
+        committed.unwrap();
+        assert_eq!(*engine.state.status.read().await, BotStatus::Paused);
+        assert_eq!(
+            db.load_pair_status("SOLUSDC", target).unwrap(),
+            Some(BotStatus::Paused)
+        );
+        assert_eq!(db.load_bot_status().unwrap(), Some(BotStatus::Paused));
+        let (tx, _) = mpsc::channel(1);
+        let restored = AppState::new(exchange, db.clone(), tx);
+        assert_eq!(*restored.status.read().await, BotStatus::Paused);
+        assert!(!submit(&mut engine).await);
+        assert!(fake.posts.lock().unwrap().is_empty());
+        engine.state.resume_trading().await.unwrap();
+        assert!(submit(&mut engine).await);
+        assert_eq!(fake.posts.lock().unwrap().len(), 1);
+        server.abort();
+    }
+}
+
+#[tokio::test]
 async fn backend_timeout_keeps_accepted_identity_and_restart_records_terminal_fill_once() {
     let fake = Exchange::default();
     fake.submission.store(1, Ordering::SeqCst);

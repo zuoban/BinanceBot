@@ -10,26 +10,28 @@ async function confirmControlState(pair: Pair, action: Action): Promise<boolean>
   for (let attempt = 0; attempt < 5; attempt++) {
     await new Promise(resolve => setTimeout(resolve, 800));
     const snapshot = await api<Snapshot>(pairPath(pair, 'status'));
-    const matches = action === 'resume' ? snapshot.status === 'RUNNING' : snapshot.status === 'PAUSED' && snapshot.active_orders.length === 0;
+    const matches = action === 'resume' ? snapshot.status === 'RUNNING' : snapshot.status === 'PAUSED';
     if (matches) return true;
   }
   return false;
 }
 
-interface ControlState { busy: Set<string>; results: Record<string, string>; run: (pair: Pair, action: Action, confirmed?: boolean) => Promise<boolean> }
-export async function runBatchControls(pairs: Pair[], action: 'pause' | 'resume', run: ControlState['run']): Promise<Pair[]> {
+export type ControlResult = 'confirmed' | 'cancellation_unconfirmed' | 'state_unconfirmed' | 'failed' | 'not_submitted';
+interface ControlState { busy: Set<string>; results: Record<string, string>; run: (pair: Pair, action: Action, confirmed?: boolean) => Promise<ControlResult> }
+export async function runBatchControls(pairs: Pair[], action: 'pause' | 'resume', run: ControlState['run']): Promise<{ pair: Pair; result: Exclude<ControlResult, 'confirmed'> }[]> {
+  const outcomes: { pair: Pair; result: Exclude<ControlResult, 'confirmed'> }[] = [];
+  const record = (pair: Pair, result: ControlResult) => {
+    if (result !== 'confirmed') outcomes.push({ pair, result });
+  };
   if (action === 'pause') {
     const results = await Promise.allSettled(pairs.map(pair => run(pair, action, true)));
-    const failure = results.find(result => result.status === 'rejected');
-    if (failure?.status === 'rejected') throw failure.reason;
-    return pairs.filter((_, index) => {
-      const result = results[index];
-      return result.status === 'fulfilled' && !result.value;
-    });
+    results.forEach((result, index) => record(pairs[index], result.status === 'fulfilled' ? result.value : 'failed'));
+  } else {
+    for (const pair of pairs) {
+      try { record(pair, await run(pair, action, true)); } catch { record(pair, 'failed'); }
+    }
   }
-  const unconfirmed: Pair[] = [];
-  for (const pair of pairs) if (!await run(pair, action, true)) unconfirmed.push(pair);
-  return unconfirmed;
+  return outcomes;
 }
 const Context = createContext<ControlState>(null!);
 export const useControls = () => useContext(Context);
@@ -39,8 +41,8 @@ export function ControlProvider({ children }: { children: React.ReactNode }) {
   const locked = useRef(new Set<string>());
   const [busy, setBusy] = useState(new Set<string>());
   const [results, setResults] = useState<Record<string, string>>({});
-  const run = async (pair: Pair, action: Action, confirmed = false) => {
-    if (locked.current.has(pair.symbol)) return false;
+  const run = async (pair: Pair, action: Action, confirmed = false): Promise<ControlResult> => {
+    if (locked.current.has(pair.symbol)) return 'not_submitted';
     locked.current.add(pair.symbol); setBusy(new Set(locked.current));
     try {
       const dangerous = action === 'rebalance' || action === 'cancel_all' || (action === 'resume' && pair.mode === 'LIVE');
@@ -50,20 +52,24 @@ export function ControlProvider({ children }: { children: React.ReactNode }) {
           content: action === 'resume' ? '恢复后将使用真实资金下单，请确认交易对和参数。' : action === 'rebalance' ? '将撤销机器人挂单并重新构建网格。' : '将撤销此交易对的机器人挂单并暂停，保留持仓。',
           okText: '确认执行', cancelText: '取消',
         });
-        if (!accepted) return false;
+        if (!accepted) return 'not_submitted';
       }
       setResults(r => ({ ...r, [pair.symbol]: '正在提交…' }));
       await post(pairPath(pair, 'control'), action === 'resume' ? { action, expected_mode: pair.mode } : { action });
-      const confirmedState = await confirmControlState(pair, action);
-      const result = confirmedState ? (action === 'rebalance' ? '重建请求已提交，请查看挂单及日志' : '已确认') : '已提交，状态尚未确认，请查看日志';
+      const observedState = await confirmControlState(pair, action).catch(() => false);
+      const cancellationUnverified = action === 'pause' || action === 'cancel_all';
+      const confirmedState = observedState && !cancellationUnverified;
+      const result = cancellationUnverified
+        ? observedState ? '已暂停，撤单结果尚未确认，请检查交易所挂单及日志' : '已提交，暂停状态及撤单结果尚未确认，请检查交易所挂单及日志'
+        : confirmedState ? (action === 'rebalance' ? '重建请求已提交，请查看挂单及日志' : '已确认') : '已提交，状态尚未确认，请查看日志';
       setResults(r => ({ ...r, [pair.symbol]: result }));
       if (!confirmedState) message.warning(`${pair.symbol}：${result}`);
-      return confirmedState;
+      return cancellationUnverified ? (observedState ? 'cancellation_unconfirmed' : 'state_unconfirmed') : (confirmedState ? 'confirmed' : 'state_unconfirmed');
     } catch (error) {
       const text = (error as Error).message;
       setResults(r => ({ ...r, [pair.symbol]: `失败：${text}` }));
       message.error(`${pair.symbol}：${text}`);
-      return false;
+      return 'failed';
     } finally {
       locked.current.delete(pair.symbol); setBusy(new Set(locked.current));
       void client.invalidateQueries({ queryKey: ['pairs'] });

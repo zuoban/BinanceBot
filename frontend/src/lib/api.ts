@@ -7,18 +7,20 @@ export const tokenStore = {
   clear: () => sessionStorage.removeItem(TOKEN_KEY),
 };
 export class ApiError extends Error {
-  constructor(message: string, public status: number) { super(message); }
+  constructor(message: string, public status: number, public kind: 'rejection' | 'invalid-response' = 'rejection') { super(message); }
 }
-export async function authenticatedFetch(path: string, init: RequestInit = {}) {
+type ApiRequestInit = RequestInit & { timeoutMs?: number };
+export async function authenticatedFetch(path: string, init: ApiRequestInit = {}) {
   const token = tokenStore.get();
+  const { timeoutMs = 15_000, ...requestInit } = init;
   const headers = new Headers(init.headers);
   if (token) headers.set('Authorization', `Bearer ${token}`);
   if (init.body) headers.set('Content-Type', 'application/json');
-  const timeout = AbortSignal.timeout(15_000);
+  const timeout = AbortSignal.timeout(timeoutMs);
   const signal = init.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
   let response: Response;
   try {
-    response = await fetch(path, { ...init, headers, signal });
+    response = await fetch(path, { ...requestInit, headers, signal });
   } catch (error) {
     if (init.signal?.aborted && signal.reason === init.signal.reason && signal.reason?.name !== 'TimeoutError') throw error;
     throw new ApiError(init.method && init.method !== 'GET'
@@ -35,11 +37,14 @@ export async function authenticatedFetch(path: string, init: RequestInit = {}) {
   }
   return response;
 }
-export async function api<T>(path: string, init?: RequestInit): Promise<T> {
+export async function api<T>(path: string, init?: ApiRequestInit): Promise<T> {
   const response = await authenticatedFetch(path, init);
   let result: ApiResponse<T>;
   try { result = await response.json(); }
-  catch { throw new ApiError(`服务返回异常 (${response.status})，请检查 API 连接`, response.status); }
+  catch { throw new ApiError(`服务返回异常 (${response.status})，请检查 API 连接`, response.status, 'invalid-response'); }
+  if (!result || typeof result !== 'object' || typeof result.success !== 'boolean') {
+    throw new ApiError(`服务返回异常 (${response.status})，请检查 API 连接`, response.status, 'invalid-response');
+  }
   if (!response.ok || !result.success) throw new ApiError(result.message || '请求失败，请重试', response.status);
   return result.data;
 }

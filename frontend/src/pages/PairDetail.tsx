@@ -2,7 +2,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { Alert, Button, Card, Col, Descriptions, Row, Space, Statistic, Tabs, Tag } from 'antd';
 import { SettingOutlined } from '@ant-design/icons';
 import { usePairSnapshot, usePairs } from '../lib/queries';
-import { accountGroups, modeOf, number, price, quoteAsset, todayTradeCounts } from '../lib/format';
+import { accountGroups, modeOf, number, numeric, price, quoteAsset, todayTradeCounts } from '../lib/format';
 import { ErrorNotice, ModeTag, PageBreadcrumb, PageTitle, Pnl, StatusTag } from '../components/Common';
 import { PairControls, useControls } from '../components/Controls';
 import { DepthChart, HourlyChart } from '../components/Charts';
@@ -23,6 +23,8 @@ export default function PairDetail() {
   const today = s ? todayTradeCounts(s) : null;
   useDocumentTitle(`${s && Number(s.ticker.mark_price) > 0 ? price(s.ticker.mark_price) : '--'} | ${today?.buy ?? '--'}B | ${today?.sell ?? '--'}S`);
   const todayPnl = today && s?.hourly_trade_stats && s.hourly_trade_stats.pending_pnl_count === 0 ? s.hourly_trade_stats.realized_pnl : null;
+  const realizedPnl = numeric(s?.stats.total_realized_pnl), commission = numeric(s?.stats.total_commission);
+  const netPnl = s?.stats.pending_pnl_trades === 0 && realizedPnl !== null && commission !== null ? realizedPnl - commission : null;
   const currentPair = pair && s ? { ...pair, status: s.status, grid_config: s.grid_config, mode: modeOf(s) } : pair;
   return <div className="pair-detail">
     <PageBreadcrumb items={[{ label: '策略总览', to: '/' }, { label: symbol ?? '策略详情' }]} />
@@ -37,7 +39,7 @@ export default function PairDetail() {
     {s && <>
       <Row gutter={[16, 16]} className="metric-row">
         <Col xs={24} sm={12} xl={6}><Card><Statistic title={`标记价格 / ${asset}`} value={Number(s.ticker.mark_price) > 0 ? price(s.ticker.mark_price) : '--'} /><div className="muted">最新成交 {price(s.ticker.last_price)}</div></Card></Col>
-        <Col xs={24} sm={12} xl={6}><Card><Statistic title={`已实现盈亏 / ${asset}`} value={s.stats.total_realized_pnl} formatter={() => <Pnl value={s.stats.total_realized_pnl} />} /><div className="muted">扣费后 {number(Number(s.stats.total_realized_pnl) - Number(s.stats.total_commission))}</div></Card></Col>
+        <Col xs={24} sm={12} xl={6}><Card><Statistic title={`已实现盈亏 / ${asset}`} value={s.stats.total_realized_pnl} formatter={() => <Pnl value={s.stats.total_realized_pnl} />} /><div className="muted">扣费后 {number(netPnl)}</div></Card></Col>
         <Col xs={24} sm={12} xl={6}><Card><Statistic title={`持仓未实现 / ${asset}`} value={s.position.unrealized_pnl} formatter={() => <Pnl value={s.position.unrealized_pnl} />} /><div className="muted">持仓数量 {price(s.position.size)}</div></Card></Col>
         <Col xs={24} sm={12} xl={6}><Card><Statistic title={`账户权益 / ${account?.asset || asset}`} value={account?.equity ?? '--'} precision={2} /><div className="muted">≈ ¥{number(account?.cny)} · 可用 {number(account?.available)}</div></Card></Col>
       </Row>

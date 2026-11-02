@@ -852,8 +852,10 @@ impl Database {
         }
         let mode = TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
         let switching = previous_scope != (config.exchange.symbol.as_str(), mode);
-        let was_dirty = arm_execution_guard_on(&tx, &config.exchange.symbol, mode)?;
-        let guarded = switching && was_dirty;
+        arm_execution_guard_on(&tx, &config.exchange.symbol, mode)?;
+        // A different account scope always requires a fresh manual resume, even
+        // when its execution guard has never been armed before.
+        let guarded = switching;
         if switching {
             tx.execute(
                 "UPDATE pair_execution_guard SET dirty = 0 WHERE symbol = ?1 AND mode = ?2",
@@ -3613,7 +3615,7 @@ mod tests {
                 (symbol, TradingMode::Live)
             )
             .unwrap(),
-            (BotStatus::Running, false)
+            (BotStatus::Paused, true)
         );
         assert!(!db.arm_execution_guard(symbol, TradingMode::Live).unwrap());
         assert!(db.arm_execution_guard(symbol, TradingMode::Paper).unwrap());
@@ -3643,6 +3645,51 @@ mod tests {
             db.load_pair_status("BTCUSDT", TradingMode::Paper).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn first_exchange_mode_switch_persists_pause_across_reopen() {
+        for target in [TradingMode::Testnet, TradingMode::Live] {
+            for scoped in [false, true] {
+                let path =
+                    std::env::temp_dir().join(format!("mode-switch-{}.db", uuid::Uuid::new_v4()));
+                let mut config = AppConfig::default();
+                if scoped {
+                    config.pairs = vec![crate::config::TradingPairConfig::new("SOLUSDC".into())];
+                }
+                {
+                    let db = Database::open(&path).unwrap();
+                    db.save_config(&config).unwrap();
+                    let mut candidate = if scoped {
+                        config.strategy_configs().unwrap().remove(0)
+                    } else {
+                        config.clone()
+                    };
+                    candidate.exchange.dry_run = false;
+                    candidate.exchange.is_testnet = target == TradingMode::Testnet;
+                    assert_eq!(
+                        db.save_runtime_config(
+                            &candidate,
+                            scoped.then_some("SOLUSDC"),
+                            BotStatus::Running,
+                            ("SOLUSDC", TradingMode::Paper)
+                        )
+                        .unwrap(),
+                        (BotStatus::Paused, true)
+                    );
+                }
+                let db = Database::open(&path).unwrap();
+                assert_eq!(
+                    db.load_pair_status("SOLUSDC", target).unwrap(),
+                    Some(BotStatus::Paused)
+                );
+                if !scoped {
+                    assert_eq!(db.load_bot_status().unwrap(), Some(BotStatus::Paused));
+                }
+                drop(db);
+                std::fs::remove_file(path).unwrap();
+            }
+        }
     }
 
     #[test]

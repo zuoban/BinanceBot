@@ -207,6 +207,71 @@ it('summarizes statuses and lets the user clear a search with no results', async
   expect(screen.getByText('BTCUSDC')).toBeInTheDocument();
 });
 
+it('confirms and resumes the freshly refreshed targets including newly paused live strategies', async () => {
+  const old = snapshot('BTCUSDC'); old.status = 'PAUSED';
+  const running = snapshot('ETHUSDC'); running.status = 'RUNNING';
+  const newlyPaused = snapshot('SOLUSDC'); newlyPaused.status = 'PAUSED';
+  const anotherPaused = snapshot('XRPUSDC'); anotherPaused.status = 'PAUSED';
+  overview.data = { generated_at: '', pairs: [{ snapshot: old, mode: 'PAPER', scoped: true }] };
+  overview.refetch.mockResolvedValue({ data: { generated_at: '', pairs: [
+    { snapshot: running, mode: 'PAPER', scoped: true },
+    { snapshot: newlyPaused, mode: 'LIVE', scoped: true },
+    { snapshot: anotherPaused, mode: 'TESTNET', scoped: true },
+  ] }, error: null });
+  render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+  const user = userEvent.setup();
+  await user.type(screen.getByLabelText('搜索交易对'), 'BTC');
+  await user.click(screen.getByRole('button', { name: /全部策略操作/ }));
+  await user.click(screen.getByText('全部恢复'));
+  expect(await screen.findByText('将操作 2 个交易对，不受当前筛选影响。其中包含实盘策略，恢复后会使用真实资金下单。')).toBeInTheDocument();
+  expect(runBatchControls).not.toHaveBeenCalled();
+  await user.click(screen.getByRole('button', { name: '确认执行' }));
+  await waitFor(() => expect(runBatchControls).toHaveBeenCalledWith([
+    expect.objectContaining({ symbol: 'SOLUSDC', status: 'PAUSED', mode: 'LIVE', scoped: true }),
+    expect.objectContaining({ symbol: 'XRPUSDC', status: 'PAUSED', mode: 'TESTNET', scoped: true }),
+  ], 'resume', actions.run));
+});
+
+it('does not resume when the refreshed confirmation is cancelled', async () => {
+  const paused = snapshot('SOLUSDC'); paused.status = 'PAUSED';
+  overview.data = { generated_at: '', pairs: [] };
+  overview.refetch.mockResolvedValue({ data: { generated_at: '', pairs: [{ snapshot: paused, mode: 'PAPER', scoped: true }] }, error: null });
+  render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+  const user = userEvent.setup();
+  await user.click(screen.getByRole('button', { name: /全部策略操作/ }));
+  await user.click(screen.getByText('全部恢复'));
+  expect(await screen.findByText('将操作 1 个交易对，不受当前筛选影响。')).toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: /取\s*消/ }));
+  expect(runBatchControls).not.toHaveBeenCalled();
+});
+
+it('reports an empty refreshed resume list without showing a confirmation', async () => {
+  const paused = snapshot('SOLUSDC'); paused.status = 'PAUSED';
+  const running = snapshot('BTCUSDC'); running.status = 'RUNNING';
+  overview.data = { generated_at: '', pairs: [{ snapshot: paused, mode: 'LIVE', scoped: true }] };
+  overview.refetch.mockResolvedValue({ data: { generated_at: '', pairs: [{ snapshot: running, mode: 'PAPER', scoped: true }] }, error: null });
+  render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+  const user = userEvent.setup();
+  await user.click(screen.getByRole('button', { name: /全部策略操作/ }));
+  await user.click(screen.getByText('全部恢复'));
+  expect(await screen.findByText('当前没有可恢复的策略')).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: '确认执行' })).not.toBeInTheDocument();
+  expect(runBatchControls).not.toHaveBeenCalled();
+});
+
+it('does not offer stale resume targets when refresh fails', async () => {
+  const paused = snapshot('SOLUSDC'); paused.status = 'PAUSED';
+  overview.data = { generated_at: '', pairs: [{ snapshot: paused, mode: 'PAPER', scoped: true }] };
+  overview.refetch.mockResolvedValue({ data: overview.data, error: new Error('连接失败') });
+  render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+  const user = userEvent.setup();
+  await user.click(screen.getByRole('button', { name: /全部策略操作/ }));
+  await user.click(screen.getByText('全部恢复'));
+  expect(await screen.findByText('批量操作失败：连接失败')).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: '确认执行' })).not.toBeInTheDocument();
+  expect(runBatchControls).not.toHaveBeenCalled();
+});
+
 it('refreshes an empty stale snapshot and pauses every returned strategy', async () => {
   overview.data = { generated_at: '', pairs: [] };
   overview.dataUpdatedAt = Date.now() - 20_000;
@@ -235,17 +300,23 @@ it('reports a refresh failure without submitting stale pause targets', async () 
   expect(runBatchControls).not.toHaveBeenCalled();
 });
 
-it('reports strategies whose batch operation was not confirmed', async () => {
+it('distinguishes failed submissions from unconfirmed pause and cancellation results', async () => {
   const s = snapshot('SOLUSDC'); s.status = 'RUNNING';
   overview.data = { generated_at: '', pairs: [{ snapshot: s, mode: 'PAPER', scoped: true }] };
   overview.refetch.mockResolvedValue({ data: overview.data, error: null });
-  vi.mocked(runBatchControls).mockResolvedValue([{ symbol: s.symbol, status: s.status, mode: 'PAPER', grid_config: s.grid_config, scoped: true }]);
+  const target = { symbol: s.symbol, status: s.status, mode: 'PAPER' as const, grid_config: s.grid_config, scoped: true };
+  vi.mocked(runBatchControls).mockResolvedValue([
+    { pair: target, result: 'failed' },
+    { pair: { ...target, symbol: 'BTCUSDC' }, result: 'state_unconfirmed' },
+    { pair: { ...target, symbol: 'ETHUSDC' }, result: 'cancellation_unconfirmed' },
+    { pair: { ...target, symbol: 'XRPUSDC' }, result: 'not_submitted' },
+  ]);
   render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
   const user = userEvent.setup();
   await user.click(screen.getByRole('button', { name: /全部策略操作/ }));
   await user.click(screen.getByText('全部暂停'));
   await user.click(await screen.findByRole('button', { name: '确认执行' }));
-  expect(await screen.findByText('以下策略未确认操作成功：SOLUSDC，请检查状态和日志')).toBeInTheDocument();
+  expect(await screen.findByText('提交失败或结果不明，请检查后再操作：SOLUSDC；操作进行中，未提交：XRPUSDC；暂停状态及撤单结果未确认：BTCUSDC；已暂停，撤单结果未确认：ETHUSDC。请检查状态、交易所挂单和日志')).toBeInTheDocument();
 });
 it('shows today’s executed buy and sell counts instead of active orders on the strategy card', () => {
   const s = snapshot('BTCUSDC');

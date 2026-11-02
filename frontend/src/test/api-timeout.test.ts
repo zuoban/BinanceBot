@@ -24,6 +24,22 @@ it('times out a stalled request even when the caller supplies a cancellation sig
   expect(caller.signal.aborted).toBe(false);
 });
 
+it('uses the caller-selected timeout and reports uncertain results for mutations', async () => {
+  const timeout = new AbortController();
+  const timeoutFactory = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(timeout.signal);
+  const fetchMock = pendingFetch();
+  vi.stubGlobal('fetch', fetchMock);
+  const request = api('/api/pairs/BTCUSDC', { method: 'DELETE', timeoutMs: 90_000 });
+  const result = expect(request).rejects.toMatchObject({
+    message: '请求未完成，操作可能已生效；请刷新状态或查看日志后再操作', status: 0,
+  });
+  expect(timeoutFactory).toHaveBeenCalledOnce();
+  expect(timeoutFactory).toHaveBeenCalledWith(90_000);
+  expect(fetchMock.mock.calls[0][1]).not.toHaveProperty('timeoutMs');
+  timeout.abort(new DOMException('Timed out', 'TimeoutError'));
+  await result;
+});
+
 it('preserves caller cancellation without treating it as a connection failure', async () => {
   const timeout = new AbortController();
   const caller = new AbortController();

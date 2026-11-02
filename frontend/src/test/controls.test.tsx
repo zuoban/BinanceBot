@@ -3,8 +3,16 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { App } from 'antd';
 import { afterEach, expect, it, vi } from 'vitest';
 import { ControlProvider, runBatchControls, useControls } from '../components/Controls';
+import type { ControlResult } from '../components/Controls';
 import { api, post } from '../lib/api';
 import { pair, snapshot } from './fixtures';
+
+vi.mock('antd', () => ({
+  App: Object.assign(({ children }: { children: React.ReactNode }) => children, {
+    useApp: () => ({ modal: { confirm: vi.fn() }, message: { warning: vi.fn(), error: vi.fn() } }),
+  }),
+}));
+vi.mock('@ant-design/icons', () => ({}));
 
 vi.mock('../lib/api', () => ({
   api: vi.fn(),
@@ -14,26 +22,19 @@ vi.mock('../lib/api', () => ({
 
 afterEach(() => { vi.useRealTimers(); vi.clearAllMocks(); });
 
-it.each([true, false])('confirms pause only when orders clear on the fifth attempt: %s', async clears => {
-  vi.useFakeTimers();
+it.each(['pause', 'cancel_all'] as const)('%s reports cancellation as unverified even when the paused snapshot has no orders', async action => {
   vi.mocked(post).mockResolvedValue(undefined);
-  const pendingOrders = { ...snapshot(), active_orders: [{}] };
-  vi.mocked(api).mockResolvedValue(pendingOrders);
-  if (clears) vi.mocked(api).mockResolvedValueOnce(pendingOrders).mockResolvedValueOnce(pendingOrders)
-    .mockResolvedValueOnce(pendingOrders).mockResolvedValueOnce(pendingOrders).mockResolvedValueOnce(snapshot());
+  vi.mocked(api).mockResolvedValue(snapshot());
   const client = new QueryClient();
   const wrapper = ({ children }: { children: React.ReactNode }) => <QueryClientProvider client={client}><App><ControlProvider>{children}</ControlProvider></App></QueryClientProvider>;
   const { result, unmount } = renderHook(() => useControls(), { wrapper });
   try {
-    let pending!: Promise<boolean>;
-    act(() => { pending = result.current.run(pair(), 'pause'); });
-    await act(async () => { await vi.advanceTimersByTimeAsync(3200); });
-    expect(api).toHaveBeenCalledTimes(4);
-    expect(result.current.busy.has('SOLUSDC')).toBe(true);
-    await act(async () => { await vi.advanceTimersByTimeAsync(800); });
-    expect(await pending).toBe(clears);
-    expect(api).toHaveBeenCalledTimes(5);
-    expect(result.current.results.SOLUSDC).toBe(clears ? '已确认' : '已提交，状态尚未确认，请查看日志');
+    let pending!: Promise<ControlResult>;
+    act(() => { pending = result.current.run(pair(), action, true); });
+    await act(async () => { await pending; });
+    expect(await pending).toBe('cancellation_unconfirmed');
+    expect(post).toHaveBeenCalledWith('/api/pairs/SOLUSDC/control', { action });
+    expect(result.current.results.SOLUSDC).toBe('已暂停，撤单结果尚未确认，请检查交易所挂单及日志');
     expect(result.current.busy.has('SOLUSDC')).toBe(false);
   } finally {
     unmount();
@@ -41,14 +42,92 @@ it.each([true, false])('confirms pause only when orders clear on the fifth attem
   }
 });
 
+it('does not submit a second operation for a locked pair', async () => {
+  vi.mocked(post).mockResolvedValue(undefined);
+  vi.mocked(api).mockResolvedValue(snapshot());
+  const client = new QueryClient();
+  const wrapper = ({ children }: { children: React.ReactNode }) => <QueryClientProvider client={client}><App><ControlProvider>{children}</ControlProvider></App></QueryClientProvider>;
+  const { result, unmount } = renderHook(() => useControls(), { wrapper });
+  try {
+    let first!: Promise<ControlResult>;
+    let second!: Promise<ControlResult>;
+    act(() => {
+      first = result.current.run(pair(), 'pause');
+      second = result.current.run(pair(), 'pause');
+    });
+    expect(await second).toBe('not_submitted');
+    expect(post).toHaveBeenCalledTimes(1);
+    await act(async () => { await first; });
+    expect(await first).toBe('cancellation_unconfirmed');
+  } finally {
+    unmount();
+    client.clear();
+  }
+});
+
+it('reports both pause and cancellation as unverified when the paused state is not observed', async () => {
+  vi.mocked(post).mockResolvedValue(undefined);
+  vi.mocked(api).mockResolvedValue({ ...snapshot(), status: 'RUNNING' });
+  const client = new QueryClient();
+  const wrapper = ({ children }: { children: React.ReactNode }) => <QueryClientProvider client={client}><App><ControlProvider>{children}</ControlProvider></App></QueryClientProvider>;
+  const { result, unmount } = renderHook(() => useControls(), { wrapper });
+  try {
+    let pending!: Promise<ControlResult>;
+    act(() => { pending = result.current.run(pair(), 'pause'); });
+    await act(async () => { await pending; });
+    expect(await pending).toBe('state_unconfirmed');
+    expect(api).toHaveBeenCalledTimes(5);
+    expect(result.current.results.SOLUSDC).toBe('已提交，暂停状态及撤单结果尚未确认，请检查交易所挂单及日志');
+  } finally {
+    unmount();
+    client.clear();
+  }
+});
+
+it('keeps the submitted pause unconfirmed when the status request fails', async () => {
+  vi.mocked(post).mockResolvedValue(undefined);
+  vi.mocked(api).mockRejectedValue(new Error('网络错误'));
+  const client = new QueryClient();
+  const wrapper = ({ children }: { children: React.ReactNode }) => <QueryClientProvider client={client}><App><ControlProvider>{children}</ControlProvider></App></QueryClientProvider>;
+  const { result, unmount } = renderHook(() => useControls(), { wrapper });
+  try {
+    let pending!: Promise<ControlResult>;
+    act(() => { pending = result.current.run(pair(), 'pause'); });
+    await act(async () => { await pending; });
+    expect(await pending).toBe('state_unconfirmed');
+    expect(result.current.results.SOLUSDC).toBe('已提交，暂停状态及撤单结果尚未确认，请检查交易所挂单及日志');
+  } finally {
+    unmount();
+    client.clear();
+  }
+});
+
+it('still confirms resume when the strategy is running', async () => {
+  vi.mocked(post).mockResolvedValue(undefined);
+  vi.mocked(api).mockResolvedValue({ ...snapshot(), status: 'RUNNING' });
+  const client = new QueryClient();
+  const wrapper = ({ children }: { children: React.ReactNode }) => <QueryClientProvider client={client}><App><ControlProvider>{children}</ControlProvider></App></QueryClientProvider>;
+  const { result, unmount } = renderHook(() => useControls(), { wrapper });
+  try {
+    let pending!: Promise<ControlResult>;
+    act(() => { pending = result.current.run(pair(), 'resume', true); });
+    await act(async () => { await pending; });
+    expect(await pending).toBe('confirmed');
+    expect(result.current.results.SOLUSDC).toBe('已确认');
+  } finally {
+    unmount();
+    client.clear();
+  }
+});
+
 it('submits resumes serially even when the first is not confirmed', async () => {
-  let finishFirst!: (value: boolean) => void;
-  const first = new Promise<boolean>(resolve => { finishFirst = resolve; });
-  const run = vi.fn().mockReturnValueOnce(first).mockResolvedValueOnce(true);
+  let finishFirst!: (value: 'state_unconfirmed') => void;
+  const first = new Promise<'state_unconfirmed'>(resolve => { finishFirst = resolve; });
+  const run = vi.fn().mockReturnValueOnce(first).mockResolvedValueOnce('confirmed');
   const pending = runBatchControls([pair('SOLUSDC'), pair('BTCUSDC')], 'resume', run);
   expect(run).toHaveBeenCalledTimes(1);
-  finishFirst(false);
-  expect(await pending).toEqual([pair('SOLUSDC')]);
+  finishFirst('state_unconfirmed');
+  expect(await pending).toEqual([{ pair: pair('SOLUSDC'), result: 'state_unconfirmed' }]);
   expect(run).toHaveBeenCalledTimes(2);
   expect(run).toHaveBeenNthCalledWith(2, expect.objectContaining({ symbol: 'BTCUSDC' }), 'resume', true);
 });
@@ -59,9 +138,9 @@ it.each(['PAPER', 'TESTNET', 'LIVE'] as const)('binds a confirmed resume to the 
   const wrapper = ({ children }: { children: React.ReactNode }) => <QueryClientProvider client={client}><App><ControlProvider>{children}</ControlProvider></App></QueryClientProvider>;
   const { result, unmount } = renderHook(() => useControls(), { wrapper });
   try {
-    let accepted = true;
+    let accepted: string = '';
     await act(async () => { accepted = await result.current.run({ ...pair(), mode }, 'resume', true); });
-    expect(accepted).toBe(false);
+    expect(accepted).toBe('failed');
     expect(post).toHaveBeenCalledWith('/api/pairs/SOLUSDC/control', { action: 'resume', expected_mode: mode });
     expect(result.current.results.SOLUSDC).toContain('策略运行模式已变化');
   } finally {

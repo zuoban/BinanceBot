@@ -120,6 +120,7 @@ struct FillProgress {
     restarted: bool,
     fills: std::collections::HashMap<i64, ExecutionFill>,
     quantity: Decimal,
+    advances: u64,
 }
 
 impl FillProgress {
@@ -130,32 +131,44 @@ impl FillProgress {
             restarted: false,
             fills: Default::default(),
             quantity: Decimal::ZERO,
+            advances: 0,
         }
     }
 }
 
+const FILL_WAITER_ACTIVE_LEASE: Duration = Duration::from_secs(3 * 60);
+
 struct FillCacheEntry {
     progress: Arc<tokio::sync::Mutex<FillProgress>>,
     last_used: Instant,
+    stalled_attempts: u8,
 }
 
 struct FillCacheCleanup<'a> {
     cache: &'a std::sync::Mutex<std::collections::HashMap<(String, i64), FillCacheEntry>>,
     key: (String, i64),
     shared: Arc<tokio::sync::Mutex<FillProgress>>,
+    progress: tokio::sync::OwnedMutexGuard<FillProgress>,
+    initial_advances: u64,
+    failed_query: bool,
 }
 
 impl Drop for FillCacheCleanup<'_> {
     fn drop(&mut self) {
-        if let Ok(progress) = self.shared.try_lock() {
-            if progress.from_id.is_none() || progress.fills.is_empty() {
-                let mut cache = self.cache.lock().unwrap();
-                if cache
-                    .get(&self.key)
-                    .is_some_and(|entry| Arc::ptr_eq(&entry.progress, &self.shared))
-                {
-                    cache.remove(&self.key);
-                }
+        // Keep the progress lock until accounting and removal are complete.
+        // Acquisition also happens under the cache lock, so a concurrent caller
+        // cannot acquire an orphaned entry while it is being removed.
+        let mut cache = self.cache.lock().unwrap();
+        if let Some(entry) = cache.get_mut(&self.key) {
+            if !Arc::ptr_eq(&entry.progress, &self.shared) {
+                return;
+            }
+            if self.progress.from_id.is_none() || self.progress.fills.is_empty() {
+                cache.remove(&self.key);
+            } else if self.failed_query && self.progress.advances == self.initial_advances {
+                entry.stalled_attempts = entry.stalled_attempts.saturating_add(1);
+            } else if self.progress.advances != self.initial_advances {
+                entry.stalled_attempts = 0;
             }
         }
     }
@@ -557,7 +570,7 @@ impl BinanceFuturesClient {
             return Err(anyhow!("Invalid executed quantity for order {}", order_id));
         }
         let key = (symbol.to_owned(), order_id);
-        let shared = {
+        let (shared, mut progress) = {
             let mut cache = self.fill_progress.lock().unwrap();
             {
                 let mut generations = self.fill_generations.lock().unwrap();
@@ -579,24 +592,6 @@ impl BinanceFuturesClient {
                         .retain(|((waiting_symbol, _), _)| waiting_symbol != symbol);
                 }
             }
-            if !cache.contains_key(&key) && cache.len() >= 8 {
-                let expired = cache
-                    .iter()
-                    .filter(|(_, entry)| {
-                        Arc::strong_count(&entry.progress) == 1
-                            && entry.last_used.elapsed()
-                                >= Duration::from_secs(
-                                    self.fill_retention_seconds
-                                        .load(Ordering::Relaxed)
-                                        .max(2 * 60 * 60),
-                                )
-                    })
-                    .min_by_key(|(_, entry)| entry.last_used)
-                    .map(|(key, _)| key.clone());
-                if let Some(expired) = expired {
-                    cache.remove(&expired);
-                }
-            }
             if !cache.contains_key(&key) {
                 let mut waiters = self.fill_waiters.lock().unwrap();
                 let now = Instant::now();
@@ -610,40 +605,80 @@ impl BinanceFuturesClient {
                     *last_seen = now;
                 } else if cache.len() >= 8 || !waiters.is_empty() {
                     if waiters.len() >= 1024 {
-                        return Err(anyhow!("Trade reconciliation waiting queue is full"));
+                        if let Some(index) = waiters.iter().position(|(_, last_seen)| {
+                            now.duration_since(*last_seen) >= FILL_WAITER_ACTIVE_LEASE
+                        }) {
+                            waiters.remove(index);
+                        } else {
+                            return Err(anyhow!("Trade reconciliation waiting queue is full"));
+                        }
                     }
                     waiters.push_back((key.clone(), now));
                 }
-                if cache.len() >= 8 || waiters.front().is_some_and(|(waiting, _)| waiting != &key) {
+                // Keep FIFO positions for slow backlog scans, but let a recently
+                // polled waiter pass an inactive head. Three minutes tolerates
+                // normal one-minute reconciliation ticks and a missed tick.
+                let active = waiters.iter().position(|(_, last_seen)| {
+                    now.duration_since(*last_seen) < FILL_WAITER_ACTIVE_LEASE
+                });
+                let turn = active.is_none_or(|index| waiters[index].0 == key);
+                if turn && active.is_some() && cache.len() >= 8 {
+                    // Preserve healthy cursors while releasing repeated failures
+                    // and cursors abandoned before the fill lookup can run.
+                    let retention = Duration::from_secs(
+                        self.fill_retention_seconds
+                            .load(Ordering::Relaxed)
+                            .max(2 * 60 * 60),
+                    );
+                    let victim = cache
+                        .iter()
+                        .filter(|(_, entry)| {
+                            (entry.stalled_attempts >= 3 || entry.last_used.elapsed() >= retention)
+                                && Arc::strong_count(&entry.progress) == 1
+                        })
+                        .min_by_key(|(_, entry)| entry.last_used)
+                        .map(|(key, _)| key.clone());
+                    if let Some(victim) = victim {
+                        cache.remove(&victim);
+                    }
+                }
+                if cache.len() >= 8 || !turn {
                     return Err(anyhow!(
                         "Trade reconciliation for order {} is waiting for a progress slot",
                         order_id
                     ));
                 }
-                if waiters.front().is_some_and(|(waiting, _)| waiting == &key) {
-                    waiters.pop_front();
+                if let Some(index) = active {
+                    waiters.remove(index);
                 }
             }
             let entry = cache.entry(key.clone()).or_insert_with(|| FillCacheEntry {
                 progress: Arc::new(tokio::sync::Mutex::new(FillProgress::new(expected_qty))),
                 last_used: Instant::now(),
+                stalled_attempts: 0,
             });
-            Arc::clone(&entry.progress)
+            let shared = Arc::clone(&entry.progress);
+            let progress = Arc::clone(&shared).try_lock_owned().map_err(|_| {
+                anyhow!(
+                    "Trade reconciliation already in progress for order {}",
+                    order_id
+                )
+            })?;
+            (shared, progress)
         };
-        let _cleanup = FillCacheCleanup {
-            cache: &self.fill_progress,
-            key: key.clone(),
-            shared: Arc::clone(&shared),
-        };
-        let mut progress = shared.try_lock().map_err(|_| {
-            anyhow!(
-                "Trade reconciliation already in progress for order {}",
-                order_id
-            )
-        })?;
         if progress.expected_qty != expected_qty {
             *progress = FillProgress::new(expected_qty);
         }
+        let initial_advances = progress.advances;
+        let mut cleanup = FillCacheCleanup {
+            cache: &self.fill_progress,
+            key: key.clone(),
+            shared: Arc::clone(&shared),
+            progress,
+            initial_advances,
+            failed_query: false,
+        };
+        let progress = &mut cleanup.progress;
         // Limit work on the live fill path. The reconciliation timer resumes the
         // saved cursor, including after a local budget or HTTP error.
         for _ in 0..3 {
@@ -665,18 +700,33 @@ impl BinanceFuturesClient {
                 self.base_url,
                 self.sign_params(&query)
             );
-            let resp = self.send(self.client.get(&url)).await?;
+            let resp = match self.send(self.client.get(&url)).await {
+                Ok(resp) => resp,
+                Err(error) => {
+                    cleanup.failed_query = true;
+                    return Err(error.into());
+                }
+            };
             if !resp.status().is_success() {
+                cleanup.failed_query = true;
                 return Err(anyhow!(
                     "Failed to fetch trades for order {}: {}",
                     order_id,
                     resp.status()
                 ));
             }
-            let page: Vec<ExecutionFill> = resp.json().await?;
+            let page: Vec<ExecutionFill> = match resp.json().await {
+                Ok(page) => page,
+                Err(error) => {
+                    cleanup.failed_query = true;
+                    return Err(error.into());
+                }
+            };
             if self.fill_generations.lock().unwrap().get(symbol).copied() != Some(clear_revision) {
                 return Err(anyhow!("Trade history was cleared during reconciliation"));
             }
+            // From here until the next await, validation either fails or advances.
+            cleanup.failed_query = true;
             let page_len = page.len();
             if page_len > 1000 {
                 return Err(anyhow!("Unexpected trade page size for order {}", order_id));
@@ -717,7 +767,7 @@ impl BinanceFuturesClient {
                 ));
             }
             if progress.fills.len() + added.len() > 1_000_000 {
-                *progress = FillProgress::new(expected_qty);
+                **progress = FillProgress::new(expected_qty);
                 return Err(anyhow!(
                     "Order {} exceeds the one million fill reconciliation limit",
                     order_id
@@ -736,13 +786,12 @@ impl BinanceFuturesClient {
                 {
                     cache.remove(&key);
                 }
-                drop(progress);
                 return Ok(result);
             }
             let next = if !progress.restarted {
                 Some(0)
             } else if page_len < 1000 {
-                *progress = FillProgress::new(expected_qty);
+                **progress = FillProgress::new(expected_qty);
                 return Err(anyhow!(
                     "Incomplete trades for order {}: {} of {}",
                     order_id,
@@ -765,9 +814,12 @@ impl BinanceFuturesClient {
             progress.quantity = quantity;
             progress.from_id = next;
             progress.restarted = true;
+            progress.advances = progress.advances.saturating_add(1);
+            cleanup.failed_query = false;
             if let Some(entry) = self.fill_progress.lock().unwrap().get_mut(&key) {
                 if Arc::ptr_eq(&entry.progress, &shared) {
                     entry.last_used = Instant::now();
+                    entry.stalled_attempts = 0;
                 }
             }
         }
@@ -957,7 +1009,7 @@ mod tests {
             .get_user_trades("BTCUSDT", 2, Decimal::ONE, 0)
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("waiting"));
+        assert!(!err.to_string().contains("waiting"));
         assert_eq!(client.fill_waiters.lock().unwrap().front().unwrap().0 .1, 1);
 
         client.note_pnl_reconcile_backlog(2000);
@@ -971,6 +1023,7 @@ mod tests {
                             Decimal::ONE,
                         ))),
                         last_used: Instant::now() - Duration::from_secs(3 * 60 * 60),
+                        stalled_attempts: 0,
                     },
                 );
             }
@@ -987,23 +1040,121 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn full_progress_cache_defers_new_orders_and_preserves_existing_cursor() {
+    async fn inactive_waiter_is_skipped_but_keeps_its_queue_position() {
         use axum::{extract::Query, routing::get, Json, Router};
         use serde_json::json;
         use std::collections::HashMap;
 
         let app = Router::new().route("/fapi/v1/userTrades", get(|Query(query): Query<HashMap<String, String>>| async move {
             let order_id: i64 = query["orderId"].parse().unwrap();
-            let id = if order_id == 99 { 10 } else {
-                assert_eq!(query.get("fromId").map(String::as_str), Some("2"));
-                2
-            };
-            Json(json!([{ "id": id, "orderId": order_id, "qty": "1", "realizedPnl": "1", "commission": "0.1", "commissionAsset": "USDT", "maker": true }]))
+            Json(json!([{ "id": order_id, "orderId": order_id, "qty": "1", "realizedPnl": "1", "commission": "0.1", "commissionAsset": "USDT", "maker": true }]))
         }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let client =
+            BinanceFuturesClient::with_base_url(&crate::config::AppConfig::default().exchange, url);
+        client.note_pnl_reconcile_backlog(33);
+        {
+            let mut waiters = client.fill_waiters.lock().unwrap();
+            waiters.push_back((
+                ("BTCUSDT".into(), 1),
+                Instant::now() - Duration::from_secs(181),
+            ));
+            waiters.push_back((
+                ("BTCUSDT".into(), 2),
+                Instant::now() - Duration::from_secs(60),
+            ));
+        }
+        assert!(client
+            .get_user_trades("BTCUSDT", 3, Decimal::ONE, 0)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("waiting"));
+        assert_eq!(
+            client
+                .get_user_trades("BTCUSDT", 2, Decimal::ONE, 0)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            client
+                .get_user_trades("BTCUSDT", 1, Decimal::ONE, 0)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            client
+                .get_user_trades("BTCUSDT", 3, Decimal::ONE, 0)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(client.fill_waiters.lock().unwrap().is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn full_inactive_waiting_queue_admits_a_new_order() {
+        let client = BinanceFuturesClient::with_base_url(
+            &crate::config::AppConfig::default().exchange,
+            "http://127.0.0.1:1".into(),
+        );
+        {
+            let mut waiters = client.fill_waiters.lock().unwrap();
+            for id in 1..=1024 {
+                waiters.push_back((
+                    ("BTCUSDT".into(), id),
+                    Instant::now() - Duration::from_secs(181),
+                ));
+            }
+        }
+        let error = client
+            .get_user_trades("BTCUSDT", 2000, Decimal::ONE, 0)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("waiting"));
+        assert!(!error.contains("queue is full"));
+        let waiters = client.fill_waiters.lock().unwrap();
+        assert_eq!(waiters.len(), 1023);
+        assert_eq!(waiters.front().unwrap().0 .1, 2);
+    }
+
+    #[tokio::test]
+    async fn failed_progress_does_not_starve_a_new_order() {
+        use axum::{
+            extract::Query, http::StatusCode, response::IntoResponse, routing::get, Json, Router,
+        };
+        use serde_json::json;
+        use std::collections::HashMap;
+
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let app = Router::new().route("/fapi/v1/userTrades", get({
+            let requests = Arc::clone(&requests);
+            move |Query(query): Query<HashMap<String, String>>| {
+                let requests = Arc::clone(&requests);
+                async move {
+                    let order_id: i64 = query["orderId"].parse().unwrap();
+                    requests.lock().unwrap().push(query);
+                    if order_id == 99 {
+                        Json(json!([{ "id": 10, "orderId": order_id, "qty": "1", "realizedPnl": "1", "commission": "0.1", "commissionAsset": "USDT", "maker": true }])).into_response()
+                    } else {
+                        StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                    }
+                }
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut client =
             BinanceFuturesClient::with_base_url(&crate::config::AppConfig::default().exchange, url);
         {
             let mut cache = client.fill_progress.lock().unwrap();
@@ -1018,27 +1169,31 @@ mod tests {
                     ("BTCUSDT".into(), order_id),
                     FillCacheEntry {
                         progress: Arc::new(tokio::sync::Mutex::new(progress)),
-                        last_used: Instant::now(),
+                        last_used: Instant::now() - Duration::from_secs((9 - order_id) as u64),
+                        stalled_attempts: 0,
                     },
                 );
             }
         }
-        assert!(client
-            .get_user_trades("BTCUSDT", 99, Decimal::ONE, 0)
-            .await
-            .is_err());
-        assert!(client
-            .get_user_trades("BTCUSDT", 99, Decimal::ONE, 0)
-            .await
-            .is_err());
-        assert_eq!(
-            client
-                .get_user_trades("BTCUSDT", 1, Decimal::from(2), 0)
-                .await
-                .unwrap()
-                .len(),
-            2
-        );
+        for attempt in 0..3 {
+            for order_id in 1..=8 {
+                // Each round represents a later rate-limit window.
+                client.limiter = Arc::new(RateLimiter::default());
+                let error = client
+                    .get_user_trades("BTCUSDT", order_id, Decimal::from(2), 0)
+                    .await
+                    .unwrap_err();
+                assert!(error.to_string().contains("500"));
+            }
+            if attempt < 2 {
+                let error = client
+                    .get_user_trades("BTCUSDT", 99, Decimal::ONE, 0)
+                    .await
+                    .unwrap_err();
+                assert!(error.to_string().contains("waiting"));
+            }
+        }
+        client.limiter = Arc::new(RateLimiter::default());
         assert_eq!(
             client
                 .get_user_trades("BTCUSDT", 99, Decimal::ONE, 0)
@@ -1047,7 +1202,394 @@ mod tests {
                 .len(),
             1
         );
+        {
+            let cache = client.fill_progress.lock().unwrap();
+            assert!(!cache.contains_key(&("BTCUSDT".into(), 1)));
+            assert!((2..=8).all(|id| cache.contains_key(&("BTCUSDT".into(), id))));
+        }
+        // The evicted order starts over, rather than combining incomplete history.
+        assert!(client
+            .get_user_trades("BTCUSDT", 1, Decimal::from(2), 0)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("500"));
+        let requests = requests.lock().unwrap();
+        assert!(requests[..24]
+            .iter()
+            .all(|query| query.get("fromId").map(String::as_str) == Some("2")));
+        assert_eq!(requests[24]["orderId"], "99");
+        assert_eq!(requests[25]["orderId"], "1");
+        assert!(!requests[25].contains_key("fromId"));
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn abandoned_cursor_is_reclaimed_after_backlog_retention() {
+        use axum::{routing::get, Json, Router};
+        use serde_json::json;
+
+        let app = Router::new().route("/fapi/v1/userTrades", get(|| async {
+            Json(json!([{ "id": 9, "orderId": 99, "qty": "1", "realizedPnl": "1", "commission": "0.1", "commissionAsset": "USDT", "maker": true }]))
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client =
+            BinanceFuturesClient::with_base_url(&crate::config::AppConfig::default().exchange, url);
+        client
+            .fill_retention_seconds
+            .store(3 * 60 * 60, Ordering::Relaxed);
+        {
+            let mut cache = client.fill_progress.lock().unwrap();
+            for order_id in 1..=8 {
+                let fill: ExecutionFill = serde_json::from_value(json!({
+                    "id": 1, "orderId": order_id, "qty": "1", "realizedPnl": "1",
+                    "commission": "0.1", "commissionAsset": "USDT", "maker": true
+                }))
+                .unwrap();
+                let mut progress = FillProgress::new(Decimal::from(2));
+                progress.fills.insert(1, fill);
+                progress.quantity = Decimal::ONE;
+                progress.from_id = Some(2);
+                progress.restarted = true;
+                cache.insert(
+                    ("BTCUSDT".into(), order_id),
+                    FillCacheEntry {
+                        progress: Arc::new(tokio::sync::Mutex::new(progress)),
+                        last_used: if order_id == 1 {
+                            Instant::now() - Duration::from_secs(2 * 60 * 60 + 30 * 60)
+                        } else {
+                            Instant::now()
+                        },
+                        stalled_attempts: 0,
+                    },
+                );
+            }
+        }
+        assert!(client
+            .get_user_trades("BTCUSDT", 99, Decimal::ONE, 0)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("waiting"));
+        client
+            .fill_progress
+            .lock()
+            .unwrap()
+            .get_mut(&("BTCUSDT".into(), 1))
+            .unwrap()
+            .last_used = Instant::now() - Duration::from_secs(3 * 60 * 60 + 1);
+        assert_eq!(
+            client
+                .get_user_trades("BTCUSDT", 99, Decimal::ONE, 0)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        let cache = client.fill_progress.lock().unwrap();
+        assert!(!cache.contains_key(&("BTCUSDT".into(), 1)));
+        assert!((2..=8).all(|id| cache.contains_key(&("BTCUSDT".into(), id))));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn nine_healthy_multi_page_orders_finish_without_eviction() {
+        use axum::{extract::Query, routing::get, Json, Router};
+        use serde_json::json;
+        use std::collections::HashMap;
+
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let app = Router::new().route(
+            "/fapi/v1/userTrades",
+            get({
+                let requests = Arc::clone(&requests);
+                move |Query(query): Query<HashMap<String, String>>| {
+                    let requests = Arc::clone(&requests);
+                    async move {
+                        let order_id: i64 = query["orderId"].parse().unwrap();
+                        let start = match query.get("fromId").map(String::as_str) {
+                            None => 3001,
+                            Some("0") => 1,
+                            Some("1001") => 1001,
+                            Some("2001") => 2001,
+                            other => panic!("unexpected cursor: {other:?}"),
+                        };
+                        requests.lock().unwrap().push((order_id, start));
+                        Json((start..start + 1000).map(|id| json!({
+                        "id": id, "orderId": order_id, "qty": "1", "realizedPnl": "1",
+                        "commission": "0.1", "commissionAsset": "USDT", "maker": true
+                    })).collect::<Vec<_>>())
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut client =
+            BinanceFuturesClient::with_base_url(&crate::config::AppConfig::default().exchange, url);
+        for order_id in 1..=8 {
+            client.limiter = Arc::new(RateLimiter::default());
+            assert!(client
+                .get_user_trades("BTCUSDT", order_id, Decimal::from(4000), 0)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("continue later"));
+        }
+        assert!(client
+            .get_user_trades("BTCUSDT", 9, Decimal::from(4000), 0)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("waiting"));
+        for order_id in 1..=8 {
+            client.limiter = Arc::new(RateLimiter::default());
+            assert_eq!(
+                client
+                    .get_user_trades("BTCUSDT", order_id, Decimal::from(4000), 0)
+                    .await
+                    .unwrap()
+                    .len(),
+                4000
+            );
+        }
+        client.limiter = Arc::new(RateLimiter::default());
+        assert!(client
+            .get_user_trades("BTCUSDT", 9, Decimal::from(4000), 0)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("continue later"));
+        client.limiter = Arc::new(RateLimiter::default());
+        assert_eq!(
+            client
+                .get_user_trades("BTCUSDT", 9, Decimal::from(4000), 0)
+                .await
+                .unwrap()
+                .len(),
+            4000
+        );
+        let requests = requests.lock().unwrap();
+        for order_id in 1..=9 {
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|(id, _)| *id == order_id)
+                    .map(|(_, start)| *start)
+                    .collect::<Vec<_>>(),
+                vec![3001, 1, 1001, 2001]
+            );
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn local_budget_and_cancelled_requests_do_not_mark_progress_failed() {
+        use axum::{http::StatusCode, routing::get, Router};
+        use serde_json::json;
+
+        fn populate(client: &BinanceFuturesClient) {
+            let mut cache = client.fill_progress.lock().unwrap();
+            for order_id in 1..=8 {
+                let fill: ExecutionFill = serde_json::from_value(json!({
+                    "id": 1, "orderId": order_id, "qty": "1", "realizedPnl": "1",
+                    "commission": "0.1", "commissionAsset": "USDT", "maker": true
+                }))
+                .unwrap();
+                let mut progress = FillProgress::new(Decimal::from(2));
+                progress.fills.insert(1, fill);
+                progress.quantity = Decimal::ONE;
+                progress.from_id = Some(2);
+                progress.restarted = true;
+                cache.insert(
+                    ("BTCUSDT".into(), order_id),
+                    FillCacheEntry {
+                        progress: Arc::new(tokio::sync::Mutex::new(progress)),
+                        last_used: Instant::now(),
+                        stalled_attempts: 0,
+                    },
+                );
+            }
+        }
+
+        let limited = BinanceFuturesClient::with_base_url(
+            &crate::config::AppConfig::default().exchange,
+            "http://127.0.0.1:1".into(),
+        );
+        populate(&limited);
+        for _ in 0..12 {
+            limited.reserve(5, RequestClass::PnlReconciliation).unwrap();
+        }
+        for _ in 0..3 {
+            assert!(limited
+                .get_user_trades("BTCUSDT", 1, Decimal::from(2), 0)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("budget"));
+        }
+        assert_eq!(
+            limited.fill_progress.lock().unwrap()[&("BTCUSDT".into(), 1)].stalled_attempts,
+            0
+        );
+        assert!(limited
+            .get_user_trades("BTCUSDT", 9, Decimal::ONE, 0)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("waiting"));
+
+        let (arrived, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let app = Router::new().route(
+            "/fapi/v1/userTrades",
+            get(move || {
+                let arrived = arrived.clone();
+                async move {
+                    arrived.send(()).unwrap();
+                    std::future::pending::<StatusCode>().await
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = Arc::new(BinanceFuturesClient::with_base_url(
+            &crate::config::AppConfig::default().exchange,
+            url,
+        ));
+        populate(&client);
+        for _ in 0..3 {
+            let client = Arc::clone(&client);
+            let task = tokio::spawn(async move {
+                client
+                    .get_user_trades("BTCUSDT", 1, Decimal::from(2), 0)
+                    .await
+            });
+            tokio::time::timeout(Duration::from_secs(5), received.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+        }
+        assert_eq!(
+            client.fill_progress.lock().unwrap()[&("BTCUSDT".into(), 1)].stalled_attempts,
+            0
+        );
+        assert!(client
+            .get_user_trades("BTCUSDT", 9, Decimal::ONE, 0)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("waiting"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn busy_caller_cannot_interrupt_cleanup_or_failure_accounting() {
+        use serde_json::json;
+
+        let client = BinanceFuturesClient::with_base_url(
+            &crate::config::AppConfig::default().exchange,
+            "http://127.0.0.1:1".into(),
+        );
+        let key = ("BTCUSDT".to_owned(), 1);
+        let shared = Arc::new(tokio::sync::Mutex::new(FillProgress::new(Decimal::from(2))));
+        client.fill_progress.lock().unwrap().insert(
+            key.clone(),
+            FillCacheEntry {
+                progress: Arc::clone(&shared),
+                last_used: Instant::now(),
+                stalled_attempts: 0,
+            },
+        );
+        let cleanup = FillCacheCleanup {
+            cache: &client.fill_progress,
+            key: key.clone(),
+            shared: Arc::clone(&shared),
+            progress: Arc::clone(&shared).try_lock_owned().unwrap(),
+            initial_advances: 0,
+            failed_query: false,
+        };
+        assert!(client
+            .get_user_trades("BTCUSDT", 1, Decimal::from(2), 0)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("already in progress"));
+        drop(cleanup);
+        assert!(!client.fill_progress.lock().unwrap().contains_key(&key));
+
+        let mut progress = FillProgress::new(Decimal::from(2));
+        let fill: ExecutionFill = serde_json::from_value(json!({
+            "id": 1, "orderId": 1, "qty": "1", "realizedPnl": "1",
+            "commission": "0.1", "commissionAsset": "USDT", "maker": true
+        }))
+        .unwrap();
+        progress.fills.insert(1, fill);
+        progress.quantity = Decimal::ONE;
+        progress.from_id = Some(2);
+        progress.restarted = true;
+        let shared = Arc::new(tokio::sync::Mutex::new(progress));
+        client.fill_progress.lock().unwrap().insert(
+            key.clone(),
+            FillCacheEntry {
+                progress: Arc::clone(&shared),
+                last_used: Instant::now(),
+                stalled_attempts: 0,
+            },
+        );
+        let cleanup = FillCacheCleanup {
+            cache: &client.fill_progress,
+            key: key.clone(),
+            shared: Arc::clone(&shared),
+            progress: Arc::clone(&shared).try_lock_owned().unwrap(),
+            initial_advances: 0,
+            failed_query: true,
+        };
+        assert!(client
+            .get_user_trades("BTCUSDT", 1, Decimal::from(2), 0)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("already in progress"));
+        drop(cleanup);
+        assert_eq!(
+            client.fill_progress.lock().unwrap()[&key].stalled_attempts,
+            1
+        );
+    }
+
+    #[test]
+    fn old_cleanup_does_not_remove_replacement_progress() {
+        let cache = std::sync::Mutex::new(std::collections::HashMap::new());
+        let key = ("BTCUSDT".to_owned(), 1);
+        let old = Arc::new(tokio::sync::Mutex::new(FillProgress::new(Decimal::ONE)));
+        let replacement = Arc::new(tokio::sync::Mutex::new(FillProgress::new(Decimal::ONE)));
+        let cleanup = FillCacheCleanup {
+            cache: &cache,
+            key: key.clone(),
+            progress: Arc::clone(&old).try_lock_owned().unwrap(),
+            shared: old,
+            initial_advances: 0,
+            failed_query: false,
+        };
+        cache.lock().unwrap().insert(
+            key.clone(),
+            FillCacheEntry {
+                progress: Arc::clone(&replacement),
+                last_used: Instant::now(),
+                stalled_attempts: 0,
+            },
+        );
+        drop(cleanup);
+        assert!(Arc::ptr_eq(
+            &cache.lock().unwrap()[&key].progress,
+            &replacement
+        ));
     }
 
     #[test]

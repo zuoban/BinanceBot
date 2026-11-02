@@ -1830,6 +1830,34 @@ async fn apply_pair_config_inner(
 
 type ControlReply = tokio::sync::oneshot::Receiver<Result<(), String>>;
 
+// A persisted pause must reach the engine before a later resume can use its
+// epoch. Keep this guard alive until the pause is queued or dispatch fails.
+struct PendingControlPause(Arc<AppState>);
+
+impl PendingControlPause {
+    fn new(state: &Arc<AppState>, action: &BotControlAction) -> Option<Self> {
+        if matches!(
+            action,
+            BotControlAction::Pause | BotControlAction::CancelAll
+        ) {
+            state
+                .pending_control_pauses
+                .send_modify(|count| *count += 1);
+            Some(Self(state.clone()))
+        } else {
+            None
+        }
+    }
+}
+
+impl Drop for PendingControlPause {
+    fn drop(&mut self) {
+        self.0
+            .pending_control_pauses
+            .send_modify(|count| *count -= 1);
+    }
+}
+
 fn control_action(
     payload: ControlRequest,
     expected_epoch: u64,
@@ -1913,6 +1941,7 @@ async fn dispatch_control(
     state: Arc<AppState>,
     action: (BotControlAction, Option<ControlReply>),
 ) -> Json<ApiResponse<String>> {
+    let pending_pause = PendingControlPause::new(&state, &action.0);
     if let Err(message) = prepare_control(&state, &action.0).await {
         return Json(ApiResponse {
             success: false,
@@ -1920,14 +1949,16 @@ async fn dispatch_control(
             message: Some(message),
         });
     }
-    dispatch_prepared_control(state, action, None, None).await
+    dispatch_prepared_control(state, action, pending_pause, None, None, None).await
 }
 
 async fn dispatch_prepared_control(
     state: Arc<AppState>,
     (action, reply): (BotControlAction, Option<ControlReply>),
+    pending_pause: Option<PendingControlPause>,
     submitted: Option<tokio::sync::oneshot::Sender<()>>,
     socket_results: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    socket_token: Option<String>,
 ) -> Json<ApiResponse<String>> {
     let action_name = format!("{:?}", action);
     let action = match action {
@@ -1967,7 +1998,29 @@ async fn dispatch_prepared_control(
             message: Some("交易对已移除，无法执行操作".into()),
         });
     }
+    // Checking immediately before submission closes the channel-wait window.
+    // Revocation can still race with this check after it completes; actions
+    // already submitted to the engine cannot be recalled here.
+    if pending_pause.is_none() {
+        if let Some(token) = &socket_token {
+            if !state.is_token_valid(token).await {
+                return Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    message: Some("会话已失效".into()),
+                });
+            }
+        }
+        if *state.pending_control_pauses.borrow() != 0 {
+            return Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some("暂停或撤单正在提交，请稍后重试".into()),
+            });
+        }
+    }
     permit.send(action);
+    drop(pending_pause);
     drop(control);
     if let Some(submitted) = submitted {
         let _ = submitted.send(());
@@ -2170,22 +2223,28 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, token: String) {
     }
 
     let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-    let (control_tx, mut control_rx) =
-        tokio::sync::mpsc::unbounded_channel::<(String, (BotControlAction, Option<ControlReply>))>(
-        );
+    let (control_tx, mut control_rx) = tokio::sync::mpsc::unbounded_channel::<(
+        String,
+        (BotControlAction, Option<ControlReply>),
+        Option<PendingControlPause>,
+    )>();
     let worker_state = state.clone();
     let worker_results = result_tx.clone();
+    let worker_token = token.clone();
     tokio::spawn(async move {
-        while let Some((name, action)) = control_rx.recv().await {
+        while let Some((name, action, pending_pause)) = control_rx.recv().await {
             let (submitted, ready) = tokio::sync::oneshot::channel();
             let state = worker_state.clone();
             let results = worker_results.clone();
+            let token = worker_token.clone();
             tokio::spawn(async move {
                 let response = dispatch_prepared_control(
                     state,
                     action,
+                    pending_pause,
                     Some(submitted),
                     Some(results.clone()),
+                    Some(token),
                 )
                 .await
                 .0;
@@ -2246,6 +2305,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, token: String) {
                         continue;
                     }
                 };
+                let pending_pause = PendingControlPause::new(&state_clone, &action.0);
                 let prepare_state = state_clone.clone();
                 let prepare_results = result_tx.clone();
                 let prepare_queue = control_tx.clone();
@@ -2253,7 +2313,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, token: String) {
                     if let Err(message) = prepare_control(&prepare_state, &action.0).await {
                         let _ = prepare_results.send(serde_json::json!({"type":"control", "action":name, "success":false, "data":null, "message":message}).to_string());
                     } else {
-                        let _ = prepare_queue.send((name.unwrap(), action));
+                        let _ = prepare_queue.send((name.unwrap(), action, pending_pause));
                     }
                 });
                 if preparation.await.is_err() {
@@ -2567,6 +2627,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn revoked_socket_commands_waiting_for_capacity_are_not_submitted() {
+        for name in ["resume", "rebalance"] {
+            let db = Arc::new(Database::open(":memory:").unwrap());
+            db.create_session("revoked-control-token").unwrap();
+            let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+            tx.send(BotControlAction::GlobalRiskCancel).await.unwrap();
+            let state = AppState::new(AppConfig::default(), db.clone(), tx);
+            let action = control_action(
+                ControlRequest {
+                    action: name.into(),
+                    expected_mode: Some(TradingMode::Paper),
+                },
+                state.pause_epoch(),
+            )
+            .unwrap();
+            let request = tokio::spawn(dispatch_prepared_control(
+                state,
+                action,
+                None,
+                None,
+                None,
+                Some("revoked-control-token".into()),
+            ));
+            tokio::task::yield_now().await;
+            db.delete_session("revoked-control-token").unwrap();
+            assert!(matches!(
+                rx.recv().await,
+                Some(BotControlAction::GlobalRiskCancel)
+            ));
+            let response = tokio::time::timeout(std::time::Duration::from_secs(3), request)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!response.0.success);
+            assert!(rx.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_persisted_pause_blocks_other_clients_until_queued() {
+        for name in ["pause", "cancel_all"] {
+            let db = Arc::new(Database::open(":memory:").unwrap());
+            let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+            let state = AppState::new(AppConfig::default(), db, tx);
+            let pause = control_action(
+                ControlRequest {
+                    action: name.into(),
+                    expected_mode: None,
+                },
+                state.pause_epoch(),
+            )
+            .unwrap();
+            let pending = PendingControlPause::new(&state, &pause.0);
+            prepare_control(&state, &pause.0).await.unwrap();
+            let resume = control_action(
+                ControlRequest {
+                    action: "resume".into(),
+                    expected_mode: Some(TradingMode::Paper),
+                },
+                state.pause_epoch(),
+            )
+            .unwrap();
+            let response =
+                dispatch_prepared_control(state.clone(), resume, None, None, None, None).await;
+            assert!(!response.0.success);
+            assert!(rx.try_recv().is_err());
+            let response =
+                dispatch_prepared_control(state.clone(), pause, pending, None, None, None).await;
+            assert!(response.0.success);
+            assert!(matches!(
+                rx.recv().await,
+                Some(
+                    BotControlAction::PauseAlreadyPersisted
+                        | BotControlAction::CancelAllAlreadyPersisted
+                )
+            ));
+            assert_eq!(*state.status.read().await, BotStatus::Paused);
+        }
+    }
+
+    #[tokio::test]
     async fn socket_pause_is_processed_while_engine_reply_is_pending() {
         use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
         for action in ["resume", "rebalance"] {
@@ -2619,14 +2760,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn socket_disconnect_keeps_accepted_pause_and_cancel_queued() {
+    async fn socket_disconnect_and_revocation_keep_accepted_pause_and_cancel_queued() {
         use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
         for action in ["pause", "cancel_all"] {
             let db = Arc::new(Database::open(":memory:").unwrap());
             db.create_session("disconnect-test-token").unwrap();
             let (tx, mut rx) = tokio::sync::mpsc::channel(1);
             tx.send(BotControlAction::GlobalRiskCancel).await.unwrap();
-            let state = AppState::new(AppConfig::default(), db, tx);
+            let state = AppState::new(AppConfig::default(), db.clone(), tx);
             state.resume_trading().await.unwrap();
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
@@ -2651,6 +2792,7 @@ mod tests {
             .await
             .unwrap();
             socket.close(None).await.unwrap();
+            db.delete_session("disconnect-test-token").unwrap();
             drop(socket);
             tokio::task::yield_now().await;
             assert!(matches!(
