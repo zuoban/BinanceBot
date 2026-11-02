@@ -2,6 +2,7 @@ use crate::config::{AppConfig, ServerConfig};
 use crate::exchange::rate_limit::RateLimiter;
 use crate::exchange::BinanceFuturesClient;
 use crate::runtime::RuntimeHandle;
+use crate::server::state::snapshot::AccountMessage;
 use crate::server::state::AppState;
 use crate::types::{
     AuthLoginPayload, AuthSetupPayload, AuthStatusResponse, AuthTokenResponse, BotControlAction,
@@ -1934,9 +1935,10 @@ async fn upgrade_accounts_socket(
                     let pairs = futures_util::future::join_all(
                         states.iter().map(|state| state.account_snapshot())
                     ).await;
-                    let message = Message::Text(serde_json::json!({
-                        "type": "accounts", "data": { "pairs": pairs }
-                    }).to_string());
+                    let Ok(json) = serde_json::to_string(&AccountMessage::Accounts { pairs }) else {
+                        break;
+                    };
+                    let message = Message::Text(json);
                     if !matches!(tokio::time::timeout(std::time::Duration::from_secs(5), sender.send(message)).await, Ok(Ok(()))) { break; }
                 }
                 message = receiver.next() => {
@@ -2247,6 +2249,7 @@ mod tests {
         let (tx, _) = tokio::sync::mpsc::channel(1);
         let mut config = AppConfig::default();
         config.exchange.api_key = "account-stream-private-key".into();
+        config.exchange.api_secret = "account-stream-private-secret".into();
         let state = AppState::new(config.clone(), db.clone(), tx.clone());
         let scoped = AppState::new_for_pair(
             config,
@@ -2280,12 +2283,18 @@ mod tests {
                 .to_text()
                 .unwrap()
                 .contains("account-stream-private-key"));
+            assert!(!first
+                .to_text()
+                .unwrap()
+                .contains("account-stream-private-secret"));
+            assert!(!first.to_text().unwrap().contains("account-stream-token"));
             let first: serde_json::Value = serde_json::from_str(first.to_text().unwrap()).unwrap();
             assert_eq!(first["type"], "accounts");
             assert_eq!(first["data"]["pairs"].as_array().unwrap().len(), 1);
-            assert!(first["data"]["pairs"][0]["snapshot"]["grid_config"]
-                .get("api_key")
-                .is_none());
+            let snapshot = &first["data"]["pairs"][0]["snapshot"];
+            assert_eq!(snapshot["grid_config"].as_object().unwrap().len(), 1);
+            assert!(snapshot["grid_config"]["is_testnet"].is_boolean());
+            assert_eq!(snapshot.as_object().unwrap().len(), 5);
             state.account.write().await.available_balance = rust_decimal_macros::dec!(1234);
             let updated = tokio::time::timeout(std::time::Duration::from_secs(3), socket.next())
                 .await

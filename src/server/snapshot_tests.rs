@@ -544,7 +544,7 @@ async fn account_snapshot_matches_full_snapshot_without_chart_queries() {
         state.position.write().await.unrealized_pnl = dec!(-12.34);
         state.account.write().await.available_balance = dec!(567.89);
         let queries = state.db.hourly_stats_query_count();
-        let account = state.account_snapshot().await;
+        let account = serde_json::to_value(state.account_snapshot().await).unwrap();
         assert_eq!(state.db.hourly_stats_query_count(), queries);
         let full = state.snapshot().await;
         assert_eq!(
@@ -575,7 +575,7 @@ async fn account_snapshot_waits_for_scope_transitions_and_trade_commits() {
     state.config.write().await.exchange.is_testnet = true;
     drop(scope);
     assert_eq!(
-        task.await.unwrap()["snapshot"]["grid_config"]["is_testnet"],
+        serde_json::to_value(task.await.unwrap()).unwrap()["snapshot"]["grid_config"]["is_testnet"],
         true
     );
 
@@ -588,7 +588,8 @@ async fn account_snapshot_waits_for_scope_transitions_and_trade_commits() {
     state.account.write().await.available_balance = dec!(42);
     drop(commit);
     assert_eq!(
-        task.await.unwrap()["snapshot"]["account"]["available_balance"],
+        serde_json::to_value(task.await.unwrap()).unwrap()["snapshot"]["account"]
+            ["available_balance"],
         "42"
     );
 }

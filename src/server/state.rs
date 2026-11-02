@@ -14,7 +14,7 @@ use tokio::sync::{broadcast, mpsc, watch, Mutex, OwnedRwLockReadGuard, RwLock};
 use tracing::{error, warn};
 
 #[path = "snapshot.rs"]
-mod snapshot;
+pub(crate) mod snapshot;
 
 /// Coordinates the filled-position limit across all currently configured strategies.
 pub(crate) struct GlobalPositionLimit {

@@ -50,6 +50,17 @@ export interface Snapshot {
   active_orders: Order[]; recent_trades: Trade[]; recent_logs: Log[];
   hourly_trade_stats: { window_start: string; window_end: string; realized_pnl: Decimal; pending_pnl_count: number; buckets: { hour_start: string; buy_count: number; sell_count: number }[] } | null;
 }
+export interface AccountSnapshot {
+  mode: Mode;
+  snapshot: Pick<Snapshot, 'symbol' | 'dry_run' | 'account'> & {
+    grid_config: Pick<GridConfig, 'is_testnet'>;
+    position: Pick<Snapshot['position'], 'unrealized_pnl'>;
+  };
+}
+export interface AccountFrame { pairs: AccountSnapshot[] }
+export type SocketMessage =
+  | { type: 'snapshot'; data: Snapshot }
+  | { type: 'accounts'; data: AccountFrame };
 export interface TodayPnl { window_start: string; window_end: string; groups: { symbol: string; mode: Mode; realized_pnl: Decimal; pending_pnl_count: number }[] }
 export interface Overview { generated_at: string; pairs: { scoped: boolean; mode: Mode; snapshot: Snapshot }[]; today_pnl?: TodayPnl | null }
 export interface HourlySnapshot {

@@ -1,7 +1,7 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterEach, expect, it, vi } from 'vitest';
-import { usePairSnapshot } from '../lib/queries';
+import { usePairSnapshot, useSocket } from '../lib/queries';
 import { tokenStore } from '../lib/api';
 import { pair, snapshot } from './fixtures';
 
@@ -18,6 +18,20 @@ class FakeSocket {
   }
 }
 afterEach(() => { vi.unstubAllGlobals(); FakeSocket.instances = []; });
+it('only delivers the message type expected by a socket', () => {
+  tokenStore.set('test-token');
+  vi.stubGlobal('WebSocket', FakeSocket);
+  const onAccounts = vi.fn();
+  const { result } = renderHook(() => useSocket('/api/accounts/ws', 'accounts', onAccounts));
+  act(() => FakeSocket.instances[0].sendSnapshot('SOLUSDC', '123'));
+  expect(onAccounts).not.toHaveBeenCalled();
+  expect(result.current.connected).toBe(false);
+  const data = { pairs: [] };
+  act(() => FakeSocket.instances[0].onmessage?.({ data: JSON.stringify({ type: 'accounts', data }) }));
+  expect(onAccounts).toHaveBeenCalledWith(data);
+  expect(result.current.connected).toBe(true);
+});
+
 it('ignores late frames after switching pairs and retains the new pair snapshot', async () => {
   tokenStore.set('test-token');
   vi.stubGlobal('WebSocket', FakeSocket);

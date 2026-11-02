@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, pairPath, socketUrl, tokenStore } from './api';
-import type { HourlySnapshot, Overview, Pair, Snapshot } from './types';
+import type { AccountFrame, HourlySnapshot, Overview, Pair, Snapshot, SocketMessage } from './types';
 
 const SOCKET_LIVE_MS = 5000;
 const HTTP_FALLBACK_MS = 3000;
@@ -17,8 +17,10 @@ export function useOverviewHistory() {
   return useQuery({ queryKey: ['overview-history'], queryFn: ({ signal }) => api<HourlySnapshot[]>('/api/overview/history', { signal }), refetchInterval: 60_000 });
 }
 
-export function useSocket<T>(path: string | undefined, onData: (data: T) => void) {
-  const callback = useRef(onData);
+type SocketDataByType = { [Message in SocketMessage as Message['type']]: Message['data'] };
+
+export function useSocket<T extends keyof SocketDataByType>(path: string | undefined, type: T, onData: (data: SocketDataByType[T]) => void) {
+  const callback = useRef<(data: SocketDataByType[T]) => void>(onData);
   callback.current = onData;
   const [lastReceived, setLastReceived] = useState(0);
   const [connected, setConnected] = useState(false);
@@ -34,9 +36,9 @@ export function useSocket<T>(path: string | undefined, onData: (data: T) => void
       socket.onmessage = event => {
         if (stopped) return;
         try {
-          const envelope = JSON.parse(event.data);
-          if (!['snapshot', 'accounts'].includes(envelope.type)) return;
-          callback.current(envelope.data);
+          const envelope = JSON.parse(event.data) as SocketMessage;
+          if (envelope.type !== type) return;
+          callback.current(envelope.data as SocketDataByType[T]);
           attempts = 0; setConnected(true); setLastReceived(Date.now());
         } catch { /* Ignore malformed frames; HTTP remains the fallback. */ }
       };
@@ -49,7 +51,7 @@ export function useSocket<T>(path: string | undefined, onData: (data: T) => void
     };
     connect();
     return () => { stopped = true; clearTimeout(retry); socket?.close(); };
-  }, [path]);
+  }, [path, type]);
   return { lastReceived, connected };
 }
 
@@ -63,7 +65,7 @@ export function usePairSnapshot(pair: Pair | undefined) {
     void client.cancelQueries({ queryKey: key });
     client.setQueryData(key, data);
   };
-  const socket = useSocket<Snapshot>(pair && pairPath(pair, 'ws'), acceptSnapshot);
+  const socket = useSocket(pair && pairPath(pair, 'ws'), 'snapshot', acceptSnapshot);
   const query = useQuery({
     queryKey: key,
     queryFn: ({ signal }) => api<Snapshot>(pairPath(pair!, 'status'), { signal }),
@@ -82,10 +84,9 @@ export function usePairSnapshot(pair: Pair | undefined) {
   return { ...query, live: socket.connected && now - socket.lastReceived < SOCKET_LIVE_MS, stale: now - query.dataUpdatedAt > SNAPSHOT_STALE_MS };
 }
 
-type AccountFrame = { pairs: { mode: Overview['pairs'][number]['mode']; snapshot: Pick<Snapshot, 'symbol' | 'dry_run' | 'account'> & { position: Pick<Snapshot['position'], 'unrealized_pnl'> } }[] };
 export function useLiveAccounts(overview: Overview | undefined) {
   const [frame, setFrame] = useState<AccountFrame>();
-  const stream = useSocket<AccountFrame>('/api/accounts/ws', setFrame);
+  const stream = useSocket('/api/accounts/ws', 'accounts', setFrame);
   if (Date.now() - stream.lastReceived > SOCKET_LIVE_MS) return overview?.pairs ?? [];
   const accounts = new Map<AccountFrame['pairs'][number]['mode'], Map<string, AccountFrame['pairs'][number]>>();
   for (const account of frame?.pairs ?? []) {

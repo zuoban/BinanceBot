@@ -1,8 +1,10 @@
 use super::AppState;
 use crate::config::AppConfig;
 use crate::db::Database;
-use crate::types::{BotSnapshot, HourlyTradeStats, OrderSide, TradingMode};
+use crate::types::{AccountInfo, BotSnapshot, HourlyTradeStats, OrderSide, TradingMode};
 use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
+use serde::Serialize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
@@ -11,6 +13,37 @@ use tracing::warn;
 const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(800);
 const TRADE_CACHE_TTL: Duration = Duration::from_secs(5);
 const QUERY_RETRY_DELAY: Duration = Duration::from_secs(5);
+
+#[derive(Serialize)]
+pub(crate) struct AccountSnapshot {
+    mode: TradingMode,
+    snapshot: AccountSnapshotData,
+}
+
+#[derive(Serialize)]
+struct AccountSnapshotData {
+    symbol: String,
+    dry_run: bool,
+    grid_config: AccountGridConfig,
+    position: AccountPosition,
+    account: AccountInfo,
+}
+
+#[derive(Serialize)]
+struct AccountGridConfig {
+    is_testnet: bool,
+}
+
+#[derive(Serialize)]
+struct AccountPosition {
+    unrealized_pnl: Decimal,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+pub(crate) enum AccountMessage {
+    Accounts { pairs: Vec<AccountSnapshot> },
+}
 
 #[derive(Clone, PartialEq, Eq)]
 struct SnapshotScope {
@@ -117,7 +150,7 @@ impl SnapshotCache {
 }
 
 impl AppState {
-    pub(crate) async fn account_snapshot(&self) -> serde_json::Value {
+    pub(crate) async fn account_snapshot(&self) -> AccountSnapshot {
         // Match the full snapshot's lock order so a scope transition or trade
         // commit cannot expose a partially updated account view.
         let _scope = self.snapshot_scope_lock.read().await;
@@ -125,16 +158,18 @@ impl AppState {
         let config = self.config.read().await;
         let unrealized_pnl = self.position.read().await.unrealized_pnl;
         let account = self.account.read().await.clone();
-        serde_json::json!({
-            "mode": TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet),
-            "snapshot": {
-                "symbol": config.exchange.symbol,
-                "dry_run": config.exchange.dry_run,
-                "grid_config": { "is_testnet": config.exchange.is_testnet },
-                "position": { "unrealized_pnl": unrealized_pnl },
-                "account": account,
-            }
-        })
+        AccountSnapshot {
+            mode: TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet),
+            snapshot: AccountSnapshotData {
+                symbol: config.exchange.symbol.clone(),
+                dry_run: config.exchange.dry_run,
+                grid_config: AccountGridConfig {
+                    is_testnet: config.exchange.is_testnet,
+                },
+                position: AccountPosition { unrealized_pnl },
+                account,
+            },
+        }
     }
 
     pub async fn snapshot(&self) -> BotSnapshot {
