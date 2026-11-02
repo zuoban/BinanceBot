@@ -14,6 +14,9 @@ async fn engines() -> (GridTradingEngine, GridTradingEngine, Arc<Database>) {
     let db = Arc::new(Database::open(":memory:").unwrap());
     db.save_config(&config).unwrap();
     let commit = Arc::new(tokio::sync::Mutex::new(()));
+    let account_cache = Arc::new(AccountCache::default());
+    let position_cache = Arc::new(PositionCache::default());
+    let market_cache = Arc::new(MarketCache::default());
     let mut engines = Vec::new();
     for (config, price) in config
         .strategy_configs()
@@ -29,7 +32,15 @@ async fn engines() -> (GridTradingEngine, GridTradingEngine, Arc<Database>) {
             &config.exchange,
             "http://127.0.0.1:1".into(),
         ));
-        engines.push(GridTradingEngine::new(state, client, rx, ticker_rx));
+        engines.push(GridTradingEngine::new_with_caches(
+            state,
+            client,
+            rx,
+            ticker_rx,
+            account_cache.clone(),
+            position_cache.clone(),
+            market_cache.clone(),
+        ));
     }
     let second = engines.pop().unwrap();
     let first = engines.pop().unwrap();
@@ -175,15 +186,14 @@ async fn live_pair_sync_shares_account_but_keeps_positions_and_assets_separate()
     let url = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let (mut sol, mut btc, _) = engines().await;
-    let cache = Arc::new(AccountCache::default());
-    let position_cache = Arc::new(PositionCache::default());
+    assert!(Arc::ptr_eq(&sol.account_cache, &btc.account_cache));
+    assert!(Arc::ptr_eq(&sol.position_cache, &btc.position_cache));
+    assert!(Arc::ptr_eq(&sol.market_cache, &btc.market_cache));
     for engine in [&mut sol, &mut btc] {
         engine.client = Arc::new(BinanceFuturesClient::with_base_url(
             &engine.state.config.read().await.exchange,
             url.clone(),
         ));
-        engine.set_account_cache(cache.clone());
-        engine.set_position_cache(position_cache.clone());
     }
     let (sol_ok, btc_ok) = tokio::join!(
         sol.sync_account_and_position_inner(true),

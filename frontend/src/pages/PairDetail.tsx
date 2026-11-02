@@ -2,7 +2,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { Alert, Button, Card, Col, Descriptions, Row, Space, Statistic, Tabs, Tag } from 'antd';
 import { SettingOutlined } from '@ant-design/icons';
 import { usePairSnapshot, usePairs } from '../lib/queries';
-import { accountGroups, number, price, quoteAsset, todayTradeCounts } from '../lib/format';
+import { accountGroups, modeOf, number, price, quoteAsset, todayTradeCounts } from '../lib/format';
 import { ErrorNotice, ModeTag, PageBreadcrumb, PageTitle, Pnl, StatusTag } from '../components/Common';
 import { PairControls, useControls } from '../components/Controls';
 import { DepthChart, HourlyChart } from '../components/Charts';
@@ -23,7 +23,7 @@ export default function PairDetail() {
   const today = s ? todayTradeCounts(s) : null;
   useDocumentTitle(`${s && Number(s.ticker.mark_price) > 0 ? price(s.ticker.mark_price) : '--'} | ${today?.buy ?? '--'}B | ${today?.sell ?? '--'}S`);
   const todayPnl = today && s?.hourly_trade_stats && s.hourly_trade_stats.pending_pnl_count === 0 ? s.hourly_trade_stats.realized_pnl : null;
-  const currentPair = pair && s ? { ...pair, status: s.status, grid_config: s.grid_config, mode: s.dry_run ? 'PAPER' as const : s.grid_config.is_testnet ? 'TESTNET' as const : 'LIVE' as const } : pair;
+  const currentPair = pair && s ? { ...pair, status: s.status, grid_config: s.grid_config, mode: modeOf(s) } : pair;
   return <div className="pair-detail">
     <PageBreadcrumb items={[{ label: '策略总览', to: '/' }, { label: symbol ?? '策略详情' }]} />
     <PageTitle title={symbol ?? '策略详情'} description="行情、网格与成交，随策略实时更新。"

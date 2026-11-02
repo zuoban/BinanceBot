@@ -423,10 +423,15 @@ impl TradingRuntime {
                 )
                 .await;
         }
-        let mut engine = GridTradingEngine::new(state.clone(), client, action_rx, ticker_rx);
-        engine.set_account_cache(self.account_cache.clone());
-        engine.set_position_cache(self.position_cache.clone());
-        engine.set_market_cache(self.market_cache.clone());
+        let mut engine = GridTradingEngine::new_with_caches(
+            state.clone(),
+            client,
+            action_rx,
+            ticker_rx,
+            self.account_cache.clone(),
+            self.position_cache.clone(),
+            self.market_cache.clone(),
+        );
         engine.set_market_stream_tx(market_tx);
         let stream = BinanceWsStream::new(market_rx, ticker_tx);
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);

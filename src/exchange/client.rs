@@ -584,25 +584,6 @@ impl BinanceFuturesClient {
         Ok(())
     }
 
-    /// Cancel all open orders for symbol
-    pub async fn cancel_all_orders(&self, symbol: &str) -> Result<()> {
-        self.reserve(1, RequestClass::Critical)?;
-        let ts = self.current_timestamp();
-        let query = format!(
-            "symbol={}&recvWindow={}&timestamp={}",
-            symbol, self.recv_window, ts
-        );
-        let signed_query = self.sign_params(&query);
-        let url = format!("{}/fapi/v1/allOpenOrders?{}", self.base_url, signed_query);
-
-        let resp = self.send(self.client.delete(&url)).await?;
-        if !resp.status().is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("Failed to cancel all orders: {}", body));
-        }
-        Ok(())
-    }
-
     /// Fetch position risk information for symbol
     pub async fn get_position(&self, symbol: &str) -> Result<Option<BinancePositionRisk>> {
         self.reserve(5, RequestClass::Critical)?;
@@ -655,31 +636,6 @@ impl BinanceFuturesClient {
 
         let acc: BinanceAccountInfoResponse = resp.json().await?;
         Ok(acc)
-    }
-
-    /// Request a user data stream listenKey
-    pub async fn get_listen_key(&self) -> Result<String> {
-        self.reserve(1, RequestClass::Normal)?;
-        let url = format!("{}/fapi/v1/listenKey", self.base_url);
-        let resp = self.send(self.client.post(&url)).await?;
-        if !resp.status().is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("Failed to obtain listenKey: {}", body));
-        }
-        let res: BinanceListenKeyResponse = resp.json().await?;
-        Ok(res.listen_key)
-    }
-
-    /// Keepalive user data stream listenKey
-    pub async fn keepalive_listen_key(&self) -> Result<()> {
-        self.reserve(1, RequestClass::Normal)?;
-        let url = format!("{}/fapi/v1/listenKey", self.base_url);
-        let resp = self.send(self.client.put(&url)).await?;
-        if !resp.status().is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("Failed to keepalive listenKey: {}", body));
-        }
-        Ok(())
     }
 }
 

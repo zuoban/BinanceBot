@@ -292,12 +292,32 @@ impl GridTradingEngine {
         action_rx: mpsc::Receiver<BotControlAction>,
         ticker_rx: broadcast::Receiver<TickerInfo>,
     ) -> Self {
+        Self::new_with_caches(
+            state,
+            client,
+            action_rx,
+            ticker_rx,
+            Arc::new(AccountCache::default()),
+            Arc::new(PositionCache::default()),
+            Arc::new(MarketCache::default()),
+        )
+    }
+
+    pub(crate) fn new_with_caches(
+        state: Arc<AppState>,
+        client: Arc<BinanceFuturesClient>,
+        action_rx: mpsc::Receiver<BotControlAction>,
+        ticker_rx: broadcast::Receiver<TickerInfo>,
+        account_cache: Arc<AccountCache>,
+        position_cache: Arc<PositionCache>,
+        market_cache: Arc<MarketCache>,
+    ) -> Self {
         Self {
             state,
             client,
-            account_cache: Arc::new(AccountCache::default()),
-            position_cache: Arc::new(PositionCache::default()),
-            market_cache: Arc::new(MarketCache::default()),
+            account_cache,
+            position_cache,
+            market_cache,
             action_rx,
             ticker_rx,
             pnl_reconcile_offset: 0,
@@ -316,18 +336,6 @@ impl GridTradingEngine {
 
     pub fn set_market_stream_tx(&mut self, tx: watch::Sender<(String, bool)>) {
         self.market_stream_tx = Some(tx);
-    }
-
-    pub(crate) fn set_market_cache(&mut self, cache: Arc<MarketCache>) {
-        self.market_cache = cache;
-    }
-
-    pub(crate) fn set_account_cache(&mut self, cache: Arc<AccountCache>) {
-        self.account_cache = cache;
-    }
-
-    pub(crate) fn set_position_cache(&mut self, cache: Arc<PositionCache>) {
-        self.position_cache = cache;
     }
 
     async fn pause_trading(&self) {

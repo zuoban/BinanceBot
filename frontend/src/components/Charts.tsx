@@ -33,7 +33,7 @@ export function HourlyChart({ snapshot }: { snapshot: Snapshot }) {
   </>;
 }
 export function DepthChart({ snapshot }: { snapshot: Snapshot }) {
-  const orders = [...snapshot.active_orders].sort((a, b) => Number(b.price) - Number(a.price));
+  const orders = snapshot.active_orders;
   if (!orders.length) return <NoData />;
   const mark = Number(snapshot.ticker.mark_price);
   const entries = orders.map(order => ({ kind: 'order' as const, value: Number(order.price), order }));

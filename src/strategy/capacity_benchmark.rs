@@ -410,10 +410,15 @@ async fn simulated_live_reconciliation() {
             url.clone(),
             limiter.clone(),
         ));
-        let mut engine = GridTradingEngine::new(state, client, action_rx, ticker_rx);
-        engine.set_account_cache(account_cache.clone());
-        engine.set_position_cache(position_cache.clone());
-        engine.set_market_cache(market_cache.clone());
+        let mut engine = GridTradingEngine::new_with_caches(
+            state,
+            client,
+            action_rx,
+            ticker_rx,
+            account_cache.clone(),
+            position_cache.clone(),
+            market_cache.clone(),
+        );
         tasks.push(tokio::spawn(async move {
             let offset = Duration::from_millis((i as u64 * 3000) / pairs as u64);
             let period = Duration::from_secs(3);

@@ -19,7 +19,6 @@ url = "2.5"
 
 axum = { version = "0.7", features = ["ws"] }
 tower = { version = "0.5" }
-tower-http = { version = "0.6", features = ["cors", "trace"] }
 
 rust_decimal = { version = "1.36", features = ["serde-str", "maths"] }
 rust_decimal_macros = "1.36"

@@ -313,9 +313,15 @@ async fn simulated_live_orders_and_fills() {
             url.clone(),
             limiter.clone(),
         ));
-        let mut engine = GridTradingEngine::new(state, client, rx, ticks);
-        engine.set_account_cache(account_cache.clone());
-        engine.set_position_cache(position_cache.clone());
+        let engine = GridTradingEngine::new_with_caches(
+            state,
+            client,
+            rx,
+            ticks,
+            account_cache.clone(),
+            position_cache.clone(),
+            Arc::new(MarketCache::default()),
+        );
         engines.push(engine);
     }
     // Exclude setup and final validation reads from the measured window.

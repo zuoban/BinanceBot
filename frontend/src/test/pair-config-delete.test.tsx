@@ -32,8 +32,8 @@ beforeEach(() => {
   vi.stubGlobal('matchMedia', vi.fn().mockImplementation(query => ({ matches: false, media: query, addListener: vi.fn(), removeListener: vi.fn(), addEventListener: vi.fn(), removeEventListener: vi.fn() })));
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
 });
-function setup(request: Promise<unknown>, initialPath = '/pairs/BTCUSDC/config', configError?: Error, symbols = (path: string): Promise<string[]> => Promise.resolve(path.includes('testnet') ? ['ETHUSDT'] : ['BTCUSDC', 'SOLUSDC'])) {
-  mocks.api.mockImplementation((path: string, init?: RequestInit) => path.startsWith('/api/exchange/symbols?') ? symbols(path) : init?.method === 'DELETE' ? request : configError ? Promise.reject(configError) : Promise.resolve({ ...pair('BTCUSDC').grid_config, config_version: 'version-1' }));
+function setup(request: Promise<unknown>, initialPath = '/pairs/BTCUSDC/config', configError?: Error, symbols = (path: string): Promise<string[]> => Promise.resolve(path.includes('testnet') ? ['ETHUSDT'] : ['BTCUSDC', 'SOLUSDC']), postOnly = true) {
+  mocks.api.mockImplementation((path: string, init?: RequestInit) => path.startsWith('/api/exchange/symbols?') ? symbols(path) : init?.method === 'DELETE' ? request : configError ? Promise.reject(configError) : Promise.resolve({ ...pair('BTCUSDC').grid_config, post_only: postOnly, config_version: 'version-1' }));
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const router = createMemoryRouter([{ element: <Shell />, children: [
     { path: '/', element: <div>总览页面</div> },
@@ -155,11 +155,13 @@ function expectDisabledAncestors(labels: string[]) {
 it('submits the new strategy defaults', async () => {
   mocks.post.mockResolvedValue('SOLUSDC');
   setup(Promise.resolve(), '/pairs/new');
+  expect(screen.getByText('订单仅作为挂单成交（Post Only）；如果订单会立即成交，交易所会拒绝该订单。')).toBeInTheDocument();
+  expect(screen.queryByRole('checkbox', { name: /Post Only/ })).not.toBeInTheDocument();
   const user = userEvent.setup();
   await selectSymbol(user, 'SOLUSDC');
   await user.click(screen.getByRole('button', { name: '保存并添加' }));
   await waitFor(() => expect(mocks.post).toHaveBeenCalledWith('/api/pairs', expect.objectContaining({
-    symbol: 'SOLUSDC', buy_window: 3, sell_window: 3, max_position_usdc: '1000', pause_on_max_position: true,
+    symbol: 'SOLUSDC', buy_window: 3, sell_window: 3, max_position_usdc: '1000', pause_on_max_position: true, post_only: true,
   })));
 });
 
@@ -281,9 +283,19 @@ it('returns to detail after saving changed parameters', async () => {
   await user.click(screen.getByRole('button', { name: '保存并立即生效' }));
   expect(await screen.findByRole('heading', { name: 'BTCUSDC' })).toBeInTheDocument();
   expect(router.state.location.pathname).toBe('/pairs/BTCUSDC');
-  expect(mocks.post).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ baseline_version: 'version-1' }));
+  expect(mocks.post).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ baseline_version: 'version-1', post_only: true }));
   expect(mocks.confirm).not.toHaveBeenCalled();
 }, 15000);
+
+it('enables post-only when saving a legacy configuration', async () => {
+  setup(Promise.resolve(), '/pairs/BTCUSDC/config', undefined, undefined, false);
+  mocks.post.mockResolvedValue(pair('BTCUSDC').grid_config);
+  const user = userEvent.setup();
+  const input = await screen.findByLabelText('网格间距');
+  await waitFor(() => expect(input).toBeEnabled());
+  await user.click(screen.getByRole('button', { name: '保存并立即生效' }));
+  await waitFor(() => expect(mocks.post).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ baseline_version: 'version-1', post_only: true })));
+});
 
 it('保留冲突时的输入，并在确认后重新加载版本', async () => {
   setup(Promise.resolve());

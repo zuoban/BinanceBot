@@ -925,14 +925,6 @@ impl Database {
         save_config_on(&conn, &saved)
     }
 
-    pub fn save_server_config(&self, server: &crate::config::ServerConfig) -> Result<()> {
-        server.socket_addr()?;
-        let conn = self.conn.lock().unwrap();
-        let mut saved = load_required_config_on(&conn)?;
-        saved.server = server.clone();
-        save_config_on(&conn, &saved)
-    }
-
     pub fn save_server_config_checked(
         &self,
         server: &crate::config::ServerConfig,
@@ -2649,10 +2641,13 @@ mod tests {
         added.grid.grid_interval = dec!(10);
         added.exchange.recv_window = 9000;
         db.add_pair_config(&added).unwrap();
-        db.save_server_config(&crate::config::ServerConfig {
-            host: "127.0.0.1".into(),
-            port: 9090,
-        })
+        db.save_server_config_checked(
+            &crate::config::ServerConfig {
+                host: "127.0.0.1".into(),
+                port: 9090,
+            },
+            None,
+        )
         .unwrap();
         added.grid.buy_window = 3;
         db.save_pair_config("BTCUSDT", &added).unwrap();

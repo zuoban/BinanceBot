@@ -1,7 +1,7 @@
 import { useContext, useEffect, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
 import { useNavigate, useParams } from 'react-router-dom';
-import { Alert, App, Button, Card, Checkbox, Col, Form, Input, InputNumber, Row, Select, Space, Switch } from 'antd';
+import { Alert, App, Button, Card, Col, Form, Input, InputNumber, Row, Select, Space, Switch } from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, ApiError, pairPath, post } from '../lib/api';
 import { usePairs } from '../lib/queries';
@@ -10,8 +10,8 @@ import type { GridConfig } from '../lib/types';
 import { ErrorNotice, PageBreadcrumb, PageTitle } from '../components/Common';
 import { useDeleteStrategy } from '../components/DeleteStrategy';
 
-type FormValues = Omit<GridConfig, 'dry_run' | 'is_testnet'> & { mode: 'PAPER' | 'TESTNET' | 'LIVE' };
-const defaults: FormValues = { symbol: '', direction: 'LONG', grid_interval: '0.1', order_amount_usdc: '100', buy_window: 3, sell_window: 3, post_only: true, mode: 'PAPER', min_price: null, max_price: null, max_position_usdc: '1000', pause_on_max_position: true };
+type FormValues = Omit<GridConfig, 'dry_run' | 'is_testnet' | 'post_only'> & { mode: 'PAPER' | 'TESTNET' | 'LIVE' };
+const defaults: FormValues = { symbol: '', direction: 'LONG', grid_interval: '0.1', order_amount_usdc: '100', buy_window: 3, sell_window: 3, mode: 'PAPER', min_price: null, max_price: null, max_position_usdc: '1000', pause_on_max_position: true };
 function toForm(c: GridConfig): FormValues {
   return { ...c, mode: c.dry_run ? 'PAPER' : c.is_testnet ? 'TESTNET' : 'LIVE' };
 }
@@ -49,7 +49,7 @@ export default function PairConfig() {
       if (!adding && (typeof baseline.current?.config.config_version !== 'string' || !baseline.current.config.config_version || baseline.current.symbol !== symbol)) throw new Error('无法确认配置版本，请重新加载策略配置');
       return post<GridConfig | string>(adding ? '/api/pairs' : pairPath(pair!, 'config'), {
         ...fields, ...(!adding && { baseline_version: baseline.current?.config.config_version }), symbol: fields.symbol.trim().toUpperCase(),
-        dry_run: mode === 'PAPER', is_testnet: mode === 'TESTNET',
+        dry_run: mode === 'PAPER', is_testnet: mode === 'TESTNET', post_only: true,
         min_price: fields.min_price || null, max_price: fields.max_price || null, max_position_usdc: fields.max_position_usdc || null,
       });
     },
@@ -127,7 +127,7 @@ export default function PairConfig() {
       <Card title="价格范围与订单" className="form-card"><Row gutter={20}>
           <Col xs={24} md={12}><Form.Item name="min_price" label="最低价格（可选）"><InputNumber stringMode min="0" style={{ width: '100%' }} /></Form.Item></Col>
           <Col xs={24} md={12}><Form.Item name="max_price" label="最高价格（可选）"><InputNumber stringMode min="0" style={{ width: '100%' }} /></Form.Item></Col>
-          <Col span={24}><Form.Item name="post_only" valuePropName="checked"><Checkbox>仅挂单（Post Only）</Checkbox></Form.Item></Col>
+          <Col span={24}><p className="muted">订单仅作为挂单成交（Post Only）；如果订单会立即成交，交易所会拒绝该订单。</p></Col>
         </Row>
       </Card>
       <div className="save-bar"><span className="muted" role="status">{edit.dirty ? '有未保存的修改' : '所有修改已保存'}</span><Space wrap>
