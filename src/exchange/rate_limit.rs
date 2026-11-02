@@ -10,6 +10,7 @@ const TEN_SECONDS: Duration = Duration::from_secs(10);
 // Conservative local ceilings leave room for other applications and emergency work.
 const IP_NORMAL: u64 = 1800;
 const IP_CRITICAL: u64 = 2280;
+const PNL_RECONCILIATION_1M: u64 = 60;
 const ORDERS_NORMAL_10S: u64 = 100;
 const ORDERS_CRITICAL_10S: u64 = 150;
 const ORDERS_NORMAL_1M: u64 = 1000;
@@ -19,6 +20,7 @@ const ORDERS_CRITICAL_1M: u64 = 1100;
 pub(crate) enum RequestClass {
     Normal,
     MarketFallback,
+    PnlReconciliation,
     Critical,
     OpeningOrder,
     ClosingOrder,
@@ -100,6 +102,7 @@ struct AccountLimits {
 #[derive(Default)]
 struct EndpointLimits {
     weight: Counter,
+    pnl_reconciliation_weight: Counter,
     accounts: HashMap<[u8; 32], AccountLimits>,
     blocked_until: Option<Instant>,
     ip_limit: Option<u64>,
@@ -145,6 +148,21 @@ impl RateLimiter {
                 "local Binance IP request-weight budget reached ({weight_limit}/minute)"
             ));
         }
+        if matches!(class, RequestClass::PnlReconciliation) {
+            endpoint.pnl_reconciliation_weight.prune(now, MINUTE);
+            // Keep ordinary requests viable even when Binance advertises a lower limit.
+            let pnl_limit = PNL_RECONCILIATION_1M.min(weight_limit / 4);
+            if endpoint
+                .pnl_reconciliation_weight
+                .local()
+                .saturating_add(weight)
+                > pnl_limit
+            {
+                return Err(format!(
+                    "local Binance PnL reconciliation request-weight budget reached ({pnl_limit}/minute)"
+                ));
+            }
+        }
         let account = endpoint.accounts.entry(account).or_default();
         account.orders_10s.prune(now, TEN_SECONDS);
         account.orders_1m.prune(now, MINUTE);
@@ -173,6 +191,9 @@ impl RateLimiter {
         }
         if weight > 0 {
             endpoint.weight.record(now, weight);
+            if matches!(class, RequestClass::PnlReconciliation) {
+                endpoint.pnl_reconciliation_weight.record(now, weight);
+            }
         }
         Ok(())
     }
@@ -300,6 +321,90 @@ mod tests {
             .is_ok());
         assert!(limiter
             .reserve("testnet", [1; 32], 1, RequestClass::Normal)
+            .is_ok());
+    }
+
+    #[test]
+    fn pnl_budget_is_shared_across_accounts_and_preserves_other_capacity() {
+        let limiter = RateLimiter::default();
+        limiter
+            .reserve("main", [1; 32], 40, RequestClass::PnlReconciliation)
+            .unwrap();
+        limiter
+            .reserve("main", [2; 32], 20, RequestClass::PnlReconciliation)
+            .unwrap();
+        assert!(limiter
+            .reserve("main", [2; 32], 1, RequestClass::PnlReconciliation)
+            .is_err());
+        assert!(limiter
+            .reserve("testnet", [1; 32], 1, RequestClass::PnlReconciliation)
+            .is_ok());
+        limiter
+            .reserve("main", [2; 32], IP_NORMAL - 60, RequestClass::Normal)
+            .unwrap();
+        assert!(limiter
+            .reserve("main", [2; 32], 1, RequestClass::Normal)
+            .is_err());
+        assert!(limiter
+            .reserve("main", [2; 32], 1, RequestClass::Critical)
+            .is_ok());
+    }
+
+    #[test]
+    fn pnl_budget_expires_and_respects_the_normal_budget() {
+        let limiter = RateLimiter::default();
+        limiter
+            .reserve("main", [1; 32], 60, RequestClass::PnlReconciliation)
+            .unwrap();
+        {
+            let mut endpoints = limiter.endpoints.lock().unwrap();
+            let endpoint = endpoints.get_mut("main").unwrap();
+            for (time, _) in &mut endpoint.pnl_reconciliation_weight.events {
+                *time = Instant::now() - MINUTE;
+            }
+        }
+        limiter
+            .reserve("main", [1; 32], 60, RequestClass::PnlReconciliation)
+            .unwrap();
+
+        let other = RateLimiter::default();
+        other
+            .reserve("main", [1; 32], IP_NORMAL - 1, RequestClass::Normal)
+            .unwrap();
+        assert!(other
+            .reserve("main", [1; 32], 2, RequestClass::PnlReconciliation)
+            .is_err());
+        assert!(other
+            .reserve("main", [1; 32], 1, RequestClass::PnlReconciliation)
+            .is_ok());
+        assert!(other
+            .reserve("main", [1; 32], 1, RequestClass::Critical)
+            .is_ok());
+    }
+
+    #[test]
+    fn pnl_budget_scales_down_with_advertised_exchange_limit() {
+        let limiter = RateLimiter::default();
+        limiter.update_exchange_limits(
+            "main",
+            &[BinanceRateLimit {
+                rate_limit_type: "REQUEST_WEIGHT".into(),
+                interval: "MINUTE".into(),
+                interval_num: 1,
+                limit: 100,
+            }],
+        );
+        limiter
+            .reserve("main", [1; 32], 18, RequestClass::PnlReconciliation)
+            .unwrap();
+        assert!(limiter
+            .reserve("main", [2; 32], 1, RequestClass::PnlReconciliation)
+            .is_err());
+        limiter
+            .reserve("main", [2; 32], 57, RequestClass::Normal)
+            .unwrap();
+        assert!(limiter
+            .reserve("main", [2; 32], 20, RequestClass::Critical)
             .is_ok());
     }
 

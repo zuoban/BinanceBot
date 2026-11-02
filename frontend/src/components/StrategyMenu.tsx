@@ -17,7 +17,7 @@ export function StrategyMenu({ pair, stale }: { pair: Pair; stale: boolean }) {
       { type: 'divider' },
       { key: running ? 'pause' : 'resume', icon: running ? <PauseOutlined aria-hidden="true" /> : <PlayCircleOutlined aria-hidden="true" />, label: running ? '暂停策略' : stale ? '恢复策略（状态过期）' : '恢复策略', disabled: stale && !running },
       { key: 'cancel_all', icon: <StopOutlined aria-hidden="true" />, label: `撤单并暂停 ${pair.symbol}`, danger: true },
-      { key: 'rebalance', icon: <ReloadOutlined aria-hidden="true" />, label: `重建 ${pair.symbol} 网格`, disabled: stale },
+      { key: 'rebalance', icon: <ReloadOutlined aria-hidden="true" />, label: `重建 ${pair.symbol} 网格`, disabled: stale || !running },
       { type: 'divider' },
       { key: 'delete', icon: <DeleteOutlined aria-hidden="true" />, label: '删除策略', danger: true },
     ],

@@ -14,11 +14,13 @@ export async function authenticatedFetch(path: string, init: RequestInit = {}) {
   const headers = new Headers(init.headers);
   if (token) headers.set('Authorization', `Bearer ${token}`);
   if (init.body) headers.set('Content-Type', 'application/json');
+  const timeout = AbortSignal.timeout(15_000);
+  const signal = init.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
   let response: Response;
   try {
-    response = await fetch(path, { ...init, headers, signal: init.signal ?? AbortSignal.timeout(15_000) });
+    response = await fetch(path, { ...init, headers, signal });
   } catch (error) {
-    if (init.signal?.aborted && init.signal.reason?.name !== 'TimeoutError') throw error;
+    if (init.signal?.aborted && signal.reason === init.signal.reason && signal.reason?.name !== 'TimeoutError') throw error;
     throw new ApiError(init.method && init.method !== 'GET'
       ? '请求未完成，操作可能已生效；请刷新状态或查看日志后再操作'
       : '无法连接后端服务，请检查网络后重试', 0);

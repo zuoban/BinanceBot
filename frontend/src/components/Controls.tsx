@@ -53,7 +53,7 @@ export function ControlProvider({ children }: { children: React.ReactNode }) {
         if (!accepted) return false;
       }
       setResults(r => ({ ...r, [pair.symbol]: '正在提交…' }));
-      await post(pairPath(pair, 'control'), { action });
+      await post(pairPath(pair, 'control'), action === 'resume' ? { action, expected_mode: pair.mode } : { action });
       const confirmedState = await confirmControlState(pair, action);
       const result = confirmedState ? (action === 'rebalance' ? '重建请求已提交，请查看挂单及日志' : '已确认') : '已提交，状态尚未确认，请查看日志';
       setResults(r => ({ ...r, [pair.symbol]: result }));
@@ -85,7 +85,7 @@ export function PairControls({ pair, compact = false, stale = false }: { pair: P
     </Tooltip>
     <Dropdown trigger={['click']} menu={{ items: [
       { key: 'cancel_all', label: `撤单并暂停 ${pair.symbol}`, danger: true },
-      { key: 'rebalance', label: `重建 ${pair.symbol} 网格`, disabled: stale },
+      { key: 'rebalance', label: `重建 ${pair.symbol} 网格`, disabled: stale || !running },
     ], onClick: ({ key }) => void run(pair, key as Action) }} disabled={busy.has(pair.symbol)}>
       <Button size={compact ? 'small' : 'middle'} icon={<MoreOutlined />} aria-label={`${pair.symbol} 更多操作`}>更多操作</Button>
     </Dropdown>

@@ -74,8 +74,9 @@ impl GlobalPositionLimit {
         let mut zero_margin = false;
         for state in &states {
             let initialized = state.global_position_initialized.load(Ordering::SeqCst);
-            let mut member_incomplete =
-                !initialized || !state.global_position_ready.load(Ordering::SeqCst);
+            let mut member_incomplete = !initialized
+                || !state.global_position_ready.load(Ordering::SeqCst)
+                || state.paper_restore_failed.load(Ordering::SeqCst);
             let mut config = state.config.read().await.clone();
             if let Some(ref committed) = committed {
                 committed.apply_to(&mut config);
@@ -301,6 +302,7 @@ pub struct AppState {
     pub(crate) global_position_limit: std::sync::OnceLock<std::sync::Weak<GlobalPositionLimit>>,
     pub(crate) global_position_ready: AtomicBool,
     pub(crate) global_position_initialized: AtomicBool,
+    pub(crate) paper_restore_failed: AtomicBool,
     pub(crate) global_cancel_pending: AtomicBool,
     pub(crate) global_cancel_queued: AtomicBool,
     pause_epoch: AtomicU64,
@@ -405,7 +407,7 @@ impl AppState {
                 db.load_bot_status()
             }
         });
-        let initial_status = match saved_status {
+        let mut initial_status = match saved_status {
             Ok(Some(status)) => status,
             Ok(None) if config.exchange.dry_run => BotStatus::Running,
             Ok(None) => BotStatus::Paused,
@@ -434,6 +436,24 @@ impl AppState {
             }
         } else {
             AccountInfo::default()
+        };
+        let mut paper_restore_failed = false;
+        let (initial_position, initial_account) = if config.exchange.dry_run {
+            match db.load_paper_state(&symbol) {
+                Ok(Some(saved)) => saved,
+                Ok(None) => (PositionInfo::default(), initial_account),
+                Err(error) => {
+                    error!(
+                        "Could not restore paper account; starting paused: {}",
+                        error
+                    );
+                    initial_status = BotStatus::Paused;
+                    paper_restore_failed = true;
+                    (PositionInfo::default(), initial_account)
+                }
+            }
+        } else {
+            (PositionInfo::default(), initial_account)
         };
 
         // Preload recent trades from SQLite database
@@ -473,7 +493,7 @@ impl AppState {
                 ..Default::default()
             }),
             stats: RwLock::new(initial_stats),
-            position: RwLock::new(PositionInfo::default()),
+            position: RwLock::new(initial_position),
             account: RwLock::new(initial_account),
             cny_rates,
             active_orders: RwLock::new(HashMap::new()),
@@ -482,6 +502,7 @@ impl AppState {
             global_position_limit: std::sync::OnceLock::new(),
             global_position_ready: AtomicBool::new(false),
             global_position_initialized: AtomicBool::new(false),
+            paper_restore_failed: AtomicBool::new(paper_restore_failed),
             global_cancel_pending: AtomicBool::new(false),
             global_cancel_queued: AtomicBool::new(false),
             pause_epoch: AtomicU64::new(0),
@@ -631,14 +652,16 @@ impl AppState {
             }
             let stored_trade = trade.clone();
             let stored_stats = updated.clone();
+            let stored_paper_state = paper_state.clone();
             match self
                 .db
                 .run_blocking(move |db| {
-                    db.insert_trade_with_recovery(
+                    db.insert_trade_with_paper_recovery(
                         &stored_trade,
                         &stored_stats,
                         pair_intent.as_ref(),
                         consumed_pair_source.as_deref(),
+                        stored_paper_state.as_ref(),
                     )
                 })
                 .await
@@ -1074,6 +1097,24 @@ impl AppState {
             .await
     }
 
+    pub(crate) async fn resume_trading_in_mode(
+        self: &Arc<Self>,
+        expected_mode: TradingMode,
+        expected_epoch: u64,
+    ) -> anyhow::Result<()> {
+        let state = self.clone();
+        tokio::spawn(async move {
+            state
+                .set_trading_status_inner(
+                    BotStatus::Running,
+                    Some(expected_epoch),
+                    Some(expected_mode),
+                )
+                .await
+        })
+        .await?
+    }
+
     pub(crate) async fn pause_for_shutdown(self: &Arc<Self>) -> anyhow::Result<()> {
         let state = self.clone();
         tokio::spawn(async move { state.pause_for_shutdown_inner().await }).await?
@@ -1184,7 +1225,7 @@ impl AppState {
         let state = self.clone();
         tokio::spawn(async move {
             state
-                .set_trading_status_inner(BotStatus::Running, Some(expected_epoch))
+                .set_trading_status_inner(BotStatus::Running, Some(expected_epoch), None)
                 .await
         })
         .await?
@@ -1196,13 +1237,15 @@ impl AppState {
         _reason: Option<&str>,
     ) -> anyhow::Result<()> {
         let state = self.clone();
-        tokio::spawn(async move { state.set_trading_status_inner(status, None).await }).await?
+        tokio::spawn(async move { state.set_trading_status_inner(status, None, None).await })
+            .await?
     }
 
     async fn set_trading_status_inner(
         self: &Arc<Self>,
         status: BotStatus,
         expected_epoch: Option<u64>,
+        expected_mode: Option<TradingMode>,
     ) -> anyhow::Result<()> {
         let global = if status == BotStatus::Running {
             self.global_position_limit
@@ -1226,6 +1269,19 @@ impl AppState {
             self.pause_epoch.fetch_add(1, Ordering::SeqCst);
         }
         let _update = self.status_update_lock.lock().await;
+        if let Some(expected) = expected_mode {
+            let config = self.config.read().await;
+            let current =
+                TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
+            anyhow::ensure!(
+                expected != TradingMode::Unknown && current == expected,
+                "策略运行模式已改变，无法恢复策略"
+            );
+        }
+        anyhow::ensure!(
+            status != BotStatus::Running || !self.paper_restore_failed.load(Ordering::SeqCst),
+            "模拟盘仓位和余额未能恢复，请核对数据并重启"
+        );
         anyhow::ensure!(
             !self.shutdown_guard_cleared.load(Ordering::SeqCst),
             "策略已完成停机，无法修改运行状态"
@@ -1801,6 +1857,37 @@ mod tests {
         pause.await.unwrap().unwrap();
         assert!(resume.await.unwrap().is_err());
         assert_eq!(db.load_bot_status().unwrap(), Some(BotStatus::Paused));
+    }
+
+    #[tokio::test]
+    async fn manual_resume_waiting_for_status_lock_rejects_newer_pause() {
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let (tx, _rx) = mpsc::channel(1);
+        let state = AppState::new(AppConfig::default(), db.clone(), tx);
+        state.pause_trading().await.unwrap();
+        let config = state.config.read().await;
+        let mode = TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
+        drop(config);
+        let epoch = state.pause_epoch();
+        let guard = state.status_update_lock.lock().await;
+        let resume_state = state.clone();
+        let resume =
+            tokio::spawn(async move { resume_state.resume_trading_in_mode(mode, epoch).await });
+        let pause_state = state.clone();
+        let pause = tokio::spawn(async move { pause_state.pause_trading().await });
+        while state.pause_epoch() == epoch {
+            tokio::task::yield_now().await;
+        }
+        drop(guard);
+        assert!(resume.await.unwrap().is_err());
+        pause.await.unwrap().unwrap();
+        assert_eq!(*state.status.read().await, BotStatus::Paused);
+        assert_eq!(db.load_bot_status().unwrap(), Some(BotStatus::Paused));
+        state
+            .resume_trading_in_mode(mode, state.pause_epoch())
+            .await
+            .unwrap();
+        assert_eq!(*state.status.read().await, BotStatus::Running);
     }
 
     #[tokio::test]

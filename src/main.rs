@@ -1,9 +1,11 @@
+mod database_process_lock;
+
 use binance_grid_bot::config::AppConfig;
 use binance_grid_bot::db::Database;
 use binance_grid_bot::lifecycle::shutdown_signal;
 use binance_grid_bot::runtime::TradingRuntime;
 use binance_grid_bot::server::create_managed_router;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,13 +23,34 @@ struct CliArgs {
     #[arg(short, long, default_value = "data/bot.db")]
     db: PathBuf,
 
-    /// API server host (default: 0.0.0.0 for external access)
+    /// API server host (defaults to the saved setting, or 127.0.0.1 for a new database)
     #[arg(long)]
     host: Option<String>,
 
     /// API server port
     #[arg(short, long)]
     port: Option<u16>,
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Initialize a legacy paper account with an empty position and 10000 balance.
+    #[command(
+        long_about = "Initialize a legacy paper account with an empty position and 10000 balance. Historical positions and balances are NOT restored. Only paper trading is affected.\n\nStop the bot before running this command, including any older version that does not honor the process lock. Use a database file with a single hard link. The strategy remains paused after restart; resume it manually after reviewing the new baseline. Existing paper snapshots and scopes without historical paper trades are rejected."
+    )]
+    MigrateLegacyPaper {
+        /// Path to an existing SQLite database file
+        #[arg(long)]
+        db: PathBuf,
+        /// Exact uppercase trading pair, e.g. BTCUSDT
+        #[arg(long)]
+        symbol: String,
+        /// Type INITIALIZE-EMPTY-PAPER-ACCOUNT to confirm the empty starting state
+        #[arg(long)]
+        confirm: String,
+    },
 }
 
 fn load_saved_config(db: &Database) -> anyhow::Result<AppConfig> {
@@ -47,6 +70,40 @@ async fn main() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
     let args = CliArgs::parse();
+    if let Some(Command::MigrateLegacyPaper {
+        db,
+        symbol,
+        confirm,
+    }) = args.command
+    {
+        anyhow::ensure!(
+            confirm == "INITIALIZE-EMPTY-PAPER-ACCOUNT",
+            "Confirmation must be exactly INITIALIZE-EMPTY-PAPER-ACCOUNT"
+        );
+        anyhow::ensure!(
+            (3..=32).contains(&symbol.len())
+                && symbol
+                    .bytes()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()),
+            "Trading pair must contain 3–32 uppercase ASCII letters or digits"
+        );
+        #[cfg(not(unix))]
+        anyhow::bail!("Offline paper migration requires Unix process locking");
+        #[cfg(unix)]
+        {
+            let metadata = std::fs::symlink_metadata(&db)
+                .map_err(|e| anyhow::anyhow!("Cannot inspect existing database {:?}: {}", db, e))?;
+            anyhow::ensure!(
+                metadata.file_type().is_file(),
+                "Migration requires an existing regular database file, not a symlink"
+            );
+            let _process_lock = database_process_lock::DatabaseProcessLock::acquire(&db)?;
+            Database::open(&db)?.initialize_legacy_paper_account(&symbol)?;
+            println!("Initialized paper account for {} with an empty position and 10000 balance. Historical positions and balances were not restored. Restart the bot and manually resume the paused strategy after reviewing the baseline.", symbol);
+            return Ok(());
+        }
+    }
+    let _process_lock = database_process_lock::DatabaseProcessLock::acquire(&args.db)?;
     let db = Arc::new(Database::open(&args.db)?);
     let mut config = load_saved_config(&db)?;
     // These options only select the listening address for this process (e.g. recovery).
@@ -157,12 +214,14 @@ mod tests {
         saved.exchange.symbol = "BTCUSDT".into();
         saved.exchange.api_key = "saved-key".into();
         saved.grid.grid_interval = dec!(10);
+        saved.server.host = "0.0.0.0".into();
         db.save_config(&saved).unwrap();
         let config = load_saved_config(&db).unwrap();
         let strategies = config.strategy_configs().unwrap();
         assert_eq!(strategies.len(), 1);
         assert_eq!(strategies[0].exchange.symbol, "BTCUSDT");
         assert_eq!(strategies[0].exchange.api_key, "saved-key");
+        assert_eq!(config.server.host, "0.0.0.0");
         assert_eq!(strategies[0].grid.grid_interval, dec!(10));
         assert_eq!(
             serde_json::to_value(&config).unwrap(),
@@ -175,6 +234,8 @@ mod tests {
         let db = Database::open(":memory:").unwrap();
         let config = load_saved_config(&db).unwrap();
         config.validate().unwrap();
+        assert_eq!(config.server.host, "127.0.0.1");
+        assert_eq!(load_saved_config(&db).unwrap().server.host, "127.0.0.1");
         assert_eq!(config.pairs.len(), 1);
         let strategy = &config.strategy_configs().unwrap()[0];
         assert!(strategy.exchange.dry_run);

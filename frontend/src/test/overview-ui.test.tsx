@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { App } from 'antd';
 import { MemoryRouter, useLocation } from 'react-router-dom';
@@ -386,4 +386,34 @@ it('does not calculate an available ratio for zero wallet balance', () => {
   overview.data = { generated_at: new Date().toISOString(), pairs };
   render(<MemoryRouter><App><AccountsContext.Provider value={pairs}><OverviewPage /></AccountsContext.Provider></App></MemoryRouter>);
   expect(screen.getByText('可用比例').parentElement).toHaveTextContent('--');
+});
+
+it('marks an unchanged overview stale as time passes and clears the warning on refresh', () => {
+  vi.useFakeTimers();
+  try {
+    overview.dataUpdatedAt = Date.now();
+    overview.data = { generated_at: '', pairs: [{ snapshot: snapshot('BTCUSDC'), mode: 'PAPER', scoped: true }] };
+    const page = <MemoryRouter><App><OverviewPage /></App></MemoryRouter>;
+    const { rerender, unmount } = render(page);
+    expect(screen.queryByText('数据暂未更新，请检查连接')).not.toBeInTheDocument();
+    act(() => { vi.advanceTimersByTime(10_000); });
+    expect(screen.queryByText('数据暂未更新，请检查连接')).not.toBeInTheDocument();
+    act(() => { vi.advanceTimersByTime(1_000); });
+    expect(screen.getByText('数据暂未更新，请检查连接')).toBeInTheDocument();
+    overview.dataUpdatedAt = Date.now();
+    rerender(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+    expect(screen.queryByText('数据暂未更新，请检查连接')).not.toBeInTheDocument();
+    unmount();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('disables rebuilding a paused strategy while keeping resume available', async () => {
+  const paused = snapshot('BTCUSDC'); paused.status = 'PAUSED';
+  overview.data = { generated_at: '', pairs: [{ snapshot: paused, mode: 'PAPER', scoped: true }] };
+  render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+  await userEvent.setup().click(screen.getByRole('button', { name: 'BTCUSDC 更多操作' }));
+  expect(screen.getByRole('menuitem', { name: /重建 BTCUSDC 网格/ })).toHaveAttribute('aria-disabled', 'true');
+  expect(screen.getByRole('menuitem', { name: /恢复策略/ })).not.toHaveAttribute('aria-disabled', 'true');
 });

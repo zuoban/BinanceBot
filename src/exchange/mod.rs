@@ -8,6 +8,9 @@ pub(crate) mod rate_limit;
 pub mod signature;
 pub mod ws;
 
+#[cfg(test)]
+mod fill_pagination_tests;
+
 pub use client::{BinanceFuturesClient, ExchangeError};
 pub use model::*;
 pub use ws::BinanceWsStream;

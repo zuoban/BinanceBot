@@ -52,3 +52,20 @@ it('submits resumes serially even when the first is not confirmed', async () => 
   expect(run).toHaveBeenCalledTimes(2);
   expect(run).toHaveBeenNthCalledWith(2, expect.objectContaining({ symbol: 'BTCUSDC' }), 'resume', true);
 });
+
+it.each(['PAPER', 'TESTNET', 'LIVE'] as const)('binds a confirmed resume to the displayed %s mode', async mode => {
+  vi.mocked(post).mockRejectedValue(new Error('策略运行模式已变化'));
+  const client = new QueryClient();
+  const wrapper = ({ children }: { children: React.ReactNode }) => <QueryClientProvider client={client}><App><ControlProvider>{children}</ControlProvider></App></QueryClientProvider>;
+  const { result, unmount } = renderHook(() => useControls(), { wrapper });
+  try {
+    let accepted = true;
+    await act(async () => { accepted = await result.current.run({ ...pair(), mode }, 'resume', true); });
+    expect(accepted).toBe(false);
+    expect(post).toHaveBeenCalledWith('/api/pairs/SOLUSDC/control', { action: 'resume', expected_mode: mode });
+    expect(result.current.results.SOLUSDC).toContain('策略运行模式已变化');
+  } finally {
+    unmount();
+    client.clear();
+  }
+});

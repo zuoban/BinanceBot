@@ -107,8 +107,10 @@ async fn exchange_server(fake: Exchange) -> (String, JoinHandle<()>) {
         .route("/fapi/v2/account", get(|| async {
             Json(json!({"totalWalletBalance":"10000", "totalMarginBalance":"10000", "totalUnrealizedProfit":"0", "availableBalance":"10000", "assets":[{"asset":"USDC", "walletBalance":"10000", "marginBalance":"10000", "availableBalance":"10000", "unrealizedProfit":"0"}]}))
         }))
-        .route("/fapi/v1/userTrades", get(|| async {
-            Json(json!([{"realizedPnl":"0", "commission":"0.01", "commissionAsset":"USDC", "maker":true}]))
+        .route("/fapi/v1/userTrades", get(|State(fake): State<Exchange>, Query(query): Query<HashMap<String, String>>| async move {
+            let orders = fake.orders.lock().unwrap();
+            let order = orders.values().find(|order| query.get("orderId") == Some(&order.order_id.to_string()));
+            Json(order.map(|order| vec![json!({"id":1, "orderId":order.order_id, "qty":order.executed_qty, "realizedPnl":"0", "commission":"0.01", "commissionAsset":"USDC", "maker":true})]).unwrap_or_default())
         }))
         // A market-data outage must not be masked by successful account APIs.
         .route("/fapi/v1/premiumIndex", get(|| async { (StatusCode::SERVICE_UNAVAILABLE, Json(json!({}))) }))
@@ -182,6 +184,137 @@ fn database() -> Arc<Database> {
     db
 }
 
+async fn resume(engine: &mut GridTradingEngine, expected_mode: TradingMode) -> Result<(), String> {
+    let (reply, response) = tokio::sync::oneshot::channel();
+    engine
+        .handle_control_action(BotControlAction::Resume {
+            expected_mode,
+            expected_epoch: engine.state.pause_epoch(),
+            reply,
+        })
+        .await;
+    response.await.unwrap()
+}
+
+#[tokio::test]
+async fn persisted_pause_actions_preserve_queued_resume_epoch() {
+    let fake = Exchange::default();
+    let (url, server) = exchange_server(fake.clone()).await;
+    for action in [
+        BotControlAction::PauseAlreadyPersisted,
+        BotControlAction::CancelAllAlreadyPersisted,
+    ] {
+        let db = database();
+        let mut engine = engine(db.clone(), &url).await;
+        fake.orders.lock().unwrap().insert(
+            "gb_b_test".into(),
+            BinanceOrderResponse {
+                order_id: 42,
+                client_order_id: "gb_b_test".into(),
+                symbol: "SOLUSDC".into(),
+                status: "NEW".into(),
+                price: dec!(99),
+                avg_price: None,
+                orig_qty: dec!(1),
+                executed_qty: dec!(0),
+                side: "BUY".into(),
+                order_type: "LIMIT".into(),
+                time_in_force: "GTX".into(),
+                update_time: None,
+            },
+        );
+        engine.state.pause_trading().await.unwrap();
+        let epoch = engine.state.pause_epoch();
+        let (reply, response) = tokio::sync::oneshot::channel();
+        let pending = BotControlAction::Resume {
+            expected_mode: TradingMode::Live,
+            expected_epoch: epoch,
+            reply,
+        };
+
+        engine.handle_control_action(action).await;
+        assert_eq!(engine.state.pause_epoch(), epoch);
+        assert_eq!(db.load_bot_status().unwrap(), Some(BotStatus::Paused));
+        assert_eq!(fake.orders.lock().unwrap()["gb_b_test"].status, "CANCELED");
+        engine.handle_control_action(pending).await;
+        assert!(response.await.unwrap().is_ok());
+        assert_eq!(*engine.state.status.read().await, BotStatus::Running);
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn internal_pause_actions_still_persist_pause() {
+    let fake = Exchange::default();
+    let (url, server) = exchange_server(fake).await;
+    for action in [BotControlAction::Pause, BotControlAction::CancelAll] {
+        let db = database();
+        let mut engine = engine(db.clone(), &url).await;
+        let epoch = engine.state.pause_epoch();
+        engine.handle_control_action(action).await;
+        assert!(engine.state.pause_epoch() > epoch);
+        assert_eq!(*engine.state.status.read().await, BotStatus::Paused);
+        assert_eq!(db.load_bot_status().unwrap(), Some(BotStatus::Paused));
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn resume_rejects_changed_and_unknown_modes_before_exchange_work() {
+    let fake = Exchange::default();
+    let (url, server) = exchange_server(fake.clone()).await;
+    let mut engine = engine(database(), &url).await;
+    engine.state.pause_trading().await.unwrap();
+    let mut paper = engine.state.config.read().await.clone();
+    paper.exchange.dry_run = true;
+    engine
+        .state
+        .save_runtime_config(paper.clone())
+        .await
+        .unwrap();
+    let (reply, response) = tokio::sync::oneshot::channel();
+    let pending = BotControlAction::Resume {
+        expected_mode: TradingMode::Paper,
+        expected_epoch: engine.state.pause_epoch(),
+        reply,
+    };
+    paper.exchange.dry_run = false;
+    paper.exchange.is_testnet = false;
+    engine.state.save_runtime_config(paper).await.unwrap();
+    engine.handle_control_action(pending).await;
+    assert!(response.await.unwrap().is_err());
+    assert!(resume(&mut engine, TradingMode::Testnet).await.is_err());
+    assert!(resume(&mut engine, TradingMode::Unknown).await.is_err());
+    assert_eq!(*engine.state.status.read().await, BotStatus::Paused);
+    assert!(!engine.exchange_rules_loaded);
+    assert!(fake.posts.lock().unwrap().is_empty());
+    *engine.state.ticker.write().await = TickerInfo::default();
+    assert!(resume(&mut engine, TradingMode::Live).await.is_ok());
+    assert_eq!(*engine.state.status.read().await, BotStatus::Running);
+    server.abort();
+}
+
+#[tokio::test]
+async fn queued_resume_rejects_a_later_pause() {
+    let fake = Exchange::default();
+    let (url, server) = exchange_server(fake).await;
+    let db = database();
+    let mut engine = engine(db.clone(), &url).await;
+    engine.state.pause_trading().await.unwrap();
+    let (reply, response) = tokio::sync::oneshot::channel();
+    let pending = BotControlAction::Resume {
+        expected_mode: TradingMode::Live,
+        expected_epoch: engine.state.pause_epoch(),
+        reply,
+    };
+    engine.state.pause_trading().await.unwrap();
+    engine.handle_control_action(pending).await;
+    assert!(response.await.unwrap().is_err());
+    assert_eq!(*engine.state.status.read().await, BotStatus::Paused);
+    assert_eq!(db.load_bot_status().unwrap(), Some(BotStatus::Paused));
+    server.abort();
+}
+
 #[tokio::test]
 async fn resume_reloads_rules_after_initialization_failure_and_rejects_invalid_spacing() {
     let fake = Exchange::default();
@@ -192,7 +325,7 @@ async fn resume_reloads_rules_after_initialization_failure_and_rejects_invalid_s
     assert!(engine.initialize().await.is_err());
     engine.state.pause_trading().await.unwrap();
 
-    engine.handle_control_action(BotControlAction::Resume).await;
+    assert!(resume(&mut engine, TradingMode::Live).await.is_err());
     assert_eq!(*engine.state.status.read().await, BotStatus::Paused);
     assert!(!engine.exchange_rules_loaded);
     assert_eq!(engine.state.rules.read().await.tick_size, dec!(0.01));
@@ -200,13 +333,13 @@ async fn resume_reloads_rules_after_initialization_failure_and_rejects_invalid_s
 
     fake.rules_unavailable.store(false, Ordering::SeqCst);
     engine.state.config.write().await.grid.grid_interval = dec!(0.000015);
-    engine.handle_control_action(BotControlAction::Resume).await;
+    assert!(resume(&mut engine, TradingMode::Live).await.is_err());
     assert_eq!(*engine.state.status.read().await, BotStatus::Paused);
     assert_eq!(engine.state.rules.read().await.tick_size, dec!(0.00001));
     assert!(fake.posts.lock().unwrap().is_empty());
 
     engine.state.config.write().await.grid.grid_interval = dec!(0.00005);
-    engine.handle_control_action(BotControlAction::Resume).await;
+    assert!(resume(&mut engine, TradingMode::Live).await.is_ok());
     assert_eq!(*engine.state.status.read().await, BotStatus::Running);
     server.abort();
 }
@@ -226,12 +359,12 @@ async fn paper_resume_retries_rules_after_initialization_failure() {
     engine.state.pause_trading().await.unwrap();
     *engine.state.ticker.write().await = TickerInfo::default();
 
-    engine.handle_control_action(BotControlAction::Resume).await;
+    assert!(resume(&mut engine, TradingMode::Paper).await.is_err());
     assert_eq!(*engine.state.status.read().await, BotStatus::Paused);
     assert!(!engine.exchange_rules_loaded);
 
     fake.rules_unavailable.store(false, Ordering::SeqCst);
-    engine.handle_control_action(BotControlAction::Resume).await;
+    assert!(resume(&mut engine, TradingMode::Paper).await.is_ok());
     assert_eq!(*engine.state.status.read().await, BotStatus::Running);
     assert!(engine.exchange_rules_loaded);
     assert_eq!(engine.state.rules.read().await.tick_size, dec!(0.00001));
@@ -248,7 +381,7 @@ async fn paper_resume_can_use_default_rules_when_exchange_is_unavailable() {
     engine.state.pause_trading().await.unwrap();
     *engine.state.ticker.write().await = TickerInfo::default();
 
-    engine.handle_control_action(BotControlAction::Resume).await;
+    assert!(resume(&mut engine, TradingMode::Paper).await.is_ok());
     assert_eq!(*engine.state.status.read().await, BotStatus::Running);
     assert!(!engine.exchange_rules_loaded);
     assert_eq!(engine.state.rules.read().await.tick_size, dec!(0.01));
@@ -604,9 +737,14 @@ async fn shutdown_skips_queued_resume_and_configuration_then_joins_engine() {
     let mut engine = engine(database(), &url).await;
     let state = engine.state.clone();
     state.request_shutdown();
+    let (resume_reply, resume_response) = tokio::sync::oneshot::channel();
     state
         .action_tx
-        .send(BotControlAction::Resume)
+        .send(BotControlAction::Resume {
+            expected_mode: TradingMode::Live,
+            expected_epoch: state.pause_epoch(),
+            reply: resume_reply,
+        })
         .await
         .unwrap();
     let (reply, response) = tokio::sync::oneshot::channel();
@@ -623,6 +761,7 @@ async fn shutdown_skips_queued_resume_and_configuration_then_joins_engine() {
     stop_engine(&state, &mut task, Duration::from_secs(2))
         .await
         .unwrap();
+    assert!(resume_response.await.unwrap().is_err());
     assert!(response.await.unwrap().is_err());
     assert!(task.is_finished());
     assert_eq!(*state.status.read().await, BotStatus::Paused);

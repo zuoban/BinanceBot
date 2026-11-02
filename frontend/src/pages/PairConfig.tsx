@@ -1,6 +1,6 @@
-import { useContext, useEffect, useRef, useState } from 'react';
+import { useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
-import { useNavigate, useParams } from 'react-router-dom';
+import { UNSAFE_DataRouterContext, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { Alert, App, Button, Card, Col, Form, Input, InputNumber, Row, Select, Space, Switch } from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, ApiError, pairPath, post } from '../lib/api';
@@ -19,6 +19,8 @@ export default function PairConfig() {
   const { symbol } = useParams();
   const adding = !symbol;
   const navigate = useNavigate();
+  const { pathname } = useLocation();
+  const router = useContext(UNSAFE_DataRouterContext)?.router;
   const pairs = usePairs();
   const pair = pairs.data?.find(p => p.symbol === symbol);
   const [form] = Form.useForm<FormValues>();
@@ -28,6 +30,17 @@ export default function PairConfig() {
   const [ready, setReady] = useState(adding);
   const deletion = useDeleteStrategy();
   const removing = useRef(false);
+  const submission = useRef<object | null>(null);
+  const page = useRef<object | null>(null);
+  useLayoutEffect(() => {
+    const current = {};
+    page.current = current;
+    const invalidate = () => { if (page.current === current) { page.current = null; submission.current = null; } };
+    // Router state can change before React commits the new route and runs cleanup.
+    const unsubscribe = router?.subscribe(state => { if (state.location.pathname !== pathname) invalidate(); });
+    if (router && router.state.location.pathname !== pathname) invalidate();
+    return () => { unsubscribe?.(); invalidate(); };
+  }, [pathname, router]);
   const baseline = useRef<{ symbol: string; config: GridConfig & { config_version: string } } | null>(null);
   const selectedMode = Form.useWatch('mode', form);
   const environment = selectedMode === 'TESTNET' ? 'testnet' : 'mainnet';
@@ -85,8 +98,17 @@ export default function PairConfig() {
     if (removed) navigate('/');
   };
   const submit = async (values: FormValues) => {
-    if (values.mode === 'LIVE' && !await modal.confirm({ title: '保存实盘配置？', content: '请核对交易对、方向、网格和持仓限制。实盘使用真实资金。', okText: '确认保存', cancelText: '取消' })) return;
-    mutation.mutate(values);
+    if (submission.current || !page.current) return;
+    const currentPage = page.current;
+    const currentSubmission = {};
+    submission.current = currentSubmission;
+    try {
+      if (values.mode === 'LIVE' && !await modal.confirm({ title: '保存实盘配置？', content: '请核对交易对、方向、网格和持仓限制。实盘使用真实资金。', okText: '确认保存', cancelText: '取消' })) return;
+      if (page.current !== currentPage || submission.current !== currentSubmission) return;
+      await mutation.mutateAsync(values).catch(() => { /* Mutation errors are reported by onError. */ });
+    } finally {
+      if (submission.current === currentSubmission) submission.current = null;
+    }
   };
   const formDisabled = !ready || edit.saving || deletion.busy;
   return <>

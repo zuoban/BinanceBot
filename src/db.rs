@@ -2,8 +2,8 @@
 use crate::auth;
 use crate::config::AppConfig;
 use crate::types::{
-    BotStatus, GridOrder, GridStats, HourlyTradeCount, HourlyTradeStats, OrderSide, RemainderPlan,
-    TradeRecord, TradingMode,
+    AccountInfo, BotStatus, GridOrder, GridStats, HourlyTradeCount, HourlyTradeStats, OrderSide,
+    PositionInfo, RemainderPlan, TradeRecord, TradingMode,
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration as ChronoDuration, FixedOffset, Utc};
@@ -71,6 +71,8 @@ pub struct Database {
     path: String,
     trade_revision: AtomicU64,
     trade_revisions: Mutex<TradeRevisions>,
+    trade_clear_revision: AtomicU64,
+    trade_clear_revisions: Mutex<TradeRevisions>,
     #[cfg(test)]
     revision_publish_hook:
         Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
@@ -296,6 +298,8 @@ impl Database {
             path: path_str,
             trade_revision: AtomicU64::new(0),
             trade_revisions: Mutex::new(TradeRevisions::default()),
+            trade_clear_revision: AtomicU64::new(0),
+            trade_clear_revisions: Mutex::new(TradeRevisions::default()),
             #[cfg(test)]
             revision_publish_hook: Mutex::new(None),
             today_pnl_cache: tokio::sync::Mutex::new(None),
@@ -578,6 +582,13 @@ impl Database {
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (symbol, mode)
             );
+            -- Durable account state is independent of deletable trade history.
+            CREATE TABLE IF NOT EXISTS paper_accounts (
+                symbol TEXT PRIMARY KEY,
+                position_json TEXT NOT NULL,
+                account_json TEXT NOT NULL
+            );
+
 
             CREATE TABLE IF NOT EXISTS pair_execution_guard (
                 symbol TEXT NOT NULL,
@@ -952,6 +963,9 @@ impl Database {
             let mut revisions = self.trade_revisions.lock().unwrap();
             let revision = self.trade_revision.fetch_add(1, Ordering::Release) + 1;
             revisions.clear_all(revision);
+            let mut clear_revisions = self.trade_clear_revisions.lock().unwrap();
+            let clear_revision = self.trade_clear_revision.fetch_add(1, Ordering::Release) + 1;
+            clear_revisions.clear_all(clear_revision);
         }
         Ok((deleted_trades, deleted_snapshots))
     }
@@ -991,6 +1005,9 @@ impl Database {
         let mut revisions = self.trade_revisions.lock().unwrap();
         let revision = self.trade_revision.fetch_add(1, Ordering::Release) + 1;
         revisions.changed(symbol, revision);
+        let mut clear_revisions = self.trade_clear_revisions.lock().unwrap();
+        let clear_revision = self.trade_clear_revision.fetch_add(1, Ordering::Release) + 1;
+        clear_revisions.changed(symbol, clear_revision);
         Ok(deleted)
     }
 
@@ -1005,11 +1022,33 @@ impl Database {
         pair_intent: Option<&GridOrder>,
         consumed_pair_source: Option<&str>,
     ) -> Result<bool> {
+        self.insert_trade_with_paper_recovery(trade, stats, pair_intent, consumed_pair_source, None)
+    }
+
+    pub(crate) fn insert_trade_with_paper_recovery(
+        &self,
+        trade: &TradeRecord,
+        stats: &GridStats,
+        pair_intent: Option<&GridOrder>,
+        consumed_pair_source: Option<&str>,
+        paper_state: Option<&(PositionInfo, AccountInfo)>,
+    ) -> Result<bool> {
+        anyhow::ensure!(
+            paper_state.is_none() || trade.mode == TradingMode::Paper,
+            "Paper state requires a paper trade"
+        );
         let mut conn = self.lock_connection("insert_trade_with_recovery");
         let tx = conn.transaction()?;
         let inserted = insert_trade_on(&tx, trade)?;
         if inserted {
             save_scoped_stats_on(&tx, &trade.symbol, trade.mode, stats)?;
+            if let Some((position, account)) = paper_state {
+                tx.execute(
+                    "INSERT INTO paper_accounts (symbol, position_json, account_json) VALUES (?1, ?2, ?3) \
+                     ON CONFLICT(symbol) DO UPDATE SET position_json = excluded.position_json, account_json = excluded.account_json",
+                    params![trade.symbol, serde_json::to_string(position)?, serde_json::to_string(account)?],
+                )?;
+            }
             if let Some(intent) = pair_intent {
                 let parent = intent
                     .paired_client_order_id
@@ -1042,6 +1081,76 @@ impl Database {
             revisions.changed(&trade.symbol, revision);
         }
         Ok(inserted)
+    }
+    pub(crate) fn load_paper_state(
+        &self,
+        symbol: &str,
+    ) -> Result<Option<(PositionInfo, AccountInfo)>> {
+        let conn = self.lock_connection("load_paper_state");
+        let saved: Option<(String, String)> = conn
+            .query_row(
+                "SELECT position_json, account_json FROM paper_accounts WHERE symbol = ?1",
+                params![symbol],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if let Some((position, account)) = saved {
+            return Ok(Some((
+                serde_json::from_str(&position)?,
+                serde_json::from_str(&account)?,
+            )));
+        }
+        // Older versions never stored the account. Cleared history and earlier
+        // restarts make replay ambiguous, so do not invent a balance or position.
+        let legacy = has_legacy_paper_history_on(&conn, symbol)?;
+        anyhow::ensure!(
+            !legacy,
+            "旧模拟盘状态无法从成交历史可靠恢复：{}，请先人工核对并迁移仓位和余额",
+            symbol
+        );
+        Ok(None)
+    }
+
+    /// Explicitly establish a new paper baseline; this cannot recover old holdings.
+    pub fn initialize_legacy_paper_account(&self, symbol: &str) -> Result<()> {
+        let mut conn = self.lock_connection("initialize_legacy_paper_account");
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM paper_accounts WHERE symbol = ?1)",
+            params![symbol],
+            |row| row.get(0),
+        )?;
+        anyhow::ensure!(!exists, "该交易对已有模拟盘状态，拒绝覆盖");
+        anyhow::ensure!(
+            has_legacy_paper_history_on(&tx, symbol)?,
+            "该交易对没有需要迁移的旧模拟盘记录"
+        );
+        let position = PositionInfo {
+            symbol: symbol.to_string(),
+            ..PositionInfo::default()
+        };
+        let balance = rust_decimal_macros::dec!(10000);
+        let account = AccountInfo {
+            asset: crate::types::quote_asset(symbol)
+                .unwrap_or(symbol)
+                .to_string(),
+            total_wallet_balance: balance,
+            available_balance: balance,
+            margin_balance: balance,
+            unrealized_profit: Decimal::ZERO,
+            update_time: Utc::now(),
+        };
+        tx.execute(
+            "INSERT INTO paper_accounts (symbol, position_json, account_json) VALUES (?1, ?2, ?3)",
+            params![
+                symbol,
+                serde_json::to_string(&position)?,
+                serde_json::to_string(&account)?
+            ],
+        )?;
+        save_pair_status_on(&tx, symbol, TradingMode::Paper, BotStatus::Paused)?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn load_pair_intents(&self, symbol: &str, mode: TradingMode) -> Result<Vec<GridOrder>> {
@@ -1481,6 +1590,17 @@ impl Database {
         limit: usize,
         offset: usize,
     ) -> Result<Vec<TradeRecord>> {
+        self.get_unverified_trades_with_clear_revision(symbol, mode, limit, offset)
+            .map(|(trades, _)| trades)
+    }
+
+    pub fn get_unverified_trades_with_clear_revision(
+        &self,
+        symbol: &str,
+        mode: TradingMode,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<TradeRecord>, u64)> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT trade_id, client_order_id, symbol, side, price, quantity, amount_usdc, realized_pnl, commission, pnl_verified, is_maker, timestamp, note, mode FROM trades WHERE symbol = ?1 AND mode = ?2 AND pnl_verified = 0 ORDER BY timestamp DESC LIMIT ?3 OFFSET ?4;",
@@ -1489,8 +1609,21 @@ impl Database {
             params![symbol, mode.as_str(), limit as i64, offset as i64],
             trade_from_row,
         )?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
+        let trades = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        let revision = self
+            .trade_clear_revisions
+            .lock()
+            .unwrap()
+            .for_symbol(symbol);
+        Ok((trades, revision))
+    }
+
+    pub fn symbol_trade_clear_revision(&self, symbol: &str) -> u64 {
+        let _conn = self.conn.lock().unwrap();
+        self.trade_clear_revisions
+            .lock()
+            .unwrap()
+            .for_symbol(symbol)
     }
 
     pub fn get_pnl_totals(
@@ -1631,6 +1764,15 @@ fn save_pair_config_on(conn: &Connection, symbol: &str, config: &AppConfig) -> R
         .with_context(|| format!("交易对 {} 不在已保存的配置中", symbol))?;
     pair.update_from(config);
     save_config_on(conn, &saved)
+}
+
+fn has_legacy_paper_history_on(conn: &Connection, symbol: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM trades WHERE symbol = ?1 AND mode IN ('PAPER', 'UNKNOWN')) \
+         OR EXISTS(SELECT 1 FROM execution_frontiers WHERE symbol = ?1 AND mode IN ('PAPER', 'UNKNOWN')) \
+         OR EXISTS(SELECT 1 FROM cleared_pair_openings WHERE symbol = ?1 AND mode IN ('PAPER', 'UNKNOWN'))",
+        params![symbol], |row| row.get(0),
+    )?)
 }
 
 fn arm_execution_guard_on(conn: &Connection, symbol: &str, mode: TradingMode) -> Result<bool> {
@@ -1978,6 +2120,85 @@ mod tests {
         assert_eq!(db.trade_data_revision(), 4);
         assert_eq!(db.symbol_trade_revision("SOLUSDC"), 4);
         assert_eq!(db.symbol_trade_revision("BTCUSDC"), 4);
+    }
+
+    #[test]
+    fn clear_revisions_track_successful_clears_by_symbol() {
+        let db = Database::open(":memory:").unwrap();
+        let sol = revision_test_trade();
+        let mut btc = sol.clone();
+        btc.trade_id = "btc-trade".into();
+        btc.client_order_id = "btc-order".into();
+        btc.symbol = "BTCUSDC".into();
+        assert!(db.insert_trade(&sol).unwrap());
+        assert!(db.insert_trade(&btc).unwrap());
+
+        let (pending, revision) = db
+            .get_unverified_trades_with_clear_revision("SOLUSDC", TradingMode::Paper, 10, 0)
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(revision, 0);
+        assert_eq!(db.symbol_trade_clear_revision("BTCUSDC"), 0);
+
+        db.conn.lock().unwrap().execute_batch(
+            "CREATE TRIGGER reject_clear BEFORE DELETE ON trades BEGIN SELECT RAISE(ABORT, 'reject'); END;"
+        ).unwrap();
+        assert!(db.clear_trade_history_for_symbol("SOLUSDC").is_err());
+        assert!(db.clear_trade_history().is_err());
+        assert_eq!(db.symbol_trade_clear_revision("SOLUSDC"), 0);
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER reject_clear")
+            .unwrap();
+
+        db.clear_trade_history_for_symbol("SOLUSDC").unwrap();
+        let (pending, sol_revision) = db
+            .get_unverified_trades_with_clear_revision("SOLUSDC", TradingMode::Paper, 10, 0)
+            .unwrap();
+        assert!(pending.is_empty());
+        assert_eq!(sol_revision, 1);
+        let (pending, btc_revision) = db
+            .get_unverified_trades_with_clear_revision("BTCUSDC", TradingMode::Paper, 10, 0)
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(btc_revision, 0);
+
+        db.clear_trade_history_for_symbol("SOLUSDC").unwrap();
+        assert_eq!(db.symbol_trade_clear_revision("SOLUSDC"), 2);
+        db.clear_selected_database(false, true).unwrap();
+        assert_eq!(db.symbol_trade_clear_revision("SOLUSDC"), 2);
+        db.clear_trade_history().unwrap();
+        assert_eq!(db.symbol_trade_clear_revision("SOLUSDC"), 3);
+        assert_eq!(db.symbol_trade_clear_revision("BTCUSDC"), 3);
+        assert_eq!(db.symbol_trade_clear_revision("ETHUSDC"), 3);
+        db.clear_trade_history_for_symbol("BTCUSDC").unwrap();
+        assert_eq!(db.symbol_trade_clear_revision("BTCUSDC"), 4);
+        assert_eq!(db.symbol_trade_clear_revision("SOLUSDC"), 3);
+    }
+
+    #[test]
+    fn committed_clear_publishes_revision_before_releasing_connection() {
+        use std::sync::{mpsc, Arc};
+
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        assert!(db.insert_trade(&revision_test_trade()).unwrap());
+        let (reached_tx, reached_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        *db.revision_publish_hook.lock().unwrap() = Some((reached_tx, resume_rx));
+        let writer_db = Arc::clone(&db);
+        let writer =
+            std::thread::spawn(move || writer_db.clear_trade_history_for_symbol("SOLUSDC"));
+        reached_rx.recv().unwrap();
+        assert!(db.conn.try_lock().is_err());
+        resume_tx.send(()).unwrap();
+        assert_eq!(writer.join().unwrap().unwrap(), 1);
+        let (pending, revision) = db
+            .get_unverified_trades_with_clear_revision("SOLUSDC", TradingMode::Paper, 10, 0)
+            .unwrap();
+        assert!(pending.is_empty());
+        assert_eq!(revision, 1);
+        assert_eq!(db.symbol_trade_clear_revision("SOLUSDC"), revision);
     }
 
     #[cfg(unix)]
@@ -3172,6 +3393,8 @@ mod tests {
             path: ":memory:".into(),
             trade_revision: AtomicU64::new(0),
             trade_revisions: Mutex::new(TradeRevisions::default()),
+            trade_clear_revision: AtomicU64::new(0),
+            trade_clear_revisions: Mutex::new(TradeRevisions::default()),
             revision_publish_hook: Mutex::new(None),
             today_pnl_cache: tokio::sync::Mutex::new(None),
             hourly_stats_queries: AtomicU64::new(0),

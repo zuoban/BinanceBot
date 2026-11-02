@@ -93,10 +93,23 @@ fn fixture_with_database(
                             BotControlAction::Pause | BotControlAction::CancelAll => {
                                 engine_state.pause_trading().await.unwrap();
                             }
-                            BotControlAction::Resume => {
-                                engine_state.resume_trading().await.unwrap();
+                            BotControlAction::PauseAlreadyPersisted
+                            | BotControlAction::CancelAllAlreadyPersisted => {}
+                            BotControlAction::Resume {
+                                expected_mode,
+                                expected_epoch,
+                                reply,
+                            } => {
+                                let result = engine_state
+                                    .resume_trading_in_mode(expected_mode, expected_epoch)
+                                    .await
+                                    .map_err(|error| error.to_string());
+                                let _ = reply.send(result);
                             }
-                            BotControlAction::Rebalance | BotControlAction::GlobalRiskCancel => {}
+                            BotControlAction::Rebalance { reply } => {
+                                let _ = reply.send(Ok(()));
+                            }
+                            BotControlAction::GlobalRiskCancel => {}
                         }
                     }
                 });

@@ -10,6 +10,10 @@ use serde_json::json;
 use std::sync::Mutex;
 
 async fn engine(direction: GridDirection) -> GridTradingEngine {
+    engine_with_db(direction, Arc::new(Database::open(":memory:").unwrap())).await
+}
+
+async fn engine_with_db(direction: GridDirection, db: Arc<Database>) -> GridTradingEngine {
     let mut config = AppConfig::default();
     config.grid.direction = direction;
     config.grid.grid_interval = dec!(1);
@@ -18,11 +22,7 @@ async fn engine(direction: GridDirection) -> GridTradingEngine {
     config.grid.sell_window = 3;
     let (tx, rx) = mpsc::channel(1);
     let (_, ticker_rx) = broadcast::channel(1);
-    let state = AppState::new(
-        config.clone(),
-        Arc::new(Database::open(":memory:").unwrap()),
-        tx,
-    );
+    let state = AppState::new(config.clone(), db, tx);
     *state.ticker.write().await = TickerInfo {
         symbol: "SOLUSDC".into(),
         last_price: dec!(100.5),
@@ -161,6 +161,102 @@ async fn paper_balance_tracks_margin_and_market_pnl_for_both_directions() {
         assert_eq!(account.available_balance, dec!(10000) + expected_pnl);
         assert_eq!(account.margin_balance, account.available_balance);
         assert_eq!(account.unrealized_profit, Decimal::ZERO);
+    }
+}
+
+#[tokio::test]
+async fn paper_position_and_wallet_survive_restart_and_history_cleanup() {
+    for (direction, opening, closing, signed_size, close_price) in [
+        (
+            GridDirection::Long,
+            OrderSide::Buy,
+            OrderSide::Sell,
+            dec!(1.5),
+            dec!(110),
+        ),
+        (
+            GridDirection::Short,
+            OrderSide::Sell,
+            OrderSide::Buy,
+            dec!(-1.5),
+            dec!(90),
+        ),
+    ] {
+        for cleanup in 0..3 {
+            let directory =
+                std::env::temp_dir().join(format!("paper-restart-{}", uuid::Uuid::new_v4()));
+            let path = directory.join("bot.db");
+            {
+                let db = Arc::new(Database::open(&path).unwrap());
+                let mut first = engine_with_db(direction, db).await;
+                assert!(
+                    first
+                        .on_order_filled(&mut order("restart_open", opening, dec!(100), dec!(2)))
+                        .await
+                );
+                assert!(
+                    first
+                        .on_order_filled(&mut order(
+                            "restart_partial",
+                            closing,
+                            close_price,
+                            dec!(0.5)
+                        ))
+                        .await
+                );
+                assert_eq!(first.state.position.read().await.size, signed_size);
+                assert_eq!(
+                    first.state.account.read().await.total_wallet_balance,
+                    dec!(10005)
+                );
+            }
+            {
+                let db = Arc::new(Database::open(&path).unwrap());
+                let restarted = engine_with_db(direction, db.clone()).await;
+                let position = restarted.state.position.read().await.clone();
+                assert_eq!(position.size, signed_size);
+                assert_eq!(position.entry_price, dec!(100));
+                assert_eq!(
+                    restarted.state.account.read().await.total_wallet_balance,
+                    dec!(10005)
+                );
+                match cleanup {
+                    1 => assert_eq!(db.clear_trade_history().unwrap(), 2),
+                    2 => assert_eq!(db.clear_trade_history_for_symbol("SOLUSDC").unwrap(), 2),
+                    _ => assert_eq!(db.get_recent_trades(10).unwrap().len(), 2),
+                }
+            }
+            {
+                let db = Arc::new(Database::open(&path).unwrap());
+                let mut restarted = engine_with_db(direction, db.clone()).await;
+                let position = restarted.state.position.read().await.clone();
+                assert_eq!(position.size, signed_size);
+                assert_eq!(position.entry_price, dec!(100));
+                assert_eq!(
+                    restarted.state.account.read().await.total_wallet_balance,
+                    dec!(10005)
+                );
+                if cleanup != 0 {
+                    assert!(db.get_recent_trades(10).unwrap().is_empty());
+                }
+                assert!(
+                    restarted
+                        .on_order_filled(&mut order(
+                            "restart_final",
+                            closing,
+                            close_price,
+                            dec!(1.5)
+                        ))
+                        .await
+                );
+                assert_eq!(restarted.state.position.read().await.size, Decimal::ZERO);
+                assert_eq!(
+                    restarted.state.account.read().await.total_wallet_balance,
+                    dec!(10020)
+                );
+            }
+            std::fs::remove_dir_all(directory).unwrap();
+        }
     }
 }
 
@@ -497,7 +593,11 @@ async fn fake_server(fake: FakeExchange) -> (String, JoinHandle<()>) {
         .route("/fapi/v1/openOrders", get(|State(fake): State<FakeExchange>| async move {
             Json(fake.orders.lock().unwrap().values().filter(|o| o.status == "NEW").cloned().collect::<Vec<_>>())
         }))
-        .route("/fapi/v1/userTrades", get(|| async { Json(json!([{"realizedPnl": "0", "commission": "0", "commissionAsset": "USDC", "maker": true}])) }))
+        .route("/fapi/v1/userTrades", get(|State(fake): State<FakeExchange>, Query(query): Query<HashMap<String, String>>| async move {
+            let orders = fake.orders.lock().unwrap();
+            let order = orders.values().find(|order| query.get("orderId") == Some(&order.order_id.to_string()));
+            Json(order.map(|order| vec![json!({"id":1, "orderId":order.order_id, "qty":order.executed_qty, "realizedPnl":"0", "commission":"0", "commissionAsset":"USDC", "maker":true})]).unwrap_or_default())
+        }))
         .route("/fapi/v1/order", get(|State(fake): State<FakeExchange>, Query(query): Query<HashMap<String, String>>| async move {
             let orders = fake.orders.lock().unwrap();
             let found = orders.values().find(|o| query.get("origClientOrderId") == Some(&o.client_order_id)

@@ -41,4 +41,4 @@ EXPOSE 8080
 ENV RUST_LOG="binance_grid_bot=info,tower_http=info"
 
 ENTRYPOINT ["/app/binance-grid-bot"]
-CMD ["--db", "/app/data/bot.db"]
+CMD ["--db", "/app/data/bot.db", "--host", "0.0.0.0"]

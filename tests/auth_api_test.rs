@@ -844,9 +844,9 @@ async fn logout_session_delete_failure_returns_error() {
 }
 
 #[test]
-fn test_default_server_binding_is_all_interfaces() {
+fn test_default_server_binding_is_loopback() {
     let config = AppConfig::default();
-    assert_eq!(config.server.host, "0.0.0.0");
+    assert_eq!(config.server.host, "127.0.0.1");
     assert_eq!(config.server.port, 8080);
 }
 
@@ -877,11 +877,29 @@ async fn websocket_authenticates_without_a_query_token() {
         .into_text()
         .unwrap()
         .contains("\"type\":\"snapshot\""));
+    let resume = "{\"action\":\"resume\",\"expected_mode\":\"PAPER\"}";
+    socket
+        .send(tokio_tungstenite::tungstenite::Message::Text(resume.into()))
+        .await
+        .unwrap();
+    let action = tokio::time::timeout(std::time::Duration::from_secs(3), action_rx.recv())
+        .await
+        .expect("valid resume request must reach the control channel")
+        .expect("control channel closed");
+    match action {
+        BotControlAction::Resume {
+            expected_mode,
+            reply,
+            ..
+        } => {
+            assert_eq!(expected_mode, binance_grid_bot::types::TradingMode::Paper);
+            reply.send(Ok(())).unwrap();
+        }
+        _ => panic!("expected resume action"),
+    }
     db.delete_session(token).unwrap();
     socket
-        .send(tokio_tungstenite::tungstenite::Message::Text(
-            "{\"action\":\"resume\"}".into(),
-        ))
+        .send(tokio_tungstenite::tungstenite::Message::Text(resume.into()))
         .await
         .unwrap();
     assert!(

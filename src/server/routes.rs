@@ -27,6 +27,7 @@ use tracing::{error, info, warn};
 #[derive(Debug, Deserialize)]
 pub struct ControlRequest {
     pub action: String,
+    pub expected_mode: Option<TradingMode>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1827,22 +1828,50 @@ async fn apply_pair_config_inner(
     response
 }
 
+type ControlReply = tokio::sync::oneshot::Receiver<Result<(), String>>;
+
+fn control_action(
+    payload: ControlRequest,
+    expected_epoch: u64,
+) -> Result<(BotControlAction, Option<ControlReply>), String> {
+    match payload.action.to_lowercase().as_str() {
+        "pause" => Ok((BotControlAction::Pause, None)),
+        "cancel_all" => Ok((BotControlAction::CancelAll, None)),
+        "resume" => {
+            let expected_mode = payload
+                .expected_mode
+                .filter(|mode| *mode != TradingMode::Unknown)
+                .ok_or_else(|| "恢复策略需要提供确认时的运行模式".to_string())?;
+            let (reply, receiver) = tokio::sync::oneshot::channel();
+            Ok((
+                BotControlAction::Resume {
+                    expected_mode,
+                    expected_epoch,
+                    reply,
+                },
+                Some(receiver),
+            ))
+        }
+        "rebalance" => {
+            let (reply, receiver) = tokio::sync::oneshot::channel();
+            Ok((BotControlAction::Rebalance { reply }, Some(receiver)))
+        }
+        other => Err(format!("未知操作指令: {}", other)),
+    }
+}
+
 async fn post_control_handler(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<ControlRequest>,
 ) -> Json<ApiResponse<String>> {
-    let action_str = payload.action.to_lowercase();
-    let action = match action_str.as_str() {
-        "pause" => BotControlAction::Pause,
-        "resume" => BotControlAction::Resume,
-        "cancel_all" => BotControlAction::CancelAll,
-        "rebalance" => BotControlAction::Rebalance,
-        other => {
+    let action = match control_action(payload, state.pause_epoch()) {
+        Ok(action) => action,
+        Err(message) => {
             return Json(ApiResponse {
                 success: false,
                 data: None,
-                message: Some(format!("未知操作指令: {}", other)),
-            });
+                message: Some(message),
+            })
         }
     };
     let result = tokio::spawn(dispatch_control(state, action)).await;
@@ -1856,11 +1885,81 @@ async fn post_control_handler(
     }
 }
 
+async fn prepare_control(state: &Arc<AppState>, action: &BotControlAction) -> Result<(), String> {
+    let reason = match action {
+        BotControlAction::Pause => Some("手动暂停策略"),
+        BotControlAction::CancelAll => Some("手动撤销全部策略挂单并暂停策略"),
+        _ => None,
+    };
+    let state = state.clone();
+    tokio::spawn(async move {
+        let _control = state.socket_control_lock.read().await;
+        if state.is_retired() {
+            return Err("交易对已移除，无法执行操作".into());
+        }
+        if let Some(reason) = reason {
+            state
+                .pause_trading_with_reason(reason)
+                .await
+                .map_err(|error| format!("暂停交易失败: {}", error))?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|error| format!("控制任务失败: {}", error))?
+}
+
 async fn dispatch_control(
     state: Arc<AppState>,
-    action: BotControlAction,
+    action: (BotControlAction, Option<ControlReply>),
 ) -> Json<ApiResponse<String>> {
-    let _control = state.socket_control_lock.read().await;
+    if let Err(message) = prepare_control(&state, &action.0).await {
+        return Json(ApiResponse {
+            success: false,
+            data: None,
+            message: Some(message),
+        });
+    }
+    dispatch_prepared_control(state, action, None, None).await
+}
+
+async fn dispatch_prepared_control(
+    state: Arc<AppState>,
+    (action, reply): (BotControlAction, Option<ControlReply>),
+    submitted: Option<tokio::sync::oneshot::Sender<()>>,
+    socket_results: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+) -> Json<ApiResponse<String>> {
+    let action_name = format!("{:?}", action);
+    let action = match action {
+        BotControlAction::Pause => BotControlAction::PauseAlreadyPersisted,
+        BotControlAction::CancelAll => BotControlAction::CancelAllAlreadyPersisted,
+        action => action,
+    };
+    let mut retired = state.subscribe_retirement();
+    if *retired.borrow() {
+        return Json(ApiResponse {
+            success: false,
+            data: None,
+            message: Some("交易对已移除，无法执行操作".into()),
+        });
+    }
+    let reservation = tokio::select! {
+        biased;
+        _ = retired.changed() => return Json(ApiResponse { success: false, data: None, message: Some("交易对已移除，无法执行操作".into()) }),
+        result = state.action_tx.reserve() => result,
+    };
+    let permit = match reservation {
+        Ok(permit) => permit,
+        Err(e) => {
+            error!("Failed to dispatch action: {}", e);
+            return Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some(format!("Failed to send action: {}", e)),
+            });
+        }
+    };
+    let control = state.socket_control_lock.read().await;
     if state.is_retired() {
         return Json(ApiResponse {
             success: false,
@@ -1868,33 +1967,38 @@ async fn dispatch_control(
             message: Some("交易对已移除，无法执行操作".into()),
         });
     }
-
-    let action_name = format!("{:?}", action);
-    if matches!(
-        action,
-        BotControlAction::Pause | BotControlAction::CancelAll
-    ) {
-        let reason = if matches!(action, BotControlAction::CancelAll) {
-            "手动撤销全部策略挂单并暂停策略"
-        } else {
-            "手动暂停策略"
-        };
-        if let Err(error) = state.pause_trading_with_reason(reason).await {
-            error!("Failed to persist immediate pause: {}", error);
-            return Json(ApiResponse {
-                success: false,
-                data: None,
-                message: Some(format!("暂停交易失败: {}", error)),
-            });
-        }
+    permit.send(action);
+    drop(control);
+    if let Some(submitted) = submitted {
+        let _ = submitted.send(());
     }
-    if let Err(e) = state.action_tx.send(action).await {
-        error!("Failed to dispatch action: {}", e);
-        return Json(ApiResponse {
-            success: false,
-            data: None,
-            message: Some(format!("Failed to send action: {}", e)),
-        });
+    if let Some(reply) = reply {
+        let response = tokio::select! {
+            biased;
+            _ = retired.changed() => return Json(ApiResponse { success: false, data: None, message: Some("交易对已移除，无法执行操作".into()) }),
+            _ = async {
+                if let Some(results) = &socket_results { results.closed().await; }
+                else { std::future::pending::<()>().await; }
+            } => return Json(ApiResponse { success: false, data: None, message: Some("控制连接已关闭".into()) }),
+            response = reply => response,
+        };
+        match response {
+            Ok(Ok(())) => {}
+            Ok(Err(message)) => {
+                return Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    message: Some(message),
+                })
+            }
+            Err(error) => {
+                return Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    message: Some(format!("策略未确认控制操作: {}", error)),
+                })
+            }
+        }
     }
 
     Json(ApiResponse {
@@ -1985,6 +2089,7 @@ async fn upgrade_accounts_socket(
                     let Ok(json) = serde_json::to_string(&AccountMessage::Accounts { pairs }) else {
                         break;
                     };
+                    if !primary.is_token_valid(&token).await { break; }
                     let message = Message::Text(json);
                     if !matches!(tokio::time::timeout(std::time::Duration::from_secs(5), sender.send(message)).await, Ok(Ok(()))) { break; }
                 }
@@ -2049,31 +2154,64 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, token: String) {
 
     // Send initial snapshot immediately upon connection
     let initial_snapshot = state.snapshot().await;
+    if !state.is_token_valid(&token).await {
+        return;
+    }
     if let Ok(json) = serde_json::to_string(&serde_json::json!({
         "type": "snapshot",
         "data": initial_snapshot
     })) {
-        if send_until_retired(&mut sender, Message::Text(json), &mut retired)
-            .await
-            .is_none()
-        {
+        if !matches!(
+            send_until_retired(&mut sender, Message::Text(json), &mut retired).await,
+            Some(Ok(()))
+        ) {
             return;
         }
     }
 
+    let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (control_tx, mut control_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(String, (BotControlAction, Option<ControlReply>))>(
+        );
+    let worker_state = state.clone();
+    let worker_results = result_tx.clone();
+    tokio::spawn(async move {
+        while let Some((name, action)) = control_rx.recv().await {
+            let (submitted, ready) = tokio::sync::oneshot::channel();
+            let state = worker_state.clone();
+            let results = worker_results.clone();
+            tokio::spawn(async move {
+                let response = dispatch_prepared_control(
+                    state,
+                    action,
+                    Some(submitted),
+                    Some(results.clone()),
+                )
+                .await
+                .0;
+                let _ = results.send(serde_json::json!({"type":"control", "action":name, "success":response.success, "data":response.data, "message":response.message}).to_string());
+            });
+            let _ = ready.await;
+        }
+    });
     let send_state = state.clone();
     let send_token = token.clone();
     let mut send_task = tokio::spawn(async move {
-        let mut check_auth = tokio::time::interval(std::time::Duration::from_secs(60));
+        let mut check_auth = tokio::time::interval(std::time::Duration::from_secs(1));
         loop {
             tokio::select! {
                 _ = retired.changed() => break,
                 _ = check_auth.tick() => {
                     if !send_state.is_token_valid(&send_token).await { break; }
                 }
+                Some(msg) = result_rx.recv() => {
+                    if !send_state.is_token_valid(&send_token).await { break; }
+                    if !matches!(send_until_retired(&mut sender, Message::Text(msg), &mut retired).await, Some(Ok(()))) { break; }
+                }
                 message = rx.recv() => {
                     match message {
                         Ok(msg) => {
+                            if !send_state.is_token_valid(&send_token).await { break; }
                             if !matches!(
                                 send_until_retired(&mut sender, Message::Text(msg), &mut retired).await,
                                 Some(Ok(()))
@@ -2090,23 +2228,36 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, token: String) {
     let mut recv_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = receiver.next().await {
             if let Message::Text(text) = msg {
-                if let Ok(req) = serde_json::from_str::<ControlRequest>(&text) {
-                    if !state_clone.is_token_valid(&token).await {
-                        break;
+                if !state_clone.is_token_valid(&token).await {
+                    break;
+                }
+                let parsed = serde_json::from_str::<ControlRequest>(&text);
+                let (name, action) = match parsed {
+                    Ok(req) => {
+                        let name = req.action.clone();
+                        (Some(name), control_action(req, state_clone.pause_epoch()))
                     }
-                    let action = match req.action.to_lowercase().as_str() {
-                        "pause" => Some(BotControlAction::Pause),
-                        "resume" => Some(BotControlAction::Resume),
-                        "cancel_all" => Some(BotControlAction::CancelAll),
-                        "rebalance" => Some(BotControlAction::Rebalance),
-                        _ => None,
-                    };
-                    if let Some(act) = action {
-                        let dispatch = tokio::spawn(dispatch_control(state_clone.clone(), act));
-                        if !matches!(dispatch.await, Ok(Json(ApiResponse { success: true, .. }))) {
-                            break;
-                        }
+                    Err(error) => (None, Err(format!("无效的控制请求: {}", error))),
+                };
+                let action = match action {
+                    Ok(action) => action,
+                    Err(message) => {
+                        let _ = result_tx.send(serde_json::json!({"type":"control", "action":name, "success":false, "data":null, "message":message}).to_string());
+                        continue;
                     }
+                };
+                let prepare_state = state_clone.clone();
+                let prepare_results = result_tx.clone();
+                let prepare_queue = control_tx.clone();
+                let preparation = tokio::spawn(async move {
+                    if let Err(message) = prepare_control(&prepare_state, &action.0).await {
+                        let _ = prepare_results.send(serde_json::json!({"type":"control", "action":name, "success":false, "data":null, "message":message}).to_string());
+                    } else {
+                        let _ = prepare_queue.send((name.unwrap(), action));
+                    }
+                });
+                if preparation.await.is_err() {
+                    break;
                 }
             }
         }
@@ -2125,6 +2276,54 @@ mod tests {
     use crate::config::AppConfig;
     use crate::db::Database;
     use crate::types::BotStatus;
+
+    #[tokio::test]
+    async fn control_requires_resume_mode_and_propagates_engine_rejections() {
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let (action_tx, mut action_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::new(AppConfig::default(), db, action_tx);
+        for expected_mode in [None, Some(TradingMode::Unknown)] {
+            let response = post_control_handler(
+                State(state.clone()),
+                Json(ControlRequest {
+                    action: "resume".into(),
+                    expected_mode,
+                }),
+            )
+            .await;
+            assert!(!response.0.success);
+            assert!(action_rx.try_recv().is_err());
+        }
+        for action in ["resume", "rebalance"] {
+            let request_state = state.clone();
+            let request = tokio::spawn(async move {
+                post_control_handler(
+                    State(request_state),
+                    Json(ControlRequest {
+                        action: action.into(),
+                        expected_mode: Some(TradingMode::Paper),
+                    }),
+                )
+                .await
+            });
+            let reply = match action_rx.recv().await.unwrap() {
+                BotControlAction::Resume {
+                    expected_mode,
+                    reply,
+                    ..
+                } => {
+                    assert_eq!(expected_mode, TradingMode::Paper);
+                    reply
+                }
+                BotControlAction::Rebalance { reply } => reply,
+                other => panic!("unexpected action: {:?}", other),
+            };
+            reply.send(Err("操作被拒绝".into())).unwrap();
+            let response = request.await.unwrap().0;
+            assert!(!response.success);
+            assert_eq!(response.message.as_deref(), Some("操作被拒绝"));
+        }
+    }
 
     #[tokio::test]
     async fn symbols_consumer_filters_sorts_and_reports_upstream_errors() {
@@ -2365,6 +2564,212 @@ mod tests {
             server.abort();
             let _ = server.await;
         }
+    }
+
+    #[tokio::test]
+    async fn socket_pause_is_processed_while_engine_reply_is_pending() {
+        use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
+        for action in ["resume", "rebalance"] {
+            let db = Arc::new(Database::open(":memory:").unwrap());
+            db.create_session("pause-test-token").unwrap();
+            let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+            let state = AppState::new(AppConfig::default(), db, tx);
+            state.resume_trading().await.unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let router = create_router(state.clone());
+            let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+            let mut request = format!("ws://{address}/ws").into_client_request().unwrap();
+            request.headers_mut().insert(
+                "Sec-WebSocket-Protocol",
+                "auth, token.pause-test-token".parse().unwrap(),
+            );
+            let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+            socket.next().await.unwrap().unwrap();
+            socket
+                .send(Message::Text(format!(
+                    r#"{{"action":"{action}","expected_mode":"PAPER"}}"#
+                )))
+                .await
+                .unwrap();
+            let first = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let reply = match first {
+                BotControlAction::Resume { reply, .. } | BotControlAction::Rebalance { reply } => {
+                    reply
+                }
+                other => panic!("unexpected action: {:?}", other),
+            };
+            assert!(state.socket_control_lock.try_write().is_ok());
+            socket
+                .send(Message::Text(r#"{"action":"pause"}"#.into()))
+                .await
+                .unwrap();
+            let paused = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(matches!(paused, BotControlAction::PauseAlreadyPersisted));
+            assert_eq!(*state.status.read().await, BotStatus::Paused);
+            drop(reply);
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn socket_disconnect_keeps_accepted_pause_and_cancel_queued() {
+        use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
+        for action in ["pause", "cancel_all"] {
+            let db = Arc::new(Database::open(":memory:").unwrap());
+            db.create_session("disconnect-test-token").unwrap();
+            let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+            tx.send(BotControlAction::GlobalRiskCancel).await.unwrap();
+            let state = AppState::new(AppConfig::default(), db, tx);
+            state.resume_trading().await.unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let router = create_router(state.clone());
+            let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+            let mut request = format!("ws://{address}/ws").into_client_request().unwrap();
+            request.headers_mut().insert(
+                "Sec-WebSocket-Protocol",
+                "auth, token.disconnect-test-token".parse().unwrap(),
+            );
+            let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+            socket.next().await.unwrap().unwrap();
+            socket
+                .send(Message::Text(format!(r#"{{"action":"{action}"}}"#)))
+                .await
+                .unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while *state.status.read().await != BotStatus::Paused {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            socket.close(None).await.unwrap();
+            drop(socket);
+            tokio::task::yield_now().await;
+            assert!(matches!(
+                rx.recv().await,
+                Some(BotControlAction::GlobalRiskCancel)
+            ));
+            let pending = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(matches!(
+                (action, pending),
+                ("pause", BotControlAction::PauseAlreadyPersisted)
+                    | ("cancel_all", BotControlAction::CancelAllAlreadyPersisted)
+            ));
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn retirement_releases_control_waiting_for_queue_capacity() {
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        tx.send(BotControlAction::GlobalRiskCancel).await.unwrap();
+        let state = AppState::new(AppConfig::default(), db, tx);
+        let request_state = state.clone();
+        let request = tokio::spawn(async move {
+            post_control_handler(
+                State(request_state),
+                Json(ControlRequest {
+                    action: "rebalance".into(),
+                    expected_mode: None,
+                }),
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        state.retire();
+        let response = tokio::time::timeout(std::time::Duration::from_secs(3), request)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!response.0.success);
+    }
+
+    #[tokio::test]
+    async fn socket_orders_pause_before_resume_and_reports_failures() {
+        use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        db.create_session("ordering-test-token").unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        let state = AppState::new(AppConfig::default(), db, tx);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = create_router(state.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let mut request = format!("ws://{address}/ws").into_client_request().unwrap();
+        request.headers_mut().insert(
+            "Sec-WebSocket-Protocol",
+            "auth, token.ordering-test-token".parse().unwrap(),
+        );
+        let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+        socket.next().await.unwrap().unwrap();
+        let original_epoch = state.pause_epoch();
+        socket
+            .send(Message::Text(r#"{"action":"pause"}"#.into()))
+            .await
+            .unwrap();
+        socket
+            .send(Message::Text(
+                r#"{"action":"resume","expected_mode":"PAPER"}"#.into(),
+            ))
+            .await
+            .unwrap();
+        socket.send(Message::Text("not json".into())).await.unwrap();
+        let first = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(first, BotControlAction::PauseAlreadyPersisted));
+        let second = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let reply = match second {
+            BotControlAction::Resume {
+                expected_epoch,
+                reply,
+                ..
+            } => {
+                assert!(expected_epoch > original_epoch);
+                assert_eq!(expected_epoch, state.pause_epoch());
+                reply
+            }
+            other => panic!("unexpected action: {:?}", other),
+        };
+        reply.send(Err("恢复被拒绝".into())).unwrap();
+        let mut parse_error = false;
+        let mut resume_error = false;
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while !parse_error || !resume_error {
+                let frame = socket.next().await.unwrap().unwrap();
+                if let Ok(value) =
+                    serde_json::from_str::<serde_json::Value>(frame.to_text().unwrap())
+                {
+                    if value["type"] == "control" && value["success"] == false {
+                        if value["action"].is_null() {
+                            parse_error = true;
+                        }
+                        if value["action"] == "resume" && value["message"] == "恢复被拒绝" {
+                            resume_error = true;
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+        server.abort();
     }
 
     #[tokio::test]
@@ -2745,6 +3150,7 @@ mod tests {
                     State(request_state),
                     Json(ControlRequest {
                         action: action.into(),
+                        expected_mode: None,
                     }),
                 )
                 .await
@@ -2769,6 +3175,7 @@ mod tests {
                 State(old),
                 Json(ControlRequest {
                     action: action.into(),
+                    expected_mode: None,
                 }),
             )
             .await;
@@ -2798,6 +3205,7 @@ mod tests {
                     State(request_state),
                     Json(ControlRequest {
                         action: action.into(),
+                        expected_mode: None,
                     }),
                 )
                 .await
@@ -2822,7 +3230,9 @@ mod tests {
             retirement.await.unwrap();
             assert!(matches!(
                 old_rx.try_recv(),
-                Ok(BotControlAction::Pause | BotControlAction::CancelAll)
+                Ok(BotControlAction::PauseAlreadyPersisted
+                    | BotControlAction::CancelAllAlreadyPersisted)
+                    | Err(tokio::sync::mpsc::error::TryRecvError::Empty)
             ));
 
             let (new_tx, _new_rx) = tokio::sync::mpsc::channel(1);
@@ -2841,7 +3251,10 @@ mod tests {
     async fn pause_updates_status_before_engine_accepts_action() {
         let db = Arc::new(Database::open(":memory:").unwrap());
         let (action_tx, action_rx) = tokio::sync::mpsc::channel(1);
-        action_tx.send(BotControlAction::Rebalance).await.unwrap();
+        action_tx
+            .send(BotControlAction::GlobalRiskCancel)
+            .await
+            .unwrap();
         let state = AppState::new(AppConfig::default(), db.clone(), action_tx);
         let request_state = state.clone();
         let request = tokio::spawn(async move {
@@ -2849,6 +3262,7 @@ mod tests {
                 State(request_state),
                 Json(ControlRequest {
                     action: "pause".into(),
+                    expected_mode: None,
                 }),
             )
             .await

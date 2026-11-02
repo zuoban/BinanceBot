@@ -411,7 +411,7 @@ async fn api_routes_authenticate_and_dispatch_to_the_selected_pair_only() {
     assert_eq!(result["success"], true);
     assert!(matches!(
         actions[1].try_recv().unwrap(),
-        BotControlAction::Pause
+        BotControlAction::PauseAlreadyPersisted
     ));
     assert!(actions[0].try_recv().is_err());
     assert_eq!(*states[0].status.read().await, BotStatus::Running);
@@ -626,7 +626,7 @@ async fn websocket_snapshot_and_controls_use_the_selected_pair() {
         .await
         .unwrap()
         .unwrap();
-    assert!(matches!(action, BotControlAction::Pause));
+    assert!(matches!(action, BotControlAction::PauseAlreadyPersisted));
     assert!(actions[0].try_recv().is_err());
     socket.close(None).await.unwrap();
     server.abort();

@@ -253,7 +253,7 @@ fn default_window_size() -> usize {
 }
 
 fn default_host() -> String {
-    "0.0.0.0".to_string()
+    "127.0.0.1".to_string()
 }
 
 fn default_port() -> u16 {
@@ -275,8 +275,8 @@ impl Default for AppConfig {
             grid: GridConfig::default(),
             pairs: Vec::new(),
             server: ServerConfig {
-                host: "0.0.0.0".to_string(),
-                port: 8080,
+                host: default_host(),
+                port: default_port(),
             },
             telegram: TelegramConfig::default(),
             global_max_position_notional: None,
@@ -476,6 +476,13 @@ mod tests {
     use super::AppConfig;
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
+
+    #[test]
+    fn server_host_defaults_to_loopback_when_missing() {
+        let config: super::ServerConfig = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(config.host, "127.0.0.1");
+        assert_eq!(config.port, 8080);
+    }
 
     #[test]
     fn validation_checks_grid_exchange_and_notification_boundaries() {

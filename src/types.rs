@@ -393,10 +393,20 @@ pub struct TodayPnl {
 #[derive(Debug)]
 pub enum BotControlAction {
     Pause,
+    /// Pause was already persisted before this action was queued.
+    PauseAlreadyPersisted,
     GlobalRiskCancel,
-    Resume,
+    Resume {
+        expected_mode: TradingMode,
+        expected_epoch: u64,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
     CancelAll,
-    Rebalance,
+    /// Pause was already persisted before this cancellation was queued.
+    CancelAllAlreadyPersisted,
+    Rebalance {
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
     Shutdown {
         removing: bool,
         reply: tokio::sync::oneshot::Sender<Result<(), String>>,

@@ -2197,13 +2197,27 @@ async fn restart_uses_the_latest_opposite_fill_to_unlock_the_previous_buy_level(
     let directory = std::env::temp_dir().join(format!("window-restart-{}", Uuid::new_v4()));
     let path = directory.join("bot.db");
     {
-        let db = Database::open(&path).unwrap();
+        let db = Arc::new(Database::open(&path).unwrap());
+        let initial = paper_engine_with_db(db.clone()).await;
+        initial.state.position.write().await.size = dec!(10);
+        let paper_state = (
+            initial.state.position.read().await.clone(),
+            initial.state.account.read().await.clone(),
+        );
         db.insert_trade(&journal_trade(0, OrderSide::Buy, dec!(118.8), dec!(1)))
             .unwrap();
-        for id in 1..=205 {
+        for id in 1..205 {
             db.insert_trade(&journal_trade(id, OrderSide::Sell, dec!(118.9), dec!(1)))
                 .unwrap();
         }
+        db.insert_trade_with_paper_recovery(
+            &journal_trade(205, OrderSide::Sell, dec!(118.9), dec!(1)),
+            &GridStats::default(),
+            None,
+            None,
+            Some(&paper_state),
+        )
+        .unwrap();
     }
     {
         let mut restarted = paper_engine_with_db(Arc::new(Database::open(&path).unwrap())).await;
@@ -2214,7 +2228,8 @@ async fn restart_uses_the_latest_opposite_fill_to_unlock_the_previous_buy_level(
             .await
             .iter()
             .all(|t| t.side == OrderSide::Sell));
-        restarted.state.position.write().await.size = dec!(10);
+        assert_eq!(*restarted.state.status.read().await, BotStatus::Running);
+        assert_eq!(restarted.state.position.read().await.size, dec!(10));
         restarted.maintain_grid_window().await;
         let active = orders(&restarted).await;
         assert!(active.iter().all(|o| o.price != dec!(118.9)));

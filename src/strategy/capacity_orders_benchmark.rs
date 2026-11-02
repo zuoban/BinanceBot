@@ -260,10 +260,11 @@ async fn simulated_live_orders_and_fills() {
                 None => (StatusCode::BAD_REQUEST, Json(json!({"code": -2013, "msg": "Order does not exist"}))),
             }
         }))
-        .route("/fapi/v1/userTrades", get(|State(fake): State<Exchange>| async move {
+        .route("/fapi/v1/userTrades", get(|State(fake): State<Exchange>, Query(query): Query<HashMap<String, String>>| async move {
             fake.trade_calls.fetch_add(1, Ordering::Relaxed);
             ExchangeDelays::wait(fake.delays.trade).await;
-            Json(json!([{"realizedPnl":"0", "commission":"0.01", "commissionAsset":"USDT", "maker":true}]))
+            let order_id = query.get("orderId").unwrap().parse::<i64>().unwrap();
+            Json(json!([{"id":1, "orderId":order_id, "qty":"1", "realizedPnl":"0", "commission":"0.01", "commissionAsset":"USDT", "maker":true}]))
         }))
         .route("/fapi/v2/positionRisk", get(|State(fake): State<Exchange>, Query(query): Query<HashMap<String, String>>| async move {
             fake.position_calls.fetch_add(1, Ordering::Relaxed);

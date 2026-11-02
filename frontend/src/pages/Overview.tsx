@@ -1,4 +1,4 @@
-import { useCallback, useContext, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { App, Button, Card, Col, Dropdown, Empty, Input, Popover, Row, Select, Space, Statistic } from 'antd';
 import { ArrowDownOutlined, ArrowRightOutlined, ArrowUpOutlined, EyeOutlined, PlusOutlined, SearchOutlined, ThunderboltOutlined } from '@ant-design/icons';
@@ -57,6 +57,8 @@ export default function OverviewPage() {
   const [sort, setSort] = useState('position');
   const [batchBusy, setBatchBusy] = useState(false);
   const [tradesExpanded, setTradesExpanded] = useState(false);
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(timer); }, []);
   const batchLock = useRef(false);
   const entries = overview.data?.pairs ?? [];
   const recentTrades = entries.flatMap(entry => entry.snapshot.recent_trades).sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp)).slice(0, 20);
@@ -64,7 +66,7 @@ export default function OverviewPage() {
   const buyTrades = displayedTrades.filter(trade => trade.side === 'BUY').length;
   const sellTrades = displayedTrades.filter(trade => trade.side === 'SELL').length;
   const tradePnlGroups = groupTradePnl(displayedTrades);
-  const stale = !!overview.error || Date.now() - overview.dataUpdatedAt > 10_000;
+  const stale = !!overview.error || now - overview.dataUpdatedAt > 10_000;
   const pairs = entries.map(e => ({ symbol: e.snapshot.symbol, status: e.snapshot.status, mode: e.mode, grid_config: e.snapshot.grid_config, scoped: e.scoped } satisfies Pair));
   const batch = async (action: 'pause' | 'resume') => {
     if (batchLock.current) return;

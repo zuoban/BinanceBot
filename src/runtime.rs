@@ -608,7 +608,14 @@ impl TradingRuntime {
         if result.is_ok() {
             let config = state.config.read().await.clone();
             result = if config.exchange.dry_run {
-                if state.position.read().await.size.is_zero() {
+                let paper_symbol = symbol.to_string();
+                let saved = state
+                    .db
+                    .run_blocking(move |db| db.load_paper_state(&paper_symbol))
+                    .await;
+                if let Err(error) = saved {
+                    Err(error.context("无法确认模拟盘持仓，无法移除交易对"))
+                } else if state.position.read().await.size.is_zero() {
                     Ok(())
                 } else {
                     Err(anyhow::anyhow!("仍有持仓，请先平仓再移除交易对"))

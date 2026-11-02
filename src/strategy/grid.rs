@@ -777,9 +777,11 @@ impl GridTradingEngine {
     async fn handle_control_action(&mut self, action: BotControlAction) {
         if self.state.is_shutting_down() && !matches!(action, BotControlAction::Shutdown { .. }) {
             if let BotControlAction::UpdateConfig { reply, .. }
-            | BotControlAction::UpdateGlobalConfig { reply, .. } = action
+            | BotControlAction::UpdateGlobalConfig { reply, .. }
+            | BotControlAction::Resume { reply, .. }
+            | BotControlAction::Rebalance { reply } = action
             {
-                let _ = reply.send(Err("程序正在退出，配置未应用".into()));
+                let _ = reply.send(Err("程序正在退出，操作未执行".into()));
             }
             return;
         }
@@ -791,10 +793,18 @@ impl GridTradingEngine {
                     .map_err(|error| error.to_string());
                 let _ = reply.send(result);
             }
-            BotControlAction::Pause => {
+            BotControlAction::Pause | BotControlAction::PauseAlreadyPersisted => {
                 info!("Bot paused by user command");
-                self.pause_trading_with_reason("手动暂停策略").await;
-                if self.cancel_all_orders().await {
+                if matches!(action, BotControlAction::Pause) {
+                    self.pause_trading_with_reason("手动暂停策略").await;
+                }
+                if self
+                    .cancel_all_orders_inner(matches!(
+                        action,
+                        BotControlAction::PauseAlreadyPersisted
+                    ))
+                    .await
+                {
                     self.state
                         .add_log("WARN", "Trading bot paused and managed orders canceled")
                         .await;
@@ -819,15 +829,27 @@ impl GridTradingEngine {
                     .global_cancel_queued
                     .store(false, std::sync::atomic::Ordering::SeqCst);
             }
-            BotControlAction::Resume => {
-                info!("Bot resumed by user command");
+            BotControlAction::Resume {
+                expected_mode,
+                expected_epoch,
+                reply,
+            } => {
                 let config = self.state.config.read().await.clone();
+                let current_mode =
+                    TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
+                if expected_mode == TradingMode::Unknown || current_mode != expected_mode {
+                    let _ = reply.send(Err("策略运行模式已改变，无法恢复策略".into()));
+                    return;
+                }
                 if !self.exchange_rules_loaded {
                     if let Err(error) = self.load_exchange_rules(&config.exchange.symbol).await {
                         if !config.exchange.dry_run {
-                            self.state
-                                .add_log("ERROR", format!("Resume failed: could not load Binance exchange rules for {}: {}", config.exchange.symbol, error))
-                                .await;
+                            let message = format!(
+                                "Resume failed: could not load Binance exchange rules for {}: {}",
+                                config.exchange.symbol, error
+                            );
+                            self.state.add_log("ERROR", &message).await;
+                            let _ = reply.send(Err(message));
                             return;
                         }
                         self.state
@@ -842,28 +864,42 @@ impl GridTradingEngine {
                     .await
                     .validate_grid_interval(config.grid.grid_interval)
                 {
-                    self.state
-                        .add_log("ERROR", format!("Resume failed: {}", error))
-                        .await;
+                    let message = format!("Resume failed: {}", error);
+                    self.state.add_log("ERROR", &message).await;
+                    let _ = reply.send(Err(message));
                     return;
                 }
-                if let Err(error) = self.state.resume_trading().await {
-                    error!("Could not persist resumed bot status: {}", error);
-                    self.state
-                        .add_log("ERROR", format!("Resume failed: {}", error))
-                        .await;
+                if let Err(error) = self
+                    .state
+                    .resume_trading_in_mode(expected_mode, expected_epoch)
+                    .await
+                {
+                    error!("Could not resume bot: {}", error);
+                    let message = format!("Resume failed: {}", error);
+                    self.state.add_log("ERROR", &message).await;
+                    let _ = reply.send(Err(message));
                     return;
                 }
+                info!("Bot resumed by user command");
                 self.state
                     .add_log("INFO", "Trading bot resumed by user")
                     .await;
+                let _ = reply.send(Ok(()));
                 self.sync_cycle().await;
             }
-            BotControlAction::CancelAll => {
+            BotControlAction::CancelAll | BotControlAction::CancelAllAlreadyPersisted => {
                 info!("Cancel all orders requested");
-                self.pause_trading_with_reason("手动撤销全部策略挂单并暂停策略")
-                    .await;
-                if self.cancel_all_orders().await {
+                if matches!(action, BotControlAction::CancelAll) {
+                    self.pause_trading_with_reason("手动撤销全部策略挂单并暂停策略")
+                        .await;
+                }
+                if self
+                    .cancel_all_orders_inner(matches!(
+                        action,
+                        BotControlAction::CancelAllAlreadyPersisted
+                    ))
+                    .await
+                {
                     self.state
                         .add_log("WARN", "Managed grid orders canceled; bot paused")
                         .await;
@@ -873,14 +909,17 @@ impl GridTradingEngine {
                         .await;
                 }
             }
-            BotControlAction::Rebalance => {
-                if *self.state.status.read().await == BotStatus::Running {
+            BotControlAction::Rebalance { reply } => {
+                let result = if *self.state.status.read().await != BotStatus::Running {
+                    Err("策略未运行，无法重建网格".into())
+                } else {
                     info!("Grid rebalance requested");
                     self.state
                         .add_log("INFO", "Manual grid rebalance triggered")
                         .await;
-                    self.rebalance_grid().await;
-                }
+                    self.rebalance_grid().await
+                };
+                let _ = reply.send(result);
             }
             BotControlAction::UpdateConfig { config, reply } => {
                 let result = self.apply_config(*config).await;
@@ -1031,6 +1070,24 @@ impl GridTradingEngine {
                 .await;
             return Ok(());
         }
+        let mut paper_state = if new_config.exchange.dry_run && (market_changed || mode_changed) {
+            let symbol = new_config.exchange.symbol.clone();
+            let state = self
+                .state
+                .db
+                .run_blocking(move |db| db.load_paper_state(&symbol))
+                .await?;
+            anyhow::ensure!(
+                !direction_changed
+                    || state
+                        .as_ref()
+                        .is_none_or(|(position, _)| position.size.is_zero()),
+                "切换做多 / 做空方向前，请先平掉目标账户的持仓"
+            );
+            state
+        } else {
+            None
+        };
 
         let new_client = if client_changed {
             Arc::new(BinanceFuturesClient::new_with_limiter(
@@ -1118,6 +1175,21 @@ impl GridTradingEngine {
                 return Err(error);
             }
         }
+        if new_config.exchange.dry_run && (market_changed || mode_changed) {
+            let symbol = new_config.exchange.symbol.clone();
+            paper_state = self
+                .state
+                .db
+                .run_blocking(move |db| db.load_paper_state(&symbol))
+                .await?;
+            anyhow::ensure!(
+                !direction_changed
+                    || paper_state
+                        .as_ref()
+                        .is_none_or(|(position, _)| position.size.is_zero()),
+                "切换做多 / 做空方向前，请先平掉目标账户的持仓"
+            );
+        }
         // Snapshot readers must see the new config together with its matching runtime data.
         let transition_state = Arc::clone(&self.state);
         let scope_transition = transition_state.snapshot_scope_lock.write().await;
@@ -1151,19 +1223,27 @@ impl GridTradingEngine {
             self.last_account_sync = None;
             self.last_orders_sync = None;
             if new_config.exchange.dry_run {
-                *self.state.account.write().await = AccountInfo {
-                    asset: quote_asset(&new_config.exchange.symbol)
-                        .unwrap_or(&new_config.exchange.symbol)
-                        .to_string(),
-                    total_wallet_balance: rust_decimal_macros::dec!(10000),
-                    available_balance: rust_decimal_macros::dec!(10000),
-                    margin_balance: rust_decimal_macros::dec!(10000),
-                    unrealized_profit: Decimal::ZERO,
-                    update_time: Utc::now(),
-                };
+                if let Some((position, account)) = paper_state {
+                    *self.state.position.write().await = position;
+                    *self.state.account.write().await = account;
+                } else {
+                    *self.state.account.write().await = AccountInfo {
+                        asset: quote_asset(&new_config.exchange.symbol)
+                            .unwrap_or(&new_config.exchange.symbol)
+                            .to_string(),
+                        total_wallet_balance: rust_decimal_macros::dec!(10000),
+                        available_balance: rust_decimal_macros::dec!(10000),
+                        margin_balance: rust_decimal_macros::dec!(10000),
+                        unrealized_profit: Decimal::ZERO,
+                        update_time: Utc::now(),
+                    };
+                }
             } else {
                 *self.state.account.write().await = AccountInfo::default();
             }
+            self.state
+                .paper_restore_failed
+                .store(false, std::sync::atomic::Ordering::SeqCst);
             if let Some(tx) = &self.market_stream_tx {
                 let _ = tx.send((
                     new_config.exchange.symbol.clone(),
@@ -1768,8 +1848,18 @@ impl GridTradingEngine {
         &self,
         symbol: &str,
         order_id: i64,
+        expected_qty: Decimal,
     ) -> Result<(Decimal, Decimal, bool)> {
-        let fills = self.client.get_user_trades(symbol, order_id).await?;
+        let scope = symbol.to_owned();
+        let clear_revision = self
+            .state
+            .db
+            .run_blocking(move |db| Ok(db.symbol_trade_clear_revision(&scope)))
+            .await?;
+        let fills = self
+            .client
+            .get_user_trades(symbol, order_id, expected_qty, clear_revision)
+            .await?;
         aggregate_execution_pnl(symbol, &fills)
     }
 
@@ -1788,16 +1878,19 @@ impl GridTradingEngine {
         }
         let mode = TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
         let pending_count = self.state.stats.read().await.pending_pnl_trades;
+        self.client.note_pnl_reconcile_backlog(pending_count);
         if pending_count == 0 {
             self.pnl_reconcile_offset = 0;
             return;
         }
         let offset = self.pnl_reconcile_offset % pending_count;
         let pending_symbol = config.exchange.symbol.clone();
-        let pending = match self
+        let (pending, clear_revision) = match self
             .state
             .db
-            .run_blocking(move |db| db.get_unverified_trades(&pending_symbol, mode, 3, offset))
+            .run_blocking(move |db| {
+                db.get_unverified_trades_with_clear_revision(&pending_symbol, mode, 3, offset)
+            })
             .await
         {
             Ok(trades) => trades,
@@ -1816,7 +1909,12 @@ impl GridTradingEngine {
                         .get_order_by_client_id(&trade.symbol, &trade.client_order_id)
                         .await?;
                     let fills = client
-                        .get_user_trades(&trade.symbol, order.order_id)
+                        .get_user_trades(
+                            &trade.symbol,
+                            order.order_id,
+                            order.executed_qty,
+                            clear_revision,
+                        )
                         .await?;
                     aggregate_execution_pnl(&trade.symbol, &fills)
                 }
@@ -2081,7 +2179,10 @@ impl GridTradingEngine {
         let (realized_pnl, commission, is_maker, pnl_verified) = if config.exchange.dry_run {
             (simulated_pnl, Decimal::ZERO, true, true)
         } else if let Some(order_id) = order.order_id {
-            match self.fetch_execution_pnl(&order.symbol, order_id).await {
+            match self
+                .fetch_execution_pnl(&order.symbol, order_id, order.quantity)
+                .await
+            {
                 Ok((pnl, fee, maker)) => (pnl, fee, maker, true),
                 Err(e) => {
                     warn!(
@@ -2907,18 +3008,25 @@ impl GridTradingEngine {
 
     /// Cancel all active orders
     async fn cancel_all_orders(&mut self) -> bool {
+        self.cancel_all_orders_inner(false).await
+    }
+
+    async fn cancel_all_orders_inner(&mut self, pause_already_persisted: bool) -> bool {
         let config = self.state.config.read().await.clone();
         let is_dry_run = config.exchange.dry_run;
         let symbol = config.exchange.symbol.clone();
         let mode = TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
         let pause_epoch = self.state.pause_epoch();
-        let was_running = *self.state.status.read().await == BotStatus::Running;
+        let was_running =
+            !pause_already_persisted && *self.state.status.read().await == BotStatus::Running;
         let mut recovery_failed = false;
-        if let Err(e) = self.state.pause_trading_silently().await {
-            error!("Failed to persist paused status before cancellation: {}", e);
-            self.pause_trading_with_reason("撤单前保存策略状态失败")
-                .await;
-            recovery_failed = true;
+        if !pause_already_persisted {
+            if let Err(e) = self.state.pause_trading_silently().await {
+                error!("Failed to persist paused status before cancellation: {}", e);
+                self.pause_trading_with_reason("撤单前保存策略状态失败")
+                    .await;
+                recovery_failed = true;
+            }
         }
 
         if let Err(e) = self.cancel_remainder_plan().await {
@@ -3066,22 +3174,23 @@ impl GridTradingEngine {
     }
 
     /// Rebalance grid centered around current price
-    async fn rebalance_grid(&mut self) {
+    async fn rebalance_grid(&mut self) -> Result<(), String> {
         if !self.cancel_all_orders().await {
-            self.state
-                .add_log(
-                    "ERROR",
-                    "Grid rebalance stopped: failed to cancel existing orders",
-                )
-                .await;
-            return;
+            let error = "Grid rebalance stopped: failed to cancel existing orders";
+            self.state.add_log("ERROR", error).await;
+            return Err(error.into());
         }
-        if *self.state.status.read().await == BotStatus::Running {
-            self.maintain_grid_window().await;
+        if *self.state.status.read().await != BotStatus::Running {
+            return Err("策略已暂停，网格重建未完成".into());
+        }
+        self.maintain_grid_window().await;
+        if *self.state.status.read().await != BotStatus::Running {
+            return Err("策略已暂停，网格重建未完成".into());
         }
         self.state
-            .add_log("INFO", "Grid window refreshed and rebalanced")
+            .add_log("INFO", "Grid rebalance request processed")
             .await;
+        Ok(())
     }
 }
 
@@ -3103,8 +3212,8 @@ mod tests {
     use crate::server::state::AppState;
     use crate::types::OrderPurpose;
     use crate::types::{
-        BotControlAction, BotStatus, GridDirection, GridOrder, GridStats, OrderSide, OrderStatus,
-        TickerInfo, TradeRecord, TradingMode,
+        AccountInfo, BotControlAction, BotStatus, GridDirection, GridOrder, GridStats, OrderSide,
+        OrderStatus, PositionInfo, TickerInfo, TradeRecord, TradingMode,
     };
     use axum::{
         extract::{Query, State},
@@ -3210,8 +3319,10 @@ mod tests {
                 .post(|State(fake): State<PairExchange>, Query(query): Query<HashMap<String, String>>| async move {
                     let id = query["newClientOrderId"].clone();
                     fake.posts.lock().unwrap().push(id.clone());
+                    let mut orders = fake.orders.lock().unwrap();
+                    let order_id = orders.values().map(|order| order.order_id).max().unwrap_or(499).max(499) + 1;
                     let order = BinanceOrderResponse {
-                        order_id: 500,
+                        order_id,
                         client_order_id: id.clone(),
                         symbol: query["symbol"].clone(),
                         status: "NEW".into(),
@@ -3224,7 +3335,7 @@ mod tests {
                         time_in_force: "GTX".into(),
                         update_time: None,
                     };
-                    fake.orders.lock().unwrap().insert(id, order.clone());
+                    orders.insert(id, order.clone());
                     if consume_failure(&fake.lose_response) {
                         (axum::http::StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"code": -1000})))
                     } else {
@@ -3407,6 +3518,154 @@ mod tests {
         engine
     }
 
+    fn seed_paper_position(db: &Database) {
+        let trade = TradeRecord {
+            trade_id: "paper-switch-fill".into(),
+            client_order_id: "paper-switch-order".into(),
+            symbol: "SOLUSDC".into(),
+            mode: TradingMode::Paper,
+            side: OrderSide::Buy,
+            price: dec!(100),
+            quantity: dec!(1),
+            amount_usdc: dec!(100),
+            realized_pnl: dec!(0),
+            commission: dec!(0),
+            pnl_verified: true,
+            is_maker: true,
+            timestamp: Utc::now(),
+            note: String::new(),
+        };
+        let position = PositionInfo {
+            symbol: "SOLUSDC".into(),
+            size: dec!(1),
+            entry_price: dec!(100),
+            ..Default::default()
+        };
+        let account = AccountInfo {
+            asset: "USDC".into(),
+            total_wallet_balance: dec!(900),
+            available_balance: dec!(800),
+            ..Default::default()
+        };
+        assert!(db
+            .insert_trade_with_paper_recovery(
+                &trade,
+                &GridStats::default(),
+                None,
+                None,
+                Some(&(position, account)),
+            )
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn switching_away_and_back_restores_paper_position_and_balance() {
+        let mut config = AppConfig::default();
+        config.grid.grid_interval = dec!(1);
+        config.exchange.api_key = "test-key".into();
+        config.exchange.api_secret = "test-secret".into();
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        seed_paper_position(&db);
+        let fake = PairExchange::default();
+        let (url, server) = pair_exchange_server(fake.clone()).await;
+        let mut engine = pair_recovery_engine(&config, db, url).await;
+        let mut live = config.clone();
+        live.exchange.dry_run = false;
+        engine.apply_config(live).await.unwrap();
+        assert_eq!(engine.state.position.read().await.size, dec!(0));
+        assert!(
+            fake.orders
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|order| order.status == "NEW")
+                .count()
+                > 1
+        );
+        engine.apply_config(config).await.unwrap();
+        assert!(fake
+            .orders
+            .lock()
+            .unwrap()
+            .values()
+            .all(|order| order.status != "NEW"));
+        assert_eq!(engine.state.position.read().await.size, dec!(1));
+        let account = engine.state.account.read().await;
+        assert_eq!(account.total_wallet_balance, dec!(900));
+        assert_eq!(account.available_balance, dec!(800));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn switching_direction_rejects_nonempty_target_paper_position() {
+        let mut config = AppConfig::default();
+        config.exchange.dry_run = false;
+        config.exchange.api_key = "test-key".into();
+        config.exchange.api_secret = "test-secret".into();
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        seed_paper_position(&db);
+        let (url, server) = pair_exchange_server(PairExchange::default()).await;
+        let mut engine = pair_recovery_engine(&config, db, url).await;
+        engine.state.position.write().await.size = dec!(0);
+        let mut paper = config.clone();
+        paper.exchange.dry_run = true;
+        paper.grid.direction = match config.grid.direction {
+            GridDirection::Long => GridDirection::Short,
+            GridDirection::Short => GridDirection::Long,
+        };
+        let error = engine.apply_config(paper).await.unwrap_err();
+        assert!(error.to_string().contains("请先平掉目标账户的持仓"));
+        let current = engine.state.config.read().await;
+        assert!(!current.exchange.dry_run);
+        assert_eq!(current.grid.direction, config.grid.direction);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn rebalance_rejects_pause_after_enqueue_without_placing_orders() {
+        let config = AppConfig::default();
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let fake = PairExchange::default();
+        let (url, server) = pair_exchange_server(fake.clone()).await;
+        let mut engine = pair_recovery_engine(&config, db, url).await;
+        engine.state.resume_trading().await.unwrap();
+        let (reply, result) = tokio::sync::oneshot::channel();
+        engine
+            .state
+            .action_tx
+            .send(BotControlAction::Rebalance { reply })
+            .await
+            .unwrap();
+        engine.state.pause_trading().await.unwrap();
+        let action = engine.action_rx.recv().await.unwrap();
+        engine.handle_control_action(action).await;
+        assert!(result.await.unwrap().is_err());
+        assert_eq!(*engine.state.status.read().await, BotStatus::Paused);
+        assert!(engine.state.active_orders.read().await.is_empty());
+        assert!(fake.posts.lock().unwrap().is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn rebalance_reports_cancellation_failure() {
+        let mut config = AppConfig::default();
+        config.exchange.dry_run = false;
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let fake = PairExchange::default();
+        fake.fail_open_orders.store(100, Ordering::SeqCst);
+        let (url, server) = pair_exchange_server(fake.clone()).await;
+        let mut engine = pair_recovery_engine(&config, db, url).await;
+        engine.state.resume_trading().await.unwrap();
+        let (reply, result) = tokio::sync::oneshot::channel();
+        engine
+            .handle_control_action(BotControlAction::Rebalance { reply })
+            .await;
+        assert!(result.await.unwrap().unwrap_err().contains("cancel"));
+        assert_eq!(*engine.state.status.read().await, BotStatus::Paused);
+        assert!(fake.posts.lock().unwrap().is_empty());
+        server.abort();
+    }
+
     async fn dirty_live_switch_fixture() -> (
         GridTradingEngine,
         Arc<Database>,
@@ -3446,6 +3705,33 @@ mod tests {
         let engine = pair_recovery_engine(&paper, db.clone(), url).await;
         engine.state.resume_trading().await.unwrap();
         (engine, db, fake, server)
+    }
+
+    #[tokio::test]
+    async fn rebalance_reports_pause_during_cancellation() {
+        let (mut engine, _db, fake, server) = dirty_live_switch_fixture().await;
+        engine.state.config.write().await.exchange.dry_run = false;
+        fake.block_cancel.store(1, Ordering::SeqCst);
+        let state = engine.state.clone();
+        let (reply, result) = tokio::sync::oneshot::channel();
+        let rebuilding = tokio::spawn(async move {
+            engine
+                .handle_control_action(BotControlAction::Rebalance { reply })
+                .await;
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            fake.cancel_started.notified(),
+        )
+        .await
+        .unwrap();
+        state.pause_trading().await.unwrap();
+        fake.release_cancel.notify_one();
+        rebuilding.await.unwrap();
+        assert!(result.await.unwrap().is_err());
+        assert_eq!(*state.status.read().await, BotStatus::Paused);
+        assert!(fake.posts.lock().unwrap().is_empty());
+        server.abort();
     }
 
     #[tokio::test]
