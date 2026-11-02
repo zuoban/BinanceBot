@@ -1,6 +1,12 @@
+import type { QueryClient, QueryKey } from '@tanstack/react-query';
 import { authenticatedFetch } from './api';
 
 export type DatabaseTarget = 'trade_history' | 'account_hourly_snapshots';
+
+export async function refreshClearedQueries(client: QueryClient, keys: QueryKey[]) {
+  await Promise.all(keys.map(queryKey => client.cancelQueries({ queryKey })));
+  await Promise.all(keys.map(queryKey => client.invalidateQueries({ queryKey })));
+}
 
 export async function downloadDatabase(path: string, targets?: DatabaseTarget[]) {
   const response = await authenticatedFetch(path, {

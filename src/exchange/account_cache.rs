@@ -1,10 +1,9 @@
+use super::cache_entries::CacheEntries;
 use super::{BinanceAccountInfoResponse, BinanceFuturesClient};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
 
 // Bound reuse independently of the configured polling period: cached balances
 // must never be treated as a fresh exchange response indefinitely.
@@ -17,11 +16,9 @@ pub(crate) struct AccountSnapshot {
     pub received_instant: Instant,
 }
 
-type AccountEntry = Arc<Mutex<Option<AccountSnapshot>>>;
-
 #[derive(Default)]
 pub(crate) struct AccountCache {
-    entries: Mutex<HashMap<[u8; 32], AccountEntry>>,
+    entries: CacheEntries<AccountSnapshot>,
 }
 
 impl AccountCache {
@@ -34,15 +31,7 @@ impl AccountCache {
     }
 
     pub async fn invalidate(&self, client: &BinanceFuturesClient) {
-        let entry = self
-            .entries
-            .lock()
-            .await
-            .get(&client.account_cache_key())
-            .cloned();
-        if let Some(entry) = entry {
-            *entry.lock().await = None;
-        }
+        self.entries.invalidate(client.account_cache_key()).await;
     }
 
     async fn get_inner(
@@ -50,13 +39,7 @@ impl AccountCache {
         client: &BinanceFuturesClient,
         force: bool,
     ) -> Result<AccountSnapshot> {
-        let entry = {
-            let mut entries = self.entries.lock().await;
-            entries
-                .entry(client.account_cache_key())
-                .or_default()
-                .clone()
-        };
+        let entry = self.entries.entry(client.account_cache_key()).await;
         let mut cached = entry.lock().await;
         if let Some(snapshot) = cached.as_ref().filter(|_| !force) {
             if snapshot.received_instant.elapsed() < MAX_AGE {
@@ -241,13 +224,7 @@ mod tests {
         let client = BinanceFuturesClient::with_base_url(&AppConfig::default().exchange, url);
         let cache = AccountCache::default();
         cache.get(&client).await.unwrap();
-        let entry = cache
-            .entries
-            .lock()
-            .await
-            .get(&client.account_cache_key())
-            .unwrap()
-            .clone();
+        let entry = cache.entries.entry(client.account_cache_key()).await;
         entry.lock().await.as_mut().unwrap().received_instant = Instant::now() - MAX_AGE;
         fail.store(true, Ordering::SeqCst);
         assert!(cache.get(&client).await.is_err());

@@ -3,7 +3,7 @@ import { App, Button, Space } from 'antd';
 import { DownloadOutlined } from '@ant-design/icons';
 import { useQueryClient } from '@tanstack/react-query';
 import { post } from '../lib/api';
-import { downloadDatabase } from '../lib/database';
+import { downloadDatabase, refreshClearedQueries } from '../lib/database';
 
 export function HistoryActions({ symbol }: { symbol: string }) {
   const { modal, message } = App.useApp();
@@ -26,8 +26,7 @@ export function HistoryActions({ symbol }: { symbol: string }) {
     try {
       if (!await modal.confirm({ title: `清理 ${symbol} 的成交历史？`, content: `将删除 ${symbol} 全部模式的历史成交并重置相关统计。持仓和挂单保留。此操作无法撤销，建议先导出。`, okText: '清理当前币种历史', okButtonProps: { danger: true }, cancelText: '取消' })) return;
       const result = await post<{ deleted_trades: number }>(`${path}/trades/clear`, { confirm: true });
-      await Promise.all([client.cancelQueries({ queryKey: ['snapshot'] }), client.cancelQueries({ queryKey: ['overview'] })]);
-      await Promise.all([client.invalidateQueries({ queryKey: ['snapshot'] }), client.invalidateQueries({ queryKey: ['overview'] })]);
+      await refreshClearedQueries(client, [['snapshot'], ['overview']]);
       message.success(`已清理 ${symbol} 的 ${result.deleted_trades} 笔历史成交`);
     } catch (error) { message.error((error as Error).message); }
     finally { lock.current = false; setBusy(null); }

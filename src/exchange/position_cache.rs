@@ -1,10 +1,8 @@
+use super::cache_entries::CacheEntries;
 use super::client::one_way_position_ref;
 use super::{BinanceFuturesClient, BinancePositionRisk};
 use anyhow::Result;
-use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
 
 const MAX_AGE: Duration = Duration::from_secs(1);
 
@@ -13,24 +11,14 @@ struct PositionSnapshot {
     received_instant: Instant,
 }
 
-type PositionEntry = Arc<Mutex<Option<PositionSnapshot>>>;
-
 #[derive(Default)]
 pub(crate) struct PositionCache {
-    entries: Mutex<HashMap<[u8; 32], PositionEntry>>,
+    entries: CacheEntries<PositionSnapshot>,
 }
 
 impl PositionCache {
     pub async fn invalidate(&self, client: &BinanceFuturesClient) {
-        let entry = self
-            .entries
-            .lock()
-            .await
-            .get(&client.account_cache_key())
-            .cloned();
-        if let Some(entry) = entry {
-            *entry.lock().await = None;
-        }
+        self.entries.invalidate(client.account_cache_key()).await;
     }
 
     pub async fn get(
@@ -38,13 +26,7 @@ impl PositionCache {
         client: &BinanceFuturesClient,
         symbol: &str,
     ) -> Result<(Option<BinancePositionRisk>, Instant)> {
-        let entry = {
-            let mut entries = self.entries.lock().await;
-            entries
-                .entry(client.account_cache_key())
-                .or_default()
-                .clone()
-        };
+        let entry = self.entries.entry(client.account_cache_key()).await;
         let mut cached = entry.lock().await;
         if cached
             .as_ref()
@@ -78,7 +60,9 @@ mod tests {
     use crate::config::AppConfig;
     use axum::{extract::Query, http::StatusCode, routing::get, Json, Router};
     use serde_json::{json, Value};
+    use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     async fn server() -> (
         String,
@@ -181,13 +165,7 @@ mod tests {
         let client = BinanceFuturesClient::with_base_url(&AppConfig::default().exchange, url);
         let cache = PositionCache::default();
         cache.get(&client, "SOLUSDC").await.unwrap();
-        let entry = cache
-            .entries
-            .lock()
-            .await
-            .get(&client.account_cache_key())
-            .unwrap()
-            .clone();
+        let entry = cache.entries.entry(client.account_cache_key()).await;
         entry.lock().await.as_mut().unwrap().received_instant = Instant::now() - MAX_AGE;
         mode.store(1, Ordering::SeqCst);
         assert!(cache.get(&client, "SOLUSDC").await.is_err());

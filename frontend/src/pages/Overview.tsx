@@ -7,7 +7,7 @@ import { AccountsContext } from '../lib/session';
 import { accountGroups, comparePositionAmount, modeLabel, numeric, number as fixedNumber, positionAmount, positionGroups, price as fixedPrice, quoteAsset, todayCount, todayPnlGroups, todayTradeCounts, trimFractionZeros } from '../lib/format';
 import { ErrorNotice, ModeTag, Pnl, StatusTag } from '../components/Common';
 import { runBatchControls, useControls } from '../components/Controls';
-import type { Pair } from '../lib/types';
+import type { Pair, Trade } from '../lib/types';
 import { OverviewLoading } from '../components/Loading';
 import { OverviewHistory } from '../components/OverviewHistory';
 import { StrategyMenu } from '../components/StrategyMenu';
@@ -15,6 +15,20 @@ import { TradesTable } from '../components/DataTables';
 
 const number = (value: unknown, digits?: number) => trimFractionZeros(fixedNumber(value, digits));
 const price = (value: unknown) => trimFractionZeros(fixedPrice(value));
+
+function groupTradePnl(trades: Trade[]) {
+  const groups = new Map<string, { mode: Trade['mode']; asset: string; total: number; available: boolean }>();
+  for (const trade of trades) {
+    const asset = quoteAsset(trade.symbol) || trade.symbol;
+    const key = `${trade.mode}:${asset}`;
+    const group = groups.get(key) ?? { mode: trade.mode, asset, total: 0, available: true };
+    const pnl = numeric(trade.realized_pnl);
+    if (!trade.pnl_verified || pnl === null) group.available = false;
+    else group.total += pnl;
+    groups.set(key, group);
+  }
+  return groups;
+}
 
 export default function OverviewPage() {
   const overview = useOverview();
@@ -49,16 +63,7 @@ export default function OverviewPage() {
   const displayedTrades = recentTrades.slice(0, tradesExpanded ? 20 : 5);
   const buyTrades = displayedTrades.filter(trade => trade.side === 'BUY').length;
   const sellTrades = displayedTrades.filter(trade => trade.side === 'SELL').length;
-  const tradePnlGroups = new Map<string, { mode: typeof displayedTrades[number]['mode']; asset: string; total: number; available: boolean }>();
-  for (const trade of displayedTrades) {
-    const asset = quoteAsset(trade.symbol) || trade.symbol;
-    const key = `${trade.mode}:${asset}`;
-    const group = tradePnlGroups.get(key) ?? { mode: trade.mode, asset, total: 0, available: true };
-    const pnl = numeric(trade.realized_pnl);
-    if (!trade.pnl_verified || pnl === null) group.available = false;
-    else group.total += pnl;
-    tradePnlGroups.set(key, group);
-  }
+  const tradePnlGroups = groupTradePnl(displayedTrades);
   const stale = !!overview.error || Date.now() - overview.dataUpdatedAt > 10_000;
   const pairs = entries.map(e => ({ symbol: e.snapshot.symbol, status: e.snapshot.status, mode: e.mode, grid_config: e.snapshot.grid_config, scoped: e.scoped } satisfies Pair));
   const batch = async (action: 'pause' | 'resume') => {

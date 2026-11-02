@@ -202,13 +202,13 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 async fn get_single_pair_handler(
     State(state): State<Arc<AppState>>,
 ) -> Json<ApiResponse<Vec<TradingPairView>>> {
-    get_pairs_handler(State(Arc::new(vec![state]))).await
+    collect_pairs(std::slice::from_ref(&state)).await
 }
 
 async fn get_single_overview_handler(
     State(state): State<Arc<AppState>>,
 ) -> Json<ApiResponse<OverviewSnapshot>> {
-    get_overview_handler(State(Arc::new(vec![state]))).await
+    collect_overview(std::slice::from_ref(&state)).await
 }
 
 fn pair_routes() -> Router<Arc<AppState>> {
@@ -308,6 +308,10 @@ pub fn create_multi_router(states: Vec<Arc<AppState>>) -> Router {
 async fn get_pairs_handler(
     State(states): State<Arc<Vec<Arc<AppState>>>>,
 ) -> Json<ApiResponse<Vec<TradingPairView>>> {
+    collect_pairs(&states).await
+}
+
+async fn collect_pairs(states: &[Arc<AppState>]) -> Json<ApiResponse<Vec<TradingPairView>>> {
     let mut pairs = Vec::with_capacity(states.len());
     for state in states.iter() {
         let config = state.config.read().await;
@@ -329,6 +333,10 @@ async fn get_pairs_handler(
 async fn get_overview_handler(
     State(states): State<Arc<Vec<Arc<AppState>>>>,
 ) -> Json<ApiResponse<OverviewSnapshot>> {
+    collect_overview(&states).await
+}
+
+async fn collect_overview(states: &[Arc<AppState>]) -> Json<ApiResponse<OverviewSnapshot>> {
     let generated_at = chrono::Utc::now();
     let today_pnl = match states.first() {
         Some(state) => state.db.cached_today_pnl(generated_at).await,
@@ -701,7 +709,7 @@ async fn get_managed_overview_handler(
             message: None,
         });
     }
-    get_overview_handler(State(Arc::new(states))).await
+    collect_overview(&states).await
 }
 
 async fn get_overview_history_handler(
@@ -799,24 +807,10 @@ async fn get_global_config_handler(
 ) -> Json<ApiResponse<WebGlobalConfigView>> {
     match handle.db.run_blocking(|db| db.load_config()).await {
         Ok(Some(config)) => {
-            let view = web_config_view(&config);
+            let global = crate::config::GlobalConfig::from_app(&config);
             Json(ApiResponse {
                 success: true,
-                data: Some(WebGlobalConfigView {
-                    version: crate::db::config_version(&crate::config::GlobalConfig::from_app(
-                        &config,
-                    )),
-                    global_max_position_notional: config.global_max_position_notional,
-                    pause_on_zero_available_margin: config.pause_on_zero_available_margin,
-                    recv_window: view.recv_window,
-                    sync_interval_secs: view.sync_interval_secs,
-                    has_api_key: view.has_api_key,
-                    has_api_secret: view.has_api_secret,
-                    api_key_preview: view.api_key_preview,
-                    telegram_enabled: view.telegram_enabled,
-                    has_telegram_bot_token: view.has_telegram_bot_token,
-                    telegram_chat_id: view.telegram_chat_id,
-                }),
+                data: Some(web_global_config_view(&config, &global)),
                 message: None,
             })
         }
@@ -844,22 +838,10 @@ async fn post_global_config_handler(
         Ok(global) => {
             let mut config = AppConfig::default();
             global.apply_to(&mut config);
-            let view = web_config_view(&config);
+            let view = web_global_config_view(&config, &global);
             Json(ApiResponse {
                 success: true,
-                data: Some(WebGlobalConfigView {
-                    version: crate::db::config_version(&global),
-                    global_max_position_notional: global.global_max_position_notional,
-                    pause_on_zero_available_margin: global.pause_on_zero_available_margin,
-                    recv_window: view.recv_window,
-                    sync_interval_secs: view.sync_interval_secs,
-                    has_api_key: view.has_api_key,
-                    has_api_secret: view.has_api_secret,
-                    api_key_preview: view.api_key_preview,
-                    telegram_enabled: view.telegram_enabled,
-                    has_telegram_bot_token: view.has_telegram_bot_token,
-                    telegram_chat_id: view.telegram_chat_id,
-                }),
+                data: Some(view),
                 message: Some("全局设置已保存，所有交易对立即生效".into()),
             })
         }
@@ -868,6 +850,26 @@ async fn post_global_config_handler(
             data: None,
             message: Some(error.to_string()),
         }),
+    }
+}
+
+fn web_global_config_view(
+    config: &AppConfig,
+    global: &crate::config::GlobalConfig,
+) -> WebGlobalConfigView {
+    let view = web_config_view(config);
+    WebGlobalConfigView {
+        version: crate::db::config_version(global),
+        global_max_position_notional: global.global_max_position_notional,
+        pause_on_zero_available_margin: global.pause_on_zero_available_margin,
+        recv_window: view.recv_window,
+        sync_interval_secs: view.sync_interval_secs,
+        has_api_key: view.has_api_key,
+        has_api_secret: view.has_api_secret,
+        api_key_preview: view.api_key_preview,
+        telegram_enabled: view.telegram_enabled,
+        has_telegram_bot_token: view.has_telegram_bot_token,
+        telegram_chat_id: view.telegram_chat_id,
     }
 }
 

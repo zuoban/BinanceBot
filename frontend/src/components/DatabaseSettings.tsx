@@ -2,7 +2,7 @@ import { useContext, useEffect, useRef, useState } from 'react';
 import { App, Button, Card, Checkbox, Space } from 'antd';
 import { useQueryClient } from '@tanstack/react-query';
 import { post } from '../lib/api';
-import { downloadDatabase, type DatabaseTarget } from '../lib/database';
+import { downloadDatabase, refreshClearedQueries, type DatabaseTarget } from '../lib/database';
 import { EditContext } from '../lib/session';
 
 const options: { label: string; value: DatabaseTarget }[] = [
@@ -33,8 +33,7 @@ export function DatabaseSettings() {
           ...(targets.includes('trade_history') ? [['snapshot'], ['overview']] : []),
           ...(targets.includes('account_hourly_snapshots') ? [['overview-history']] : []),
         ];
-        await Promise.all(keys.map(queryKey => client.cancelQueries({ queryKey })));
-        await Promise.all(keys.map(queryKey => client.invalidateQueries({ queryKey })));
+        await refreshClearedQueries(client, keys);
         const counts = [
           ...(targets.includes('trade_history') ? [`${result.deleted_trades} 笔历史成交`] : []),
           ...(targets.includes('account_hourly_snapshots') ? [`${result.deleted_account_hourly_snapshots} 条账户小时快照`] : []),
