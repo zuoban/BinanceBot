@@ -213,10 +213,13 @@ cargo run --release -- --host 127.0.0.1 --port 8080
 | `POST /api/database/export` | 使用 `{"targets":["trade_history","account_hourly_snapshots"]}` 导出选定数据 |
 | `POST /api/database/clear` | 指定相同 `targets` 和 `"confirm":true` 清理选定数据 |
 | `/api/pairs/{symbol}/ws` | 指定交易对的快照、日志和控制通道，认证方式同 `/ws` |
+| `/api/accounts/ws` | 使用 `auth` WebSocket 子协议认证，每秒推送 `accounts` 帧；包含各交易对的模式、运行环境、未实现盈亏和账户余额，不包含凭证 |
 
 原 `/api/status`、`/api/config`、`/api/control` 和 `/ws` 在多交易对模式下指向列表中的第一个交易对。全局数据库操作支持选择成交历史及统计、账户小时快照；币种操作覆盖该币种所有运行模式。成交清理保留交易去重标识及执行前沿，避免历史回放和策略恢复受到影响。导出文件用于分析，并非完整恢复备份。
 
 修改已有交易对配置时，先通过对应的 `GET /api/pairs/{symbol}/config`（或旧版 `GET /api/config`）读取 `data.config_version`，再在对应 POST 请求中提供 `baseline_version`。缺少版本的更新会被拒绝；版本过期时返回 HTTP 409，需重新读取配置并检查修改后再提交。版本在服务重启或交易对重建后也会失效。添加交易对的 `POST /api/pairs` 不需要版本。升级后，直接调用配置 API 的旧客户端需增加上述版本字段。
+
+交易对配置更新中的 `min_price`、`max_price` 和 `max_position_usdc` 被省略或设为 `null` 时都会清空。全局配置中的 `global_max_position_notional` 则在省略时保留原值，显式设为 `null` 时清空。
 
 ### 本地多交易对负载测试
 
