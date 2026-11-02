@@ -11,7 +11,7 @@ use crate::types::{
     WebConfigView, WebGlobalConfigView,
 };
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, Query, State};
+use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -19,6 +19,7 @@ use axum::routing::{delete, get, post};
 use axum::{Extension, Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use tower::ServiceExt;
 use tracing::{error, info, warn};
@@ -900,14 +901,14 @@ async fn remove_pair_handler(
         return Json(ApiResponse {
             success: false,
             data: None,
-            message: Some("请确认移除交易对；已有持仓和历史记录会保留".into()),
+            message: Some("请确认移除交易对；移除前须平仓，历史记录会保留".into()),
         });
     }
     match handle.remove_pair(symbol.clone()).await {
         Ok(()) => Json(ApiResponse {
             success: true,
             data: Some(symbol),
-            message: Some("交易对已移除，已有持仓和历史记录保留".into()),
+            message: Some("交易对已移除，历史记录保留".into()),
         }),
         Err(error) => Json(ApiResponse {
             success: false,
@@ -1090,10 +1091,34 @@ async fn get_auth_status_handler(
     }
 }
 
+fn peer_ip(address: SocketAddr) -> IpAddr {
+    match address.ip() {
+        IpAddr::V6(ip) => ip
+            .to_ipv4_mapped()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(ip)),
+        ip => ip,
+    }
+}
+fn auth_busy<T>() -> (StatusCode, Json<ApiResponse<T>>) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(ApiResponse {
+            success: false,
+            data: None,
+            message: Some("认证服务繁忙，请稍后重试".to_string()),
+        }),
+    )
+}
+
 async fn post_auth_setup_handler(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(address): ConnectInfo<SocketAddr>,
     Json(payload): Json<AuthSetupPayload>,
 ) -> (StatusCode, Json<ApiResponse<AuthTokenResponse>>) {
+    let Some(permit) = state.try_begin_auth_work() else {
+        return auth_busy();
+    };
     let is_set = match state.db.run_blocking(|db| db.is_admin_password_set()).await {
         Ok(is_set) => is_set,
         Err(error) => {
@@ -1126,7 +1151,7 @@ async fn post_auth_setup_handler(
         );
     }
 
-    if !state.begin_login_attempt().await {
+    if !state.begin_login_attempt(peer_ip(address)).await {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(ApiResponse {
@@ -1152,7 +1177,10 @@ async fn post_auth_setup_handler(
     let session_token = token.clone();
     match state
         .db
-        .run_blocking(move |db| db.initialize_admin_session(&password, &session_token))
+        .run_blocking(move |db| {
+            let _permit = permit;
+            db.initialize_admin_session(&password, &session_token)
+        })
         .await
     {
         Ok(true) => {}
@@ -1179,7 +1207,7 @@ async fn post_auth_setup_handler(
         }
     }
 
-    state.clear_login_attempts().await;
+    state.clear_login_attempts(peer_ip(address)).await;
     info!("Admin password successfully initialized and initial session created");
 
     (
@@ -1194,9 +1222,13 @@ async fn post_auth_setup_handler(
 
 async fn post_auth_login_handler(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(address): ConnectInfo<SocketAddr>,
     Json(payload): Json<AuthLoginPayload>,
 ) -> (StatusCode, Json<ApiResponse<AuthTokenResponse>>) {
-    if !state.begin_login_attempt().await {
+    let Some(permit) = state.try_begin_auth_work() else {
+        return auth_busy();
+    };
+    if !state.begin_login_attempt(peer_ip(address)).await {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(ApiResponse {
@@ -1229,11 +1261,14 @@ async fn post_auth_login_handler(
     let session_token = token.clone();
     match state
         .db
-        .run_blocking(move |db| db.authenticate_and_create_session(&password, &session_token))
+        .run_blocking(move |db| {
+            let _permit = permit;
+            db.authenticate_and_create_session(&password, &session_token)
+        })
         .await
     {
         Ok(true) => {
-            state.clear_login_attempts().await;
+            state.clear_login_attempts(peer_ip(address)).await;
             info!("Admin authentication successful");
             (
                 StatusCode::OK,
@@ -1304,12 +1339,18 @@ async fn post_change_password_handler(
             }),
         );
     }
+    let Some(permit) = state.try_begin_auth_work() else {
+        return auth_busy();
+    };
 
     let old_password = payload.old_password;
     let new_password = new_password.to_string();
     match state
         .db
-        .run_blocking(move |db| db.change_admin_password(&old_password, &new_password))
+        .run_blocking(move |db| {
+            let _permit = permit;
+            db.change_admin_password(&old_password, &new_password)
+        })
         .await
     {
         Ok(true) => {

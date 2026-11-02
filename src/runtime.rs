@@ -340,15 +340,15 @@ impl TradingRuntime {
     }
 
     async fn prepare_pair(&self, strategy: AppConfig, multi: bool) -> anyhow::Result<PairTask> {
-        self.prepare_pair_with_paper_state(strategy, multi, None, false, None)
+        self.prepare_pair_with_state(strategy, multi, None, false, None)
             .await
     }
 
-    async fn prepare_pair_with_paper_state(
+    async fn prepare_pair_with_state(
         &self,
         strategy: AppConfig,
         multi: bool,
-        paper_state: Option<(crate::types::PositionInfo, crate::types::AccountInfo)>,
+        previous_state: Option<(crate::types::PositionInfo, crate::types::AccountInfo)>,
         force_paused: bool,
         prearmed: Option<(bool, bool)>,
     ) -> anyhow::Result<PairTask> {
@@ -392,7 +392,7 @@ impl TradingRuntime {
         if force_paused || previous_unclean {
             *state.status.write().await = crate::types::BotStatus::Paused;
         }
-        if let Some((position, account)) = paper_state {
+        if let Some((position, account)) = previous_state {
             *state.position.write().await = position;
             *state.account.write().await = account;
         }
@@ -551,7 +551,7 @@ impl TradingRuntime {
             .membership_ready
             .store(false, std::sync::atomic::Ordering::SeqCst);
         let result = self
-            .prepare_pair_with_paper_state(
+            .prepare_pair_with_state(
                 config,
                 true,
                 None,
@@ -604,6 +604,56 @@ impl TradingRuntime {
         let _ = pair.shutdown_tx.send(true);
         let mut result =
             remove_engine(&pair.state, &mut pair.engine, Duration::from_secs(30)).await;
+        let state = pair.state.clone();
+        if result.is_ok() {
+            let config = state.config.read().await.clone();
+            result = if config.exchange.dry_run {
+                if state.position.read().await.size.is_zero() {
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!("仍有持仓，请先平仓再移除交易对"))
+                }
+            } else {
+                let client = self.exchange_client(&config.exchange);
+                let position = match client.sync_server_time().await {
+                    Ok(_) => client.get_position(symbol).await,
+                    Err(error) => Err(error.context("同步交易所时间失败")),
+                };
+                match position {
+                    Ok(Some(position)) => {
+                        let has_position = !position.position_amt.is_zero();
+                        {
+                            let mut current = state.position.write().await;
+                            current.symbol = position.symbol;
+                            current.size = position.position_amt;
+                            current.entry_price = position.entry_price;
+                            current.mark_price = position.mark_price;
+                            current.unrealized_pnl = position.un_realized_profit;
+                            current.liquidation_price = position.liquidation_price;
+                            current.leverage = position.leverage.parse().unwrap_or(20);
+                            current.update_time = Some(chrono::Utc::now());
+                        }
+                        if has_position {
+                            self.global_position_limit.check().await;
+                            Err(anyhow::anyhow!("仍有持仓，请先平仓再移除交易对"))
+                        } else {
+                            Ok(())
+                        }
+                    }
+                    failure => {
+                        state
+                            .global_position_ready
+                            .store(false, std::sync::atomic::Ordering::SeqCst);
+                        self.global_position_limit.check().await;
+                        match failure {
+                            Ok(None) => Err(anyhow::anyhow!("无法确认交易所持仓，请稍后重试")),
+                            Err(error) => Err(error.context("查询交易所持仓失败，无法移除交易对")),
+                            Ok(Some(_)) => unreachable!(),
+                        }
+                    }
+                }
+            };
+        }
         if result.is_ok() {
             let symbol = symbol.to_string();
             result = self
@@ -615,20 +665,17 @@ impl TradingRuntime {
         if let Err(error) = result {
             // The engine may have committed a configuration update while stopping.
             let config = self.pairs[index].state.config.read().await.clone();
-            let paper_state = if config.exchange.dry_run {
-                Some((
-                    self.pairs[index].state.position.read().await.clone(),
-                    self.pairs[index].state.account.read().await.clone(),
-                ))
-            } else {
-                None
-            };
+            // Keep the last known exposure visible while a replacement reconciles.
+            let previous_state = Some((
+                self.pairs[index].state.position.read().await.clone(),
+                self.pairs[index].state.account.read().await.clone(),
+            ));
             for task in self.pairs[index].background.drain(..) {
                 task.abort();
                 let _ = task.await;
             }
             match self
-                .prepare_pair_with_paper_state(config, true, paper_state, true, None)
+                .prepare_pair_with_state(config, true, previous_state, true, None)
                 .await
             {
                 Ok(replacement) => {

@@ -1,9 +1,10 @@
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { App } from 'antd';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { beforeEach, expect, it, vi } from 'vitest';
 import OverviewPage from '../pages/Overview';
+import { runBatchControls } from '../components/Controls';
 import { snapshot } from './fixtures';
 import type { Overview } from '../lib/types';
 import { AccountsContext } from '../lib/session';
@@ -13,6 +14,9 @@ beforeEach(() => {
   overview.data = undefined;
   overview.isPending = false;
   overview.error = null;
+  overview.dataUpdatedAt = Date.now();
+  overview.refetch.mockReset();
+  vi.mocked(runBatchControls).mockReset().mockResolvedValue([]);
   vi.stubGlobal('matchMedia', vi.fn().mockImplementation(query => ({ matches: false, media: query, addListener: vi.fn(), removeListener: vi.fn(), addEventListener: vi.fn(), removeEventListener: vi.fn() })));
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
 });
@@ -87,7 +91,7 @@ it('keeps both add links available when there are no strategies', () => {
   render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
   const section = screen.getByRole('region', { name: '交易策略' });
   expect(within(section).getAllByRole('link', { name: /新增交易对/ })).toHaveLength(2);
-  expect(within(section).getByRole('button', { name: /全部策略操作/ })).toBeDisabled();
+  expect(within(section).getByRole('button', { name: /全部策略操作/ })).toBeEnabled();
   for (const link of within(section).getAllByRole('link', { name: /新增交易对/ })) expect(link).toHaveAttribute('href', '/pairs/new');
 });
 
@@ -201,6 +205,47 @@ it('summarizes statuses and lets the user clear a search with no results', async
   expect(screen.getByText('没有符合筛选条件的策略')).toBeInTheDocument();
   await user.click(screen.getAllByRole('button', { name: '清除筛选' })[0]);
   expect(screen.getByText('BTCUSDC')).toBeInTheDocument();
+});
+
+it('refreshes an empty stale snapshot and pauses every returned strategy', async () => {
+  overview.data = { generated_at: '', pairs: [] };
+  overview.dataUpdatedAt = Date.now() - 20_000;
+  const paused = snapshot('SOLUSDC'); paused.status = 'PAUSED';
+  const running = snapshot('BTCUSDC'); running.status = 'RUNNING';
+  overview.refetch.mockResolvedValue({ data: { generated_at: '', pairs: [paused, running].map(s => ({ snapshot: s, mode: 'PAPER', scoped: true })) }, error: null });
+  render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+  const user = userEvent.setup();
+  await user.click(screen.getByRole('button', { name: /全部策略操作/ }));
+  await user.click(screen.getByText('全部暂停'));
+  await user.click(await screen.findByRole('button', { name: '确认执行' }));
+  await waitFor(() => expect(runBatchControls).toHaveBeenCalledWith([
+    expect.objectContaining({ symbol: 'SOLUSDC' }), expect.objectContaining({ symbol: 'BTCUSDC' }),
+  ], 'pause', actions.run));
+});
+
+it('reports a refresh failure without submitting stale pause targets', async () => {
+  overview.data = { generated_at: '', pairs: [{ snapshot: snapshot(), mode: 'PAPER', scoped: true }] };
+  overview.refetch.mockResolvedValue({ data: overview.data, error: new Error('连接失败') });
+  render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+  const user = userEvent.setup();
+  await user.click(screen.getByRole('button', { name: /全部策略操作/ }));
+  await user.click(screen.getByText('全部暂停'));
+  await user.click(await screen.findByRole('button', { name: '确认执行' }));
+  expect(await screen.findByText('批量操作失败：连接失败')).toBeInTheDocument();
+  expect(runBatchControls).not.toHaveBeenCalled();
+});
+
+it('reports strategies whose batch operation was not confirmed', async () => {
+  const s = snapshot('SOLUSDC'); s.status = 'RUNNING';
+  overview.data = { generated_at: '', pairs: [{ snapshot: s, mode: 'PAPER', scoped: true }] };
+  overview.refetch.mockResolvedValue({ data: overview.data, error: null });
+  vi.mocked(runBatchControls).mockResolvedValue([{ symbol: s.symbol, status: s.status, mode: 'PAPER', grid_config: s.grid_config, scoped: true }]);
+  render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+  const user = userEvent.setup();
+  await user.click(screen.getByRole('button', { name: /全部策略操作/ }));
+  await user.click(screen.getByText('全部暂停'));
+  await user.click(await screen.findByRole('button', { name: '确认执行' }));
+  expect(await screen.findByText('以下策略未确认操作成功：SOLUSDC，请检查状态和日志')).toBeInTheDocument();
 });
 it('shows today’s executed buy and sell counts instead of active orders on the strategy card', () => {
   const s = snapshot('BTCUSDC');

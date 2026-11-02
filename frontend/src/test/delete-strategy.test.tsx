@@ -29,7 +29,8 @@ it('deletes only after confirmation and refreshes strategy data', async () => {
   const invalidate = setup();
   await userEvent.setup().click(screen.getByRole('button', { name: '删除策略' }));
   await waitFor(() => expect(mocks.api).toHaveBeenCalledWith('/api/pairs/BTCUSDC', { method: 'DELETE', body: JSON.stringify({ confirm: true }), signal: expect.any(AbortSignal) }));
-  expect(mocks.confirm.mock.calls[0][0].content).toContain('不会平仓');
+  expect(mocks.confirm).toHaveBeenCalledOnce();
+  expect(mocks.confirm.mock.invocationCallOrder[0]).toBeLessThan(mocks.api.mock.invocationCallOrder[0]);
   expect(invalidate).toHaveBeenCalledWith({ queryKey: ['pairs'] });
   expect(invalidate).toHaveBeenCalledWith({ queryKey: ['overview'] });
 });

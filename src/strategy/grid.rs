@@ -1953,12 +1953,15 @@ impl GridTradingEngine {
         }
         let mode = TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
         let recorded_id = order.client_order_id.clone();
-        match self
-            .state
-            .db
-            .run_blocking(move |db| db.has_recorded_order(&recorded_id, mode))
-            .await
-        {
+        let recorded = if config.exchange.dry_run {
+            self.state.has_recorded_paper_order(recorded_id, mode).await
+        } else {
+            self.state
+                .db
+                .run_blocking(move |db| db.has_recorded_order(&recorded_id, mode))
+                .await
+        };
+        match recorded {
             Ok(true) => {
                 self.state
                     .active_orders
@@ -1984,12 +1987,14 @@ impl GridTradingEngine {
             }
         }
 
-        // Remove from active orders
-        self.state
-            .active_orders
-            .write()
-            .await
-            .remove(&order.client_order_id);
+        // Keep paper orders retryable until the detached commit has finished.
+        if !config.exchange.dry_run {
+            self.state
+                .active_orders
+                .write()
+                .await
+                .remove(&order.client_order_id);
+        }
 
         let mut cycle_profit = Decimal::ZERO;
         let mut simulated_pnl = Decimal::ZERO;
@@ -2035,16 +2040,13 @@ impl GridTradingEngine {
                         "Completed Grid Cycle! {} at {} (Paired Entry: {}, Spread Estimate: {} USDC)",
                         order.side.as_str(), order.price, price, cycle_profit
                     );
-                    self.state.add_log("SUCCESS", note.clone()).await;
                 }
             }
         }
-        if !is_completed_cycle {
-            self.state.add_log("INFO", note.clone()).await;
-        }
 
+        let mut paper_state = None;
         if config.exchange.dry_run {
-            let mut pos = self.state.position.write().await;
+            let mut pos = self.state.position.read().await.clone();
             let delta = if order.side == OrderSide::Buy {
                 order.quantity
             } else {
@@ -2068,9 +2070,10 @@ impl GridTradingEngine {
             }
             pos.size = new_size;
             let ticker = self.state.ticker.read().await.clone();
-            let mut acc = self.state.account.write().await;
+            let mut acc = self.state.account.read().await.clone();
             acc.total_wallet_balance += simulated_pnl;
             update_paper_account(&mut pos, &mut acc, ticker.grid_reference_price());
+            paper_state = Some((pos, acc));
         } else {
             self.sync_account_and_position().await;
         }
@@ -2107,17 +2110,18 @@ impl GridTradingEngine {
             pnl_verified,
             is_maker,
             timestamp: order.updated_at,
-            note,
+            note: note.clone(),
         };
 
         // Persist trade to SQLite and update runtime stats
         let recorded = self
             .state
-            .record_trade(
+            .record_trade_with_paper_state(
                 trade,
                 is_completed_cycle.then_some(cycle_profit),
                 None,
                 order.paired_client_order_id.clone(),
+                paper_state,
             )
             .await;
         if !recorded {
@@ -2129,6 +2133,16 @@ impl GridTradingEngine {
                 .insert(order.client_order_id.clone(), order.clone());
             return false;
         }
+        self.state
+            .add_log(
+                if is_completed_cycle {
+                    "SUCCESS"
+                } else {
+                    "INFO"
+                },
+                note,
+            )
+            .await;
         true
     }
 
@@ -3089,8 +3103,8 @@ mod tests {
     use crate::server::state::AppState;
     use crate::types::OrderPurpose;
     use crate::types::{
-        BotControlAction, BotStatus, GridOrder, GridStats, OrderSide, OrderStatus, TickerInfo,
-        TradeRecord, TradingMode,
+        BotControlAction, BotStatus, GridDirection, GridOrder, GridStats, OrderSide, OrderStatus,
+        TickerInfo, TradeRecord, TradingMode,
     };
     use axum::{
         extract::{Query, State},
@@ -4637,6 +4651,160 @@ mod tests {
         wrong_asset[0].commission_asset = "BNB".into();
         assert!(aggregate_execution_pnl("SOLUSDC", &wrong_asset).is_err());
         assert!(aggregate_execution_pnl("SOLUSDC", &[]).is_err());
+    }
+
+    #[tokio::test]
+    async fn paper_fill_persistence_failure_preserves_account_and_retry_applies_once() {
+        for (direction, side, initial_size, price, expected_size, expected_pnl) in [
+            (
+                GridDirection::Long,
+                OrderSide::Buy,
+                dec!(0),
+                dec!(100),
+                dec!(1),
+                dec!(0),
+            ),
+            (
+                GridDirection::Long,
+                OrderSide::Sell,
+                dec!(2),
+                dec!(110),
+                dec!(1),
+                dec!(10),
+            ),
+            (
+                GridDirection::Short,
+                OrderSide::Sell,
+                dec!(0),
+                dec!(100),
+                dec!(-1),
+                dec!(0),
+            ),
+            (
+                GridDirection::Short,
+                OrderSide::Buy,
+                dec!(-2),
+                dec!(90),
+                dec!(-1),
+                dec!(10),
+            ),
+        ] {
+            let path = std::env::temp_dir().join(format!("paper-fill-{}.db", uuid::Uuid::new_v4()));
+            let db = Arc::new(Database::open(&path).unwrap());
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TRIGGER reject_paper_stats BEFORE INSERT ON scoped_grid_stats \
+                 BEGIN SELECT RAISE(ABORT, 'reject stats'); END;",
+                )
+                .unwrap();
+            let mut config = AppConfig::default();
+            config.grid.direction = direction;
+            let (action_tx, action_rx) = mpsc::channel(1);
+            let (_ticker_tx, ticker_rx) = broadcast::channel(1);
+            let state = AppState::new(config.clone(), db.clone(), action_tx);
+            let client = Arc::new(BinanceFuturesClient::new(&config.exchange));
+            let mut engine = GridTradingEngine::new(state.clone(), client, action_rx, ticker_rx);
+            {
+                let mut position = state.position.write().await;
+                position.size = initial_size;
+                position.entry_price = if initial_size.is_zero() {
+                    dec!(0)
+                } else {
+                    dec!(100)
+                };
+                position.mark_price = dec!(100);
+                position.leverage = 10;
+            }
+            state.ticker.write().await.last_price = dec!(100);
+            let position_before = serde_json::to_value(&*state.position.read().await).unwrap();
+            let account_before = serde_json::to_value(&*state.account.read().await).unwrap();
+            let stats_before = serde_json::to_value(&*state.stats.read().await).unwrap();
+            let wallet_before = state.account.read().await.total_wallet_balance;
+            let mut order = GridOrder {
+                client_order_id: "paper-retry".into(),
+                order_id: None,
+                symbol: "SOLUSDC".into(),
+                side,
+                price,
+                quantity: dec!(1),
+                amount_usdc: price,
+                status: OrderStatus::New,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                grid_level: 1,
+                paired_client_order_id: None,
+                is_take_profit: false,
+                purpose: crate::types::OrderPurpose::Legacy,
+                merge_sources: Vec::new(),
+            };
+            state
+                .active_orders
+                .write()
+                .await
+                .insert(order.client_order_id.clone(), order.clone());
+
+            assert!(!engine.on_order_filled(&mut order).await);
+            assert_eq!(*state.status.read().await, BotStatus::Paused);
+            assert!(state
+                .active_orders
+                .read()
+                .await
+                .contains_key(&order.client_order_id));
+            assert_eq!(
+                serde_json::to_value(&*state.position.read().await).unwrap(),
+                position_before
+            );
+            assert_eq!(
+                serde_json::to_value(&*state.account.read().await).unwrap(),
+                account_before
+            );
+            assert_eq!(
+                serde_json::to_value(&*state.stats.read().await).unwrap(),
+                stats_before
+            );
+            assert!(db.get_recent_trades(10).unwrap().is_empty());
+
+            connection
+                .execute_batch("DROP TRIGGER reject_paper_stats")
+                .unwrap();
+            assert!(engine.on_order_filled(&mut order).await);
+            assert_eq!(state.position.read().await.size, expected_size);
+            assert_eq!(state.position.read().await.entry_price, dec!(100));
+            assert_eq!(
+                state.account.read().await.total_wallet_balance,
+                wallet_before + expected_pnl
+            );
+            assert!(!state
+                .active_orders
+                .read()
+                .await
+                .contains_key(&order.client_order_id));
+            assert_eq!(state.stats.read().await.total_trades, 1);
+            assert_eq!(state.stats.read().await.total_realized_pnl, expected_pnl);
+            let trades = db.get_recent_trades(10).unwrap();
+            assert_eq!(trades.len(), 1);
+            assert_eq!(trades[0].realized_pnl, expected_pnl);
+            let position_after = serde_json::to_value(&*state.position.read().await).unwrap();
+            let account_after = serde_json::to_value(&*state.account.read().await).unwrap();
+            assert!(engine.on_order_filled(&mut order).await);
+            assert_eq!(
+                serde_json::to_value(&*state.position.read().await).unwrap(),
+                position_after
+            );
+            assert_eq!(
+                serde_json::to_value(&*state.account.read().await).unwrap(),
+                account_after
+            );
+            assert_eq!(state.stats.read().await.total_trades, 1);
+            assert_eq!(db.get_recent_trades(10).unwrap().len(), 1);
+
+            drop(engine);
+            drop(state);
+            drop(connection);
+            drop(db);
+            std::fs::remove_file(path).unwrap();
+        }
     }
 
     #[tokio::test]

@@ -48,7 +48,7 @@ it('submits resumes serially even when the first is not confirmed', async () => 
   const pending = runBatchControls([pair('SOLUSDC'), pair('BTCUSDC')], 'resume', run);
   expect(run).toHaveBeenCalledTimes(1);
   finishFirst(false);
-  await pending;
+  expect(await pending).toEqual([pair('SOLUSDC')]);
   expect(run).toHaveBeenCalledTimes(2);
   expect(run).toHaveBeenNthCalledWith(2, expect.objectContaining({ symbol: 'BTCUSDC' }), 'resume', true);
 });

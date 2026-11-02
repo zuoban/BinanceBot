@@ -81,6 +81,102 @@ pub struct Database {
     benchmark_wait_samples: std::sync::OnceLock<std::sync::Arc<DatabaseWaitSamples>>,
 }
 
+#[cfg(unix)]
+fn validate_database_file(path: &Path, expected_uid: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "SQLite database and sidecar paths must not be symbolic links",
+        ));
+    }
+    if metadata.uid() != expected_uid {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "file owner {} differs from service effective user {}",
+                metadata.uid(),
+                expected_uid
+            ),
+        ));
+    }
+    if metadata.permissions().mode() & 0o077 != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "remove group and other permissions before starting",
+        ));
+    }
+    Ok(())
+}
+
+fn prepare_database_path(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder
+            .create(parent)
+            .with_context(|| format!("Failed to create database directory: {:?}", parent))?;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        // Pre-create the database privately so SQLite also creates its WAL and
+        // shared-memory files with private permissions, without changing umask.
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(path)
+                {
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(error) => {
+                        return Err(error).with_context(|| {
+                            format!("Failed to prepare SQLite database at {:?}", path)
+                        })
+                    }
+                }
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("Failed to inspect {:?}", path))
+            }
+        }
+        // Inspect without opening existing files: closing a descriptor can
+        // release another SQLite connection's process-wide POSIX locks.
+        let effective_uid = unsafe { libc::geteuid() } as u32;
+        let validate = |path: &Path| validate_database_file(path, effective_uid);
+        validate(path).with_context(|| format!("Insecure SQLite database path {:?}; ensure it is owned by the service user, remove group and other permissions and avoid symbolic links", path))?;
+
+        // SQLite resolves parent symlinks before choosing sidecar names.
+        let canonical = path
+            .canonicalize()
+            .context("Failed to resolve database path")?;
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let mut name = canonical.as_os_str().to_os_string();
+            name.push(suffix);
+            let sidecar = Path::new(&name);
+            match validate(sidecar) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error).with_context(|| format!("Insecure SQLite sidecar {:?}; ensure it is owned by the service user, remove group and other permissions and avoid symbolic links", sidecar)),
+            }
+        }
+    }
+    Ok(())
+}
+
 impl Database {
     pub async fn run_blocking<T, F>(self: &std::sync::Arc<Self>, operation: F) -> Result<T>
     where
@@ -164,13 +260,13 @@ impl Database {
         let path_str = path_ref.to_string_lossy().to_string();
 
         if path_str != ":memory:" {
-            if let Some(parent) = path_ref.parent() {
-                if !parent.as_os_str().is_empty() {
-                    std::fs::create_dir_all(parent).with_context(|| {
-                        format!("Failed to create database directory: {:?}", parent)
-                    })?;
-                }
-            }
+            // URI filenames can redirect SQLite to a different path or VFS;
+            // they cannot be secured by preparing this filesystem path.
+            anyhow::ensure!(
+                !path_str.starts_with("file:"),
+                "SQLite URI database paths are not supported; use a filesystem path"
+            );
+            prepare_database_path(path_ref)?;
         }
 
         let conn = Connection::open(path_ref)
@@ -1882,6 +1978,106 @@ mod tests {
         assert_eq!(db.trade_data_revision(), 4);
         assert_eq!(db.symbol_trade_revision("SOLUSDC"), 4);
         assert_eq!(db.symbol_trade_revision("BTCUSDC"), 4);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn database_files_are_private_without_changing_existing_parent() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!("db-permissions-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let directory = root.join("new").join("nested");
+        let path = directory.join("bot.db");
+        let db = Database::open(&path).unwrap();
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&root), 0o755);
+        assert_eq!(mode(&root.join("new")) & 0o077, 0);
+        assert_eq!(mode(&directory) & 0o077, 0);
+        assert_eq!(mode(&path) & 0o077, 0);
+        let wal = directory.join("bot.db-wal");
+        let shm = directory.join("bot.db-shm");
+        assert_eq!(mode(&wal) & 0o077, 0);
+        assert_eq!(mode(&shm) & 0o077, 0);
+        let uid = unsafe { libc::geteuid() } as u32;
+        for file in [&path, &wal, &shm] {
+            validate_database_file(file, uid).unwrap();
+            let error = validate_database_file(file, uid.wrapping_add(1)).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+            assert!(error
+                .to_string()
+                .contains("differs from service effective user"));
+        }
+
+        // Existing insecure files must be repaired by the operator, without
+        // changing any of their permissions during a failed open.
+        for file in [&path, &wal, &shm] {
+            std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o644)).unwrap();
+            let error = match Database::open(&path) {
+                Ok(_) => panic!("accepted insecure {}", file.display()),
+                Err(error) => error,
+            };
+            assert!(error
+                .to_string()
+                .contains("remove group and other permissions"));
+            assert_eq!(mode(file), 0o644);
+            std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        assert_eq!(mode(&root), 0o755);
+        let reopened = Database::open(&path).unwrap();
+        drop(reopened);
+        drop(db);
+        let journal = directory.join("bot.db-journal");
+        std::fs::write(&journal, b"old journal").unwrap();
+        std::fs::set_permissions(&journal, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(prepare_database_path(&path).is_err());
+        assert_eq!(mode(&journal), 0o644);
+        std::fs::set_permissions(&journal, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(validate_database_file(&journal, uid.wrapping_add(1)).is_err());
+        prepare_database_path(&path).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn database_and_sidecar_symlinks_are_rejected_without_changing_targets() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = std::env::temp_dir().join(format!("db-symlinks-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("bot.db");
+        let target = root.join("target");
+        std::fs::write(&target, b"unrelated").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let target_mode = || std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+
+        symlink(&target, &path).unwrap();
+        assert!(prepare_database_path(&path).is_err());
+        assert_eq!(target_mode(), 0o644);
+        std::fs::remove_file(&path).unwrap();
+        symlink(root.join("missing"), &path).unwrap();
+        assert!(prepare_database_path(&path).is_err());
+        assert!(!root.join("missing").exists());
+        std::fs::remove_file(&path).unwrap();
+
+        prepare_database_path(&path).unwrap();
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let sidecar = root.join(format!("bot.db{suffix}"));
+            symlink(&target, &sidecar).unwrap();
+            assert!(prepare_database_path(&path).is_err());
+            assert_eq!(target_mode(), 0o644);
+            std::fs::remove_file(&sidecar).unwrap();
+            symlink(root.join("missing"), &sidecar).unwrap();
+            assert!(prepare_database_path(&path).is_err());
+            std::fs::remove_file(&sidecar).unwrap();
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn database_rejects_sqlite_uri_paths() {
+        assert!(Database::open("file:other.db?mode=rwc").is_err());
     }
 
     #[test]

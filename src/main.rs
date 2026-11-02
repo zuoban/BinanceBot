@@ -107,15 +107,18 @@ async fn main() -> anyhow::Result<()> {
     );
     let (web_stop, mut web_stop_rx) = watch::channel(false);
     let mut web_task = tokio::spawn(async move {
-        axum::serve(listener, app)
-            .with_graceful_shutdown(async move {
-                while !*web_stop_rx.borrow_and_update() {
-                    if web_stop_rx.changed().await.is_err() {
-                        break;
-                    }
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            while !*web_stop_rx.borrow_and_update() {
+                if web_stop_rx.changed().await.is_err() {
+                    break;
                 }
-            })
-            .await
+            }
+        })
+        .await
     });
     let reason = tokio::select! {
         reason = shutdown_signal() => reason.map(str::to_string),

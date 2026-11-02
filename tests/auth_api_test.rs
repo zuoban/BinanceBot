@@ -1,4 +1,5 @@
 use axum::body::{to_bytes, Body};
+use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
 use binance_grid_bot::config::AppConfig;
 use binance_grid_bot::db::Database;
@@ -6,6 +7,7 @@ use binance_grid_bot::server::{create_router, AppState};
 use binance_grid_bot::types::BotControlAction;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::client::IntoClientRequest};
@@ -33,7 +35,9 @@ async fn test_full_auth_lifecycle() {
             }
         }
     });
-    let app = create_router(state);
+    let app = create_router(state).layer(axum::Extension(ConnectInfo(
+        "127.0.0.1:12345".parse::<SocketAddr>().unwrap(),
+    )));
 
     // The backend is API-only; the separately deployed frontend serves the SPA.
     let res = app
@@ -387,11 +391,153 @@ fn auth_request(path: &str, body: serde_json::Value, token: Option<&str>) -> Req
     let mut builder = Request::builder()
         .method("POST")
         .uri(path)
-        .header("Content-Type", "application/json");
+        .header("Content-Type", "application/json")
+        .extension(ConnectInfo(
+            "127.0.0.1:12345".parse::<SocketAddr>().unwrap(),
+        ));
     if let Some(token) = token {
         builder = builder.header("Authorization", format!("Bearer {token}"));
     }
     builder.body(Body::from(body.to_string())).unwrap()
+}
+
+#[tokio::test]
+async fn saturated_password_workers_reject_without_consuming_source_limit() {
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    db.set_admin_password("{{SECRET_vwmfr05k}}password")
+        .unwrap();
+    let (tx, _rx) = mpsc::channel(1);
+    let state = AppState::new(AppConfig::default(), db, tx);
+    let app = create_router(state.clone());
+    let permits: Vec<_> = (0..4)
+        .map(|_| state.try_begin_auth_work().unwrap())
+        .collect();
+    assert!(state.try_begin_auth_work().is_none());
+    let request = || {
+        auth_request(
+            "/api/auth/login",
+            serde_json::json!({"password": "wrong"}),
+            None,
+        )
+    };
+    for _ in 0..11 {
+        assert_eq!(
+            app.clone().oneshot(request()).await.unwrap().status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+    drop(permits);
+    assert_eq!(
+        app.oneshot(request()).await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn login_limit_is_scoped_to_socket_ip_and_ignores_forwarded_headers() {
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    db.set_admin_password("correct-password").unwrap();
+    let (action_tx, _action_rx) = mpsc::channel(16);
+    let app = create_router(AppState::new(AppConfig::default(), db, action_tx));
+    let request = |address: &str, forwarded: &str, password: &str| {
+        Request::builder()
+            .method("POST")
+            .uri("/api/auth/login")
+            .header("Content-Type", "application/json")
+            .header("X-Forwarded-For", forwarded)
+            .header("X-Real-IP", forwarded)
+            .extension(ConnectInfo(address.parse::<SocketAddr>().unwrap()))
+            .body(Body::from(
+                serde_json::json!({"password": password}).to_string(),
+            ))
+            .unwrap()
+    };
+
+    for i in 0..10 {
+        let response = app
+            .clone()
+            .oneshot(request(
+                "192.0.2.1:1000",
+                &format!("198.51.100.{i}"),
+                "wrong-password",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+    let response = app
+        .clone()
+        .oneshot(request("192.0.2.2:2000", "192.0.2.1", "correct-password"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = app
+        .clone()
+        .oneshot(request(
+            "[::ffff:192.0.2.1]:3000",
+            "203.0.113.1",
+            "correct-password",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    let missing_peer = Request::builder()
+        .method("POST")
+        .uri("/api/auth/login")
+        .header("Content-Type", "application/json")
+        .header("X-Forwarded-For", "192.0.2.3")
+        .body(Body::from(r#"{"password":"correct-password"}"#))
+        .unwrap();
+    assert_eq!(
+        app.oneshot(missing_peer).await.unwrap().status(),
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+}
+
+#[tokio::test]
+async fn setup_attempts_are_isolated_by_socket_ip() {
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    let (action_tx, _action_rx) = mpsc::channel(16);
+    let state = AppState::new(AppConfig::default(), db, action_tx);
+    let setup_code = state.setup_code().unwrap().to_string();
+    let app = create_router(state);
+    let request = |address: &str, code: &str| {
+        Request::builder()
+            .method("POST")
+            .uri("/api/auth/setup")
+            .header("Content-Type", "application/json")
+            .extension(ConnectInfo(address.parse::<SocketAddr>().unwrap()))
+            .body(Body::from(
+                serde_json::json!({"password": "correct-password", "setup_code": code}).to_string(),
+            ))
+            .unwrap()
+    };
+    for _ in 0..10 {
+        assert_eq!(
+            app.clone()
+                .oneshot(request("192.0.2.1:1000", "incorrect"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+    assert_eq!(
+        app.clone()
+            .oneshot(request("192.0.2.1:2000", &setup_code))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(
+        app.oneshot(request("192.0.2.2:1000", &setup_code))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
 }
 
 #[tokio::test]

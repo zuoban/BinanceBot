@@ -70,15 +70,23 @@ export default function OverviewPage() {
     if (batchLock.current) return;
     batchLock.current = true; setBatchBusy(true);
     try {
-      const targets = pairs.filter(p => action === 'resume' ? p.status !== 'RUNNING' : p.status === 'RUNNING');
-      if (!targets.length) return;
+      const targets = action === 'resume' ? pairs.filter(p => p.status !== 'RUNNING') : pairs;
+      if (action === 'resume' && !targets.length) return;
       const accepted = await modal.confirm({
         title: `${action === 'resume' ? '恢复' : '暂停'}全部策略`,
-        content: `将操作 ${targets.length} 个交易对，不受当前筛选影响。${action === 'resume' && targets.some(p => p.mode === 'LIVE') ? '其中包含实盘策略，恢复后会使用真实资金下单。' : ''}`,
+        content: action === 'pause' ? '将刷新策略列表并暂停全部交易对，不受当前筛选影响。' : `将操作 ${targets.length} 个交易对，不受当前筛选影响。${targets.some(p => p.mode === 'LIVE') ? '其中包含实盘策略，恢复后会使用真实资金下单。' : ''}`,
         okText: '确认执行', cancelText: '取消',
       });
       if (!accepted) return;
-      await runBatchControls(targets, action, controls.run);
+      let selected = targets;
+      if (action === 'pause') {
+        const refreshed = await overview.refetch();
+        if (refreshed.error || !refreshed.data) throw refreshed.error ?? new Error('无法刷新策略列表');
+        selected = refreshed.data.pairs.map(e => ({ symbol: e.snapshot.symbol, status: e.snapshot.status, mode: e.mode, grid_config: e.snapshot.grid_config, scoped: e.scoped } satisfies Pair));
+        if (!selected.length) { message.info('当前没有可暂停的策略'); return; }
+      }
+      const unconfirmed = await runBatchControls(selected, action, controls.run);
+      if (unconfirmed.length) message.warning(`以下策略未确认操作成功：${unconfirmed.map(pair => pair.symbol).join('、')}，请检查状态和日志`);
     } catch (error) {
       message.error(`批量操作失败：${error instanceof Error ? error.message : String(error)}`);
     } finally { batchLock.current = false; setBatchBusy(false); }
@@ -149,7 +157,7 @@ export default function OverviewPage() {
     <section className="strategies-section" aria-labelledby="strategies-heading">
     <div className="section-heading"><h2 id="strategies-heading">交易策略</h2>
       <div className="strategy-heading-actions">
-        <Dropdown trigger={['click']} disabled={batchBusy || controls.busy.size > 0 || !pairs.length} menu={{ items: [{ key: 'resume', label: '全部恢复', disabled: stale }, { key: 'pause', label: '全部暂停' }], onClick: ({ key }) => void batch(key as 'pause' | 'resume') }}>
+        <Dropdown trigger={['click']} disabled={batchBusy || controls.busy.size > 0} menu={{ items: [{ key: 'resume', label: '全部恢复', disabled: stale || !pairs.length }, { key: 'pause', label: '全部暂停' }], onClick: ({ key }) => void batch(key as 'pause' | 'resume') }}>
           <Button loading={batchBusy} icon={<ThunderboltOutlined />}>全部策略操作</Button>
         </Dropdown>
         {addPairLink}

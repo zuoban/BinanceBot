@@ -17,14 +17,19 @@ async function confirmControlState(pair: Pair, action: Action): Promise<boolean>
 }
 
 interface ControlState { busy: Set<string>; results: Record<string, string>; run: (pair: Pair, action: Action, confirmed?: boolean) => Promise<boolean> }
-export async function runBatchControls(pairs: Pair[], action: 'pause' | 'resume', run: ControlState['run']) {
+export async function runBatchControls(pairs: Pair[], action: 'pause' | 'resume', run: ControlState['run']): Promise<Pair[]> {
   if (action === 'pause') {
     const results = await Promise.allSettled(pairs.map(pair => run(pair, action, true)));
     const failure = results.find(result => result.status === 'rejected');
     if (failure?.status === 'rejected') throw failure.reason;
-  } else {
-    for (const pair of pairs) await run(pair, action, true);
+    return pairs.filter((_, index) => {
+      const result = results[index];
+      return result.status === 'fulfilled' && !result.value;
+    });
   }
+  const unconfirmed: Pair[] = [];
+  for (const pair of pairs) if (!await run(pair, action, true)) unconfirmed.push(pair);
+  return unconfirmed;
 }
 const Context = createContext<ControlState>(null!);
 export const useControls = () => useContext(Context);

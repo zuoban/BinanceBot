@@ -7,10 +7,13 @@ use crate::types::*;
 use chrono::Utc;
 use rust_decimal::Decimal;
 use std::collections::{HashMap, VecDeque};
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{broadcast, mpsc, watch, Mutex, OwnedRwLockReadGuard, RwLock};
+use tokio::sync::{
+    broadcast, mpsc, watch, Mutex, OwnedRwLockReadGuard, OwnedSemaphorePermit, RwLock, Semaphore,
+};
 use tracing::{error, warn};
 
 #[path = "snapshot.rs"]
@@ -274,6 +277,12 @@ impl Drop for PendingSafetyPause<'_> {
     }
 }
 
+#[derive(Default)]
+struct LoginAttempts {
+    by_source: HashMap<IpAddr, VecDeque<Instant>>,
+    global: VecDeque<Instant>,
+}
+
 pub struct AppState {
     pub db: Arc<Database>,
     pub config: RwLock<AppConfig>,
@@ -311,7 +320,8 @@ pub struct AppState {
     pub(crate) snapshot_scope_lock: RwLock<()>,
     snapshot_publish_lock: Mutex<()>,
     snapshot_cache: snapshot::SnapshotCache,
-    login_failures: Mutex<VecDeque<Instant>>,
+    login_failures: Mutex<LoginAttempts>,
+    auth_work: Arc<Semaphore>,
     setup_code: Option<String>,
 
     pub action_tx: mpsc::Sender<BotControlAction>,
@@ -489,7 +499,8 @@ impl AppState {
             snapshot_scope_lock: RwLock::new(()),
             snapshot_publish_lock: Mutex::new(()),
             snapshot_cache: snapshot::SnapshotCache::default(),
-            login_failures: Mutex::new(VecDeque::new()),
+            login_failures: Mutex::new(LoginAttempts::default()),
+            auth_work: Arc::new(Semaphore::new(4)),
             setup_code,
             action_tx,
             ws_broadcast_tx,
@@ -508,6 +519,82 @@ impl AppState {
         cycle_profit: Option<Decimal>,
         pair_intent: Option<GridOrder>,
         consumed_pair_source: Option<String>,
+    ) -> bool {
+        self.record_trade_with_paper_state(
+            trade,
+            cycle_profit,
+            pair_intent,
+            consumed_pair_source,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn record_trade_with_paper_state(
+        self: &Arc<Self>,
+        trade: TradeRecord,
+        cycle_profit: Option<Decimal>,
+        pair_intent: Option<GridOrder>,
+        consumed_pair_source: Option<String>,
+        paper_state: Option<(PositionInfo, AccountInfo)>,
+    ) -> bool {
+        if paper_state.is_some() {
+            let state = Arc::clone(self);
+            let order_id = trade.client_order_id.clone();
+            return match tokio::spawn(async move {
+                let recorded = state
+                    .record_trade_inner(
+                        trade,
+                        cycle_profit,
+                        pair_intent,
+                        consumed_pair_source,
+                        paper_state,
+                    )
+                    .await;
+                if recorded {
+                    state.active_orders.write().await.remove(&order_id);
+                } else if let Err(error) = state.pause_trading().await {
+                    error!("Could not persist paused bot status: {}", error);
+                }
+                recorded
+            })
+            .await
+            {
+                Ok(recorded) => recorded,
+                Err(error) => {
+                    error!("Paper fill commit task failed: {}", error);
+                    false
+                }
+            };
+        }
+        self.record_trade_inner(
+            trade,
+            cycle_profit,
+            pair_intent,
+            consumed_pair_source,
+            paper_state,
+        )
+        .await
+    }
+
+    pub(crate) async fn has_recorded_paper_order(
+        self: &Arc<Self>,
+        order_id: String,
+        mode: TradingMode,
+    ) -> anyhow::Result<bool> {
+        let _commit = self.trade_commit_lock.lock().await;
+        self.db
+            .run_blocking(move |db| db.has_recorded_order(&order_id, mode))
+            .await
+    }
+
+    async fn record_trade_inner(
+        self: &Arc<Self>,
+        trade: TradeRecord,
+        cycle_profit: Option<Decimal>,
+        pair_intent: Option<GridOrder>,
+        consumed_pair_source: Option<String>,
+        paper_state: Option<(PositionInfo, AccountInfo)>,
     ) -> bool {
         // Persist the trade and its cumulative statistics together.
         let current_config = self.config.read().await;
@@ -565,6 +652,12 @@ impl AppState {
                     );
                     return false;
                 }
+            }
+            if let Some((position, account)) = paper_state {
+                let mut current_position = self.position.write().await;
+                let mut current_account = self.account.write().await;
+                *current_position = position;
+                *current_account = account;
             }
             if telegram.enabled {
                 let symbol = trade.symbol.clone();
@@ -912,18 +1005,38 @@ impl AppState {
         self.db.run_blocking(Database::clear_all_sessions).await
     }
 
-    pub async fn begin_login_attempt(&self) -> bool {
+    pub async fn begin_login_attempt(&self, source: IpAddr) -> bool {
         let mut failures = self.login_failures.lock().await;
-        failures.retain(|time| time.elapsed() < Duration::from_secs(60));
-        if failures.len() >= 10 {
+        failures.by_source.retain(|_, attempts| {
+            attempts.retain(|time| time.elapsed() < Duration::from_secs(60));
+            !attempts.is_empty()
+        });
+        failures
+            .global
+            .retain(|time| time.elapsed() < Duration::from_secs(60));
+        if failures.global.len() >= 100 {
             return false;
         }
-        failures.push_back(Instant::now());
+        // Active windows must not be evicted by churn from other sources.
+        if !failures.by_source.contains_key(&source) && failures.by_source.len() >= 10_000 {
+            return false;
+        }
+        let attempts = failures.by_source.entry(source).or_default();
+        if attempts.len() >= 10 {
+            return false;
+        }
+        let now = Instant::now();
+        attempts.push_back(now);
+        failures.global.push_back(now);
         true
     }
 
-    pub async fn clear_login_attempts(&self) {
-        self.login_failures.lock().await.clear();
+    pub async fn clear_login_attempts(&self, source: IpAddr) {
+        self.login_failures.lock().await.by_source.remove(&source);
+    }
+
+    pub fn try_begin_auth_work(&self) -> Option<OwnedSemaphorePermit> {
+        self.auth_work.clone().try_acquire_owned().ok()
     }
 
     pub async fn pause_trading(self: &Arc<Self>) -> anyhow::Result<()> {
@@ -1221,6 +1334,117 @@ impl AppState {
 mod tests {
     use super::*;
     use rust_decimal_macros::dec;
+
+    #[tokio::test]
+    async fn login_global_limit_is_shared_and_expires_without_reset_on_success() {
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let (tx, _rx) = mpsc::channel(1);
+        let state = AppState::new(AppConfig::default(), db, tx);
+        let first = IpAddr::V4(std::net::Ipv4Addr::from(1));
+        for _ in 0..10 {
+            assert!(state.begin_login_attempt(first).await);
+        }
+        for _ in 0..10 {
+            assert!(!state.begin_login_attempt(first).await);
+        }
+        state.clear_login_attempts(first).await;
+        for i in 2..=91 {
+            assert!(
+                state
+                    .begin_login_attempt(IpAddr::V4(std::net::Ipv4Addr::from(i)))
+                    .await
+            );
+        }
+        let other = IpAddr::V4(std::net::Ipv4Addr::from(100));
+        assert!(!state.begin_login_attempt(other).await);
+        state.clear_login_attempts(first).await;
+        assert!(!state.begin_login_attempt(other).await);
+        state.login_failures.lock().await.global[0] = Instant::now() - Duration::from_secs(61);
+        assert!(state.begin_login_attempt(other).await);
+    }
+
+    #[tokio::test]
+    async fn saturated_login_table_keeps_active_windows_until_expiry() {
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let (tx, _rx) = mpsc::channel(1);
+        let state = AppState::new(AppConfig::default(), db, tx);
+        let blocked = IpAddr::V4(std::net::Ipv4Addr::from(1));
+        let new_source = IpAddr::V4(std::net::Ipv4Addr::from(10_001));
+        {
+            let mut attempts = state.login_failures.lock().await;
+            for i in 1..=10_000 {
+                let count = if i == 1 { 10 } else { 1 };
+                attempts.by_source.insert(
+                    IpAddr::V4(std::net::Ipv4Addr::from(i)),
+                    std::iter::repeat(Instant::now()).take(count).collect(),
+                );
+            }
+        }
+        assert!(!state.begin_login_attempt(new_source).await);
+        assert!(!state.begin_login_attempt(blocked).await);
+        state.login_failures.lock().await.by_source.insert(
+            IpAddr::V4(std::net::Ipv4Addr::from(2)),
+            VecDeque::from([Instant::now() - Duration::from_secs(61)]),
+        );
+        assert!(state.begin_login_attempt(new_source).await);
+        assert!(!state.begin_login_attempt(blocked).await);
+    }
+
+    #[tokio::test]
+    async fn cancelled_paper_fill_finishes_publishing_before_retry_checks_history() {
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let (tx, _rx) = mpsc::channel(1);
+        let state = AppState::new(AppConfig::default(), db.clone(), tx);
+        let trade = cache_test_trade("cancel-paper-fill", 1, TradingMode::Paper);
+        let mut position = PositionInfo::default();
+        position.size = dec!(1);
+        position.entry_price = dec!(100);
+        let mut account = state.account.read().await.clone();
+        account.available_balance = dec!(9900);
+        let position_guard = state.position.write().await;
+        let revision = db.trade_data_revision();
+        let committing_state = state.clone();
+        let committing_trade = trade.clone();
+        let commit = tokio::spawn(async move {
+            committing_state
+                .record_trade_with_paper_state(
+                    committing_trade,
+                    None,
+                    None,
+                    None,
+                    Some((position, account)),
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while db.trade_data_revision() == revision {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        commit.abort();
+        assert!(commit.await.unwrap_err().is_cancelled());
+        assert!(state.trade_commit_lock.try_lock().is_err());
+        let retry_state = state.clone();
+        let retry_id = trade.client_order_id.clone();
+        let retry = tokio::spawn(async move {
+            retry_state
+                .has_recorded_paper_order(retry_id, TradingMode::Paper)
+                .await
+                .unwrap()
+        });
+        drop(position_guard);
+        assert!(tokio::time::timeout(Duration::from_secs(5), retry)
+            .await
+            .unwrap()
+            .unwrap());
+        assert_eq!(state.position.read().await.size, dec!(1));
+        assert_eq!(state.position.read().await.entry_price, dec!(100));
+        assert_eq!(state.account.read().await.available_balance, dec!(9900));
+        assert_eq!(state.stats.read().await.total_trades, 1);
+        assert_eq!(db.get_recent_trades(10).unwrap().len(), 1);
+    }
 
     #[tokio::test]
     async fn cancelled_cleanup_finishes_all_cache_resets_before_releasing_commit_lock() {
