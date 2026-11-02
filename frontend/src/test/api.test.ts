@@ -23,6 +23,23 @@ describe('API client', () => {
     await expect(request).rejects.toThrow();
     expect(tokenStore.get()).toBe('new-token');
   });
+  it('keeps the session when the authentication service fails', async () => {
+    tokenStore.set('test-token');
+    const expired = vi.fn();
+    window.addEventListener('auth-expired', expired);
+    try {
+      vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => new Response(
+        JSON.stringify({ success: false, message: '认证服务异常，请稍后重试' }), { status: 500 },
+      )));
+      for (const path of ['/api/auth/status', '/api/status']) {
+        await expect(api(path)).rejects.toThrow('认证服务异常，请稍后重试');
+        expect(tokenStore.get()).toBe('test-token');
+      }
+      expect(expired).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener('auth-expired', expired);
+    }
+  });
   it('reports the server error for an incorrect password', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ success: false, message: '密码错误' }), { status: 401 })));
     await expect(api('/api/auth/login', { method: 'POST', body: '{}' })).rejects.toThrow('密码错误');

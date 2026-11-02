@@ -395,6 +395,156 @@ fn auth_request(path: &str, body: serde_json::Value, token: Option<&str>) -> Req
 }
 
 #[tokio::test]
+async fn auth_status_reports_database_errors_instead_of_false_state() {
+    for table in ["admin_auth", "auth_sessions"] {
+        let fixture = AuthTestDatabase::new();
+        fixture
+            .db
+            .set_admin_password(concat!("original", "-password"))
+            .unwrap();
+        fixture.db.create_session("valid-token").unwrap();
+        let (action_tx, _action_rx) = mpsc::channel(16);
+        let state = AppState::new(AppConfig::default(), fixture.db.clone(), action_tx);
+        let app = create_router(state);
+
+        let request = || {
+            Request::builder()
+                .uri("/api/auth/status")
+                .header("Authorization", "Bearer valid-token")
+                .body(Body::empty())
+                .unwrap()
+        };
+        let response = app.clone().oneshot(request()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["data"]["initialized"], true);
+        assert_eq!(json["data"]["authenticated"], true);
+
+        fixture
+            .external
+            .execute_batch(&format!(
+                "ALTER TABLE {table} RENAME TO {table}_unavailable"
+            ))
+            .unwrap();
+        let response = app.oneshot(request()).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "{table}"
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["success"], false, "{table}");
+        assert!(json["data"].is_null(), "{table}");
+        assert_eq!(json["message"], "认证服务异常，请稍后重试", "{table}");
+    }
+}
+
+#[tokio::test]
+async fn protected_route_reports_session_read_failure_without_treating_it_as_expiration() {
+    let fixture = AuthTestDatabase::new();
+    fixture.db.create_session("valid-token").unwrap();
+    let (action_tx, _action_rx) = mpsc::channel(16);
+    let state = AppState::new(AppConfig::default(), fixture.db.clone(), action_tx);
+    let app = create_router(state);
+    let request = |token: &str| {
+        Request::builder()
+            .uri("/api/status")
+            .header("Authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    assert_eq!(
+        app.clone()
+            .oneshot(request("valid-token"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(request("invalid-token"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    fixture
+        .external
+        .execute_batch("ALTER TABLE auth_sessions RENAME TO auth_sessions_unavailable")
+        .unwrap();
+    let response = app.oneshot(request("valid-token")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["success"], false);
+    assert!(json["data"].is_null());
+    assert_eq!(json["message"], "认证服务异常，请稍后重试");
+}
+
+#[tokio::test]
+async fn expired_session_cleanup_failure_still_allows_reauthentication() {
+    let fixture = AuthTestDatabase::new();
+    fixture
+        .db
+        .set_admin_password(concat!("original", "-password"))
+        .unwrap();
+    fixture.db.create_session("expired-token").unwrap();
+    fixture
+        .external
+        .execute(
+            "UPDATE auth_sessions SET created_at = ?1 WHERE token = ?2",
+            ["2000-01-01T00:00:00Z", "expired-token"],
+        )
+        .unwrap();
+    fixture.fail_session_writes("DELETE");
+    let (action_tx, _action_rx) = mpsc::channel(16);
+    let state = AppState::new(AppConfig::default(), fixture.db.clone(), action_tx);
+    let app = create_router(state);
+    let request = |path: &str| {
+        Request::builder()
+            .uri(path)
+            .header("Authorization", "Bearer expired-token")
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    let response = app
+        .clone()
+        .oneshot(request("/api/auth/status"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["data"]["initialized"], true);
+    assert_eq!(json["data"]["authenticated"], false);
+    assert_eq!(
+        app.clone()
+            .oneshot(request("/api/status"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(fixture.session_count(), 1);
+
+    let response = app
+        .oneshot(auth_request(
+            "/api/auth/login",
+            serde_json::json!({ "password": concat!("original", "-password") }),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(fixture.session_count(), 2);
+}
+
+#[tokio::test]
 async fn setup_session_insert_failure_rolls_back_password_and_session() {
     let fixture = AuthTestDatabase::new();
     let (action_tx, _action_rx) = mpsc::channel(16);

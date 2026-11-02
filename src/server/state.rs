@@ -880,15 +880,18 @@ impl AppState {
 }
 
 impl AppState {
-    pub async fn is_token_valid(&self, token: &str) -> bool {
+    pub async fn check_token_valid(&self, token: &str) -> anyhow::Result<bool> {
         if token.is_empty() {
-            return false;
+            return Ok(false);
         }
         let token = token.to_string();
         self.db
             .run_blocking(move |db| db.is_session_valid(&token))
             .await
-            .unwrap_or(false)
+    }
+
+    pub async fn is_token_valid(&self, token: &str) -> bool {
+        self.check_token_valid(token).await.unwrap_or(false)
     }
 
     pub async fn create_session(&self, token: &str) -> anyhow::Result<()> {

@@ -153,14 +153,30 @@ fn extract_token(headers: &HeaderMap) -> Option<String> {
     None
 }
 
+fn auth_service_error<T>() -> (StatusCode, Json<ApiResponse<T>>) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ApiResponse {
+            success: false,
+            data: None,
+            message: Some("认证服务异常，请稍后重试".into()),
+        }),
+    )
+}
+
 async fn require_auth_middleware(
     State(state): State<Arc<AppState>>,
     req: axum::extract::Request,
     next: Next,
 ) -> Result<Response, (StatusCode, Json<ApiResponse<()>>)> {
-    let token_opt = extract_token(req.headers());
-    let is_valid = match token_opt {
-        Some(ref t) => state.is_token_valid(t).await,
+    let is_valid = match extract_token(req.headers()) {
+        Some(token) => match state.check_token_valid(&token).await {
+            Ok(valid) => valid,
+            Err(error) => {
+                error!("Failed to check session: {}", error);
+                return Err(auth_service_error());
+            }
+        },
         None => false,
     };
 
@@ -1041,26 +1057,37 @@ async fn clear_multi_trade_history_handler(
 async fn get_auth_status_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-) -> Json<ApiResponse<AuthStatusResponse>> {
-    let initialized = state
-        .db
-        .run_blocking(|db| db.is_admin_password_set())
-        .await
-        .unwrap_or(false);
+) -> (StatusCode, Json<ApiResponse<AuthStatusResponse>>) {
     let token = extract_token(&headers);
-    let authenticated = match token {
-        Some(ref t) => state.is_token_valid(t).await,
-        None => false,
-    };
+    let result = state
+        .db
+        .run_blocking(move |db| {
+            let initialized = db.is_admin_password_set()?;
+            let authenticated = match token {
+                Some(token) => db.is_session_valid(&token)?,
+                None => false,
+            };
+            Ok(AuthStatusResponse {
+                initialized,
+                authenticated,
+            })
+        })
+        .await;
 
-    Json(ApiResponse {
-        success: true,
-        data: Some(AuthStatusResponse {
-            initialized,
-            authenticated,
-        }),
-        message: None,
-    })
+    match result {
+        Ok(status) => (
+            StatusCode::OK,
+            Json(ApiResponse {
+                success: true,
+                data: Some(status),
+                message: None,
+            }),
+        ),
+        Err(error) => {
+            error!("Failed to check authentication status: {}", error);
+            auth_service_error()
+        }
+    }
 }
 
 async fn post_auth_setup_handler(
@@ -1071,14 +1098,7 @@ async fn post_auth_setup_handler(
         Ok(is_set) => is_set,
         Err(error) => {
             error!("Failed to check admin initialization: {}", error);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse {
-                    success: false,
-                    data: None,
-                    message: Some("认证服务异常，请稍后重试".into()),
-                }),
-            );
+            return auth_service_error();
         }
     };
     if is_set {
@@ -1190,14 +1210,7 @@ async fn post_auth_login_handler(
         Ok(is_set) => is_set,
         Err(error) => {
             error!("Failed to check admin initialization: {}", error);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse {
-                    success: false,
-                    data: None,
-                    message: Some("认证服务异常，请稍后重试".into()),
-                }),
-            );
+            return auth_service_error();
         }
     };
     if !is_set {
@@ -1244,14 +1257,7 @@ async fn post_auth_login_handler(
         }
         Err(e) => {
             error!("Database error during password verification: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse {
-                    success: false,
-                    data: None,
-                    message: Some("认证服务异常，请稍后重试".into()),
-                }),
-            )
+            auth_service_error()
         }
     }
 }

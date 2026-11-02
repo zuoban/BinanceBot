@@ -194,10 +194,12 @@ impl Database {
             Utc::now().signed_duration_since(time.with_timezone(&Utc)) < ChronoDuration::hours(24)
         });
         if !valid {
-            conn.execute(
+            if let Err(error) = conn.execute(
                 "DELETE FROM auth_sessions WHERE token = ?1;",
                 params![token],
-            )?;
+            ) {
+                tracing::warn!(%error, "Failed to delete expired session");
+            }
         }
         Ok(valid)
     }
