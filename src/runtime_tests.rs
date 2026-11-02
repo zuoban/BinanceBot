@@ -106,7 +106,7 @@ fn fixture_with_database(
                                     .map_err(|error| error.to_string());
                                 let _ = reply.send(result);
                             }
-                            BotControlAction::Rebalance { reply } => {
+                            BotControlAction::Rebalance { reply, .. } => {
                                 let _ = reply.send(Ok(()));
                             }
                             BotControlAction::GlobalRiskCancel => {}

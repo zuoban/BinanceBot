@@ -3,6 +3,7 @@ import { App, Button, Dropdown, Space, Tooltip } from 'antd';
 import { MoreOutlined, PauseOutlined, PlayCircleOutlined } from '@ant-design/icons';
 import { useQueryClient } from '@tanstack/react-query';
 import { api, pairPath, post } from '../lib/api';
+import { modeLabel } from '../lib/format';
 import type { Action, Pair, Snapshot } from '../lib/types';
 
 async function confirmControlState(pair: Pair, action: Action): Promise<boolean> {
@@ -16,7 +17,7 @@ async function confirmControlState(pair: Pair, action: Action): Promise<boolean>
   return false;
 }
 
-export type ControlResult = 'confirmed' | 'cancellation_unconfirmed' | 'state_unconfirmed' | 'failed' | 'not_submitted';
+export type ControlResult = 'confirmed' | 'cancellation_unconfirmed' | 'state_unconfirmed' | 'request_unconfirmed' | 'failed' | 'not_submitted';
 interface ControlState { busy: Set<string>; results: Record<string, string>; run: (pair: Pair, action: Action, confirmed?: boolean) => Promise<ControlResult> }
 export async function runBatchControls(pairs: Pair[], action: 'pause' | 'resume', run: ControlState['run']): Promise<{ pair: Pair; result: Exclude<ControlResult, 'confirmed'> }[]> {
   const outcomes: { pair: Pair; result: Exclude<ControlResult, 'confirmed'> }[] = [];
@@ -25,10 +26,10 @@ export async function runBatchControls(pairs: Pair[], action: 'pause' | 'resume'
   };
   if (action === 'pause') {
     const results = await Promise.allSettled(pairs.map(pair => run(pair, action, true)));
-    results.forEach((result, index) => record(pairs[index], result.status === 'fulfilled' ? result.value : 'failed'));
+    results.forEach((result, index) => record(pairs[index], result.status === 'fulfilled' ? result.value : 'request_unconfirmed'));
   } else {
     for (const pair of pairs) {
-      try { record(pair, await run(pair, action, true)); } catch { record(pair, 'failed'); }
+      try { record(pair, await run(pair, action, true)); } catch { record(pair, 'request_unconfirmed'); }
     }
   }
   return outcomes;
@@ -44,18 +45,20 @@ export function ControlProvider({ children }: { children: React.ReactNode }) {
   const run = async (pair: Pair, action: Action, confirmed = false): Promise<ControlResult> => {
     if (locked.current.has(pair.symbol)) return 'not_submitted';
     locked.current.add(pair.symbol); setBusy(new Set(locked.current));
+    let submitted = false;
     try {
       const dangerous = action === 'rebalance' || action === 'cancel_all' || (action === 'resume' && pair.mode === 'LIVE');
       if (dangerous && !confirmed) {
         const accepted = await modal.confirm({
           title: `${pair.symbol} · ${action === 'resume' ? '恢复实盘策略' : action === 'rebalance' ? '重建网格' : '撤单并暂停'}`,
-          content: action === 'resume' ? '恢复后将使用真实资金下单，请确认交易对和参数。' : action === 'rebalance' ? '将撤销机器人挂单并重新构建网格。' : '将撤销此交易对的机器人挂单并暂停，保留持仓。',
+          content: action === 'resume' ? '恢复后将使用真实资金下单，请确认交易对和参数。' : action === 'rebalance' ? `将在${modeLabel[pair.mode]}模式撤销机器人挂单并重新构建网格，请确认交易模式。` : '将撤销此交易对的机器人挂单并暂停，保留持仓。',
           okText: '确认执行', cancelText: '取消',
         });
         if (!accepted) return 'not_submitted';
       }
       setResults(r => ({ ...r, [pair.symbol]: '正在提交…' }));
-      await post(pairPath(pair, 'control'), action === 'resume' ? { action, expected_mode: pair.mode } : { action });
+      submitted = true;
+      await post(pairPath(pair, 'control'), action === 'resume' || action === 'rebalance' ? { action, expected_mode: pair.mode } : { action });
       const observedState = await confirmControlState(pair, action).catch(() => false);
       const cancellationUnverified = action === 'pause' || action === 'cancel_all';
       const confirmedState = observedState && !cancellationUnverified;
@@ -66,8 +69,14 @@ export function ControlProvider({ children }: { children: React.ReactNode }) {
       if (!confirmedState) message.warning(`${pair.symbol}：${result}`);
       return cancellationUnverified ? (observedState ? 'cancellation_unconfirmed' : 'state_unconfirmed') : (confirmedState ? 'confirmed' : 'state_unconfirmed');
     } catch (error) {
-      const text = (error as Error).message;
-      setResults(r => ({ ...r, [pair.symbol]: `失败：${text}` }));
+      const text = error instanceof Error ? error.message : String(error);
+      if (submitted) {
+        const result = `请求结果不明，操作可能已生效：${text}；请刷新状态并核对交易所挂单及日志后再操作`;
+        setResults(r => ({ ...r, [pair.symbol]: result }));
+        message.warning(`${pair.symbol}：${result}`);
+        return 'request_unconfirmed';
+      }
+      setResults(r => ({ ...r, [pair.symbol]: `未提交：${text}` }));
       message.error(`${pair.symbol}：${text}`);
       return 'failed';
     } finally {

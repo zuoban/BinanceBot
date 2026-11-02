@@ -144,6 +144,7 @@ pub struct GridOrder {
 pub enum OrderPurpose {
     #[default]
     Legacy,
+    Unverified,
     Grid,
     TakeProfit,
     Remainder,
@@ -413,6 +414,7 @@ pub enum BotControlAction {
     /// Pause was already persisted before this cancellation was queued.
     CancelAllAlreadyPersisted,
     Rebalance {
+        expected_mode: TradingMode,
         reply: tokio::sync::oneshot::Sender<Result<(), String>>,
     },
     Shutdown {

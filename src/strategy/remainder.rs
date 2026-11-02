@@ -208,6 +208,8 @@ impl GridTradingEngine {
                         .client
                         .get_order_by_client_id(&plan.symbol, &source.client_order_id)
                         .await?;
+                    self.confirm_remainder_identity(source, &found, None)
+                        .await?;
                     if !terminal(&found.status) {
                         self.client
                             .cancel_order(&plan.symbol, None, Some(&source.client_order_id))
@@ -220,7 +222,8 @@ impl GridTradingEngine {
                     if !terminal(&found.status) {
                         return Err(anyhow!("Source cancellation is not terminal"));
                     }
-                    self.settle_remainder_order(source.clone(), found).await?;
+                    self.settle_remainder_order(source.clone(), found, None)
+                        .await?;
                 }
             }
             // All sources are now terminal. Live quantities must be recalculated
@@ -384,7 +387,7 @@ impl GridTradingEngine {
                     reduce_only: true,
                 })
                 .await?;
-            self.settle_remainder_order(plan.target.clone(), found)
+            self.settle_remainder_order(plan.target.clone(), found, Some(&mut *plan))
                 .await?;
         }
         plan.phase = RemainderPhase::Complete;
@@ -419,7 +422,7 @@ impl GridTradingEngine {
         else {
             return Ok(false);
         };
-        self.settle_remainder_order(plan.target.clone(), found)
+        self.settle_remainder_order(plan.target.clone(), found, Some(&mut *plan))
             .await?;
         plan.phase = RemainderPhase::Complete;
         self.persist_remainder_plan(plan).await?;
@@ -427,19 +430,12 @@ impl GridTradingEngine {
         Ok(true)
     }
 
-    async fn settle_remainder_order(
+    async fn confirm_remainder_identity(
         &mut self,
-        mut order: GridOrder,
-        found: BinanceOrderResponse,
+        order: &GridOrder,
+        found: &BinanceOrderResponse,
+        plan: Option<&mut RemainderPlan>,
     ) -> Result<()> {
-        let inconsistent_fill = unresolved_filled_quantity(&found);
-        if inconsistent_fill {
-            self.last_orders_sync = None;
-            self.report_reconciliation_state(true).await;
-            self.account_cache.invalidate(&self.client).await;
-            self.position_cache.invalidate(&self.client).await;
-            self.last_account_sync = None;
-        }
         let active = self
             .state
             .active_orders
@@ -447,22 +443,42 @@ impl GridTradingEngine {
             .await
             .get(&order.client_order_id)
             .cloned();
-        let trusted = if order.order_id.is_some() {
-            order.clone()
-        } else {
-            active
-                .filter(|item| item.order_id.is_some())
-                .unwrap_or_else(|| order.clone())
-        };
+        let key = (
+            self.client.account_identity_key(),
+            order.client_order_id.clone(),
+        );
+        let trusted = self
+            .order_identity_conflicts
+            .get(&key)
+            .filter(|item| item.order_id.is_some_and(|id| id != found.order_id))
+            .cloned()
+            .or_else(|| {
+                order
+                    .order_id
+                    .filter(|id| *id != found.order_id)
+                    .map(|_| order.clone())
+            })
+            .or_else(|| {
+                active
+                    .as_ref()
+                    .filter(|item| item.order_id.is_some_and(|id| id != found.order_id))
+                    .cloned()
+            })
+            .or_else(|| {
+                self.order_identity_conflicts
+                    .get(&key)
+                    .filter(|item| item.order_id.is_some())
+                    .cloned()
+            })
+            .or_else(|| active.filter(|item| item.order_id.is_some()))
+            .unwrap_or_else(|| order.clone());
         let id_conflict = trusted.order_id.is_some_and(|id| id != found.order_id);
         if id_conflict {
-            if !inconsistent_fill {
-                self.last_orders_sync = None;
-                self.report_reconciliation_state(true).await;
-                self.account_cache.invalidate(&self.client).await;
-                self.position_cache.invalidate(&self.client).await;
-                self.last_account_sync = None;
-            }
+            self.last_orders_sync = None;
+            self.report_reconciliation_state(true).await;
+            self.account_cache.invalidate(&self.client).await;
+            self.position_cache.invalidate(&self.client).await;
+            self.last_account_sync = None;
             self.track_identity_conflict(&trusted, &found);
             self.state
                 .active_orders
@@ -481,6 +497,53 @@ impl GridTradingEngine {
         {
             return Err(anyhow!("Remainder exchange identity mismatch"));
         }
+        if self.order_identity_observations.contains_key(&key)
+            && !self
+                .persist_identity_observations(key.0, &order.symbol)
+                .await
+        {
+            return Err(anyhow!("Could not persist remainder identity observations"));
+        }
+        if let Some(plan) = plan {
+            plan.target.order_id = Some(found.order_id);
+            if let Err(error) = self.persist_remainder_plan(plan).await {
+                let mut confirmed = order.clone();
+                confirmed.order_id = Some(found.order_id);
+                self.track_identity_conflict(&confirmed, found);
+                self.state
+                    .active_orders
+                    .write()
+                    .await
+                    .insert(confirmed.client_order_id.clone(), confirmed);
+                self.last_orders_sync = None;
+                self.report_reconciliation_state(true).await;
+                self.account_cache.invalidate(&self.client).await;
+                self.position_cache.invalidate(&self.client).await;
+                self.last_account_sync = None;
+                self.persist_identity_observations(key.0, &order.symbol)
+                    .await;
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    async fn settle_remainder_order(
+        &mut self,
+        mut order: GridOrder,
+        found: BinanceOrderResponse,
+        plan: Option<&mut RemainderPlan>,
+    ) -> Result<()> {
+        let inconsistent_fill = unresolved_filled_quantity(&found);
+        if inconsistent_fill {
+            self.last_orders_sync = None;
+            self.report_reconciliation_state(true).await;
+            self.account_cache.invalidate(&self.client).await;
+            self.position_cache.invalidate(&self.client).await;
+            self.last_account_sync = None;
+        }
+        self.confirm_remainder_identity(&order, &found, plan)
+            .await?;
         order.order_id = Some(found.order_id);
         if inconsistent_fill {
             order.quantity = order.quantity.max(found.orig_qty);
@@ -578,6 +641,8 @@ impl GridTradingEngine {
                 .lookup_order_by_client_id(&plan.symbol, &plan.target.client_order_id)
                 .await?
             {
+                self.confirm_remainder_identity(&plan.target.clone(), &found, Some(&mut plan))
+                    .await?;
                 if !terminal(&found.status) {
                     self.client
                         .cancel_order(&plan.symbol, None, Some(&plan.target.client_order_id))
@@ -590,7 +655,7 @@ impl GridTradingEngine {
                 if !terminal(&found.status) {
                     return Err(anyhow!("Remainder target cancellation unresolved"));
                 }
-                self.settle_remainder_order(plan.target.clone(), found)
+                self.settle_remainder_order(plan.target.clone(), found, Some(&mut plan))
                     .await?;
             }
         }

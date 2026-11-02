@@ -1881,8 +1881,18 @@ fn control_action(
             ))
         }
         "rebalance" => {
+            let expected_mode = payload
+                .expected_mode
+                .filter(|mode| *mode != TradingMode::Unknown)
+                .ok_or_else(|| "重建网格需要提供确认时的运行模式".to_string())?;
             let (reply, receiver) = tokio::sync::oneshot::channel();
-            Ok((BotControlAction::Rebalance { reply }, Some(receiver)))
+            Ok((
+                BotControlAction::Rebalance {
+                    expected_mode,
+                    reply,
+                },
+                Some(receiver),
+            ))
         }
         other => Err(format!("未知操作指令: {}", other)),
     }
@@ -2338,21 +2348,23 @@ mod tests {
     use crate::types::BotStatus;
 
     #[tokio::test]
-    async fn control_requires_resume_mode_and_propagates_engine_rejections() {
+    async fn control_requires_confirmation_mode_and_propagates_engine_rejections() {
         let db = Arc::new(Database::open(":memory:").unwrap());
         let (action_tx, mut action_rx) = tokio::sync::mpsc::channel(1);
         let state = AppState::new(AppConfig::default(), db, action_tx);
-        for expected_mode in [None, Some(TradingMode::Unknown)] {
-            let response = post_control_handler(
-                State(state.clone()),
-                Json(ControlRequest {
-                    action: "resume".into(),
-                    expected_mode,
-                }),
-            )
-            .await;
-            assert!(!response.0.success);
-            assert!(action_rx.try_recv().is_err());
+        for action in ["resume", "rebalance"] {
+            for expected_mode in [None, Some(TradingMode::Unknown)] {
+                let response = post_control_handler(
+                    State(state.clone()),
+                    Json(ControlRequest {
+                        action: action.into(),
+                        expected_mode,
+                    }),
+                )
+                .await;
+                assert!(!response.0.success);
+                assert!(action_rx.try_recv().is_err());
+            }
         }
         for action in ["resume", "rebalance"] {
             let request_state = state.clone();
@@ -2375,7 +2387,13 @@ mod tests {
                     assert_eq!(expected_mode, TradingMode::Paper);
                     reply
                 }
-                BotControlAction::Rebalance { reply } => reply,
+                BotControlAction::Rebalance {
+                    expected_mode,
+                    reply,
+                } => {
+                    assert_eq!(expected_mode, TradingMode::Paper);
+                    reply
+                }
                 other => panic!("unexpected action: {:?}", other),
             };
             reply.send(Err("操作被拒绝".into())).unwrap();
@@ -2741,9 +2759,8 @@ mod tests {
                 .unwrap()
                 .unwrap();
             let reply = match first {
-                BotControlAction::Resume { reply, .. } | BotControlAction::Rebalance { reply } => {
-                    reply
-                }
+                BotControlAction::Resume { reply, .. }
+                | BotControlAction::Rebalance { reply, .. } => reply,
                 other => panic!("unexpected action: {:?}", other),
             };
             assert!(state.socket_control_lock.try_write().is_ok());
@@ -2827,7 +2844,7 @@ mod tests {
                 State(request_state),
                 Json(ControlRequest {
                     action: "rebalance".into(),
-                    expected_mode: None,
+                    expected_mode: Some(TradingMode::Paper),
                 }),
             )
             .await

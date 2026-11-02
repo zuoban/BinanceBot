@@ -4,7 +4,7 @@ import { App } from 'antd';
 import { afterEach, expect, it, vi } from 'vitest';
 import { ControlProvider, runBatchControls, useControls } from '../components/Controls';
 import type { ControlResult } from '../components/Controls';
-import { api, post } from '../lib/api';
+import { api, ApiError, post } from '../lib/api';
 import { pair, snapshot } from './fixtures';
 
 vi.mock('antd', () => ({
@@ -15,12 +15,43 @@ vi.mock('antd', () => ({
 vi.mock('@ant-design/icons', () => ({}));
 
 vi.mock('../lib/api', () => ({
+  ApiError: class extends Error {
+    constructor(message: string, public status: number, public kind: 'rejection' | 'invalid-response' = 'rejection') { super(message); }
+  },
   api: vi.fn(),
   post: vi.fn(),
   pairPath: (value: { symbol: string }, path: string) => `/api/pairs/${value.symbol}/${path}`,
 }));
 
 afterEach(() => { vi.useRealTimers(); vi.clearAllMocks(); });
+
+it.each([
+  ['pause', new ApiError('Failed to send action: channel closed', 200)],
+  ['cancel_all', new ApiError('Failed to send action: channel closed', 200)],
+  ['resume', new ApiError('网络错误', 0)],
+  ['resume', new ApiError('策略未确认控制操作', 200)],
+  ['rebalance', new ApiError('部分撤单后重建失败', 200)],
+  ['rebalance', new ApiError('响应无效', 200, 'invalid-response')],
+] as const)('%s reports an uncertain result and refreshes after a control error', async (action, error) => {
+  vi.mocked(post).mockRejectedValue(error);
+  const client = new QueryClient();
+  const invalidate = vi.spyOn(client, 'invalidateQueries');
+  const wrapper = ({ children }: { children: React.ReactNode }) => <QueryClientProvider client={client}><App><ControlProvider>{children}</ControlProvider></App></QueryClientProvider>;
+  const { result, unmount } = renderHook(() => useControls(), { wrapper });
+  try {
+    let outcome!: ControlResult;
+    await act(async () => { outcome = await result.current.run(pair(), action, true); });
+    expect(outcome).toBe('request_unconfirmed');
+    expect(result.current.results.SOLUSDC).toContain('操作可能已生效');
+    expect(result.current.results.SOLUSDC).toContain('核对交易所挂单');
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['pairs'] });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['overview'] });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['snapshot', 'SOLUSDC'] });
+  } finally {
+    unmount();
+    client.clear();
+  }
+});
 
 it.each(['pause', 'cancel_all'] as const)('%s reports cancellation as unverified even when the paused snapshot has no orders', async action => {
   vi.mocked(post).mockResolvedValue(undefined);
@@ -133,14 +164,14 @@ it('submits resumes serially even when the first is not confirmed', async () => 
 });
 
 it.each(['PAPER', 'TESTNET', 'LIVE'] as const)('binds a confirmed resume to the displayed %s mode', async mode => {
-  vi.mocked(post).mockRejectedValue(new Error('策略运行模式已变化'));
+  vi.mocked(post).mockRejectedValue(new ApiError('策略运行模式已变化', 200));
   const client = new QueryClient();
   const wrapper = ({ children }: { children: React.ReactNode }) => <QueryClientProvider client={client}><App><ControlProvider>{children}</ControlProvider></App></QueryClientProvider>;
   const { result, unmount } = renderHook(() => useControls(), { wrapper });
   try {
     let accepted: string = '';
     await act(async () => { accepted = await result.current.run({ ...pair(), mode }, 'resume', true); });
-    expect(accepted).toBe('failed');
+    expect(accepted).toBe('request_unconfirmed');
     expect(post).toHaveBeenCalledWith('/api/pairs/SOLUSDC/control', { action: 'resume', expected_mode: mode });
     expect(result.current.results.SOLUSDC).toContain('策略运行模式已变化');
   } finally {

@@ -16,7 +16,7 @@ it('submits all pause requests before waiting for any confirmation', async () =>
 
 it('continues submitting pauses if one control unexpectedly rejects', async () => {
   const run = vi.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce('confirmed');
-  await expect(runBatchControls([pair('SOLUSDC'), pair('BTCUSDC')], 'pause', run)).resolves.toEqual([{ pair: pair('SOLUSDC'), result: 'failed' }]);
+  await expect(runBatchControls([pair('SOLUSDC'), pair('BTCUSDC')], 'pause', run)).resolves.toEqual([{ pair: pair('SOLUSDC'), result: 'request_unconfirmed' }]);
   expect(run).toHaveBeenCalledTimes(2);
 });
 

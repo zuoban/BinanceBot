@@ -94,7 +94,8 @@ export default function OverviewPage() {
       }
       const outcomes = await runBatchControls(selected, action, controls.run);
       const groups = [
-        { result: 'failed', label: '提交失败或结果不明，请检查后再操作' },
+        { result: 'failed', label: '提交前出错，未提交' },
+        { result: 'request_unconfirmed', label: '请求结果不明，操作可能已生效' },
         { result: 'not_submitted', label: '操作进行中，未提交' },
         { result: 'state_unconfirmed', label: action === 'pause' ? '暂停状态及撤单结果未确认' : '恢复状态未确认' },
         { result: 'cancellation_unconfirmed', label: '已暂停，撤单结果未确认' },

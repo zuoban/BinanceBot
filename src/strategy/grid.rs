@@ -104,7 +104,8 @@ fn known_order_identity(order: &GridOrder) -> Option<ObservedOrderIdentity> {
 }
 
 fn identity_differs_from_order(observed: &ObservedOrderIdentity, expected: &GridOrder) -> bool {
-    observed.symbol != expected.symbol
+    observed.client_order_id != expected.client_order_id
+        || observed.symbol != expected.symbol
         || observed.side != expected.side.as_str()
         || expected.order_id.is_some_and(|id| observed.order_id != id)
 }
@@ -275,6 +276,13 @@ impl MarketRetry {
     }
 }
 
+#[derive(Clone)]
+struct InitialOrderResponseBatch {
+    batch_id: String,
+    responses: Vec<(String, String, String, BinanceOrderResponse)>,
+    identities: Vec<(GridOrder, ObservedOrderIdentity)>,
+}
+
 pub struct GridTradingEngine {
     state: Arc<AppState>,
     client: Arc<BinanceFuturesClient>,
@@ -295,6 +303,9 @@ pub struct GridTradingEngine {
     order_identity_observations: HashMap<([u8; 32], String), Vec<ObservedOrderIdentity>>,
     provisional_order_observations: HashMap<([u8; 32], String), Vec<ObservedOrderIdentity>>,
     loaded_identity_scopes: HashSet<([u8; 32], String)>,
+    terminal_order_disagreements:
+        HashMap<([u8; 32], String, String), Vec<(BinanceOrderResponse, BinanceOrderResponse)>>,
+    initial_order_responses: HashMap<([u8; 32], String), Vec<InitialOrderResponseBatch>>,
     exchange_rules_loaded: bool,
     market_data_blocked: bool,
     last_remainder_change: Option<Instant>,
@@ -356,11 +367,335 @@ impl GridTradingEngine {
             order_identity_observations: HashMap::new(),
             provisional_order_observations: HashMap::new(),
             loaded_identity_scopes: HashSet::new(),
+            terminal_order_disagreements: HashMap::new(),
+            initial_order_responses: HashMap::new(),
             exchange_rules_loaded: false,
             market_data_blocked: false,
             last_remainder_change: None,
             market_stream_tx: None,
         }
+    }
+
+    async fn record_initial_order_response(
+        &mut self,
+        account: [u8; 32],
+        symbol: &str,
+        expected_client_id: &str,
+        response: &BinanceOrderResponse,
+    ) -> bool {
+        let batch_id = Uuid::new_v4().to_string();
+        self.record_initial_order_response_batch(
+            account,
+            symbol,
+            expected_client_id,
+            &batch_id,
+            response,
+        )
+        .await
+    }
+
+    async fn record_initial_order_response_batch(
+        &mut self,
+        account: [u8; 32],
+        symbol: &str,
+        expected_client_id: &str,
+        batch_id: &str,
+        response: &BinanceOrderResponse,
+    ) -> bool {
+        let observation = (
+            expected_client_id.to_owned(),
+            Uuid::new_v4().to_string(),
+            batch_id.to_owned(),
+            response.clone(),
+        );
+        self.initial_order_responses
+            .entry((account, symbol.to_owned()))
+            .or_default()
+            .push(InitialOrderResponseBatch {
+                batch_id: batch_id.to_owned(),
+                responses: vec![observation],
+                identities: Vec::new(),
+            });
+        self.flush_initial_order_responses(account, symbol, expected_client_id)
+            .await
+    }
+
+    async fn record_initial_order_response_snapshot(
+        &mut self,
+        account: [u8; 32],
+        symbol: &str,
+        batch_id: &str,
+        responses: &[(String, BinanceOrderResponse)],
+        identities: &[(GridOrder, ObservedOrderIdentity)],
+    ) -> bool {
+        let key = (account, symbol.to_owned());
+        let observations: Vec<_> = responses
+            .iter()
+            .enumerate()
+            .map(|(index, (client_id, response))| {
+                (
+                    client_id.clone(),
+                    format!("snapshot:{batch_id}:{index}"),
+                    batch_id.to_owned(),
+                    response.clone(),
+                )
+            })
+            .collect();
+        if !observations.is_empty() || !identities.is_empty() {
+            let batches = self.initial_order_responses.entry(key).or_default();
+            if let Some(existing) = batches.iter().find(|batch| batch.batch_id == batch_id) {
+                let same = match (
+                    serde_json::to_vec(&existing.responses),
+                    serde_json::to_vec(&observations),
+                    serde_json::to_vec(&existing.identities),
+                    serde_json::to_vec(identities),
+                ) {
+                    (Ok(a), Ok(b), Ok(c), Ok(d)) => a == b && c == d,
+                    _ => false,
+                };
+                if !same {
+                    error!("Initial order snapshot batch ID reused with different data");
+                    self.last_orders_sync = None;
+                    self.report_reconciliation_state(true).await;
+                    return false;
+                }
+            } else {
+                batches.push(InitialOrderResponseBatch {
+                    batch_id: batch_id.to_owned(),
+                    responses: observations,
+                    identities: identities.to_vec(),
+                });
+            }
+        }
+        self.flush_initial_order_responses(account, symbol, "")
+            .await
+    }
+
+    async fn flush_initial_order_responses(
+        &mut self,
+        account: [u8; 32],
+        symbol: &str,
+        _expected_client_id: &str,
+    ) -> bool {
+        let key = (account, symbol.to_owned());
+        loop {
+            let Some(responses) = self
+                .initial_order_responses
+                .get(&key)
+                .and_then(|batches| batches.first())
+                .cloned()
+            else {
+                return true;
+            };
+            let save_key = key.clone();
+            match self
+                .state
+                .db
+                .run_blocking(move |db| {
+                    db.save_initial_order_response_snapshot(
+                        save_key.0,
+                        &save_key.1,
+                        &responses.responses,
+                        &responses.identities,
+                    )
+                })
+                .await
+            {
+                Ok(()) => {
+                    let batches = self.initial_order_responses.get_mut(&key).unwrap();
+                    batches.remove(0);
+                    if batches.is_empty() {
+                        self.initial_order_responses.remove(&key);
+                    }
+                }
+                Err(error) => {
+                    error!("Could not persist initial order responses: {}", error);
+                    self.last_orders_sync = None;
+                    self.report_reconciliation_state(true).await;
+                    return false;
+                }
+            }
+        }
+    }
+
+    async fn load_initial_order_responses(
+        &mut self,
+        account: [u8; 32],
+        symbol: &str,
+        expected_client_id: &str,
+    ) -> Option<Vec<BinanceOrderResponse>> {
+        self.load_initial_order_response_timeline(account, symbol, expected_client_id)
+            .await
+            .map(|responses| {
+                responses
+                    .into_iter()
+                    .map(|(_, response)| response)
+                    .collect()
+            })
+    }
+
+    async fn load_initial_order_response_timeline(
+        &mut self,
+        account: [u8; 32],
+        symbol: &str,
+        expected_client_id: &str,
+    ) -> Option<Vec<(String, BinanceOrderResponse)>> {
+        if !self
+            .flush_initial_order_responses(account, symbol, expected_client_id)
+            .await
+        {
+            return None;
+        }
+        let symbol = symbol.to_owned();
+        let expected_client_id = expected_client_id.to_owned();
+        match self
+            .state
+            .db
+            .run_blocking(move |db| {
+                db.load_initial_order_response_timeline(account, &symbol, &expected_client_id)
+            })
+            .await
+        {
+            Ok(responses) => Some(responses),
+            Err(error) => {
+                error!("Could not load initial order responses: {}", error);
+                self.last_orders_sync = None;
+                self.report_reconciliation_state(true).await;
+                None
+            }
+        }
+    }
+
+    pub(super) async fn clear_order_evidence_groups(
+        &mut self,
+        account: [u8; 32],
+        symbol: &str,
+        client_ids: &[String],
+    ) -> bool {
+        if client_ids.is_empty() {
+            return true;
+        }
+        if !self.persist_identity_observations(account, symbol).await {
+            self.last_orders_sync = None;
+            return false;
+        }
+        for id in client_ids {
+            if !self
+                .flush_initial_order_responses(account, symbol, id)
+                .await
+            {
+                return false;
+            }
+        }
+        let scope = symbol.to_owned();
+        let ids = client_ids.to_vec();
+        if let Err(error) = self
+            .state
+            .db
+            .run_blocking(move |db| db.delete_order_evidence_groups(account, &scope, &ids))
+            .await
+        {
+            error!("Could not clear resolved order evidence: {}", error);
+            self.last_orders_sync = None;
+            self.report_reconciliation_state(true).await;
+            return false;
+        }
+        for id in client_ids {
+            let key = (account, id.clone());
+            if self
+                .order_identity_conflicts
+                .get(&key)
+                .is_some_and(|expected| expected.symbol == symbol)
+            {
+                self.order_identity_observations.remove(&key);
+                self.order_identity_conflicts.remove(&key);
+                self.provisional_order_ids.remove(&key);
+            }
+        }
+        true
+    }
+
+    async fn record_terminal_disagreement(
+        &mut self,
+        account: [u8; 32],
+        symbol: &str,
+        expected_client_id: &str,
+        first: &BinanceOrderResponse,
+        conflicting: &BinanceOrderResponse,
+    ) -> bool {
+        let key = (account, symbol.to_owned(), expected_client_id.to_owned());
+        let evidence = (first.clone(), conflicting.clone());
+        self.terminal_order_disagreements
+            .entry(key.clone())
+            .or_default()
+            .push(evidence.clone());
+        self.last_orders_sync = None;
+        self.report_reconciliation_state(true).await;
+        match self
+            .state
+            .db
+            .run_blocking(move |db| {
+                db.save_terminal_order_disagreement(key.0, &key.1, &key.2, &evidence.0, &evidence.1)
+            })
+            .await
+        {
+            Ok(()) => true,
+            Err(error) => {
+                error!("Could not persist terminal order disagreement: {}", error);
+                false
+            }
+        }
+    }
+
+    async fn terminal_disagreement_blocked(&mut self, account: [u8; 32], symbol: &str) -> bool {
+        let pending: Vec<_> = self
+            .terminal_order_disagreements
+            .iter()
+            .filter(|(key, _)| key.0 == account && key.1 == symbol)
+            .map(|(key, evidence)| (key.clone(), evidence.clone()))
+            .collect();
+        let scope_symbol = symbol.to_owned();
+        let result = self
+            .state
+            .db
+            .run_blocking(move |db| {
+                for (key, observations) in pending {
+                    for evidence in observations {
+                        db.save_terminal_order_disagreement(
+                            key.0,
+                            &key.1,
+                            &key.2,
+                            &evidence.0,
+                            &evidence.1,
+                        )?;
+                    }
+                }
+                db.load_terminal_order_disagreements(account, &scope_symbol)
+            })
+            .await;
+        let stored_blocked = match result {
+            Ok(records) => !records.is_empty(),
+            Err(error) => {
+                error!(
+                    "Could not load or persist terminal order disagreements: {}",
+                    error
+                );
+                self.last_orders_sync = None;
+                self.report_reconciliation_state(true).await;
+                return true;
+            }
+        };
+        let blocked = stored_blocked
+            || self
+                .terminal_order_disagreements
+                .keys()
+                .any(|key| key.0 == account && key.1 == symbol);
+        if blocked {
+            warn!("Terminal order disagreement for {} requires manual investigation; automatic clearing is unavailable", symbol);
+            self.last_orders_sync = None;
+            self.report_reconciliation_state(true).await;
+        }
+        blocked
     }
 
     fn track_identity_conflict(&mut self, expected: &GridOrder, observed: &BinanceOrderResponse) {
@@ -372,10 +707,12 @@ impl GridTradingEngine {
         self.order_identity_conflicts
             .insert(key.clone(), expected.clone());
         let observations = self.order_identity_observations.entry(key).or_default();
-        if !observations
-            .iter()
-            .any(|old| old.symbol == observed.symbol && old.order_id == observed.order_id)
-        {
+        if !observations.iter().any(|old| {
+            old.client_order_id == observed.client_order_id
+                && old.symbol == observed.symbol
+                && old.side == observed.side
+                && old.order_id == observed.order_id
+        }) {
             observations.push(ObservedOrderIdentity {
                 client_order_id: observed.client_order_id.clone(),
                 symbol: observed.symbol.clone(),
@@ -392,10 +729,12 @@ impl GridTradingEngine {
         );
         self.provisional_order_ids.insert(key.clone());
         let observations = self.provisional_order_observations.entry(key).or_default();
-        if !observations
-            .iter()
-            .any(|old| old.symbol == observed.symbol && old.order_id == observed.order_id)
-        {
+        if !observations.iter().any(|old| {
+            old.client_order_id == observed.client_order_id
+                && old.symbol == observed.symbol
+                && old.side == observed.side
+                && old.order_id == observed.order_id
+        }) {
             observations.push(ObservedOrderIdentity {
                 client_order_id: observed.client_order_id.clone(),
                 symbol: observed.symbol.clone(),
@@ -850,7 +1189,7 @@ impl GridTradingEngine {
             if let BotControlAction::UpdateConfig { reply, .. }
             | BotControlAction::UpdateGlobalConfig { reply, .. }
             | BotControlAction::Resume { reply, .. }
-            | BotControlAction::Rebalance { reply } = action
+            | BotControlAction::Rebalance { reply, .. } = action
             {
                 let _ = reply.send(Err("程序正在退出，操作未执行".into()));
             }
@@ -980,16 +1319,26 @@ impl GridTradingEngine {
                         .await;
                 }
             }
-            BotControlAction::Rebalance { reply } => {
-                let result = if *self.state.status.read().await != BotStatus::Running {
-                    Err("策略未运行，无法重建网格".into())
-                } else {
-                    info!("Grid rebalance requested");
-                    self.state
-                        .add_log("INFO", "Manual grid rebalance triggered")
-                        .await;
-                    self.rebalance_grid().await
-                };
+            BotControlAction::Rebalance {
+                expected_mode,
+                reply,
+            } => {
+                let config = self.state.config.read().await;
+                let current_mode =
+                    TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
+                drop(config);
+                let result =
+                    if expected_mode == TradingMode::Unknown || expected_mode != current_mode {
+                        Err("策略运行模式已改变，无法重建网格".into())
+                    } else if *self.state.status.read().await != BotStatus::Running {
+                        Err("策略未运行，无法重建网格".into())
+                    } else {
+                        info!("Grid rebalance requested");
+                        self.state
+                            .add_log("INFO", "Manual grid rebalance triggered")
+                            .await;
+                        self.rebalance_grid().await
+                    };
                 let _ = reply.send(result);
             }
             BotControlAction::UpdateConfig { config, reply } => {
@@ -1832,15 +2181,62 @@ impl GridTradingEngine {
                     return false;
                 }
             };
+            let conflict = self
+                .order_identity_conflicts
+                .get(&(
+                    self.client.account_identity_key(),
+                    intent.client_order_id.clone(),
+                ))
+                .cloned();
             if let Some(found) = exchange_order {
-                if found.client_order_id != intent.client_order_id
-                    || found.symbol != intent.symbol
-                    || found.side != intent.side.as_str()
-                {
+                if unresolved_filled_quantity(&found) {
+                    self.last_orders_sync = None;
+                    self.report_reconciliation_state(true).await;
+                }
+                let active = self
+                    .state
+                    .active_orders
+                    .read()
+                    .await
+                    .get(&intent.client_order_id)
+                    .cloned();
+                let mismatch = [
+                    &intent,
+                    active.as_ref().unwrap_or(&intent),
+                    conflict.as_ref().unwrap_or(&intent),
+                ]
+                .into_iter()
+                .find(|expected| {
+                    found.client_order_id != expected.client_order_id
+                        || found.symbol != expected.symbol
+                        || found.side != expected.side.as_str()
+                        || expected.order_id.is_some_and(|id| found.order_id != id)
+                });
+                if let Some(expected) = mismatch {
                     error!(
                         "Pair order {} has mismatched exchange identity",
                         intent.client_order_id
                     );
+                    self.track_identity_conflict(expected, &found);
+                    self.last_orders_sync = None;
+                    self.report_reconciliation_state(true).await;
+                    if !self
+                        .persist_identity_observations(
+                            self.client.account_identity_key(),
+                            &intent.symbol,
+                        )
+                        .await
+                    {
+                        self.pause_trading().await;
+                    }
+                    return false;
+                }
+                if conflict
+                    .as_ref()
+                    .is_some_and(|order| order.order_id.is_none())
+                {
+                    self.last_orders_sync = None;
+                    self.report_reconciliation_state(true).await;
                     return false;
                 }
                 intent.order_id = Some(found.order_id);
@@ -1848,8 +2244,6 @@ impl GridTradingEngine {
                 original.quantity = original.quantity.max(found.orig_qty);
                 original.amount_usdc = original.price * original.quantity;
                 if unresolved_filled_quantity(&found) {
-                    self.last_orders_sync = None;
-                    self.report_reconciliation_state(true).await;
                     self.account_cache.invalidate(&self.client).await;
                     self.position_cache.invalidate(&self.client).await;
                     self.last_account_sync = None;
@@ -1930,6 +2324,11 @@ impl GridTradingEngine {
                     OrderStatus::New
                 };
             } else {
+                if conflict.is_some() {
+                    self.last_orders_sync = None;
+                    self.report_reconciliation_state(true).await;
+                    return false;
+                }
                 if *self.state.status.read().await != BotStatus::Running {
                     continue;
                 }
@@ -3273,6 +3672,29 @@ impl GridTradingEngine {
                         .await
                 }
             };
+            if let Ok(exchange_order) = &exchange_order {
+                if exchange_order.client_order_id != order.client_order_id
+                    || exchange_order.symbol != order.symbol
+                    || exchange_order.side != order.side.as_str()
+                    || order
+                        .order_id
+                        .is_some_and(|id| exchange_order.order_id != id)
+                {
+                    self.track_identity_conflict(order, exchange_order);
+                    self.last_orders_sync = None;
+                    self.report_reconciliation_state(true).await;
+                    if !self
+                        .persist_identity_observations(
+                            self.client.account_identity_key(),
+                            &order.symbol,
+                        )
+                        .await
+                    {
+                        self.pause_trading().await;
+                    }
+                    return false;
+                }
+            }
             match exchange_order {
                 Ok(exchange_order) if unresolved_filled_quantity(&exchange_order) => {
                     self.account_cache.invalidate(&self.client).await;
@@ -3314,19 +3736,21 @@ impl GridTradingEngine {
                 }
             }
         }
-        self.state
-            .active_orders
-            .write()
-            .await
-            .remove(&order.client_order_id);
         if let Err(e) = self.delete_managed_order(&order.client_order_id).await {
             error!(
                 "Could not delete managed order {}: {}",
                 order.client_order_id, e
             );
+            self.last_orders_sync = None;
+            self.report_reconciliation_state(true).await;
             self.pause_trading().await;
             return false;
         }
+        self.state
+            .active_orders
+            .write()
+            .await
+            .remove(&order.client_order_id);
         true
     }
 
@@ -3370,11 +3794,11 @@ impl GridTradingEngine {
             let mut active = self.state.active_orders.write().await;
             for id in ids {
                 let key = (account, id.clone());
-                let Some(current) = active.get(&id).cloned() else {
-                    if let Some(expected) = self.order_identity_conflicts.get(&key) {
-                        active.insert(id, expected.clone());
-                        conflict = true;
-                    }
+                let Some(current) = active
+                    .get(&id)
+                    .cloned()
+                    .or_else(|| self.order_identity_conflicts.get(&key).cloned())
+                else {
                     continue;
                 };
                 let durable = managed
@@ -3390,17 +3814,50 @@ impl GridTradingEngine {
                         })
                     });
                 let Some(durable) = durable else {
-                    conflict |= self.order_identity_conflicts.contains_key(&key);
+                    if let Some(expected) = self.order_identity_conflicts.get(&key) {
+                        active.entry(id).or_insert_with(|| expected.clone());
+                        conflict = true;
+                    }
                     continue;
                 };
-                if self.order_identity_conflicts.contains_key(&key)
-                    || durable.symbol != current.symbol
-                    || durable.side != current.side
-                    || durable
+                let expected = self.order_identity_conflicts.get(&key);
+                let compatible = |a: &GridOrder, b: &GridOrder| {
+                    a.client_order_id == b.client_order_id
+                        && a.symbol == b.symbol
+                        && a.side == b.side
+                        && !a.order_id.zip(b.order_id).is_some_and(|(a, b)| a != b)
+                };
+                let identities_agree = compatible(durable, &current)
+                    && expected.is_none_or(|expected| {
+                        compatible(durable, expected) && compatible(&current, expected)
+                    });
+                let mut restored = durable.clone();
+                if identities_agree {
+                    restored.order_id = restored
                         .order_id
-                        .zip(current.order_id)
-                        .is_some_and(|(a, b)| a != b)
-                {
+                        .or(current.order_id)
+                        .or_else(|| expected.and_then(|order| order.order_id));
+                } else if let Some(expected) = expected.filter(|order| order.order_id.is_some()) {
+                    if let Some(observed) = known_order_identity(durable) {
+                        if identity_differs_from_order(&observed, expected) {
+                            let items = self
+                                .order_identity_observations
+                                .entry(key.clone())
+                                .or_default();
+                            if !items.iter().any(|old| {
+                                old.client_order_id == observed.client_order_id
+                                    && old.symbol == observed.symbol
+                                    && old.side == observed.side
+                                    && old.order_id == observed.order_id
+                            }) {
+                                items.push(observed);
+                            }
+                        }
+                    }
+                    restored = expected.clone();
+                }
+                let durable = &restored;
+                if expected.is_some() || !identities_agree {
                     if let Some(observed) = known_order_identity(&current) {
                         if identity_differs_from_order(&observed, durable) {
                             let items = self
@@ -3408,7 +3865,10 @@ impl GridTradingEngine {
                                 .entry(key.clone())
                                 .or_default();
                             if !items.iter().any(|old| {
-                                old.symbol == observed.symbol && old.order_id == observed.order_id
+                                old.client_order_id == observed.client_order_id
+                                    && old.symbol == observed.symbol
+                                    && old.side == observed.side
+                                    && old.order_id == observed.order_id
                             }) {
                                 items.push(observed);
                             }
@@ -3422,7 +3882,10 @@ impl GridTradingEngine {
                         for item in observed {
                             if identity_differs_from_order(&item, durable)
                                 && !items.iter().any(|old| {
-                                    old.symbol == item.symbol && old.order_id == item.order_id
+                                    old.client_order_id == item.client_order_id
+                                        && old.symbol == item.symbol
+                                        && old.side == item.side
+                                        && old.order_id == item.order_id
                                 })
                             {
                                 items.push(item);
@@ -3440,7 +3903,10 @@ impl GridTradingEngine {
                                 .entry(key.clone())
                                 .or_default();
                             if !items.iter().any(|item| {
-                                item.symbol == old.symbol && item.order_id == old.order_id
+                                item.client_order_id == old.client_order_id
+                                    && item.symbol == old.symbol
+                                    && item.side == old.side
+                                    && item.order_id == old.order_id
                             }) {
                                 items.push(old);
                             }
@@ -3452,7 +3918,6 @@ impl GridTradingEngine {
                     continue;
                 }
                 let mut restored = durable.clone();
-                restored.order_id = durable.order_id.or(current.order_id);
                 restored.quantity = durable.quantity.max(current.quantity);
                 restored.amount_usdc = restored.price * restored.quantity;
                 active.insert(id.clone(), restored);
@@ -3750,7 +4215,9 @@ impl GridTradingEngine {
                                         .entry(key.clone())
                                         .or_default();
                                     if !items.iter().any(|old| {
-                                        old.symbol == observed.symbol
+                                        old.client_order_id == observed.client_order_id
+                                            && old.symbol == observed.symbol
+                                            && old.side == observed.side
                                             && old.order_id == observed.order_id
                                     }) {
                                         items.push(observed);
@@ -4318,6 +4785,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rebalance_rejects_mode_changed_after_enqueue_before_exchange_work() {
+        let (mut engine, _db, fake, server) = dirty_live_switch_fixture().await;
+        let (reply, result) = tokio::sync::oneshot::channel();
+        engine
+            .state
+            .action_tx
+            .send(BotControlAction::Rebalance {
+                expected_mode: TradingMode::Paper,
+                reply,
+            })
+            .await
+            .unwrap();
+        engine.state.config.write().await.exchange.dry_run = false;
+        let action = engine.action_rx.recv().await.unwrap();
+        engine.handle_control_action(action).await;
+        assert!(result.await.unwrap().unwrap_err().contains("模式已改变"));
+        assert_eq!(
+            fake.orders
+                .lock()
+                .unwrap()
+                .get("gb_b_dirty_target")
+                .unwrap()
+                .status,
+            "NEW"
+        );
+        assert!(fake.posts.lock().unwrap().is_empty());
+        assert_eq!(*engine.state.status.read().await, BotStatus::Running);
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn rebalance_rejects_pause_after_enqueue_without_placing_orders() {
         let config = AppConfig::default();
         let db = Arc::new(Database::open(":memory:").unwrap());
@@ -4329,7 +4827,13 @@ mod tests {
         engine
             .state
             .action_tx
-            .send(BotControlAction::Rebalance { reply })
+            .send(BotControlAction::Rebalance {
+                expected_mode: TradingMode::from_exchange(
+                    config.exchange.dry_run,
+                    config.exchange.is_testnet,
+                ),
+                reply,
+            })
             .await
             .unwrap();
         engine.state.pause_trading().await.unwrap();
@@ -4354,7 +4858,13 @@ mod tests {
         engine.state.resume_trading().await.unwrap();
         let (reply, result) = tokio::sync::oneshot::channel();
         engine
-            .handle_control_action(BotControlAction::Rebalance { reply })
+            .handle_control_action(BotControlAction::Rebalance {
+                expected_mode: TradingMode::from_exchange(
+                    config.exchange.dry_run,
+                    config.exchange.is_testnet,
+                ),
+                reply,
+            })
             .await;
         assert!(result.await.unwrap().unwrap_err().contains("cancel"));
         assert_eq!(*engine.state.status.read().await, BotStatus::Paused);
@@ -4409,10 +4919,17 @@ mod tests {
         engine.state.config.write().await.exchange.dry_run = false;
         fake.block_cancel.store(1, Ordering::SeqCst);
         let state = engine.state.clone();
+        let expected_mode = {
+            let config = state.config.read().await;
+            TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet)
+        };
         let (reply, result) = tokio::sync::oneshot::channel();
         let rebuilding = tokio::spawn(async move {
             engine
-                .handle_control_action(BotControlAction::Rebalance { reply })
+                .handle_control_action(BotControlAction::Rebalance {
+                    expected_mode,
+                    reply,
+                })
                 .await;
         });
         tokio::time::timeout(

@@ -307,6 +307,7 @@ it('distinguishes failed submissions from unconfirmed pause and cancellation res
   const target = { symbol: s.symbol, status: s.status, mode: 'PAPER' as const, grid_config: s.grid_config, scoped: true };
   vi.mocked(runBatchControls).mockResolvedValue([
     { pair: target, result: 'failed' },
+    { pair: { ...target, symbol: 'BNBUSDC' }, result: 'request_unconfirmed' },
     { pair: { ...target, symbol: 'BTCUSDC' }, result: 'state_unconfirmed' },
     { pair: { ...target, symbol: 'ETHUSDC' }, result: 'cancellation_unconfirmed' },
     { pair: { ...target, symbol: 'XRPUSDC' }, result: 'not_submitted' },
@@ -316,7 +317,7 @@ it('distinguishes failed submissions from unconfirmed pause and cancellation res
   await user.click(screen.getByRole('button', { name: /全部策略操作/ }));
   await user.click(screen.getByText('全部暂停'));
   await user.click(await screen.findByRole('button', { name: '确认执行' }));
-  expect(await screen.findByText('提交失败或结果不明，请检查后再操作：SOLUSDC；操作进行中，未提交：XRPUSDC；暂停状态及撤单结果未确认：BTCUSDC；已暂停，撤单结果未确认：ETHUSDC。请检查状态、交易所挂单和日志')).toBeInTheDocument();
+  expect(await screen.findByText('提交前出错，未提交：SOLUSDC；请求结果不明，操作可能已生效：BNBUSDC；操作进行中，未提交：XRPUSDC；暂停状态及撤单结果未确认：BTCUSDC；已暂停，撤单结果未确认：ETHUSDC。请检查状态、交易所挂单和日志')).toBeInTheDocument();
 });
 it('shows today’s executed buy and sell counts instead of active orders on the strategy card', () => {
   const s = snapshot('BTCUSDC');

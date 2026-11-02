@@ -560,7 +560,7 @@ impl Database {
     }
 
     pub fn init_tables(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let mut conn = self.conn.lock().unwrap();
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS app_config (
@@ -660,11 +660,35 @@ impl Database {
                 account_key BLOB NOT NULL,
                 client_order_id TEXT NOT NULL,
                 expected_symbol TEXT NOT NULL,
+                observed_client_order_id TEXT NOT NULL,
                 observed_symbol TEXT NOT NULL,
+                observed_side TEXT NOT NULL,
                 observed_order_id INTEGER NOT NULL,
                 expected_json TEXT NOT NULL,
                 observed_json TEXT NOT NULL,
-                PRIMARY KEY (account_key, client_order_id, observed_symbol, observed_order_id)
+                PRIMARY KEY (account_key, client_order_id, expected_symbol, observed_client_order_id, observed_symbol, observed_side, observed_order_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS initial_order_responses (
+                account_key BLOB NOT NULL,
+                expected_symbol TEXT NOT NULL,
+                client_order_id TEXT NOT NULL,
+                observed_client_order_id TEXT NOT NULL,
+                observed_symbol TEXT NOT NULL,
+                observed_side TEXT NOT NULL,
+                observed_order_id INTEGER NOT NULL,
+                response_json TEXT NOT NULL,
+                observation_id TEXT NOT NULL UNIQUE,
+                batch_id TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS terminal_order_disagreements (
+                account_key BLOB NOT NULL,
+                expected_symbol TEXT NOT NULL,
+                client_order_id TEXT NOT NULL,
+                first_json TEXT NOT NULL,
+                conflicting_json TEXT NOT NULL,
+                PRIMARY KEY (account_key, expected_symbol, client_order_id, first_json, conflicting_json)
             );
 
             CREATE TABLE IF NOT EXISTS pair_intents (
@@ -727,6 +751,109 @@ impl Database {
             "#,
         )
         .context("Failed to initialize SQLite tables")?;
+
+        // Rebuild the old key atomically, retaining the identities in the stored JSON.
+        let tx = conn.transaction()?;
+        let has_observed_client_id: i64 = tx.query_row(
+            "SELECT count(*) FROM pragma_table_info('order_identity_observations') WHERE name = 'observed_client_order_id'",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_observed_client_id == 0 {
+            tx.execute_batch(
+                r#"
+                CREATE TABLE order_identity_observations_new (
+                    account_key BLOB NOT NULL,
+                    client_order_id TEXT NOT NULL,
+                    expected_symbol TEXT NOT NULL,
+                    observed_client_order_id TEXT NOT NULL,
+                    observed_symbol TEXT NOT NULL,
+                    observed_side TEXT NOT NULL,
+                    observed_order_id INTEGER NOT NULL,
+                    expected_json TEXT NOT NULL,
+                    observed_json TEXT NOT NULL,
+                    PRIMARY KEY (account_key, client_order_id, expected_symbol, observed_client_order_id, observed_symbol, observed_side, observed_order_id)
+                );
+                INSERT INTO order_identity_observations_new
+                    (account_key, client_order_id, expected_symbol, observed_client_order_id, observed_symbol, observed_side, observed_order_id, expected_json, observed_json)
+                SELECT account_key, client_order_id, expected_symbol,
+                    json_extract(observed_json, '$.client_order_id'), observed_symbol,
+                    json_extract(observed_json, '$.side'), observed_order_id, expected_json, observed_json
+                FROM order_identity_observations;
+                DROP TABLE order_identity_observations;
+                ALTER TABLE order_identity_observations_new RENAME TO order_identity_observations;
+                "#,
+            )?;
+        }
+        // Older versions deduplicated by response content. Preserve the order
+        // of surviving rows; observations already discarded cannot be restored.
+        let has_observation_id: i64 = tx.query_row(
+            "SELECT count(*) FROM pragma_table_info('initial_order_responses') WHERE name = 'observation_id'",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_observation_id == 0 {
+            tx.execute_batch(
+                r#"
+                CREATE TABLE initial_order_responses_new (
+                    account_key BLOB NOT NULL,
+                    expected_symbol TEXT NOT NULL,
+                    client_order_id TEXT NOT NULL,
+                    observed_client_order_id TEXT NOT NULL,
+                    observed_symbol TEXT NOT NULL,
+                    observed_side TEXT NOT NULL,
+                    observed_order_id INTEGER NOT NULL,
+                    response_json TEXT NOT NULL,
+                    observation_id TEXT NOT NULL UNIQUE
+                );
+                INSERT INTO initial_order_responses_new
+                    (account_key, expected_symbol, client_order_id, observed_client_order_id,
+                     observed_symbol, observed_side, observed_order_id, response_json, observation_id)
+                SELECT account_key, expected_symbol, client_order_id, observed_client_order_id,
+                    observed_symbol, observed_side, observed_order_id, response_json,
+                    'legacy:' || rowid
+                FROM initial_order_responses ORDER BY rowid;
+                DROP TABLE initial_order_responses;
+                ALTER TABLE initial_order_responses_new RENAME TO initial_order_responses;
+                "#,
+            )?;
+        }
+        let has_batch_id: i64 = tx.query_row(
+            "SELECT count(*) FROM pragma_table_info('initial_order_responses') WHERE name = 'batch_id'",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_batch_id == 0 {
+            tx.execute_batch(
+                "ALTER TABLE initial_order_responses ADD COLUMN batch_id TEXT NOT NULL DEFAULT 'legacy';",
+            )?;
+        }
+        let terminal_key_columns: i64 = tx.query_row(
+            "SELECT count(*) FROM pragma_table_info('terminal_order_disagreements') WHERE pk > 0",
+            [],
+            |row| row.get(0),
+        )?;
+        if terminal_key_columns == 3 {
+            tx.execute_batch(
+                r#"
+                CREATE TABLE terminal_order_disagreements_new (
+                    account_key BLOB NOT NULL,
+                    expected_symbol TEXT NOT NULL,
+                    client_order_id TEXT NOT NULL,
+                    first_json TEXT NOT NULL,
+                    conflicting_json TEXT NOT NULL,
+                    PRIMARY KEY (account_key, expected_symbol, client_order_id, first_json, conflicting_json)
+                );
+                INSERT INTO terminal_order_disagreements_new
+                    (account_key, expected_symbol, client_order_id, first_json, conflicting_json)
+                SELECT account_key, expected_symbol, client_order_id, first_json, conflicting_json
+                FROM terminal_order_disagreements;
+                DROP TABLE terminal_order_disagreements;
+                ALTER TABLE terminal_order_disagreements_new RENAME TO terminal_order_disagreements;
+                "#,
+            )?;
+        }
+        tx.commit()?;
 
         let has_pnl_verified: i64 = conn.query_row(
             "SELECT count(*) FROM pragma_table_info('trades') WHERE name = 'pnl_verified';",
@@ -1252,6 +1379,45 @@ impl Database {
         Ok(())
     }
 
+    pub(crate) fn save_managed_orders_if_absent(&self, orders: &[GridOrder]) -> Result<()> {
+        let mut conn = self.lock_reconciliation_connection("save_managed_orders_if_absent");
+        let tx = conn.transaction()?;
+        {
+            let mut statement = tx.prepare(
+                "INSERT INTO managed_orders (client_order_id, symbol, order_json, updated_at) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(client_order_id) DO NOTHING;",
+            )?;
+            for order in orders {
+                let inserted = statement.execute(params![
+                    order.client_order_id,
+                    order.symbol,
+                    serde_json::to_string(order)?,
+                    Utc::now().to_rfc3339(),
+                ])?;
+                if inserted == 0 {
+                    let (stored_symbol, stored_json): (String, String) = tx.query_row(
+                        "SELECT symbol, order_json FROM managed_orders WHERE client_order_id = ?1;",
+                        params![order.client_order_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )?;
+                    let stored: GridOrder = serde_json::from_str(&stored_json)?;
+                    if stored.client_order_id != order.client_order_id
+                        || stored_symbol != order.symbol
+                        || stored.symbol != order.symbol
+                        || stored.side != order.side
+                        || stored.order_id != order.order_id
+                    {
+                        anyhow::bail!(
+                            "managed order identity conflict for client order ID {}",
+                            order.client_order_id
+                        );
+                    }
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn load_managed_orders(&self, symbol: &str) -> Result<Vec<GridOrder>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare("SELECT order_json FROM managed_orders WHERE symbol = ?1;")?;
@@ -1262,6 +1428,222 @@ impl Database {
         }
         Ok(orders)
     }
+    pub(crate) fn save_initial_order_responses(
+        &self,
+        account: [u8; 32],
+        symbol: &str,
+        client_order_id: &str,
+        responses: &[crate::exchange::BinanceOrderResponse],
+    ) -> Result<()> {
+        let observations: Vec<_> = responses
+            .iter()
+            .map(|response| {
+                let id = uuid::Uuid::new_v4().to_string();
+                (id.clone(), id, response.clone())
+            })
+            .collect();
+        self.save_identified_initial_order_responses(
+            account,
+            symbol,
+            client_order_id,
+            &observations,
+        )
+    }
+
+    // Reuse each observation ID on retry; allocate a fresh ID for every new observation.
+    pub(crate) fn save_identified_initial_order_responses(
+        &self,
+        account: [u8; 32],
+        symbol: &str,
+        client_order_id: &str,
+        observations: &[(String, String, crate::exchange::BinanceOrderResponse)],
+    ) -> Result<()> {
+        self.save_initial_order_response_rows(
+            account,
+            symbol,
+            &[],
+            observations.iter().map(|(id, batch, response)| {
+                (client_order_id, id.as_str(), batch.as_str(), response)
+            }),
+        )
+    }
+
+    pub(crate) fn save_initial_order_response_snapshot(
+        &self,
+        account: [u8; 32],
+        symbol: &str,
+        observations: &[(
+            String,
+            String,
+            String,
+            crate::exchange::BinanceOrderResponse,
+        )],
+        identities: &[(GridOrder, crate::types::ObservedOrderIdentity)],
+    ) -> Result<()> {
+        self.save_initial_order_response_rows(
+            account,
+            symbol,
+            identities,
+            observations.iter().map(|(client_id, id, batch, response)| {
+                (client_id.as_str(), id.as_str(), batch.as_str(), response)
+            }),
+        )
+    }
+
+    fn save_initial_order_response_rows<'a>(
+        &self,
+        account: [u8; 32],
+        symbol: &str,
+        identities: &[(GridOrder, crate::types::ObservedOrderIdentity)],
+        observations: impl IntoIterator<
+            Item = (
+                &'a str,
+                &'a str,
+                &'a str,
+                &'a crate::exchange::BinanceOrderResponse,
+            ),
+        >,
+    ) -> Result<()> {
+        let mut conn = self.lock_reconciliation_connection("save_initial_order_responses");
+        let tx = conn.transaction()?;
+        Self::save_identity_observation_rows(&tx, account, identities)?;
+        {
+            let mut statement = tx.prepare(
+                "INSERT INTO initial_order_responses (account_key, expected_symbol, client_order_id, observed_client_order_id, observed_symbol, observed_side, observed_order_id, response_json, observation_id, batch_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(observation_id) DO NOTHING"
+            )?;
+            for (client_order_id, observation_id, batch_id, response) in observations {
+                let json = serde_json::to_string(response)?;
+                let inserted = statement.execute(params![
+                    &account[..],
+                    symbol,
+                    client_order_id,
+                    response.client_order_id,
+                    response.symbol,
+                    response.side,
+                    response.order_id,
+                    &json,
+                    observation_id,
+                    batch_id
+                ])?;
+                if inserted == 0 {
+                    let matches: bool = tx.query_row(
+                        "SELECT account_key=?1 AND expected_symbol=?2 AND client_order_id=?3 AND response_json=?4 AND batch_id=?5 FROM initial_order_responses WHERE observation_id=?6",
+                        params![&account[..], symbol, client_order_id, &json, batch_id, observation_id],
+                        |row| row.get(0),
+                    )?;
+                    anyhow::ensure!(
+                        matches,
+                        "initial order response observation ID reused with different data"
+                    );
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn load_initial_order_responses(
+        &self,
+        account: [u8; 32],
+        symbol: &str,
+        client_order_id: &str,
+    ) -> Result<Vec<crate::exchange::BinanceOrderResponse>> {
+        Ok(self
+            .load_initial_order_response_timeline(account, symbol, client_order_id)?
+            .into_iter()
+            .map(|(_, response)| response)
+            .collect())
+    }
+
+    pub(crate) fn load_initial_order_response_timeline(
+        &self,
+        account: [u8; 32],
+        symbol: &str,
+        client_order_id: &str,
+    ) -> Result<Vec<(String, crate::exchange::BinanceOrderResponse)>> {
+        let conn = self.lock_reconciliation_connection("load_initial_order_responses");
+        let mut statement = conn.prepare("SELECT batch_id, response_json FROM initial_order_responses WHERE account_key=?1 AND expected_symbol=?2 AND client_order_id=?3 ORDER BY rowid")?;
+        let rows = statement.query_map(params![&account[..], symbol, client_order_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut responses = Vec::new();
+        for row in rows {
+            let (batch_id, json) = row?;
+            responses.push((batch_id, serde_json::from_str(&json)?));
+        }
+        Ok(responses)
+    }
+
+    pub(crate) fn delete_order_evidence_groups(
+        &self,
+        account: [u8; 32],
+        symbol: &str,
+        client_ids: &[String],
+    ) -> Result<()> {
+        if client_ids.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.lock_reconciliation_connection("delete_order_evidence_groups");
+        let tx = conn.transaction()?;
+        {
+            let mut initial = tx.prepare("DELETE FROM initial_order_responses WHERE account_key=?1 AND expected_symbol=?2 AND client_order_id=?3")?;
+            let mut observations = tx.prepare("DELETE FROM order_identity_observations WHERE account_key=?1 AND expected_symbol=?2 AND client_order_id=?3")?;
+            for id in client_ids {
+                initial.execute(params![&account[..], symbol, id])?;
+                observations.execute(params![&account[..], symbol, id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn save_terminal_order_disagreement(
+        &self,
+        account: [u8; 32],
+        symbol: &str,
+        client_order_id: &str,
+        first: &crate::exchange::BinanceOrderResponse,
+        conflicting: &crate::exchange::BinanceOrderResponse,
+    ) -> Result<()> {
+        let conn = self.lock_reconciliation_connection("save_terminal_order_disagreement");
+        conn.execute(
+            "INSERT INTO terminal_order_disagreements (account_key, expected_symbol, client_order_id, first_json, conflicting_json) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(account_key, expected_symbol, client_order_id, first_json, conflicting_json) DO NOTHING",
+            params![&account[..], symbol, client_order_id, serde_json::to_string(first)?, serde_json::to_string(conflicting)?],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn load_terminal_order_disagreements(
+        &self,
+        account: [u8; 32],
+        symbol: &str,
+    ) -> Result<
+        Vec<(
+            String,
+            crate::exchange::BinanceOrderResponse,
+            crate::exchange::BinanceOrderResponse,
+        )>,
+    > {
+        let conn = self.lock_reconciliation_connection("load_terminal_order_disagreements");
+        let mut stmt = conn.prepare("SELECT client_order_id, first_json, conflicting_json FROM terminal_order_disagreements WHERE account_key=?1 AND expected_symbol=?2")?;
+        let rows = stmt.query_map(params![&account[..], symbol], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut records = Vec::new();
+        for row in rows {
+            let (client_order_id, first, conflicting) = row?;
+            records.push((
+                client_order_id,
+                serde_json::from_str(&first)?,
+                serde_json::from_str(&conflicting)?,
+            ));
+        }
+        Ok(records)
+    }
 
     pub(crate) fn save_identity_observations(
         &self,
@@ -1270,23 +1652,34 @@ impl Database {
     ) -> Result<()> {
         let mut conn = self.lock_reconciliation_connection("save_identity_observations");
         let tx = conn.transaction()?;
+        Self::save_identity_observation_rows(&tx, account, records)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn save_identity_observation_rows(
+        tx: &rusqlite::Transaction<'_>,
+        account: [u8; 32],
+        records: &[(GridOrder, crate::types::ObservedOrderIdentity)],
+    ) -> Result<()> {
         {
             let mut statement = tx.prepare(
-                "INSERT INTO order_identity_observations (account_key, client_order_id, expected_symbol, observed_symbol, observed_order_id, expected_json, observed_json) VALUES (?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(account_key,client_order_id,observed_symbol,observed_order_id) DO UPDATE SET expected_symbol=excluded.expected_symbol, expected_json=excluded.expected_json, observed_json=excluded.observed_json"
+                "INSERT INTO order_identity_observations (account_key, client_order_id, expected_symbol, observed_client_order_id, observed_symbol, observed_side, observed_order_id, expected_json, observed_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(account_key,client_order_id,expected_symbol,observed_client_order_id,observed_symbol,observed_side,observed_order_id) DO UPDATE SET expected_json=excluded.expected_json, observed_json=excluded.observed_json"
             )?;
             for (expected, observed) in records {
                 statement.execute(params![
                     &account[..],
                     expected.client_order_id,
                     expected.symbol,
+                    observed.client_order_id,
                     observed.symbol,
+                    observed.side,
                     observed.order_id,
                     serde_json::to_string(expected)?,
                     serde_json::to_string(observed)?
                 ])?;
             }
         }
-        tx.commit()?;
         Ok(())
     }
 

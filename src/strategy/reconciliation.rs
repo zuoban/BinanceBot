@@ -1,5 +1,82 @@
 use super::*;
 
+fn terminal_responses_disagree(a: &BinanceOrderResponse, b: &BinanceOrderResponse) -> bool {
+    let terminal = |order: &BinanceOrderResponse| {
+        matches!(
+            order.status.as_str(),
+            "FILLED" | "CANCELED" | "EXPIRED" | "EXPIRED_IN_MATCH" | "REJECTED"
+        )
+    };
+    if a.client_order_id != b.client_order_id
+        || a.symbol != b.symbol
+        || a.side != b.side
+        || a.order_id != b.order_id
+    {
+        return false;
+    }
+    // An impossible zero-fill FILLED response is itself unresolved, but it
+    // cannot establish a terminal transition that prevents later correction.
+    // Never discard earlier positive execution evidence for this exception.
+    if (unresolved_filled_quantity(a) && a.executed_qty <= Decimal::ZERO)
+        || unresolved_filled_quantity(b)
+    {
+        return false;
+    }
+    if !terminal(a) && !terminal(b) {
+        if !matches!(a.status.as_str(), "NEW" | "PARTIALLY_FILLED")
+            || !matches!(b.status.as_str(), "NEW" | "PARTIALLY_FILLED")
+        {
+            return false;
+        }
+        return b.executed_qty < a.executed_qty
+            || (a.status == "PARTIALLY_FILLED" && b.status == "NEW")
+            || a.update_time
+                .zip(b.update_time)
+                .is_some_and(|(first, second)| second < first)
+            || a.orig_qty != b.orig_qty
+            || a.price != b.price
+            || (a.executed_qty > Decimal::ZERO
+                && a.executed_qty == b.executed_qty
+                && a.avg_price
+                    .zip(b.avg_price)
+                    .is_some_and(|(first, second)| first != second));
+    }
+    if matches!(a.status.as_str(), "NEW" | "PARTIALLY_FILLED") && terminal(b) {
+        // A fill can occur between the two queries. Leave a legitimate
+        // progression for a later consistent verification rather than
+        // persisting it as an irreconcilable terminal contradiction.
+        let valid_start = match a.status.as_str() {
+            "NEW" => a.executed_qty == Decimal::ZERO,
+            "PARTIALLY_FILLED" => a.executed_qty > Decimal::ZERO && a.executed_qty < a.orig_qty,
+            _ => false,
+        };
+        let valid_end = b.executed_qty >= a.executed_qty
+            && b.executed_qty <= b.orig_qty
+            && (b.status != "FILLED" || b.executed_qty == b.orig_qty);
+        let stable_average = a.executed_qty != b.executed_qty
+            || a.executed_qty == Decimal::ZERO
+            || a.avg_price
+                .zip(b.avg_price)
+                .is_none_or(|(first, second)| first == second);
+        let ordered_time = a
+            .update_time
+            .zip(b.update_time)
+            .is_none_or(|(first, second)| second >= first);
+        return !(valid_start
+            && valid_end
+            && stable_average
+            && a.orig_qty == b.orig_qty
+            && a.price == b.price
+            && ordered_time);
+    }
+    a.status != b.status
+        || a.executed_qty != b.executed_qty
+        || a.orig_qty != b.orig_qty
+        || a.price != b.price
+        || a.avg_price != b.avg_price
+        || a.update_time != b.update_time
+}
+
 impl GridTradingEngine {
     pub(super) async fn load_identity_observations(
         &mut self,
@@ -33,14 +110,25 @@ impl GridTradingEngine {
                 self.order_identity_conflicts
                     .insert(key.clone(), expected.clone());
                 let observations = self.order_identity_observations.entry(key).or_default();
-                if !observations
-                    .iter()
-                    .any(|old| old.symbol == observed.symbol && old.order_id == observed.order_id)
-                {
+                if !observations.iter().any(|old| {
+                    old.client_order_id == observed.client_order_id
+                        && old.symbol == observed.symbol
+                        && old.side == observed.side
+                        && old.order_id == observed.order_id
+                }) {
                     observations.push(observed);
                 }
                 active
                     .entry(expected.client_order_id.clone())
+                    .and_modify(|current| {
+                        if current.client_order_id == expected.client_order_id
+                            && current.symbol == expected.symbol
+                            && current.side == expected.side
+                            && current.order_id.is_none()
+                        {
+                            current.order_id = expected.order_id;
+                        }
+                    })
                     .or_insert(expected);
             }
         }
@@ -53,6 +141,15 @@ impl GridTradingEngine {
         account: [u8; 32],
         symbol: &str,
     ) -> bool {
+        // A pending snapshot includes both full responses and identities. Its
+        // transaction must succeed before any identity-only write can proceed.
+        if !self
+            .flush_initial_order_responses(account, symbol, "")
+            .await
+        {
+            self.report_reconciliation_state(true).await;
+            return false;
+        }
         let mut records = Vec::new();
         let mut missing_expected = false;
         for (key, observations) in &self.order_identity_observations {
@@ -142,6 +239,14 @@ impl GridTradingEngine {
             self.last_orders_sync = None;
             return false;
         }
+        if self
+            .terminal_disagreement_blocked(account_key, &symbol)
+            .await
+        {
+            self.last_orders_sync = None;
+            self.report_reconciliation_state(true).await;
+            return false;
+        }
         let pending_ids: HashSet<_> = self
             .provisional_order_ids
             .iter()
@@ -196,6 +301,27 @@ impl GridTradingEngine {
                         {
                             authoritative.order_id = expected.order_id;
                         }
+                        if let Some(observed) = active.get(id).and_then(known_order_identity) {
+                            if authoritative.symbol != observed.symbol
+                                || authoritative.side.as_str() != observed.side
+                                || authoritative
+                                    .order_id
+                                    .is_none_or(|order_id| order_id != observed.order_id)
+                            {
+                                let items = self
+                                    .order_identity_observations
+                                    .entry((account_key, id.clone()))
+                                    .or_default();
+                                if !items.iter().any(|old| {
+                                    old.client_order_id == observed.client_order_id
+                                        && old.symbol == observed.symbol
+                                        && old.side == observed.side
+                                        && old.order_id == observed.order_id
+                                }) {
+                                    items.push(observed);
+                                }
+                            }
+                        }
                         active.insert(id.clone(), authoritative.clone());
                         self.order_identity_conflicts
                             .insert((account_key, id.clone()), authoritative.clone());
@@ -212,7 +338,9 @@ impl GridTradingEngine {
                                     .entry((account_key, id.clone()))
                                     .or_default();
                                 if !items.iter().any(|old| {
-                                    old.symbol == observed.symbol
+                                    old.client_order_id == observed.client_order_id
+                                        && old.symbol == observed.symbol
+                                        && old.side == observed.side
                                         && old.order_id == observed.order_id
                                 }) {
                                     items.push(observed);
@@ -230,7 +358,10 @@ impl GridTradingEngine {
                             for item in observed {
                                 if identity_differs_from_order(&item, &authoritative)
                                     && !items.iter().any(|old| {
-                                        old.symbol == item.symbol && old.order_id == item.order_id
+                                        old.client_order_id == item.client_order_id
+                                            && old.symbol == item.symbol
+                                            && old.side == item.side
+                                            && old.order_id == item.order_id
                                     })
                                 {
                                     items.push(item);
@@ -278,7 +409,10 @@ impl GridTradingEngine {
                                 .entry((account_key, id.clone()))
                                 .or_default();
                             if !items.iter().any(|old| {
-                                old.symbol == observed.symbol && old.order_id == observed.order_id
+                                old.client_order_id == observed.client_order_id
+                                    && old.symbol == observed.symbol
+                                    && old.side == observed.side
+                                    && old.order_id == observed.order_id
                             }) {
                                 items.push(observed);
                             }
@@ -294,7 +428,10 @@ impl GridTradingEngine {
                             for item in observed {
                                 if identity_differs_from_order(&item, durable)
                                     && !items.iter().any(|old| {
-                                        old.symbol == item.symbol && old.order_id == item.order_id
+                                        old.client_order_id == item.client_order_id
+                                            && old.symbol == item.symbol
+                                            && old.side == item.side
+                                            && old.order_id == item.order_id
                                     })
                                 {
                                     items.push(item);
@@ -344,6 +481,438 @@ impl GridTradingEngine {
             Ok(live_orders) => {
                 let mut live_orders = live_orders;
                 self.last_orders_sync = None;
+                // Inspect duplicate client IDs before building a map: collecting
+                // into a map would discard an identity based on response order.
+                let mut groups: HashMap<&str, Vec<&BinanceOrderResponse>> = HashMap::new();
+                for found in &live_orders {
+                    if is_grid_order(&found.client_order_id) {
+                        groups
+                            .entry(&found.client_order_id)
+                            .or_default()
+                            .push(found);
+                    }
+                }
+                let managed_symbol = symbol.clone();
+                let managed = self
+                    .state
+                    .db
+                    .run_blocking(move |db| db.load_managed_orders(&managed_symbol))
+                    .await;
+                if let Err(error) = &managed {
+                    error!("Could not verify snapshot order identities: {}", error);
+                }
+                let state = self.state.clone();
+                let active = state.active_orders.read().await;
+                let mut duplicates: Vec<_> = groups
+                    .values()
+                    .cloned()
+                    .filter(|orders| {
+                        let first = orders[0];
+                        let known = [
+                            managed.as_ref().ok().and_then(|items| {
+                                items
+                                    .iter()
+                                    .find(|order| order.client_order_id == first.client_order_id)
+                            }),
+                            pair_intents.get(&first.client_order_id),
+                            remainder_plan.as_ref().and_then(|plan| {
+                                plan.sources
+                                    .iter()
+                                    .chain(std::iter::once(&plan.target))
+                                    .find(|order| order.client_order_id == first.client_order_id)
+                            }),
+                            active.get(&first.client_order_id),
+                        ];
+                        managed.is_err()
+                            || self
+                                .order_identity_conflicts
+                                .contains_key(&(account_key, first.client_order_id.clone()))
+                            || known.into_iter().flatten().any(|expected| {
+                                orders.iter().any(|found| {
+                                    expected.symbol != found.symbol
+                                        || (expected.purpose
+                                            != crate::types::OrderPurpose::Unverified
+                                            && expected.side.as_str() != found.side)
+                                        || expected.order_id.is_some_and(|id| id != found.order_id)
+                                })
+                            })
+                            || orders.iter().any(|order| {
+                                order.symbol != symbol
+                                    || !matches!(order.side.as_str(), "BUY" | "SELL")
+                            })
+                            || orders.iter().skip(1).any(|order| {
+                                let first = orders[0];
+                                order.symbol != first.symbol
+                                    || order.side != first.side
+                                    || order.order_id != first.order_id
+                                    || order.status != first.status
+                                    || order.price != first.price
+                                    || order.avg_price != first.avg_price
+                                    || order.orig_qty != first.orig_qty
+                                    || order.executed_qty != first.executed_qty
+                                    || order.order_type != first.order_type
+                                    || order.time_in_force != first.time_in_force
+                                    || order.update_time != first.update_time
+                            })
+                    })
+                    .collect();
+                let mut restore_orders = Vec::new();
+                let mut active_to_persist = Vec::new();
+                let mut active_identity_observations = Vec::new();
+                for current in active.values() {
+                    let durable = managed
+                        .as_ref()
+                        .ok()
+                        .and_then(|items| {
+                            items
+                                .iter()
+                                .find(|item| item.client_order_id == current.client_order_id)
+                        })
+                        .or_else(|| pair_intents.get(&current.client_order_id))
+                        .or_else(|| {
+                            remainder_plan.as_ref().and_then(|plan| {
+                                plan.sources
+                                    .iter()
+                                    .chain(std::iter::once(&plan.target))
+                                    .find(|item| item.client_order_id == current.client_order_id)
+                            })
+                        });
+                    if let (Some(expected), Some(observed)) =
+                        (durable, known_order_identity(current))
+                    {
+                        if expected.symbol != current.symbol
+                            || expected.side != current.side
+                            || expected
+                                .order_id
+                                .is_none_or(|id| Some(id) != current.order_id)
+                        {
+                            if expected.order_id.is_none()
+                                && expected.symbol == current.symbol
+                                && expected.side == current.side
+                                && restored_ids.contains(&current.client_order_id)
+                                && live_orders.iter().any(|found| {
+                                    found.client_order_id == current.client_order_id
+                                        && found.symbol == current.symbol
+                                        && found.side == current.side.as_str()
+                                        && Some(found.order_id) == current.order_id
+                                        && !unresolved_filled_quantity(found)
+                                })
+                            {
+                                continue;
+                            }
+                            let mut retained = expected.clone();
+                            if retained.order_id.is_none()
+                                && retained.symbol == current.symbol
+                                && retained.side == current.side
+                                && current.purpose != crate::types::OrderPurpose::Unverified
+                                && !restored_ids.contains(&current.client_order_id)
+                                && !self
+                                    .provisional_order_ids
+                                    .contains(&(account_key, current.client_order_id.clone()))
+                            {
+                                retained.order_id = current.order_id;
+                            }
+                            active_identity_observations.push((retained, observed));
+                        }
+                    }
+                }
+                if !duplicates.is_empty() || !active_identity_observations.is_empty() {
+                    // A conflict blocks normal reconciliation for the entire
+                    // snapshot. Retain unrelated newly discovered orders too,
+                    // since they may fill before the next snapshot or restart.
+                    for orders in groups.values() {
+                        let id = &orders[0].client_order_id;
+                        let durable = managed
+                            .as_ref()
+                            .ok()
+                            .and_then(|items| {
+                                items.iter().find(|order| &order.client_order_id == id)
+                            })
+                            .or_else(|| pair_intents.get(id))
+                            .or_else(|| {
+                                remainder_plan.as_ref().and_then(|plan| {
+                                    plan.sources
+                                        .iter()
+                                        .chain(std::iter::once(&plan.target))
+                                        .find(|order| &order.client_order_id == id)
+                                })
+                            });
+                        if !active.contains_key(id) {
+                            if let Some(order) = durable {
+                                restore_orders.push(order.clone());
+                            }
+                        }
+                        if durable.is_none_or(|order| order.order_id.is_none())
+                            && !duplicates
+                                .iter()
+                                .any(|group| &group[0].client_order_id == id)
+                        {
+                            // An in-memory order can be left by a failed write;
+                            // persist its identity rather than treating it as durable.
+                            duplicates.push(orders.clone());
+                        }
+                    }
+                    for order in active.values() {
+                        if order.symbol != symbol
+                            || order.purpose == crate::types::OrderPurpose::Unverified
+                            || managed.as_ref().ok().is_some_and(|items| {
+                                items
+                                    .iter()
+                                    .any(|item| item.client_order_id == order.client_order_id)
+                            })
+                            || pair_intents.contains_key(&order.client_order_id)
+                            || remainder_plan.as_ref().is_some_and(|plan| {
+                                plan.sources
+                                    .iter()
+                                    .chain(std::iter::once(&plan.target))
+                                    .any(|item| item.client_order_id == order.client_order_id)
+                            })
+                        {
+                            continue;
+                        }
+                        active_to_persist.push(order.clone());
+                    }
+                }
+                drop(active);
+                if !duplicates.is_empty() || !active_identity_observations.is_empty() {
+                    let block = managed.is_err()
+                        || active_identity_observations
+                            .iter()
+                            .any(|(expected, observed)| {
+                                if restored_ids.contains(&expected.client_order_id)
+                                    && expected.order_id.is_none()
+                                    && expected.client_order_id == observed.client_order_id
+                                    && expected.symbol == observed.symbol
+                                    && expected.side.as_str() == observed.side
+                                {
+                                    return false;
+                                }
+                                let key = (account_key, expected.client_order_id.clone());
+                                self.order_identity_observations
+                                    .get(&key)
+                                    .is_none_or(|items| {
+                                        !items.iter().any(|old| {
+                                            old.client_order_id == observed.client_order_id
+                                                && old.symbol == observed.symbol
+                                                && old.side == observed.side
+                                                && old.order_id == observed.order_id
+                                        })
+                                    })
+                            })
+                        || duplicates.iter().any(|orders| {
+                            let key = (account_key, orders[0].client_order_id.clone());
+                            if orders.len() == 1
+                                && self
+                                    .order_identity_conflicts
+                                    .get(&key)
+                                    .is_some_and(|expected| {
+                                        let found = orders[0];
+                                        expected.client_order_id == found.client_order_id
+                                            && expected.symbol == found.symbol
+                                            && expected.side.as_str() == found.side
+                                            && expected.order_id == Some(found.order_id)
+                                    })
+                            {
+                                return false;
+                            }
+                            !self.order_identity_conflicts.contains_key(&key)
+                                || orders.iter().any(|found| {
+                                    self.order_identity_observations
+                                        .get(&key)
+                                        .is_none_or(|items| {
+                                            !items.iter().any(|old| {
+                                                old.client_order_id == found.client_order_id
+                                                    && old.symbol == found.symbol
+                                                    && old.side == found.side
+                                                    && old.order_id == found.order_id
+                                            })
+                                        })
+                                })
+                        });
+                    self.report_reconciliation_state(true).await;
+                    if managed.is_err() {
+                        self.last_orders_sync = None;
+                    }
+                    let state = self.state.clone();
+                    let mut active = state.active_orders.write().await;
+                    let mut snapshot_responses = Vec::new();
+                    for order in restore_orders {
+                        active.entry(order.client_order_id.clone()).or_insert(order);
+                    }
+                    for (mut expected, observed) in active_identity_observations {
+                        let key = (account_key, expected.client_order_id.clone());
+                        self.provisional_order_ids.insert(key.clone());
+                        if let Some(confirmed) = self.order_identity_conflicts.get(&key) {
+                            if expected.order_id.is_none()
+                                && confirmed.order_id.is_some()
+                                && expected.client_order_id == confirmed.client_order_id
+                                && expected.symbol == confirmed.symbol
+                                && expected.side == confirmed.side
+                            {
+                                expected.order_id = confirmed.order_id;
+                            }
+                        }
+                        self.order_identity_conflicts.insert(key.clone(), expected);
+                        let items = self.order_identity_observations.entry(key).or_default();
+                        if !items.iter().any(|old| {
+                            old.client_order_id == observed.client_order_id
+                                && old.symbol == observed.symbol
+                                && old.side == observed.side
+                                && old.order_id == observed.order_id
+                        }) {
+                            items.push(observed);
+                        }
+                    }
+                    for mut observations in duplicates {
+                        observations.sort_by(|a, b| {
+                            (&a.symbol, &a.side, a.order_id).cmp(&(&b.symbol, &b.side, b.order_id))
+                        });
+                        let first = observations[0];
+                        let mut expected = managed
+                            .as_ref()
+                            .ok()
+                            .and_then(|orders| {
+                                orders
+                                    .iter()
+                                    .find(|order| order.client_order_id == first.client_order_id)
+                            })
+                            .or_else(|| pair_intents.get(&first.client_order_id))
+                            .or_else(|| {
+                                remainder_plan.as_ref().and_then(|plan| {
+                                    plan.sources
+                                        .iter()
+                                        .chain(std::iter::once(&plan.target))
+                                        .find(|order| {
+                                            order.client_order_id == first.client_order_id
+                                        })
+                                })
+                            })
+                            .or_else(|| active.get(&first.client_order_id))
+                            .cloned()
+                            .unwrap_or_else(|| {
+                                let quantity = observations
+                                    .iter()
+                                    .map(|order| order.orig_qty)
+                                    .max()
+                                    .unwrap_or(Decimal::ZERO);
+                                let price = observations
+                                    .iter()
+                                    .map(|order| order.price)
+                                    .max()
+                                    .unwrap_or(Decimal::ZERO);
+                                GridOrder {
+                                    client_order_id: first.client_order_id.clone(),
+                                    order_id: None,
+                                    symbol: symbol.clone(),
+                                    side: if first.side == "SELL" {
+                                        OrderSide::Sell
+                                    } else {
+                                        OrderSide::Buy
+                                    },
+                                    price,
+                                    quantity,
+                                    amount_usdc: price * quantity,
+                                    status: OrderStatus::New,
+                                    created_at: Utc::now(),
+                                    updated_at: Utc::now(),
+                                    grid_level: 0,
+                                    paired_client_order_id: None,
+                                    is_take_profit: false,
+                                    purpose: crate::types::OrderPurpose::Unverified,
+                                    merge_sources: Vec::new(),
+                                }
+                            });
+                        if let Some(confirmed) = self
+                            .order_identity_conflicts
+                            .get(&(account_key, expected.client_order_id.clone()))
+                        {
+                            if expected.order_id.is_none()
+                                && confirmed.order_id.is_some()
+                                && expected.client_order_id == confirmed.client_order_id
+                                && expected.symbol == confirmed.symbol
+                                && expected.side == confirmed.side
+                            {
+                                expected.order_id = confirmed.order_id;
+                            }
+                        }
+                        if expected.purpose == crate::types::OrderPurpose::Unverified {
+                            for found in &observations {
+                                expected.price = expected.price.max(found.price);
+                                expected.quantity = expected.quantity.max(found.orig_qty);
+                            }
+                            expected.amount_usdc = expected.price * expected.quantity;
+                        }
+                        for found in observations {
+                            self.track_identity_conflict(&expected, found);
+                            snapshot_responses
+                                .push((expected.client_order_id.clone(), found.clone()));
+                        }
+                        active.insert(expected.client_order_id.clone(), expected);
+                    }
+                    drop(active);
+                    let snapshot_batch = format!("snapshot:{}", uuid::Uuid::new_v4());
+                    let mut snapshot_identities = Vec::new();
+                    let mut identities_complete = true;
+                    for (key, observations) in &self.order_identity_observations {
+                        if key.0 != account_key {
+                            continue;
+                        }
+                        let Some(expected) = self.order_identity_conflicts.get(key) else {
+                            identities_complete = false;
+                            break;
+                        };
+                        if expected.symbol == symbol {
+                            snapshot_identities.extend(
+                                observations
+                                    .iter()
+                                    .map(|observed| (expected.clone(), observed.clone())),
+                            );
+                        }
+                    }
+                    let saved_snapshots = if identities_complete {
+                        self.record_initial_order_response_snapshot(
+                            account_key,
+                            &symbol,
+                            &snapshot_batch,
+                            &snapshot_responses,
+                            &snapshot_identities,
+                        )
+                        .await
+                    } else {
+                        false
+                    };
+                    if !saved_snapshots {
+                        self.report_reconciliation_state(true).await;
+                        return false;
+                    }
+                    let saved_active = if active_to_persist.is_empty() {
+                        true
+                    } else {
+                        match self
+                            .state
+                            .db
+                            .run_blocking(move |db| {
+                                db.save_managed_orders_if_absent(&active_to_persist)
+                            })
+                            .await
+                        {
+                            Ok(()) => true,
+                            Err(error) => {
+                                error!(
+                                    "Could not persist active orders before reconciliation: {}",
+                                    error
+                                );
+                                false
+                            }
+                        }
+                    };
+                    let saved_observations = self
+                        .persist_identity_observations(account_key, &symbol)
+                        .await;
+                    if !saved_active || !saved_observations || !saved_snapshots || block {
+                        return false;
+                    }
+                }
                 let conflicts: Vec<_> = self
                     .order_identity_conflicts
                     .iter()
@@ -375,8 +944,52 @@ impl GridTradingEngine {
                     return false;
                 }
                 for (key, mut expected) in conflicts {
+                    let timeline = match self
+                        .load_initial_order_response_timeline(
+                            account_key,
+                            &symbol,
+                            &expected.client_order_id,
+                        )
+                        .await
+                    {
+                        Some(responses) => responses,
+                        None => {
+                            self.report_reconciliation_state(true).await;
+                            return false;
+                        }
+                    };
+                    let mut prior_disagreement = false;
+                    for (index, (batch, earlier)) in timeline.iter().enumerate() {
+                        for (later_batch, later) in timeline.iter().skip(index + 1) {
+                            if batch != later_batch
+                                && !later_batch.starts_with("snapshot:")
+                                && terminal_responses_disagree(earlier, later)
+                            {
+                                self.record_terminal_disagreement(
+                                    account_key,
+                                    &symbol,
+                                    &expected.client_order_id,
+                                    earlier,
+                                    later,
+                                )
+                                .await;
+                                prior_disagreement = true;
+                            }
+                        }
+                    }
+                    if prior_disagreement {
+                        self.report_reconciliation_state(true).await;
+                        return false;
+                    }
+                    let initial_responses: Vec<_> =
+                        timeline.into_iter().map(|(_, response)| response).collect();
                     let mut corrected_expected: Option<BinanceOrderResponse> = None;
                     let mut ambiguous_candidate = false;
+                    let mut harmless_candidate: Option<BinanceOrderResponse> = None;
+                    let mut ambiguous_harmless = false;
+                    let mut harmless_identities = HashSet::new();
+                    let mut queried_orders: HashMap<(String, String, i64), BinanceOrderResponse> =
+                        HashMap::new();
                     let observations = self
                         .order_identity_observations
                         .get(&key)
@@ -389,6 +1002,75 @@ impl GridTradingEngine {
                             .await
                         {
                             Ok(found) => {
+                                if !self
+                                    .record_initial_order_response(
+                                        account_key,
+                                        &symbol,
+                                        &expected.client_order_id,
+                                        &found,
+                                    )
+                                    .await
+                                {
+                                    self.report_reconciliation_state(true).await;
+                                    return false;
+                                }
+                                let mut historical_disagreement = false;
+                                for initial in &initial_responses {
+                                    if terminal_responses_disagree(initial, &found) {
+                                        self.record_terminal_disagreement(
+                                            account_key,
+                                            &symbol,
+                                            &expected.client_order_id,
+                                            initial,
+                                            &found,
+                                        )
+                                        .await;
+                                        historical_disagreement = true;
+                                    }
+                                }
+                                if historical_disagreement {
+                                    self.report_reconciliation_state(true).await;
+                                    return false;
+                                }
+                                let query_key = (
+                                    found.client_order_id.clone(),
+                                    found.symbol.clone(),
+                                    found.order_id,
+                                );
+                                if let Some(previous) = queried_orders.get(&query_key) {
+                                    if previous.side != found.side {
+                                        self.track_identity_conflict(&expected, previous);
+                                        self.track_identity_conflict(&expected, &found);
+                                        self.persist_identity_observations(account_key, &symbol)
+                                            .await;
+                                        self.report_reconciliation_state(true).await;
+                                        return false;
+                                    }
+                                    if terminal_responses_disagree(previous, &found) {
+                                        self.record_terminal_disagreement(
+                                            account_key,
+                                            &symbol,
+                                            &expected.client_order_id,
+                                            previous,
+                                            &found,
+                                        )
+                                        .await;
+                                        self.report_reconciliation_state(true).await;
+                                        return false;
+                                    }
+                                    if previous.status != found.status
+                                        || previous.executed_qty != found.executed_qty
+                                        || previous.orig_qty != found.orig_qty
+                                        || previous.price != found.price
+                                        || previous.avg_price != found.avg_price
+                                        || previous.update_time != found.update_time
+                                    {
+                                        self.report_reconciliation_state(true).await;
+                                        return false;
+                                    }
+                                } else {
+                                    queried_orders.insert(query_key, found.clone());
+                                }
                                 let same_order = found.order_id == observed.order_id
                                     && found.symbol == observed.symbol
                                     && found.client_order_id == observed.client_order_id;
@@ -398,10 +1080,19 @@ impl GridTradingEngine {
                                         found.status.as_str(),
                                         "CANCELED" | "EXPIRED" | "EXPIRED_IN_MATCH" | "REJECTED"
                                     );
+                                if harmless_terminal {
+                                    harmless_identities.insert((
+                                        found.client_order_id.clone(),
+                                        found.symbol.clone(),
+                                        found.order_id,
+                                    ));
+                                }
                                 let corrected_to_expected = same_order
                                     && found.client_order_id == expected.client_order_id
                                     && found.symbol == expected.symbol
-                                    && found.side == expected.side.as_str()
+                                    && matches!(found.side.as_str(), "BUY" | "SELL")
+                                    && (expected.purpose == crate::types::OrderPurpose::Unverified
+                                        || found.side == expected.side.as_str())
                                     && expected.order_id.is_none_or(|id| id == found.order_id)
                                     && !unresolved_filled_quantity(&found)
                                     && matches!(
@@ -415,6 +1106,18 @@ impl GridTradingEngine {
                                             | "REJECTED"
                                     );
                                 if corrected_to_expected
+                                    && harmless_terminal
+                                    && expected.purpose == crate::types::OrderPurpose::Unverified
+                                {
+                                    if harmless_candidate
+                                        .as_ref()
+                                        .is_some_and(|old| old.order_id != found.order_id)
+                                    {
+                                        ambiguous_harmless = true;
+                                    } else {
+                                        harmless_candidate = Some(found.clone());
+                                    }
+                                } else if corrected_to_expected
                                     && (expected.order_id.is_some() || !harmless_terminal)
                                 {
                                     if corrected_expected
@@ -435,11 +1138,23 @@ impl GridTradingEngine {
                             return false;
                         }
                     }
+                    if corrected_expected.is_none()
+                        && expected.purpose == crate::types::OrderPurpose::Unverified
+                    {
+                        if ambiguous_harmless {
+                            self.report_reconciliation_state(true).await;
+                            return false;
+                        }
+                        corrected_expected = harmless_candidate;
+                    }
                     if ambiguous_candidate {
                         self.report_reconciliation_state(true).await;
                         return false;
                     }
-                    if expected.order_id.is_none() {
+                    if expected.order_id.is_none()
+                        || expected.purpose == crate::types::OrderPurpose::Unverified
+                        || corrected_expected.is_some()
+                    {
                         if let Some(candidate) = &corrected_expected {
                             let unique = self
                                 .client
@@ -448,12 +1163,35 @@ impl GridTradingEngine {
                                     &expected.client_order_id,
                                 )
                                 .await;
+                            if let Ok(Some(found)) = &unique {
+                                if !self
+                                    .record_initial_order_response(
+                                        account_key,
+                                        &symbol,
+                                        &expected.client_order_id,
+                                        found,
+                                    )
+                                    .await
+                                {
+                                    self.report_reconciliation_state(true).await;
+                                    return false;
+                                }
+                            }
                             let unique = match unique {
                                 Ok(Some(found))
                                     if found.client_order_id == expected.client_order_id
                                         && found.symbol == expected.symbol
-                                        && found.side == expected.side.as_str()
+                                        && found.side == candidate.side
+                                        && (expected.purpose
+                                            == crate::types::OrderPurpose::Unverified
+                                            || found.side == expected.side.as_str())
                                         && found.order_id == candidate.order_id
+                                        && found.status == candidate.status
+                                        && found.executed_qty == candidate.executed_qty
+                                        && found.orig_qty == candidate.orig_qty
+                                        && found.price == candidate.price
+                                        && found.avg_price == candidate.avg_price
+                                        && found.update_time == candidate.update_time
                                         && !unresolved_filled_quantity(&found)
                                         && matches!(
                                             found.status.as_str(),
@@ -469,6 +1207,16 @@ impl GridTradingEngine {
                                     found
                                 }
                                 Ok(Some(found)) => {
+                                    if terminal_responses_disagree(candidate, &found) {
+                                        self.record_terminal_disagreement(
+                                            account_key,
+                                            &symbol,
+                                            &expected.client_order_id,
+                                            candidate,
+                                            &found,
+                                        )
+                                        .await;
+                                    }
                                     self.track_identity_conflict(&expected, &found);
                                     self.persist_identity_observations(account_key, &symbol)
                                         .await;
@@ -493,6 +1241,16 @@ impl GridTradingEngine {
                                 self.report_reconciliation_state(true).await;
                                 return false;
                             }
+                            if expected.purpose == crate::types::OrderPurpose::Unverified {
+                                expected.side = if unique.side == "SELL" {
+                                    OrderSide::Sell
+                                } else {
+                                    OrderSide::Buy
+                                };
+                                expected.price = unique.price;
+                                expected.amount_usdc = expected.price * expected.quantity;
+                                expected.purpose = crate::types::OrderPurpose::Legacy;
+                            }
                             expected.order_id = Some(unique.order_id);
                             self.order_identity_conflicts
                                 .insert(key.clone(), expected.clone());
@@ -510,10 +1268,25 @@ impl GridTradingEngine {
                                 .get_mut(&expected.client_order_id)
                             {
                                 order.order_id = expected.order_id;
+                                order.side = expected.side;
+                                order.price = expected.price;
+                                order.amount_usdc = expected.amount_usdc;
+                                order.purpose = expected.purpose;
                             }
                             corrected_expected = Some(unique);
                         }
                     }
+                    if expected.purpose == crate::types::OrderPurpose::Unverified {
+                        self.report_reconciliation_state(true).await;
+                        return false;
+                    }
+                    live_orders.retain(|order| {
+                        !harmless_identities.contains(&(
+                            order.client_order_id.clone(),
+                            order.symbol.clone(),
+                            order.order_id,
+                        ))
+                    });
                     if let Some(corrected) = corrected_expected {
                         // A single-order query is authoritative for this same
                         // exchange ID even if the list still has the old side.
@@ -564,21 +1337,234 @@ impl GridTradingEngine {
                             }
                         };
                         match result {
-                            Ok(Some(found))
-                                if found.client_order_id == expected.client_order_id
+                            Ok(Some(found)) => {
+                                let unknown_id = expected.order_id.is_none();
+                                let identity_matches = found.client_order_id
+                                    == expected.client_order_id
                                     && found.symbol == expected.symbol
                                     && found.side == expected.side.as_str()
-                                    && expected.order_id.is_none_or(|id| found.order_id == id)
-                                    && !unresolved_filled_quantity(&found)
-                                    && matches!(
-                                        found.status.as_str(),
-                                        "FILLED"
-                                            | "CANCELED"
-                                            | "EXPIRED"
-                                            | "EXPIRED_IN_MATCH"
-                                            | "REJECTED"
-                                    ) =>
-                            {
+                                    && expected.order_id.is_none_or(|id| found.order_id == id);
+                                if unknown_id || !identity_matches {
+                                    self.track_identity_conflict(&expected, &found);
+                                    if !self
+                                        .persist_identity_observations(account_key, &symbol)
+                                        .await
+                                    {
+                                        return false;
+                                    }
+                                }
+                                {
+                                    if !self
+                                        .record_initial_order_response(
+                                            account_key,
+                                            &symbol,
+                                            &expected.client_order_id,
+                                            &found,
+                                        )
+                                        .await
+                                    {
+                                        self.report_reconciliation_state(true).await;
+                                        return false;
+                                    }
+                                    let mut historical_disagreement = false;
+                                    for initial in &initial_responses {
+                                        if terminal_responses_disagree(initial, &found) {
+                                            self.record_terminal_disagreement(
+                                                account_key,
+                                                &symbol,
+                                                &expected.client_order_id,
+                                                initial,
+                                                &found,
+                                            )
+                                            .await;
+                                            historical_disagreement = true;
+                                        }
+                                    }
+                                    if historical_disagreement {
+                                        self.report_reconciliation_state(true).await;
+                                        return false;
+                                    }
+                                }
+                                if !identity_matches
+                                    || unresolved_filled_quantity(&found)
+                                    || (!unknown_id
+                                        && !matches!(
+                                            found.status.as_str(),
+                                            "FILLED"
+                                                | "CANCELED"
+                                                | "EXPIRED"
+                                                | "EXPIRED_IN_MATCH"
+                                                | "REJECTED"
+                                        ))
+                                {
+                                    self.report_reconciliation_state(true).await;
+                                    return false;
+                                }
+                                let found = if unknown_id {
+                                    let verified = match self
+                                        .client
+                                        .get_order(&found.symbol, found.order_id)
+                                        .await
+                                    {
+                                        Ok(verified) => verified,
+                                        Err(_) => {
+                                            self.report_reconciliation_state(true).await;
+                                            return false;
+                                        }
+                                    };
+                                    if !self
+                                        .record_initial_order_response(
+                                            account_key,
+                                            &symbol,
+                                            &expected.client_order_id,
+                                            &verified,
+                                        )
+                                        .await
+                                    {
+                                        self.report_reconciliation_state(true).await;
+                                        return false;
+                                    }
+                                    if terminal_responses_disagree(&found, &verified) {
+                                        self.record_terminal_disagreement(
+                                            account_key,
+                                            &symbol,
+                                            &expected.client_order_id,
+                                            &found,
+                                            &verified,
+                                        )
+                                        .await;
+                                        self.report_reconciliation_state(true).await;
+                                        return false;
+                                    }
+                                    if verified.client_order_id != found.client_order_id
+                                        || verified.symbol != found.symbol
+                                        || verified.side != found.side
+                                        || verified.order_id != found.order_id
+                                        || verified.status != found.status
+                                        || verified.executed_qty != found.executed_qty
+                                        || verified.orig_qty != found.orig_qty
+                                        || verified.price != found.price
+                                        || verified.avg_price != found.avg_price
+                                        || verified.update_time != found.update_time
+                                        || unresolved_filled_quantity(&verified)
+                                        || !matches!(
+                                            verified.status.as_str(),
+                                            "FILLED"
+                                                | "CANCELED"
+                                                | "EXPIRED"
+                                                | "EXPIRED_IN_MATCH"
+                                                | "REJECTED"
+                                        )
+                                    {
+                                        self.track_identity_conflict(&expected, &verified);
+                                        self.persist_identity_observations(account_key, &symbol)
+                                            .await;
+                                        self.report_reconciliation_state(true).await;
+                                        return false;
+                                    }
+                                    let unique = match self
+                                        .client
+                                        .lookup_order_by_client_id(
+                                            &expected.symbol,
+                                            &expected.client_order_id,
+                                        )
+                                        .await
+                                    {
+                                        Ok(Some(unique)) => unique,
+                                        _ => {
+                                            self.report_reconciliation_state(true).await;
+                                            return false;
+                                        }
+                                    };
+                                    if !self
+                                        .record_initial_order_response(
+                                            account_key,
+                                            &symbol,
+                                            &expected.client_order_id,
+                                            &unique,
+                                        )
+                                        .await
+                                    {
+                                        self.report_reconciliation_state(true).await;
+                                        return false;
+                                    }
+                                    if terminal_responses_disagree(&verified, &unique) {
+                                        self.record_terminal_disagreement(
+                                            account_key,
+                                            &symbol,
+                                            &expected.client_order_id,
+                                            &verified,
+                                            &unique,
+                                        )
+                                        .await;
+                                        self.report_reconciliation_state(true).await;
+                                        return false;
+                                    }
+                                    if unique.client_order_id != verified.client_order_id
+                                        || unique.symbol != verified.symbol
+                                        || unique.side != verified.side
+                                        || unique.order_id != verified.order_id
+                                        || unresolved_filled_quantity(&unique)
+                                        || !matches!(
+                                            unique.status.as_str(),
+                                            "FILLED"
+                                                | "CANCELED"
+                                                | "EXPIRED"
+                                                | "EXPIRED_IN_MATCH"
+                                                | "REJECTED"
+                                        )
+                                        || unique.status != verified.status
+                                        || unique.executed_qty != verified.executed_qty
+                                        || unique.orig_qty != verified.orig_qty
+                                        || unique.price != verified.price
+                                        || unique.avg_price != verified.avg_price
+                                        || unique.update_time != verified.update_time
+                                    {
+                                        self.track_identity_conflict(&expected, &unique);
+                                        self.persist_identity_observations(account_key, &symbol)
+                                            .await;
+                                        self.report_reconciliation_state(true).await;
+                                        return false;
+                                    }
+                                    let compatible = self
+                                        .state
+                                        .active_orders
+                                        .read()
+                                        .await
+                                        .get(&expected.client_order_id)
+                                        .is_none_or(|order| {
+                                            order.symbol == expected.symbol
+                                                && order.side == expected.side
+                                                && order
+                                                    .order_id
+                                                    .is_none_or(|id| id == verified.order_id)
+                                        });
+                                    if !compatible {
+                                        self.report_reconciliation_state(true).await;
+                                        return false;
+                                    }
+                                    expected.order_id = Some(verified.order_id);
+                                    self.order_identity_conflicts
+                                        .insert(key.clone(), expected.clone());
+                                    if !self
+                                        .persist_identity_observations(account_key, &symbol)
+                                        .await
+                                    {
+                                        return false;
+                                    }
+                                    if let Some(order) = self
+                                        .state
+                                        .active_orders
+                                        .write()
+                                        .await
+                                        .get_mut(&expected.client_order_id)
+                                    {
+                                        order.order_id = expected.order_id;
+                                    }
+                                    verified
+                                } else {
+                                    found
+                                };
                                 corrected_terminal.insert(found.client_order_id.clone(), found);
                             }
                             _ => {
@@ -640,7 +1626,10 @@ impl GridTradingEngine {
                                     let observations =
                                         self.order_identity_observations.entry(key).or_default();
                                     if !observations.iter().any(|old| {
-                                        old.symbol == found.symbol && old.order_id == found.order_id
+                                        old.client_order_id == found.client_order_id
+                                            && old.symbol == found.symbol
+                                            && old.side == found.side
+                                            && old.order_id == found.order_id
                                     }) {
                                         observations.push(ObservedOrderIdentity {
                                             client_order_id: found.client_order_id.clone(),
@@ -672,7 +1661,10 @@ impl GridTradingEngine {
                                     let observations =
                                         self.order_identity_observations.entry(key).or_default();
                                     if !observations.iter().any(|old| {
-                                        old.symbol == found.symbol && old.order_id == found.order_id
+                                        old.client_order_id == found.client_order_id
+                                            && old.symbol == found.symbol
+                                            && old.side == found.side
+                                            && old.order_id == found.order_id
                                     }) {
                                         observations.push(ObservedOrderIdentity {
                                             client_order_id: found.client_order_id.clone(),
@@ -788,7 +1780,10 @@ impl GridTradingEngine {
                                     let items =
                                         self.order_identity_observations.entry(key).or_default();
                                     if !items.iter().any(|old| {
-                                        old.symbol == found.symbol && old.order_id == found.order_id
+                                        old.client_order_id == found.client_order_id
+                                            && old.symbol == found.symbol
+                                            && old.side == found.side
+                                            && old.order_id == found.order_id
                                     }) {
                                         items.push(ObservedOrderIdentity {
                                             client_order_id: found.client_order_id.clone(),
@@ -1024,29 +2019,41 @@ impl GridTradingEngine {
                         }
                     };
                     let mut conflicts = Vec::new();
+                    let mut invalid_live_identity = false;
+                    let state = self.state.clone();
+                    let active = state.active_orders.read().await;
                     for found in live_ids.values() {
-                        if let Some(durable) = managed
-                            .iter()
-                            .find(|order| order.client_order_id == found.client_order_id)
-                            .or_else(|| pair_intents.get(&found.client_order_id))
-                            .or_else(|| {
-                                remainder_plan.as_ref().and_then(|plan| {
-                                    plan.sources
-                                        .iter()
-                                        .chain(std::iter::once(&plan.target))
-                                        .find(|order| {
-                                            order.client_order_id == found.client_order_id
-                                        })
-                                })
-                            })
+                        if found.symbol != symbol || !matches!(found.side.as_str(), "BUY" | "SELL")
                         {
-                            if durable.symbol != found.symbol
-                                || durable.side.as_str() != found.side
-                                || durable.order_id.is_some_and(|id| id != found.order_id)
-                            {
-                                conflicts.push((durable.clone(), found.clone()));
-                            }
+                            invalid_live_identity = true;
+                            self.track_provisional_observation(found);
                         }
+                        let candidates = [
+                            managed
+                                .iter()
+                                .find(|order| order.client_order_id == found.client_order_id),
+                            active.get(&found.client_order_id),
+                            pair_intents.get(&found.client_order_id),
+                            remainder_plan.as_ref().and_then(|plan| {
+                                plan.sources
+                                    .iter()
+                                    .chain(std::iter::once(&plan.target))
+                                    .find(|order| order.client_order_id == found.client_order_id)
+                            }),
+                        ];
+                        if let Some(expected) = candidates.into_iter().flatten().find(|order| {
+                            order.client_order_id != found.client_order_id
+                                || order.symbol != found.symbol
+                                || order.side.as_str() != found.side
+                                || order.order_id.is_some_and(|id| id != found.order_id)
+                        }) {
+                            conflicts.push((expected.clone(), found.clone()));
+                        }
+                    }
+                    drop(active);
+                    if invalid_live_identity && conflicts.is_empty() {
+                        self.report_reconciliation_state(true).await;
+                        return false;
                     }
                     if !conflicts.is_empty() {
                         self.report_reconciliation_state(true).await;
@@ -1318,6 +2325,20 @@ impl GridTradingEngine {
                         }
                         Ok(None) => unresolved_orders = true,
                         Ok(Some(exchange_order)) => {
+                            if exchange_order.client_order_id != order.client_order_id
+                                || exchange_order.symbol != order.symbol
+                                || exchange_order.side != order.side.as_str()
+                                || order
+                                    .order_id
+                                    .is_some_and(|id| id != exchange_order.order_id)
+                            {
+                                self.track_identity_conflict(&order, &exchange_order);
+                                self.report_reconciliation_state(true).await;
+                                self.persist_identity_observations(account_key, &symbol)
+                                    .await;
+                                unresolved_orders = true;
+                                continue;
+                            }
                             // A query may confirm acceptance before the open-
                             // orders snapshot catches up. Persist it before a
                             // later lookup or restart can lose that distinction.
@@ -1426,34 +2447,14 @@ impl GridTradingEngine {
                 if persistence_ok && self.state.pause_epoch() == pause_epoch {
                     let client_ids: Vec<_> = resolved_conflict_keys
                         .iter()
-                        .filter(|key| self.order_identity_observations.contains_key(*key))
                         .map(|key| key.1.clone())
                         .collect();
-                    let cleared = if client_ids.is_empty() {
-                        Ok(())
-                    } else {
-                        let scope = symbol.clone();
-                        self.state
-                            .db
-                            .run_blocking(move |db| {
-                                db.delete_identity_observation_groups(
-                                    account_key,
-                                    &scope,
-                                    &client_ids,
-                                )
-                            })
-                            .await
-                    };
-                    if let Err(error) = cleared {
-                        error!("Could not clear resolved identity observations: {}", error);
+                    if !self
+                        .clear_order_evidence_groups(account_key, &symbol, &client_ids)
+                        .await
+                    {
                         self.last_orders_sync = None;
                         persistence_ok = false;
-                    } else {
-                        for key in resolved_conflict_keys {
-                            self.order_identity_observations.remove(&key);
-                            self.order_identity_conflicts.remove(&key);
-                            self.provisional_order_ids.remove(&key);
-                        }
                     }
                 }
                 self.report_reconciliation_state(!persistence_ok).await;
