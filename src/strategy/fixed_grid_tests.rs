@@ -1414,14 +1414,26 @@ async fn migration_and_window_pruning_require_terminal_cancellation_and_recover_
             "price": price.to_string(), "avgPrice": price.to_string(), "origQty": "1.68", "executedQty": "0.46",
             "side": "BUY", "type": "LIMIT", "timeInForce": "GTX"
         });
-        let app = Router::new().route(
-            "/fapi/v1/order",
-            get(move || {
-                let response = response.clone();
-                async move { Json(response) }
-            })
-            .delete(|| async { Json(serde_json::json!({})) }),
-        );
+        let app = Router::new()
+            .route(
+                "/fapi/v1/order",
+                get(move || {
+                    let response = response.clone();
+                    async move { Json(response) }
+                })
+                .delete(|| async { Json(serde_json::json!({})) }),
+            )
+            .route("/fapi/v2/positionRisk", get(|| async {
+                Json(serde_json::json!([{"symbol":"SOLUSDC", "positionSide":"BOTH",
+                    "positionAmt":"0.46", "entryPrice":"118.81", "markPrice":"118.84",
+                    "unRealizedProfit":"0", "liquidationPrice":"0", "leverage":"20"}]))
+            }))
+            .route("/fapi/v2/account", get(|| async {
+                Json(serde_json::json!({"totalWalletBalance":"10000", "totalMarginBalance":"10000",
+                    "totalUnrealizedProfit":"0", "availableBalance":"10000", "assets":[
+                        {"asset":"USDC", "walletBalance":"10000", "marginBalance":"10000",
+                         "availableBalance":"10000", "unrealizedProfit":"0"}]}))
+            }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -1701,14 +1713,26 @@ async fn stale_orders_require_confirmed_cancel_and_record_racing_fills() {
                 "price": price.to_string(), "avgPrice": price.to_string(), "origQty": "1.66", "executedQty": "0.46",
                 "side": side.as_str(), "type": "LIMIT", "timeInForce": "GTX"
             });
-            let app = Router::new().route(
-                "/fapi/v1/order",
-                get(move || {
-                    let response = response.clone();
-                    async move { Json(response) }
-                })
-                .delete(|| async { Json(serde_json::json!({})) }),
-            );
+            let app = Router::new()
+                .route(
+                    "/fapi/v1/order",
+                    get(move || {
+                        let response = response.clone();
+                        async move { Json(response) }
+                    })
+                    .delete(|| async { Json(serde_json::json!({})) }),
+                )
+                .route("/fapi/v2/positionRisk", get(|| async {
+                    Json(serde_json::json!([{"symbol":"SOLUSDC", "positionSide":"BOTH",
+                        "positionAmt":"100", "entryPrice":"118.81", "markPrice":"118.84",
+                        "unRealizedProfit":"0", "liquidationPrice":"0", "leverage":"20"}]))
+                }))
+                .route("/fapi/v2/account", get(|| async {
+                    Json(serde_json::json!({"totalWalletBalance":"10000", "totalMarginBalance":"10000",
+                        "totalUnrealizedProfit":"0", "availableBalance":"10000", "assets":[
+                            {"asset":"USDC", "walletBalance":"10000", "marginBalance":"10000",
+                             "availableBalance":"10000", "unrealizedProfit":"0"}]}))
+                }));
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
             let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });

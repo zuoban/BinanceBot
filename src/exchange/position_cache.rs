@@ -18,7 +18,25 @@ pub(crate) struct PositionCache {
 
 impl PositionCache {
     pub async fn invalidate(&self, client: &BinanceFuturesClient) {
-        self.entries.invalidate(client.account_cache_key()).await;
+        self.entries.retire(client.account_cache_key()).await;
+    }
+
+    pub async fn refresh_critical(
+        &self,
+        client: &BinanceFuturesClient,
+        symbol: &str,
+    ) -> Result<(Option<BinancePositionRisk>, Instant)> {
+        let key = client.account_cache_key();
+        loop {
+            let epoch = self.entries.detach(key).await;
+            let position = client.get_position(symbol).await;
+            let received_at = Instant::now();
+            let current = self.entries.detach_if_current(key, epoch).await;
+            let position = position?;
+            if current {
+                return Ok((position, received_at));
+            }
+        }
     }
 
     pub async fn get(
@@ -26,31 +44,48 @@ impl PositionCache {
         client: &BinanceFuturesClient,
         symbol: &str,
     ) -> Result<(Option<BinancePositionRisk>, Instant)> {
-        let entry = self.entries.entry(client.account_cache_key()).await;
-        let mut cached = entry.lock().await;
-        if cached
-            .as_ref()
-            .is_none_or(|snapshot| snapshot.received_instant.elapsed() >= MAX_AGE)
-        {
-            *cached = None;
-            let positions = client.get_all_positions().await?;
-            *cached = Some(PositionSnapshot {
-                positions,
-                received_instant: Instant::now(),
-            });
-        }
-        let snapshot = cached.as_ref().expect("position snapshot just loaded");
-        let position = one_way_position_ref(&snapshot.positions, symbol)?.cloned();
-        let received_instant = snapshot.received_instant;
-        drop(cached);
-        if position.is_some() {
-            return Ok((position, received_instant));
-        }
+        let key = client.account_cache_key();
+        loop {
+            let (epoch, entry) = self.entries.entry(key).await;
+            let mut cached = entry.lock().await;
+            if !self.entries.is_current(key, epoch, &entry).await {
+                continue;
+            }
+            if cached
+                .as_ref()
+                .is_none_or(|snapshot| snapshot.received_instant.elapsed() >= MAX_AGE)
+            {
+                *cached = None;
+                let positions = client.get_all_positions().await;
+                if !self.entries.is_current(key, epoch, &entry).await {
+                    continue;
+                }
+                *cached = Some(PositionSnapshot {
+                    positions: positions?,
+                    received_instant: Instant::now(),
+                });
+            }
+            let snapshot = cached.as_ref().expect("position snapshot just loaded");
+            let position =
+                one_way_position_ref(&snapshot.positions, symbol).map(|position| position.cloned());
+            let received_instant = snapshot.received_instant;
+            drop(cached);
+            if !self.entries.is_current(key, epoch, &entry).await {
+                continue;
+            }
+            let position = position?;
+            if position.is_some() {
+                return Ok((position, received_instant));
+            }
 
-        // A missing symbol is unknown, not a flat position. Retry the original
-        // symbol-specific endpoint before allowing reconciliation to succeed.
-        let position = client.get_position(symbol).await?;
-        Ok((position, Instant::now()))
+            // A missing symbol is unknown, not a flat position. Retry the original
+            // symbol-specific endpoint before allowing reconciliation to succeed.
+            let position = client.get_position(symbol).await;
+            let received_instant = Instant::now();
+            if self.entries.is_current(key, epoch, &entry).await {
+                return Ok((position?, received_instant));
+            }
+        }
     }
 }
 
@@ -165,7 +200,7 @@ mod tests {
         let client = BinanceFuturesClient::with_base_url(&AppConfig::default().exchange, url);
         let cache = PositionCache::default();
         cache.get(&client, "SOLUSDC").await.unwrap();
-        let entry = cache.entries.entry(client.account_cache_key()).await;
+        let (_epoch, entry) = cache.entries.entry(client.account_cache_key()).await;
         entry.lock().await.as_mut().unwrap().received_instant = Instant::now() - MAX_AGE;
         mode.store(1, Ordering::SeqCst);
         assert!(cache.get(&client, "SOLUSDC").await.is_err());
@@ -173,6 +208,192 @@ mod tests {
         mode.store(0, Ordering::SeqCst);
         assert!(cache.get(&client, "SOLUSDC").await.unwrap().0.is_some());
         assert_eq!(calls.load(Ordering::SeqCst), 3);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn invalidation_does_not_wait_for_or_reuse_inflight_snapshot() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let app = Router::new().route(
+            "/fapi/v2/positionRisk",
+            get({
+                let calls = calls.clone();
+                let started = started.clone();
+                let release = release.clone();
+                move || {
+                    let calls = calls.clone();
+                    let started = started.clone();
+                    let release = release.clone();
+                    async move {
+                        let old = calls.fetch_add(1, Ordering::SeqCst) == 0;
+                        if old {
+                            started.notify_one();
+                            release.notified().await;
+                        }
+                        Json(json!([{
+                            "symbol": "SOLUSDC", "positionSide": "BOTH",
+                            "positionAmt": if old { "0" } else { "1" },
+                            "entryPrice": "100", "markPrice": "100", "unRealizedProfit": "0",
+                            "liquidationPrice": "0", "leverage": "20"
+                        }]))
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = Arc::new(BinanceFuturesClient::with_base_url(
+            &AppConfig::default().exchange,
+            url,
+        ));
+        let cache = Arc::new(PositionCache::default());
+        let old_load = tokio::spawn({
+            let client = client.clone();
+            let cache = cache.clone();
+            async move {
+                cache
+                    .get(&client, "SOLUSDC")
+                    .await
+                    .unwrap()
+                    .0
+                    .unwrap()
+                    .position_amt
+            }
+        });
+        started.notified().await;
+        tokio::time::timeout(Duration::from_secs(1), cache.invalidate(&client))
+            .await
+            .unwrap();
+        let fresh = tokio::time::timeout(Duration::from_secs(1), cache.get(&client, "SOLUSDC"))
+            .await
+            .unwrap()
+            .unwrap()
+            .0
+            .unwrap();
+        assert_eq!(fresh.position_amt, rust_decimal::Decimal::ONE);
+        release.notify_one();
+        assert_eq!(old_load.await.unwrap(), rust_decimal::Decimal::ONE);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            cache
+                .get(&client, "SOLUSDC")
+                .await
+                .unwrap()
+                .0
+                .unwrap()
+                .position_amt,
+            rust_decimal::Decimal::ONE
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn critical_position_retries_when_another_pair_invalidates_in_flight() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let app = Router::new().route(
+            "/fapi/v2/positionRisk",
+            get({
+                let calls = calls.clone();
+                let started = started.clone();
+                let release = release.clone();
+                move || {
+                    let calls = calls.clone();
+                    let started = started.clone();
+                    let release = release.clone();
+                    async move {
+                        let old = calls.fetch_add(1, Ordering::SeqCst) == 0;
+                        if old {
+                            started.notify_one();
+                            release.notified().await;
+                        }
+                        Json(json!([{"symbol":"SOLUSDC", "positionSide":"BOTH",
+                        "positionAmt":if old { "0" } else { "1" }, "entryPrice":"100",
+                        "markPrice":"100", "unRealizedProfit":"0", "liquidationPrice":"0",
+                        "leverage":"20"}]))
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = Arc::new(BinanceFuturesClient::with_base_url(
+            &AppConfig::default().exchange,
+            url,
+        ));
+        let cache = Arc::new(PositionCache::default());
+        let critical = tokio::spawn({
+            let client = client.clone();
+            let cache = cache.clone();
+            async move { cache.refresh_critical(&client, "SOLUSDC").await.unwrap() }
+        });
+        started.notified().await;
+        cache.invalidate(&client).await;
+        release.notify_one();
+        assert_eq!(
+            critical.await.unwrap().0.unwrap().position_amt,
+            rust_decimal::Decimal::ONE
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn concurrent_critical_position_refreshes_do_not_invalidate_each_other() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let app = Router::new().route(
+            "/fapi/v2/positionRisk",
+            get({
+                let calls = calls.clone();
+                let barrier = barrier.clone();
+                move || {
+                    let calls = calls.clone();
+                    let barrier = barrier.clone();
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        barrier.wait().await;
+                        Json(
+                            json!([{"symbol":"SOLUSDC", "positionSide":"BOTH", "positionAmt":"1",
+                        "entryPrice":"100", "markPrice":"100", "unRealizedProfit":"0",
+                        "liquidationPrice":"0", "leverage":"20"}]),
+                        )
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = Arc::new(BinanceFuturesClient::with_base_url(
+            &AppConfig::default().exchange,
+            url,
+        ));
+        let cache = Arc::new(PositionCache::default());
+        let task = tokio::spawn({
+            let client = client.clone();
+            let cache = cache.clone();
+            async move {
+                tokio::join!(
+                    cache.refresh_critical(&client, "SOLUSDC"),
+                    cache.refresh_critical(&client, "SOLUSDC")
+                )
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), barrier.wait())
+            .await
+            .unwrap();
+        let (first, second) = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(first.is_ok() && second.is_ok());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
         server.abort();
     }
 }

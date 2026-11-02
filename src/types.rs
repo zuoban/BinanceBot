@@ -110,6 +110,14 @@ pub enum OrderStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ObservedOrderIdentity {
+    pub client_order_id: String,
+    pub symbol: String,
+    pub side: String,
+    pub order_id: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GridOrder {
     pub client_order_id: String,
     pub order_id: Option<i64>,

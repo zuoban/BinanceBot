@@ -84,10 +84,14 @@ export function usePairSnapshot(pair: Pair | undefined) {
   return { ...query, live: socket.connected && now - socket.lastReceived < SOCKET_LIVE_MS, stale: now - query.dataUpdatedAt > SNAPSHOT_STALE_MS };
 }
 
-export function useLiveAccounts(overview: Overview | undefined) {
+export function useLiveAccounts(overview: Overview | undefined, overviewUpdatedAt: number) {
   const [frame, setFrame] = useState<AccountFrame>();
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(timer); }, []);
   const stream = useSocket('/api/accounts/ws', 'accounts', setFrame);
-  if (Date.now() - stream.lastReceived > SOCKET_LIVE_MS) return overview?.pairs ?? [];
+  const httpStale = now - overviewUpdatedAt > SNAPSHOT_STALE_MS;
+  const fallback = (overview?.pairs ?? []).map(entry => ({ ...entry, account_observation_stale: httpStale }));
+  if (now - stream.lastReceived >= SOCKET_LIVE_MS) return fallback;
   const accounts = new Map<AccountFrame['pairs'][number]['mode'], Map<string, AccountFrame['pairs'][number]>>();
   for (const account of frame?.pairs ?? []) {
     let symbols = accounts.get(account.mode);
@@ -97,9 +101,9 @@ export function useLiveAccounts(overview: Overview | undefined) {
     }
     if (!symbols.has(account.snapshot.symbol)) symbols.set(account.snapshot.symbol, account);
   }
-  return overview?.pairs.map(entry => {
+  return fallback.map(entry => {
     const account = accounts.get(entry.mode)?.get(entry.snapshot.symbol);
     if (!account) return entry;
-    return { ...entry, snapshot: { ...entry.snapshot, account: account.snapshot.account, position: { ...entry.snapshot.position, ...account.snapshot.position } } };
-  }) ?? [];
+    return { ...entry, account_observation_stale: false, snapshot: { ...entry.snapshot, account: account.snapshot.account, position: { ...entry.snapshot.position, ...account.snapshot.position }, ticker: { ...entry.snapshot.ticker, ...account.snapshot.ticker } } };
+  });
 }

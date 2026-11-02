@@ -30,8 +30,25 @@ impl AccountCache {
         self.get_inner(client, true).await
     }
 
+    pub async fn refresh_critical(&self, client: &BinanceFuturesClient) -> Result<AccountSnapshot> {
+        let key = client.account_cache_key();
+        loop {
+            let epoch = self.entries.detach(key).await;
+            let account = client.get_account_critical().await;
+            let current = self.entries.detach_if_current(key, epoch).await;
+            let account = account?;
+            if current {
+                return Ok(AccountSnapshot {
+                    account: Arc::new(account),
+                    received_at: Utc::now(),
+                    received_instant: Instant::now(),
+                });
+            }
+        }
+    }
+
     pub async fn invalidate(&self, client: &BinanceFuturesClient) {
-        self.entries.invalidate(client.account_cache_key()).await;
+        self.entries.retire(client.account_cache_key()).await;
     }
 
     async fn get_inner(
@@ -39,23 +56,32 @@ impl AccountCache {
         client: &BinanceFuturesClient,
         force: bool,
     ) -> Result<AccountSnapshot> {
-        let entry = self.entries.entry(client.account_cache_key()).await;
-        let mut cached = entry.lock().await;
-        if let Some(snapshot) = cached.as_ref().filter(|_| !force) {
-            if snapshot.received_instant.elapsed() < MAX_AGE {
-                return Ok(snapshot.clone());
+        let key = client.account_cache_key();
+        loop {
+            let (epoch, entry) = self.entries.entry(key).await;
+            let mut cached = entry.lock().await;
+            if !self.entries.is_current(key, epoch, &entry).await {
+                continue;
             }
+            if let Some(snapshot) = cached.as_ref().filter(|_| !force) {
+                if snapshot.received_instant.elapsed() < MAX_AGE {
+                    return Ok(snapshot.clone());
+                }
+            }
+            // Do not serve an expired or invalidated snapshot after a failure.
+            *cached = None;
+            let account = client.get_account().await;
+            if !self.entries.is_current(key, epoch, &entry).await {
+                continue;
+            }
+            let snapshot = AccountSnapshot {
+                account: Arc::new(account?),
+                received_at: Utc::now(),
+                received_instant: Instant::now(),
+            };
+            *cached = Some(snapshot.clone());
+            return Ok(snapshot);
         }
-        // Do not serve an expired snapshot if the exchange request fails.
-        *cached = None;
-        let account = client.get_account().await?;
-        let snapshot = AccountSnapshot {
-            account: Arc::new(account),
-            received_at: Utc::now(),
-            received_instant: Instant::now(),
-        };
-        *cached = Some(snapshot.clone());
-        Ok(snapshot)
     }
 }
 
@@ -224,7 +250,7 @@ mod tests {
         let client = BinanceFuturesClient::with_base_url(&AppConfig::default().exchange, url);
         let cache = AccountCache::default();
         cache.get(&client).await.unwrap();
-        let entry = cache.entries.entry(client.account_cache_key()).await;
+        let (_epoch, entry) = cache.entries.entry(client.account_cache_key()).await;
         entry.lock().await.as_mut().unwrap().received_instant = Instant::now() - MAX_AGE;
         fail.store(true, Ordering::SeqCst);
         assert!(cache.get(&client).await.is_err());
@@ -232,6 +258,174 @@ mod tests {
         fail.store(false, Ordering::SeqCst);
         cache.get(&client).await.unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 3);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn invalidation_does_not_wait_for_inflight_account_request() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let app = Router::new().route("/fapi/v2/account", get({
+            let calls = calls.clone();
+            let started = started.clone();
+            let release = release.clone();
+            move || {
+                let calls = calls.clone();
+                let started = started.clone();
+                let release = release.clone();
+                async move {
+                    let old = calls.fetch_add(1, Ordering::SeqCst) == 0;
+                    if old {
+                        started.notify_one();
+                        release.notified().await;
+                    }
+                    let balance = if old { "1" } else { "2" };
+                    Json(json!({"totalWalletBalance": balance, "totalMarginBalance": balance,
+                        "totalUnrealizedProfit": "0", "availableBalance": balance,
+                        "assets": [{"asset": "USDC", "walletBalance": balance,
+                            "unrealizedProfit": "0", "marginBalance": balance, "availableBalance": balance}]}))
+                }
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = Arc::new(BinanceFuturesClient::with_base_url(
+            &AppConfig::default().exchange,
+            url,
+        ));
+        let cache = Arc::new(AccountCache::default());
+        let old_load = tokio::spawn({
+            let client = client.clone();
+            let cache = cache.clone();
+            async move { cache.get(&client).await.unwrap() }
+        });
+        started.notified().await;
+        tokio::time::timeout(Duration::from_secs(1), cache.invalidate(&client))
+            .await
+            .unwrap();
+        let fresh = tokio::time::timeout(Duration::from_secs(1), cache.get(&client))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            fresh.account.available_balance,
+            rust_decimal::Decimal::from(2)
+        );
+        release.notify_one();
+        let old_result = old_load.await.unwrap();
+        assert_eq!(
+            old_result.account.available_balance,
+            rust_decimal::Decimal::from(2)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn concurrent_invalidation_forces_critical_refresh_to_retry_and_yield_fresh_balance() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let app = Router::new().route("/fapi/v2/account", get({
+            let calls = calls.clone();
+            let started = started.clone();
+            let release = release.clone();
+            move || {
+                let calls = calls.clone();
+                let started = started.clone();
+                let release = release.clone();
+                async move {
+                    let call = calls.fetch_add(1, Ordering::SeqCst);
+                    if call == 0 {
+                        started.notify_one();
+                        release.notified().await;
+                    }
+                    let balance = if call == 0 { "10" } else { "2" };
+                    Json(json!({"totalWalletBalance": balance, "totalMarginBalance": balance,
+                        "totalUnrealizedProfit": "0", "availableBalance": balance,
+                        "assets": [{"asset": "USDC", "walletBalance": balance,
+                            "unrealizedProfit": "0", "marginBalance": balance, "availableBalance": balance}]}))
+                }
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = Arc::new(BinanceFuturesClient::with_base_url(
+            &AppConfig::default().exchange,
+            url,
+        ));
+        let cache = Arc::new(AccountCache::default());
+        let critical_task = tokio::spawn({
+            let client = client.clone();
+            let cache = cache.clone();
+            async move { cache.refresh_critical(&client).await.unwrap() }
+        });
+        started.notified().await;
+        // Sibling pair fills an order while the first pair's request is in flight.
+        cache.invalidate(&client).await;
+        release.notify_one();
+        let snapshot = critical_task.await.unwrap();
+        assert_eq!(
+            snapshot.account.available_balance,
+            rust_decimal::Decimal::from(2)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn concurrent_critical_account_refreshes_do_not_invalidate_each_other() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let app = Router::new().route(
+            "/fapi/v2/account",
+            get({
+                let calls = calls.clone();
+                let barrier = barrier.clone();
+                move || {
+                    let calls = calls.clone();
+                    let barrier = barrier.clone();
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        barrier.wait().await;
+                        Json(json!({"totalWalletBalance":"2", "totalMarginBalance":"2",
+                        "totalUnrealizedProfit":"0", "availableBalance":"2", "assets":[
+                            {"asset":"USDC", "walletBalance":"2", "marginBalance":"2",
+                             "availableBalance":"2", "unrealizedProfit":"0"}]}))
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = Arc::new(BinanceFuturesClient::with_base_url(
+            &AppConfig::default().exchange,
+            url,
+        ));
+        let cache = Arc::new(AccountCache::default());
+        let task = tokio::spawn({
+            let client = client.clone();
+            let cache = cache.clone();
+            async move {
+                tokio::join!(
+                    cache.refresh_critical(&client),
+                    cache.refresh_critical(&client)
+                )
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), barrier.wait())
+            .await
+            .unwrap();
+        let (first, second) = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(first.is_ok() && second.is_ok());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
         server.abort();
     }
 }

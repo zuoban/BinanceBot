@@ -54,7 +54,8 @@ export interface AccountSnapshot {
   mode: Mode;
   snapshot: Pick<Snapshot, 'symbol' | 'dry_run' | 'account'> & {
     grid_config: Pick<GridConfig, 'is_testnet'>;
-    position: Pick<Snapshot['position'], 'unrealized_pnl'>;
+    position: Pick<Snapshot['position'], 'size' | 'unrealized_pnl'>;
+    ticker: Pick<Snapshot['ticker'], 'mark_price' | 'mark_update_time'>;
   };
 }
 export interface AccountFrame { pairs: AccountSnapshot[] }
@@ -62,7 +63,7 @@ export type SocketMessage =
   | { type: 'snapshot'; data: Snapshot }
   | { type: 'accounts'; data: AccountFrame };
 export interface TodayPnl { window_start: string; window_end: string; groups: { symbol: string; mode: Mode; realized_pnl: Decimal; pending_pnl_count: number }[] }
-export interface Overview { generated_at: string; pairs: { scoped: boolean; mode: Mode; snapshot: Snapshot }[]; today_pnl?: TodayPnl | null }
+export interface Overview { generated_at: string; pairs: { scoped: boolean; mode: Mode; snapshot: Snapshot; account_observation_stale?: boolean }[]; today_pnl?: TodayPnl | null }
 export interface HourlySnapshot {
   hour: number;
   groups: { mode: Mode; asset: string; equity: Decimal | null; long: Decimal | null; short: Decimal | null }[];

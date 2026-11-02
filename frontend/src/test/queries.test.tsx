@@ -1,7 +1,7 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterEach, expect, it, vi } from 'vitest';
-import { usePairSnapshot, useSocket } from '../lib/queries';
+import { useLiveAccounts, usePairSnapshot, useSocket } from '../lib/queries';
 import { tokenStore } from '../lib/api';
 import { pair, snapshot } from './fixtures';
 
@@ -30,6 +30,33 @@ it('only delivers the message type expected by a socket', () => {
   act(() => FakeSocket.instances[0].onmessage?.({ data: JSON.stringify({ type: 'accounts', data }) }));
   expect(onAccounts).toHaveBeenCalledWith(data);
   expect(result.current.connected).toBe(true);
+});
+
+it('expires silent account frames, falls back to HTTP and marks an old HTTP observation stale', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2025-01-01T00:00:00Z'));
+  tokenStore.set('test-token');
+  vi.stubGlobal('WebSocket', FakeSocket);
+  const http = snapshot();
+  const overview = { generated_at: '', pairs: [{ snapshot: http, mode: 'PAPER' as const, scoped: true }] };
+  const updatedAt = Date.now();
+  const { result, unmount } = renderHook(() => useLiveAccounts(overview, updatedAt));
+  try {
+    const streamed = snapshot();
+    streamed.position.size = '2';
+    streamed.ticker.mark_price = '123';
+    act(() => FakeSocket.instances[0].onmessage?.({ data: JSON.stringify({ type: 'accounts', data: { pairs: [{ mode: 'PAPER', snapshot: streamed }] } }) }));
+    expect(result.current[0].snapshot.position.size).toBe('2');
+    expect(result.current[0].snapshot.ticker.mark_price).toBe('123');
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(result.current[0].snapshot.position.size).toBe('0');
+    expect(result.current[0].account_observation_stale).toBe(false);
+    await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
+    expect(result.current[0].account_observation_stale).toBe(true);
+  } finally {
+    unmount();
+    vi.useRealTimers();
+  }
 });
 
 it('ignores late frames after switching pairs and retains the new pair snapshot', async () => {

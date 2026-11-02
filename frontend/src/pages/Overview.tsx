@@ -144,7 +144,7 @@ export default function OverviewPage() {
           <span className="account-cny muted">{group.cny !== null ? `≈ ¥${number(group.cny)}` : '人民币估值待更新'}</span></div>
         <div className="account-availability">
           <div><span>可用余额</span><strong>{number(group.available)} <small>{group.asset}</small></strong></div>
-          <div><span>可用比例</span><strong>{group.ratio !== null ? `${number(group.ratio)}%` : '--'}</strong></div>
+          <div><span>可用比例（按钱包余额）</span><strong>{group.ratio !== null ? `${number(group.ratio)}%` : '--'}</strong></div>
         </div>
         <div className="account-assets" aria-label={`${group.asset}账户资产`}>
           <div><span>钱包余额</span><strong>{number(group.wallet)}</strong></div>
@@ -207,7 +207,7 @@ export default function OverviewPage() {
                 <div><dt>最低价格</dt><dd>{s.grid_config.min_price == null ? '未设置' : trimFractionZeros(s.grid_config.min_price)}</dd></div>
                 <div><dt>最高价格</dt><dd>{s.grid_config.max_price == null ? '未设置' : trimFractionZeros(s.grid_config.max_price)}</dd></div>
                 <div><dt>最大持仓名义价值</dt><dd>{s.grid_config.max_position_usdc == null ? '未设置' : `${trimFractionZeros(s.grid_config.max_position_usdc)} ${quote}`}</dd></div>
-                <div><dt>达到持仓上限时</dt><dd>{s.grid_config.pause_on_max_position ? '暂停策略' : '限制开仓'}</dd></div>
+                <div><dt>持仓上限处理方式</dt><dd>{s.grid_config.pause_on_max_position ? '暂停策略' : '限制开仓'}</dd></div>
                 <div><dt>仅挂单</dt><dd>{s.grid_config.post_only ? '开启' : '关闭'}</dd></div>
               </dl>
               <Link to={`/pairs/${s.symbol}/config`}>查看完整配置 <ArrowRightOutlined /></Link>

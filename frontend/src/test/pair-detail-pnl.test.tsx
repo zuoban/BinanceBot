@@ -53,3 +53,14 @@ it('shows zero when the inputs are explicitly zero', () => {
   render(view());
   expect(screen.getByText('扣费后 0.00')).toBeInTheDocument();
 });
+
+it('uses wallet balance for the available ratio when equity includes unrealized profit', () => {
+  render(view());
+  expect(screen.getByText('可用比例（按钱包余额）').parentElement).toHaveTextContent('80.00%');
+});
+
+it('does not show an available ratio when wallet balance is zero', () => {
+  state.data!.account.total_wallet_balance = '0';
+  render(view());
+  expect(screen.getByText('可用比例（按钱包余额）').parentElement).toHaveTextContent('--');
+});

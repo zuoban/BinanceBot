@@ -44,6 +44,41 @@ describe('account and trade summaries', () => {
     expect(accountGroups([{ snapshot: s, mode: 'LIVE', scoped: true }])[0]).toMatchObject({ equity: null, wallet: null, unrealized: null });
     expect(todayCount(s)).toBeNull();
   });
+  it('uses the newest valid observation of a shared live account', () => {
+    const now = Date.now(), old = snapshot('SOLUSDC', 'LIVE'), current = snapshot('BTCUSDC', 'LIVE');
+    old.account.update_time = new Date(now + 1000).toISOString();
+    old.account.margin_balance = '999';
+    current.account.update_time = new Date(now - 1000).toISOString();
+    current.account.margin_balance = '200';
+    const entries = [
+      { snapshot: old, mode: 'LIVE' as const, scoped: true, account_observation_stale: true },
+      { snapshot: current, mode: 'LIVE' as const, scoped: true, account_observation_stale: false },
+    ];
+    expect(accountGroups(entries, now)[0].equity).toBe(200);
+    current.account.update_time = new Date(now - 31_000).toISOString();
+    expect(accountGroups(entries, now)[0].equity).toBeNull();
+  });
+  it('keeps a flat paper ledger but rejects stale open-position valuations', () => {
+    const now = Date.now(), s = snapshot('SOLUSDC');
+    const entries = [{ snapshot: s, mode: 'PAPER' as const, scoped: true }];
+    s.account.update_time = new Date(now - 60_000).toISOString();
+    s.ticker.mark_update_time = new Date(now - 60_000).toISOString();
+    expect(accountGroups(entries, now)[0]).toMatchObject({ equity: 105, available: 80, wallet: 100 });
+    expect(accountGroups([{ ...entries[0], account_observation_stale: true }], now)[0]).toMatchObject({ equity: null, available: null, wallet: null });
+    s.position.size = '1';
+    expect(accountGroups(entries, now)[0]).toMatchObject({ equity: null, available: null, unrealized: null, wallet: 100 });
+    s.account.update_time = new Date(now).toISOString();
+    expect(accountGroups(entries, now)[0].equity).toBeNull();
+    s.ticker.mark_update_time = new Date(now).toISOString();
+    expect(accountGroups(entries, now)[0].equity).toBe(105);
+    s.account.update_time = new Date(now - 30_000).toISOString();
+    expect(accountGroups(entries, now)[0].equity).toBeNull();
+    s.account.update_time = new Date(now + 3_000).toISOString();
+    s.ticker.mark_update_time = new Date(now + 3_000).toISOString();
+    expect(accountGroups(entries, now)[0].equity).toBe(105);
+    s.ticker.mark_update_time = new Date(now + 5_001).toISOString();
+    expect(accountGroups(entries, now)[0].equity).toBeNull();
+  });
 });
 
 describe('today realized pnl', () => {

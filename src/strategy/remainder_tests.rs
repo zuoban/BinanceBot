@@ -272,6 +272,10 @@ struct Exchange {
     reject_post: Arc<AtomicUsize>,
     hide_open: Arc<AtomicUsize>,
     cancel_fill: Arc<Mutex<Decimal>>,
+    fail_position: Arc<AtomicUsize>,
+    fail_cancel: Arc<AtomicUsize>,
+    lookup_calls: Arc<AtomicUsize>,
+    filled_zero_after: Arc<AtomicUsize>,
 }
 
 fn consume(counter: &AtomicUsize) -> bool {
@@ -323,11 +327,17 @@ async fn exchange_server(fake: Exchange) -> (String, tokio::task::JoinHandle<()>
         }))
         .route("/fapi/v1/order", get(|State(fake): State<Exchange>, Query(query): Query<HashMap<String,String>>| async move {
             if consume(&fake.fail_lookup) { return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"code": -1000, "msg": "uncertain"}))) }
+            let call = fake.lookup_calls.fetch_add(1, Ordering::SeqCst) + 1;
             match lookup(&fake.orders.lock().unwrap(), &query) {
-                Some(order) => (StatusCode::OK, Json(serde_json::to_value(order).unwrap())),
+                Some(mut order) => {
+                    let threshold = fake.filled_zero_after.load(Ordering::SeqCst);
+                    if threshold > 0 && call >= threshold { order.status = "FILLED".into(); order.executed_qty = Decimal::ZERO; }
+                    (StatusCode::OK, Json(serde_json::to_value(order).unwrap()))
+                },
                 None => (StatusCode::BAD_REQUEST, Json(json!({"code": -2013, "msg": "Order does not exist"}))),
             }
         }).delete(|State(fake): State<Exchange>, Query(query): Query<HashMap<String,String>>| async move {
+            if consume(&fake.fail_cancel) { return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"code": -1000}))); }
             let mut orders = fake.orders.lock().unwrap();
             let mut order = lookup(&orders, &query).unwrap();
             let fill = std::mem::take(&mut *fake.cancel_fill.lock().unwrap());
@@ -349,7 +359,10 @@ async fn exchange_server(fake: Exchange) -> (String, tokio::task::JoinHandle<()>
             } else { (StatusCode::OK, Json(serde_json::to_value(order).unwrap())) }
         }))
         .route("/fapi/v2/positionRisk", get(|State(fake): State<Exchange>| async move {
-            Json(json!([{"symbol": "SOLUSDC", "positionAmt": fake.position.lock().unwrap().to_string(), "entryPrice":"120", "markPrice":"122.31", "unRealizedProfit":"0", "liquidationPrice":"0", "leverage":"1"}]))
+            if consume(&fake.fail_position) {
+                return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({})));
+            }
+            (StatusCode::OK, Json(json!([{"symbol": "SOLUSDC", "positionAmt": fake.position.lock().unwrap().to_string(), "entryPrice":"120", "markPrice":"122.31", "unRealizedProfit":"0", "liquidationPrice":"0", "leverage":"1"}])))
         }))
         .route("/fapi/v2/account", get(|| async { Json(json!({
             "totalWalletBalance":"10000", "totalMarginBalance":"10000", "totalUnrealizedProfit":"0", "availableBalance":"10000",
@@ -409,6 +422,117 @@ async fn lost_submit_response_is_adopted_after_restart_with_provenance() {
     assert_eq!(posts[0]["quantity"], "0.48");
     assert_eq!(posts[0]["reduceOnly"], "true");
     assert_eq!(posts[0]["timeInForce"], "GTX");
+    server.abort();
+}
+
+#[tokio::test]
+async fn provisional_remainder_uses_recovery_plan_metadata_without_managed_row() {
+    let (mut engine, fake, _, server) = live_fixture().await;
+    fake.lose_post.store(1, Ordering::SeqCst);
+    engine.maintain_grid_window().await;
+    let plan = engine.load_remainder_plan().await.unwrap().unwrap();
+    engine
+        .state
+        .db
+        .delete_managed_order(&plan.target.client_order_id)
+        .unwrap();
+    let mut placeholder = plan.target.clone();
+    placeholder.order_id = Some(999);
+    placeholder.purpose = OrderPurpose::Legacy;
+    placeholder.merge_sources.clear();
+    engine
+        .state
+        .active_orders
+        .write()
+        .await
+        .insert(placeholder.client_order_id.clone(), placeholder);
+    engine.provisional_order_ids.insert((
+        engine.client.account_identity_key(),
+        plan.target.client_order_id.clone(),
+    ));
+    assert!(engine.sync_live_orders().await);
+    let active = engine.state.active_orders.read().await;
+    let target = &active[&plan.target.client_order_id];
+    assert_eq!(target.purpose, OrderPurpose::Remainder);
+    assert_eq!(target.merge_sources.len(), 2);
+    let saved = engine.state.db.load_managed_orders("SOLUSDC").unwrap();
+    let stored = saved
+        .iter()
+        .find(|order| order.client_order_id == plan.target.client_order_id)
+        .unwrap();
+    assert_eq!(stored.purpose, OrderPurpose::Remainder);
+    assert_eq!(stored.merge_sources.len(), 2);
+    server.abort();
+}
+
+#[tokio::test]
+async fn bulk_cancel_unknown_remainder_uses_plan_metadata_on_first_discovery() {
+    let (mut engine, fake, _, server) = live_fixture().await;
+    fake.lose_post.store(1, Ordering::SeqCst);
+    engine.maintain_grid_window().await;
+    let plan = engine.load_remainder_plan().await.unwrap().unwrap();
+    engine
+        .state
+        .db
+        .delete_managed_order(&plan.target.client_order_id)
+        .unwrap();
+    engine
+        .state
+        .active_orders
+        .write()
+        .await
+        .remove(&plan.target.client_order_id);
+    fake.fail_cancel.store(2, Ordering::SeqCst);
+    fake.lookup_calls.store(0, Ordering::SeqCst);
+    fake.filled_zero_after.store(2, Ordering::SeqCst);
+    assert!(!engine.cancel_all_orders().await);
+    let active = engine.state.active_orders.read().await;
+    let target = &active[&plan.target.client_order_id];
+    assert_eq!(target.purpose, OrderPurpose::Remainder);
+    assert_eq!(target.merge_sources.len(), 2);
+    let saved = engine.state.db.load_managed_orders("SOLUSDC").unwrap();
+    let target = saved
+        .iter()
+        .find(|order| order.client_order_id == plan.target.client_order_id)
+        .unwrap();
+    assert_eq!(target.purpose, OrderPurpose::Remainder);
+    assert_eq!(target.merge_sources.len(), 2);
+    server.abort();
+}
+
+#[tokio::test]
+async fn cancel_retry_restores_provisional_remainder_from_plan() {
+    let (mut engine, fake, _, server) = live_fixture().await;
+    fake.lose_post.store(1, Ordering::SeqCst);
+    engine.maintain_grid_window().await;
+    let plan = engine.load_remainder_plan().await.unwrap().unwrap();
+    engine
+        .state
+        .db
+        .delete_managed_order(&plan.target.client_order_id)
+        .unwrap();
+    let mut placeholder = plan.target.clone();
+    placeholder.order_id = Some(999);
+    placeholder.purpose = OrderPurpose::Legacy;
+    placeholder.merge_sources.clear();
+    engine
+        .state
+        .active_orders
+        .write()
+        .await
+        .insert(placeholder.client_order_id.clone(), placeholder);
+    engine.provisional_order_ids.insert((
+        engine.client.account_identity_key(),
+        plan.target.client_order_id.clone(),
+    ));
+    fake.lose_cancel.store(1, Ordering::SeqCst);
+    assert!(!engine.cancel_all_orders().await);
+    let active = engine.state.active_orders.read().await;
+    assert_eq!(
+        active[&plan.target.client_order_id].purpose,
+        OrderPurpose::Remainder
+    );
+    assert_eq!(active[&plan.target.client_order_id].merge_sources.len(), 2);
     server.abort();
 }
 
@@ -541,6 +665,222 @@ async fn missing_open_snapshot_does_not_release_an_uncertain_targets_inventory()
     assert_eq!(orders[0].purpose, OrderPurpose::Remainder);
     assert!(engine.load_remainder_plan().await.unwrap().is_none());
     server.abort();
+}
+
+#[tokio::test]
+async fn partially_filled_remainder_lookup_refreshes_risk_before_reducing_reservation() {
+    let (mut engine, fake, _, server) = live_fixture().await;
+    fake.lose_post.store(1, Ordering::SeqCst);
+    engine.maintain_grid_window().await;
+    let mut plan = engine.load_remainder_plan().await.unwrap().unwrap();
+    engine
+        .position_cache
+        .get(&engine.client, "SOLUSDC")
+        .await
+        .unwrap();
+    engine.account_cache.get(&engine.client).await.unwrap();
+    {
+        let mut orders = fake.orders.lock().unwrap();
+        let target = orders.get_mut(&plan.target.client_order_id).unwrap();
+        target.status = "PARTIALLY_FILLED".into();
+        target.executed_qty = dec!(0.24);
+    }
+    *fake.position.lock().unwrap() = dec!(0.24);
+    fake.fail_position.store(1, Ordering::SeqCst);
+    assert!(engine.adopt_remainder_target(&mut plan).await.is_err());
+    assert_eq!(
+        engine.state.active_orders.read().await[&plan.target.client_order_id].quantity,
+        dec!(0.48)
+    );
+    assert_eq!(plan.phase, RemainderPhase::Submitting);
+    assert!(engine.last_account_sync.is_none());
+    assert!(engine
+        .state
+        .db
+        .load_managed_orders("SOLUSDC")
+        .unwrap()
+        .iter()
+        .any(|order| order.client_order_id == plan.target.client_order_id
+            && order.quantity == dec!(0.48)));
+
+    assert!(engine.adopt_remainder_target(&mut plan).await.unwrap());
+    assert_eq!(
+        engine.state.active_orders.read().await[&plan.target.client_order_id].quantity,
+        dec!(0.24)
+    );
+    assert_eq!(engine.state.position.read().await.size, dec!(0.24));
+    assert_eq!(plan.phase, RemainderPhase::Complete);
+    server.abort();
+}
+
+#[tokio::test]
+async fn remainder_zero_fill_conflicting_order_id_keeps_trusted_identity_and_persists_observation()
+{
+    let (mut engine, fake, _, server) = live_fixture().await;
+    fake.lose_post.store(1, Ordering::SeqCst);
+    engine.maintain_grid_window().await;
+    let mut plan = engine.load_remainder_plan().await.unwrap().unwrap();
+    plan.target.order_id = Some(123);
+    {
+        let mut orders = fake.orders.lock().unwrap();
+        let found = orders.get_mut(&plan.target.client_order_id).unwrap();
+        found.order_id = 456;
+        found.status = "FILLED".into();
+        found.executed_qty = Decimal::ZERO;
+    }
+    engine
+        .state
+        .active_orders
+        .write()
+        .await
+        .remove(&plan.target.client_order_id);
+    assert!(engine.adopt_remainder_target(&mut plan).await.is_err());
+    assert_eq!(plan.phase, RemainderPhase::Submitting);
+    assert_eq!(
+        engine.state.active_orders.read().await[&plan.target.client_order_id].order_id,
+        Some(123)
+    );
+    let observations = engine
+        .state
+        .db
+        .load_identity_observations(engine.client.account_identity_key(), "SOLUSDC")
+        .unwrap();
+    assert_eq!(observations.len(), 1);
+    assert_eq!(observations[0].0.order_id, Some(123));
+    assert_eq!(observations[0].1.order_id, 456);
+    assert!(!engine.state.global_position_ready.load(Ordering::SeqCst));
+    server.abort();
+}
+
+#[tokio::test]
+async fn filled_remainder_with_zero_quantity_stays_recoverable_until_cancel_confirmed() {
+    let (mut engine, fake, _, server) = live_fixture().await;
+    fake.lose_post.store(1, Ordering::SeqCst);
+    engine.maintain_grid_window().await;
+    let mut plan = engine.load_remainder_plan().await.unwrap().unwrap();
+    fake.orders
+        .lock()
+        .unwrap()
+        .get_mut(&plan.target.client_order_id)
+        .unwrap()
+        .status = "FILLED".into();
+    let state = engine.state.clone();
+    state.global_position_ready.store(true, Ordering::SeqCst);
+    let guard = state.active_orders.write().await;
+    let task = tokio::spawn(async move {
+        let result = engine.adopt_remainder_target(&mut plan).await;
+        (engine, plan, result)
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while state.global_position_ready.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    drop(guard);
+    let (mut engine, mut plan, result) = task.await.unwrap();
+    assert!(result.is_err());
+    assert_eq!(plan.phase, RemainderPhase::Submitting);
+    assert_eq!(
+        engine.state.active_orders.read().await[&plan.target.client_order_id].quantity,
+        dec!(0.48)
+    );
+    assert!(engine
+        .state
+        .db
+        .load_managed_orders("SOLUSDC")
+        .unwrap()
+        .iter()
+        .any(|order| order.client_order_id == plan.target.client_order_id));
+    fake.orders
+        .lock()
+        .unwrap()
+        .get_mut(&plan.target.client_order_id)
+        .unwrap()
+        .status = "CANCELED".into();
+    assert!(engine.adopt_remainder_target(&mut plan).await.unwrap());
+    assert_eq!(plan.phase, RemainderPhase::Complete);
+    assert!(!engine
+        .state
+        .active_orders
+        .read()
+        .await
+        .contains_key(&plan.target.client_order_id));
+    server.abort();
+}
+
+#[tokio::test]
+async fn remainder_partial_persistence_failure_blocks_global_and_keeps_reservation() {
+    let path = std::env::temp_dir().join(format!("remainder-partial-{}.db", uuid::Uuid::new_v4()));
+    let db = Arc::new(Database::open(&path).unwrap());
+    db.save_bot_status(BotStatus::Running).unwrap();
+    let fake = Exchange::default();
+    *fake.position.lock().unwrap() = dec!(0.48);
+    let (url, server) = exchange_server(fake.clone()).await;
+    let mut engine = engine(db.clone(), Some(url)).await;
+    let sources = two_sources();
+    for (i, order) in sources.iter().enumerate() {
+        fake.orders
+            .lock()
+            .unwrap()
+            .insert(order.client_order_id.clone(), response(order, i as i64 + 1));
+    }
+    seed(&engine, &sources).await;
+    fake.lose_post.store(1, Ordering::SeqCst);
+    engine.maintain_grid_window().await;
+    let mut plan = engine.load_remainder_plan().await.unwrap().unwrap();
+    {
+        let mut orders = fake.orders.lock().unwrap();
+        let target = orders.get_mut(&plan.target.client_order_id).unwrap();
+        target.status = "PARTIALLY_FILLED".into();
+        target.executed_qty = dec!(0.24);
+    }
+    *fake.position.lock().unwrap() = dec!(0.24);
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER reject_partial BEFORE INSERT ON managed_orders \
+        WHEN json_extract(NEW.order_json, '$.status') = 'PARTIALLYFILLED' \
+        BEGIN SELECT RAISE(ABORT, 'partial write failed'); END;",
+        )
+        .unwrap();
+    engine
+        .state
+        .config
+        .write()
+        .await
+        .global_max_position_notional = Some(dec!(10000));
+    let global =
+        crate::server::state::GlobalPositionLimit::new(Arc::new(tokio::sync::RwLock::new(vec![
+            engine.state.clone(),
+        ])));
+    global.membership_ready.store(true, Ordering::SeqCst);
+    engine
+        .state
+        .global_position_initialized
+        .store(true, Ordering::SeqCst);
+    engine
+        .state
+        .global_position_ready
+        .store(true, Ordering::SeqCst);
+    let _ = engine
+        .state
+        .global_position_limit
+        .set(Arc::downgrade(&global));
+    assert!(engine.adopt_remainder_target(&mut plan).await.is_err());
+    assert!(!engine.state.global_position_ready.load(Ordering::SeqCst));
+    assert_eq!(*engine.state.status.read().await, BotStatus::Paused);
+    assert_eq!(
+        engine.state.active_orders.read().await[&plan.target.client_order_id].quantity,
+        dec!(0.48)
+    );
+    assert_eq!(plan.phase, RemainderPhase::Submitting);
+    server.abort();
+    drop(connection);
+    drop(engine);
+    drop(db);
+    let _ = std::fs::remove_file(path);
 }
 
 #[tokio::test]

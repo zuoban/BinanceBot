@@ -446,7 +446,7 @@ it('shows available balance as a percentage of wallet balance', () => {
   const pairs = [{ snapshot: s, mode: 'PAPER' as const, scoped: true }];
   overview.data = { generated_at: new Date().toISOString(), pairs };
   render(<MemoryRouter><App><AccountsContext.Provider value={pairs}><OverviewPage /></AccountsContext.Provider></App></MemoryRouter>);
-  expect(screen.getByText('可用比例').parentElement).toHaveTextContent('80%');
+  expect(screen.getByText('可用比例（按钱包余额）').parentElement).toHaveTextContent('80%');
 });
 
 it('does not calculate an available ratio for zero wallet balance', () => {
@@ -456,7 +456,7 @@ it('does not calculate an available ratio for zero wallet balance', () => {
   const pairs = [{ snapshot: s, mode: 'PAPER' as const, scoped: true }];
   overview.data = { generated_at: new Date().toISOString(), pairs };
   render(<MemoryRouter><App><AccountsContext.Provider value={pairs}><OverviewPage /></AccountsContext.Provider></App></MemoryRouter>);
-  expect(screen.getByText('可用比例').parentElement).toHaveTextContent('--');
+  expect(screen.getByText('可用比例（按钱包余额）').parentElement).toHaveTextContent('--');
 });
 
 it('marks an unchanged overview stale as time passes and clears the warning on refresh', () => {

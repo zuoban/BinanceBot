@@ -90,6 +90,25 @@ fn is_grid_order(client_order_id: &str) -> bool {
     client_order_id.starts_with(GRID_ORDER_PREFIX)
 }
 
+fn unresolved_filled_quantity(order: &BinanceOrderResponse) -> bool {
+    order.status == "FILLED" && order.executed_qty <= Decimal::ZERO
+}
+
+fn known_order_identity(order: &GridOrder) -> Option<ObservedOrderIdentity> {
+    Some(ObservedOrderIdentity {
+        client_order_id: order.client_order_id.clone(),
+        symbol: order.symbol.clone(),
+        side: order.side.as_str().to_owned(),
+        order_id: order.order_id?,
+    })
+}
+
+fn identity_differs_from_order(observed: &ObservedOrderIdentity, expected: &GridOrder) -> bool {
+    observed.symbol != expected.symbol
+        || observed.side != expected.side.as_str()
+        || expected.order_id.is_some_and(|id| observed.order_id != id)
+}
+
 /// All idle orders follow the window. Partial executions finish on their existing order.
 fn is_window_order(order: &GridOrder) -> bool {
     is_grid_order(&order.client_order_id) && order.status == OrderStatus::New
@@ -271,6 +290,11 @@ pub struct GridTradingEngine {
     mark_retry: MarketRetry,
     ticker_retry: MarketRetry,
     reconciliation_blocked: bool,
+    provisional_order_ids: HashSet<([u8; 32], String)>,
+    order_identity_conflicts: HashMap<([u8; 32], String), GridOrder>,
+    order_identity_observations: HashMap<([u8; 32], String), Vec<ObservedOrderIdentity>>,
+    provisional_order_observations: HashMap<([u8; 32], String), Vec<ObservedOrderIdentity>>,
+    loaded_identity_scopes: HashSet<([u8; 32], String)>,
     exchange_rules_loaded: bool,
     market_data_blocked: bool,
     last_remainder_change: Option<Instant>,
@@ -327,10 +351,57 @@ impl GridTradingEngine {
             mark_retry: MarketRetry::default(),
             ticker_retry: MarketRetry::default(),
             reconciliation_blocked: false,
+            provisional_order_ids: HashSet::new(),
+            order_identity_conflicts: HashMap::new(),
+            order_identity_observations: HashMap::new(),
+            provisional_order_observations: HashMap::new(),
+            loaded_identity_scopes: HashSet::new(),
             exchange_rules_loaded: false,
             market_data_blocked: false,
             last_remainder_change: None,
             market_stream_tx: None,
+        }
+    }
+
+    fn track_identity_conflict(&mut self, expected: &GridOrder, observed: &BinanceOrderResponse) {
+        let key = (
+            self.client.account_identity_key(),
+            expected.client_order_id.clone(),
+        );
+        self.provisional_order_ids.insert(key.clone());
+        self.order_identity_conflicts
+            .insert(key.clone(), expected.clone());
+        let observations = self.order_identity_observations.entry(key).or_default();
+        if !observations
+            .iter()
+            .any(|old| old.symbol == observed.symbol && old.order_id == observed.order_id)
+        {
+            observations.push(ObservedOrderIdentity {
+                client_order_id: observed.client_order_id.clone(),
+                symbol: observed.symbol.clone(),
+                side: observed.side.clone(),
+                order_id: observed.order_id,
+            });
+        }
+    }
+
+    fn track_provisional_observation(&mut self, observed: &BinanceOrderResponse) {
+        let key = (
+            self.client.account_identity_key(),
+            observed.client_order_id.clone(),
+        );
+        self.provisional_order_ids.insert(key.clone());
+        let observations = self.provisional_order_observations.entry(key).or_default();
+        if !observations
+            .iter()
+            .any(|old| old.symbol == observed.symbol && old.order_id == observed.order_id)
+        {
+            observations.push(ObservedOrderIdentity {
+                client_order_id: observed.client_order_id.clone(),
+                symbol: observed.symbol.clone(),
+                side: observed.side.clone(),
+                order_id: observed.order_id,
+            });
         }
     }
 
@@ -1655,6 +1726,74 @@ impl GridTradingEngine {
         PairPlacementDecision::Skip("paired replenishment retired; sliding window owns new orders")
     }
 
+    // Direct order lookups can observe a fill absent from the open-orders
+    // snapshot. Preserve the old reservation until both risk inputs are fresh.
+    async fn prepare_partial_adoption(
+        &mut self,
+        order: &mut GridOrder,
+        found: &BinanceOrderResponse,
+    ) -> bool {
+        if found.executed_qty <= Decimal::ZERO {
+            return true;
+        }
+        let remaining = (found.orig_qty - found.executed_qty).max(Decimal::ZERO);
+        let previous = self
+            .state
+            .active_orders
+            .read()
+            .await
+            .get(&order.client_order_id)
+            .cloned();
+        if self
+            .last_account_sync
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(10))
+            && previous.as_ref().is_some_and(|old| {
+                old.status == OrderStatus::PartiallyFilled && old.quantity == remaining
+            })
+        {
+            return true;
+        }
+        let pause_epoch = self.state.pause_epoch();
+        self.account_cache.invalidate(&self.client).await;
+        self.position_cache.invalidate(&self.client).await;
+        let position = self.sync_position(false).await;
+        let account = if position.is_some() {
+            self.sync_account(false, true).await
+        } else {
+            None
+        };
+        self.last_account_sync = position.zip(account).map(|(p, a)| p.min(a));
+        if self.last_account_sync.is_some() && self.state.pause_epoch() == pause_epoch {
+            return true;
+        }
+
+        // An unknown accepted order must remain durable and visible to cancel
+        // and reconciliation even when the exchange cannot refresh risk data.
+        let quantity = previous
+            .as_ref()
+            .map_or(found.orig_qty, |old| old.quantity.max(remaining));
+        let mut reserved = previous.unwrap_or_else(|| order.clone());
+        reserved.order_id = Some(found.order_id);
+        reserved.quantity = quantity;
+        reserved.amount_usdc = reserved.price * reserved.quantity;
+        reserved.status = OrderStatus::PartiallyFilled;
+        self.state
+            .active_orders
+            .write()
+            .await
+            .insert(reserved.client_order_id.clone(), reserved.clone());
+        if let Err(error) = self.save_managed_order(&reserved).await {
+            error!(
+                "Could not persist partial order {}: {}",
+                reserved.client_order_id, error
+            );
+            self.pause_trading().await;
+        }
+        self.last_orders_sync = None;
+        self.report_reconciliation_state(true).await;
+        false
+    }
+
     async fn drain_pair_intents(&mut self, symbol: &str, mode: TradingMode) -> bool {
         let scope = symbol.to_string();
         let intents = match self
@@ -1671,6 +1810,7 @@ impl GridTradingEngine {
         };
 
         for mut intent in intents {
+            let mut original = intent.clone();
             let parent_id = match intent.paired_client_order_id.clone() {
                 Some(id) => id,
                 None => {
@@ -1704,6 +1844,30 @@ impl GridTradingEngine {
                     return false;
                 }
                 intent.order_id = Some(found.order_id);
+                original.order_id = Some(found.order_id);
+                original.quantity = original.quantity.max(found.orig_qty);
+                original.amount_usdc = original.price * original.quantity;
+                if unresolved_filled_quantity(&found) {
+                    self.last_orders_sync = None;
+                    self.report_reconciliation_state(true).await;
+                    self.account_cache.invalidate(&self.client).await;
+                    self.position_cache.invalidate(&self.client).await;
+                    self.last_account_sync = None;
+                    self.state
+                        .active_orders
+                        .write()
+                        .await
+                        .entry(original.client_order_id.clone())
+                        .or_insert(original.clone());
+                    if let Err(error) = self.save_managed_order(&original).await {
+                        error!(
+                            "Could not persist uncertain pair order {}: {}",
+                            original.client_order_id, error
+                        );
+                        self.pause_trading().await;
+                    }
+                    return false;
+                }
                 if matches!(
                     found.status.as_str(),
                     "FILLED" | "CANCELED" | "EXPIRED" | "EXPIRED_IN_MATCH" | "REJECTED"
@@ -1755,6 +1919,9 @@ impl GridTradingEngine {
                     }
                     continue;
                 }
+                if !self.prepare_partial_adoption(&mut intent, &found).await {
+                    return false;
+                }
                 intent.quantity = (found.orig_qty - found.executed_qty).max(Decimal::ZERO);
                 intent.amount_usdc = intent.price * intent.quantity;
                 intent.status = if found.executed_qty > Decimal::ZERO {
@@ -1805,14 +1972,33 @@ impl GridTradingEngine {
                     "Could not persist pair order {}: {}",
                     intent.client_order_id, e
                 );
+                self.state
+                    .active_orders
+                    .write()
+                    .await
+                    .entry(original.client_order_id.clone())
+                    .or_insert(original);
+                self.last_orders_sync = None;
+                self.report_reconciliation_state(true).await;
                 self.pause_trading().await;
                 return false;
             }
+            let partial = intent.status == OrderStatus::PartiallyFilled;
             self.state
                 .active_orders
                 .write()
                 .await
                 .insert(intent.client_order_id.clone(), intent);
+            if partial {
+                if let Some(global) = self
+                    .state
+                    .global_position_limit
+                    .get()
+                    .and_then(std::sync::Weak::upgrade)
+                {
+                    global.check().await;
+                }
+            }
             let parent = parent_id.clone();
             if let Err(e) = self
                 .state
@@ -1943,22 +2129,16 @@ impl GridTradingEngine {
         self.sync_account_and_position_inner(false).await
     }
 
-    async fn sync_account_and_position_inner(&mut self, shared_position: bool) -> bool {
-        let pause_epoch = self.state.pause_epoch();
+    async fn sync_position(&self, shared_position: bool) -> Option<Instant> {
         let symbol = self.state.config.read().await.exchange.symbol.clone();
-
         let position_result = if shared_position {
             self.position_cache.get(&self.client, &symbol).await
         } else {
-            let result = self.client.get_position(&symbol).await;
-            let received_at = Instant::now();
-            // Critical reconciliations and fills must not leave an older
-            // account-wide position snapshot available for later polling.
-            self.position_cache.invalidate(&self.client).await;
-            result.map(|position| (position, received_at))
+            self.position_cache
+                .refresh_critical(&self.client, &symbol)
+                .await
         };
-        let position_instant = position_result.as_ref().ok().map(|(_, at)| *at);
-        let position_ok = if let Ok((Some(pos), received_at)) = position_result {
+        if let Ok((Some(pos), received_at)) = position_result {
             let mut state_pos = self.state.position.write().await;
             state_pos.symbol = pos.symbol;
             state_pos.size = pos.position_amt;
@@ -1970,30 +2150,25 @@ impl GridTradingEngine {
             state_pos.update_time = chrono::Duration::from_std(received_at.elapsed())
                 .ok()
                 .map(|age| Utc::now() - age);
-            true
+            Some(received_at)
         } else {
             self.state.position.write().await.update_time = None;
             warn!("Could not sync Binance position for {}", symbol);
-            false
-        };
-
-        if !position_ok {
             self.set_global_reconciliation_ready(false).await;
+            None
         }
-        if self.state.pause_epoch() != pause_epoch {
-            return false;
-        }
+    }
 
-        let account = if shared_position {
+    async fn sync_account(&self, shared: bool, critical: bool) -> Option<Instant> {
+        let symbol = self.state.config.read().await.exchange.symbol.clone();
+        let account = if critical {
+            self.account_cache.refresh_critical(&self.client).await
+        } else if shared {
             self.account_cache.get(&self.client).await
         } else {
             self.account_cache.refresh(&self.client).await
         };
-        let account_instant = account
-            .as_ref()
-            .ok()
-            .map(|snapshot| snapshot.received_instant);
-        let account_ok = match account {
+        match account {
             Ok(snapshot) => {
                 if let Some(asset) = snapshot.account.margin_asset_for_symbol(&symbol) {
                     let mut state_acc = self.state.account.write().await;
@@ -2003,24 +2178,36 @@ impl GridTradingEngine {
                     state_acc.margin_balance = asset.margin_balance;
                     state_acc.unrealized_profit = asset.unrealized_profit;
                     state_acc.update_time = snapshot.received_at;
-                    true
+                    Some(snapshot.received_instant)
                 } else {
                     warn!(
                         "No matching margin asset in Binance account response for {}",
                         symbol
                     );
-                    false
+                    self.state.account.write().await.update_time =
+                        chrono::DateTime::<Utc>::default();
+                    self.set_global_reconciliation_ready(false).await;
+                    None
                 }
             }
             Err(e) => {
                 warn!("Could not sync Binance account balance: {}", e);
-                false
+                self.state.account.write().await.update_time = chrono::DateTime::<Utc>::default();
+                self.set_global_reconciliation_ready(false).await;
+                None
             }
-        };
-        if !account_ok {
-            self.state.account.write().await.update_time = chrono::DateTime::<Utc>::default();
-            self.set_global_reconciliation_ready(false).await;
         }
+    }
+
+    async fn sync_account_and_position_inner(&mut self, shared_position: bool) -> bool {
+        let pause_epoch = self.state.pause_epoch();
+        let position_instant = self.sync_position(shared_position).await;
+        let position_ok = position_instant.is_some();
+        if self.state.pause_epoch() != pause_epoch {
+            return false;
+        }
+        let account_instant = self.sync_account(shared_position, !shared_position).await;
+        let account_ok = account_instant.is_some();
         if let Some(global) = self
             .state
             .global_position_limit
@@ -2048,6 +2235,7 @@ impl GridTradingEngine {
             order.updated_at = Utc::now();
         } else {
             self.account_cache.invalidate(&self.client).await;
+            self.position_cache.invalidate(&self.client).await;
         }
         let mode = TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
         let recorded_id = order.client_order_id.clone();
@@ -2061,6 +2249,12 @@ impl GridTradingEngine {
         };
         match recorded {
             Ok(true) => {
+                // A restored, already-recorded fill can still be present in
+                // active orders. Refresh before removing its exposure reservation.
+                if !config.exchange.dry_run && self.sync_position(false).await.is_none() {
+                    self.last_account_sync = None;
+                    return false;
+                }
                 self.state
                     .active_orders
                     .write()
@@ -2083,6 +2277,31 @@ impl GridTradingEngine {
                 self.pause_trading().await;
                 return false;
             }
+        }
+
+        // Retain the managed order until both position and account are known.
+        // A failed refresh must not remove the only reservation or record a fill
+        // that a later reconciliation can no longer find.
+        if !config.exchange.dry_run && !self.sync_account_and_position().await {
+            let missing = {
+                let mut active = self.state.active_orders.write().await;
+                if active.contains_key(&order.client_order_id) {
+                    false
+                } else {
+                    active.insert(order.client_order_id.clone(), order.clone());
+                    true
+                }
+            };
+            if missing {
+                if let Err(error) = self.save_managed_order(order).await {
+                    error!(
+                        "Could not persist unverified terminal order {}: {}",
+                        order.client_order_id, error
+                    );
+                    self.pause_trading().await;
+                }
+            }
+            return false;
         }
 
         // Keep paper orders retryable until the detached commit has finished.
@@ -2172,8 +2391,6 @@ impl GridTradingEngine {
             acc.total_wallet_balance += simulated_pnl;
             update_paper_account(&mut pos, &mut acc, ticker.grid_reference_price());
             paper_state = Some((pos, acc));
-        } else {
-            self.sync_account_and_position().await;
         }
 
         let (realized_pnl, commission, is_maker, pnl_verified) = if config.exchange.dry_run {
@@ -2830,22 +3047,113 @@ impl GridTradingEngine {
                 .await
             {
                 Ok(resp) => {
+                    if unresolved_filled_quantity(&resp) {
+                        self.last_orders_sync = None;
+                        self.report_reconciliation_state(true).await;
+                        self.account_cache.invalidate(&self.client).await;
+                        self.position_cache.invalidate(&self.client).await;
+                        self.last_account_sync = None;
+                    }
                     order.order_id = Some(resp.order_id);
-                    order.symbol = resp.symbol;
+                    order.symbol = resp.symbol.clone();
                     order.client_order_id = resp.client_order_id.clone();
 
-                    if let Err(e) = self.save_managed_order(&order).await {
+                    let persisted = if let Err(e) = self.save_managed_order(&order).await {
                         error!(
                             "Order {} was accepted but could not be persisted: {}",
                             resp.client_order_id, e
                         );
+                        self.last_orders_sync = None;
+                        self.report_reconciliation_state(true).await;
                         self.pause_trading().await;
-                    }
+                        false
+                    } else {
+                        true
+                    };
                     self.state
                         .active_orders
                         .write()
                         .await
-                        .insert(resp.client_order_id, order);
+                        .insert(resp.client_order_id.clone(), order.clone());
+                    if !persisted {
+                        if resp.executed_qty > Decimal::ZERO {
+                            self.account_cache.invalidate(&self.client).await;
+                            self.position_cache.invalidate(&self.client).await;
+                            self.last_account_sync = None;
+                        }
+                        return false;
+                    }
+                    if resp.executed_qty <= Decimal::ZERO {
+                        if matches!(
+                            resp.status.as_str(),
+                            "CANCELED" | "EXPIRED" | "EXPIRED_IN_MATCH" | "REJECTED"
+                        ) {
+                            if let Err(error) =
+                                self.delete_managed_order(&order.client_order_id).await
+                            {
+                                error!(
+                                    "Could not clear terminal order {}: {}",
+                                    order.client_order_id, error
+                                );
+                                self.last_orders_sync = None;
+                                self.report_reconciliation_state(true).await;
+                                self.pause_trading().await;
+                                return false;
+                            }
+                            self.state
+                                .active_orders
+                                .write()
+                                .await
+                                .remove(&order.client_order_id);
+                            return false;
+                        }
+                        if resp.status == "FILLED" {
+                            // The contradictory response was blocked before persistence.
+                            return false;
+                        }
+                    }
+                    if resp.executed_qty > Decimal::ZERO {
+                        if matches!(
+                            resp.status.as_str(),
+                            "FILLED" | "CANCELED" | "EXPIRED" | "EXPIRED_IN_MATCH" | "REJECTED"
+                        ) {
+                            order.updated_at = exchange_fill_time(&resp);
+                            order.quantity = resp.executed_qty;
+                            if let Some(price) =
+                                resp.avg_price.filter(|price| *price > Decimal::ZERO)
+                            {
+                                order.price = price;
+                            }
+                            order.amount_usdc = order.price * order.quantity;
+                            let recorded = self.on_order_filled(&mut order).await;
+                            let paused = self.pause_if_position_limit_reached().await;
+                            return recorded && !paused;
+                        }
+                        if !self.prepare_partial_adoption(&mut order, &resp).await {
+                            return false;
+                        }
+                        order.quantity = (resp.orig_qty - resp.executed_qty).max(Decimal::ZERO);
+                        order.amount_usdc = order.price * order.quantity;
+                        order.status = OrderStatus::PartiallyFilled;
+                        if let Err(error) = self.save_managed_order(&order).await {
+                            error!(
+                                "Could not persist partially filled order {}: {}",
+                                order.client_order_id, error
+                            );
+                            self.last_orders_sync = None;
+                            self.report_reconciliation_state(true).await;
+                            self.pause_trading().await;
+                            return false;
+                        }
+                        self.state
+                            .active_orders
+                            .write()
+                            .await
+                            .insert(order.client_order_id.clone(), order);
+                        if self.pause_if_position_limit_reached().await {
+                            return false;
+                        }
+                    }
                     info!(
                         "Placed {} Maker order on Binance: price={}, qty={}, orderId={}",
                         side.as_str(),
@@ -2897,6 +3205,14 @@ impl GridTradingEngine {
                             .await
                         {
                             Ok(found) => {
+                                if found.executed_qty > Decimal::ZERO
+                                    || unresolved_filled_quantity(&found)
+                                {
+                                    self.report_reconciliation_state(true).await;
+                                    self.account_cache.invalidate(&self.client).await;
+                                    self.position_cache.invalidate(&self.client).await;
+                                    self.last_account_sync = None;
+                                }
                                 order.order_id = Some(found.order_id);
                                 order.status = if found.executed_qty > Decimal::ZERO {
                                     OrderStatus::PartiallyFilled
@@ -2958,6 +3274,14 @@ impl GridTradingEngine {
                 }
             };
             match exchange_order {
+                Ok(exchange_order) if unresolved_filled_quantity(&exchange_order) => {
+                    self.account_cache.invalidate(&self.client).await;
+                    self.position_cache.invalidate(&self.client).await;
+                    self.last_account_sync = None;
+                    self.last_orders_sync = None;
+                    self.report_reconciliation_state(true).await;
+                    return false;
+                }
                 Ok(exchange_order)
                     if !matches!(
                         exchange_order.status.as_str(),
@@ -3006,6 +3330,145 @@ impl GridTradingEngine {
         true
     }
 
+    async fn restore_provisional_before_cancel(&mut self, symbol: &str, mode: TradingMode) -> bool {
+        let account = self.client.account_identity_key();
+        let ids: Vec<_> = self
+            .provisional_order_ids
+            .iter()
+            .filter(|(key, _)| *key == account)
+            .map(|(_, id)| id.clone())
+            .collect();
+        if ids.is_empty() {
+            return true;
+        }
+        let scope = symbol.to_owned();
+        let records = self
+            .state
+            .db
+            .run_blocking(move |db| {
+                Ok((
+                    db.load_managed_orders(&scope)?,
+                    db.load_pair_intents(&scope, mode)?,
+                    db.load_remainder_plan(&scope, mode)?,
+                ))
+            })
+            .await;
+        let (managed, intents, remainder) = match records {
+            Ok(records) => records,
+            Err(error) => {
+                error!(
+                    "Could not restore provisional orders before cancellation: {}",
+                    error
+                );
+                self.last_orders_sync = None;
+                self.report_reconciliation_state(true).await;
+                return false;
+            }
+        };
+        let mut conflict = false;
+        {
+            let mut active = self.state.active_orders.write().await;
+            for id in ids {
+                let key = (account, id.clone());
+                let Some(current) = active.get(&id).cloned() else {
+                    if let Some(expected) = self.order_identity_conflicts.get(&key) {
+                        active.insert(id, expected.clone());
+                        conflict = true;
+                    }
+                    continue;
+                };
+                let durable = managed
+                    .iter()
+                    .find(|order| order.client_order_id == id)
+                    .or_else(|| intents.iter().find(|order| order.client_order_id == id))
+                    .or_else(|| {
+                        remainder.as_ref().and_then(|plan| {
+                            plan.sources
+                                .iter()
+                                .chain(std::iter::once(&plan.target))
+                                .find(|order| order.client_order_id == id)
+                        })
+                    });
+                let Some(durable) = durable else {
+                    conflict |= self.order_identity_conflicts.contains_key(&key);
+                    continue;
+                };
+                if self.order_identity_conflicts.contains_key(&key)
+                    || durable.symbol != current.symbol
+                    || durable.side != current.side
+                    || durable
+                        .order_id
+                        .zip(current.order_id)
+                        .is_some_and(|(a, b)| a != b)
+                {
+                    if let Some(observed) = known_order_identity(&current) {
+                        if identity_differs_from_order(&observed, durable) {
+                            let items = self
+                                .order_identity_observations
+                                .entry(key.clone())
+                                .or_default();
+                            if !items.iter().any(|old| {
+                                old.symbol == observed.symbol && old.order_id == observed.order_id
+                            }) {
+                                items.push(observed);
+                            }
+                        }
+                    }
+                    if let Some(observed) = self.provisional_order_observations.remove(&key) {
+                        let items = self
+                            .order_identity_observations
+                            .entry(key.clone())
+                            .or_default();
+                        for item in observed {
+                            if identity_differs_from_order(&item, durable)
+                                && !items.iter().any(|old| {
+                                    old.symbol == item.symbol && old.order_id == item.order_id
+                                })
+                            {
+                                items.push(item);
+                            }
+                        }
+                    }
+                    if let Some(old) = self
+                        .order_identity_conflicts
+                        .get(&key)
+                        .and_then(known_order_identity)
+                    {
+                        if identity_differs_from_order(&old, durable) {
+                            let items = self
+                                .order_identity_observations
+                                .entry(key.clone())
+                                .or_default();
+                            if !items.iter().any(|item| {
+                                item.symbol == old.symbol && item.order_id == old.order_id
+                            }) {
+                                items.push(old);
+                            }
+                        }
+                    }
+                    self.order_identity_conflicts.insert(key, durable.clone());
+                    active.insert(id, durable.clone());
+                    conflict = true;
+                    continue;
+                }
+                let mut restored = durable.clone();
+                restored.order_id = durable.order_id.or(current.order_id);
+                restored.quantity = durable.quantity.max(current.quantity);
+                restored.amount_usdc = restored.price * restored.quantity;
+                active.insert(id.clone(), restored);
+                self.provisional_order_observations
+                    .remove(&(account, id.clone()));
+                self.provisional_order_ids.remove(&(account, id));
+            }
+        }
+        if conflict {
+            self.last_orders_sync = None;
+            self.report_reconciliation_state(true).await;
+            self.persist_identity_observations(account, symbol).await;
+        }
+        !conflict
+    }
+
     /// Cancel all active orders
     async fn cancel_all_orders(&mut self) -> bool {
         self.cancel_all_orders_inner(false).await
@@ -3020,6 +3483,7 @@ impl GridTradingEngine {
         let was_running =
             !pause_already_persisted && *self.state.status.read().await == BotStatus::Running;
         let mut recovery_failed = false;
+        let mut managed_read_failed = false;
         if !pause_already_persisted {
             if let Err(e) = self.state.pause_trading_silently().await {
                 error!("Failed to persist paused status before cancellation: {}", e);
@@ -3029,7 +3493,40 @@ impl GridTradingEngine {
             }
         }
 
-        if let Err(e) = self.cancel_remainder_plan().await {
+        let observations_ready = is_dry_run
+            || self
+                .load_identity_observations(self.client.account_identity_key(), &symbol)
+                .await;
+        let recovery_sources = if is_dry_run {
+            Some((Vec::new(), None))
+        } else {
+            let scope = symbol.clone();
+            match self
+                .state
+                .db
+                .run_blocking(move |db| {
+                    Ok((
+                        db.load_pair_intents(&scope, mode)?,
+                        db.load_remainder_plan(&scope, mode)?,
+                    ))
+                })
+                .await
+            {
+                Ok(sources) => Some(sources),
+                Err(error) => {
+                    error!("Could not load cancellation recovery sources: {}", error);
+                    self.last_orders_sync = None;
+                    self.report_reconciliation_state(true).await;
+                    None
+                }
+            }
+        };
+        let metadata_ready = observations_ready
+            && recovery_sources.is_some()
+            && (is_dry_run || self.restore_provisional_before_cancel(&symbol, mode).await);
+        if !metadata_ready {
+            recovery_failed = true;
+        } else if let Err(e) = self.cancel_remainder_plan().await {
             error!(
                 "Could not resolve pending remainder plan during cancellation: {}",
                 e
@@ -3053,10 +3550,15 @@ impl GridTradingEngine {
                 Err(e) => {
                     error!("Failed to load managed orders before cancellation: {}", e);
                     self.pause_trading().await;
+                    managed_read_failed = true;
                     recovery_failed = true;
                     Vec::new()
                 }
             };
+            let managed_sources: HashMap<_, _> = restored
+                .iter()
+                .map(|order| (order.client_order_id.clone(), order.clone()))
+                .collect();
             {
                 let mut active = self.state.active_orders.write().await;
                 for order in restored
@@ -3109,17 +3611,181 @@ impl GridTradingEngine {
                     .cancel_order(&symbol, Some(order.order_id), None)
                     .await
                 {
-                    if self
-                        .client
-                        .get_order(&symbol, order.order_id)
-                        .await
-                        .is_ok_and(|confirmed| {
-                            matches!(
-                                confirmed.status.as_str(),
-                                "FILLED" | "CANCELED" | "EXPIRED" | "EXPIRED_IN_MATCH" | "REJECTED"
+                    let confirmation = self.client.get_order(&symbol, order.order_id).await;
+                    if confirmation.as_ref().is_ok_and(unresolved_filled_quantity) {
+                        self.last_orders_sync = None;
+                        self.report_reconciliation_state(true).await;
+                        self.account_cache.invalidate(&self.client).await;
+                        self.position_cache.invalidate(&self.client).await;
+                        self.last_account_sync = None;
+                        // A managed exchange order can be absent from local
+                        // metadata. Keep it recoverable before the list changes.
+                        let source = managed_sources
+                            .get(&order.client_order_id)
+                            .cloned()
+                            .or_else(|| {
+                                recovery_sources.as_ref().and_then(|(intents, plan)| {
+                                    intents
+                                        .iter()
+                                        .find(|item| item.client_order_id == order.client_order_id)
+                                        .or_else(|| {
+                                            plan.as_ref().and_then(|plan| {
+                                                plan.sources
+                                                    .iter()
+                                                    .chain(std::iter::once(&plan.target))
+                                                    .find(|item| {
+                                                        item.client_order_id
+                                                            == order.client_order_id
+                                                    })
+                                            })
+                                        })
+                                        .cloned()
+                                })
+                            });
+                        let confirmation_conflict = confirmation.as_ref().is_ok_and(|found| {
+                            found.client_order_id != order.client_order_id
+                                || found.symbol != order.symbol
+                                || found.side != order.side
+                                || found.order_id != order.order_id
+                        });
+                        let (retained, identity_conflict, previous) = {
+                            let mut active = self.state.active_orders.write().await;
+                            let current = active.get(&order.client_order_id).cloned();
+                            let mut retained =
+                                source
+                                    .or_else(|| current.clone())
+                                    .unwrap_or_else(|| GridOrder {
+                                        client_order_id: order.client_order_id.clone(),
+                                        order_id: Some(order.order_id),
+                                        symbol: order.symbol.clone(),
+                                        side: if order.side == "BUY" {
+                                            OrderSide::Buy
+                                        } else {
+                                            OrderSide::Sell
+                                        },
+                                        price: order.price,
+                                        quantity: order.orig_qty,
+                                        amount_usdc: order.price * order.orig_qty,
+                                        status: OrderStatus::New,
+                                        created_at: Utc::now(),
+                                        updated_at: Utc::now(),
+                                        grid_level: 0,
+                                        paired_client_order_id: None,
+                                        is_take_profit: false,
+                                        purpose: OrderPurpose::Legacy,
+                                        merge_sources: Vec::new(),
+                                    });
+                            if let Some(current) = &current {
+                                if retained.order_id.is_none()
+                                    && retained.symbol == current.symbol
+                                    && retained.side == current.side
+                                {
+                                    retained.order_id = current.order_id;
+                                }
+                            }
+                            let identity_matches = order.symbol == symbol
+                                && matches!(order.side.as_str(), "BUY" | "SELL")
+                                && retained.symbol == order.symbol
+                                && retained.side.as_str() == order.side
+                                && retained.order_id.is_none_or(|id| id == order.order_id);
+                            let active_matches = current.as_ref().is_none_or(|current| {
+                                current.symbol == retained.symbol
+                                    && current.side == retained.side
+                                    && current
+                                        .order_id
+                                        .zip(retained.order_id)
+                                        .is_none_or(|(a, b)| a == b)
+                            });
+                            let active_list_matches = current.as_ref().is_none_or(|current| {
+                                current.symbol == order.symbol
+                                    && current.side.as_str() == order.side
+                                    && current.order_id.is_none_or(|id| id == order.order_id)
+                            });
+                            if identity_matches
+                                && active_matches
+                                && active_list_matches
+                                && !confirmation_conflict
+                            {
+                                retained.order_id = Some(order.order_id);
+                                retained.quantity = retained.quantity.max(order.orig_qty);
+                                if let Some(current) = &current {
+                                    retained.quantity = retained.quantity.max(current.quantity);
+                                }
+                                retained.amount_usdc = retained.price * retained.quantity;
+                            }
+                            active.insert(retained.client_order_id.clone(), retained.clone());
+                            (
+                                retained,
+                                !identity_matches
+                                    || !active_matches
+                                    || !active_list_matches
+                                    || confirmation_conflict,
+                                current,
                             )
-                        })
-                    {
+                        };
+                        let key = (
+                            self.client.account_identity_key(),
+                            retained.client_order_id.clone(),
+                        );
+                        if identity_conflict {
+                            if confirmation_conflict {
+                                if let Ok(found) = &confirmation {
+                                    self.track_identity_conflict(&retained, found);
+                                }
+                            }
+                            if retained.symbol != order.symbol
+                                || retained.side.as_str() != order.side
+                                || retained.order_id.is_some_and(|id| id != order.order_id)
+                            {
+                                self.track_identity_conflict(&retained, &order);
+                            }
+                            if let Some(observed) = previous.as_ref().and_then(known_order_identity)
+                            {
+                                if identity_differs_from_order(&observed, &retained) {
+                                    self.provisional_order_ids.insert(key.clone());
+                                    self.order_identity_conflicts
+                                        .insert(key.clone(), retained.clone());
+                                    let items = self
+                                        .order_identity_observations
+                                        .entry(key.clone())
+                                        .or_default();
+                                    if !items.iter().any(|old| {
+                                        old.symbol == observed.symbol
+                                            && old.order_id == observed.order_id
+                                    }) {
+                                        items.push(observed);
+                                    }
+                                }
+                            }
+                        }
+                        if managed_read_failed || !metadata_ready {
+                            self.track_provisional_observation(&order);
+                            self.provisional_order_ids.insert(key);
+                        } else if let Err(error) = self.save_managed_order(&retained).await {
+                            self.track_provisional_observation(&order);
+                            self.provisional_order_ids.insert(key);
+                            error!(
+                                "Could not persist uncertain canceled order {}: {}",
+                                retained.client_order_id, error
+                            );
+                            self.pause_trading().await;
+                        }
+                        if identity_conflict {
+                            self.persist_identity_observations(
+                                self.client.account_identity_key(),
+                                &symbol,
+                            )
+                            .await;
+                        }
+                        cancellation_failed = true;
+                        continue;
+                    }
+                    if confirmation.is_ok_and(|confirmed| {
+                        matches!(
+                            confirmed.status.as_str(),
+                            "FILLED" | "CANCELED" | "EXPIRED" | "EXPIRED_IN_MATCH" | "REJECTED"
+                        )
+                    }) {
                         warn!("Cancellation response failed for {}, but its terminal state was confirmed", order.client_order_id);
                         continue;
                     }
@@ -3236,12 +3902,15 @@ mod tests {
         orders: Arc<Mutex<HashMap<String, BinanceOrderResponse>>>,
         posts: Arc<Mutex<Vec<String>>>,
         fail_lookup: Arc<AtomicUsize>,
+        filled_zero_lookup: Arc<AtomicUsize>,
         fail_open_orders: Arc<AtomicUsize>,
         fail_cancel: Arc<AtomicUsize>,
         block_cancel: Arc<AtomicUsize>,
         cancel_started: Arc<tokio::sync::Notify>,
         release_cancel: Arc<tokio::sync::Notify>,
         lose_response: Arc<AtomicUsize>,
+        fail_position: Arc<AtomicUsize>,
+        position_calls: Arc<AtomicUsize>,
     }
 
     fn consume_failure(counter: &AtomicUsize) -> bool {
@@ -3266,8 +3935,12 @@ mod tests {
             .route("/fapi/v1/ticker/price", get(|| async {
                 Json(serde_json::json!({"symbol":"SOLUSDC","price":"100","time":0}))
             }))
-            .route("/fapi/v2/positionRisk", get(|| async {
-                Json(serde_json::json!([{"symbol":"SOLUSDC","positionAmt":"0","entryPrice":"0","markPrice":"100","unRealizedProfit":"0","liquidationPrice":"0","leverage":"1"}]))
+            .route("/fapi/v2/positionRisk", get(|State(fake): State<PairExchange>| async move {
+                fake.position_calls.fetch_add(1, Ordering::SeqCst);
+                if consume_failure(&fake.fail_position) {
+                    return (axum::http::StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({})));
+                }
+                (axum::http::StatusCode::OK, Json(serde_json::json!([{"symbol":"SOLUSDC","positionAmt":"0","entryPrice":"0","markPrice":"100","unRealizedProfit":"0","liquidationPrice":"0","leverage":"1"}])))
             }))
             .route("/fapi/v2/account", get(|| async {
                 Json(serde_json::json!({"totalWalletBalance":"10000","totalMarginBalance":"10000","totalUnrealizedProfit":"0","availableBalance":"10000","assets":[{"asset":"USDC","walletBalance":"10000","marginBalance":"10000","availableBalance":"10000","unrealizedProfit":"0"}]}))
@@ -3298,7 +3971,13 @@ mod tests {
                         query.get("orderId").and_then(|id| id.parse::<i64>().ok()).and_then(|id| orders.values().find(|order| order.order_id == id).cloned())
                     };
                     match order {
-                        Some(order) => (axum::http::StatusCode::OK, Json(serde_json::to_value(order).unwrap())),
+                        Some(mut order) => {
+                            if consume_failure(&fake.filled_zero_lookup) {
+                                order.status = "FILLED".into();
+                                order.executed_qty = Decimal::ZERO;
+                            }
+                            (axum::http::StatusCode::OK, Json(serde_json::to_value(order).unwrap()))
+                        },
                         None => (axum::http::StatusCode::BAD_REQUEST, Json(serde_json::json!({"code": -2013, "msg": "Order does not exist"}))),
                     }
                 })
@@ -4244,6 +4923,432 @@ mod tests {
             stored[0].paired_client_order_id,
             intent.paired_client_order_id
         );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn provisional_pair_uses_intent_metadata_for_normal_and_terminal_recovery() {
+        for terminal in [false, true] {
+            let (config, db, intent) = pending_pair_fixture();
+            let fake = PairExchange::default();
+            fake.orders.lock().unwrap().insert(
+                intent.client_order_id.clone(),
+                BinanceOrderResponse {
+                    order_id: 501,
+                    client_order_id: intent.client_order_id.clone(),
+                    symbol: intent.symbol.clone(),
+                    status: if terminal { "FILLED" } else { "NEW" }.into(),
+                    price: intent.price,
+                    avg_price: terminal.then_some(intent.price),
+                    orig_qty: intent.quantity,
+                    executed_qty: if terminal {
+                        intent.quantity
+                    } else {
+                        Decimal::ZERO
+                    },
+                    side: intent.side.as_str().into(),
+                    order_type: "LIMIT".into(),
+                    time_in_force: "GTX".into(),
+                    update_time: None,
+                },
+            );
+            let (url, server) = pair_exchange_server(fake).await;
+            let mut engine = pair_recovery_engine(&config, db.clone(), url).await;
+            let mut placeholder = intent.clone();
+            placeholder.order_id = Some(501);
+            placeholder.paired_client_order_id = None;
+            placeholder.purpose = crate::types::OrderPurpose::Legacy;
+            engine
+                .state
+                .active_orders
+                .write()
+                .await
+                .insert(placeholder.client_order_id.clone(), placeholder);
+            engine.provisional_order_ids.insert((
+                engine.client.account_identity_key(),
+                intent.client_order_id.clone(),
+            ));
+            assert!(engine.sync_live_orders().await);
+            if terminal {
+                let trades = db.get_recent_trades(10).unwrap();
+                let closing = trades
+                    .iter()
+                    .find(|trade| trade.client_order_id == intent.client_order_id)
+                    .unwrap();
+                assert!(closing.note.contains("Completed Grid Cycle"));
+                assert_eq!(
+                    db.load_pair_intents("SOLUSDC", TradingMode::Live)
+                        .unwrap()
+                        .len(),
+                    0
+                );
+            } else {
+                let stored = db.load_managed_orders("SOLUSDC").unwrap();
+                assert_eq!(
+                    stored[0].paired_client_order_id,
+                    intent.paired_client_order_id
+                );
+                assert_eq!(stored[0].purpose, intent.purpose);
+            }
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn bulk_cancel_unknown_pair_preserves_intent_metadata_before_recording_fill() {
+        let (config, db, intent) = pending_pair_fixture();
+        let fake = PairExchange::default();
+        fake.fail_cancel.store(1, Ordering::SeqCst);
+        fake.filled_zero_lookup.store(1, Ordering::SeqCst);
+        fake.orders.lock().unwrap().insert(
+            intent.client_order_id.clone(),
+            BinanceOrderResponse {
+                order_id: 501,
+                client_order_id: intent.client_order_id.clone(),
+                symbol: intent.symbol.clone(),
+                status: "NEW".into(),
+                price: intent.price,
+                avg_price: None,
+                orig_qty: intent.quantity,
+                executed_qty: Decimal::ZERO,
+                side: intent.side.as_str().into(),
+                order_type: "LIMIT".into(),
+                time_in_force: "GTX".into(),
+                update_time: None,
+            },
+        );
+        let (url, server) = pair_exchange_server(fake.clone()).await;
+        let mut engine = pair_recovery_engine(&config, db.clone(), url).await;
+        assert!(!engine.cancel_all_orders().await);
+        let saved = db.load_managed_orders("SOLUSDC").unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(
+            saved[0].paired_client_order_id,
+            intent.paired_client_order_id
+        );
+        assert_eq!(saved[0].purpose, intent.purpose);
+        {
+            let mut orders = fake.orders.lock().unwrap();
+            let order = orders.get_mut(&intent.client_order_id).unwrap();
+            order.status = "FILLED".into();
+            order.executed_qty = order.orig_qty;
+            order.avg_price = Some(order.price);
+        }
+        assert!(engine.sync_live_orders().await);
+        let trades = db.get_recent_trades(10).unwrap();
+        let closing = trades
+            .iter()
+            .find(|trade| trade.client_order_id == intent.client_order_id)
+            .unwrap();
+        assert!(closing.note.contains("Completed Grid Cycle"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn provisional_pair_uses_intent_metadata_before_cancel_retry() {
+        let (config, db, intent) = pending_pair_fixture();
+        let fake = PairExchange::default();
+        fake.fail_cancel.store(1, Ordering::SeqCst);
+        fake.orders.lock().unwrap().insert(
+            intent.client_order_id.clone(),
+            BinanceOrderResponse {
+                order_id: 501,
+                client_order_id: intent.client_order_id.clone(),
+                symbol: intent.symbol.clone(),
+                status: "NEW".into(),
+                price: intent.price,
+                avg_price: None,
+                orig_qty: intent.quantity,
+                executed_qty: Decimal::ZERO,
+                side: intent.side.as_str().into(),
+                order_type: "LIMIT".into(),
+                time_in_force: "GTX".into(),
+                update_time: None,
+            },
+        );
+        let (url, server) = pair_exchange_server(fake).await;
+        let mut engine = pair_recovery_engine(&config, db, url).await;
+        let mut placeholder = intent.clone();
+        placeholder.order_id = Some(501);
+        placeholder.paired_client_order_id = None;
+        placeholder.purpose = OrderPurpose::Legacy;
+        engine
+            .state
+            .active_orders
+            .write()
+            .await
+            .insert(placeholder.client_order_id.clone(), placeholder);
+        engine.provisional_order_ids.insert((
+            engine.client.account_identity_key(),
+            intent.client_order_id.clone(),
+        ));
+        assert!(!engine.cancel_all_orders().await);
+        let active = engine.state.active_orders.read().await;
+        assert_eq!(
+            active[&intent.client_order_id].paired_client_order_id,
+            intent.paired_client_order_id
+        );
+        assert_eq!(active[&intent.client_order_id].purpose, intent.purpose);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn partially_filled_pair_lookup_refreshes_risk_and_preserves_intent_on_failure() {
+        let (config, db, intent) = pending_pair_fixture();
+        let fake = PairExchange::default();
+        fake.orders.lock().unwrap().insert(
+            intent.client_order_id.clone(),
+            BinanceOrderResponse {
+                order_id: 501,
+                client_order_id: intent.client_order_id.clone(),
+                symbol: intent.symbol.clone(),
+                status: "PARTIALLY_FILLED".into(),
+                price: intent.price,
+                avg_price: None,
+                orig_qty: intent.quantity,
+                executed_qty: dec!(0.4),
+                side: intent.side.as_str().into(),
+                order_type: "LIMIT".into(),
+                time_in_force: "GTX".into(),
+                update_time: None,
+            },
+        );
+        let (url, server) = pair_exchange_server(fake.clone()).await;
+        let mut engine = pair_recovery_engine(&config, db.clone(), url).await;
+        engine
+            .position_cache
+            .get(&engine.client, "SOLUSDC")
+            .await
+            .unwrap();
+        engine.account_cache.get(&engine.client).await.unwrap();
+        fake.fail_position.store(1, Ordering::SeqCst);
+        assert!(
+            !engine
+                .drain_pair_intents("SOLUSDC", TradingMode::Live)
+                .await
+        );
+        assert_eq!(
+            engine.state.active_orders.read().await[&intent.client_order_id].quantity,
+            dec!(1)
+        );
+        assert_eq!(
+            db.load_managed_orders("SOLUSDC").unwrap()[0].quantity,
+            dec!(1)
+        );
+        assert_eq!(
+            db.load_pair_intents("SOLUSDC", TradingMode::Live)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(engine.last_account_sync.is_none());
+
+        assert!(
+            engine
+                .drain_pair_intents("SOLUSDC", TradingMode::Live)
+                .await
+        );
+        assert_eq!(
+            engine.state.active_orders.read().await[&intent.client_order_id].quantity,
+            dec!(0.6)
+        );
+        assert_eq!(engine.state.position.read().await.size, dec!(0));
+        assert_eq!(fake.position_calls.load(Ordering::SeqCst), 3);
+        assert!(db
+            .load_pair_intents("SOLUSDC", TradingMode::Live)
+            .unwrap()
+            .is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn conflicting_intent_and_remainder_identities_survive_failed_managed_read_and_restart() {
+        for remainder in [false, true] {
+            let (config, seed_db, mut intent) = pending_pair_fixture();
+            intent.order_id = Some(123);
+            let path = std::env::temp_dir()
+                .join(format!("identity-observation-{}.db", uuid::Uuid::new_v4()));
+            let db = Arc::new(Database::open(&path).unwrap());
+            db.save_bot_status(BotStatus::Running).unwrap();
+            let trade = seed_db.get_recent_trades(10).unwrap().remove(0);
+            if remainder {
+                db.insert_trade(&trade).unwrap();
+                intent.purpose = OrderPurpose::Remainder;
+                db.save_remainder_plan(&crate::types::RemainderPlan {
+                    symbol: "SOLUSDC".into(),
+                    mode: TradingMode::Live,
+                    sources: Vec::new(),
+                    target: intent.clone(),
+                    phase: crate::types::RemainderPhase::Submitting,
+                })
+                .unwrap();
+            } else {
+                db.insert_trade_with_recovery(&trade, &GridStats::default(), Some(&intent), None)
+                    .unwrap();
+            }
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            connection.execute("INSERT INTO managed_orders(client_order_id,symbol,order_json,updated_at) VALUES ('gb_corrupt','SOLUSDC','invalid','0')", []).unwrap();
+            let stage = Arc::new(AtomicUsize::new(0));
+            let seen = Arc::new(Mutex::new(Vec::<i64>::new()));
+            let client_id = intent.client_order_id.clone();
+            let app = Router::new()
+                .route("/fapi/v1/openOrders", get({
+                    let stage = stage.clone(); let client_id = client_id.clone();
+                    move || { let stage = stage.clone(); let client_id = client_id.clone(); async move {
+                        if stage.load(Ordering::SeqCst) > 0 { return Json(serde_json::json!([])); }
+                        Json(serde_json::json!([{"orderId":456,"clientOrderId":client_id,"symbol":"SOLUSDC",
+                            "status":"FILLED","price":"101","origQty":"1","executedQty":"0",
+                            "side":"SELL","type":"LIMIT","timeInForce":"GTX"}]))
+                    }}
+                }))
+                .route("/fapi/v1/order", get({
+                    let stage = stage.clone(); let seen = seen.clone(); let client_id = client_id.clone();
+                    move |Query(query): Query<HashMap<String, String>>| {
+                        let stage = stage.clone(); let seen = seen.clone(); let client_id = client_id.clone();
+                        async move {
+                            let id = query.get("orderId").and_then(|value| value.parse::<i64>().ok()).unwrap_or(123);
+                            seen.lock().unwrap().push(id);
+                            if id == 123 && stage.load(Ordering::SeqCst) == 2 {
+                                return (axum::http::StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({})));
+                            }
+                            let status = if id == 456 && stage.load(Ordering::SeqCst) == 1 { "FILLED" } else { "CANCELED" };
+                            (axum::http::StatusCode::OK, Json(serde_json::json!({"orderId":id,"clientOrderId":client_id,"symbol":"SOLUSDC",
+                                "status":status,"price":"101","origQty":"1","executedQty":"0",
+                                "side":"SELL","type":"LIMIT","timeInForce":"GTX"})))
+                        }
+                    }
+                }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let mut first = pair_recovery_engine(&config, db.clone(), url.clone()).await;
+            assert!(!first.sync_live_orders().await);
+            assert_eq!(
+                first.state.active_orders.read().await[&intent.client_order_id].order_id,
+                Some(123)
+            );
+            let account = first.client.account_identity_key();
+            let key = (account, intent.client_order_id.clone());
+            assert_eq!(first.order_identity_observations[&key][0].order_id, 456);
+            assert_eq!(
+                db.load_identity_observations(account, "SOLUSDC")
+                    .unwrap()
+                    .len(),
+                1
+            );
+            connection
+                .execute(
+                    "DELETE FROM managed_orders WHERE client_order_id='gb_corrupt'",
+                    [],
+                )
+                .unwrap();
+            drop(first);
+            let mut changed_config = config.clone();
+            changed_config.exchange.recv_window += 1000;
+            stage.store(1, Ordering::SeqCst);
+            let mut restarted =
+                pair_recovery_engine(&changed_config, db.clone(), url.clone()).await;
+            assert_eq!(restarted.client.account_identity_key(), account);
+            assert!(!restarted.sync_live_orders().await);
+            assert_eq!(
+                restarted.state.active_orders.read().await[&intent.client_order_id].order_id,
+                Some(123)
+            );
+            assert!(seen.lock().unwrap().contains(&456));
+            stage.store(2, Ordering::SeqCst);
+            assert!(!restarted.sync_live_orders().await);
+            assert_eq!(
+                db.load_identity_observations(account, "SOLUSDC")
+                    .unwrap()
+                    .len(),
+                1
+            );
+            drop(restarted);
+            stage.store(3, Ordering::SeqCst);
+            let mut restarted = pair_recovery_engine(&changed_config, db.clone(), url).await;
+            assert!(restarted.sync_live_orders().await);
+            assert!(seen.lock().unwrap().contains(&123));
+            assert!(db
+                .load_identity_observations(account, "SOLUSDC")
+                .unwrap()
+                .is_empty());
+            server.abort();
+            drop(connection);
+            drop(restarted);
+            drop(db);
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[tokio::test]
+    async fn filled_pair_with_zero_quantity_preserves_intent_until_cancel_confirmed() {
+        let (config, db, intent) = pending_pair_fixture();
+        let fake = PairExchange::default();
+        fake.orders.lock().unwrap().insert(
+            intent.client_order_id.clone(),
+            BinanceOrderResponse {
+                order_id: 501,
+                client_order_id: intent.client_order_id.clone(),
+                symbol: intent.symbol.clone(),
+                status: "FILLED".into(),
+                price: intent.price,
+                avg_price: None,
+                orig_qty: intent.quantity,
+                executed_qty: Decimal::ZERO,
+                side: intent.side.as_str().into(),
+                order_type: "LIMIT".into(),
+                time_in_force: "GTX".into(),
+                update_time: None,
+            },
+        );
+        let (url, server) = pair_exchange_server(fake.clone()).await;
+        let mut engine = pair_recovery_engine(&config, db.clone(), url).await;
+        let state = engine.state.clone();
+        state.global_position_ready.store(true, Ordering::SeqCst);
+        let guard = state.active_orders.write().await;
+        let task = tokio::spawn(async move {
+            let ok = engine
+                .drain_pair_intents("SOLUSDC", TradingMode::Live)
+                .await;
+            (engine, ok)
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while state.global_position_ready.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(guard);
+        let (mut engine, ok) = task.await.unwrap();
+        assert!(!ok);
+        assert_eq!(
+            engine.state.active_orders.read().await[&intent.client_order_id].quantity,
+            intent.quantity
+        );
+        assert_eq!(
+            db.load_pair_intents("SOLUSDC", TradingMode::Live)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(db.load_managed_orders("SOLUSDC").unwrap().len(), 1);
+        fake.orders
+            .lock()
+            .unwrap()
+            .get_mut(&intent.client_order_id)
+            .unwrap()
+            .status = "CANCELED".into();
+        assert!(
+            engine
+                .drain_pair_intents("SOLUSDC", TradingMode::Live)
+                .await
+        );
+        assert!(db
+            .load_pair_intents("SOLUSDC", TradingMode::Live)
+            .unwrap()
+            .is_empty());
+        assert!(db.load_managed_orders("SOLUSDC").unwrap().is_empty());
         server.abort();
     }
 

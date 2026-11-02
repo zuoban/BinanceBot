@@ -174,7 +174,7 @@ it('requires a position limit when pause is enabled and allows clearing it when 
   await user.click(screen.getByRole('button', { name: '保存并添加' }));
   expect(await screen.findByText('暂停策略需要大于 0 的持仓上限')).toBeInTheDocument();
   expect(mocks.post).not.toHaveBeenCalled();
-  await user.click(screen.getByRole('switch', { name: '达到持仓上限时' }));
+  await user.click(screen.getByRole('switch', { name: '持仓上限处理方式' }));
   await user.click(screen.getByRole('button', { name: '保存并添加' }));
   await waitFor(() => expect(mocks.post).toHaveBeenCalledWith('/api/pairs', expect.objectContaining({
     max_position_usdc: null, pause_on_max_position: false,

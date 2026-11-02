@@ -309,6 +309,17 @@ impl BinanceFuturesClient {
         hash.finalize().into()
     }
 
+    // Recovery records belong to the exchange account, independent of request
+    // timing settings or changes to the API secret for the same API key.
+    pub(crate) fn account_identity_key(&self) -> [u8; 32] {
+        let mut hash = Sha256::new();
+        for value in [self.base_url.as_bytes(), self._api_key.as_bytes()] {
+            hash.update((value.len() as u64).to_be_bytes());
+            hash.update(value);
+        }
+        hash.finalize().into()
+    }
+
     fn rate_account_key(&self) -> [u8; 32] {
         Sha256::digest(self._api_key.as_bytes()).into()
     }
@@ -946,7 +957,18 @@ impl BinanceFuturesClient {
 
     /// Fetch account balance summary
     pub async fn get_account(&self) -> Result<BinanceAccountInfoResponse> {
-        self.reserve(5, RequestClass::Normal)?;
+        self.get_account_with_class(RequestClass::Normal).await
+    }
+
+    pub(crate) async fn get_account_critical(&self) -> Result<BinanceAccountInfoResponse> {
+        self.get_account_with_class(RequestClass::Critical).await
+    }
+
+    async fn get_account_with_class(
+        &self,
+        class: RequestClass,
+    ) -> Result<BinanceAccountInfoResponse> {
+        self.reserve(5, class)?;
         let ts = self.current_timestamp();
         let query = format!("recvWindow={}&timestamp={}", self.recv_window, ts);
         let signed_query = self.sign_params(&query);

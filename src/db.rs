@@ -656,6 +656,17 @@ impl Database {
             );
             CREATE INDEX IF NOT EXISTS idx_managed_orders_symbol ON managed_orders (symbol);
 
+            CREATE TABLE IF NOT EXISTS order_identity_observations (
+                account_key BLOB NOT NULL,
+                client_order_id TEXT NOT NULL,
+                expected_symbol TEXT NOT NULL,
+                observed_symbol TEXT NOT NULL,
+                observed_order_id INTEGER NOT NULL,
+                expected_json TEXT NOT NULL,
+                observed_json TEXT NOT NULL,
+                PRIMARY KEY (account_key, client_order_id, observed_symbol, observed_order_id)
+            );
+
             CREATE TABLE IF NOT EXISTS pair_intents (
                 parent_client_order_id TEXT PRIMARY KEY,
                 symbol TEXT NOT NULL,
@@ -1250,6 +1261,79 @@ impl Database {
             orders.push(serde_json::from_str(&row?)?);
         }
         Ok(orders)
+    }
+
+    pub(crate) fn save_identity_observations(
+        &self,
+        account: [u8; 32],
+        records: &[(GridOrder, crate::types::ObservedOrderIdentity)],
+    ) -> Result<()> {
+        let mut conn = self.lock_reconciliation_connection("save_identity_observations");
+        let tx = conn.transaction()?;
+        {
+            let mut statement = tx.prepare(
+                "INSERT INTO order_identity_observations (account_key, client_order_id, expected_symbol, observed_symbol, observed_order_id, expected_json, observed_json) VALUES (?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(account_key,client_order_id,observed_symbol,observed_order_id) DO UPDATE SET expected_symbol=excluded.expected_symbol, expected_json=excluded.expected_json, observed_json=excluded.observed_json"
+            )?;
+            for (expected, observed) in records {
+                statement.execute(params![
+                    &account[..],
+                    expected.client_order_id,
+                    expected.symbol,
+                    observed.symbol,
+                    observed.order_id,
+                    serde_json::to_string(expected)?,
+                    serde_json::to_string(observed)?
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn save_identity_observation(
+        &self,
+        account: [u8; 32],
+        expected: &GridOrder,
+        observed: &crate::types::ObservedOrderIdentity,
+    ) -> Result<()> {
+        self.save_identity_observations(account, &[(expected.clone(), observed.clone())])
+    }
+
+    pub(crate) fn load_identity_observations(
+        &self,
+        account: [u8; 32],
+        symbol: &str,
+    ) -> Result<Vec<(GridOrder, crate::types::ObservedOrderIdentity)>> {
+        let conn = self.lock_reconciliation_connection("load_identity_observations");
+        let mut stmt = conn.prepare("SELECT expected_json, observed_json FROM order_identity_observations WHERE account_key=?1 AND expected_symbol=?2")?;
+        let rows = stmt.query_map(params![&account[..], symbol], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut observations = Vec::new();
+        for row in rows {
+            let (expected, observed) = row?;
+            observations.push((
+                serde_json::from_str(&expected)?,
+                serde_json::from_str(&observed)?,
+            ));
+        }
+        Ok(observations)
+    }
+
+    pub(crate) fn delete_identity_observation_groups(
+        &self,
+        account: [u8; 32],
+        symbol: &str,
+        client_ids: &[String],
+    ) -> Result<()> {
+        let mut conn = self.lock_reconciliation_connection("delete_identity_observation_groups");
+        let tx = conn.transaction()?;
+        for id in client_ids {
+            tx.execute("DELETE FROM order_identity_observations WHERE account_key=?1 AND expected_symbol=?2 AND client_order_id=?3", params![&account[..], symbol, id])?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn delete_managed_order(&self, client_order_id: &str) -> Result<()> {

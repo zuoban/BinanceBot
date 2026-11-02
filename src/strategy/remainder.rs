@@ -432,6 +432,49 @@ impl GridTradingEngine {
         mut order: GridOrder,
         found: BinanceOrderResponse,
     ) -> Result<()> {
+        let inconsistent_fill = unresolved_filled_quantity(&found);
+        if inconsistent_fill {
+            self.last_orders_sync = None;
+            self.report_reconciliation_state(true).await;
+            self.account_cache.invalidate(&self.client).await;
+            self.position_cache.invalidate(&self.client).await;
+            self.last_account_sync = None;
+        }
+        let active = self
+            .state
+            .active_orders
+            .read()
+            .await
+            .get(&order.client_order_id)
+            .cloned();
+        let trusted = if order.order_id.is_some() {
+            order.clone()
+        } else {
+            active
+                .filter(|item| item.order_id.is_some())
+                .unwrap_or_else(|| order.clone())
+        };
+        let id_conflict = trusted.order_id.is_some_and(|id| id != found.order_id);
+        if id_conflict {
+            if !inconsistent_fill {
+                self.last_orders_sync = None;
+                self.report_reconciliation_state(true).await;
+                self.account_cache.invalidate(&self.client).await;
+                self.position_cache.invalidate(&self.client).await;
+                self.last_account_sync = None;
+            }
+            self.track_identity_conflict(&trusted, &found);
+            self.state
+                .active_orders
+                .write()
+                .await
+                .insert(trusted.client_order_id.clone(), trusted.clone());
+            self.persist_identity_observations(self.client.account_identity_key(), &trusted.symbol)
+                .await;
+            return Err(anyhow!(
+                "Remainder exchange order ID conflicts with recovery metadata"
+            ));
+        }
         if found.client_order_id != order.client_order_id
             || found.symbol != order.symbol
             || found.side != order.side.as_str()
@@ -439,6 +482,22 @@ impl GridTradingEngine {
             return Err(anyhow!("Remainder exchange identity mismatch"));
         }
         order.order_id = Some(found.order_id);
+        if inconsistent_fill {
+            order.quantity = order.quantity.max(found.orig_qty);
+            order.amount_usdc = order.price * order.quantity;
+            self.state
+                .active_orders
+                .write()
+                .await
+                .entry(order.client_order_id.clone())
+                .or_insert(order.clone());
+            let saved = self.save_managed_order(&order).await;
+            if let Err(error) = saved {
+                self.pause_trading().await;
+                return Err(error);
+            }
+            return Err(anyhow!("Remainder fill quantity remains unresolved"));
+        }
         if terminal(&found.status) {
             if found.executed_qty > Decimal::ZERO {
                 order.updated_at = exchange_fill_time(&found);
@@ -460,6 +519,14 @@ impl GridTradingEngine {
                     .remove(&order.client_order_id);
             }
         } else {
+            if !self.prepare_partial_adoption(&mut order, &found).await {
+                return Err(anyhow!(
+                    "Could not refresh risk data for partially filled remainder"
+                ));
+            }
+            let mut original = order.clone();
+            original.quantity = original.quantity.max(found.orig_qty);
+            original.amount_usdc = original.price * original.quantity;
             order.price = found.price;
             order.quantity = (found.orig_qty - found.executed_qty).max(Decimal::ZERO);
             order.amount_usdc = order.price * order.quantity;
@@ -468,12 +535,33 @@ impl GridTradingEngine {
             } else {
                 OrderStatus::New
             };
-            self.save_managed_order(&order).await?;
+            if let Err(error) = self.save_managed_order(&order).await {
+                self.state
+                    .active_orders
+                    .write()
+                    .await
+                    .entry(original.client_order_id.clone())
+                    .or_insert(original);
+                self.last_orders_sync = None;
+                self.report_reconciliation_state(true).await;
+                self.pause_trading().await;
+                return Err(error);
+            }
             self.state
                 .active_orders
                 .write()
                 .await
                 .insert(order.client_order_id.clone(), order);
+            if found.executed_qty > Decimal::ZERO {
+                if let Some(global) = self
+                    .state
+                    .global_position_limit
+                    .get()
+                    .and_then(std::sync::Weak::upgrade)
+                {
+                    global.check().await;
+                }
+            }
         }
         Ok(())
     }

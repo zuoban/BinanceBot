@@ -19,7 +19,7 @@ export default function PairDetail() {
   const query = usePairSnapshot(pair);
   const controls = useControls();
   const s = query.data, asset = quoteAsset(symbol ?? '');
-  const account = s && accountGroups([{ snapshot: s, mode: pair!.mode, scoped: pair!.scoped }])[0];
+  const account = s && accountGroups([{ snapshot: s, mode: pair!.mode, scoped: pair!.scoped, account_observation_stale: query.stale }])[0];
   const today = s ? todayTradeCounts(s) : null;
   useDocumentTitle(`${s && Number(s.ticker.mark_price) > 0 ? price(s.ticker.mark_price) : '--'} | ${today?.buy ?? '--'}B | ${today?.sell ?? '--'}S`);
   const todayPnl = today && s?.hourly_trade_stats && s.hourly_trade_stats.pending_pnl_count === 0 ? s.hourly_trade_stats.realized_pnl : null;
@@ -64,7 +64,7 @@ export default function PairDetail() {
             { key: 'trades', label: '累计成交', children: s.stats.total_trades },
             { key: 'pending', label: '待核实盈亏', children: `${s.stats.pending_pnl_trades} 笔` },
             { key: 'volume', label: '累计成交额', children: `${number(s.stats.total_volume_usdc)} ${asset}` },
-            { key: 'available', label: '可用保证金比例', children: account?.equity && account.available !== null ? `${number(account.available / account.equity * 100)}%` : '--' },
+            { key: 'available', label: '可用比例（按钱包余额）', children: account?.ratio != null ? `${number(account.ratio)}%` : '--' },
           ]} /></Card>
         </> },
         { key: 'orders', label: `挂单 (${s.active_orders.length})`, children: <Card><OrdersTable orders={s.active_orders} mark={s.ticker.mark_price} /></Card> },

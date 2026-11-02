@@ -541,7 +541,16 @@ async fn account_snapshot_matches_full_snapshot_without_chart_queries() {
             config.exchange.dry_run = dry_run;
             config.exchange.is_testnet = is_testnet;
         }
-        state.position.write().await.unrealized_pnl = dec!(-12.34);
+        {
+            let mut ticker = state.ticker.write().await;
+            ticker.mark_price = dec!(123.45);
+            ticker.mark_update_time = test_time();
+        }
+        {
+            let mut position = state.position.write().await;
+            position.size = dec!(-2.5);
+            position.unrealized_pnl = dec!(-12.34);
+        }
         state.account.write().await.available_balance = dec!(567.89);
         let queries = state.db.hourly_stats_query_count();
         let account = serde_json::to_value(state.account_snapshot().await).unwrap();
@@ -555,7 +564,14 @@ async fn account_snapshot_matches_full_snapshot_without_chart_queries() {
                     "symbol": full.symbol,
                     "dry_run": full.dry_run,
                     "grid_config": { "is_testnet": full.grid_config.is_testnet },
-                    "position": { "unrealized_pnl": full.position.unrealized_pnl },
+                    "ticker": {
+                        "mark_price": full.ticker.mark_price,
+                        "mark_update_time": full.ticker.mark_update_time,
+                    },
+                    "position": {
+                        "size": full.position.size,
+                        "unrealized_pnl": full.position.unrealized_pnl,
+                    },
                     "account": full.account,
                 }
             })

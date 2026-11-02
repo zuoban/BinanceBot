@@ -25,6 +25,7 @@ struct AccountSnapshotData {
     symbol: String,
     dry_run: bool,
     grid_config: AccountGridConfig,
+    ticker: AccountTicker,
     position: AccountPosition,
     account: AccountInfo,
 }
@@ -35,7 +36,14 @@ struct AccountGridConfig {
 }
 
 #[derive(Serialize)]
+struct AccountTicker {
+    mark_price: Decimal,
+    mark_update_time: DateTime<Utc>,
+}
+
+#[derive(Serialize)]
 struct AccountPosition {
+    size: Decimal,
     unrealized_pnl: Decimal,
 }
 
@@ -156,7 +164,20 @@ impl AppState {
         let _scope = self.snapshot_scope_lock.read().await;
         let _commit = self.trade_commit_lock.lock().await;
         let config = self.config.read().await;
-        let unrealized_pnl = self.position.read().await.unrealized_pnl;
+        let ticker = {
+            let ticker = self.ticker.read().await;
+            AccountTicker {
+                mark_price: ticker.mark_price,
+                mark_update_time: ticker.mark_update_time,
+            }
+        };
+        let position = {
+            let position = self.position.read().await;
+            AccountPosition {
+                size: position.size,
+                unrealized_pnl: position.unrealized_pnl,
+            }
+        };
         let account = self.account.read().await.clone();
         AccountSnapshot {
             mode: TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet),
@@ -166,7 +187,8 @@ impl AppState {
                 grid_config: AccountGridConfig {
                     is_testnet: config.exchange.is_testnet,
                 },
-                position: AccountPosition { unrealized_pnl },
+                ticker,
+                position,
                 account,
             },
         }

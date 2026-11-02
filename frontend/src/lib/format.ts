@@ -79,24 +79,43 @@ export function availableRatio(available: number | null, wallet: number | null):
 }
 
 export function accountGroups(entries: Overview['pairs'], now = Date.now()) {
-  const groups = new Map<string, { mode: Mode; asset: string; snapshots: Snapshot[] }>();
-  for (const { snapshot: s } of entries) {
+  const groups = new Map<string, { mode: Mode; asset: string; snapshots: Snapshot[]; observed: Snapshot[]; observationStale: boolean }>();
+  for (const { snapshot: s, account_observation_stale } of entries) {
     const mode = modeOf(s), asset = s.account.asset || quoteAsset(s.symbol), key = `${mode}:${asset}`;
-    const group = groups.get(key) ?? { mode, asset, snapshots: [] };
-    group.snapshots.push(s); groups.set(key, group);
+    const group = groups.get(key) ?? { mode, asset, snapshots: [], observed: [], observationStale: false };
+    group.snapshots.push(s);
+    if (!account_observation_stale) group.observed.push(s);
+    group.observationStale ||= !!account_observation_stale;
+    groups.set(key, group);
   }
-  return [...groups.values()].map(({ mode, asset, snapshots }) => {
-    const latest = [...snapshots].sort((a, b) => Date.parse(b.account.update_time) - Date.parse(a.account.update_time))[0];
-    const fresh = mode === 'PAPER' || now - Date.parse(latest.account.update_time) < 30_000;
+  return [...groups.values()].map(({ mode, asset, snapshots, observed, observationStale }) => {
+    // Exchange timestamps can lead the browser clock slightly.
+    const recent = (timestamp: string, maxAge: number) => {
+      const age = now - Date.parse(timestamp);
+      return age >= -5_000 && age < maxAge;
+    };
+    const latest = [...observed].filter(s => recent(s.account.update_time, 30_000))
+      .sort((a, b) => Date.parse(b.account.update_time) - Date.parse(a.account.update_time))[0];
+    const fresh = !!latest;
+    const account = latest ?? snapshots[0];
+    const unavailable = mode === 'PAPER' ? observationStale : !fresh;
+    // Paper wallet balances are local ledger state; open positions also need a
+    // recent valuation and a recent mark price to make equity meaningful.
+    const paperValued = snapshots.every(s => {
+      const size = numeric(s.position.size);
+      if (size === null) return false;
+      if (size === 0) return true;
+      return recent(s.account.update_time, 30_000) && recent(s.ticker.mark_update_time, 15_000) && (numeric(s.ticker.mark_price) ?? 0) > 0;
+    });
     const sum = (values: (number | null)[]) => values.every(v => v !== null) ? values.reduce<number>((a, b) => a + b!, 0) : null;
-    const equity = mode === 'PAPER' ? sum(snapshots.map(s => {
+    const equity = mode === 'PAPER' ? paperValued ? sum(snapshots.map(s => {
       const wallet = numeric(s.account.total_wallet_balance), pnl = numeric(s.position.unrealized_pnl);
       return wallet === null || pnl === null ? null : wallet + pnl;
-    })) : fresh ? numeric(latest.account.margin_balance) : null;
-    const available = mode === 'PAPER' ? sum(snapshots.map(s => numeric(s.account.available_balance))) : fresh ? numeric(latest.account.available_balance) : null;
-    const wallet = mode === 'PAPER' ? sum(snapshots.map(s => numeric(s.account.total_wallet_balance))) : fresh ? numeric(latest.account.total_wallet_balance) : null;
-    const unrealized = mode === 'PAPER' ? sum(snapshots.map(s => numeric(s.position.unrealized_pnl))) : fresh ? numeric(latest.account.unrealized_profit) : null;
-    const rate = latest.account_cny_rate?.asset === asset ? numeric(latest.account_cny_rate.cny_per_unit) : null;
-    return { key: `${mode}:${asset}`, mode, asset, count: snapshots.length, equity, available, wallet, unrealized, ratio: availableRatio(available, wallet), cny: equity !== null && rate !== null ? equity * rate : null };
+    })) : null : fresh ? numeric(account.account.margin_balance) : null;
+    const available = mode === 'PAPER' ? paperValued ? sum(snapshots.map(s => numeric(s.account.available_balance))) : null : fresh ? numeric(account.account.available_balance) : null;
+    const wallet = mode === 'PAPER' ? sum(snapshots.map(s => numeric(s.account.total_wallet_balance))) : fresh ? numeric(account.account.total_wallet_balance) : null;
+    const unrealized = mode === 'PAPER' ? paperValued ? sum(snapshots.map(s => numeric(s.position.unrealized_pnl))) : null : fresh ? numeric(account.account.unrealized_profit) : null;
+    const rate = account.account_cny_rate?.asset === asset ? numeric(account.account_cny_rate.cny_per_unit) : null;
+    return { key: `${mode}:${asset}`, mode, asset, count: snapshots.length, equity: unavailable ? null : equity, available: unavailable ? null : available, wallet: unavailable ? null : wallet, unrealized: unavailable ? null : unrealized, ratio: unavailable ? null : availableRatio(available, wallet), cny: !unavailable && equity !== null && rate !== null ? equity * rate : null };
   });
 }

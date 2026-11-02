@@ -14,7 +14,7 @@ export default function Shell() {
   const navigate = useNavigate(), location = useLocation();
   const pairs = usePairs();
   const overview = useOverview();
-  const accounts = useLiveAccounts(overview.data);
+  const accounts = useLiveAccounts(overview.data, overview.dataUpdatedAt);
   const [dirty, setDirty] = useState(false), [saving, setSaving] = useState(false);
   const { modal, message } = App.useApp();
   const { logout } = useSession();

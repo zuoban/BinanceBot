@@ -2600,7 +2600,10 @@ mod tests {
             let snapshot = &first["data"]["pairs"][0]["snapshot"];
             assert_eq!(snapshot["grid_config"].as_object().unwrap().len(), 1);
             assert!(snapshot["grid_config"]["is_testnet"].is_boolean());
-            assert_eq!(snapshot.as_object().unwrap().len(), 5);
+            assert_eq!(snapshot.as_object().unwrap().len(), 6);
+            assert!(snapshot["ticker"]["mark_update_time"].is_string());
+            assert!(snapshot["ticker"]["mark_price"].is_string());
+            assert!(snapshot["position"]["size"].is_string());
             state.account.write().await.available_balance = rust_decimal_macros::dec!(1234);
             let updated = tokio::time::timeout(std::time::Duration::from_secs(3), socket.next())
                 .await

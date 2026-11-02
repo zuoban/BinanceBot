@@ -143,7 +143,7 @@ export default function PairConfig() {
       </Card>
       <Card title="仓位限制" className="form-card"><Row gutter={20}>
           <Col xs={24} md={12}><Form.Item name="max_position_usdc" label="最大持仓名义价值" extra="留空表示不设置；选择暂停策略时须填写大于 0 的上限。" dependencies={['pause_on_max_position']} rules={[({ getFieldValue }) => ({ validator: (_, value) => !getFieldValue('pause_on_max_position') || (value != null && value !== '' && Number(value) > 0) ? Promise.resolve() : Promise.reject(new Error('暂停策略需要大于 0 的持仓上限')) })]}><InputNumber stringMode min="0" style={{ width: '100%' }} /></Form.Item></Col>
-          <Col xs={24} md={12}><Form.Item name="pause_on_max_position" label="达到持仓上限时" extra="限制开仓会保留平仓订单；暂停策略会撤销机器人挂单。" valuePropName="checked"><Switch checkedChildren="暂停策略" unCheckedChildren="限制开仓" /></Form.Item></Col>
+          <Col xs={24} md={12}><Form.Item name="pause_on_max_position" label="持仓上限处理方式" extra="限制开仓会保留平仓订单；选择暂停策略时，当前持仓名义价值达到上限，或下一笔完整开仓单成交后预计超过上限，会暂停策略并尝试撤销机器人挂单，需手动恢复。撤单可能失败，请检查交易所挂单。仅挂单占用额度不会触发暂停。" valuePropName="checked"><Switch checkedChildren="暂停策略" unCheckedChildren="限制开仓" /></Form.Item></Col>
         </Row>
       </Card>
       <Card title="价格范围与订单" className="form-card"><Row gutter={20}>
