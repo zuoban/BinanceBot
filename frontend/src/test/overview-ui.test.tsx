@@ -72,6 +72,14 @@ it.each(['loading', 'error'])('keeps the add link available during initial %s', 
   expect(screen.getAllByRole('link', { name: /新增交易对/ })).toHaveLength(1);
 });
 
+it('places the add link in the strategy skeleton while loading', () => {
+  overview.isPending = true;
+  render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+  const loading = screen.getByRole('status', { name: '正在同步策略数据' });
+  expect(within(loading).getByRole('link', { name: /新增交易对/ })).toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: '策略运行概览' }).parentElement).not.toContainElement(screen.getByRole('link', { name: /新增交易对/ }));
+});
+
 it('keeps both add links available when there are no strategies', () => {
   overview.data = { generated_at: new Date().toISOString(), pairs: [] };
   overview.isPending = false;

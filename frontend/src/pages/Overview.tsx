@@ -85,7 +85,7 @@ export default function OverviewPage() {
   const today = counts.every(c => c !== null) ? counts.reduce<{ buy: number; sell: number }>((sum, c) => ({ buy: sum.buy + c!.buy, sell: sum.sell + c!.sell }), { buy: 0, sell: 0 }) : null;
   const pnlGroups = todayPnlGroups(overview.data?.today_pnl);
   return <>
-    <div className="section-heading"><h2>策略运行概览</h2>{!overview.data && addPairLink}</div>
+    <div className="section-heading"><h2>策略运行概览</h2></div>
     <ErrorNotice error={overview.error} retry={() => void overview.refetch()} />
     <div className="overview-banner" aria-label="策略运行概览">
       {stale && <div className="overview-summary"><span className="sync-warning">数据暂未更新，请检查连接</span></div>}
@@ -103,7 +103,7 @@ export default function OverviewPage() {
         <div className="overview-trade-breakdown"><span>买单 {overview.data && today ? today.buy : '--'} 笔 / 卖单 {overview.data && today ? today.sell : '--'} 笔</span>{overview.data && <span className="overview-status-links"><span>已暂停 {pairs.filter(p => p.status === 'PAUSED').length}</span><span>异常 {pairs.filter(p => p.status === 'ERROR').length}</span></span>}</div>
       </div>
     </div>
-    {overview.isPending && !overview.data ? <OverviewLoading /> : overview.data && <>
+    {overview.isPending && !overview.data ? <OverviewLoading addPairLink={addPairLink} /> : !overview.data ? <section className="strategies-section" aria-labelledby="strategies-heading"><div className="section-heading"><h2 id="strategies-heading">交易策略</h2>{addPairLink}</div></section> : <>
     <div className="overview-finances">
     <section className="overview-finance-group" aria-labelledby="accounts-heading">
     <div className="section-heading"><h2 id="accounts-heading">账户概览</h2></div>

@@ -1,3 +1,5 @@
+import type { ReactNode } from 'react';
+
 export function LoadingScreen({ label = '正在准备工作台' }: { label?: string }) {
   return <div className="loading-screen" role="status" aria-live="polite">
     <div className="loading-brand"><img className="brand-symbol" src="/logo.svg" alt="" /><span>GRID CONSOLE<small>STRATEGY WORKSPACE</small></span></div>
@@ -43,11 +45,11 @@ export function OverviewPageLoading() {
 }
 
 
-export function OverviewLoading() {
+export function OverviewLoading({ addPairLink }: { addPairLink?: ReactNode }) {
   return <div className="overview-placeholder" role="status" aria-label="正在同步策略数据">
     <div className="skeleton-section-heading"><SkeletonLine width="110px" /></div>
     <div className="skeleton-grid skeleton-grid-finances">{[0, 1].map(item => <SkeletonCard key={item} variant="strategy" />)}</div>
-    <div className="skeleton-section-heading"><SkeletonLine width="110px" /><SkeletonLine width="112px" /></div>
+    <div className="skeleton-section-heading"><SkeletonLine width="110px" />{addPairLink ?? <SkeletonLine width="112px" />}</div>
     <div className="skeleton-filters"><SkeletonLine width="180px" /><SkeletonLine width="140px" /></div>
     <div className="skeleton-grid skeleton-grid-strategies">{[0, 1, 2].map(item => <SkeletonCard key={item} variant="strategy" />)}</div>
     <span className="sr-only">正在同步策略数据</span>
