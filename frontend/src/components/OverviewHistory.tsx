@@ -1,21 +1,13 @@
-import { useState } from 'react';
+import { Suspense, lazy, useState } from 'react';
 import { Card, Select } from 'antd';
-import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { useOverviewHistory } from '../lib/queries';
 import { modeLabel, number, trimFractionZeros } from '../lib/format';
 import type { Mode } from '../lib/types';
+import { LoadErrorBoundary } from './LoadErrorBoundary';
 
+const OverviewHistoryChart = lazy(() => import('./OverviewHistoryChart'));
 const formatValue = (value: unknown) => trimFractionZeros(number(value));
-const formatHour = (hour: number) => new Date(hour * 1000).toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hour12: false });
 const formatDate = (hour: number) => new Date(hour * 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
-const axisValue = (value: number) => Math.abs(value) >= 10000 ? `${(value / 10000).toLocaleString('en-US', { maximumFractionDigits: 4 })}万` : formatValue(value);
-
-type HistoryPoint = { hour: number; equity: number | null };
-function HistoryDot({ cx, cy, payload, stroke, index, data }: { cx?: number; cy?: number; payload?: { hour: number }; stroke?: string; index?: number; data: HistoryPoint[] }) {
-  if (cx == null || cy == null || !payload || (index != null && data[index]?.equity == null)) return null;
-  const isolated = index != null && data[index - 1]?.equity == null && data[index + 1]?.equity == null;
-  return <circle cx={cx} cy={cy} r={2} fill={stroke} className={payload.hour % (4 * 3600) === 0 || isolated ? 'history-point' : 'history-point history-point-hourly'} />;
-}
 
 export function OverviewHistory() {
   const history = useOverviewHistory();
@@ -34,21 +26,18 @@ export function OverviewHistory() {
   });
   const latest = [...data].reverse().find(point => point.recorded);
   const ticks = data.filter(point => point.hour % (4 * 3600) === 0).map(point => point.hour);
-  const tooltip = { labelFormatter: (value: unknown) => `${formatDate(Number(value))} · 北京时间`, formatter: (value: unknown) => `${formatValue(value)} ${asset ?? ''}`, cursor: { stroke: '#8aa99b', strokeDasharray: '3 4' } };
   return <Card className="overview-history" size="small">
     <div className="history-heading"><div><h2>账户权益趋势</h2></div>{options.length > 0 && !history.isPending && !history.error && <div className="history-metric history-equity" aria-label="最近一次快照"><span>最近账户权益 · {asset}</span><strong>{formatValue(latest?.equity)}</strong></div>}</div>
     {options.length > 0 && <div className="history-account-row"><Select aria-label="选择趋势账户" value={key} options={options} onChange={setSelected} /></div>}
     {history.isPending ? <div className="history-empty">正在加载快照…</div> : history.error ? <div className="history-empty" role="alert">快照加载失败，请稍后重试</div> : !options.length ? <div className="history-empty">暂无快照数据，整点后开始记录</div> : <>
       <div className="history-caption"><span>单位 {asset} · 近 24 小时 · 北京时间</span><span>最近记录 {latest ? formatDate(latest.hour) : '--'}</span></div>
-      <div className="history-plot chart" aria-label={`近24小时${asset ?? ''}账户权益折线图，最近记录 ${latest ? `${formatDate(latest.hour)}，权益 ${formatValue(latest.equity)}` : '暂无'}`}><ResponsiveContainer width="100%" height={180}>
-        <LineChart data={data} margin={{ top: 12, right: 8, bottom: 0, left: 0 }}>
-          <CartesianGrid vertical={false} stroke="#e7ece9" />
-          <XAxis dataKey="hour" ticks={ticks} tickFormatter={formatHour} tickLine={false} axisLine={false} minTickGap={10} tick={{ fontSize: 11 }} />
-          <YAxis width={52} domain={['auto', 'auto']} tickFormatter={axisValue} tickLine={false} axisLine={false} tick={{ fontSize: 11 }} tickCount={3} />
-          <Tooltip {...tooltip} />
-          <Line name="账户权益" dataKey="equity" stroke="var(--history-equity)" strokeWidth={2} dot={<HistoryDot data={data} />} activeDot={{ r: 4 }} connectNulls={false} isAnimationActive={false} />
-        </LineChart>
-      </ResponsiveContainer></div>
+      <div className="history-plot chart" aria-label={`近24小时${asset ?? ''}账户权益折线图，最近记录 ${latest ? `${formatDate(latest.hour)}，权益 ${formatValue(latest.equity)}` : '暂无'}`}>
+        <LoadErrorBoundary label="权益图" onReload={() => window.location.reload()}>
+          <Suspense fallback={<div className="history-empty" style={{ minHeight: 180 }} role="status">正在加载图表…</div>}>
+            <OverviewHistoryChart data={data} ticks={ticks} asset={asset} formatValue={formatValue} formatDate={formatDate} />
+          </Suspense>
+        </LoadErrorBoundary>
+      </div>
 
     </>}
   </Card>;

@@ -1,4 +1,4 @@
-import { useContext, useEffect, useRef, useState } from 'react';
+import { Suspense, lazy, useContext, useEffect, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
 import { Alert, App, Button, Card, Checkbox, Col, Form, Input, InputNumber, Row, Space, Switch, Tabs } from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -6,7 +6,9 @@ import { api, post } from '../lib/api';
 import { EditContext, useSession } from '../lib/session';
 import type { GlobalConfig, ServerConfig } from '../lib/types';
 import { ErrorNotice, PageTitle } from '../components/Common';
-import { DatabaseSettings } from '../components/DatabaseSettings';
+import { LoadErrorBoundary } from '../components/LoadErrorBoundary';
+
+const DatabaseSettings = lazy(() => import('../components/DatabaseSettings').then(module => ({ default: module.DatabaseSettings })));
 
 type GlobalForm = GlobalConfig & { api_key?: string; api_secret?: string; telegram_bot_token?: string; clear_api_credentials: boolean; clear_telegram_credentials: boolean };
 function GlobalSettings() {
@@ -169,7 +171,7 @@ export default function Settings() {
     }} destroyOnHidden items={[
       { key: 'global', label: '连接与通知', children: <GlobalSettings /> },
       { key: 'server', label: '服务设置', children: <ServerSettings /> },
-      { key: 'database', label: '数据库操作', children: <DatabaseSettings /> },
+      { key: 'database', label: '数据库操作', children: <LoadErrorBoundary label="数据库操作" onReload={() => window.location.reload()}><Suspense fallback={<div className="history-empty" role="status">正在加载数据库操作…</div>}><DatabaseSettings /></Suspense></LoadErrorBoundary> },
       { key: 'security', label: '账户安全', children: <SecuritySettings /> },
     ]} />
   </>;

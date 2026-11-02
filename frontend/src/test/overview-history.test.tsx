@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, expect, it, vi } from 'vitest';
 import { OverviewHistory } from '../components/OverviewHistory';
 import type { HourlySnapshot } from '../lib/types';
@@ -21,14 +21,14 @@ it('shows a meaningful empty state before the first snapshot', () => {
   expect(screen.getByText('暂无快照数据，整点后开始记录')).toBeInTheDocument();
 });
 
-it('keeps missing hours and unavailable metrics as gaps', () => {
+it('keeps missing hours and unavailable metrics as gaps', async () => {
   const hour = Math.floor(Date.now() / 3600_000) * 3600;
   history.data = [{ hour: hour - 3600, groups: [{ mode: 'PAPER', asset: 'USDC', equity: '100', long: null, short: '0' }] }];
   render(<OverviewHistory />);
   expect(screen.getByRole('heading', { name: '账户权益趋势' })).toBeInTheDocument();
   expect(screen.queryByText('做多持仓')).not.toBeInTheDocument();
   expect(screen.queryByText('做空持仓')).not.toBeInTheDocument();
-  expect(chart.data).toHaveLength(24);
+  await waitFor(() => expect(chart.data).toHaveLength(24));
   expect(chart.data[22]).toMatchObject({ equity: 100 });
   expect(chart.data[23]).toMatchObject({ equity: null });
 });
