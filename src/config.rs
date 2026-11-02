@@ -361,9 +361,7 @@ impl AppConfig {
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
-        if let Some(limit) = self.global_max_position_notional {
-            anyhow::ensure!(limit > Decimal::ZERO, "全局最大持仓金额必须大于 0");
-        }
+        validate_global_position_limit(self.global_max_position_notional)?;
         if !self.pairs.is_empty() {
             for config in self.strategy_configs()? {
                 config
@@ -373,56 +371,9 @@ impl AppConfig {
             return Ok(());
         }
         validate_symbol(&self.exchange.symbol)?;
-        anyhow::ensure!(
-            self.grid.grid_interval > Decimal::ZERO,
-            "网格间距必须大于 0"
-        );
-        anyhow::ensure!(
-            self.grid.order_amount_usdc > Decimal::ZERO,
-            "每格金额必须大于 0"
-        );
-        anyhow::ensure!(
-            self.grid.post_only,
-            "滑动网格策略必须开启 Post-Only Maker 挂单"
-        );
-        anyhow::ensure!(
-            (1..=50).contains(&self.grid.buy_window) && (1..=50).contains(&self.grid.sell_window),
-            "买入和卖出窗口必须在 1-50 之间"
-        );
-        if let Some(minimum) = self.grid.min_price {
-            anyhow::ensure!(minimum > Decimal::ZERO, "价格下限必须大于 0");
-        }
-        if let Some(maximum) = self.grid.max_price {
-            anyhow::ensure!(maximum > Decimal::ZERO, "价格上限必须大于 0");
-        }
-        if let (Some(minimum), Some(maximum)) = (self.grid.min_price, self.grid.max_price) {
-            anyhow::ensure!(minimum < maximum, "价格下限必须小于上限");
-        }
-        if let Some(limit) = self.grid.max_position_usdc {
-            anyhow::ensure!(limit > Decimal::ZERO, "最大持仓金额必须大于 0");
-        }
-        anyhow::ensure!(
-            !self.grid.pause_on_max_position || self.grid.max_position_usdc.is_some(),
-            "启用达到上限时暂停策略前，请设置最大持仓名义价值"
-        );
-        anyhow::ensure!(self.exchange.sync_interval_secs > 0, "同步间隔必须大于 0");
-        anyhow::ensure!(
-            (1..=60_000).contains(&self.exchange.recv_window),
-            "请求有效窗口必须在 1-60000 毫秒之间"
-        );
-        if !self.exchange.dry_run {
-            anyhow::ensure!(
-                !self.exchange.api_key.trim().is_empty()
-                    && !self.exchange.api_secret.trim().is_empty(),
-                "实盘或测试网需要配置 API Key 和 Secret"
-            );
-        }
-        anyhow::ensure!(
-            !self.telegram.enabled
-                || (!self.telegram.bot_token.trim().is_empty()
-                    && !self.telegram.chat_id.trim().is_empty()),
-            "启用 Telegram 通知前请填写 Bot Token 和 Chat ID"
-        );
+        self.grid.validate()?;
+        self.exchange.validate()?;
+        self.telegram.validate()?;
         Ok(())
     }
 
@@ -445,6 +396,69 @@ impl AppConfig {
     }
 }
 
+impl GridConfig {
+    fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(self.grid_interval > Decimal::ZERO, "网格间距必须大于 0");
+        anyhow::ensure!(self.order_amount_usdc > Decimal::ZERO, "每格金额必须大于 0");
+        anyhow::ensure!(self.post_only, "滑动网格策略必须开启 Post-Only Maker 挂单");
+        anyhow::ensure!(
+            (1..=50).contains(&self.buy_window) && (1..=50).contains(&self.sell_window),
+            "买入和卖出窗口必须在 1-50 之间"
+        );
+        if let Some(minimum) = self.min_price {
+            anyhow::ensure!(minimum > Decimal::ZERO, "价格下限必须大于 0");
+        }
+        if let Some(maximum) = self.max_price {
+            anyhow::ensure!(maximum > Decimal::ZERO, "价格上限必须大于 0");
+        }
+        if let (Some(minimum), Some(maximum)) = (self.min_price, self.max_price) {
+            anyhow::ensure!(minimum < maximum, "价格下限必须小于上限");
+        }
+        if let Some(limit) = self.max_position_usdc {
+            anyhow::ensure!(limit > Decimal::ZERO, "最大持仓金额必须大于 0");
+        }
+        anyhow::ensure!(
+            !self.pause_on_max_position || self.max_position_usdc.is_some(),
+            "启用达到上限时暂停策略前，请设置最大持仓名义价值"
+        );
+        Ok(())
+    }
+}
+
+impl ExchangeConfig {
+    fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(self.sync_interval_secs > 0, "同步间隔必须大于 0");
+        anyhow::ensure!(
+            (1..=60_000).contains(&self.recv_window),
+            "请求有效窗口必须在 1-60000 毫秒之间"
+        );
+        if !self.dry_run {
+            anyhow::ensure!(
+                !self.api_key.trim().is_empty() && !self.api_secret.trim().is_empty(),
+                "实盘或测试网需要配置 API Key 和 Secret"
+            );
+        }
+        Ok(())
+    }
+}
+
+impl TelegramConfig {
+    fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.enabled || (!self.bot_token.trim().is_empty() && !self.chat_id.trim().is_empty()),
+            "启用 Telegram 通知前请填写 Bot Token 和 Chat ID"
+        );
+        Ok(())
+    }
+}
+
+pub(crate) fn validate_global_position_limit(limit: Option<Decimal>) -> anyhow::Result<()> {
+    if let Some(limit) = limit {
+        anyhow::ensure!(limit > Decimal::ZERO, "全局最大持仓金额必须大于 0");
+    }
+    Ok(())
+}
+
 fn validate_symbol(symbol: &str) -> anyhow::Result<()> {
     anyhow::ensure!(
         (3..=32).contains(&symbol.len())
@@ -462,6 +476,50 @@ mod tests {
     use super::AppConfig;
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
+
+    #[test]
+    fn validation_checks_grid_exchange_and_notification_boundaries() {
+        let mut config = AppConfig::default();
+        config.grid.buy_window = 1;
+        config.grid.sell_window = 50;
+        config.exchange.recv_window = 60_000;
+        assert!(config.validate().is_ok());
+        config.grid.buy_window = 0;
+        assert!(config.validate().unwrap_err().to_string().contains("窗口"));
+        config.grid.buy_window = 1;
+        config.grid.min_price = Some(dec!(10));
+        config.grid.max_price = Some(dec!(10));
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("价格下限必须小于上限"));
+        config.grid.max_price = Some(dec!(11));
+        config.exchange.recv_window = 60_001;
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("请求有效窗口"));
+        config.exchange.recv_window = 1;
+        config.exchange.dry_run = false;
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("API Key"));
+        config.exchange.api_key = "key".into();
+        config.exchange.api_secret = "secret".into();
+        config.telegram.enabled = true;
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("Telegram"));
+        config.telegram.bot_token = "token".into();
+        config.telegram.chat_id = "chat".into();
+        assert!(config.validate().is_ok());
+    }
 
     #[test]
     fn legacy_configs_default_long_and_pairs_keep_independent_directions() {

@@ -826,12 +826,13 @@ async fn post_global_config_handler(
     State(handle): State<RuntimeHandle>,
     Json(payload): Json<UpdateGlobalConfigPayload>,
 ) -> Json<ApiResponse<WebGlobalConfigView>> {
-    if matches!(payload.global_max_position_notional, Some(Some(value)) if value <= rust_decimal::Decimal::ZERO)
-    {
+    if let Err(error) = crate::config::validate_global_position_limit(
+        payload.global_max_position_notional.flatten(),
+    ) {
         return Json(ApiResponse {
             success: false,
             data: None,
-            message: Some("全局最大持仓金额必须大于 0".into()),
+            message: Some(error.to_string()),
         });
     }
     match handle.update_global_config(payload).await {
@@ -2486,6 +2487,83 @@ mod tests {
         );
         assert!(refreshed.pairs[1].snapshot.account.update_time > account_time);
         assert_eq!(db.hourly_stats_query_count(), 2);
+    }
+
+    #[test]
+    fn pair_update_preserves_optional_settings_and_handles_explicit_clears() {
+        use rust_decimal_macros::dec;
+
+        let mut config = AppConfig::default();
+        config.exchange.api_key = "key".into();
+        config.exchange.api_secret = "secret".into();
+        config.telegram.bot_token = "token".into();
+        config.telegram.chat_id = "chat".into();
+        config.grid.min_price = Some(dec!(1));
+        config.grid.max_price = Some(dec!(100));
+        let mut payload = serde_json::json!({
+            "symbol": "SOLUSDC", "grid_interval": "0.1", "order_amount_usdc": "100",
+            "buy_window": 5, "sell_window": 5,
+            "api_key": " ", "api_secret": " ", "telegram_bot_token": " "
+        });
+        let updated = apply_config_payload(
+            config.clone(),
+            serde_json::from_value(payload.clone()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(updated.exchange.api_key, "key");
+        assert_eq!(updated.exchange.api_secret, "secret");
+        assert_eq!(updated.telegram.bot_token, "token");
+        assert_eq!(updated.telegram.chat_id, "chat");
+        assert_eq!(updated.grid.min_price, None);
+        assert_eq!(updated.grid.max_price, None);
+        assert_eq!(updated.grid.max_position_usdc, None);
+
+        payload["min_price"] = serde_json::Value::Null;
+        payload["max_price"] = serde_json::Value::Null;
+        payload["max_position_usdc"] = serde_json::Value::Null;
+        payload["clear_api_credentials"] = serde_json::json!(true);
+        payload["clear_telegram_credentials"] = serde_json::json!(true);
+        payload["api_key"] = serde_json::json!("replacement");
+        payload["telegram_bot_token"] = serde_json::json!("replacement");
+        let cleared =
+            apply_config_payload(config, serde_json::from_value(payload).unwrap()).unwrap();
+        assert!(cleared.exchange.api_key.is_empty() && cleared.exchange.api_secret.is_empty());
+        assert!(cleared.telegram.bot_token.is_empty() && cleared.telegram.chat_id.is_empty());
+        assert_eq!(cleared.grid.min_price, None);
+        assert_eq!(cleared.grid.max_price, None);
+        assert_eq!(cleared.grid.max_position_usdc, None);
+    }
+
+    #[tokio::test]
+    async fn pair_update_rejects_missing_and_stale_versions_before_dispatch() {
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let (action_tx, mut action_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::new(AppConfig::default(), db.clone(), action_tx);
+        let mut payload = serde_json::json!({
+            "symbol": "SOLUSDC", "grid_interval": "0.1", "order_amount_usdc": "100",
+            "buy_window": 5, "sell_window": 5
+        });
+        for version in [None, Some(""), Some("   "), Some("stale")] {
+            if let Some(version) = version {
+                payload["baseline_version"] = serde_json::json!(version);
+            }
+            let (status, response) = post_config_handler(
+                State(state.clone()),
+                Json(serde_json::from_value(payload.clone()).unwrap()),
+            )
+            .await;
+            assert_eq!(
+                status,
+                if version == Some("stale") {
+                    StatusCode::CONFLICT
+                } else {
+                    StatusCode::BAD_REQUEST
+                }
+            );
+            assert!(!response.0.success);
+            assert!(action_rx.try_recv().is_err());
+            assert!(db.load_config().unwrap().is_none());
+        }
     }
 
     #[tokio::test]
