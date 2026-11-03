@@ -2351,12 +2351,9 @@ pub(crate) fn config_version<T: serde::Serialize>(value: &T) -> String {
         key
     });
     let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("valid HMAC key");
-    mac.update(&serde_json::to_vec(value).expect("config serialization must succeed"));
-    mac.finalize()
-        .into_bytes()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    let serialized = serde_json::to_vec(value).unwrap_or_default();
+    mac.update(&serialized);
+    hex::encode(mac.finalize().into_bytes())
 }
 
 fn save_pair_config_on(conn: &Connection, symbol: &str, config: &AppConfig) -> Result<()> {

@@ -99,3 +99,6 @@
 - 模式匹配扁平化与假不可达分支清理：避免写嵌套式的多层枚举解构（如先匹配 `Ok(Some(v))`，然后在兜底分支里再次匹配并放入 `Ok(Some(_)) => unreachable!()`），这类代码属于典型的冗余坏味道。应当直接在一层 `match` 中将 `Ok(Some(v))`、`Ok(None)` 和 `Err(e)` 平铺展开，消除虚假的 `unreachable!()` 隐患，由编译器穷尽性检查提供安全保障。
 - 循环闭包内避免无谓的重复索引与变量遮蔽：在循环与迭代器谓词内部（如 `orders.iter().skip(1).any(...)`），如果外层作用域已经提取了固定基准对象（如 `first = orders[0]`），切忌在内部闭包中重复重新索引或同名遮蔽定义；直接复用外层变量既能消除重复寻址开销，也能使数据比较意图更直观。
 - 共享缓存快照解构安全与 Panic 防御：在异步共享缓存层（如 `MarketCache::mark_price` 与 `PositionCache::get`）中，即便前文对缓存有效性进行了校验或重新拉取填充，消费缓存数据时仍应采用安全的条件解构（`let Some(snapshot) = cached.as_ref() else { ... }`），而不是调用 `.expect("...")`；这能彻底杜绝并发下缓存失效竞争带来的崩溃隐患，将不可预期状态转化为可重试或可控的降级逻辑。
+- 异步跨任务分派与 JoinHandle 隔离：在 HTTP 控制接口（如 `post_config_handler`、`post_managed_config_handler`）中使用 `tokio::spawn` 隔离执行持久化逻辑时，接收 `JoinHandle` 结果后绝不能直接调用 `.expect(...)`。当异步任务在停机或极端异常下被中止（Cancelled）或内部 Panic 时，`.expect(...)` 会直接导致外部 Web 线程崩溃；必须使用 `match task.await` 将 JoinError 转换为可控的 HTTP 500 业务响应。
+- 摘要十六进制编码与分配优化：计算基于 HMAC-SHA256 的版本或指纹（如 `config_version`）时，避免使用 `.into_bytes().iter().map(|b| format!("{b:02x}")).collect()`，该写法在单次调用中会产生 32 次小字符串分配与重组开销；直接采用 `hex::encode` 能实现单次预分配直接格式化，提高性能并消除无谓的堆内存碎片。
+- 动态路由聚合容错：在构建多交易对路由（`create_multi_router`）时，避免无条件对交易对列表和作用域调用 `.expect(...)`；若配置列表为空或交易对作用域未就绪，应安全降级返回空路由或跳过未就绪项，提升动态路由构建的防御能力。

@@ -292,15 +292,14 @@ fn public_routes() -> Router<Arc<AppState>> {
 
 /// Existing unscoped APIs address the first pair; scoped APIs never change another pair.
 pub fn create_multi_router(states: Vec<Arc<AppState>>) -> Router {
-    let primary = states
-        .first()
-        .expect("At least one trading pair is required")
-        .clone();
+    let Some(primary) = states.first().cloned() else {
+        return Router::new();
+    };
     let mut router = create_base_router(primary.clone(), false);
     for state in &states {
-        let symbol = state
-            .pair_scope()
-            .expect("Multi-pair routes require a stable symbol");
+        let Some(symbol) = state.pair_scope() else {
+            continue;
+        };
         let scoped = pair_routes()
             .route_layer(middleware::from_fn_with_state(
                 state.clone(),
@@ -803,7 +802,7 @@ async fn post_managed_config_handler(
     Extension(handle): Extension<RuntimeHandle>,
     Json(payload): Json<UpdateConfigPayload>,
 ) -> (StatusCode, Json<ApiResponse<WebConfigView>>) {
-    tokio::spawn(async move {
+    match tokio::spawn(async move {
         let _membership = handle.membership_lock.lock().await;
         if !handle
             .states
@@ -824,7 +823,17 @@ async fn post_managed_config_handler(
         apply_pair_config(state, payload).await
     })
     .await
-    .expect("配置更新任务异常退出")
+    {
+        Ok(result) => result,
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some(format!("配置更新任务异常退出: {}", error)),
+            }),
+        ),
+    }
 }
 
 async fn get_global_config_handler(
@@ -1730,9 +1739,17 @@ async fn post_config_handler(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<UpdateConfigPayload>,
 ) -> (StatusCode, Json<ApiResponse<WebConfigView>>) {
-    tokio::spawn(async move { apply_pair_config(state, payload).await })
-        .await
-        .expect("配置更新任务异常退出")
+    match tokio::spawn(async move { apply_pair_config(state, payload).await }).await {
+        Ok(result) => result,
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some(format!("配置更新任务异常退出: {}", error)),
+            }),
+        ),
+    }
 }
 
 async fn apply_pair_config(
