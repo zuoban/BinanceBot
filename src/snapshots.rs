@@ -131,7 +131,8 @@ pub async fn run_hourly_snapshots(handle: RuntimeHandle) {
     loop {
         let now = Utc::now().timestamp();
         let next = (now.div_euclid(3600) + 1) * 3600;
-        tokio::time::sleep(Duration::from_secs((next - now) as u64)).await;
+        let delay = u64::try_from(next - now).unwrap_or(1).max(1);
+        tokio::time::sleep(Duration::from_secs(delay)).await;
         let now = Utc::now();
         // Do not assign current values to an earlier hour after a long suspension.
         if now.timestamp() - next >= 60 {

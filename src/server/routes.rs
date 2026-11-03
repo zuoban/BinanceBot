@@ -496,8 +496,11 @@ async fn dispatch_managed_database_pair(
     } else {
         "/trades/clear"
     };
+    let Ok(uri) = resource.parse() else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
     let mut req = req;
-    *req.uri_mut() = resource.parse().unwrap();
+    *req.uri_mut() = uri;
     pair_resource_routes()
         .with_state(state)
         .oneshot(req)

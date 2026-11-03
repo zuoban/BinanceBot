@@ -267,11 +267,12 @@ impl GlobalPositionLimit {
             reasons.push("全局风控数据不可用或已过期".to_string());
         }
         if position_limit_reached {
-            reasons.push(format!(
-                "全局持仓名义价值 {} 已达到上限 {}",
-                total,
-                limit.expect("position limit must exist")
-            ));
+            if let Some(limit_val) = limit {
+                reasons.push(format!(
+                    "全局持仓名义价值 {} 已达到上限 {}",
+                    total, limit_val
+                ));
+            }
         }
         let reason = if reasons.is_empty() {
             String::new()
