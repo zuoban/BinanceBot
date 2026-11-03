@@ -139,15 +139,15 @@ export default function OverviewPage() {
     <section className="overview-finance-group" aria-labelledby="accounts-heading">
     <div className="section-heading"><h2 id="accounts-heading">账户概览</h2></div>
     <Row gutter={[16, 16]} className="account-row">
-      {accountGroups(accounts).map(group => <Col xs={24} xl={12} key={group.key}><Card className="account-card" size="small">
-        <div className="section-line account-card-heading"><span>保证金余额</span></div>
-        <div className="account-equity-line"><Statistic value={group.equity ?? '--'} formatter={() => number(group.equity)} suffix={group.asset} />
-          <span className="account-cny muted">{group.cny !== null ? `≈ ¥${number(group.cny)}` : '人民币估值待更新'}</span></div>
-        <div className="account-availability">
+      {accountGroups(accounts).map(group => <Col xs={24} xl={12} key={group.key}><Card className="account-card finance-card" size="small">
+        <div className="section-line finance-card-heading"><span>保证金余额</span></div>
+        <div className="finance-card-primary"><Statistic value={group.equity ?? '--'} formatter={() => number(group.equity)} suffix={group.asset} />
+          <span className="finance-card-note muted">{group.cny !== null ? `≈ ¥${number(group.cny)}` : '人民币估值待更新'}</span></div>
+        <div className="finance-metrics finance-metrics-primary">
           <div><span>可用余额</span><strong>{number(group.available)} <small>{group.asset}</small></strong></div>
           <div><span>可用比例（按钱包余额）</span><strong>{group.ratio !== null ? `${number(group.ratio)}%` : '--'}</strong></div>
         </div>
-        <div className="account-assets" aria-label={`${group.asset}账户资产`}>
+        <div className="finance-metrics finance-metrics-secondary" aria-label={`${group.asset}账户资产`}>
           <div><span>钱包余额</span><strong>{number(group.wallet)}</strong></div>
           <div><span>未实现盈亏</span><strong>{group.unrealized === null ? '--' : <Pnl value={group.unrealized} />}</strong></div>
         </div>
@@ -159,14 +159,21 @@ export default function OverviewPage() {
       <div className="section-heading"><h2 id="positions-heading">持仓概览</h2><span className="muted">按标记价格计算 · 全部策略</span></div>
       <Row gutter={[16, 16]} className="position-row">
         {positionGroups(entries).map(group => <Col xs={24} xl={12} key={group.key}>
-          <Card className="position-summary" size="small">
-            <div className="position-summary-metrics">
-              <div className="position-total"><span>总持仓金额 / {group.asset}</span><strong>{number(group.total)}</strong></div>
+          <Card className="position-summary finance-card" size="small">
+            <div className="section-line finance-card-heading"><span>总持仓金额 / {group.asset}</span></div>
+            <div className="finance-card-primary">
+              <Statistic value={group.total ?? '--'} formatter={() => number(group.total)} suffix={group.asset} />
+              <span className="finance-card-note muted">按标记价格估值</span>
+            </div>
+            <div className="finance-metrics finance-metrics-primary">
               <div><span>做多持仓金额</span><strong className="position-long">{number(group.long)}</strong></div>
               <div><span>做空持仓金额</span><strong className="position-short">{number(group.short)}</strong></div>
-              <div><span>多空比（金额占比）</span><strong>{group.total !== null && group.total > 0 && group.long !== null && group.short !== null ? `${number(group.long / group.total * 100, 1)}% / ${number(group.short / group.total * 100, 1)}%` : '--'}</strong></div>
             </div>
-            <div className="section-line position-summary-footer"><span className="muted">按实际持仓方向统计{group.total === null ? ' · 部分持仓数据不可用' : ''}</span></div>
+            <div className="finance-metrics finance-metrics-secondary">
+              <div><span>多空比（金额占比）</span><strong>{group.total !== null && group.total > 0 && group.long !== null && group.short !== null ? `${number(group.long / group.total * 100, 1)}% / ${number(group.short / group.total * 100, 1)}%` : '--'}</strong></div>
+              <div><span>覆盖策略</span><strong>{group.count} <small>个</small></strong></div>
+            </div>
+            <div className="position-summary-footer muted">按实际持仓方向统计{group.total === null ? ' · 部分持仓数据不可用' : ''}</div>
           </Card>
         </Col>)}
       </Row>

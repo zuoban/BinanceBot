@@ -34,7 +34,7 @@ export function positionGroups(entries: Overview['pairs']) {
       if (size > 0) long += amount;
       if (size < 0) short += amount;
     }
-    return { key, mode: group.mode, asset: group.asset, long: complete ? long : null, short: complete ? short : null, total: complete ? long + short : null };
+    return { key, mode: group.mode, asset: group.asset, count: group.snapshots.length, long: complete ? long : null, short: complete ? short : null, total: complete ? long + short : null };
   });
 }
 export function number(value: unknown, digits = 2) {

@@ -434,12 +434,13 @@ it('shows position amounts and their long/short shares for all strategies', asyn
   short.position.size = '-1';
   overview.data = { generated_at: new Date().toISOString(), pairs: [long, short].map(s => ({ snapshot: s, mode: 'PAPER' as const, scoped: true })) };
   render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
-  expect(screen.getByText('总持仓金额 / USDC').parentElement).toHaveTextContent('404');
+  expect(screen.getByText('总持仓金额 / USDC').closest('.position-summary')).toHaveTextContent('404');
   expect(screen.getByText('做多持仓金额').parentElement).toHaveTextContent('303');
   expect(screen.getByText('做空持仓金额').parentElement).toHaveTextContent('101');
   expect(screen.getByText('多空比（金额占比）').parentElement).toHaveTextContent('75% / 25%');
+  expect(screen.getByText('覆盖策略').parentElement).toHaveTextContent('2 个');
   await userEvent.setup().type(screen.getByLabelText('搜索交易对'), 'BTC');
-  expect(screen.getByText('总持仓金额 / USDC').parentElement).toHaveTextContent('404');
+  expect(screen.getByText('总持仓金额 / USDC').closest('.position-summary')).toHaveTextContent('404');
 });
 
 it('shows available balance as a percentage of wallet balance', () => {
