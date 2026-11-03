@@ -3,7 +3,7 @@ import { Table, Tag } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { number, price, relativeTime, time } from '../lib/format';
 import type { Log, Order, Trade } from '../lib/types';
-import { ModeTag, Pnl } from './Common';
+import { Pnl } from './Common';
 
 const side = (value: string) => <Tag color={value === 'BUY' ? 'green' : 'red'}>{value === 'BUY' ? '买入' : '卖出'}</Tag>;
 const purposeLabel: Record<string, string> = { GRID: '网格', TAKE_PROFIT: '止盈', REMAINDER: '余量合并', LEGACY: '历史订单' };
@@ -31,7 +31,7 @@ export function TradesTable({ trades, overview = false }: { trades: Trade[]; ove
     return () => window.clearInterval(timer);
   }, [overview, trades.length]);
   const columns: ColumnsType<Trade> = [
-    ...(overview ? [{ title: '交易对', dataIndex: 'symbol', className: 'trade-symbol', width: 130 }, { title: '模式', dataIndex: 'mode', render: (mode: Trade['mode']) => <ModeTag mode={mode} />, width: 100 }] : []),
+    ...(overview ? [{ title: '交易对', dataIndex: 'symbol', className: 'trade-symbol', width: 130 }] : []),
     { title: '方向', dataIndex: 'side', render: side, width: 90, fixed: overview ? undefined : 'left' },
     { title: overview ? '成交时间' : '时间（北京）', dataIndex: 'timestamp', className: overview ? 'trade-time' : undefined, render: overview ? (value: string) => <span title={Number.isFinite(Date.parse(value)) ? `${time(value)}（北京时间）` : undefined}>{relativeTime(value, now)}</span> : time, width: overview ? 90 : 185 },
     { title: '成交价格', align: 'right', className: 'table-numeric', dataIndex: 'price', render: price },
