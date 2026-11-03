@@ -85,7 +85,6 @@ async fn test_non_cfg_test_consumer_constructs_grid_trading_engine() {
 async fn test_four_argument_record_trade_persists_pair_intent_atomically() {
     let mut config = AppConfig::default();
     config.exchange.symbol = "SOLUSDC".to_string();
-    config.exchange.dry_run = true;
     let db = Arc::new(Database::open(":memory:").unwrap());
     let (action_tx, _action_rx) = mpsc::channel(16);
     let state = AppState::new(config, db.clone(), action_tx);
@@ -143,7 +142,6 @@ async fn test_four_argument_record_trade_persists_pair_intent_atomically() {
 async fn test_four_argument_record_trade_duplicate_fill_idempotence() {
     let mut config = AppConfig::default();
     config.exchange.symbol = "SOLUSDC".to_string();
-    config.exchange.dry_run = true;
     let db = Arc::new(Database::open(":memory:").unwrap());
     let (action_tx, _action_rx) = mpsc::channel(16);
     let state = AppState::new(config, db.clone(), action_tx);
@@ -215,7 +213,6 @@ async fn test_four_argument_record_trade_duplicate_fill_idempotence() {
 async fn test_four_argument_record_trade_consumed_pair_source_deletes_intent() {
     let mut config = AppConfig::default();
     config.exchange.symbol = "SOLUSDC".to_string();
-    config.exchange.dry_run = true;
     let db = Arc::new(Database::open(":memory:").unwrap());
     let (action_tx, _action_rx) = mpsc::channel(16);
     let state = AppState::new(config, db.clone(), action_tx);
@@ -293,7 +290,6 @@ async fn test_four_argument_record_trade_consumed_pair_source_deletes_intent() {
 async fn test_four_argument_record_trade_atomic_rollback_on_missing_parent() {
     let mut config = AppConfig::default();
     config.exchange.symbol = "SOLUSDC".to_string();
-    config.exchange.dry_run = true;
     let db = Arc::new(Database::open(":memory:").unwrap());
     let (action_tx, _action_rx) = mpsc::channel(16);
     let state = AppState::new(config, db.clone(), action_tx);
@@ -343,7 +339,8 @@ async fn test_four_argument_record_trade_atomic_rollback_on_missing_parent() {
 async fn test_four_argument_record_trade_live_mode_managed_order_and_pair_intent() {
     let mut config = AppConfig::default();
     config.exchange.symbol = "SOLUSDC".to_string();
-    config.exchange.dry_run = false;
+    config.exchange.api_key = "live-key".into();
+    config.exchange.api_secret = "live-secret".into();
     let db = Arc::new(Database::open(":memory:").unwrap());
     let (action_tx, _action_rx) = mpsc::channel(16);
     let state = AppState::new(config, db.clone(), action_tx);
@@ -431,7 +428,6 @@ async fn test_four_argument_record_trade_live_mode_managed_order_and_pair_intent
 async fn test_four_argument_record_trade_scope_mismatch_rejected() {
     let mut config = AppConfig::default();
     config.exchange.symbol = "SOLUSDC".to_string();
-    config.exchange.dry_run = true;
     let db = Arc::new(Database::open(":memory:").unwrap());
     let (action_tx, _action_rx) = mpsc::channel(16);
     let state = AppState::new(config, db.clone(), action_tx);

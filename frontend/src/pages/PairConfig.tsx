@@ -6,15 +6,12 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, ApiError, pairPath, post } from '../lib/api';
 import { usePairs } from '../lib/queries';
 import { EditContext } from '../lib/session';
-import type { GridConfig } from '../lib/types';
-import { ErrorNotice, PageBreadcrumb, PageTitle } from '../components/Common';
+import type { GlobalConfig, GridConfig } from '../lib/types';
+import { ErrorNotice, ModeTag, PageBreadcrumb, PageTitle } from '../components/Common';
 import { useDeleteStrategy } from '../components/DeleteStrategy';
 
-type FormValues = Omit<GridConfig, 'dry_run' | 'post_only'> & { mode: 'PAPER' | 'LIVE' };
-const defaults: FormValues = { symbol: '', direction: 'LONG', grid_interval: '0.1', order_amount_usdc: '100', buy_window: 3, sell_window: 3, mode: 'PAPER', min_price: null, max_price: null, max_position_usdc: '1000', pause_on_max_position: true };
-function toForm(c: GridConfig): FormValues {
-  return { ...c, mode: c.dry_run ? 'PAPER' : 'LIVE' };
-}
+type FormValues = Omit<GridConfig, 'post_only'>;
+const defaults: FormValues = { symbol: '', direction: 'LONG', grid_interval: '0.1', order_amount_usdc: '100', buy_window: 3, sell_window: 3, min_price: null, max_price: null, max_position_usdc: '1000', pause_on_max_position: true };
 export default function PairConfig() {
   const { symbol } = useParams();
   const adding = !symbol;
@@ -42,7 +39,10 @@ export default function PairConfig() {
     return () => { unsubscribe?.(); invalidate(); };
   }, [pathname, router]);
   const baseline = useRef<{ symbol: string; config: GridConfig & { config_version: string } } | null>(null);
-  const selectedMode = Form.useWatch('mode', form);
+  const global = useQuery({ queryKey: ['global-config'], queryFn: ({ signal }) => api<GlobalConfig>('/api/global/config', { signal }), refetchOnWindowFocus: false });
+  const modeKnown = !!global.data || !!pair;
+  // Unknown state (for example a failed global-config request) is confirmed as live.
+  const live = global.data ? global.data.has_api_key && global.data.has_api_secret : pair ? pair.mode === 'LIVE' : true;
   const symbols = useQuery({ queryKey: ['exchange-symbols'], queryFn: ({ signal }) => api<string[]>('/api/exchange/symbols?environment=mainnet', { signal }), enabled: adding, retry: false, refetchOnWindowFocus: false });
   const config = useQuery({ queryKey: ['config', symbol, pair?.scoped], queryFn: ({ signal }) => api<GridConfig & { config_version: string }>(pairPath(pair!, 'config'), { signal }), enabled: !!pair, refetchOnWindowFocus: false });
   useEffect(() => {
@@ -52,23 +52,23 @@ export default function PairConfig() {
     if (adding) form.setFieldsValue(defaults);
   }, [symbol, adding, form]);
   useEffect(() => {
-    if (config.data && !ready && !adding && symbol) { baseline.current = { symbol, config: config.data }; form.setFieldsValue(toForm(config.data)); setReady(true); }
+    if (config.data && !ready && !adding && symbol) { baseline.current = { symbol, config: config.data }; form.setFieldsValue(config.data); setReady(true); }
   }, [config.data, ready, adding, form, symbol]);
   useEffect(() => () => { edit.setDirty(false); edit.setSaving(false); }, [edit.setDirty, edit.setSaving]);
   const mutation = useMutation({
     mutationFn: (values: FormValues) => {
-      const { mode, ...fields } = values;
+      const fields = values;
       if (!adding && (typeof baseline.current?.config.config_version !== 'string' || !baseline.current.config.config_version || baseline.current.symbol !== symbol)) throw new Error('无法确认配置版本，请重新加载策略配置');
       return post<GridConfig | string>(adding ? '/api/pairs' : pairPath(pair!, 'config'), {
         ...fields, ...(!adding && { baseline_version: baseline.current?.config.config_version }), symbol: fields.symbol.trim().toUpperCase(),
-        dry_run: mode === 'PAPER', post_only: true,
+        post_only: true,
         min_price: fields.min_price || null, max_price: fields.max_price || null, max_position_usdc: fields.max_position_usdc || null,
       });
     },
     onMutate: () => edit.setSaving(true),
     onSuccess: (data, values) => {
       flushSync(() => { edit.setDirty(false); edit.setSaving(false); });
-      if (!adding && typeof data !== 'string') form.setFieldsValue(toForm(data));
+      if (!adding && typeof data !== 'string') form.setFieldsValue(data);
       message.success(adding ? '交易对已添加，策略保持暂停，请检查配置后手动恢复' : '策略配置已保存并生效');
       const targetSymbol = adding ? (typeof data === 'string' ? data : values.symbol.trim().toUpperCase()) : symbol;
       navigate(`/pairs/${targetSymbol}`, { replace: true });
@@ -102,7 +102,9 @@ export default function PairConfig() {
     const currentSubmission = {};
     submission.current = currentSubmission;
     try {
-      if (values.mode === 'LIVE' && !await modal.confirm({ title: '保存实盘配置？', content: '请核对交易对、方向、网格和持仓限制。实盘使用真实资金。', okText: '确认保存', cancelText: '取消' })) return;
+      const latest = await global.refetch();
+      const currentLive = latest.data ? latest.data.has_api_key && latest.data.has_api_secret : pair ? pair.mode === 'LIVE' : true;
+      if (currentLive && !await modal.confirm({ title: '保存实盘配置？', content: '请核对交易对、方向、网格和持仓限制。实盘使用真实资金。', okText: '确认保存', cancelText: '取消' })) return;
       if (page.current !== currentPage || submission.current !== currentSubmission) return;
       await mutation.mutateAsync(values).catch(() => { /* Mutation errors are reported by onError. */ });
     } finally {
@@ -120,7 +122,7 @@ export default function PairConfig() {
     {!adding && (mutation.error instanceof ApiError && mutation.error.status === 409 || mutation.error?.message.includes('无法确认配置版本')) && <Button onClick={async () => {
       if (!await modal.confirm({ title: '重新加载策略配置？', content: '重新加载会放弃当前未保存的修改，请先记录需要保留的内容。', okText: '重新加载', cancelText: '继续编辑' })) return;
       const result = await config.refetch();
-      if (!result.error && result.data && symbol) { baseline.current = { symbol, config: result.data }; form.setFieldsValue(toForm(result.data)); edit.setDirty(false); mutation.reset(); }
+      if (!result.error && result.data && symbol) { baseline.current = { symbol, config: result.data }; form.setFieldsValue(result.data); edit.setDirty(false); mutation.reset(); }
     }}>重新加载策略配置</Button>}
     {pairs.data && !pair && !adding && <Alert type="warning" title="该交易对不存在或已移除" />}
     <Form<FormValues> className="config-form" form={form} layout="vertical" onFinish={values => void submit(values)} onValuesChange={() => { edit.setDirty(true); }} disabled={formDisabled}>
@@ -128,9 +130,9 @@ export default function PairConfig() {
         <Row gutter={20}>
           <Col xs={24} md={12}><Form.Item name="symbol" label="合约交易对" rules={[{ required: true, message: '请选择交易对' }]} getValueProps={value => ({ value: value || undefined })} extra={adding && symbols.isError ? <span>交易对加载失败 <Button type="link" onClick={() => void symbols.refetch()}>重试</Button></span> : undefined}>{adding ? <Select showSearch optionFilterProp="label" placeholder={symbols.isFetching ? '正在加载交易对...' : '搜索并选择交易对'} loading={symbols.isFetching} disabled={formDisabled || symbols.isFetching || symbols.isError} notFoundContent="没有匹配的交易对" options={(symbols.data ?? []).map(value => ({ value, label: value }))} /> : <Input disabled />}</Form.Item></Col>
           <Col xs={24} md={12}><Form.Item name="direction" label="交易方向" rules={[{ required: true }]}><Select options={[{ value: 'LONG', label: '做多 · 买入开仓 / 卖出平仓' }, { value: 'SHORT', label: '做空 · 卖出开仓 / 买入平仓' }]} /></Form.Item></Col>
-          <Col xs={24} md={12}><Form.Item name="mode" label="运行模式" rules={[{ required: true }]} extra="模拟盘使用真实行情进行本地撮合。"><Select options={[{ value: 'PAPER', label: '模拟盘 / Paper Trading' }, { value: 'LIVE', label: '实盘 / Live' }]} /></Form.Item></Col>
+          <Col xs={24} md={12}><Form.Item label="运行模式" extra="由全局设置中的 API Key 决定：已配置 API Key 后以实盘运行，未配置时以模拟盘运行。">{modeKnown ? <ModeTag mode={live ? 'LIVE' : 'PAPER'} /> : '未知（保存时按实盘确认）'}</Form.Item></Col>
         </Row>
-        {selectedMode === 'LIVE' && <Alert type="warning" showIcon title="实盘使用真实资金，请核对交易方向和风险限制。" />}
+        {live && <Alert type="warning" showIcon title="实盘使用真实资金，请核对交易方向和风险限制。" />}
       </Card>
       <Card title="网格参数" className="form-card">
         <Row gutter={20}>
@@ -152,7 +154,7 @@ export default function PairConfig() {
         </Row>
       </Card>
       <div className="save-bar"><span className="muted" role="status">{edit.dirty ? '有未保存的修改' : '所有修改已保存'}</span><Space wrap>
-        <Button onClick={async () => { if (edit.dirty && !await modal.confirm({ title: '放弃未保存的修改？', okText: '还原', cancelText: '继续编辑' })) return; if (adding) form.setFieldsValue(defaults); else if (baseline.current?.symbol === symbol) form.setFieldsValue(toForm(baseline.current.config)); edit.setDirty(false); }}>还原</Button>
+        <Button onClick={async () => { if (edit.dirty && !await modal.confirm({ title: '放弃未保存的修改？', okText: '还原', cancelText: '继续编辑' })) return; if (adding) form.setFieldsValue(defaults); else if (baseline.current?.symbol === symbol) form.setFieldsValue(baseline.current.config); edit.setDirty(false); }}>还原</Button>
         <Button type="primary" htmlType="submit" loading={mutation.isPending}>{adding ? '保存并添加' : '保存并立即生效'}</Button>
       </Space></div>
       {!adding && <Card className="danger-zone" title="删除策略"><p>删除前请暂停策略、等待挂单撤销并平仓；删除不会自动平仓，历史记录会保留。</p><Button danger disabled={edit.saving} loading={deletion.busy} onClick={() => void remove()}>删除策略</Button></Card>}

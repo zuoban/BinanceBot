@@ -345,7 +345,6 @@ async fn legacy_paper_account_starts_paused_and_cannot_resume() {
         }
         let mut config = AppConfig::default();
         config.exchange.symbol = "SOLUSDC".into();
-        config.exchange.dry_run = true;
         let (tx, _rx) = mpsc::channel(1);
         let state = AppState::new(config, db, tx);
         assert_eq!(*state.status.read().await, BotStatus::Paused);

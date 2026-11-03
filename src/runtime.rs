@@ -659,7 +659,7 @@ impl TradingRuntime {
             prearmed
         } else {
             let symbol = strategy.exchange.symbol.clone();
-            let mode = crate::types::TradingMode::from_dry_run(strategy.exchange.dry_run);
+            let mode = strategy.exchange.trading_mode();
             db.run_blocking(move |db| db.arm_execution_guard(&symbol, mode))
                 .await?
         };
@@ -706,7 +706,7 @@ impl TradingRuntime {
                 )
                 .await;
         }
-        if self.admin_auth.is_none() && !strategy.exchange.dry_run {
+        if self.admin_auth.is_none() && !strategy.exchange.is_paper() {
             if prearmed.is_none() {
                 state
                     .pause_trading_with_reason(
@@ -958,7 +958,7 @@ impl TradingRuntime {
         let state = pair.state.clone();
         if result.is_ok() {
             let config = state.config.read().await.clone();
-            result = if config.exchange.dry_run {
+            result = if config.exchange.is_paper() {
                 let paper_symbol = symbol.to_string();
                 let saved = state
                     .db

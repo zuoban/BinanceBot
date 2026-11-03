@@ -32,7 +32,7 @@ pub struct TradingPairConfig {
     pub telegram: Option<TelegramConfig>,
 }
 
-/// Only execution mode is pair-specific. Other fields are read for legacy migration.
+/// Legacy per-pair connection fields, read only to migrate older configurations.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PairExchangeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -40,19 +40,9 @@ pub struct PairExchangeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_secret: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dry_run: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recv_window: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sync_interval_secs: Option<u64>,
-}
-
-impl PairExchangeConfig {
-    fn apply(&self, exchange: &mut ExchangeConfig) {
-        if let Some(value) = self.dry_run {
-            exchange.dry_run = value;
-        }
-    }
 }
 
 impl TradingPairConfig {
@@ -67,10 +57,7 @@ impl TradingPairConfig {
 
     pub fn update_from(&mut self, config: &AppConfig) {
         self.grid = Some(config.grid.clone());
-        self.exchange = PairExchangeConfig {
-            dry_run: Some(config.exchange.dry_run),
-            ..Default::default()
-        };
+        self.exchange = PairExchangeConfig::default();
         self.telegram = None;
     }
 }
@@ -129,8 +116,6 @@ pub struct ExchangeConfig {
     pub api_key: String,
     #[serde(default)]
     pub api_secret: String,
-    #[serde(default = "default_true")]
-    pub dry_run: bool,
     #[serde(default = "default_recv_window")]
     pub recv_window: u64,
     #[serde(default = "default_sync_interval")]
@@ -208,11 +193,6 @@ pub struct GridConfigSummary {
     pub max_price: Option<Decimal>,
     pub max_position_usdc: Option<Decimal>,
     pub pause_on_max_position: bool,
-    pub dry_run: bool,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 fn default_symbol() -> String {
@@ -225,6 +205,10 @@ fn default_recv_window() -> u64 {
 
 fn default_sync_interval() -> u64 {
     3
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_grid_interval() -> Decimal {
@@ -254,7 +238,6 @@ impl Default for AppConfig {
                 symbol: "SOLUSDC".to_string(),
                 api_key: String::new(),
                 api_secret: String::new(),
-                dry_run: true,
                 recv_window: 5000,
                 sync_interval_secs: 3,
             },
@@ -339,7 +322,6 @@ impl AppConfig {
             let mut config = self.clone();
             config.pairs.clear();
             config.exchange.symbol = pair.symbol.clone();
-            pair.exchange.apply(&mut config.exchange);
             config.grid = pair.grid.clone().unwrap_or_else(|| self.grid.clone());
             configs.push(config);
         }
@@ -376,7 +358,6 @@ impl AppConfig {
             max_price: self.grid.max_price,
             max_position_usdc: self.grid.max_position_usdc,
             pause_on_max_position: self.grid.pause_on_max_position,
-            dry_run: self.exchange.dry_run,
         }
     }
 }
@@ -411,18 +392,29 @@ impl GridConfig {
 }
 
 impl ExchangeConfig {
+    /// Paper mode is the absence of API credentials; configured credentials run live.
+    pub fn trading_mode(&self) -> crate::types::TradingMode {
+        if self.api_key.trim().is_empty() && self.api_secret.trim().is_empty() {
+            crate::types::TradingMode::Paper
+        } else {
+            crate::types::TradingMode::Live
+        }
+    }
+
+    pub fn is_paper(&self) -> bool {
+        self.trading_mode() == crate::types::TradingMode::Paper
+    }
+
     fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(self.sync_interval_secs > 0, "同步间隔必须大于 0");
         anyhow::ensure!(
             (1..=60_000).contains(&self.recv_window),
             "请求有效窗口必须在 1-60000 毫秒之间"
         );
-        if !self.dry_run {
-            anyhow::ensure!(
-                !self.api_key.trim().is_empty() && !self.api_secret.trim().is_empty(),
-                "实盘需要配置 API Key 和 Secret"
-            );
-        }
+        anyhow::ensure!(
+            self.api_key.trim().is_empty() == self.api_secret.trim().is_empty(),
+            "API Key 和 Secret 必须同时配置：配置后以实盘运行，全部清空后以模拟盘运行"
+        );
         Ok(())
     }
 }
@@ -494,7 +486,7 @@ mod tests {
             .to_string()
             .contains("请求有效窗口"));
         config.exchange.recv_window = 1;
-        config.exchange.dry_run = false;
+        config.exchange.api_key = "key".into();
         assert!(config
             .validate()
             .unwrap_err()
@@ -573,13 +565,13 @@ mod tests {
     }
 
     #[test]
-    fn pair_overrides_migrate_once_to_first_pair_globals_without_changing_modes_or_grids() {
+    fn pair_overrides_migrate_once_to_first_pair_globals() {
         let mut config: AppConfig = serde_json::from_value(serde_json::json!({
             "exchange": {}, "server": {}, "pairs": [
-                {"symbol":"SOLUSDC", "exchange":{"api_key":"first-key", "api_secret":"first-secret", "recv_window":8000, "sync_interval_secs":7, "dry_run":false},
+                {"symbol":"SOLUSDC", "exchange":{"api_key":"first-key", "api_secret":"first-secret", "recv_window":8000, "sync_interval_secs":7},
                  "telegram":{"enabled":true,"bot_token":"first-token","chat_id":"123"}},
                 {"symbol":"BTCUSDT", "grid":{"grid_interval":"10"},
-                 "exchange":{"api_key":"second-key","api_secret":"second-secret", "dry_run":true},
+                 "exchange":{"api_key":"second-key","api_secret":"second-secret"},
                  "telegram":{"enabled":false}}
             ]
         })).unwrap();
@@ -592,8 +584,9 @@ mod tests {
                 && strategy.exchange.recv_window == 8000
                 && strategy.exchange.sync_interval_secs == 7
                 && strategy.telegram.bot_token == "first-token"));
-        assert!(!configs[0].exchange.dry_run);
-        assert!(configs[1].exchange.dry_run);
+        assert!(configs
+            .iter()
+            .all(|c| c.exchange.trading_mode() == crate::types::TradingMode::Live));
         assert_eq!(configs[1].grid.grid_interval, dec!(10));
         let serialized = serde_json::to_value(&config).unwrap();
         config.ensure_pair_list().unwrap();
@@ -692,7 +685,7 @@ mod tests {
             "pairs": [
                 {"symbol": "SOLUSDC"},
                 {"symbol": "BTCUSDT", "grid": {"grid_interval": "10", "order_amount_usdc": "200", "buy_window": 3},
-                 "exchange": {"dry_run": false}}
+                 "exchange": {}}
             ]
         })).unwrap();
         config.validate().unwrap();
@@ -700,11 +693,17 @@ mod tests {
         assert_eq!(configs.len(), 2);
         assert_eq!(configs[0].grid.grid_interval, dec!(1));
         assert_eq!(configs[0].grid.order_amount_usdc, dec!(50));
-        assert!(configs[0].exchange.dry_run);
+        assert_eq!(
+            configs[0].exchange.trading_mode(),
+            crate::types::TradingMode::Live
+        );
         assert_eq!(configs[1].grid.grid_interval, dec!(10));
         assert_eq!(configs[1].grid.buy_window, 3);
         assert_eq!(configs[1].exchange.api_key, "shared-key");
-        assert!(!configs[1].exchange.dry_run);
+        assert_eq!(
+            configs[1].exchange.trading_mode(),
+            crate::types::TradingMode::Live
+        );
         assert!(configs.iter().all(|c| c.pairs.is_empty()));
         let json = serde_json::to_value(config).unwrap();
         let restored: AppConfig = serde_json::from_value(json.clone()).unwrap();
@@ -735,8 +734,7 @@ mod tests {
             .to_string()
             .contains("BTCUSDT"));
         config.pairs[1].grid = None;
-        config.pairs[1].exchange.dry_run = Some(false);
-        config.exchange.api_key.clear();
+        config.exchange.api_key = "key".into();
         config.exchange.api_secret.clear();
         assert!(config.validate().is_err());
     }

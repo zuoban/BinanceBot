@@ -35,7 +35,10 @@ fn source(id: &str, price: Decimal, quantity: Decimal) -> GridOrder {
 
 async fn engine(db: Arc<Database>, url: Option<String>) -> GridTradingEngine {
     let mut config = AppConfig::default();
-    config.exchange.dry_run = url.is_none();
+    if url.is_some() {
+        config.exchange.api_key = "live-key".into();
+        config.exchange.api_secret = "live-secret".into();
+    }
     config.grid.grid_interval = dec!(1.2);
     config.grid.order_amount_usdc = dec!(3000);
     config.grid.buy_window = 0;

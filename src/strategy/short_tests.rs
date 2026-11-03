@@ -642,7 +642,6 @@ async fn fake_server(fake: FakeExchange) -> (String, JoinHandle<()>) {
 async fn live_engine(direction: GridDirection, url: String) -> GridTradingEngine {
     let mut engine = engine(direction).await;
     let mut config = engine.state.config.write().await;
-    config.exchange.dry_run = false;
     config.exchange.api_key = "test-key".into();
     config.exchange.api_secret = "test-secret".into();
     engine.client = Arc::new(BinanceFuturesClient::with_base_url(&config.exchange, url));

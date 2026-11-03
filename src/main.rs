@@ -159,7 +159,7 @@ async fn main() -> anyhow::Result<()> {
             strategy.grid.order_amount_usdc,
             strategy.grid.buy_window,
             strategy.grid.sell_window,
-            binance_grid_bot::types::TradingMode::from_dry_run(strategy.exchange.dry_run).as_str()
+            strategy.exchange.trading_mode().as_str()
         );
     }
     let addr = config.server.socket_addr()?;
@@ -290,7 +290,10 @@ mod tests {
         assert_eq!(load_saved_config(&db).unwrap().server.host, "127.0.0.1");
         assert_eq!(config.pairs.len(), 1);
         let strategy = &config.strategy_configs().unwrap()[0];
-        assert!(strategy.exchange.dry_run);
+        assert_eq!(
+            strategy.exchange.trading_mode(),
+            binance_grid_bot::types::TradingMode::Paper
+        );
         assert!(strategy.exchange.api_key.is_empty());
         assert!(strategy.exchange.api_secret.is_empty());
     }

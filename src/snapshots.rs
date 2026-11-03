@@ -30,7 +30,7 @@ fn fresh(now: DateTime<Utc>, updated: DateTime<Utc>, seconds: u64) -> bool {
 fn aggregate(snapshots: &[(BotSnapshot, u64)], now: DateTime<Utc>) -> Vec<SnapshotGroup> {
     let mut groups: BTreeMap<(String, String), Vec<(&BotSnapshot, u64)>> = BTreeMap::new();
     for (snapshot, sync_interval) in snapshots {
-        let mode = TradingMode::from_dry_run(snapshot.dry_run);
+        let mode = snapshot.mode;
         let asset = quote_asset(&snapshot.symbol).unwrap_or_else(|| {
             if snapshot.account.asset.is_empty() {
                 &snapshot.symbol
@@ -178,7 +178,10 @@ mod tests {
     async fn sample(symbol: &str, paper: bool) -> BotSnapshot {
         let mut config = AppConfig::default();
         config.exchange.symbol = symbol.into();
-        config.exchange.dry_run = paper;
+        if !paper {
+            config.exchange.api_key = "live-key".into();
+            config.exchange.api_secret = "live-secret".into();
+        }
         let (tx, _rx) = mpsc::channel(1);
         let state = AppState::new(config, Arc::new(Database::open(":memory:").unwrap()), tx);
         state.account.write().await.asset = quote_asset(symbol).unwrap_or(symbol).into();

@@ -855,7 +855,7 @@ impl GridTradingEngine {
     }
 
     async fn ensure_flat_for_direction_change(&mut self) -> Result<()> {
-        if !self.state.config.read().await.exchange.dry_run {
+        if !self.state.config.read().await.exchange.is_paper() {
             anyhow::ensure!(
                 self.sync_account_and_position().await,
                 "无法确认当前持仓，交易方向未切换"
@@ -891,7 +891,7 @@ impl GridTradingEngine {
         market: Decimal,
     ) -> Result<(Vec<Decimal>, Vec<Decimal>)> {
         let symbol = config.exchange.symbol.clone();
-        let mode = TradingMode::from_dry_run(config.exchange.dry_run);
+        let mode = config.exchange.trading_mode();
         let last_fill = self
             .state
             .db
@@ -975,8 +975,8 @@ impl GridTradingEngine {
                     symbol,
                     config.grid.grid_interval,
                     config.grid.order_amount_usdc,
-                    if config.exchange.dry_run {
-                        "DRY_RUN (Paper Trading)"
+                    if config.exchange.is_paper() {
+                        "PAPER (模拟盘)"
                     } else {
                         "LIVE"
                     }
@@ -986,7 +986,7 @@ impl GridTradingEngine {
 
         // Restore managed metadata before any exchange request can fail. A
         // subsequent initial pause must reconcile these orders before clearing them.
-        if !config.exchange.dry_run {
+        if !config.exchange.is_paper() {
             let restore_symbol = symbol.clone();
             let restored = self
                 .state
@@ -1012,7 +1012,7 @@ impl GridTradingEngine {
             Ok(()) => {}
             Err(e) => {
                 warn!("Could not load exchange rules for {}: {}", symbol, e);
-                if !config.exchange.dry_run {
+                if !config.exchange.is_paper() {
                     return Err(anyhow!(
                         "Could not load Binance exchange rules for {}: {}",
                         symbol,
@@ -1040,7 +1040,7 @@ impl GridTradingEngine {
             }
             Err(e) => {
                 warn!("Failed to fetch initial market price: {}", e);
-                if !config.exchange.dry_run {
+                if !config.exchange.is_paper() {
                     return Err(anyhow!("Could not load initial market price: {}", e));
                 }
             }
@@ -1067,7 +1067,7 @@ impl GridTradingEngine {
         }
 
         // Reconcile restored orders only after the exchange prerequisites are ready.
-        if !config.exchange.dry_run
+        if !config.exchange.is_paper()
             && (!self.sync_account_and_position().await || !self.sync_live_orders().await)
         {
             return Err(anyhow!(
@@ -1112,7 +1112,7 @@ impl GridTradingEngine {
 
     /// Clear recovered live orders before processing controls queued during initialization.
     pub async fn reconcile_initial_pause(&mut self) {
-        let live = !self.state.config.read().await.exchange.dry_run;
+        let live = !self.state.config.read().await.exchange.is_paper();
         let paused = *self.state.status.read().await == BotStatus::Paused;
         if live && paused && !self.state.is_shutting_down() && !self.cancel_all_orders().await {
             self.state
@@ -1252,14 +1252,14 @@ impl GridTradingEngine {
                 reply,
             } => {
                 let config = self.state.config.read().await.clone();
-                let current_mode = TradingMode::from_dry_run(config.exchange.dry_run);
+                let current_mode = config.exchange.trading_mode();
                 if expected_mode == TradingMode::Unknown || current_mode != expected_mode {
                     let _ = reply.send(Err("策略运行模式已改变，无法恢复策略".into()));
                     return;
                 }
                 if !self.exchange_rules_loaded {
                     if let Err(error) = self.load_exchange_rules(&config.exchange.symbol).await {
-                        if !config.exchange.dry_run {
+                        if !config.exchange.is_paper() {
                             let message = format!(
                                 "Resume failed: could not load Binance exchange rules for {}: {}",
                                 config.exchange.symbol, error
@@ -1330,7 +1330,7 @@ impl GridTradingEngine {
                 reply,
             } => {
                 let config = self.state.config.read().await;
-                let current_mode = TradingMode::from_dry_run(config.exchange.dry_run);
+                let current_mode = config.exchange.trading_mode();
                 drop(config);
                 let result =
                     if expected_mode == TradingMode::Unknown || expected_mode != current_mode {
@@ -1383,7 +1383,7 @@ impl GridTradingEngine {
         // installed in memory. Restore them before canceling so racing fills
         // are recorded rather than discarded with the recovery metadata.
         let config = self.state.config.read().await.clone();
-        if removing && !config.exchange.dry_run {
+        if removing && !config.exchange.is_paper() {
             if let Err(error) = self.client.get_open_orders(&config.exchange.symbol).await {
                 if matches!(
                     error.downcast_ref::<crate::exchange::client::ExchangeError>(),
@@ -1424,7 +1424,7 @@ impl GridTradingEngine {
                 return Err(error.context("无法确认删除交易对的交易所挂单"));
             }
         }
-        if !config.exchange.dry_run {
+        if !config.exchange.is_paper() {
             let restored = self
                 .state
                 .db
@@ -1477,7 +1477,7 @@ impl GridTradingEngine {
         let only_window_changed =
             old_config.exchange == new_config.exchange && resized_grid == new_config.grid;
         let market_changed = old_config.exchange.symbol != new_config.exchange.symbol;
-        let mode_changed = old_config.exchange.dry_run != new_config.exchange.dry_run;
+        let mode_changed = old_config.exchange.trading_mode() != new_config.exchange.trading_mode();
         let client_changed = old_config.exchange.api_key != new_config.exchange.api_key
             || old_config.exchange.api_secret != new_config.exchange.api_secret
             || old_config.exchange.recv_window != new_config.exchange.recv_window;
@@ -1490,7 +1490,8 @@ impl GridTradingEngine {
                 .await;
             return Ok(());
         }
-        let mut paper_state = if new_config.exchange.dry_run && (market_changed || mode_changed) {
+        let mut paper_state = if new_config.exchange.is_paper() && (market_changed || mode_changed)
+        {
             let symbol = new_config.exchange.symbol.clone();
             let state = self
                 .state
@@ -1510,14 +1511,11 @@ impl GridTradingEngine {
         };
 
         let new_client = if client_changed {
-            Arc::new(BinanceFuturesClient::new_with_limiter(
-                &new_config.exchange,
-                self.client.limiter(),
-            ))
+            Arc::new(self.client.reconfig(&new_config.exchange))
         } else {
             Arc::clone(&self.client)
         };
-        if !new_config.exchange.dry_run {
+        if !new_config.exchange.is_paper() {
             new_client.sync_server_time().await?;
             let new_position = new_client
                 .get_position(&new_config.exchange.symbol)
@@ -1538,7 +1536,7 @@ impl GridTradingEngine {
 
         let fetch_rules = market_changed
             || mode_changed
-            || (!new_config.exchange.dry_run && !self.exchange_rules_loaded);
+            || (!new_config.exchange.is_paper() && !self.exchange_rules_loaded);
         let new_rules = if fetch_rules {
             let info = new_client
                 .get_exchange_info(Some(&new_config.exchange.symbol))
@@ -1595,7 +1593,7 @@ impl GridTradingEngine {
                 return Err(error);
             }
         }
-        if new_config.exchange.dry_run && (market_changed || mode_changed) {
+        if new_config.exchange.is_paper() && (market_changed || mode_changed) {
             let symbol = new_config.exchange.symbol.clone();
             paper_state = self
                 .state
@@ -1642,7 +1640,7 @@ impl GridTradingEngine {
             *self.state.position.write().await = PositionInfo::default();
             self.last_account_sync = None;
             self.last_orders_sync = None;
-            if new_config.exchange.dry_run {
+            if new_config.exchange.is_paper() {
                 if let Some((position, account)) = paper_state {
                     *self.state.position.write().await = position;
                     *self.state.account.write().await = account;
@@ -1674,7 +1672,7 @@ impl GridTradingEngine {
         }
         drop(scope_transition);
 
-        let ready = if new_config.exchange.dry_run {
+        let ready = if new_config.exchange.is_paper() {
             true
         } else {
             self.sync_live_orders().await && self.sync_account_and_position().await
@@ -1682,7 +1680,7 @@ impl GridTradingEngine {
         // A dirty target scope is installed paused, but reconciliation can have
         // recovered its live orders. Apply the same cancellation as startup.
         let cancellation_complete = if (market_changed || mode_changed)
-            && !new_config.exchange.dry_run
+            && !new_config.exchange.is_paper()
             && *self.state.status.read().await == BotStatus::Paused
         {
             self.cancel_all_orders().await
@@ -1763,8 +1761,8 @@ impl GridTradingEngine {
         }
 
         // Update unrealized PnL for current position
-        let is_dry_run = self.state.config.read().await.exchange.dry_run;
-        if is_dry_run {
+        let paper = self.state.config.read().await.exchange.is_paper();
+        if paper {
             let mut pos = self.state.position.write().await;
             let mut account = self.state.account.write().await;
             update_paper_account(&mut pos, &mut account, valuation_price);
@@ -1775,14 +1773,14 @@ impl GridTradingEngine {
         }
         let is_running = *self.state.status.read().await == BotStatus::Running;
 
-        // In Paper Trading / Dry Run mode, match simulated orders against live market price
+        // In paper mode, match simulated orders against live market price
         let prices_fresh = self.state.ticker.read().await.prices_are_fresh(Utc::now());
-        if is_running && is_dry_run && prices_fresh && last_updated {
+        if is_running && paper && prices_fresh && last_updated {
             self.simulate_order_fills(ticker_update.last_price).await;
         }
     }
 
-    /// Check simulated fills in Dry Run mode
+    /// Check simulated fills in paper mode
     async fn simulate_order_fills(&mut self, current_price: Decimal) {
         if !self.position_direction_ready().await {
             return;
@@ -1868,9 +1866,9 @@ impl GridTradingEngine {
         }
         let pause_epoch = self.state.pause_epoch();
         let config = self.state.config.read().await.clone();
-        let is_dry_run = config.exchange.dry_run;
+        let paper = config.exchange.is_paper();
 
-        self.refresh_mark_price(&config.exchange.symbol, is_dry_run)
+        self.refresh_mark_price(&config.exchange.symbol, paper)
             .await;
         if let Some(started) = started {
             debug!(
@@ -1896,7 +1894,7 @@ impl GridTradingEngine {
             return;
         }
 
-        let account_ready = if !is_dry_run {
+        let account_ready = if !paper {
             let orders_ready = self
                 .sync_live_orders_with_priority(ReconciliationPriority::Periodic)
                 .await;
@@ -1962,7 +1960,7 @@ impl GridTradingEngine {
         }
     }
 
-    async fn refresh_mark_price(&mut self, symbol: &str, is_dry_run: bool) {
+    async fn refresh_mark_price(&mut self, symbol: &str, paper: bool) {
         let previous = self.state.ticker.read().await.clone();
         let age = Utc::now().signed_duration_since(previous.mark_update_time);
         if previous.symbol == symbol
@@ -1991,7 +1989,7 @@ impl GridTradingEngine {
                 ticker.mark_update_time = requested_at;
                 drop(ticker);
 
-                if is_dry_run {
+                if paper {
                     let mut pos = self.state.position.write().await;
                     let mut account = self.state.account.write().await;
                     update_paper_account(&mut pos, &mut account, price);
@@ -2479,10 +2477,10 @@ impl GridTradingEngine {
             return;
         }
         let config = self.state.config.read().await.clone();
-        if config.exchange.dry_run {
+        if config.exchange.is_paper() {
             return;
         }
-        let mode = TradingMode::from_dry_run(config.exchange.dry_run);
+        let mode = config.exchange.trading_mode();
         let pending_count = self.state.stats.read().await.pending_pnl_trades;
         self.client.note_pnl_reconcile_backlog(pending_count);
         if pending_count == 0 {
@@ -2651,15 +2649,15 @@ impl GridTradingEngine {
     async fn on_order_filled(&mut self, order: &mut GridOrder) -> bool {
         order.status = OrderStatus::Filled;
         let config = self.state.config.read().await.clone();
-        if config.exchange.dry_run {
+        if config.exchange.is_paper() {
             order.updated_at = Utc::now();
         } else {
             self.account_cache.invalidate(&self.client).await;
             self.position_cache.invalidate(&self.client).await;
         }
-        let mode = TradingMode::from_dry_run(config.exchange.dry_run);
+        let mode = config.exchange.trading_mode();
         let recorded_id = order.client_order_id.clone();
-        let recorded = if config.exchange.dry_run {
+        let recorded = if config.exchange.is_paper() {
             self.state.has_recorded_paper_order(recorded_id, mode).await
         } else {
             self.state
@@ -2671,7 +2669,7 @@ impl GridTradingEngine {
             Ok(true) => {
                 // Refresh position and account and publish the global risk check
                 // before removing the reservation for an already-recorded fill.
-                if !config.exchange.dry_run && !self.sync_account_and_position().await {
+                if !config.exchange.is_paper() && !self.sync_account_and_position().await {
                     self.last_account_sync = None;
                     return false;
                 }
@@ -2680,7 +2678,7 @@ impl GridTradingEngine {
                     .write()
                     .await
                     .remove(&order.client_order_id);
-                if !config.exchange.dry_run {
+                if !config.exchange.is_paper() {
                     if let Err(e) = self.delete_managed_order(&order.client_order_id).await {
                         error!("Could not clear already-recorded order: {}", e);
                         return false;
@@ -2702,7 +2700,7 @@ impl GridTradingEngine {
         // Retain the managed order until both position and account are known.
         // A failed refresh must not remove the only reservation or record a fill
         // that a later reconciliation can no longer find.
-        if !config.exchange.dry_run && !self.sync_account_and_position().await {
+        if !config.exchange.is_paper() && !self.sync_account_and_position().await {
             let missing = {
                 let mut active = self.state.active_orders.write().await;
                 if active.contains_key(&order.client_order_id) {
@@ -2725,7 +2723,7 @@ impl GridTradingEngine {
         }
 
         // Keep paper orders retryable until the detached commit has finished.
-        if !config.exchange.dry_run {
+        if !config.exchange.is_paper() {
             self.state
                 .active_orders
                 .write()
@@ -2782,7 +2780,7 @@ impl GridTradingEngine {
         }
 
         let mut paper_state = None;
-        if config.exchange.dry_run {
+        if config.exchange.is_paper() {
             let mut pos = self.state.position.read().await.clone();
             let delta = if order.side == OrderSide::Buy {
                 order.quantity
@@ -2813,7 +2811,7 @@ impl GridTradingEngine {
             paper_state = Some((pos, acc));
         }
 
-        let (realized_pnl, commission, is_maker, pnl_verified) = if config.exchange.dry_run {
+        let (realized_pnl, commission, is_maker, pnl_verified) = if config.exchange.is_paper() {
             (simulated_pnl, Decimal::ZERO, true, true)
         } else if let Some(order_id) = order.order_id {
             match self
@@ -2913,9 +2911,9 @@ impl GridTradingEngine {
                 return;
             }
         }
-        if !config.exchange.dry_run {
+        if !config.exchange.is_paper() {
             let symbol = config.exchange.symbol.clone();
-            let mode = TradingMode::from_dry_run(false);
+            let mode = TradingMode::Live;
             match self
                 .state
                 .db
@@ -2932,9 +2930,9 @@ impl GridTradingEngine {
             }
         }
         self.trim_closing_orders_to_position().await;
-        if !config.exchange.dry_run {
+        if !config.exchange.is_paper() {
             let symbol = config.exchange.symbol.clone();
-            let mode = TradingMode::from_dry_run(false);
+            let mode = TradingMode::Live;
             match self
                 .state
                 .db
@@ -3262,7 +3260,7 @@ impl GridTradingEngine {
             return false;
         }
 
-        if !config.exchange.dry_run
+        if !config.exchange.is_paper()
             && self
                 .last_account_sync
                 .is_none_or(|at| at.elapsed() >= Duration::from_secs(10))
@@ -3270,7 +3268,7 @@ impl GridTradingEngine {
             warn!("Skipping order: Binance account or position has not been synchronized recently");
             return false;
         }
-        if !config.exchange.dry_run
+        if !config.exchange.is_paper()
             && self
                 .last_orders_sync
                 .is_none_or(|at| at.elapsed() >= Duration::from_secs(10))
@@ -3417,7 +3415,7 @@ impl GridTradingEngine {
             merge_sources: Vec::new(),
         };
 
-        if config.exchange.dry_run {
+        if config.exchange.is_paper() {
             let mut active_orders = self.state.active_orders.write().await;
             if self.state.is_shutting_down() {
                 return false;
@@ -3426,7 +3424,7 @@ impl GridTradingEngine {
             order.order_id = Some(rand::random::<i64>().abs());
             active_orders.insert(client_order_id.clone(), order);
             debug!(
-                "[DRY-RUN] Placed {} Maker order: price={}, qty={}, id={}",
+                "[PAPER] Placed {} Maker order: price={}, qty={}, id={}",
                 side.as_str(),
                 formatted_price,
                 formatted_qty,
@@ -3705,8 +3703,8 @@ impl GridTradingEngine {
 
     /// Cancel a single order
     async fn cancel_single_order(&mut self, order: &GridOrder) -> bool {
-        let is_dry_run = self.state.config.read().await.exchange.dry_run;
-        if !is_dry_run {
+        let paper = self.state.config.read().await.exchange.is_paper();
+        if !paper {
             if let Err(e) = self
                 .client
                 .cancel_order(&order.symbol, order.order_id, Some(&order.client_order_id))
@@ -3993,9 +3991,9 @@ impl GridTradingEngine {
 
     async fn cancel_all_orders_inner(&mut self, pause_already_persisted: bool) -> bool {
         let config = self.state.config.read().await.clone();
-        let is_dry_run = config.exchange.dry_run;
+        let paper = config.exchange.is_paper();
         let symbol = config.exchange.symbol.clone();
-        let mode = TradingMode::from_dry_run(config.exchange.dry_run);
+        let mode = config.exchange.trading_mode();
         let pause_epoch = self.state.pause_epoch();
         let was_running =
             !pause_already_persisted && *self.state.status.read().await == BotStatus::Running;
@@ -4010,11 +4008,11 @@ impl GridTradingEngine {
             }
         }
 
-        let observations_ready = is_dry_run
+        let observations_ready = paper
             || self
                 .load_identity_observations(self.client.account_identity_key(), &symbol)
                 .await;
-        let recovery_sources = if is_dry_run {
+        let recovery_sources = if paper {
             Some((Vec::new(), None))
         } else {
             let scope = symbol.clone();
@@ -4040,7 +4038,7 @@ impl GridTradingEngine {
         };
         let metadata_ready = observations_ready
             && recovery_sources.is_some()
-            && (is_dry_run || self.restore_provisional_before_cancel(&symbol, mode).await);
+            && (paper || self.restore_provisional_before_cancel(&symbol, mode).await);
         if !metadata_ready {
             recovery_failed = true;
         } else if let Err(e) = self.cancel_remainder_plan().await {
@@ -4053,7 +4051,7 @@ impl GridTradingEngine {
             recovery_failed = true;
         }
 
-        if !is_dry_run {
+        if !paper {
             // Initialization may have failed while loading recovery metadata.
             // Never clear persisted orders without first restoring and reconciling them.
             let restore_symbol = symbol.clone();
@@ -4332,7 +4330,7 @@ impl GridTradingEngine {
             return false;
         }
         self.state.active_orders.write().await.clear();
-        if !is_dry_run {
+        if !paper {
             if let Err(e) = self
                 .state
                 .db
@@ -4550,7 +4548,8 @@ mod tests {
 
     fn pending_pair_fixture() -> (AppConfig, Arc<Database>, GridOrder) {
         let mut config = AppConfig::default();
-        config.exchange.dry_run = false;
+        config.exchange.api_key = "live-key".into();
+        config.exchange.api_secret = "live-secret".into();
         config.grid.grid_interval = dec!(1);
         let db = Arc::new(Database::open(":memory:").unwrap());
         db.save_bot_status(BotStatus::Running).unwrap();
@@ -4666,7 +4665,8 @@ mod tests {
         connection.execute_batch("DROP TABLE pair_intents").unwrap();
         drop(connection);
         let mut config = AppConfig::default();
-        config.exchange.dry_run = false;
+        config.exchange.api_key = "live-key".into();
+        config.exchange.api_secret = "live-secret".into();
         let mut engine = pair_recovery_engine(&config, db.clone(), url).await;
         assert!(engine.shutdown_inner(true).await.is_err());
         drop(engine);
@@ -4687,7 +4687,8 @@ mod tests {
         let url = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let mut config = AppConfig::default();
-        config.exchange.dry_run = false;
+        config.exchange.api_key = "live-key".into();
+        config.exchange.api_secret = "live-secret".into();
         let db = Arc::new(Database::open(":memory:").unwrap());
         let mut engine = pair_recovery_engine(&config, db, url).await;
         assert!(engine.shutdown_inner(true).await.is_err());
@@ -4760,15 +4761,14 @@ mod tests {
     async fn switching_away_and_back_restores_paper_position_and_balance() {
         let mut config = AppConfig::default();
         config.grid.grid_interval = dec!(1);
-        config.exchange.api_key = "test-key".into();
-        config.exchange.api_secret = "test-secret".into();
         let db = Arc::new(Database::open(":memory:").unwrap());
         seed_paper_position(&db);
         let fake = PairExchange::default();
         let (url, server) = pair_exchange_server(fake.clone()).await;
         let mut engine = pair_recovery_engine(&config, db, url).await;
         let mut live = config.clone();
-        live.exchange.dry_run = false;
+        live.exchange.api_key = "live-key".into();
+        live.exchange.api_secret = "live-secret".into();
         engine.apply_config(live).await.unwrap();
         assert_eq!(engine.state.position.read().await.size, dec!(0));
         assert_eq!(*engine.state.status.read().await, BotStatus::Paused);
@@ -4781,7 +4781,7 @@ mod tests {
         let (reply, response) = tokio::sync::oneshot::channel();
         engine
             .handle_control_action(BotControlAction::Resume {
-                expected_mode: TradingMode::from_dry_run(false),
+                expected_mode: TradingMode::Live,
                 expected_epoch: engine.state.pause_epoch(),
                 reply,
             })
@@ -4814,7 +4814,6 @@ mod tests {
     #[tokio::test]
     async fn switching_direction_rejects_nonempty_target_paper_position() {
         let mut config = AppConfig::default();
-        config.exchange.dry_run = false;
         config.exchange.api_key = "test-key".into();
         config.exchange.api_secret = "test-secret".into();
         let db = Arc::new(Database::open(":memory:").unwrap());
@@ -4823,7 +4822,8 @@ mod tests {
         let mut engine = pair_recovery_engine(&config, db, url).await;
         engine.state.position.write().await.size = dec!(0);
         let mut paper = config.clone();
-        paper.exchange.dry_run = true;
+        paper.exchange.api_key.clear();
+        paper.exchange.api_secret.clear();
         paper.grid.direction = match config.grid.direction {
             GridDirection::Long => GridDirection::Short,
             GridDirection::Short => GridDirection::Long,
@@ -4831,7 +4831,7 @@ mod tests {
         let error = engine.apply_config(paper).await.unwrap_err();
         assert!(error.to_string().contains("请先平掉目标账户的持仓"));
         let current = engine.state.config.read().await;
-        assert!(!current.exchange.dry_run);
+        assert!(!current.exchange.is_paper());
         assert_eq!(current.grid.direction, config.grid.direction);
         server.abort();
     }
@@ -4849,7 +4849,8 @@ mod tests {
             })
             .await
             .unwrap();
-        engine.state.config.write().await.exchange.dry_run = false;
+        engine.state.config.write().await.exchange.api_key = "live-key".into();
+        engine.state.config.write().await.exchange.api_secret = "live-secret".into();
         let action = engine.action_rx.recv().await.unwrap();
         engine.handle_control_action(action).await;
         assert!(result.await.unwrap().unwrap_err().contains("模式已改变"));
@@ -4880,7 +4881,7 @@ mod tests {
             .state
             .action_tx
             .send(BotControlAction::Rebalance {
-                expected_mode: TradingMode::from_dry_run(config.exchange.dry_run),
+                expected_mode: config.exchange.trading_mode(),
                 reply,
             })
             .await
@@ -4898,7 +4899,8 @@ mod tests {
     #[tokio::test]
     async fn rebalance_reports_cancellation_failure() {
         let mut config = AppConfig::default();
-        config.exchange.dry_run = false;
+        config.exchange.api_key = "live-key".into();
+        config.exchange.api_secret = "live-secret".into();
         let db = Arc::new(Database::open(":memory:").unwrap());
         let fake = PairExchange::default();
         fake.fail_open_orders.store(100, Ordering::SeqCst);
@@ -4908,7 +4910,7 @@ mod tests {
         let (reply, result) = tokio::sync::oneshot::channel();
         engine
             .handle_control_action(BotControlAction::Rebalance {
-                expected_mode: TradingMode::from_dry_run(config.exchange.dry_run),
+                expected_mode: config.exchange.trading_mode(),
                 reply,
             })
             .await;
@@ -4926,8 +4928,6 @@ mod tests {
     ) {
         let mut paper = AppConfig::default();
         paper.grid.grid_interval = dec!(1);
-        paper.exchange.api_key = "test-key".into();
-        paper.exchange.api_secret = "test-secret".into();
         let db = Arc::new(Database::open(":memory:").unwrap());
         db.save_config(&paper).unwrap();
         db.arm_execution_guard("SOLUSDC", TradingMode::Paper)
@@ -4962,12 +4962,13 @@ mod tests {
     #[tokio::test]
     async fn rebalance_reports_pause_during_cancellation() {
         let (mut engine, _db, fake, server) = dirty_live_switch_fixture().await;
-        engine.state.config.write().await.exchange.dry_run = false;
+        engine.state.config.write().await.exchange.api_key = "live-key".into();
+        engine.state.config.write().await.exchange.api_secret = "live-secret".into();
         fake.block_cancel.store(1, Ordering::SeqCst);
         let state = engine.state.clone();
         let expected_mode = {
             let config = state.config.read().await;
-            TradingMode::from_dry_run(config.exchange.dry_run)
+            config.exchange.trading_mode()
         };
         let (reply, result) = tokio::sync::oneshot::channel();
         let rebuilding = tokio::spawn(async move {
@@ -4997,10 +4998,11 @@ mod tests {
     async fn switching_to_dirty_live_cancels_recovered_orders_and_stays_paused() {
         let (mut engine, db, fake, server) = dirty_live_switch_fixture().await;
         let mut live = engine.state.config.read().await.clone();
-        live.exchange.dry_run = false;
+        live.exchange.api_key = "live-key".into();
+        live.exchange.api_secret = "live-secret".into();
         engine.apply_config(live).await.unwrap();
 
-        assert!(!engine.state.config.read().await.exchange.dry_run);
+        assert!(!engine.state.config.read().await.exchange.is_paper());
         assert_eq!(*engine.state.status.read().await, BotStatus::Paused);
         assert_eq!(
             db.load_pair_status("SOLUSDC", TradingMode::Live).unwrap(),
@@ -5020,10 +5022,11 @@ mod tests {
         let (mut engine, db, fake, server) = dirty_live_switch_fixture().await;
         fake.fail_cancel.store(100, Ordering::SeqCst);
         let mut live = engine.state.config.read().await.clone();
-        live.exchange.dry_run = false;
+        live.exchange.api_key = "live-key".into();
+        live.exchange.api_secret = "live-secret".into();
         assert!(engine.apply_config(live).await.is_err());
 
-        assert!(!engine.state.config.read().await.exchange.dry_run);
+        assert!(!engine.state.config.read().await.exchange.is_paper());
         assert_eq!(*engine.state.status.read().await, BotStatus::Paused);
         assert_eq!(
             db.load_pair_status("SOLUSDC", TradingMode::Live).unwrap(),
@@ -5053,7 +5056,8 @@ mod tests {
         fake.block_cancel.store(1, Ordering::SeqCst);
         let state = engine.state.clone();
         let mut live = state.config.read().await.clone();
-        live.exchange.dry_run = false;
+        live.exchange.api_key = "live-key".into();
+        live.exchange.api_secret = "live-secret".into();
         let switching = tokio::spawn(async move { engine.apply_config(live).await });
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
@@ -6374,7 +6378,8 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
         let mut config = AppConfig::default();
-        config.exchange.dry_run = false;
+        config.exchange.api_key = "live-key".into();
+        config.exchange.api_secret = "live-secret".into();
         let db = Arc::new(Database::open(":memory:").unwrap());
         let (action_tx, action_rx) = mpsc::channel(1);
         let (_ticker_tx, ticker_rx) = broadcast::channel(1);
@@ -6496,7 +6501,8 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
         let mut config = AppConfig::default();
-        config.exchange.dry_run = false;
+        config.exchange.api_key = "live-key".into();
+        config.exchange.api_secret = "live-secret".into();
         let db = Arc::new(Database::open(":memory:").unwrap());
         let (action_tx, action_rx) = mpsc::channel(1);
         let (_ticker_tx, ticker_rx) = broadcast::channel(1);
@@ -6544,7 +6550,8 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
         let mut config = AppConfig::default();
-        config.exchange.dry_run = false;
+        config.exchange.api_key = "live-key".into();
+        config.exchange.api_secret = "live-secret".into();
         let db = Arc::new(Database::open(":memory:").unwrap());
         let (action_tx, action_rx) = mpsc::channel(1);
         let (_ticker_tx, ticker_rx) = broadcast::channel(1);
@@ -6552,11 +6559,12 @@ mod tests {
         let client = Arc::new(BinanceFuturesClient::with_base_url(&config.exchange, url));
         let mut engine = GridTradingEngine::new(state.clone(), client, action_rx, ticker_rx);
         let mut paper = config;
-        paper.exchange.dry_run = true;
+        paper.exchange.api_key.clear();
+        paper.exchange.api_secret.clear();
 
         engine.apply_config(paper).await.unwrap();
         assert_eq!(fake.cancellations.load(Ordering::SeqCst), 1);
-        assert!(state.config.read().await.exchange.dry_run);
+        assert!(state.config.read().await.exchange.is_paper());
         server.abort();
     }
 

@@ -109,7 +109,8 @@ async fn periodic_reconciliation_preserves_critical_budget_for_cancellation() {
     let url = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let (mut engine, _, _) = engines().await;
-    engine.state.config.write().await.exchange.dry_run = false;
+    engine.state.config.write().await.exchange.api_key = "live-key".into();
+    engine.state.config.write().await.exchange.api_secret = "live-secret".into();
     let limiter = Arc::new(RateLimiter::default());
     limiter
         .reserve(&url, [0; 32], 1800, RequestClass::Normal)
@@ -518,8 +519,6 @@ async fn mode_changes_keep_pause_after_database_reopen_for_live() {
     let path = std::env::temp_dir().join(format!("mode-pause-{}.db", uuid::Uuid::new_v4()));
     let db = Arc::new(Database::open(&path).unwrap());
     let mut config = AppConfig::default();
-    config.exchange.api_key = "test-key".into();
-    config.exchange.api_secret = "test-secret".into();
     config.pairs = vec![TradingPairConfig::new("SOLUSDC".into())];
     db.save_config(&config).unwrap();
     // A previous unclean exit left the target mode running.
@@ -545,7 +544,8 @@ async fn mode_changes_keep_pause_after_database_reopen_for_live() {
     assert!(!engine.mark_retry.ready());
     assert!(!engine.ticker_retry.ready());
     let mut live = paper;
-    live.exchange.dry_run = false;
+    live.exchange.api_key = "live-key".into();
+    live.exchange.api_secret = "live-secret".into();
     engine.apply_config(live.clone()).await.unwrap();
     assert!(engine.mark_retry.ready());
     assert!(engine.ticker_retry.ready());
@@ -659,7 +659,8 @@ async fn partial_fill_refreshes_inflight_position_and_fails_closed_on_error() {
     let url = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let (mut engine, _, _) = engines().await;
-    engine.state.config.write().await.exchange.dry_run = false;
+    engine.state.config.write().await.exchange.api_key = "live-key".into();
+    engine.state.config.write().await.exchange.api_secret = "live-secret".into();
     engine.client = Arc::new(BinanceFuturesClient::with_base_url(
         &engine.state.config.read().await.exchange,
         url.clone(),
@@ -848,7 +849,8 @@ async fn pause_during_partial_fill_refresh_keeps_discovered_order_recoverable() 
     let url = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let (mut engine, _, db) = engines().await;
-    engine.state.config.write().await.exchange.dry_run = false;
+    engine.state.config.write().await.exchange.api_key = "live-key".into();
+    engine.state.config.write().await.exchange.api_secret = "live-secret".into();
     engine.client = Arc::new(BinanceFuturesClient::with_base_url(
         &engine.state.config.read().await.exchange,
         url,
@@ -917,7 +919,8 @@ async fn inconsistent_open_order_uses_individual_lookup_to_recover() {
         let url = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let (mut engine, _, db) = engines().await;
-        engine.state.config.write().await.exchange.dry_run = false;
+        engine.state.config.write().await.exchange.api_key = "live-key".into();
+        engine.state.config.write().await.exchange.api_secret = "live-secret".into();
         engine.client = Arc::new(BinanceFuturesClient::with_base_url(
             &engine.state.config.read().await.exchange,
             url,
@@ -1031,7 +1034,8 @@ async fn inconsistent_open_order_identity_conflicts_preserve_original_record() {
         let url = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let (mut engine, _, db) = engines().await;
-        engine.state.config.write().await.exchange.dry_run = false;
+        engine.state.config.write().await.exchange.api_key = "live-key".into();
+        engine.state.config.write().await.exchange.api_secret = "live-secret".into();
         engine.client = Arc::new(BinanceFuturesClient::with_base_url(
             &engine.state.config.read().await.exchange,
             url,
@@ -1096,7 +1100,8 @@ async fn inconsistent_open_order_preserves_existing_disk_order_metadata() {
     let url = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let (mut engine, _, db) = engines().await;
-    engine.state.config.write().await.exchange.dry_run = false;
+    engine.state.config.write().await.exchange.api_key = "live-key".into();
+    engine.state.config.write().await.exchange.api_secret = "live-secret".into();
     engine.client = Arc::new(BinanceFuturesClient::with_base_url(
         &engine.state.config.read().await.exchange,
         url,
@@ -1175,7 +1180,8 @@ async fn inconsistent_order_blocks_other_pairs_before_waiting_for_lookup() {
     let (mut engine, other, db) = engines().await;
     for state in [&engine.state, &other.state] {
         let mut config = state.config.write().await;
-        config.exchange.dry_run = false;
+        config.exchange.api_key = "live-key".into();
+        config.exchange.api_secret = "live-secret".into();
         config.global_max_position_notional = Some(dec!(10000));
         drop(config);
         state.position.write().await.update_time = Some(Utc::now());
@@ -1253,7 +1259,8 @@ async fn inconsistent_individual_lookup_revokes_readiness_before_next_lookup() {
     let url = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let (mut engine, _, db) = engines().await;
-    engine.state.config.write().await.exchange.dry_run = false;
+    engine.state.config.write().await.exchange.api_key = "live-key".into();
+    engine.state.config.write().await.exchange.api_secret = "live-secret".into();
     engine.client = Arc::new(BinanceFuturesClient::with_base_url(
         &engine.state.config.read().await.exchange,
         url,

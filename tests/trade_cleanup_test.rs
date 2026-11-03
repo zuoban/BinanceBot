@@ -260,10 +260,12 @@ async fn cleanup_requires_auth_and_confirmation_then_clears_every_scope() {
     assert_eq!(event["type"], "snapshot");
     assert_eq!(event["data"]["recent_trades"], json!([]));
 
-    state.config.write().await.exchange.dry_run = false;
+    state.config.write().await.exchange.api_key = "live-key".into();
+    state.config.write().await.exchange.api_secret = "live-secret".into();
     state.refresh_current_scope().await;
     assert_eq!(state.stats.read().await.total_trades, 0);
-    state.config.write().await.exchange.dry_run = true;
+    state.config.write().await.exchange.api_key.clear();
+    state.config.write().await.exchange.api_secret.clear();
     state.refresh_current_scope().await;
     // Replaying a cleared order must not reappear or alter the reset totals.
     assert!(

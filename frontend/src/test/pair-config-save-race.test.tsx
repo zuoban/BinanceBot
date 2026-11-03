@@ -26,9 +26,13 @@ vi.mock('../components/ThemeSwitch', () => ({ ThemeSwitch: () => null, themeLabe
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.confirm.mockReset();
+  mocks.post.mockReset();
   vi.stubGlobal('matchMedia', vi.fn().mockImplementation(query => ({ matches: false, media: query, addListener: vi.fn(), removeListener: vi.fn(), addEventListener: vi.fn(), removeEventListener: vi.fn() })));
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
-  mocks.api.mockImplementation((path: string) => Promise.resolve({ ...pair(path.includes('ETHUSDC') ? 'ETHUSDC' : 'BTCUSDC').grid_config, config_version: 'version-1' }));
+  mocks.api.mockImplementation((path: string) => path === '/api/global/config'
+    ? Promise.resolve({ version: 'global-version', has_api_key: true, has_api_secret: true })
+    : Promise.resolve({ ...pair(path.includes('ETHUSDC') ? 'ETHUSDC' : 'BTCUSDC').grid_config, config_version: 'version-1' }));
 });
 
 function setup() {
@@ -44,10 +48,7 @@ function setup() {
 
 async function prepareLive() {
   const user = userEvent.setup();
-  const mode = await screen.findByLabelText('运行模式');
-  await waitFor(() => expect(mode).toBeEnabled());
-  await user.click(mode);
-  await user.click(await screen.findByTitle('实盘 / Live'));
+  await screen.findByText('实盘');
   return user;
 }
 

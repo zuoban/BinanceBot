@@ -549,9 +549,7 @@ impl Database {
         }
         // Only the former single strategy inherits the legacy global status.
         if let Some(config) = self.load_config()? {
-            if config.exchange.symbol == symbol
-                && TradingMode::from_dry_run(config.exchange.dry_run) == mode
-            {
+            if config.exchange.symbol == symbol && config.exchange.trading_mode() == mode {
                 return self.load_bot_status();
             }
         }
@@ -904,6 +902,7 @@ impl Database {
             [],
         )?;
         retire_legacy_testnet_config(&conn)?;
+        retire_legacy_dry_run_intent(&conn)?;
         retire_legacy_testnet_rows(&conn)?;
 
         info!("SQLite schema verified for database: {}", self.path);
@@ -991,7 +990,7 @@ impl Database {
         pair.update_from(config);
         saved.pairs.push(pair);
         save_config_on(&tx, &saved)?;
-        let mode = TradingMode::from_dry_run(config.exchange.dry_run);
+        let mode = config.exchange.trading_mode();
         save_pair_status_on(&tx, &config.exchange.symbol, mode, BotStatus::Paused)?;
         let was_dirty = arm_execution_guard_on(&tx, &config.exchange.symbol, mode)?;
         #[cfg(test)]
@@ -1055,13 +1054,17 @@ impl Database {
             Some(symbol) => save_pair_config_on(&tx, symbol, config)?,
             None => save_config_on(&tx, config)?,
         }
-        let mode = TradingMode::from_dry_run(config.exchange.dry_run);
+        let mode = config.exchange.trading_mode();
         let switching = previous_scope != (config.exchange.symbol.as_str(), mode);
         arm_execution_guard_on(&tx, &config.exchange.symbol, mode)?;
         // A different account scope always requires a fresh manual resume, even
         // when its execution guard has never been armed before.
         let guarded = switching;
         if switching {
+            // Never let the abandoned mode keep a Running status: the mode now
+            // derives from globally persisted credentials, so a crash between
+            // this pair commit and the global commit must not resume it live.
+            save_pair_status_on(&tx, previous_scope.0, previous_scope.1, BotStatus::Paused)?;
             tx.execute(
                 "UPDATE pair_execution_guard SET dirty = 0 WHERE symbol = ?1 AND mode = ?2",
                 params![previous_scope.0, previous_scope.1.as_str()],
@@ -2405,6 +2408,7 @@ fn retire_legacy_testnet_config(conn: &Connection) -> Result<()> {
     };
     let mut symbols = Vec::new();
     let mut retired = false;
+    let mut paper_required = false;
     let mut global_testnet = false;
     if let Some(exchange) = root
         .get_mut("exchange")
@@ -2416,9 +2420,7 @@ fn retire_legacy_testnet_config(conn: &Connection) -> Result<()> {
         {
             retired = true;
             global_testnet = flag;
-        }
-        if global_testnet {
-            exchange.insert("dry_run".into(), serde_json::Value::Bool(true));
+            paper_required |= flag;
         }
     }
     if let Some(pairs) = root
@@ -2448,7 +2450,12 @@ fn retire_legacy_testnet_config(conn: &Connection) -> Result<()> {
                 .get_mut("exchange")
                 .and_then(serde_json::Value::as_object_mut)
             {
-                exchange.insert("dry_run".into(), serde_json::Value::Bool(true));
+                let testnet = flag.unwrap_or(global_testnet);
+                paper_required |= testnet;
+                if testnet {
+                    exchange.remove("api_key");
+                    exchange.remove("api_secret");
+                }
             }
             if let Some(symbol) = pair.get("symbol").and_then(|value| value.as_str()) {
                 symbols.push(symbol.to_ascii_uppercase());
@@ -2457,6 +2464,15 @@ fn retire_legacy_testnet_config(conn: &Connection) -> Result<()> {
     }
     if !retired {
         return Ok(());
+    }
+    if paper_required {
+        if let Some(exchange) = root
+            .get_mut("exchange")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            exchange.remove("api_key");
+            exchange.remove("api_secret");
+        }
     }
     if global_testnet {
         if let Some(symbol) = root
@@ -2486,6 +2502,102 @@ fn retire_legacy_testnet_config(conn: &Connection) -> Result<()> {
         "Retired testnet configuration now uses paper mode and stays paused until resumed: {}",
         symbols.join(", ")
     );
+    Ok(())
+}
+
+/// Run mode used to be stored per pair. A saved paper-mode configuration could
+/// still carry API credentials, which now select live mode. Force that derived
+/// live scope to start paused and drop the retired flag so an operator's later
+/// resume is not undone on the next restart.
+fn retire_legacy_dry_run_intent(conn: &Connection) -> Result<()> {
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT config_json FROM app_config WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(stored) = stored else {
+        return Ok(());
+    };
+    let Ok(mut config) = serde_json::from_str::<serde_json::Value>(&stored) else {
+        return Ok(());
+    };
+    let Some(root) = config.as_object_mut() else {
+        return Ok(());
+    };
+    let mut removed = false;
+    let global_intent = root
+        .get_mut("exchange")
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|exchange| {
+            let value = exchange.remove("dry_run");
+            removed |= value.is_some();
+            value
+        })
+        .and_then(|value| value.as_bool());
+    // Older configs defaulted both fields to paper when omitted.
+    let default_intent = global_intent.unwrap_or(true);
+    let mut pair_intents = std::collections::HashMap::new();
+    if let Some(pairs) = root
+        .get_mut("pairs")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for pair in pairs {
+            let symbol = pair
+                .get("symbol")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+            let intent = pair
+                .get_mut("exchange")
+                .and_then(serde_json::Value::as_object_mut)
+                .and_then(|exchange| {
+                    let value = exchange.remove("dry_run");
+                    removed |= value.is_some();
+                    value
+                })
+                .and_then(|value| value.as_bool());
+            if let Some(symbol) = symbol {
+                pair_intents.insert(symbol, intent.unwrap_or(default_intent));
+            }
+        }
+    }
+    if !removed {
+        return Ok(());
+    }
+    let mut app: AppConfig = serde_json::from_value(config.clone())?;
+    // Match the promotion performed by AppConfig::ensure_pair_list at startup.
+    app.ensure_pair_list()?;
+    let live_symbols: Vec<String> = app
+        .strategy_configs()?
+        .into_iter()
+        .filter(|strategy| {
+            strategy.exchange.trading_mode() == TradingMode::Live
+                && pair_intents
+                    .get(&strategy.exchange.symbol)
+                    .copied()
+                    .unwrap_or(default_intent)
+        })
+        .map(|strategy| strategy.exchange.symbol)
+        .collect();
+    // Persist the pause before consuming the legacy flag: a crash in between
+    // re-applies the safe pause, never an automatic live resume.
+    for symbol in &live_symbols {
+        save_pair_status_on(conn, symbol, TradingMode::Live, BotStatus::Paused)?;
+    }
+    conn.execute(
+        "UPDATE app_config SET config_json = ?1, updated_at = ?2 WHERE id = 1",
+        params![
+            serde_json::to_string_pretty(&config)?,
+            Utc::now().to_rfc3339()
+        ],
+    )?;
+    if !live_symbols.is_empty() {
+        warn!(
+            "Legacy paper configuration had API credentials; now live and paused until resumed: {}",
+            live_symbols.join(", ")
+        );
+    }
     Ok(())
 }
 
@@ -4254,7 +4366,8 @@ mod tests {
         db.save_pair_status("SOLUSDC", TradingMode::Live, BotStatus::Running)
             .unwrap();
         let mut candidate = config.strategy_configs().unwrap().remove(0);
-        candidate.exchange.dry_run = false;
+        candidate.exchange.api_key = "live-key".into();
+        candidate.exchange.api_secret = "live-secret".into();
         candidate.grid.buy_window = 7;
         db.conn
             .lock()
@@ -4291,7 +4404,8 @@ mod tests {
         assert!(!db.arm_execution_guard(symbol, TradingMode::Paper).unwrap());
         assert!(!db.arm_execution_guard(symbol, TradingMode::Live).unwrap());
         let mut live = paper.clone();
-        live.exchange.dry_run = false;
+        live.exchange.api_key = "live-key".into();
+        live.exchange.api_secret = "live-secret".into();
 
         db.conn
             .lock()
@@ -4310,7 +4424,7 @@ mod tests {
                 (symbol, TradingMode::Paper)
             )
             .is_err());
-        assert!(db.load_config().unwrap().unwrap().exchange.dry_run);
+        assert!(db.load_config().unwrap().unwrap().exchange.is_paper());
         assert!(db.arm_execution_guard(symbol, TradingMode::Paper).unwrap());
         assert!(db.arm_execution_guard(symbol, TradingMode::Live).unwrap());
         db.conn
@@ -4329,6 +4443,10 @@ mod tests {
             .unwrap(),
             (BotStatus::Paused, true)
         );
+        assert_eq!(
+            db.load_pair_status(symbol, TradingMode::Paper).unwrap(),
+            Some(BotStatus::Paused)
+        );
         assert!(!db.arm_execution_guard(symbol, TradingMode::Paper).unwrap());
         assert!(db.arm_execution_guard(symbol, TradingMode::Live).unwrap());
         db.clear_execution_guard(symbol, TradingMode::Paper)
@@ -4342,6 +4460,10 @@ mod tests {
             )
             .unwrap(),
             (BotStatus::Paused, true)
+        );
+        assert_eq!(
+            db.load_pair_status(symbol, TradingMode::Live).unwrap(),
+            Some(BotStatus::Paused)
         );
         assert!(!db.arm_execution_guard(symbol, TradingMode::Live).unwrap());
         assert!(db.arm_execution_guard(symbol, TradingMode::Paper).unwrap());
@@ -4384,10 +4506,11 @@ mod tests {
                 .unwrap();
             let mut legacy = serde_json::to_value(AppConfig::default()).unwrap();
             legacy["exchange"]["is_testnet"] = serde_json::json!(true);
-            legacy["exchange"]["dry_run"] = serde_json::json!(false);
+            legacy["exchange"]["api_key"] = serde_json::json!("testnet-key");
+            legacy["exchange"]["api_secret"] = serde_json::json!("testnet-secret");
             legacy["pairs"] = serde_json::json!([
                 {"symbol": "SOLUSDC"},
-                {"symbol": "BTCUSDT", "exchange": {"dry_run": false}}
+                {"symbol": "BTCUSDT", "exchange": {"api_key": "pair-key", "api_secret": "pair-secret"}}
             ]);
             db.conn
                 .lock()
@@ -4400,12 +4523,14 @@ mod tests {
         }
         let db = Database::open(&path).unwrap();
         let config = db.load_config().unwrap().unwrap();
-        assert!(config.exchange.dry_run);
+        assert!(config.exchange.is_paper());
+        assert!(config.exchange.api_key.is_empty());
+        assert!(config.exchange.api_secret.is_empty());
         assert!(config
             .strategy_configs()
             .unwrap()
             .iter()
-            .all(|strategy| strategy.exchange.dry_run));
+            .all(|strategy| strategy.exchange.is_paper()));
         let stored: String = db
             .conn
             .lock()
@@ -4427,6 +4552,76 @@ mod tests {
                 None
             );
         }
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn legacy_paper_intent_with_credentials_pauses_derived_live_mode_once() {
+        let path =
+            std::env::temp_dir().join(format!("legacy-paper-intent-{}.db", uuid::Uuid::new_v4()));
+        let mut config = AppConfig::default();
+        config.exchange.api_key = "legacy-key".into();
+        config.exchange.api_secret = "legacy-secret".into();
+        config.pairs = ["SOLUSDC", "BTCUSDT"]
+            .map(|symbol| crate::config::TradingPairConfig::new(symbol.into()))
+            .to_vec();
+        {
+            let db = Database::open(&path).unwrap();
+            db.save_config(&config).unwrap();
+            for symbol in ["SOLUSDC", "BTCUSDT"] {
+                db.save_pair_status(symbol, TradingMode::Live, BotStatus::Running)
+                    .unwrap();
+            }
+            let mut legacy = serde_json::to_value(&config).unwrap();
+            legacy["exchange"]["api_key"] = serde_json::json!("");
+            legacy["exchange"]["api_secret"] = serde_json::json!("");
+            legacy["exchange"]["dry_run"] = serde_json::json!(true);
+            legacy["pairs"][0]["exchange"] = serde_json::json!({
+                "api_key": "pair-key",
+                "api_secret": "pair-secret",
+                "dry_run": true
+            });
+            legacy["pairs"][1]["exchange"] = serde_json::json!({"dry_run": false});
+            db.conn
+                .lock()
+                .unwrap()
+                .execute(
+                    "UPDATE app_config SET config_json = ?1 WHERE id = 1",
+                    params![serde_json::to_string_pretty(&legacy).unwrap()],
+                )
+                .unwrap();
+        }
+        let db = Database::open(&path).unwrap();
+        assert_eq!(
+            db.load_pair_status("SOLUSDC", TradingMode::Live).unwrap(),
+            Some(BotStatus::Paused)
+        );
+        // A pair that was explicitly live before the upgrade keeps its status.
+        assert_eq!(
+            db.load_pair_status("BTCUSDT", TradingMode::Live).unwrap(),
+            Some(BotStatus::Running)
+        );
+        let stored: String = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT config_json FROM app_config WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!stored.contains("dry_run"));
+        // A later manual resume must survive the next restart.
+        db.save_pair_status("SOLUSDC", TradingMode::Live, BotStatus::Running)
+            .unwrap();
+        drop(db);
+        let db = Database::open(&path).unwrap();
+        assert_eq!(
+            db.load_pair_status("SOLUSDC", TradingMode::Live).unwrap(),
+            Some(BotStatus::Running)
+        );
         drop(db);
         std::fs::remove_file(path).unwrap();
     }
@@ -4498,7 +4693,8 @@ mod tests {
                 } else {
                     config.clone()
                 };
-                candidate.exchange.dry_run = false;
+                candidate.exchange.api_key = "live-key".into();
+                candidate.exchange.api_secret = "live-secret".into();
                 assert_eq!(
                     db.save_runtime_config(
                         &candidate,

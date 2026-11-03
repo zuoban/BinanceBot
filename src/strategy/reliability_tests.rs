@@ -189,7 +189,8 @@ async fn exchange_server(fake: Exchange) -> (String, JoinHandle<()>) {
 
 async fn engine(db: Arc<Database>, url: &str) -> GridTradingEngine {
     let mut config = AppConfig::default();
-    config.exchange.dry_run = false;
+    config.exchange.api_key = "live-key".into();
+    config.exchange.api_secret = "live-secret".into();
     config.grid.grid_interval = dec!(1);
     config.grid.buy_window = 1;
     config.grid.sell_window = 1;
@@ -2310,7 +2311,8 @@ async fn resume_rejects_changed_and_unknown_modes_before_exchange_work() {
     let mut engine = engine(database(), &url).await;
     engine.state.pause_trading().await.unwrap();
     let mut paper = engine.state.config.read().await.clone();
-    paper.exchange.dry_run = true;
+    paper.exchange.api_key.clear();
+    paper.exchange.api_secret.clear();
     engine
         .state
         .save_runtime_config(paper.clone())
@@ -2322,7 +2324,8 @@ async fn resume_rejects_changed_and_unknown_modes_before_exchange_work() {
         expected_epoch: engine.state.pause_epoch(),
         reply,
     };
-    paper.exchange.dry_run = false;
+    paper.exchange.api_key = "live-key".into();
+    paper.exchange.api_secret = "live-secret".into();
     engine.state.save_runtime_config(paper).await.unwrap();
     engine.handle_control_action(pending).await;
     assert!(response.await.unwrap().is_err());
@@ -2394,7 +2397,8 @@ async fn paper_resume_retries_rules_after_initialization_failure() {
     let mut engine = engine(database(), &url).await;
     {
         let mut config = engine.state.config.write().await;
-        config.exchange.dry_run = true;
+        config.exchange.api_key.clear();
+        config.exchange.api_secret.clear();
         config.grid.grid_interval = dec!(0.00005);
     }
     assert!(engine.initialize().await.is_err());
@@ -2419,7 +2423,15 @@ async fn paper_resume_can_use_default_rules_when_exchange_is_unavailable() {
     fake.rules_unavailable.store(true, Ordering::SeqCst);
     let (url, server) = exchange_server(fake).await;
     let mut engine = engine(database(), &url).await;
-    engine.state.config.write().await.exchange.dry_run = true;
+    engine.state.config.write().await.exchange.api_key.clear();
+    engine
+        .state
+        .config
+        .write()
+        .await
+        .exchange
+        .api_secret
+        .clear();
     engine.state.pause_trading().await.unwrap();
     *engine.state.ticker.write().await = TickerInfo::default();
 
@@ -7958,7 +7970,13 @@ async fn switching_to_exchange_modes_requires_manual_resume_before_orders() {
         let db = database();
         let mut engine = engine(db.clone(), &url).await;
         let mut initial = engine.state.config.read().await.clone();
-        initial.exchange.dry_run = source == TradingMode::Paper;
+        if source == TradingMode::Paper {
+            initial.exchange.api_key.clear();
+            initial.exchange.api_secret.clear();
+        } else {
+            initial.exchange.api_key = "live-key".into();
+            initial.exchange.api_secret = "live-secret".into();
+        }
         db.save_config(&initial).unwrap();
         engine
             .state
@@ -7972,7 +7990,8 @@ async fn switching_to_exchange_modes_requires_manual_resume_before_orders() {
         }
         let epoch = engine.state.pause_epoch();
         let mut exchange = initial;
-        exchange.exchange.dry_run = false;
+        exchange.exchange.api_key = "live-key".into();
+        exchange.exchange.api_secret = "live-secret".into();
         let (committed, _) = tokio::join!(
             engine.state.save_runtime_config(exchange.clone()),
             engine.state.resume_trading_silently(epoch)
@@ -8307,7 +8326,15 @@ async fn stale_mark_does_not_match_or_prune_existing_paper_orders() {
     let (url, server) = exchange_server(fake).await;
     let db = database();
     let mut engine = engine(db.clone(), &url).await;
-    engine.state.config.write().await.exchange.dry_run = true;
+    engine.state.config.write().await.exchange.api_key.clear();
+    engine
+        .state
+        .config
+        .write()
+        .await
+        .exchange
+        .api_secret
+        .clear();
     assert!(submit(&mut engine).await);
     engine.state.ticker.write().await.mark_update_time = Utc::now() - chrono::Duration::seconds(16);
     engine

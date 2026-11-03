@@ -110,7 +110,7 @@ describe('position summaries', () => {
     short.grid_config.direction = 'LONG';
     live.position.size = '-2';
     otherAsset.position.size = '1';
-    const groups = positionGroups([long, short, live, otherAsset].map(s => ({ snapshot: s, mode: s.dry_run ? 'PAPER' : 'LIVE', scoped: true })));
+    const groups = positionGroups([long, short, live, otherAsset].map(s => ({ snapshot: s, mode: s.mode, scoped: true })));
     expect(groups.find(g => g.key === 'PAPER:USDC')).toMatchObject({ long: 303, short: 101, total: 404 });
     expect(groups.find(g => g.key === 'LIVE:USDC')).toMatchObject({ long: 0, short: 202, total: 202 });
     expect(groups.find(g => g.key === 'PAPER:USDT')).toMatchObject({ total: 101 });

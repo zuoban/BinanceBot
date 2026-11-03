@@ -55,12 +55,13 @@ function GlobalSettings() {
     if (!!values.pause_on_zero_available_margin !== !!baseline.current?.pause_on_zero_available_margin) {
       changes.push(`保证金不足时暂停：${values.pause_on_zero_available_margin ? '开启' : '关闭'}`);
     }
-    if (values.clear_api_credentials) changes.push('清除已保存的 API Key 和 Secret');
+    if (!baseline.current?.has_api_key && (values.api_key?.trim() || values.api_secret?.trim())) changes.push('配置 API Key 和 Secret（所有交易对将以实盘运行并保持暂停）');
+    if (values.clear_api_credentials) changes.push('清除已保存的 API Key 和 Secret（所有交易对将以模拟盘运行并保持暂停）');
     if (values.clear_telegram_credentials) changes.push('清除已保存的 Telegram 凭证');
     try {
       if (changes.length && !await modal.confirm({
         title: '确认保存全局设置？',
-        content: <div><p>以下变更保存后立即生效，全局风控将作用于所有交易对：</p><ul>{changes.map(change => <li key={change}>{change}</li>)}</ul></div>,
+        content: <div><p>以下变更保存后立即生效：</p><ul>{changes.map(change => <li key={change}>{change}</li>)}</ul></div>,
         okText: '确认保存', cancelText: '继续编辑',
       })) {
         submitting.current = false;
@@ -84,13 +85,13 @@ function GlobalSettings() {
       if (!result.error && result.data) { fill(result.data); edit.setDirty(false); mutation.reset(); }
     }}>重新加载全局设置</Button>}
     <Form form={form} layout="vertical" disabled={!ready || edit.saving} onValuesChange={() => edit.setDirty(true)} onFinish={v => void submit(v)}>
-      <Card title="交易所连接"><Alert type="info" showIcon title={`密钥不会回显，留空将保留已有值。${query.data?.has_api_key ? `当前 API Key：${query.data.api_key_preview}` : '尚未配置 API Key。'}`} />
+      <Card title="交易所连接"><Alert type="info" showIcon title={`密钥不会回显，留空将保留已有值。${query.data?.has_api_key ? `当前 API Key：${query.data.api_key_preview}` : '尚未配置 API Key。'}运行模式由 API Key 决定：已配置以实盘运行，未配置以模拟盘运行。`} />
         <Row gutter={20} className="settings-fields">
           <Col xs={24} md={12}><Form.Item name="api_key" label="API Key"><Input.Password autoComplete="off" placeholder="留空保留已保存的值" /></Form.Item></Col>
           <Col xs={24} md={12}><Form.Item name="api_secret" label="API Secret"><Input.Password autoComplete="new-password" placeholder="留空保留已保存的值" /></Form.Item></Col>
           <Col xs={24} md={12}><Form.Item name="recv_window" label="请求有效窗口（毫秒）" extra="交易所接受已签名请求的时间窗口。" rules={[{ required: true }]}><InputNumber min={1} precision={0} style={{ width: '100%' }} /></Form.Item></Col>
           <Col xs={24} md={12}><Form.Item name="sync_interval_secs" label="同步间隔（秒）" extra="策略定期同步订单、账户和持仓的间隔。" rules={[{ required: true }]}><InputNumber min={1} precision={0} style={{ width: '100%' }} /></Form.Item></Col>
-          <Col span={24}><Form.Item name="clear_api_credentials" valuePropName="checked"><Checkbox>清除已保存的 API Key 和 Secret（所有交易对须为模拟盘）</Checkbox></Form.Item></Col>
+          <Col span={24}><Form.Item name="clear_api_credentials" valuePropName="checked"><Checkbox>清除已保存的 API Key 和 Secret（清除后所有交易对将以模拟盘运行）</Checkbox></Form.Item></Col>
         </Row>
       </Card>
       <Card title="全局风控" className="form-card"><Row gutter={20}>

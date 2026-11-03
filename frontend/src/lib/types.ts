@@ -12,7 +12,6 @@ export interface GridConfig {
   buy_window: number;
   sell_window: number;
   post_only: boolean;
-  dry_run: boolean;
   min_price: Decimal | null;
   max_price: Decimal | null;
   max_position_usdc: Decimal | null;
@@ -36,7 +35,7 @@ export interface Account {
   margin_balance: Decimal; unrealized_profit: Decimal; update_time: string;
 }
 export interface Snapshot {
-  symbol: string; status: Status; dry_run: boolean; grid_config: GridConfig;
+  symbol: string; status: Status; mode: Mode; grid_config: GridConfig;
   ticker: { last_price: Decimal; mark_price: Decimal; change_percent_24h: Decimal; high_24h: Decimal; low_24h: Decimal; update_time: string; mark_update_time: string };
   stats: {
     total_trades: number; completed_cycles: number; total_realized_pnl: Decimal;
@@ -51,7 +50,7 @@ export interface Snapshot {
 }
 export interface AccountSnapshot {
   mode: Mode;
-  snapshot: Pick<Snapshot, 'symbol' | 'dry_run' | 'account'> & {
+  snapshot: Pick<Snapshot, 'symbol' | 'account'> & {
     position: Pick<Snapshot['position'], 'size' | 'unrealized_pnl'>;
     ticker: Pick<Snapshot['ticker'], 'mark_price' | 'mark_update_time'>;
   };

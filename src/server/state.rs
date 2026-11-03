@@ -172,7 +172,7 @@ impl GlobalPositionLimit {
                     .min(i64::MAX as u64) as i64;
                 let age = Utc::now().signed_duration_since(account.update_time);
                 if account.asset.is_empty()
-                    || (!config.exchange.dry_run
+                    || (!config.exchange.is_paper()
                         && (age < chrono::Duration::zero()
                             || age > chrono::Duration::seconds(max_age)))
                 {
@@ -187,7 +187,7 @@ impl GlobalPositionLimit {
                 continue;
             }
             let position = state.position.read().await.clone();
-            if !config.exchange.dry_run {
+            if !config.exchange.is_paper() {
                 let max_age = config
                     .exchange
                     .sync_interval_secs
@@ -517,7 +517,7 @@ impl AppState {
     ) -> Arc<Self> {
         let (ws_broadcast_tx, _) = broadcast::channel(100);
         let symbol = config.exchange.symbol.clone();
-        let mode = TradingMode::from_dry_run(config.exchange.dry_run);
+        let mode = config.exchange.trading_mode();
         let saved_status = db.load_pair_status(&symbol, mode).and_then(|status| {
             if status.is_some() || pair_scope.is_some() {
                 Ok(status)
@@ -527,7 +527,7 @@ impl AppState {
         });
         let mut initial_status = match saved_status {
             Ok(Some(status)) => status,
-            Ok(None) if config.exchange.dry_run => BotStatus::Running,
+            Ok(None) if config.exchange.is_paper() => BotStatus::Running,
             Ok(None) => BotStatus::Paused,
             Err(error) => {
                 warn!(
@@ -538,7 +538,7 @@ impl AppState {
             }
         };
 
-        let initial_account = if config.exchange.dry_run {
+        let initial_account = if config.exchange.is_paper() {
             AccountInfo {
                 asset: quote_asset(&symbol).unwrap_or(&symbol).to_string(),
                 total_wallet_balance: rust_decimal_macros::dec!(10000.0),
@@ -551,7 +551,7 @@ impl AppState {
             AccountInfo::default()
         };
         let mut paper_restore_failed = false;
-        let (initial_position, initial_account) = if config.exchange.dry_run {
+        let (initial_position, initial_account) = if config.exchange.is_paper() {
             match db.load_paper_state(&symbol) {
                 Ok(Some(saved)) => saved,
                 Ok(None) => (PositionInfo::default(), initial_account),
@@ -734,7 +734,7 @@ impl AppState {
         // Persist the trade and its cumulative statistics together.
         let current_config = self.config.read().await;
         let current_symbol = current_config.exchange.symbol.clone();
-        let current_mode = TradingMode::from_dry_run(current_config.exchange.dry_run);
+        let current_mode = current_config.exchange.trading_mode();
         let telegram = current_config.telegram.clone();
         let direction = current_config.grid.direction;
         drop(current_config);
@@ -865,7 +865,7 @@ impl AppState {
             return Ok(());
         }
         let config = self.config.read().await;
-        let current_mode = TradingMode::from_dry_run(config.exchange.dry_run);
+        let current_mode = config.exchange.trading_mode();
         let current_symbol = config.exchange.symbol.clone();
         drop(config);
         if trade.symbol == current_symbol && trade.mode == current_mode {
@@ -892,7 +892,7 @@ impl AppState {
         let _commit = self.trade_commit_lock.lock().await;
         let config = self.config.read().await;
         let symbol = config.exchange.symbol.clone();
-        let mode = TradingMode::from_dry_run(config.exchange.dry_run);
+        let mode = config.exchange.trading_mode();
         drop(config);
         let query_symbol = symbol.clone();
         let result = self
@@ -1034,7 +1034,7 @@ impl AppState {
         let status = *self.status.read().await;
         let previous = self.config.read().await;
         let previous_symbol = previous.exchange.symbol.clone();
-        let previous_mode = TradingMode::from_dry_run(previous.exchange.dry_run);
+        let previous_mode = previous.exchange.trading_mode();
         drop(previous);
         let scope = self.pair_scope.clone();
         let saved = config.clone();
@@ -1062,7 +1062,7 @@ impl AppState {
     async fn persist_status(&self, status: BotStatus) -> anyhow::Result<()> {
         let config = self.config.read().await;
         let symbol = config.exchange.symbol.clone();
-        let mode = TradingMode::from_dry_run(config.exchange.dry_run);
+        let mode = config.exchange.trading_mode();
         let legacy = self.pair_scope.is_none();
         drop(config);
         self.db
@@ -1317,7 +1317,7 @@ impl AppState {
         }
         let config = self.config.read().await;
         let symbol = config.exchange.symbol.clone();
-        let mode = TradingMode::from_dry_run(config.exchange.dry_run);
+        let mode = config.exchange.trading_mode();
         drop(config);
         self.db
             .run_blocking(move |db| db.clear_execution_guard(&symbol, mode))
@@ -1383,7 +1383,7 @@ impl AppState {
         let _update = self.status_update_lock.lock().await;
         if let Some(expected) = expected_mode {
             let config = self.config.read().await;
-            let current = TradingMode::from_dry_run(config.exchange.dry_run);
+            let current = config.exchange.trading_mode();
             anyhow::ensure!(
                 expected != TradingMode::Unknown && current == expected,
                 "策略运行模式已改变，无法恢复策略"
@@ -1982,7 +1982,6 @@ mod tests {
     async fn legacy_and_multi_pair_formats_preserve_pause_and_manual_resume() {
         let db = Arc::new(Database::open(":memory:").unwrap());
         let mut config = AppConfig::default();
-        config.exchange.dry_run = false;
         config.exchange.api_key = "test-key".into();
         config.exchange.api_secret = "test-secret".into();
         config.pairs = vec![crate::config::TradingPairConfig::new("SOLUSDC".into())];
@@ -2044,7 +2043,7 @@ mod tests {
         let state = AppState::new(AppConfig::default(), db.clone(), tx);
         state.pause_trading().await.unwrap();
         let config = state.config.read().await;
-        let mode = TradingMode::from_dry_run(config.exchange.dry_run);
+        let mode = config.exchange.trading_mode();
         drop(config);
         let epoch = state.pause_epoch();
         let guard = state.status_update_lock.lock().await;
@@ -2142,12 +2141,13 @@ mod tests {
             Arc::new(Mutex::new(())),
         );
         let mut live = state.config.read().await.clone();
-        live.exchange.dry_run = false;
+        live.exchange.api_key = "live-key".into();
+        live.exchange.api_secret = "live-secret".into();
         let (committed, paused) =
             tokio::join!(state.save_runtime_config(live), state.pause_trading());
         committed.unwrap();
         paused.unwrap();
-        assert!(!state.config.read().await.exchange.dry_run);
+        assert!(!state.config.read().await.exchange.is_paper());
         assert_eq!(*state.status.read().await, BotStatus::Paused);
         assert_eq!(
             db.load_pair_status("SOLUSDC", TradingMode::Live).unwrap(),
@@ -2160,8 +2160,6 @@ mod tests {
         for legacy in [false, true] {
             let db = Arc::new(Database::open(":memory:").unwrap());
             let mut config = AppConfig::default();
-            config.exchange.api_key = "test-key".into();
-            config.exchange.api_secret = "test-secret".into();
             if !legacy {
                 config.pairs = vec![crate::config::TradingPairConfig::new("SOLUSDC".into())];
             }
@@ -2190,7 +2188,8 @@ mod tests {
             assert_eq!(state.pause_epoch(), epoch);
 
             let mut live = config;
-            live.exchange.dry_run = false;
+            live.exchange.api_key = "live-key".into();
+            live.exchange.api_secret = "live-secret".into();
             state.save_runtime_config(live.clone()).await.unwrap();
             assert_eq!(*state.status.read().await, BotStatus::Paused);
             assert_eq!(
@@ -2428,7 +2427,11 @@ mod tests {
             .write()
             .await
             .pause_on_zero_available_margin = true;
-        fixture.state.config.write().await.exchange.dry_run = false;
+        {
+            let mut config = fixture.state.config.write().await;
+            config.exchange.api_key = "live-key".into();
+            config.exchange.api_secret = "live-secret".into();
+        }
         *fixture.state.account.write().await = AccountInfo::default();
         let global = GlobalPositionLimit::new(Arc::new(RwLock::new(vec![fixture.state.clone()])));
         global.membership_ready.store(true, Ordering::SeqCst);
@@ -2911,14 +2914,16 @@ mod tests {
             ))
             .unwrap();
         }
-        state.config.write().await.exchange.dry_run = false;
+        state.config.write().await.exchange.api_key = "live-key".into();
+        state.config.write().await.exchange.api_secret = "live-secret".into();
         state.refresh_current_scope().await;
         let live = state.recent_trades.read().await;
         assert_eq!(live.len(), 200);
         assert_eq!(live.front().unwrap().trade_id, "live-5");
         assert_eq!(live.back().unwrap().trade_id, "live-204");
         drop(live);
-        state.config.write().await.exchange.dry_run = true;
+        state.config.write().await.exchange.api_key.clear();
+        state.config.write().await.exchange.api_secret.clear();
         state.refresh_current_scope().await;
         assert_eq!(
             state
@@ -2985,7 +2990,8 @@ mod tests {
         let hourly = snapshot.hourly_trade_stats.unwrap();
         assert_eq!(hourly.buckets.iter().map(|b| b.buy_count).sum::<u64>(), 1);
 
-        state.config.write().await.exchange.dry_run = false;
+        state.config.write().await.exchange.api_key = "live-key".into();
+        state.config.write().await.exchange.api_secret = "live-secret".into();
         state.refresh_current_scope().await;
         assert_eq!(state.stats.read().await.total_realized_pnl, dec!(-2));
         let trades = state.recent_trades.read().await;

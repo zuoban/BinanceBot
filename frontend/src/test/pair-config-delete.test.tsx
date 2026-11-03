@@ -54,20 +54,14 @@ async function selectSymbol(user: UserEvent, symbol: string) {
   await user.click(await screen.findByTitle(symbol));
 }
 
-async function selectMode(user: UserEvent, label: string) {
-  await user.click(screen.getByLabelText('运行模式'));
-  await user.click(await screen.findByTitle(label));
-}
 
-it('loads symbols from the exchange and allows selecting symbol and mode', async () => {
+it('loads symbols from the exchange and allows selecting a symbol', async () => {
   setup(Promise.resolve(), '/pairs/new');
   const user = userEvent.setup();
   await waitFor(() => expect(mocks.api).toHaveBeenCalledWith('/api/exchange/symbols?environment=mainnet', expect.anything()));
   await selectSymbol(user, 'SOLUSDC');
-  await selectMode(user, '实盘 / Live');
   expect(screen.getByLabelText('合约交易对').closest('.ant-select-content')).toHaveAttribute('title', 'SOLUSDC');
-  await selectMode(user, '模拟盘 / Paper Trading');
-  expect(screen.getByLabelText('合约交易对').closest('.ant-select-content')).toHaveAttribute('title', 'SOLUSDC');
+  expect(screen.getByText('模拟盘')).toBeInTheDocument();
 });
 
 it('shows loading, retries a failed symbol request and searches the returned symbols', async () => {
@@ -102,7 +96,6 @@ it('locks the symbol while adding a pair and unlocks it if saving fails', async 
   await user.click(screen.getByRole('button', { name: '保存并添加' }));
   await waitFor(() => expect(mocks.post).toHaveBeenCalledWith('/api/pairs', expect.objectContaining({ symbol: 'SOLUSDC' })));
   await waitFor(() => expect(symbol).toBeDisabled());
-  expect(screen.getByLabelText('运行模式')).toBeDisabled();
   await act(async () => { fail(new Error('保存失败')); });
   await waitFor(() => expect(mocks.error).toHaveBeenCalledWith('保存失败'));
   await waitFor(() => expect(symbol).toBeEnabled());

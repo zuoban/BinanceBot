@@ -350,7 +350,11 @@ async fn scope_changes_isolate_trade_modes_and_symbols() {
             .unwrap();
     }
     assert_eq!(total(&state.snapshot_at(now).await), 1);
-    state.config.write().await.exchange.dry_run = false;
+    {
+        let mut config = state.config.write().await;
+        config.exchange.api_key = "live-key".into();
+        config.exchange.api_secret = "live-secret".into();
+    }
     state.refresh_current_scope().await;
     let live = state.snapshot_at(now).await;
     assert_eq!(total(&live), 2);
@@ -358,7 +362,8 @@ async fn scope_changes_isolate_trade_modes_and_symbols() {
     {
         let mut config = state.config.write().await;
         config.exchange.symbol = "BTCUSDT".into();
-        config.exchange.dry_run = true;
+        config.exchange.api_key.clear();
+        config.exchange.api_secret.clear();
     }
     state.refresh_current_scope().await;
     let btc = state.snapshot_at(now).await;
@@ -479,7 +484,8 @@ async fn snapshot_push_continues_while_the_trading_engine_waits_for_rest() {
     let db = Arc::new(Database::open(":memory:").unwrap());
     db.save_bot_status(BotStatus::Paused).unwrap();
     let mut config = AppConfig::default();
-    config.exchange.dry_run = false;
+    config.exchange.api_key = "live-key".into();
+    config.exchange.api_secret = "live-secret".into();
     let (tx, rx) = mpsc::channel(1);
     let (_ticks, ticker_rx) = broadcast::channel(1);
     let state = AppState::new(config.clone(), db.clone(), tx);
@@ -532,10 +538,19 @@ async fn snapshot_push_continues_while_the_trading_engine_waits_for_rest() {
 #[tokio::test]
 async fn account_snapshot_matches_full_snapshot_without_chart_queries() {
     let state = fixture();
-    for dry_run in [true, false] {
+    for paper in [true, false] {
         {
             let mut config = state.config.write().await;
-            config.exchange.dry_run = dry_run;
+            config.exchange.api_key = if paper {
+                String::new()
+            } else {
+                "live-key".into()
+            };
+            config.exchange.api_secret = if paper {
+                String::new()
+            } else {
+                "live-secret".into()
+            };
         }
         {
             let mut ticker = state.ticker.write().await;
@@ -555,10 +570,9 @@ async fn account_snapshot_matches_full_snapshot_without_chart_queries() {
         assert_eq!(
             account,
             serde_json::json!({
-                "mode": TradingMode::from_dry_run(full.dry_run),
+                "mode": full.mode,
                 "snapshot": {
                     "symbol": full.symbol,
-                    "dry_run": full.dry_run,
                     "ticker": {
                         "mark_price": full.ticker.mark_price,
                         "mark_update_time": full.ticker.mark_update_time,
@@ -583,11 +597,15 @@ async fn account_snapshot_waits_for_scope_transitions_and_trade_commits() {
     assert!(tokio::time::timeout(Duration::from_millis(50), &mut task)
         .await
         .is_err());
-    state.config.write().await.exchange.dry_run = false;
+    {
+        let mut config = state.config.write().await;
+        config.exchange.api_key = "live-key".into();
+        config.exchange.api_secret = "live-secret".into();
+    }
     drop(scope);
     assert_eq!(
-        serde_json::to_value(task.await.unwrap()).unwrap()["snapshot"]["dry_run"],
-        false
+        serde_json::to_value(task.await.unwrap()).unwrap()["mode"],
+        "LIVE"
     );
 
     let commit = state.trade_commit_lock.lock().await;

@@ -56,7 +56,7 @@ fn fixture_with_unresponsive_engine(
     };
     db.save_config(&config).unwrap();
     for strategy in config.strategy_configs().unwrap() {
-        let mode = TradingMode::from_dry_run(strategy.exchange.dry_run);
+        let mode = strategy.exchange.trading_mode();
         db.arm_execution_guard(&strategy.exchange.symbol, mode)
             .unwrap();
     }
@@ -172,7 +172,7 @@ fn fixture_with_unresponsive_engine(
 async fn seed_paper_account_and_position(
     state: &AppState,
 ) -> (crate::types::AccountInfo, crate::types::PositionInfo) {
-    assert!(state.config.read().await.exchange.dry_run);
+    assert!(state.config.read().await.exchange.is_paper());
     let account = {
         let mut account = state.account.write().await;
         account.asset = "USDC".into();
@@ -370,7 +370,8 @@ async fn live_removal_requires_confirmed_zero_exchange_position_after_shutdown()
         let old = runtime.pairs.remove(0);
         old.engine.abort();
         let mut config = old.state.config.read().await.clone();
-        config.exchange.dry_run = false;
+        config.exchange.api_key = "live-key".into();
+        config.exchange.api_secret = "live-secret".into();
         let (tx, mut rx) = mpsc::channel(8);
         let state = AppState::new_for_pair(
             config,
@@ -421,7 +422,7 @@ async fn live_removal_requires_confirmed_zero_exchange_position_after_shutdown()
             account.available_balance = rust_decimal_macros::dec!(100);
             account.update_time = chrono::Utc::now();
         }
-        let mut global = GlobalConfig::from_app(&*state.config.read().await);
+        let mut global = GlobalConfig::from_app(&AppConfig::default());
         global.global_max_position_notional = Some(rust_decimal_macros::dec!(1000));
         global.pause_on_zero_available_margin = false;
         runtime.global_position_limit.initialize_config(global);
@@ -1725,7 +1726,7 @@ async fn adding_pair_rolls_back_when_guard_write_fails_and_can_be_retried() {
     let manager = tokio::spawn(async move { runtime.run().await });
 
     let (_, response) = request(&router, "/api/pairs", "POST", payload("ETHUSDT"), true).await;
-    assert_eq!(response["success"], false);
+    assert_eq!(response["success"], false, "{response}");
     assert!(!db
         .load_config()
         .unwrap()
@@ -1738,7 +1739,6 @@ async fn adding_pair_rolls_back_when_guard_write_fails_and_can_be_retried() {
         None
     );
     assert_eq!(handle.states.read().await.len(), 2);
-
     connection
         .execute_batch("DROP TRIGGER reject_new_guard;")
         .unwrap();
@@ -2447,7 +2447,8 @@ async fn global_settings_reach_every_engine_and_new_pairs_inherit_without_overri
         assert_eq!(config.exchange.sync_interval_secs, 9);
         assert_eq!(config.telegram.bot_token, "shared-token");
         assert!(config.telegram.enabled);
-        assert_eq!(*state.status.read().await, BotStatus::Running);
+        // Switching to live mode requires a fresh manual resume.
+        assert_eq!(*state.status.read().await, BotStatus::Paused);
     }
     let (_, blank) = request(
         &router,
@@ -2511,7 +2512,7 @@ async fn global_settings_reach_every_engine_and_new_pairs_inherit_without_overri
 }
 
 #[tokio::test]
-async fn global_clearing_validates_all_pair_modes_and_notification_credentials() {
+async fn clearing_credentials_switches_every_pair_to_paper() {
     let mut runtime = fixture();
     let handle = runtime.handle();
     let router = create_managed_router(handle.clone()).await;
@@ -2528,30 +2529,18 @@ async fn global_clearing_validates_all_pair_modes_and_notification_credentials()
     )
     .await;
     assert_eq!(applied["success"], true);
-    let mut live = versioned_payload(&router, "BTCUSDT").await;
-    live["dry_run"] = json!(false);
-    assert_eq!(
-        request(&router, "/api/pairs/BTCUSDT/config", "POST", live, true)
-            .await
-            .1["success"],
-        true
-    );
-    for clear in [
-        json!({"clear_api_credentials":true}),
-        json!({"clear_telegram_credentials":true}),
-    ] {
-        let (_, rejected) = request(&router, "/api/global/config", "POST", clear, true).await;
-        assert_eq!(rejected["success"], false);
+    for state in handle.states.read().await.iter() {
+        assert!(!state.config.read().await.exchange.is_paper());
     }
-    assert!(handle
-        .states
-        .read()
-        .await
-        .iter()
-        .all(|state| !state.is_shutting_down()));
-    let mut paper = versioned_payload(&router, "BTCUSDT").await;
-    paper["dry_run"] = json!(true);
-    request(&router, "/api/pairs/BTCUSDT/config", "POST", paper, true).await;
+    let (_, rejected) = request(
+        &router,
+        "/api/global/config",
+        "POST",
+        json!({"clear_telegram_credentials":true}),
+        true,
+    )
+    .await;
+    assert_eq!(rejected["success"], false);
     let (_, cleared) = request(&router, "/api/global/config", "POST", json!({
         "clear_api_credentials":true, "clear_telegram_credentials":true, "telegram_enabled":false
     }), true).await;
@@ -2559,6 +2548,7 @@ async fn global_clearing_validates_all_pair_modes_and_notification_credentials()
     for state in handle.states.read().await.iter() {
         let config = state.config.read().await;
         assert!(config.exchange.api_key.is_empty());
+        assert!(config.exchange.is_paper());
         assert!(config.telegram.bot_token.is_empty());
         assert!(config.telegram.chat_id.is_empty());
         assert!(!config.telegram.enabled);
@@ -2665,7 +2655,8 @@ async fn global_update_drains_old_submissions_before_switching_and_releases_only
             "new-account-key"
         );
         assert!(state.try_order_submission().is_some());
-        assert_eq!(*state.status.read().await, BotStatus::Running);
+        // Credential changes switch the run mode, which requires a manual resume.
+        assert_eq!(*state.status.read().await, BotStatus::Paused);
     }
 }
 
@@ -3090,7 +3081,6 @@ async fn interrupt_during_pair_preparation_blocks_orders_and_cleans_up_guards() 
             .to_vec(),
         ..Default::default()
     };
-    config.exchange.dry_run = false;
     config.exchange.api_key = "test-key".into();
     config.exchange.api_secret = "test-secret".into();
     let db = Arc::new(Database::open(&path).unwrap());
@@ -3205,7 +3195,7 @@ async fn restart_restores_each_pair_after_clean_shutdown() {
             .to_vec(),
         ..Default::default()
     };
-    assert!(config.exchange.dry_run);
+    assert!(config.exchange.is_paper());
     {
         let db = Arc::new(Database::open(&path).unwrap());
         db.save_config(&config).unwrap();

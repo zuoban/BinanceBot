@@ -97,7 +97,6 @@ async fn control_during_market_request() {
         let db = Arc::new(Database::open(":memory:").unwrap());
         let mut config = AppConfig::default();
         config.exchange.symbol = "BTCUSDT".into();
-        config.exchange.dry_run = true;
         config.exchange.sync_interval_secs = 1;
         let mut stored_config = config.clone();
         stored_config.pairs = vec![crate::config::TradingPairConfig::new(

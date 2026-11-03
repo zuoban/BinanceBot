@@ -247,6 +247,12 @@ impl BinanceFuturesClient {
             fill_generations: std::sync::Mutex::new(Default::default()),
         }
     }
+    /// Rebuild credentials while keeping the configured endpoint and rate limiter.
+    pub(crate) fn reconfig(&self, config: &ExchangeConfig) -> Self {
+        let mut client = Self::new_with_limiter(config, Arc::clone(&self.limiter));
+        client.base_url.clone_from(&self.base_url);
+        client
+    }
 
     #[cfg(test)]
     pub(crate) fn with_base_url(config: &ExchangeConfig, base_url: String) -> Self {
@@ -320,6 +326,7 @@ impl BinanceFuturesClient {
         Sha256::digest(self._api_key.as_bytes()).into()
     }
 
+    #[cfg(test)]
     pub(crate) fn limiter(&self) -> Arc<RateLimiter> {
         self.limiter.clone()
     }

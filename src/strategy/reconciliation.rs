@@ -392,7 +392,7 @@ impl GridTradingEngine {
         let pause_epoch = self.state.pause_epoch();
         let config = self.state.config.read().await.clone();
         let symbol = config.exchange.symbol.clone();
-        let mode = TradingMode::from_dry_run(config.exchange.dry_run);
+        let mode = config.exchange.trading_mode();
         let intent_symbol = symbol.clone();
         let pair_intents = match self
             .state

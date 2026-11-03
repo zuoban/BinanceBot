@@ -69,15 +69,6 @@ pub enum TradingMode {
 }
 
 impl TradingMode {
-    /// Paper mode runs locally; every order-bearing environment is mainnet.
-    pub fn from_dry_run(dry_run: bool) -> Self {
-        if dry_run {
-            Self::Paper
-        } else {
-            Self::Live
-        }
-    }
-
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Unknown => "UNKNOWN",
@@ -341,7 +332,7 @@ pub struct HourlyTradeStats {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BotSnapshot {
     pub status: BotStatus,
-    pub dry_run: bool,
+    pub mode: TradingMode,
     pub symbol: String,
     pub ticker: TickerInfo,
     pub stats: GridStats,
@@ -535,6 +526,8 @@ pub struct UpdateConfigPayload {
     pub sell_window: usize,
     #[serde(default)]
     pub post_only: Option<bool>,
+    /// Retired: the run mode now derives from API credentials. Rejected so a
+    /// stale client cannot believe it is still switching modes.
     #[serde(default)]
     pub dry_run: Option<bool>,
     /// Retired: testnet mode was removed. Only rejected so a stale client
@@ -585,7 +578,6 @@ pub struct WebConfigView {
     pub buy_window: usize,
     pub sell_window: usize,
     pub post_only: bool,
-    pub dry_run: bool,
     pub recv_window: u64,
     pub sync_interval_secs: u64,
     pub has_api_key: bool,

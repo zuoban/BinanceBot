@@ -8,7 +8,6 @@ async fn paper_engine() -> GridTradingEngine {
 
 async fn paper_engine_with_db(db: Arc<Database>) -> GridTradingEngine {
     let mut config = AppConfig::default();
-    config.exchange.dry_run = true;
     config.grid.order_amount_usdc = dec!(200);
     config.grid.buy_window = 3;
     config.grid.sell_window = 3;
@@ -548,7 +547,8 @@ async fn max_position_pause_on_live_sync_stays_paused_when_cancellation_fails() 
     let mut engine = paper_engine().await;
     {
         let mut config = engine.state.config.write().await;
-        config.exchange.dry_run = false;
+        config.exchange.api_key = "live-key".into();
+        config.exchange.api_secret = "live-secret".into();
         config.grid.max_position_usdc = Some(dec!(1000));
         config.grid.pause_on_max_position = true;
         engine.client = Arc::new(BinanceFuturesClient::with_base_url(&config.exchange, url));
@@ -1406,7 +1406,8 @@ async fn migration_and_window_pruning_require_terminal_cancellation_and_recover_
         (dec!(118.4), true),
     ] {
         let mut engine = paper_engine().await;
-        engine.state.config.write().await.exchange.dry_run = false;
+        engine.state.config.write().await.exchange.api_key = "live-key".into();
+        engine.state.config.write().await.exchange.api_secret = "live-secret".into();
         let old = order("b_migration", OrderSide::Buy, price, dec!(1.68));
         let response = serde_json::json!({
             "orderId": 42, "clientOrderId": old.client_order_id,
@@ -1488,7 +1489,8 @@ async fn interrupted_window_cleanup_retries_remaining_orders_after_partial_succe
     use std::sync::atomic::{AtomicBool, Ordering};
 
     let mut engine = paper_engine().await;
-    engine.state.config.write().await.exchange.dry_run = false;
+    engine.state.config.write().await.exchange.api_key = "live-key".into();
+    engine.state.config.write().await.exchange.api_secret = "live-secret".into();
     let allow_second_cancel = Arc::new(AtomicBool::new(false));
     let gate = allow_second_cancel.clone();
     let app = Router::new().route(
@@ -1699,7 +1701,8 @@ async fn stale_orders_require_confirmed_cancel_and_record_racing_fills() {
     for side in [OrderSide::Buy, OrderSide::Sell] {
         for terminal in [false, true] {
             let mut engine = paper_engine().await;
-            engine.state.config.write().await.exchange.dry_run = false;
+            engine.state.config.write().await.exchange.api_key = "live-key".into();
+            engine.state.config.write().await.exchange.api_secret = "live-secret".into();
             engine.state.position.write().await.size = dec!(100);
             let price = if side == OrderSide::Buy {
                 dec!(118.2)
@@ -2291,7 +2294,8 @@ async fn last_prices_are_isolated_by_symbol_and_mode_and_never_force_out_of_boun
             .unwrap(),
         (vec![dec!(118.8)], vec![])
     );
-    config.exchange.dry_run = false;
+    config.exchange.api_key = "live-key".into();
+    config.exchange.api_secret = "live-secret".into();
     assert_eq!(
         engine
             .window_prices(&config, &rules, dec!(118.84))
@@ -2299,7 +2303,8 @@ async fn last_prices_are_isolated_by_symbol_and_mode_and_never_force_out_of_boun
             .unwrap(),
         (vec![dec!(118.8)], vec![dec!(118.9)])
     );
-    config.exchange.dry_run = true;
+    config.exchange.api_key.clear();
+    config.exchange.api_secret.clear();
     config.exchange.symbol = "ETHUSDC".into();
     assert_eq!(
         engine

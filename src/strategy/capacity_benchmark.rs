@@ -398,7 +398,6 @@ async fn simulated_live_reconciliation() {
     for i in 0..pairs {
         let mut config = AppConfig::default();
         config.exchange.symbol = format!("BENCH{i}USDT");
-        config.exchange.dry_run = false;
         config.exchange.api_key = "benchmark-key".into();
         config.exchange.api_secret = "benchmark-secret".into();
         let (action_tx, action_rx) = mpsc::channel(8);

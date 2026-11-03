@@ -328,7 +328,7 @@ async fn collect_pairs(states: &[Arc<AppState>]) -> Json<ApiResponse<Vec<Trading
             symbol: config.exchange.symbol.clone(),
             scoped: state.pair_scope().is_some(),
             status: *state.status.read().await,
-            mode: TradingMode::from_dry_run(config.exchange.dry_run),
+            mode: config.exchange.trading_mode(),
             grid_config: config.summary(),
         });
     }
@@ -356,7 +356,7 @@ async fn collect_overview(states: &[Arc<AppState>]) -> Json<ApiResponse<Overview
         let snapshot = state.snapshot().await;
         OverviewPairView {
             scoped: state.pair_scope().is_some(),
-            mode: TradingMode::from_dry_run(snapshot.dry_run),
+            mode: snapshot.mode,
             snapshot,
         }
     }))
@@ -1259,7 +1259,7 @@ async fn get_trades_handler(
 ) -> Json<ApiResponse<Vec<TradeRecord>>> {
     let config = state.config.read().await;
     let symbol = config.exchange.symbol.clone();
-    let mode = TradingMode::from_dry_run(config.exchange.dry_run);
+    let mode = config.exchange.trading_mode();
     drop(config);
     let trades = match state
         .db
@@ -1454,7 +1454,6 @@ fn web_config_view(config: &AppConfig) -> WebConfigView {
         buy_window: config.grid.buy_window,
         sell_window: config.grid.sell_window,
         post_only: config.grid.post_only,
-        dry_run: config.exchange.dry_run,
         recv_window: config.exchange.recv_window,
         sync_interval_secs: config.exchange.sync_interval_secs,
         has_api_key: has_key,
@@ -1477,8 +1476,12 @@ fn apply_config_payload(
     payload: UpdateConfigPayload,
 ) -> anyhow::Result<AppConfig> {
     anyhow::ensure!(
+        payload.dry_run.is_none(),
+        "运行模式已由 API Key 决定，请刷新页面后重试"
+    );
+    anyhow::ensure!(
         !payload.is_testnet.unwrap_or(false),
-        "测试网模式已移除，请选择模拟盘或实盘"
+        "测试网模式已移除，运行模式由 API Key 决定"
     );
     current_config.exchange.symbol = payload.symbol.trim().to_uppercase();
     if let Some(direction) = payload.direction {
@@ -1490,9 +1493,6 @@ fn apply_config_payload(
     current_config.grid.sell_window = payload.sell_window;
     if let Some(post_only) = payload.post_only {
         current_config.grid.post_only = post_only;
-    }
-    if let Some(dry_run) = payload.dry_run {
-        current_config.exchange.dry_run = dry_run;
     }
     if let Some(value) = payload.recv_window {
         current_config.exchange.recv_window = value;
@@ -2493,7 +2493,7 @@ mod tests {
             assert_eq!(first["type"], "accounts");
             assert_eq!(first["data"]["pairs"].as_array().unwrap().len(), 1);
             let snapshot = &first["data"]["pairs"][0]["snapshot"];
-            assert_eq!(snapshot.as_object().unwrap().len(), 5);
+            assert_eq!(snapshot.as_object().unwrap().len(), 4);
             assert!(snapshot["ticker"]["mark_update_time"].is_string());
             assert!(snapshot["ticker"]["mark_price"].is_string());
             assert!(snapshot["position"]["size"].is_string());
@@ -2926,10 +2926,13 @@ mod tests {
         db.create_session("overview-test-token").unwrap();
         let lock = Arc::new(tokio::sync::Mutex::new(()));
         let mut states = Vec::new();
-        for (symbol, dry_run) in [("SOLUSDC", true), ("BTCUSDT", false)] {
+        for (symbol, paper) in [("SOLUSDC", true), ("BTCUSDT", false)] {
             let mut config = AppConfig::default();
             config.exchange.symbol = symbol.into();
-            config.exchange.dry_run = dry_run;
+            if !paper {
+                config.exchange.api_key = "live-key".into();
+                config.exchange.api_secret = "live-secret".into();
+            }
             let (tx, _) = tokio::sync::mpsc::channel(1);
             states.push(auth_pair_state(config, db.clone(), tx, lock.clone()));
         }
@@ -3035,11 +3038,22 @@ mod tests {
     fn retired_testnet_request_is_rejected_instead_of_trading_live() {
         let payload: UpdateConfigPayload = serde_json::from_value(serde_json::json!({
             "symbol": "SOLUSDC", "grid_interval": "0.1", "order_amount_usdc": "100",
-            "buy_window": 5, "sell_window": 5, "dry_run": false, "is_testnet": true
+            "buy_window": 5, "sell_window": 5, "is_testnet": true
         }))
         .unwrap();
         let error = apply_config_payload(AppConfig::default(), payload).unwrap_err();
         assert!(error.to_string().contains("测试网模式已移除"));
+    }
+
+    #[test]
+    fn retired_dry_run_request_is_rejected() {
+        let payload: UpdateConfigPayload = serde_json::from_value(serde_json::json!({
+            "symbol": "SOLUSDC", "grid_interval": "0.1", "order_amount_usdc": "100",
+            "buy_window": 5, "sell_window": 5, "dry_run": true
+        }))
+        .unwrap();
+        let error = apply_config_payload(AppConfig::default(), payload).unwrap_err();
+        assert!(error.to_string().contains("API Key"));
     }
 
     #[tokio::test]
