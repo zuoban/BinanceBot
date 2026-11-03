@@ -10,10 +10,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-#[derive(Parser, Debug)]
+#[derive(Parser)]
 #[command(
     name = "binance-grid-bot",
     about = "High-performance Binance Futures Grid Trading Bot API and SQLite Storage"
@@ -30,6 +30,11 @@ struct CliArgs {
     /// API server port
     #[arg(short, long)]
     port: Option<u16>,
+
+    /// Administrator password for the web console (prefer the ADMIN_PASSWORD environment variable)
+    #[arg(long)]
+    admin_password: Option<String>,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -106,8 +111,24 @@ async fn main() -> anyhow::Result<()> {
     let mut signals = ShutdownSignals::register().await?;
     let signal = signals.wait();
     tokio::pin!(signal);
+    let admin_password = args
+        .admin_password
+        .filter(|password| !password.is_empty())
+        .or_else(|| {
+            std::env::var("ADMIN_PASSWORD")
+                .ok()
+                .filter(|password| !password.is_empty())
+        });
+    let admin_auth = match admin_password {
+        Some(password) => Some(Arc::new(binance_grid_bot::auth::AdminAuth::from_password(
+            &password,
+        )?)),
+        None => None,
+    };
     let _process_lock = database_process_lock::DatabaseProcessLock::acquire(&args.db)?;
     let db = Arc::new(Database::open(&args.db)?);
+    db.clear_all_sessions()
+        .map_err(|error| error.context("Failed to clear persisted login sessions"))?;
     let mut config = load_saved_config(&db)?;
     // These options only select the listening address for this process (e.g. recovery).
     if let Some(host) = args.host {
@@ -117,20 +138,19 @@ async fn main() -> anyhow::Result<()> {
         config.server.port = port;
     }
     let strategies = config.strategy_configs()?;
-    let has_admin = db.is_admin_password_set()?;
     info!(
         "Binance Futures Grid Bot — SQLite {:?}, {} trading pair(s)",
         args.db,
         strategies.len()
     );
-    info!(
-        "Admin authentication: {}",
-        if has_admin {
-            "PROTECTED"
-        } else {
-            "PENDING SETUP"
-        }
-    );
+    if admin_auth.is_some() {
+        info!("Admin authentication: enabled (password from startup configuration)");
+    } else {
+        warn!(
+            "Admin authentication: DISABLED (no --admin-password or ADMIN_PASSWORD); \
+             the console and trading APIs are open to anyone who can reach this port"
+        );
+    }
     for strategy in &strategies {
         info!(
             "{}: interval {}, amount {}, window {} buy / {} sell, mode {}",
@@ -147,7 +167,7 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let (startup_stop, startup_stop_rx) = watch::channel(false);
     let mut runtime = {
-        let startup = TradingRuntime::start_interruptible(&config, db, startup_stop_rx);
+        let startup = TradingRuntime::start_interruptible(&config, db, startup_stop_rx, admin_auth);
         tokio::pin!(startup);
         tokio::select! {
             biased;
@@ -172,13 +192,6 @@ async fn main() -> anyhow::Result<()> {
     let snapshot_task = tokio::spawn(binance_grid_bot::snapshots::run_hourly_snapshots(
         runtime.handle(),
     ));
-    let states = runtime.states();
-    if let Some(code) = states[0].setup_code() {
-        info!(
-            "首次设置管理员密码需要初始化码: {}（可在应用日志中查看）",
-            code
-        );
-    }
     let app = create_managed_router(runtime.handle()).await;
     info!(
         "API server running at http://{} (local: http://127.0.0.1:{})",

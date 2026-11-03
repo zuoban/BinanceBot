@@ -36,7 +36,7 @@ it('keeps the settings tabs usable when the database module fails', async () => 
   await user.click(screen.getByRole('tab', { name: '数据库操作' }));
   expect(await screen.findByText('数据库操作加载失败，请刷新页面重试。')).toBeInTheDocument();
   await user.click(screen.getByRole('tab', { name: '账户安全' }));
-  expect(await screen.findByText('修改管理员密码')).toBeInTheDocument();
+  expect(await screen.findByText('管理员密码')).toBeInTheDocument();
 });
 
 it('offers the supplied recovery action after a lazy import fails', async () => {

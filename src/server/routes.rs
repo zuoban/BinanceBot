@@ -5,10 +5,10 @@ use crate::runtime::RuntimeHandle;
 use crate::server::state::snapshot::AccountMessage;
 use crate::server::state::AppState;
 use crate::types::{
-    AuthLoginPayload, AuthSetupPayload, AuthStatusResponse, AuthTokenResponse, BotControlAction,
-    BotSnapshot, ChangePasswordPayload, GridOrder, LogEntry, OverviewPairView, OverviewSnapshot,
-    TradeRecord, TradingMode, TradingPairView, UpdateConfigPayload, UpdateGlobalConfigPayload,
-    WebConfigView, WebGlobalConfigView,
+    AuthLoginPayload, AuthStatusResponse, AuthTokenResponse, BotControlAction, BotSnapshot,
+    GridOrder, LogEntry, OverviewPairView, OverviewSnapshot, TradeRecord, TradingMode,
+    TradingPairView, UpdateConfigPayload, UpdateGlobalConfigPayload, WebConfigView,
+    WebGlobalConfigView,
 };
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, Path, Query, State};
@@ -164,6 +164,9 @@ async fn require_auth_middleware(
     req: axum::extract::Request,
     next: Next,
 ) -> Result<Response, (StatusCode, Json<ApiResponse<()>>)> {
+    if !state.is_auth_configured() {
+        return Ok(next.run(req).await);
+    }
     let is_valid = match extract_token(req.headers()) {
         Some(token) => match state.check_token_valid(&token).await {
             Ok(valid) => valid,
@@ -256,11 +259,7 @@ fn create_base_router(state: Arc<AppState>, history_clear: bool) -> Router {
             "/api/config",
             get(get_config_handler).post(post_config_handler),
         )
-        .route("/api/control", post(post_control_handler))
-        .route(
-            "/api/auth/change_password",
-            post(post_change_password_handler),
-        );
+        .route("/api/control", post(post_control_handler));
     if history_clear {
         api_protected = api_protected.route("/api/trades/clear", post(clear_trade_history_handler));
     }
@@ -278,7 +277,6 @@ fn create_base_router(state: Arc<AppState>, history_clear: bool) -> Router {
 fn public_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/auth/status", get(get_auth_status_handler))
-        .route("/api/auth/setup", post(post_auth_setup_handler))
         .route("/api/auth/login", post(post_auth_login_handler))
         .route("/api/auth/logout", post(post_auth_logout_handler))
 }
@@ -429,10 +427,6 @@ pub async fn create_managed_router(handle: RuntimeHandle) -> Router {
         .route(
             "/api/database/export",
             get(export_database_handler).post(export_selected_database_handler),
-        )
-        .route(
-            "/api/auth/change_password",
-            post(post_change_password_handler),
         )
         .route_layer(middleware::from_fn_with_state(
             primary.clone(),
@@ -1079,14 +1073,15 @@ async fn get_auth_status_handler(
     headers: HeaderMap,
 ) -> (StatusCode, Json<ApiResponse<AuthStatusResponse>>) {
     let token = extract_token(&headers);
+    let initialized = state.is_auth_configured();
     let result = state
         .db
         .run_blocking(move |db| {
-            let initialized = db.is_admin_password_set()?;
-            let authenticated = match token {
-                Some(token) => db.is_session_valid(&token)?,
-                None => false,
-            };
+            let authenticated = !initialized
+                || match token {
+                    Some(token) => db.is_session_valid(&token)?,
+                    None => false,
+                };
             Ok(AuthStatusResponse {
                 initialized,
                 authenticated,
@@ -1109,7 +1104,6 @@ async fn get_auth_status_handler(
         }
     }
 }
-
 fn peer_ip(address: SocketAddr) -> IpAddr {
     match address.ip() {
         IpAddr::V6(ip) => ip
@@ -1126,115 +1120,6 @@ fn auth_busy<T>() -> (StatusCode, Json<ApiResponse<T>>) {
             success: false,
             data: None,
             message: Some("认证服务繁忙，请稍后重试".to_string()),
-        }),
-    )
-}
-
-async fn post_auth_setup_handler(
-    State(state): State<Arc<AppState>>,
-    ConnectInfo(address): ConnectInfo<SocketAddr>,
-    Json(payload): Json<AuthSetupPayload>,
-) -> (StatusCode, Json<ApiResponse<AuthTokenResponse>>) {
-    let Some(permit) = state.try_begin_auth_work() else {
-        return auth_busy();
-    };
-    let is_set = match state.db.run_blocking(|db| db.is_admin_password_set()).await {
-        Ok(is_set) => is_set,
-        Err(error) => {
-            error!("Failed to check admin initialization: {}", error);
-            return auth_service_error();
-        }
-    };
-    if is_set {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse {
-                success: false,
-                data: None,
-                message: Some(
-                    "管理员密码已初始化，不能重复设置。如需修改请在登录后操作。".to_string(),
-                ),
-            }),
-        );
-    }
-
-    let password = payload.password.trim();
-    if password.len() < 6 {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse {
-                success: false,
-                data: None,
-                message: Some("管理员密码长度至少需为 6 位字符".to_string()),
-            }),
-        );
-    }
-
-    if !state.begin_login_attempt(peer_ip(address)).await {
-        return (
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(ApiResponse {
-                success: false,
-                data: None,
-                message: Some("初始化尝试过于频繁，请一分钟后重试".to_string()),
-            }),
-        );
-    }
-    if !state.verify_setup_code(&payload.setup_code) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(ApiResponse {
-                success: false,
-                data: None,
-                message: Some("初始化码不正确，请从当前应用日志中获取".to_string()),
-            }),
-        );
-    }
-
-    let password = password.to_string();
-    let token = crate::auth::generate_session_token();
-    let session_token = token.clone();
-    match state
-        .db
-        .run_blocking(move |db| {
-            let _permit = permit;
-            db.initialize_admin_session(&password, &session_token)
-        })
-        .await
-    {
-        Ok(true) => {}
-        Ok(false) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ApiResponse {
-                    success: false,
-                    data: None,
-                    message: Some("管理员密码已由其他请求初始化".to_string()),
-                }),
-            )
-        }
-        Err(e) => {
-            error!("Failed to set admin password: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse {
-                    success: false,
-                    data: None,
-                    message: Some("初始化失败，请稍后重试或查看服务器日志".into()),
-                }),
-            );
-        }
-    }
-
-    state.clear_login_attempts(peer_ip(address)).await;
-    info!("Admin password successfully initialized and initial session created");
-
-    (
-        StatusCode::OK,
-        Json(ApiResponse {
-            success: true,
-            data: Some(AuthTokenResponse { token }),
-            message: Some("管理员密码设置成功并已自动登录！".to_string()),
         }),
     )
 }
@@ -1257,36 +1142,51 @@ async fn post_auth_login_handler(
             }),
         );
     }
-    let is_set = match state.db.run_blocking(|db| db.is_admin_password_set()).await {
-        Ok(is_set) => is_set,
-        Err(error) => {
-            error!("Failed to check admin initialization: {}", error);
-            return auth_service_error();
-        }
-    };
-    if !is_set {
+    let Some(admin_auth) = state.admin_auth() else {
+        warn!("Admin login rejected: no password configured for this process");
         return (
             StatusCode::BAD_REQUEST,
             Json(ApiResponse {
                 success: false,
                 data: None,
-                message: Some("系统尚未设置管理员密码，请先完成初始密码设置".to_string()),
+                message: Some("未启用管理员密码认证，无需登录".to_string()),
+            }),
+        );
+    };
+
+    let password = payload.password;
+    let verified = match tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        admin_auth.verify(&password)
+    })
+    .await
+    {
+        Ok(verified) => verified,
+        Err(error) => {
+            error!("Admin password verification task failed: {}", error);
+            return auth_service_error();
+        }
+    };
+    if !verified {
+        warn!("Failed admin authentication attempt: incorrect password");
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some("管理员密码错误，请重新输入".to_string()),
             }),
         );
     }
 
-    let password = payload.password;
     let token = crate::auth::generate_session_token();
     let session_token = token.clone();
     match state
         .db
-        .run_blocking(move |db| {
-            let _permit = permit;
-            db.authenticate_and_create_session(&password, &session_token)
-        })
+        .run_blocking(move |db| db.create_session(&session_token))
         .await
     {
-        Ok(true) => {
+        Ok(()) => {
             state.clear_login_attempts(peer_ip(address)).await;
             info!("Admin authentication successful");
             (
@@ -1298,19 +1198,8 @@ async fn post_auth_login_handler(
                 }),
             )
         }
-        Ok(false) => {
-            warn!("Failed admin authentication attempt: incorrect password");
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(ApiResponse {
-                    success: false,
-                    data: None,
-                    message: Some("管理员密码错误，请重新输入".to_string()),
-                }),
-            )
-        }
-        Err(e) => {
-            error!("Database error during password verification: {}", e);
+        Err(error) => {
+            error!("Failed to create admin session: {}", error);
             auth_service_error()
         }
     }
@@ -1341,68 +1230,6 @@ async fn post_auth_logout_handler(
             message: Some("已安全退出登录".to_string()),
         }),
     )
-}
-
-async fn post_change_password_handler(
-    State(state): State<Arc<AppState>>,
-    Json(payload): Json<ChangePasswordPayload>,
-) -> (StatusCode, Json<ApiResponse<()>>) {
-    let new_password = payload.new_password.trim();
-    if new_password.len() < 6 {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse {
-                success: false,
-                data: None,
-                message: Some("新密码长度至少需为 6 位字符".to_string()),
-            }),
-        );
-    }
-    let Some(permit) = state.try_begin_auth_work() else {
-        return auth_busy();
-    };
-
-    let old_password = payload.old_password;
-    let new_password = new_password.to_string();
-    match state
-        .db
-        .run_blocking(move |db| {
-            let _permit = permit;
-            db.change_admin_password(&old_password, &new_password)
-        })
-        .await
-    {
-        Ok(true) => {
-            info!("Admin password changed successfully, all sessions cleared");
-            (
-                StatusCode::OK,
-                Json(ApiResponse {
-                    success: true,
-                    data: None,
-                    message: Some("管理员密码已成功修改，所有会话已重置，请重新登录".to_string()),
-                }),
-            )
-        }
-        Ok(false) => (
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse {
-                success: false,
-                data: None,
-                message: Some("原密码校验失败，请重新输入".to_string()),
-            }),
-        ),
-        Err(error) => {
-            error!("Failed to change admin password: {}", error);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse {
-                    success: false,
-                    data: None,
-                    message: Some("修改密码失败，请稍后重试或查看服务器日志".into()),
-                }),
-            )
-        }
-    }
 }
 
 async fn get_status_handler(
@@ -2373,6 +2200,29 @@ mod tests {
     use crate::db::Database;
     use crate::types::BotStatus;
 
+    fn test_admin_auth() -> Option<Arc<crate::auth::AdminAuth>> {
+        Some(Arc::new(
+            crate::auth::AdminAuth::from_password("test-password").unwrap(),
+        ))
+    }
+
+    fn auth_state(
+        config: AppConfig,
+        db: Arc<Database>,
+        action_tx: tokio::sync::mpsc::Sender<BotControlAction>,
+    ) -> Arc<AppState> {
+        AppState::new_with_admin_auth(config, db, action_tx, test_admin_auth())
+    }
+
+    fn auth_pair_state(
+        config: AppConfig,
+        db: Arc<Database>,
+        action_tx: tokio::sync::mpsc::Sender<BotControlAction>,
+        trade_lock: Arc<tokio::sync::Mutex<()>>,
+    ) -> Arc<AppState> {
+        AppState::new_for_pair_with_admin_auth(config, db, action_tx, trade_lock, test_admin_auth())
+    }
+
     #[tokio::test]
     async fn control_requires_confirmation_mode_and_propagates_engine_rejections() {
         let db = Arc::new(Database::open(":memory:").unwrap());
@@ -2476,7 +2326,7 @@ mod tests {
         let db = Arc::new(Database::open(":memory:").unwrap());
         db.create_session("symbols-test-token").unwrap();
         let (tx, _) = tokio::sync::mpsc::channel(1);
-        let router = create_router(AppState::new(AppConfig::default(), db, tx));
+        let router = create_router(auth_state(AppConfig::default(), db, tx));
         let response = router
             .clone()
             .oneshot(
@@ -2601,8 +2451,8 @@ mod tests {
         let mut config = AppConfig::default();
         config.exchange.api_key = "account-stream-private-key".into();
         config.exchange.api_secret = "account-stream-private-secret".into();
-        let state = AppState::new(config.clone(), db.clone(), tx.clone());
-        let scoped = AppState::new_for_pair(
+        let state = auth_state(config.clone(), db.clone(), tx.clone());
+        let scoped = auth_pair_state(
             config,
             db.clone(),
             tx,
@@ -2679,7 +2529,7 @@ mod tests {
             db.create_session("revoked-control-token").unwrap();
             let (tx, mut rx) = tokio::sync::mpsc::channel(1);
             tx.send(BotControlAction::GlobalRiskCancel).await.unwrap();
-            let state = AppState::new(AppConfig::default(), db.clone(), tx);
+            let state = auth_state(AppConfig::default(), db.clone(), tx);
             let action = control_action(
                 ControlRequest {
                     action: name.into(),
@@ -2812,7 +2662,7 @@ mod tests {
             db.create_session("disconnect-test-token").unwrap();
             let (tx, mut rx) = tokio::sync::mpsc::channel(1);
             tx.send(BotControlAction::GlobalRiskCancel).await.unwrap();
-            let state = AppState::new(AppConfig::default(), db.clone(), tx);
+            let state = auth_state(AppConfig::default(), db.clone(), tx);
             state.resume_trading().await.unwrap();
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
@@ -3037,7 +2887,7 @@ mod tests {
         config.exchange.api_secret = "overview-private-api-secret".into();
         config.telegram.bot_token = "overview-private-telegram-token".into();
         config.telegram.chat_id = "overview-private-chat-id".into();
-        let state = AppState::new(config, db, tx);
+        let state = auth_state(config, db, tx);
         let router = create_router(state);
         assert_eq!(
             overview_response(&router, false).await.0,
@@ -3081,7 +2931,7 @@ mod tests {
             config.exchange.symbol = symbol.into();
             config.exchange.dry_run = dry_run;
             let (tx, _) = tokio::sync::mpsc::channel(1);
-            states.push(AppState::new_for_pair(config, db.clone(), tx, lock.clone()));
+            states.push(auth_pair_state(config, db.clone(), tx, lock.clone()));
         }
         let account_time = chrono::Utc::now() - chrono::Duration::minutes(2);
         states[0].ticker.write().await.last_price = rust_decimal_macros::dec!(123);

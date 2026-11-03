@@ -2,26 +2,30 @@ use argon2::password_hash::{
     rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString,
 };
 use argon2::Argon2;
-use sha2::{Digest, Sha256};
+use rand::RngCore;
 
-const HASH_ROUNDS: usize = 10_000;
+/// Administrator credentials supplied at process startup.
+///
+/// Only the Argon2 hash is held in memory; the plaintext password is never
+/// written to the database or configuration files.
+pub struct AdminAuth {
+    password_hash: String,
+}
 
-/// Hashes a password with salt using 10,000 iterative SHA-256 rounds.
-pub fn hash_password(password: &str, salt: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(salt.as_bytes());
-    hasher.update(password.as_bytes());
-    let mut current_hash = hasher.finalize();
-
-    for i in 0..HASH_ROUNDS {
-        let mut next_hasher = Sha256::new();
-        next_hasher.update(current_hash);
-        next_hasher.update(salt.as_bytes());
-        next_hasher.update(i.to_le_bytes());
-        current_hash = next_hasher.finalize();
+impl AdminAuth {
+    pub fn from_password(password: &str) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            password.len() >= 6,
+            "管理员密码长度至少为 6 个字符（--admin-password 或 ADMIN_PASSWORD）"
+        );
+        Ok(Self {
+            password_hash: hash_password_argon2(password)?,
+        })
     }
 
-    hex::encode(current_hash)
+    pub fn verify(&self, password: &str) -> bool {
+        verify_password_argon2(password, &self.password_hash)
+    }
 }
 
 pub fn hash_password_argon2(password: &str) -> anyhow::Result<String> {
@@ -40,23 +44,10 @@ pub fn verify_password_argon2(password: &str, stored_hash: &str) -> bool {
     })
 }
 
-/// Generates a cryptographically random 16-byte hex salt (32 hex characters).
-pub fn generate_salt() -> String {
-    let mut bytes = [0u8; 16];
-    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut bytes);
-    hex::encode(bytes)
-}
-
 /// Generates a secure random 32-byte hex session token (64 hex characters).
 pub fn generate_session_token() -> String {
     let mut bytes = [0u8; 32];
-    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut bytes);
-    hex::encode(bytes)
-}
-
-pub fn generate_setup_code() -> String {
-    let mut bytes = [0u8; 16];
-    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut bytes);
+    rand::thread_rng().fill_bytes(&mut bytes);
     hex::encode(bytes)
 }
 
@@ -65,23 +56,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_password_hashing_and_verification() {
-        let salt = generate_salt();
-        assert_eq!(salt.len(), 32);
-
-        let pass1 = "Admin@123456";
-        let hash1 = hash_password(pass1, &salt);
-        let hash2 = hash_password(pass1, &salt);
-
-        assert_eq!(hash1, hash2);
-
-        let pass_wrong = "Admin@654321";
-        let hash_wrong = hash_password(pass_wrong, &salt);
-        assert_ne!(hash1, hash_wrong);
+    fn admin_password_hash_verifies_only_the_configured_password() {
+        let auth = AdminAuth::from_password("correct horse battery staple").unwrap();
+        assert!(auth.verify("correct horse battery staple"));
+        assert!(!auth.verify("Correct horse battery staple"));
+        assert!(!auth.verify(""));
     }
 
     #[test]
-    fn test_session_token_uniqueness() {
+    fn admin_password_requires_six_characters() {
+        assert!(AdminAuth::from_password("short").is_err());
+        assert!(AdminAuth::from_password("sixchr").is_ok());
+    }
+
+    #[test]
+    fn session_token_uniqueness() {
         let token1 = generate_session_token();
         let token2 = generate_session_token();
         assert_eq!(token1.len(), 64);

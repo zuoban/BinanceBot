@@ -3,7 +3,7 @@ import { flushSync } from 'react-dom';
 import { Alert, App, Button, Card, Checkbox, Col, Form, Input, InputNumber, Row, Space, Switch, Tabs } from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, post } from '../lib/api';
-import { EditContext, useSession } from '../lib/session';
+import { EditContext } from '../lib/session';
 import type { GlobalConfig, ServerConfig } from '../lib/types';
 import { ErrorNotice, PageTitle } from '../components/Common';
 import { LoadErrorBoundary } from '../components/LoadErrorBoundary';
@@ -139,25 +139,13 @@ function ServerSettings() {
   </>;
 }
 function SecuritySettings() {
-  const edit = useContext(EditContext);
-  const { message } = App.useApp();
-  const session = useSession();
-  const client = useQueryClient();
-  const [form] = Form.useForm();
-  useEffect(() => () => { edit.setDirty(false); edit.setSaving(false); }, [edit.setDirty, edit.setSaving]);
-  const mutation = useMutation({
-    mutationFn: (values: { old_password: string; new_password: string }) => post('/api/auth/change_password', values),
-    onMutate: () => edit.setSaving(true),
-    onSuccess: () => { form.resetFields(); edit.setDirty(false); message.success('密码已更新，请重新登录'); client.clear(); void session.logout(true); },
-    onError: error => message.error(error.message),
-    onSettled: () => edit.setSaving(false),
-  });
-  return <Card title="修改管理员密码"><Form form={form} layout="vertical" onValuesChange={(_, values) => edit.setDirty(Object.values(values).some(Boolean))} onFinish={v => mutation.mutate(v)} disabled={mutation.isPending} className="security-form">
-    <Form.Item name="old_password" label="当前密码" rules={[{ required: true }]}><Input.Password autoComplete="current-password" /></Form.Item>
-    <Form.Item name="new_password" label="新密码" rules={[{ required: true }, { min: 6, message: '至少 6 个字符' }]}><Input.Password autoComplete="new-password" /></Form.Item>
-    <Form.Item name="confirm" label="确认新密码" dependencies={['new_password']} rules={[{ required: true }, ({ getFieldValue }) => ({ validator: (_, value) => value === getFieldValue('new_password') ? Promise.resolve() : Promise.reject(new Error('两次密码不一致')) })]}><Input.Password autoComplete="new-password" /></Form.Item>
-    <Button type="primary" htmlType="submit" loading={mutation.isPending}>更新密码</Button>
-  </Form></Card>;
+  return <Card title="管理员密码">
+    <Alert type="warning" showIcon title="管理员密码通过服务端启动参数配置，不保存在数据库中。" description={<>
+      <p>使用命令行参数 <code>--admin-password &lt;密码&gt;</code>，或设置环境变量 <code>ADMIN_PASSWORD</code>，然后重启后端。</p>
+      <p>未设置密码时不启用认证，所有能访问该端口的人都可以操作控制台。请仅在受信任网络或本机使用，并优先通过环境变量提供密码，避免密码出现在进程列表中。</p>
+      <p>修改密码后需重启后端；重启会清除所有登录会话，需要使用新密码重新登录。</p>
+    </>} />
+  </Card>;
 }
 export default function Settings() {
   const edit = useContext(EditContext);

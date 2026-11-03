@@ -67,7 +67,15 @@ fn fixture_with_unresponsive_engine(
         .into_iter()
         .map(|config| {
             let (tx, mut rx) = mpsc::channel(8);
-            let state = AppState::new_for_pair(config, db.clone(), tx, lock.clone());
+            let state = AppState::new_for_pair_with_admin_auth(
+                config,
+                db.clone(),
+                tx,
+                lock.clone(),
+                Some(Arc::new(
+                    crate::auth::AdminAuth::from_password("test-password").unwrap(),
+                )),
+            );
             let engine_state = state.clone();
             let observer = observer.clone();
             let engine = tokio::spawn(async move {
@@ -157,6 +165,7 @@ fn fixture_with_unresponsive_engine(
         lock,
         config.server.clone(),
         GlobalConfig::from_app(&config),
+        None,
     )
 }
 
@@ -773,10 +782,17 @@ async fn failed_removal_and_rebuild_keeps_member_in_global_risk() {
     state.position.write().await.size = rust_decimal_macros::dec!(1);
     state.ticker.write().await.mark_price = rust_decimal_macros::dec!(200);
     state.ticker.write().await.mark_update_time = chrono::Utc::now();
-    state.pause_trading().await.unwrap();
     let connection = rusqlite::Connection::open(&path).unwrap();
-    connection.execute_batch("DROP TABLE admin_auth;").unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER reject_guard_insert BEFORE INSERT ON pair_execution_guard \
+             BEGIN SELECT RAISE(ABORT, 'simulated guard failure'); END; \
+             CREATE TRIGGER reject_guard_update BEFORE UPDATE ON pair_execution_guard \
+             BEGIN SELECT RAISE(ABORT, 'simulated guard failure'); END;",
+        )
+        .unwrap();
     drop(connection);
+    state.pause_trading().await.unwrap();
 
     let handle = runtime.handle();
     let global_limit = runtime.global_position_limit.clone();
@@ -788,6 +804,11 @@ async fn failed_removal_and_rebuild_keeps_member_in_global_risk() {
         .unwrap()
         .unwrap_err();
     assert!(format!("{error:#}").contains("删除失败后无法重启策略"));
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute_batch("DROP TRIGGER reject_guard_insert; DROP TRIGGER reject_guard_update;")
+        .unwrap();
+    drop(connection);
     assert_eq!(db.load_config().unwrap().unwrap().pairs.len(), 2);
     assert!(state.is_shutting_down());
     assert!(*state.subscribe_retirement().borrow());
@@ -3073,7 +3094,6 @@ async fn interrupt_during_pair_preparation_blocks_orders_and_cleans_up_guards() 
     config.exchange.api_key = "test-key".into();
     config.exchange.api_secret = "test-secret".into();
     let db = Arc::new(Database::open(&path).unwrap());
-    db.initialize_admin_password("test-password").unwrap();
     db.save_config(&config).unwrap();
     for symbol in ["SOLUSDC", "BTCUSDT", "ETHUSDT"] {
         db.save_pair_status(symbol, TradingMode::Live, BotStatus::Running)
@@ -3385,6 +3405,7 @@ async fn concurrent_safety_pause_prevents_shutdown_recovery() {
             lock,
             config.server.clone(),
             GlobalConfig::from_app(&config),
+            None,
         );
         state.resume_trading().await.unwrap();
         let shutdown = tokio::spawn(async move { runtime.shutdown(Duration::from_secs(5)).await });

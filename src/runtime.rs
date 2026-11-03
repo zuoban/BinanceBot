@@ -55,7 +55,7 @@ struct PreparePairOptions {
     multi: bool,
     previous_state: Option<(crate::types::PositionInfo, crate::types::AccountInfo)>,
     force_paused: bool,
-    prearmed: Option<(bool, bool)>,
+    prearmed: Option<bool>,
     start: Option<oneshot::Receiver<()>>,
     startup_shutdown: Option<watch::Receiver<bool>>,
     #[cfg(test)]
@@ -306,6 +306,7 @@ pub struct TradingRuntime {
     market_cache: Arc<MarketCache>,
     rate_limiter: Arc<RateLimiter>,
     global_position_limit: Arc<crate::server::state::GlobalPositionLimit>,
+    admin_auth: Option<Arc<crate::auth::AdminAuth>>,
     #[cfg(test)]
     test_exchange_url: Option<String>,
 }
@@ -317,6 +318,7 @@ impl TradingRuntime {
         trade_lock: Arc<Mutex<()>>,
         active_server: crate::config::ServerConfig,
         global_config: GlobalConfig,
+        admin_auth: Option<Arc<crate::auth::AdminAuth>>,
     ) -> Self {
         let (commands, command_rx) = mpsc::channel(16);
         let (stop, _) = watch::channel(false);
@@ -358,16 +360,22 @@ impl TradingRuntime {
             position_cache: Arc::new(PositionCache::default()),
             market_cache: Arc::new(MarketCache::default()),
             rate_limiter,
+            admin_auth,
             #[cfg(test)]
             test_exchange_url: None,
         }
     }
 
-    pub async fn start(config: &AppConfig, db: Arc<Database>) -> anyhow::Result<Self> {
+    pub async fn start(
+        config: &AppConfig,
+        db: Arc<Database>,
+        admin_auth: Option<Arc<crate::auth::AdminAuth>>,
+    ) -> anyhow::Result<Self> {
         Self::start_impl(
             config,
             db,
             None,
+            admin_auth,
             #[cfg(test)]
             None,
             #[cfg(test)]
@@ -382,11 +390,13 @@ impl TradingRuntime {
         config: &AppConfig,
         db: Arc<Database>,
         shutdown: watch::Receiver<bool>,
+        admin_auth: Option<Arc<crate::auth::AdminAuth>>,
     ) -> anyhow::Result<Self> {
         Self::start_impl(
             config,
             db,
             Some(shutdown),
+            admin_auth,
             #[cfg(test)]
             None,
             #[cfg(test)]
@@ -403,7 +413,7 @@ impl TradingRuntime {
         db: Arc<Database>,
         url: String,
     ) -> anyhow::Result<Self> {
-        Self::start_impl(config, db, None, Some(url), None, None).await
+        Self::start_impl(config, db, None, None, Some(url), None, None).await
     }
 
     #[cfg(test)]
@@ -414,7 +424,16 @@ impl TradingRuntime {
         shutdown: watch::Receiver<bool>,
         hook: mpsc::Sender<(String, oneshot::Sender<()>)>,
     ) -> anyhow::Result<Self> {
-        Self::start_impl(config, db, Some(shutdown), Some(url), Some(hook), None).await
+        Self::start_impl(
+            config,
+            db,
+            Some(shutdown),
+            None,
+            Some(url),
+            Some(hook),
+            None,
+        )
+        .await
     }
 
     #[cfg(test)]
@@ -425,13 +444,23 @@ impl TradingRuntime {
         shutdown: watch::Receiver<bool>,
         hook: mpsc::Sender<(String, oneshot::Sender<()>)>,
     ) -> anyhow::Result<Self> {
-        Self::start_impl(config, db, Some(shutdown), Some(url), None, Some(hook)).await
+        Self::start_impl(
+            config,
+            db,
+            Some(shutdown),
+            None,
+            Some(url),
+            None,
+            Some(hook),
+        )
+        .await
     }
 
     async fn start_impl(
         config: &AppConfig,
         db: Arc<Database>,
         mut shutdown: Option<watch::Receiver<bool>>,
+        admin_auth: Option<Arc<crate::auth::AdminAuth>>,
         #[cfg(test)] test_exchange_url: Option<String>,
         #[cfg(test)] hook: Option<mpsc::Sender<(String, oneshot::Sender<()>)>>,
         #[cfg(test)] prepare_hook: Option<mpsc::Sender<(String, oneshot::Sender<()>)>>,
@@ -443,6 +472,7 @@ impl TradingRuntime {
             trade_lock.clone(),
             config.server.clone(),
             GlobalConfig::from_app(config),
+            admin_auth,
         );
         #[cfg(test)]
         {
@@ -625,15 +655,13 @@ impl TradingRuntime {
         let mut startup_shutdown = options.startup_shutdown;
         #[cfg(test)]
         let prepare_hook = options.prepare_hook;
-        let (previous_unclean, has_admin) = if let Some(prearmed) = prearmed {
+        let previous_unclean = if let Some(prearmed) = prearmed {
             prearmed
         } else {
             let symbol = strategy.exchange.symbol.clone();
             let mode = crate::types::TradingMode::from_dry_run(strategy.exchange.dry_run);
-            let previous_unclean = db
-                .run_blocking(move |db| db.arm_execution_guard(&symbol, mode))
-                .await?;
-            (previous_unclean, db.is_admin_password_set()?)
+            db.run_blocking(move |db| db.arm_execution_guard(&symbol, mode))
+                .await?
         };
         let (action_tx, action_rx) = mpsc::channel(32);
         let (ticker_tx, ticker_rx) = broadcast::channel::<TickerInfo>(64);
@@ -646,6 +674,7 @@ impl TradingRuntime {
                 action_tx,
                 self.trade_lock.clone(),
                 self.cny_rates.clone(),
+                self.admin_auth.clone(),
             )
         } else {
             AppState::new_with_rates(
@@ -653,6 +682,7 @@ impl TradingRuntime {
                 db.clone(),
                 action_tx,
                 self.cny_rates.clone(),
+                self.admin_auth.clone(),
             )
         };
         if force_paused || previous_unclean {
@@ -676,16 +706,18 @@ impl TradingRuntime {
                 )
                 .await;
         }
-        if !has_admin && !strategy.exchange.dry_run {
+        if self.admin_auth.is_none() && !strategy.exchange.dry_run {
             if prearmed.is_none() {
                 state
-                    .pause_trading_with_reason("实盘策略等待管理员完成初始化")
+                    .pause_trading_with_reason(
+                        "未设置管理员密码，实盘策略已暂停；请确认配置后手动恢复或设置 ADMIN_PASSWORD",
+                    )
                     .await?;
             }
             state
                 .add_log(
                     "WARN",
-                    "Live trading paused until administrator setup is complete",
+                    "Live trading paused because no administrator password is configured",
                 )
                 .await;
         }
@@ -843,7 +875,6 @@ impl TradingRuntime {
         let rules = SymbolRules::from_exchange_info(&info, symbol)
             .ok_or_else(|| anyhow::anyhow!("币安交易对 {} 的交易规则缺失或无效", symbol))?;
         rules.validate_grid_interval(config.grid.grid_interval)?;
-        let has_admin = self.handle.db.is_admin_password_set()?;
         let saved = config.clone();
         let previous_unclean = self
             .handle
@@ -858,7 +889,7 @@ impl TradingRuntime {
                 config,
                 PreparePairOptions {
                     multi: true,
-                    prearmed: Some((previous_unclean, has_admin)),
+                    prearmed: Some(previous_unclean),
                     ..Default::default()
                 },
             )
@@ -1279,6 +1310,7 @@ mod tests {
             commit,
             config.server.clone(),
             GlobalConfig::from_app(&config),
+            None,
         );
         runtime.shutdown(Duration::from_secs(2)).await.unwrap();
         for state in states {

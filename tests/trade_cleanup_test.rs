@@ -1,5 +1,6 @@
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
+use binance_grid_bot::auth::AdminAuth;
 use binance_grid_bot::config::AppConfig;
 use binance_grid_bot::db::Database;
 use binance_grid_bot::server::{create_router, AppState};
@@ -11,6 +12,19 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tower::ServiceExt;
+
+fn auth_state(
+    config: AppConfig,
+    db: Arc<Database>,
+    action_tx: mpsc::Sender<binance_grid_bot::types::BotControlAction>,
+) -> Arc<AppState> {
+    AppState::new_with_admin_auth(
+        config,
+        db,
+        action_tx,
+        Some(Arc::new(AdminAuth::from_password("test-password").unwrap())),
+    )
+}
 
 fn trade(id: usize, symbol: &str, mode: TradingMode) -> TradeRecord {
     TradeRecord {
@@ -45,7 +59,7 @@ async fn single_pair_routes_export_and_clear_only_the_requested_symbol() {
         .unwrap();
     }
     let (action_tx, _action_rx) = mpsc::channel(1);
-    let state = AppState::new(config, db.clone(), action_tx);
+    let state = auth_state(config, db.clone(), action_tx);
     state.create_session("pair-cleanup-token").await.unwrap();
     let app = create_router(state);
 
@@ -139,7 +153,7 @@ async fn cleanup_requires_auth_and_confirmation_then_clears_every_scope() {
     let config = AppConfig::default();
     db.save_config(&config).unwrap();
     let (action_tx, mut action_rx) = mpsc::channel(1);
-    let state = AppState::new(config, db.clone(), action_tx);
+    let state = auth_state(config, db.clone(), action_tx);
     state.create_session("cleanup-token").await.unwrap();
     state.position.write().await.size = dec!(3);
     let status_before = *state.status.read().await;

@@ -11,9 +11,9 @@ import { ThemeSwitch } from '../components/ThemeSwitch';
 export default function Login({ onLogin }: { onLogin: () => void }) {
   const status = useQuery({ queryKey: ['auth-status'], queryFn: () => api<AuthStatus>('/api/auth/status'), retry: false });
   const [error, setError] = useState<Error | null>(null);
-  const setup = status.data?.initialized === false;
+  const configured = status.data?.initialized !== false;
   const mutation = useMutation({
-    mutationFn: (values: { password: string; setup_code?: string }) => post<{ token: string }>(`/api/auth/${setup ? 'setup' : 'login'}`, values),
+    mutationFn: (values: { password: string }) => post<{ token: string }>('/api/auth/login', values),
     onSuccess: data => { tokenStore.set(data.token); onLogin(); },
     onError: setError,
   });
@@ -28,19 +28,17 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
       </div>
     </aside>
     <section className="login-form"><div className="login-form-content">
-      <Typography.Title level={2}>{setup ? '初始化控制台' : '登录交易控制台'}</Typography.Title>
-      <Typography.Paragraph type="secondary">{setup ? '使用启动日志中的初始化码创建管理员密码' : '输入管理员密码，进入策略工作台'}</Typography.Paragraph>
+      <Typography.Title level={2}>{configured ? '登录交易控制台' : '无需登录'}</Typography.Title>
+      <Typography.Paragraph type="secondary">{configured ? '输入管理员密码，进入策略工作台' : '服务端未设置管理员密码，可直接进入控制台'}</Typography.Paragraph>
       <ErrorNotice error={status.error} retry={() => void status.refetch()} /><ErrorNotice error={error} />
-      {setup && <Alert type="info" showIcon title="首次启动默认使用模拟盘" />}
-      <Form layout="vertical" onFinish={values => { setError(null); mutation.mutate(values); }} disabled={mutation.isPending || !status.data}>
-        {setup && <Form.Item name="setup_code" label="初始化码" rules={[{ required: true, message: '请输入初始化码' }]}><Input size="large" autoComplete="off" /></Form.Item>}
-        <Form.Item name="password" label="管理员密码" rules={[{ required: true, message: '请输入密码' }, ...(setup ? [{ min: 6, message: '至少 6 个字符' }] : [])]}>
-          <Input.Password prefix={<LockOutlined />} size="large" autoComplete={setup ? 'new-password' : 'current-password'} />
+      {!configured && <><Alert type="info" showIcon title="未启用管理员密码认证，所有能访问该端口的人都可以操作。" /><Button type="primary" size="large" block onClick={onLogin}>进入控制台</Button></>}
+      {configured && <Form layout="vertical" onFinish={values => { setError(null); mutation.mutate(values); }} disabled={mutation.isPending || !status.data}>
+        <Form.Item name="password" label="管理员密码" rules={[{ required: true, message: '请输入密码' }]}>
+          <Input.Password prefix={<LockOutlined />} size="large" autoComplete="current-password" />
         </Form.Item>
-        {setup && <Form.Item name="confirm" label="确认密码" dependencies={['password']} rules={[{ required: true, message: '请再次输入密码' }, ({ getFieldValue }) => ({ validator: (_, value) => value === getFieldValue('password') ? Promise.resolve() : Promise.reject(new Error('两次密码不一致')) })]}><Input.Password size="large" autoComplete="new-password" /></Form.Item>}
-        <Button type="primary" size="large" htmlType="submit" block loading={mutation.isPending}>{setup ? '创建并进入控制台' : '进入控制台'}</Button>
-      </Form>
-      <p className="login-note">会话仅保存在当前浏览器标签页</p>
+        <Button type="primary" size="large" htmlType="submit" block loading={mutation.isPending}>进入控制台</Button>
+      </Form>}
+      <p className="login-note">{configured ? '会话仅保存在当前浏览器标签页' : '未启用认证，可直接操作控制台'}</p>
     </div></section>
   </main>;
 }

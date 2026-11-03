@@ -1,5 +1,6 @@
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
+use binance_grid_bot::auth::AdminAuth;
 use binance_grid_bot::config::AppConfig;
 use binance_grid_bot::db::Database;
 use binance_grid_bot::server::{create_router, AppState};
@@ -11,7 +12,12 @@ use tower::ServiceExt;
 async fn database_export_requires_auth_and_returns_a_private_sqlite_attachment() {
     let db = Arc::new(Database::open(":memory:").unwrap());
     let (action_tx, _action_rx) = mpsc::channel(1);
-    let state = AppState::new(AppConfig::default(), db.clone(), action_tx);
+    let state = AppState::new_with_admin_auth(
+        AppConfig::default(),
+        db.clone(),
+        action_tx,
+        Some(Arc::new(AdminAuth::from_password("test-password").unwrap())),
+    );
     state
         .create_session("export-test-valid-token")
         .await

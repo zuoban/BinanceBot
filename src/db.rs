@@ -1,5 +1,3 @@
-#[cfg(test)]
-use crate::auth;
 use crate::config::AppConfig;
 use crate::types::{
     AccountInfo, BotStatus, GridOrder, GridStats, HourlyTradeCount, HourlyTradeStats, OrderSide,
@@ -438,7 +436,7 @@ impl Database {
                 params![serde_json::to_string(&config)?],
             )?;
         }
-        snapshot.execute_batch("DELETE FROM admin_auth; DELETE FROM auth_sessions; VACUUM;")?;
+        snapshot.execute_batch("DELETE FROM auth_sessions; VACUUM;")?;
         // VACUUM removes credentials from freed pages and old config payloads too.
         Ok(snapshot.serialize(rusqlite::DatabaseName::Main)?.to_vec())
     }
@@ -747,20 +745,33 @@ impl Database {
                 PRIMARY KEY (symbol, mode)
             );
 
-            CREATE TABLE IF NOT EXISTS admin_auth (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                password_hash TEXT NOT NULL,
-                salt TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-
             CREATE TABLE IF NOT EXISTS auth_sessions (
                 token TEXT PRIMARY KEY,
                 created_at TEXT NOT NULL
             );
+
             "#,
         )
         .context("Failed to initialize SQLite tables")?;
+
+        let has_legacy_admin_auth: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'admin_auth')",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_legacy_admin_auth {
+            conn.execute_batch(
+                "PRAGMA secure_delete = ON;
+                 DROP TABLE admin_auth;
+                 VACUUM;
+                 PRAGMA wal_checkpoint(TRUNCATE);",
+            )
+            .context("Failed to remove the legacy administrator password from SQLite")?;
+            warn!(
+                "Removed the legacy administrator password from SQLite; \
+                 set ADMIN_PASSWORD or --admin-password to require console authentication"
+            );
+        }
 
         // Rebuild the old key atomically, retaining the identities in the stored JSON.
         let tx = conn.transaction()?;
@@ -3314,16 +3325,10 @@ mod tests {
         config.telegram.bot_token = "export-test-telegram-token".into();
         config.telegram.chat_id = "export-test-chat-id".into();
         db.save_config(&config).unwrap();
-        db.initialize_admin_password("export-test-password")
-            .unwrap();
         db.create_session("export-test-session-token").unwrap();
         db.save_bot_status(BotStatus::Running).unwrap();
-        let password_hash: String;
         {
             let conn = db.conn.lock().unwrap();
-            password_hash = conn
-                .query_row("SELECT password_hash FROM admin_auth", [], |r| r.get(0))
-                .unwrap();
             for index in 0..65 {
                 conn.execute(
                     "INSERT INTO trades (rowid, trade_id, client_order_id, symbol, mode, side, price, quantity, amount_usdc, realized_pnl, commission, is_maker, timestamp, note) VALUES (?1, ?2, ?2, ?3, ?4, 'BUY', '118.3', '2.53', '299.299', '0', '0', 1, '2026-09-30T00:00:00Z', 'export test')",
@@ -3353,7 +3358,6 @@ mod tests {
             "export-test-telegram-token",
             "export-test-chat-id",
             "export-test-session-token",
-            &password_hash,
         ] {
             assert!(!raw.contains(secret), "Credential bytes leaked: {secret}");
         }
@@ -3373,7 +3377,6 @@ mod tests {
             ("scoped_grid_stats", 1),
             ("app_config", 1),
             ("bot_runtime", 1),
-            ("admin_auth", 0),
             ("auth_sessions", 0),
         ] {
             let count: i64 = snapshot
@@ -3442,7 +3445,6 @@ mod tests {
             config.telegram.bot_token
         );
         assert!(db.is_session_valid("export-test-session-token").unwrap());
-        assert!(db.verify_admin_password("export-test-password").unwrap());
         assert_eq!(db.load_bot_status().unwrap(), Some(BotStatus::Running));
         drop(snapshot);
         drop(db);
@@ -3488,38 +3490,6 @@ mod tests {
         assert!(loaded[0].is_take_profit);
         db.delete_managed_order(&order.client_order_id).unwrap();
         assert!(db.load_managed_orders("SOLUSDC").unwrap().is_empty());
-    }
-
-    #[test]
-    fn admin_setup_is_atomic_and_legacy_hashes_upgrade() {
-        let db = Database::open(":memory:").unwrap();
-        assert!(db.initialize_admin_password("first-password").unwrap());
-        assert!(!db.initialize_admin_password("second-password").unwrap());
-        assert!(db.verify_admin_password("first-password").unwrap());
-        assert!(!db.verify_admin_password("second-password").unwrap());
-
-        let salt = auth::generate_salt();
-        let legacy_hash = auth::hash_password("legacy-password", &salt);
-        db.conn
-            .lock()
-            .unwrap()
-            .execute(
-                "UPDATE admin_auth SET password_hash = ?1, salt = ?2 WHERE id = 1;",
-                params![legacy_hash, salt],
-            )
-            .unwrap();
-        assert!(db.verify_admin_password("legacy-password").unwrap());
-        let upgraded: String = db
-            .conn
-            .lock()
-            .unwrap()
-            .query_row(
-                "SELECT password_hash FROM admin_auth WHERE id = 1;",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert!(upgraded.starts_with("$argon2id$"));
     }
 
     #[test]
@@ -4172,19 +4142,54 @@ mod tests {
     }
 
     #[test]
-    fn test_db_admin_auth_and_sessions() {
+    fn opening_database_removes_legacy_admin_password_table() {
+        let directory =
+            std::env::temp_dir().join(format!("binancebot-legacy-auth-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("legacy.db");
+        {
+            let db = Database::open(&path).unwrap();
+            db.conn
+                .lock()
+                .unwrap()
+                .execute_batch(
+                    "CREATE TABLE admin_auth (
+                        id INTEGER PRIMARY KEY CHECK (id = 1),
+                        password_hash TEXT NOT NULL,
+                        salt TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    INSERT INTO admin_auth VALUES (1, 'legacy-password-hash-marker', 'legacy-salt-marker', '2026-01-01');",
+                )
+                .unwrap();
+        }
+
+        let db = Database::open(&path).unwrap();
+        let remaining: i64 = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'admin_auth'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0);
+        drop(db);
+        let mut bytes = std::fs::read(&path).unwrap();
+        if let Ok(wal) = std::fs::read(path.with_extension("db-wal")) {
+            bytes.extend(wal);
+        }
+        let raw = String::from_utf8_lossy(&bytes);
+        assert!(!raw.contains("legacy-password-hash-marker"));
+        assert!(!raw.contains("legacy-salt-marker"));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn test_db_sessions() {
         let db = Database::open(":memory:").unwrap();
-        assert!(!db.is_admin_password_set().unwrap());
-
-        // Set password
-        db.set_admin_password("Secret123").unwrap();
-        assert!(db.is_admin_password_set().unwrap());
-
-        // Verify password
-        assert!(db.verify_admin_password("Secret123").unwrap());
-        assert!(!db.verify_admin_password("WrongPassword").unwrap());
-
-        // Session tokens
         let token = "test_token_123456";
         assert!(!db.is_session_valid(token).unwrap());
 
@@ -4193,6 +4198,12 @@ mod tests {
 
         db.delete_session(token).unwrap();
         assert!(!db.is_session_valid(token).unwrap());
+
+        db.create_session("first-token").unwrap();
+        db.create_session("second-token").unwrap();
+        db.clear_all_sessions().unwrap();
+        assert!(!db.is_session_valid("first-token").unwrap());
+        assert!(!db.is_session_valid("second-token").unwrap());
     }
 
     #[test]

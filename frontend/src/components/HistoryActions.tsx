@@ -31,5 +31,5 @@ export function HistoryActions({ symbol }: { symbol: string }) {
     } catch (error) { message.error((error as Error).message); }
     finally { lock.current = false; setBusy(null); }
   };
-  return <div><p className="muted">导出的是当前币种全部模式的脱敏分析快照：交易所 API 密钥、Telegram 令牌和聊天 ID 会被清空，管理员认证和会话会被移除。快照不能作为完整恢复备份。</p><Space wrap><Button icon={<DownloadOutlined />} loading={busy === 'export'} disabled={busy !== null} onClick={() => void download()}>导出当前币种分析快照</Button><Button danger loading={busy === 'clear'} disabled={busy !== null} onClick={() => void clear()}>清理当前币种全部模式</Button></Space></div>;
+  return <div><p className="muted">导出的是当前币种全部模式的脱敏分析快照：交易所 API 密钥、Telegram 令牌和聊天 ID 会被清空，登录会话会被移除。快照不能作为完整恢复备份。</p><Space wrap><Button icon={<DownloadOutlined />} loading={busy === 'export'} disabled={busy !== null} onClick={() => void download()}>导出当前币种分析快照</Button><Button danger loading={busy === 'clear'} disabled={busy !== null} onClick={() => void clear()}>清理当前币种全部模式</Button></Space></div>;
 }

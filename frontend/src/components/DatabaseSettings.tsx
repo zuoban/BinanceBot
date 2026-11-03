@@ -49,7 +49,7 @@ export function DatabaseSettings() {
 
   return <Card title="数据库操作">
     <p className="muted">选择需要导出或清空的数据类别。成交历史及统计覆盖全部币种和全部模式。</p>
-    <p className="muted">导出的是脱敏分析快照：交易所 API 密钥、Telegram 令牌和聊天 ID 会被清空，管理员认证和会话会被移除。快照不能作为完整恢复备份。</p>
+    <p className="muted">导出的是脱敏分析快照：交易所 API 密钥、Telegram 令牌和聊天 ID 会被清空，登录会话会被移除。快照不能作为完整恢复备份。</p>
     <Checkbox.Group options={options} value={targets} disabled={busy !== null} onChange={values => setTargets(values as DatabaseTarget[])} />
     <div style={{ marginTop: 16 }}><Space wrap>
       <Button loading={busy === 'selected'} disabled={busy !== null || targets.length === 0} onClick={() => void run('selected')}>导出所选数据分析快照</Button>

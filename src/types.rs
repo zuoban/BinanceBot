@@ -607,23 +607,9 @@ pub struct AuthStatusResponse {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct AuthSetupPayload {
-    pub password: String,
-    #[serde(default)]
-    pub setup_code: String,
-}
-
-#[derive(Debug, Deserialize)]
 pub struct AuthLoginPayload {
     pub password: String,
 }
-
-#[derive(Debug, Deserialize)]
-pub struct ChangePasswordPayload {
-    pub old_password: String,
-    pub new_password: String,
-}
-
 #[derive(Debug, Serialize)]
 pub struct AuthTokenResponse {
     pub token: String,

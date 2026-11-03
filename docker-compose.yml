@@ -12,6 +12,7 @@ services:
       - ./data:/app/data
     environment:
       RUST_LOG: binance_grid_bot=info,tower_http=info
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
   frontend:
     build:
       context: .

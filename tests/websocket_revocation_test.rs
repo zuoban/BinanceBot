@@ -1,5 +1,6 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use binance_grid_bot::auth::AdminAuth;
 use binance_grid_bot::config::{AppConfig, TradingPairConfig};
 use binance_grid_bot::db::Database;
 use binance_grid_bot::server::{create_multi_router, create_router, AppState};
@@ -15,6 +16,10 @@ use tokio_tungstenite::{
     tungstenite::{client::IntoClientRequest, Message},
     MaybeTlsStream, WebSocketStream,
 };
+
+fn test_auth() -> Option<Arc<AdminAuth>> {
+    Some(Arc::new(AdminAuth::from_password("test-password").unwrap()))
+}
 use tower::ServiceExt;
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -67,9 +72,8 @@ async fn assert_account_marker(socket: &mut Socket, should_receive: bool) {
         "unexpected account data after revocation"
     );
 }
-async fn revocation_scenario(multi: bool, change_password: bool) {
+async fn revocation_scenario(multi: bool) {
     let db = Arc::new(Database::open(":memory:").unwrap());
-    db.set_admin_password("original-password").unwrap();
     db.create_session("first-session").unwrap();
     db.create_session("other-session").unwrap();
 
@@ -88,7 +92,13 @@ async fn revocation_scenario(multi: bool, change_password: bool) {
             .into_iter()
             .map(|config| {
                 let (tx, _rx) = mpsc::channel(8);
-                AppState::new_for_pair(config, db.clone(), tx, lock.clone())
+                AppState::new_for_pair_with_admin_auth(
+                    config,
+                    db.clone(),
+                    tx,
+                    lock.clone(),
+                    test_auth(),
+                )
             })
             .collect();
         (
@@ -103,7 +113,8 @@ async fn revocation_scenario(multi: bool, change_password: bool) {
         )
     } else {
         let (tx, _rx) = mpsc::channel(8);
-        let state = AppState::new(AppConfig::default(), db.clone(), tx);
+        let state =
+            AppState::new_with_admin_auth(AppConfig::default(), db.clone(), tx, test_auth());
         (
             create_router(state.clone()),
             vec![state],
@@ -152,50 +163,24 @@ async fn revocation_scenario(multi: bool, change_password: bool) {
         );
     }
 
-    let (path, body) = if change_password {
-        (
-            "/api/auth/change_password",
-            json!({"old_password":"original-password", "new_password":"replacement-password"})
-                .to_string(),
-        )
-    } else {
-        ("/api/auth/logout", "{}".to_string())
-    };
     let response = router
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(path)
+                .uri("/api/auth/logout")
                 .header("Authorization", "Bearer first-session")
                 .header("Content-Type", "application/json")
-                .body(Body::from(body))
+                .body(Body::from("{}"))
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
-    // Password changes revoke every session; logout must leave the other session usable.
-    // Previously queued account frames can predate the HTTP response. Change a
-    // field afterwards so only newly generated account data carries this marker.
+    // Logout must leave the other session usable. Previously queued account
+    // frames can predate the HTTP response. Change a field afterwards so only
+    // newly generated account data carries this marker.
     states[0].position.write().await.unrealized_pnl = dec!(54321);
-    let mut observers = if change_password {
-        db.create_session("replacement-session").unwrap();
-        let mut sockets = Vec::new();
-        for path in &paths {
-            let mut socket = connect(address, path, "replacement-session").await;
-            let expected = if *path == "/api/accounts/ws" {
-                "accounts"
-            } else {
-                "snapshot"
-            };
-            assert_eq!(next_json(&mut socket).await["type"], expected);
-            sockets.push(socket);
-        }
-        sockets
-    } else {
-        Vec::new()
-    };
 
     for (index, state) in states.iter().enumerate() {
         let payload = json!({"type":"log", "data":{"message":format!("after-{index}")}});
@@ -207,48 +192,25 @@ async fn revocation_scenario(multi: bool, change_password: bool) {
         }
         let state_index = usize::from(path.contains("BTCUSDT"));
         let expected = format!("after-{state_index}");
-        let observer = if change_password {
-            &mut observers[index]
-        } else {
-            &mut other[index]
-        };
-        assert_eq!(next_json(observer).await["data"]["message"], expected);
+        assert_eq!(
+            next_json(&mut other[index]).await["data"]["message"],
+            expected
+        );
     }
-    let account = if change_password {
-        observers.last_mut().unwrap()
-    } else {
-        other.last_mut().unwrap()
-    };
-    assert_account_marker(account, true).await;
+    assert_account_marker(other.last_mut().unwrap(), true).await;
     for socket in &mut first[..paths.len() - 1] {
         assert_no_sensitive_data(socket).await;
     }
     assert_account_marker(first.last_mut().unwrap(), false).await;
-    if change_password {
-        for socket in &mut other[..paths.len() - 1] {
-            assert_no_sensitive_data(socket).await;
-        }
-        assert_account_marker(other.last_mut().unwrap(), false).await;
-    }
     server.abort();
 }
 
 #[tokio::test]
 async fn single_pair_logout_revokes_existing_websockets() {
-    revocation_scenario(false, false).await;
-}
-
-#[tokio::test]
-async fn single_pair_password_change_revokes_existing_websockets() {
-    revocation_scenario(false, true).await;
+    revocation_scenario(false).await;
 }
 
 #[tokio::test]
 async fn multi_pair_logout_revokes_existing_websockets() {
-    revocation_scenario(true, false).await;
-}
-
-#[tokio::test]
-async fn multi_pair_password_change_revokes_existing_websockets() {
-    revocation_scenario(true, true).await;
+    revocation_scenario(true).await;
 }

@@ -1,6 +1,7 @@
 use axum::body::{to_bytes, Body};
 use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
+use binance_grid_bot::auth::AdminAuth;
 use binance_grid_bot::config::AppConfig;
 use binance_grid_bot::db::Database;
 use binance_grid_bot::server::{create_router, AppState};
@@ -13,13 +14,24 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::client::IntoClientRequest};
 use tower::ServiceExt;
 
+fn state_with_password(
+    db: Arc<Database>,
+    action_tx: mpsc::Sender<BotControlAction>,
+    password: &str,
+) -> Arc<AppState> {
+    AppState::new_with_admin_auth(
+        AppConfig::default(),
+        db,
+        action_tx,
+        Some(Arc::new(AdminAuth::from_password(password).unwrap())),
+    )
+}
+
 #[tokio::test]
 async fn test_full_auth_lifecycle() {
     let db = Arc::new(Database::open(":memory:").unwrap());
-    let config = AppConfig::default();
     let (action_tx, mut action_rx) = mpsc::channel(16);
-    let state = AppState::new(config, db.clone(), action_tx);
-    let setup_code = state.setup_code().unwrap().to_string();
+    let state = state_with_password(db.clone(), action_tx, "correct-password");
     let config_state = state.clone();
     tokio::spawn(async move {
         while let Some(action) = action_rx.recv().await {
@@ -47,7 +59,7 @@ async fn test_full_auth_lifecycle() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 
-    // 1. Initial status: should be uninitialized
+    // 1. Initial status: authentication is configured from process startup.
     let res = app
         .clone()
         .oneshot(
@@ -62,7 +74,7 @@ async fn test_full_auth_lifecycle() {
     assert_eq!(res.status(), StatusCode::OK);
     let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["data"]["initialized"], false);
+    assert_eq!(json["data"]["initialized"], true);
     assert_eq!(json["data"]["authenticated"], false);
 
     // 2. Accessing protected endpoint without token: should be 401 Unauthorized
@@ -78,7 +90,7 @@ async fn test_full_auth_lifecycle() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 
-    // 3. Setup with password too short (< 6 chars): should be 400 Bad Request
+    // 3. The removed setup endpoint must not be reachable.
     let res = app
         .clone()
         .oneshot(
@@ -86,25 +98,37 @@ async fn test_full_auth_lifecycle() {
                 .method("POST")
                 .uri("/api/auth/setup")
                 .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"password": "123"}"#))
+                .body(Body::from(r#"{"password": "irrelevant"}"#))
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
 
-    // 4. Setup with valid password: should be 200 OK and return token
+    // 4. Login with wrong password: should be 401
     let res = app
         .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/api/auth/setup")
+                .uri("/api/auth/login")
                 .header("Content-Type", "application/json")
-                .body(Body::from(format!(
-                    r#"{{"password": "MySuperSecret123", "setup_code": "{}"}}"#,
-                    setup_code
-                )))
+                .body(Body::from(r#"{"password": "WrongPassword!"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+    // 5. Login with the configured password: should succeed with a new token
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/login")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"password": "correct-password"}"#))
                 .unwrap(),
         )
         .await
@@ -115,21 +139,6 @@ async fn test_full_auth_lifecycle() {
     assert!(json["success"].as_bool().unwrap());
     let token = json["data"]["token"].as_str().unwrap().to_string();
     assert!(!token.is_empty());
-
-    // 5. Subsequent setup attempt: should be rejected (cannot re-setup)
-    let res = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/auth/setup")
-                .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"password": "AnotherPassword123"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 
     // 6. Accessing protected route with Bearer token: should now succeed!
     let res = app
@@ -206,37 +215,7 @@ async fn test_full_auth_lifecycle() {
     let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
     assert!(!String::from_utf8_lossy(&body).contains("123:secret-token"));
 
-    // 7. Login with wrong password: should be 401
-    let res = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/auth/login")
-                .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"password": "WrongPassword!"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
-
-    // 8. Login with correct password: should succeed with a new token
-    let res = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/auth/login")
-                .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"password": "MySuperSecret123"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-
-    // 9. Logout with token: should invalidate token
+    // 7. Logout with token: should invalidate token
     let res = app
         .clone()
         .oneshot(
@@ -251,7 +230,7 @@ async fn test_full_auth_lifecycle() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 
-    // 10. Accessing protected route with invalidated token: should now be 401!
+    // 8. Accessing protected route with invalidated token: should now be 401!
     let res = app
         .clone()
         .oneshot(
@@ -264,75 +243,6 @@ async fn test_full_auth_lifecycle() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
-}
-
-#[tokio::test]
-async fn change_password_distinguishes_invalid_password_from_invalid_session() {
-    let db = Arc::new(Database::open(":memory:").unwrap());
-    db.set_admin_password("original-password").unwrap();
-    db.create_session("valid-token").unwrap();
-    let (action_tx, _action_rx) = mpsc::channel(16);
-    let app = create_router(AppState::new(AppConfig::default(), db.clone(), action_tx));
-
-    let change_password = |token: &str, old_password: &str| {
-        Request::builder()
-            .method("POST")
-            .uri("/api/auth/change_password")
-            .header("Authorization", format!("Bearer {token}"))
-            .header("Content-Type", "application/json")
-            .body(Body::from(
-                serde_json::json!({"old_password": old_password, "new_password": "new-password"})
-                    .to_string(),
-            ))
-            .unwrap()
-    };
-
-    let response = app
-        .clone()
-        .oneshot(change_password("valid-token", "wrong-password"))
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let json: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["success"], false);
-    assert_eq!(json["message"], "原密码校验失败，请重新输入");
-    assert!(db.verify_admin_password("original-password").unwrap());
-
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/api/config")
-                .header("Authorization", "Bearer valid-token")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let response = app
-        .clone()
-        .oneshot(change_password("invalid-token", "original-password"))
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    assert!(db.verify_admin_password("original-password").unwrap());
-
-    let response = app
-        .clone()
-        .oneshot(change_password("valid-token", "original-password"))
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert!(db.verify_admin_password("new-password").unwrap());
-
-    let response = app
-        .oneshot(change_password("valid-token", "new-password"))
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 struct AuthTestDatabase {
@@ -404,10 +314,8 @@ fn auth_request(path: &str, body: serde_json::Value, token: Option<&str>) -> Req
 #[tokio::test]
 async fn saturated_password_workers_reject_without_consuming_source_limit() {
     let db = Arc::new(Database::open(":memory:").unwrap());
-    db.set_admin_password("{{SECRET_vwmfr05k}}password")
-        .unwrap();
     let (tx, _rx) = mpsc::channel(1);
-    let state = AppState::new(AppConfig::default(), db, tx);
+    let state = state_with_password(db, tx, "correct-password");
     let app = create_router(state.clone());
     let permits: Vec<_> = (0..4)
         .map(|_| state.try_begin_auth_work().unwrap())
@@ -436,9 +344,8 @@ async fn saturated_password_workers_reject_without_consuming_source_limit() {
 #[tokio::test]
 async fn login_limit_is_scoped_to_socket_ip_and_ignores_forwarded_headers() {
     let db = Arc::new(Database::open(":memory:").unwrap());
-    db.set_admin_password("correct-password").unwrap();
     let (action_tx, _action_rx) = mpsc::channel(16);
-    let app = create_router(AppState::new(AppConfig::default(), db, action_tx));
+    let app = create_router(state_with_password(db, action_tx, "correct-password"));
     let request = |address: &str, forwarded: &str, password: &str| {
         Request::builder()
             .method("POST")
@@ -496,95 +403,38 @@ async fn login_limit_is_scoped_to_socket_ip_and_ignores_forwarded_headers() {
 }
 
 #[tokio::test]
-async fn setup_attempts_are_isolated_by_socket_ip() {
-    let db = Arc::new(Database::open(":memory:").unwrap());
+async fn auth_status_reports_database_errors_instead_of_false_state() {
+    let fixture = AuthTestDatabase::new();
+    fixture.db.create_session("valid-token").unwrap();
     let (action_tx, _action_rx) = mpsc::channel(16);
-    let state = AppState::new(AppConfig::default(), db, action_tx);
-    let setup_code = state.setup_code().unwrap().to_string();
+    let state = state_with_password(fixture.db.clone(), action_tx, "correct-password");
     let app = create_router(state);
-    let request = |address: &str, code: &str| {
+
+    let request = || {
         Request::builder()
-            .method("POST")
-            .uri("/api/auth/setup")
-            .header("Content-Type", "application/json")
-            .extension(ConnectInfo(address.parse::<SocketAddr>().unwrap()))
-            .body(Body::from(
-                serde_json::json!({"password": "correct-password", "setup_code": code}).to_string(),
-            ))
+            .uri("/api/auth/status")
+            .header("Authorization", "Bearer valid-token")
+            .body(Body::empty())
             .unwrap()
     };
-    for _ in 0..10 {
-        assert_eq!(
-            app.clone()
-                .oneshot(request("192.0.2.1:1000", "incorrect"))
-                .await
-                .unwrap()
-                .status(),
-            StatusCode::FORBIDDEN
-        );
-    }
-    assert_eq!(
-        app.clone()
-            .oneshot(request("192.0.2.1:2000", &setup_code))
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::TOO_MANY_REQUESTS
-    );
-    assert_eq!(
-        app.oneshot(request("192.0.2.2:1000", &setup_code))
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::OK
-    );
-}
+    let response = app.clone().oneshot(request()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["data"]["initialized"], true);
+    assert_eq!(json["data"]["authenticated"], true);
 
-#[tokio::test]
-async fn auth_status_reports_database_errors_instead_of_false_state() {
-    for table in ["admin_auth", "auth_sessions"] {
-        let fixture = AuthTestDatabase::new();
-        fixture
-            .db
-            .set_admin_password(concat!("original", "-password"))
-            .unwrap();
-        fixture.db.create_session("valid-token").unwrap();
-        let (action_tx, _action_rx) = mpsc::channel(16);
-        let state = AppState::new(AppConfig::default(), fixture.db.clone(), action_tx);
-        let app = create_router(state);
-
-        let request = || {
-            Request::builder()
-                .uri("/api/auth/status")
-                .header("Authorization", "Bearer valid-token")
-                .body(Body::empty())
-                .unwrap()
-        };
-        let response = app.clone().oneshot(request()).await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let json: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["data"]["initialized"], true);
-        assert_eq!(json["data"]["authenticated"], true);
-
-        fixture
-            .external
-            .execute_batch(&format!(
-                "ALTER TABLE {table} RENAME TO {table}_unavailable"
-            ))
-            .unwrap();
-        let response = app.oneshot(request()).await.unwrap();
-        assert_eq!(
-            response.status(),
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "{table}"
-        );
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let json: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["success"], false, "{table}");
-        assert!(json["data"].is_null(), "{table}");
-        assert_eq!(json["message"], "认证服务异常，请稍后重试", "{table}");
-    }
+    fixture
+        .external
+        .execute_batch("ALTER TABLE auth_sessions RENAME TO auth_sessions_unavailable")
+        .unwrap();
+    let response = app.oneshot(request()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["success"], false);
+    assert!(json["data"].is_null());
+    assert_eq!(json["message"], "认证服务异常，请稍后重试");
 }
 
 #[tokio::test]
@@ -592,7 +442,7 @@ async fn protected_route_reports_session_read_failure_without_treating_it_as_exp
     let fixture = AuthTestDatabase::new();
     fixture.db.create_session("valid-token").unwrap();
     let (action_tx, _action_rx) = mpsc::channel(16);
-    let state = AppState::new(AppConfig::default(), fixture.db.clone(), action_tx);
+    let state = state_with_password(fixture.db.clone(), action_tx, "correct-password");
     let app = create_router(state);
     let request = |token: &str| {
         Request::builder()
@@ -634,10 +484,6 @@ async fn protected_route_reports_session_read_failure_without_treating_it_as_exp
 #[tokio::test]
 async fn expired_session_cleanup_failure_still_allows_reauthentication() {
     let fixture = AuthTestDatabase::new();
-    fixture
-        .db
-        .set_admin_password(concat!("original", "-password"))
-        .unwrap();
     fixture.db.create_session("expired-token").unwrap();
     fixture
         .external
@@ -648,7 +494,7 @@ async fn expired_session_cleanup_failure_still_allows_reauthentication() {
         .unwrap();
     fixture.fail_session_writes("DELETE");
     let (action_tx, _action_rx) = mpsc::channel(16);
-    let state = AppState::new(AppConfig::default(), fixture.db.clone(), action_tx);
+    let state = state_with_password(fixture.db.clone(), action_tx, "correct-password");
     let app = create_router(state);
     let request = |path: &str| {
         Request::builder()
@@ -681,7 +527,7 @@ async fn expired_session_cleanup_failure_still_allows_reauthentication() {
     let response = app
         .oneshot(auth_request(
             "/api/auth/login",
-            serde_json::json!({ "password": concat!("original", "-password") }),
+            serde_json::json!({ "password": "correct-password" }),
             None,
         ))
         .await
@@ -691,56 +537,13 @@ async fn expired_session_cleanup_failure_still_allows_reauthentication() {
 }
 
 #[tokio::test]
-async fn setup_session_insert_failure_rolls_back_password_and_session() {
-    let fixture = AuthTestDatabase::new();
-    let (action_tx, _action_rx) = mpsc::channel(16);
-    let state = AppState::new(AppConfig::default(), fixture.db.clone(), action_tx);
-    let setup_code = state.setup_code().unwrap().to_string();
-    let app = create_router(state);
-    fixture.fail_session_writes("INSERT");
-
-    let response = app
-        .clone()
-        .oneshot(auth_request(
-            "/api/auth/setup",
-            serde_json::json!({
-                "password": "original-password", "setup_code": setup_code
-            }),
-            None,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    assert!(!fixture.db.is_admin_password_set().unwrap());
-    assert_eq!(fixture.session_count(), 0);
-
-    fixture
-        .external
-        .execute_batch("DROP TRIGGER fail_session_write")
-        .unwrap();
-    let response = app
-        .oneshot(auth_request(
-            "/api/auth/setup",
-            serde_json::json!({
-                "password": "original-password", "setup_code": setup_code
-            }),
-            None,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(fixture.session_count(), 1);
-}
-
-#[tokio::test]
 async fn login_session_insert_failure_returns_error_without_token() {
     let fixture = AuthTestDatabase::new();
-    fixture.db.set_admin_password("original-password").unwrap();
     let (action_tx, _action_rx) = mpsc::channel(16);
-    let app = create_router(AppState::new(
-        AppConfig::default(),
+    let app = create_router(state_with_password(
         fixture.db.clone(),
         action_tx,
+        "correct-password",
     ));
     fixture.fail_session_writes("INSERT");
 
@@ -748,7 +551,7 @@ async fn login_session_insert_failure_returns_error_without_token() {
         .oneshot(auth_request(
             "/api/auth/login",
             serde_json::json!({
-                "password": concat!("original", "-password")
+                "password": "correct-password"
             }),
             None,
         ))
@@ -763,59 +566,35 @@ async fn login_session_insert_failure_returns_error_without_token() {
 }
 
 #[tokio::test]
-async fn password_change_session_delete_failure_rolls_back_and_preserves_session() {
-    let fixture = AuthTestDatabase::new();
-    fixture.db.set_admin_password("original-password").unwrap();
-    fixture.db.create_session("valid-token").unwrap();
+async fn login_rejects_when_the_process_has_no_password_configured() {
+    let db = Arc::new(Database::open(":memory:").unwrap());
     let (action_tx, _action_rx) = mpsc::channel(16);
-    let app = create_router(AppState::new(
-        AppConfig::default(),
-        fixture.db.clone(),
-        action_tx,
-    ));
-    fixture.fail_session_writes("DELETE");
+    let app = create_router(AppState::new(AppConfig::default(), db, action_tx));
 
     let response = app
-        .clone()
         .oneshot(auth_request(
-            "/api/auth/change_password",
-            serde_json::json!({
-                "old_password": concat!("original", "-password"), "new_password": "new-password"
-            }),
-            Some("valid-token"),
+            "/api/auth/login",
+            serde_json::json!({"password": "anything"}),
+            None,
         ))
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    assert!(fixture
-        .db
-        .verify_admin_password("original-password")
-        .unwrap());
-    assert!(!fixture.db.verify_admin_password("new-password").unwrap());
-    assert_eq!(fixture.session_count(), 1);
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri("/api/config")
-                .header("Authorization", "Bearer valid-token")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["success"], false);
+    assert!(json["message"].as_str().unwrap().contains("无需登录"));
 }
 
 #[tokio::test]
 async fn logout_session_delete_failure_returns_error() {
     let fixture = AuthTestDatabase::new();
-    fixture.db.set_admin_password("original-password").unwrap();
     fixture.db.create_session("valid-token").unwrap();
     let (action_tx, _action_rx) = mpsc::channel(16);
-    let app = create_router(AppState::new(
-        AppConfig::default(),
+    let app = create_router(state_with_password(
         fixture.db.clone(),
         action_tx,
+        "correct-password",
     ));
     fixture.fail_session_writes("DELETE");
 
@@ -843,6 +622,66 @@ async fn logout_session_delete_failure_returns_error() {
     assert_eq!(response.status(), StatusCode::OK);
 }
 
+#[tokio::test]
+async fn missing_password_disables_http_authentication() {
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    let (action_tx, _action_rx) = mpsc::channel(16);
+    let app = create_router(AppState::new(AppConfig::default(), db, action_tx));
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/auth/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["data"]["initialized"], false);
+    assert_eq!(json["data"]["authenticated"], true);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/config")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn missing_password_allows_tokenless_websockets() {
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    let (action_tx, _action_rx) = mpsc::channel(1);
+    let state = AppState::new(AppConfig::default(), db, action_tx);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server =
+        tokio::spawn(async move { axum::serve(listener, create_router(state)).await.unwrap() });
+
+    let mut request = format!("ws://{}/ws", address)
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("Sec-WebSocket-Protocol", "auth".parse().unwrap());
+    let (mut socket, response) = connect_async(request).await.unwrap();
+    assert_eq!(response.headers()["Sec-WebSocket-Protocol"], "auth");
+    let message = socket.next().await.unwrap().unwrap();
+    assert!(message
+        .into_text()
+        .unwrap()
+        .contains("\"type\":\"snapshot\""));
+    server.abort();
+}
+
 #[test]
 fn test_default_server_binding_is_loopback() {
     let config = AppConfig::default();
@@ -853,11 +692,10 @@ fn test_default_server_binding_is_loopback() {
 #[tokio::test]
 async fn websocket_authenticates_without_a_query_token() {
     let db = Arc::new(Database::open(":memory:").unwrap());
-    db.set_admin_password("secret-password").unwrap();
-    let token = "test-session-token";
+    let token = "web-socket-session-token";
     db.create_session(token).unwrap();
     let (action_tx, mut action_rx) = mpsc::channel(1);
-    let state = AppState::new(AppConfig::default(), db.clone(), action_tx);
+    let state = state_with_password(db.clone(), action_tx, "correct-password");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server =
@@ -903,7 +741,7 @@ async fn websocket_authenticates_without_a_query_token() {
         .await
         .unwrap();
     assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(300), action_rx.recv())
+        tokio::time::timeout(tokio::time::Duration::from_millis(300), action_rx.recv())
             .await
             .is_err()
     );

@@ -31,8 +31,8 @@ export function useSocket<T extends keyof SocketDataByType>(path: string | undef
     let attempts = 0;
     const connect = () => {
       const token = tokenStore.get();
-      if (stopped || !token) return;
-      socket = new WebSocket(socketUrl(path), ['auth', `token.${token}`]);
+      if (stopped) return;
+      socket = new WebSocket(socketUrl(path), token ? ['auth', `token.${token}`] : ['auth']);
       socket.onmessage = event => {
         if (stopped) return;
         try {

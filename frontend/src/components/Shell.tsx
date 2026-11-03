@@ -17,7 +17,7 @@ export default function Shell() {
   const accounts = useLiveAccounts(overview.data, overview.dataUpdatedAt);
   const [dirty, setDirty] = useState(false), [saving, setSaving] = useState(false);
   const { modal, message } = App.useApp();
-  const { logout } = useSession();
+  const { logout, authEnabled } = useSession();
   const { preference, setPreference } = useTheme();
   const groups = accountGroups(accounts);
   useDocumentTitle(location.pathname.match(/^\/pairs\/(?!new\/?$)[^/]+\/?$/) ? null : groups.length ? groups.map(group => {
@@ -60,7 +60,7 @@ export default function Shell() {
             { key: 'overview', icon: <AppstoreOutlined aria-hidden="true" />, label: '策略总览' }, { key: 'settings', icon: <SettingOutlined aria-hidden="true" />, label: '全局设置' },
             { type: 'divider' },
             { key: 'theme', icon: <BulbOutlined aria-hidden="true" />, label: `主题：${themeLabels[preference]}`, children: Object.entries(themeLabels).map(([key, label]) => ({ key: `theme-${key}`, label: `${preference === key ? '✓ ' : ''}${label}` })) },
-            { key: 'logout', icon: <LogoutOutlined aria-hidden="true" />, label: '退出', disabled: saving },
+            ...(authEnabled ? [{ type: 'divider' as const }, { key: 'logout', icon: <LogoutOutlined aria-hidden="true" />, label: '退出', disabled: saving }] : []),
           ],
           selectedKeys: selected === 'pair' ? [] : [selected],
           onClick: ({ key }) => {

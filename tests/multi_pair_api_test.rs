@@ -1,5 +1,6 @@
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
+use binance_grid_bot::auth::AdminAuth;
 use binance_grid_bot::config::{AppConfig, TradingPairConfig};
 use binance_grid_bot::db::Database;
 use binance_grid_bot::server::{create_multi_router, AppState};
@@ -32,7 +33,13 @@ fn fixture() -> (
     let mut receivers = Vec::new();
     for config in config.strategy_configs().unwrap() {
         let (tx, rx) = mpsc::channel(8);
-        states.push(AppState::new_for_pair(config, db.clone(), tx, lock.clone()));
+        states.push(AppState::new_for_pair_with_admin_auth(
+            config,
+            db.clone(),
+            tx,
+            lock.clone(),
+            Some(Arc::new(AdminAuth::from_password("test-password").unwrap())),
+        ));
         receivers.push(rx);
     }
     (db, states, receivers)

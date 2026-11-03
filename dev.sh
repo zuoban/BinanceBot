@@ -10,6 +10,16 @@ for command in cargo node npm; do
   fi
 done
 
+has_password_arg=false
+for arg in "$@"; do
+  case "$arg" in
+    --admin-password|--admin-password=*) has_password_arg=true ;;
+  esac
+done
+if [[ -z "${ADMIN_PASSWORD:-}" && "$has_password_arg" == false ]]; then
+  printf '未设置 ADMIN_PASSWORD，本次启动不启用管理员认证。\n'
+fi
+
 if [[ ! -d "$ROOT_DIR/frontend/node_modules" ]]; then
   printf '正在安装前端依赖...\n'
   (cd "$ROOT_DIR/frontend" && npm ci)
@@ -36,7 +46,7 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-printf '正在启动后端；首次启动的管理员初始化码会显示在后端日志中。\n'
+printf '正在启动后端；管理员认证由 ADMIN_PASSWORD 或 --admin-password 决定。\n'
 (cd "$ROOT_DIR" && exec cargo run --release -- "$@") &
 backend_pid=$!
 backend_port=""

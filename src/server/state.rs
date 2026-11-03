@@ -411,7 +411,7 @@ pub struct AppState {
     snapshot_cache: snapshot::SnapshotCache,
     login_failures: Mutex<LoginAttempts>,
     auth_work: Arc<Semaphore>,
-    setup_code: Option<String>,
+    admin_auth: Option<Arc<crate::auth::AdminAuth>>,
 
     pub action_tx: mpsc::Sender<BotControlAction>,
     pub ws_broadcast_tx: broadcast::Sender<String>,
@@ -424,7 +424,22 @@ impl AppState {
         db: Arc<Database>,
         action_tx: mpsc::Sender<BotControlAction>,
     ) -> Arc<Self> {
-        Self::new_with_rates(config, db, action_tx, Arc::new(CnyRateCache::new()))
+        Self::new_with_admin_auth(config, db, action_tx, None)
+    }
+
+    pub fn new_with_admin_auth(
+        config: AppConfig,
+        db: Arc<Database>,
+        action_tx: mpsc::Sender<BotControlAction>,
+        admin_auth: Option<Arc<crate::auth::AdminAuth>>,
+    ) -> Arc<Self> {
+        Self::new_with_rates(
+            config,
+            db,
+            action_tx,
+            Arc::new(CnyRateCache::new()),
+            admin_auth,
+        )
     }
 
     pub(crate) fn new_with_rates(
@@ -432,6 +447,7 @@ impl AppState {
         db: Arc<Database>,
         action_tx: mpsc::Sender<BotControlAction>,
         cny_rates: Arc<CnyRateCache>,
+        admin_auth: Option<Arc<crate::auth::AdminAuth>>,
     ) -> Arc<Self> {
         Self::build(
             config,
@@ -440,6 +456,7 @@ impl AppState {
             None,
             Arc::new(Mutex::new(())),
             cny_rates,
+            admin_auth,
         )
     }
 
@@ -449,12 +466,23 @@ impl AppState {
         action_tx: mpsc::Sender<BotControlAction>,
         trade_commit_lock: Arc<Mutex<()>>,
     ) -> Arc<Self> {
+        Self::new_for_pair_with_admin_auth(config, db, action_tx, trade_commit_lock, None)
+    }
+
+    pub fn new_for_pair_with_admin_auth(
+        config: AppConfig,
+        db: Arc<Database>,
+        action_tx: mpsc::Sender<BotControlAction>,
+        trade_commit_lock: Arc<Mutex<()>>,
+        admin_auth: Option<Arc<crate::auth::AdminAuth>>,
+    ) -> Arc<Self> {
         Self::new_for_pair_with_rates(
             config,
             db,
             action_tx,
             trade_commit_lock,
             Arc::new(CnyRateCache::new()),
+            admin_auth,
         )
     }
 
@@ -464,6 +492,7 @@ impl AppState {
         action_tx: mpsc::Sender<BotControlAction>,
         trade_commit_lock: Arc<Mutex<()>>,
         cny_rates: Arc<CnyRateCache>,
+        admin_auth: Option<Arc<crate::auth::AdminAuth>>,
     ) -> Arc<Self> {
         let symbol = config.exchange.symbol.clone();
         Self::build(
@@ -473,6 +502,7 @@ impl AppState {
             Some(symbol),
             trade_commit_lock,
             cny_rates,
+            admin_auth,
         )
     }
 
@@ -483,6 +513,7 @@ impl AppState {
         pair_scope: Option<String>,
         trade_commit_lock: Arc<Mutex<()>>,
         cny_rates: Arc<CnyRateCache>,
+        admin_auth: Option<Arc<crate::auth::AdminAuth>>,
     ) -> Arc<Self> {
         let (ws_broadcast_tx, _) = broadcast::channel(100);
         let symbol = config.exchange.symbol.clone();
@@ -505,11 +536,6 @@ impl AppState {
                 );
                 BotStatus::Paused
             }
-        };
-        let setup_code = if db.is_admin_password_set().unwrap_or(false) {
-            None
-        } else {
-            Some(crate::auth::generate_setup_code())
         };
 
         let initial_account = if config.exchange.dry_run {
@@ -610,7 +636,7 @@ impl AppState {
             snapshot_cache: snapshot::SnapshotCache::default(),
             login_failures: Mutex::new(LoginAttempts::default()),
             auth_work: Arc::new(Semaphore::new(4)),
-            setup_code,
+            admin_auth,
             action_tx,
             ws_broadcast_tx,
             telegram_notifier: TelegramNotifier::new(
@@ -1080,6 +1106,9 @@ impl AppState {
 
 impl AppState {
     pub async fn check_token_valid(&self, token: &str) -> anyhow::Result<bool> {
+        if !self.is_auth_configured() {
+            return Ok(true);
+        }
         if token.is_empty() {
             return Ok(false);
         }
@@ -1524,14 +1553,12 @@ impl AppState {
                 .is_some_and(|global| global.shutdown_requested.load(Ordering::SeqCst))
     }
 
-    pub fn setup_code(&self) -> Option<&str> {
-        self.setup_code.as_deref()
+    pub fn admin_auth(&self) -> Option<Arc<crate::auth::AdminAuth>> {
+        self.admin_auth.clone()
     }
 
-    pub fn verify_setup_code(&self, code: &str) -> bool {
-        self.setup_code
-            .as_deref()
-            .is_some_and(|expected| expected == code)
+    pub fn is_auth_configured(&self) -> bool {
+        self.admin_auth.is_some()
     }
 }
 
