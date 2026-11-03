@@ -7,7 +7,7 @@ import { api, ApiError, pairPath, post } from '../lib/api';
 import { usePairs } from '../lib/queries';
 import { EditContext } from '../lib/session';
 import type { GlobalConfig, GridConfig } from '../lib/types';
-import { ErrorNotice, ModeTag, PageBreadcrumb, PageTitle } from '../components/Common';
+import { ErrorNotice, PageBreadcrumb, PageTitle } from '../components/Common';
 import { useDeleteStrategy } from '../components/DeleteStrategy';
 
 type FormValues = Omit<GridConfig, 'post_only'>;
@@ -40,7 +40,6 @@ export default function PairConfig() {
   }, [pathname, router]);
   const baseline = useRef<{ symbol: string; config: GridConfig & { config_version: string } } | null>(null);
   const global = useQuery({ queryKey: ['global-config'], queryFn: ({ signal }) => api<GlobalConfig>('/api/global/config', { signal }), refetchOnWindowFocus: false });
-  const modeKnown = !!global.data || !!pair;
   // Unknown state (for example a failed global-config request) is confirmed as live.
   const live = global.data ? global.data.has_api_key && global.data.has_api_secret : pair ? pair.mode === 'LIVE' : true;
   const symbols = useQuery({ queryKey: ['exchange-symbols'], queryFn: ({ signal }) => api<string[]>('/api/exchange/symbols?environment=mainnet', { signal }), enabled: adding, retry: false, refetchOnWindowFocus: false });
@@ -130,7 +129,6 @@ export default function PairConfig() {
         <Row gutter={20}>
           <Col xs={24} md={12}><Form.Item name="symbol" label="合约交易对" rules={[{ required: true, message: '请选择交易对' }]} getValueProps={value => ({ value: value || undefined })} extra={adding && symbols.isError ? <span>交易对加载失败 <Button type="link" onClick={() => void symbols.refetch()}>重试</Button></span> : undefined}>{adding ? <Select showSearch optionFilterProp="label" placeholder={symbols.isFetching ? '正在加载交易对...' : '搜索并选择交易对'} loading={symbols.isFetching} disabled={formDisabled || symbols.isFetching || symbols.isError} notFoundContent="没有匹配的交易对" options={(symbols.data ?? []).map(value => ({ value, label: value }))} /> : <Input disabled />}</Form.Item></Col>
           <Col xs={24} md={12}><Form.Item name="direction" label="交易方向" rules={[{ required: true }]}><Select options={[{ value: 'LONG', label: '做多 · 买入开仓 / 卖出平仓' }, { value: 'SHORT', label: '做空 · 卖出开仓 / 买入平仓' }]} /></Form.Item></Col>
-          <Col xs={24} md={12}><Form.Item label="运行模式" extra="由全局设置中的 API Key 决定：已配置 API Key 后以实盘运行，未配置时以模拟盘运行。">{modeKnown ? <ModeTag mode={live ? 'LIVE' : 'PAPER'} /> : '未知（保存时按实盘确认）'}</Form.Item></Col>
         </Row>
         {live && <Alert type="warning" showIcon title="实盘使用真实资金，请核对交易方向和风险限制。" />}
       </Card>

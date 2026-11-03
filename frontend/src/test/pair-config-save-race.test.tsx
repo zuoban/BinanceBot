@@ -48,7 +48,7 @@ function setup() {
 
 async function prepareLive() {
   const user = userEvent.setup();
-  await screen.findByText('实盘');
+  await screen.findByText('实盘使用真实资金，请核对交易方向和风险限制。');
   return user;
 }
 

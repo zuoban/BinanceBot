@@ -5,7 +5,7 @@ import { ArrowDownOutlined, ArrowRightOutlined, ArrowUpOutlined, EyeOutlined, Pl
 import { useOverview } from '../lib/queries';
 import { AccountsContext } from '../lib/session';
 import { accountGroups, comparePositionAmount, modeLabel, numeric, number as fixedNumber, positionAmount, positionGroups, price as fixedPrice, quoteAsset, todayCount, todayPnlGroups, todayTradeCounts, trimFractionZeros } from '../lib/format';
-import { ErrorNotice, ModeTag, Pnl, StatusTag } from '../components/Common';
+import { ErrorNotice, Pnl, StatusTag } from '../components/Common';
 import { runBatchControls, useControls } from '../components/Controls';
 import type { Pair, Trade } from '../lib/types';
 import { OverviewLoading } from '../components/Loading';
@@ -140,7 +140,7 @@ export default function OverviewPage() {
     <div className="section-heading"><h2 id="accounts-heading">账户概览</h2></div>
     <Row gutter={[16, 16]} className="account-row">
       {accountGroups(accounts).map(group => <Col xs={24} xl={12} key={group.key}><Card className="account-card" size="small">
-        <div className="section-line account-card-heading"><span>保证金余额</span><ModeTag mode={group.mode} /></div>
+        <div className="section-line account-card-heading"><span>保证金余额</span></div>
         <div className="account-equity-line"><Statistic value={group.equity ?? '--'} formatter={() => number(group.equity)} suffix={group.asset} />
           <span className="account-cny muted">{group.cny !== null ? `≈ ¥${number(group.cny)}` : '人民币估值待更新'}</span></div>
         <div className="account-availability">
@@ -166,7 +166,7 @@ export default function OverviewPage() {
               <div><span>做空持仓金额</span><strong className="position-short">{number(group.short)}</strong></div>
               <div><span>多空比（金额占比）</span><strong>{group.total !== null && group.total > 0 && group.long !== null && group.short !== null ? `${number(group.long / group.total * 100, 1)}% / ${number(group.short / group.total * 100, 1)}%` : '--'}</strong></div>
             </div>
-            <div className="section-line position-summary-footer"><span className="muted">按实际持仓方向统计{group.total === null ? ' · 部分持仓数据不可用' : ''}</span><ModeTag mode={group.mode} /></div>
+            <div className="section-line position-summary-footer"><span className="muted">按实际持仓方向统计{group.total === null ? ' · 部分持仓数据不可用' : ''}</span></div>
           </Card>
         </Col>)}
       </Row>
@@ -197,11 +197,10 @@ export default function OverviewPage() {
         const formattedChange = change !== null && Number.isFinite(change) ? number(change, 2) : null;
         const roundedChange = formattedChange === null ? null : Number(formattedChange.replaceAll(',', ''));
         return <Col xs={24} lg={12} xxl={8} key={s.symbol}><Card className={`strategy-card ${s.grid_config.direction === 'SHORT' ? 'strategy-short' : 'strategy-long'}`}>
-          <div className="section-line strategy-card-heading"><div className="strategy-identity"><Link className="pair-name" to={`/pairs/${s.symbol}`}>{s.symbol}</Link><span className="strategy-direction" role="img" aria-label={s.grid_config.direction === 'SHORT' ? '策略方向：做空' : '策略方向：做多'}>{s.grid_config.direction === 'SHORT' ? <><ArrowDownOutlined />做空</> : <><ArrowUpOutlined />做多</>}</span><ModeTag mode={m} /></div><Space className="strategy-card-actions" size={2}><StatusTag status={s.status} /><Popover trigger="click" placement="bottomRight" title={`${s.symbol} 策略配置`} content={
+          <div className="section-line strategy-card-heading"><div className="strategy-identity"><Link className="pair-name" to={`/pairs/${s.symbol}`}>{s.symbol}</Link><span className="strategy-direction" role="img" aria-label={s.grid_config.direction === 'SHORT' ? '策略方向：做空' : '策略方向：做多'}>{s.grid_config.direction === 'SHORT' ? <><ArrowDownOutlined />做空</> : <><ArrowUpOutlined />做多</>}</span></div><Space className="strategy-card-actions" size={2}><StatusTag status={s.status} /><Popover trigger="click" placement="bottomRight" title={`${s.symbol} 策略配置`} content={
             <div className="strategy-config-popover">
               <dl>
                 <div><dt>交易方向</dt><dd>{s.grid_config.direction === 'SHORT' ? '做空' : '做多'}</dd></div>
-                <div><dt>运行模式</dt><dd>{modeLabel[m]}</dd></div>
                 <div><dt>网格间距</dt><dd>{trimFractionZeros(s.grid_config.grid_interval)} {quote}</dd></div>
                 <div><dt>每格金额</dt><dd>{trimFractionZeros(s.grid_config.order_amount_usdc)} {quote}</dd></div>
                 <div><dt>买单 / 卖单窗口</dt><dd>{s.grid_config.buy_window} / {s.grid_config.sell_window}</dd></div>

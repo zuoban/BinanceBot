@@ -9,6 +9,7 @@ import { ControlProvider } from './Controls';
 import { themeLabels } from './ThemeSwitch';
 import { useTheme, type ThemePreference } from '../lib/theme';
 import { defaultTitle, useDocumentTitle } from '../lib/documentTitle';
+import { ModeTag } from './Common';
 
 export default function Shell() {
   const navigate = useNavigate(), location = useLocation();
@@ -54,7 +55,7 @@ export default function Shell() {
       <div className="topbar-main">
         <Link className="topbar-brand" to="/" aria-label="Grid Console 首页"><span className="topbar-brand-name"><strong>GRID CONSOLE</strong><small>BINANCE FUTURES</small></span></Link>
       </div>
-      <Space className="topbar-actions">{selected === 'pair' && symbol !== 'new' && <Select className="topbar-pair-select" aria-label="切换交易对" title={symbol} popupMatchSelectWidth={false} value={symbol} options={pairs.data?.map(p => ({ value: p.symbol, label: p.symbol }))} onChange={value => navigate(`/pairs/${value}${location.pathname.endsWith('/config') ? '/config' : ''}`)} />}
+      <Space className="topbar-actions">{pairs.data?.[0] && <ModeTag mode={pairs.data[0].mode} />}{selected === 'pair' && symbol !== 'new' && <Select className="topbar-pair-select" aria-label="切换交易对" title={symbol} popupMatchSelectWidth={false} value={symbol} options={pairs.data?.map(p => ({ value: p.symbol, label: p.symbol }))} onChange={value => navigate(`/pairs/${value}${location.pathname.endsWith('/config') ? '/config' : ''}`)} />}
         <Dropdown placement="bottomRight" trigger={['click']} menu={{
           items: [
             { key: 'overview', icon: <AppstoreOutlined aria-hidden="true" />, label: '策略总览' }, { key: 'settings', icon: <SettingOutlined aria-hidden="true" />, label: '全局设置' },

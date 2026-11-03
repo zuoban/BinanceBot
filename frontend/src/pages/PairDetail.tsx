@@ -3,7 +3,7 @@ import { Alert, Button, Card, Col, Descriptions, Row, Space, Statistic, Tabs, Ta
 import { SettingOutlined } from '@ant-design/icons';
 import { usePairSnapshot, usePairs } from '../lib/queries';
 import { accountGroups, modeOf, number, numeric, price, quoteAsset, todayTradeCounts } from '../lib/format';
-import { ErrorNotice, ModeTag, PageBreadcrumb, PageTitle, Pnl, StatusTag } from '../components/Common';
+import { ErrorNotice, PageBreadcrumb, PageTitle, Pnl, StatusTag } from '../components/Common';
 import { PairControls, useControls } from '../components/Controls';
 import { DepthChart, HourlyChart } from '../components/Charts';
 import { LogsTable, OrdersTable, TradesTable } from '../components/DataTables';
@@ -33,7 +33,7 @@ export default function PairDetail() {
     <ErrorNotice error={pairs.error || query.error} retry={() => { void pairs.refetch(); void query.refetch(); }} />
     {pairs.data && !pair && <Alert type="warning" title="该交易对不存在或已移除" />}
     {controls.results[symbol ?? ''] && <Alert type="info" title={controls.results[symbol ?? '']} />}
-    {pair && <div className="detail-status"><Space wrap><ModeTag mode={currentPair!.mode} /><StatusTag status={currentPair!.status} /><Tag color={query.live ? 'success' : 'warning'}>{query.live ? '实时连接' : 'HTTP 自动刷新'}</Tag></Space><span className="muted">{query.dataUpdatedAt ? `最近同步 ${new Date(query.dataUpdatedAt).toLocaleTimeString('zh-CN')}` : '等待首次快照'}</span></div>}
+    {pair && <div className="detail-status"><Space wrap><StatusTag status={currentPair!.status} /><Tag color={query.live ? 'success' : 'warning'}>{query.live ? '实时连接' : 'HTTP 自动刷新'}</Tag></Space><span className="muted">{query.dataUpdatedAt ? `最近同步 ${new Date(query.dataUpdatedAt).toLocaleTimeString('zh-CN')}` : '等待首次快照'}</span></div>}
     {query.stale && s && <Alert type="warning" showIcon title="快照暂未更新，数值可能已过期；仍可撤单并暂停。" />}
     {!s && (pairs.isPending || (pair && query.isPending)) && <DetailLoading />}
     {s && <>

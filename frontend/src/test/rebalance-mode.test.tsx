@@ -3,7 +3,6 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { App } from 'antd';
 import { afterEach, expect, it, vi } from 'vitest';
 import { ControlProvider, useControls } from '../components/Controls';
-import { modeLabel } from '../lib/format';
 import { post } from '../lib/api';
 import { pair } from './fixtures';
 
@@ -21,7 +20,7 @@ vi.mock('../lib/api', () => ({
 
 afterEach(() => { vi.clearAllMocks(); });
 
-it.each(['PAPER', 'LIVE'] as const)('binds the rebalance confirmation to displayed %s mode', async mode => {
+it.each(['PAPER', 'LIVE'] as const)('binds the rebalance confirmation to the %s mode', async mode => {
   confirm.mockResolvedValue(true);
   vi.mocked(post).mockResolvedValue(undefined);
   const client = new QueryClient();
@@ -29,7 +28,7 @@ it.each(['PAPER', 'LIVE'] as const)('binds the rebalance confirmation to display
   const { result, unmount } = renderHook(() => useControls(), { wrapper });
   try {
     await act(async () => { await result.current.run({ ...pair(), mode }, 'rebalance'); });
-    expect(confirm).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining(modeLabel[mode]) }));
+    expect(confirm).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('重新构建网格') }));
     expect(post).toHaveBeenCalledWith('/api/pairs/SOLUSDC/control', { action: 'rebalance', expected_mode: mode });
   } finally {
     unmount();

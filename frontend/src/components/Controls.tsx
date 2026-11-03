@@ -3,7 +3,6 @@ import { App, Button, Dropdown, Space, Tooltip } from 'antd';
 import { MoreOutlined, PauseOutlined, PlayCircleOutlined } from '@ant-design/icons';
 import { useQueryClient } from '@tanstack/react-query';
 import { api, pairPath, post } from '../lib/api';
-import { modeLabel } from '../lib/format';
 import type { Action, Pair, Snapshot } from '../lib/types';
 
 async function confirmControlState(pair: Pair, action: Action): Promise<boolean> {
@@ -50,8 +49,8 @@ export function ControlProvider({ children }: { children: React.ReactNode }) {
       const dangerous = action === 'rebalance' || action === 'cancel_all' || (action === 'resume' && pair.mode === 'LIVE');
       if (dangerous && !confirmed) {
         const accepted = await modal.confirm({
-          title: `${pair.symbol} · ${action === 'resume' ? '恢复实盘策略' : action === 'rebalance' ? '重建网格' : '撤单并暂停'}`,
-          content: action === 'resume' ? '恢复后将使用真实资金下单，请确认交易对和参数。' : action === 'rebalance' ? `将在${modeLabel[pair.mode]}模式撤销机器人挂单并重新构建网格，请确认交易模式。` : '将撤销此交易对的机器人挂单并暂停，保留持仓。',
+          title: `${pair.symbol} · ${action === 'resume' ? '恢复策略' : action === 'rebalance' ? '重建网格' : '撤单并暂停'}`,
+          content: action === 'resume' ? (pair.mode === 'LIVE' ? '恢复后将使用真实资金下单，请确认交易对和参数。' : '恢复后将按当前参数继续维护网格。') : action === 'rebalance' ? '将撤销机器人挂单并重新构建网格，请确认交易对和参数。' : '将撤销此交易对的机器人挂单并暂停，保留持仓。',
           okText: '确认执行', cancelText: '取消',
         });
         if (!accepted) return 'not_submitted';
