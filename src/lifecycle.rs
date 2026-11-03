@@ -84,7 +84,8 @@ pub async fn stop_engine(
     engine: &mut JoinHandle<()>,
     limit: Duration,
 ) -> Result<()> {
-    stop_engine_inner(state, engine, limit, true).await
+    let early = begin_stop_engine(Arc::clone(state), limit).await;
+    finish_stop_engine(state, engine, early).await
 }
 
 pub(crate) async fn remove_engine(
@@ -92,15 +93,32 @@ pub(crate) async fn remove_engine(
     engine: &mut JoinHandle<()>,
     limit: Duration,
 ) -> Result<()> {
-    stop_engine_inner(state, engine, limit, false).await
+    let early = begin_stop_engine_inner(state, limit, false).await;
+    finish_stop_engine_inner(state, engine, early, false).await
 }
 
-async fn stop_engine_inner(
+/// Begin a normal shutdown without requiring ownership of the engine handle.
+/// The returned deadline bounds both this phase and the subsequent engine join.
+pub(crate) async fn begin_stop_engine(
+    state: Arc<AppState>,
+    limit: Duration,
+) -> (Instant, Result<()>) {
+    begin_stop_engine_inner(&state, limit, true).await
+}
+
+pub(crate) async fn finish_stop_engine(
     state: &Arc<AppState>,
     engine: &mut JoinHandle<()>,
+    early: (Instant, Result<()>),
+) -> Result<()> {
+    finish_stop_engine_inner(state, engine, early, true).await
+}
+
+async fn begin_stop_engine_inner(
+    state: &Arc<AppState>,
     limit: Duration,
     recover: bool,
-) -> Result<()> {
+) -> (Instant, Result<()>) {
     state.request_shutdown();
     let deadline = Instant::now() + limit;
     let requested = timeout_at(deadline, async {
@@ -133,6 +151,16 @@ async fn stop_engine_inner(
             limit.as_secs()
         )),
     };
+    (deadline, outcome)
+}
+
+async fn finish_stop_engine_inner(
+    state: &Arc<AppState>,
+    engine: &mut JoinHandle<()>,
+    early: (Instant, Result<()>),
+    recover: bool,
+) -> Result<()> {
+    let (deadline, outcome) = early;
     let outcome = match outcome {
         Err(error) => {
             engine.abort();

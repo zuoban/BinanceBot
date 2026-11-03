@@ -203,10 +203,27 @@ async fn main() -> anyhow::Result<()> {
         })
         .await
     });
-    let reason = tokio::select! {
-        reason = &mut signal => reason.map(str::to_string),
-        result = &mut web_task => Err(anyhow::anyhow!("Web server stopped: {:?}", result)),
-        message = runtime.run() => Err(anyhow::anyhow!(message)),
+    let handle = runtime.handle();
+    let reason = {
+        let running = runtime.run();
+        tokio::pin!(running);
+        let (reason, finished) = tokio::select! {
+            biased;
+            reason = &mut signal => (reason.map(str::to_string), false),
+            result = &mut web_task => (Err(anyhow::anyhow!("Web server stopped: {:?}", result)), false),
+            message = &mut running => (Err(anyhow::anyhow!(message)), true),
+        };
+        // This gate also covers a pair being prepared or rebuilt by the active command.
+        handle.request_shutdown();
+        let _ = web_stop.send(true);
+        // The active removal owns its target; other existing engines can stop now.
+        handle.start_early_shutdown(Duration::from_secs(30)).await;
+        if !finished {
+            // DB workers cannot be canceled safely. Wait without a deadline for the
+            // command to publish its outcome before cleaning up the final engine set.
+            running.await;
+        }
+        reason
     };
     info!("Stopping bot: {:?}", reason);
     snapshot_task.abort();

@@ -2160,6 +2160,30 @@ impl GridTradingEngine {
     }
 
     async fn drain_pair_intents(&mut self, symbol: &str, mode: TradingMode) -> bool {
+        let scope = symbol.to_owned();
+        match self
+            .state
+            .db
+            .run_blocking(move |db| db.load_pair_intents(&scope, mode))
+            .await
+        {
+            Ok(intents) if intents.is_empty() => return true,
+            Ok(_) => {}
+            Err(error) => {
+                error!("Could not load pending pair intents: {}", error);
+                return false;
+            }
+        }
+        // Re-read under the gate: intents may change while the writer is acquired.
+        let mut guard = self.state.begin_fill_reconciliation().await;
+        let result = self.drain_pair_intents_under_gate(symbol, mode).await;
+        if result {
+            guard.resolve();
+        }
+        result
+    }
+
+    async fn drain_pair_intents_under_gate(&mut self, symbol: &str, mode: TradingMode) -> bool {
         let scope = symbol.to_string();
         let intents = match self
             .state
@@ -2664,9 +2688,9 @@ impl GridTradingEngine {
         };
         match recorded {
             Ok(true) => {
-                // A restored, already-recorded fill can still be present in
-                // active orders. Refresh before removing its exposure reservation.
-                if !config.exchange.dry_run && self.sync_position(false).await.is_none() {
+                // Refresh position and account and publish the global risk check
+                // before removing the reservation for an already-recorded fill.
+                if !config.exchange.dry_run && !self.sync_account_and_position().await {
                     self.last_account_sync = None;
                     return false;
                 }
@@ -3413,14 +3437,13 @@ impl GridTradingEngine {
         };
 
         if config.exchange.dry_run {
+            let mut active_orders = self.state.active_orders.write().await;
+            if self.state.is_shutting_down() {
+                return false;
+            }
             // Paper Trading simulation
             order.order_id = Some(rand::random::<i64>().abs());
-
-            self.state
-                .active_orders
-                .write()
-                .await
-                .insert(client_order_id.clone(), order);
+            active_orders.insert(client_order_id.clone(), order);
             debug!(
                 "[DRY-RUN] Placed {} Maker order: price={}, qty={}, id={}",
                 side.as_str(),
@@ -3448,7 +3471,17 @@ impl GridTradingEngine {
                 }
                 return false;
             }
-            match self
+            let Some(exchange_guard) = self.state.try_exchange_submission() else {
+                if let Err(e) = self.delete_managed_order(&client_order_id).await {
+                    error!(
+                        "Could not clear gated order intent {}: {}",
+                        client_order_id, e
+                    );
+                    self.report_reconciliation_state(true).await;
+                }
+                return false;
+            };
+            let result = self
                 .client
                 .place_order(NewOrderRequest {
                     symbol: &symbol,
@@ -3459,8 +3492,22 @@ impl GridTradingEngine {
                     post_only: true,
                     reduce_only: side == config.grid.direction.closing_side(),
                 })
-                .await
+                .await;
+            let mut fill_guard = if result.as_ref().is_ok_and(|response| {
+                response.executed_qty > Decimal::ZERO || unresolved_filled_quantity(response)
+            }) || result
+                .as_ref()
+                .is_err_and(|error| error.execution_status_unknown())
             {
+                Some(self.state.publish_fill_reconciliation())
+            } else {
+                None
+            };
+            exchange_guard.complete();
+            if let Some(guard) = &mut fill_guard {
+                guard.acquire().await;
+            }
+            match result {
                 Ok(resp) => {
                     if unresolved_filled_quantity(&resp) {
                         self.last_orders_sync = None;
@@ -3541,6 +3588,11 @@ impl GridTradingEngine {
                             }
                             order.amount_usdc = order.price * order.quantity;
                             let recorded = self.on_order_filled(&mut order).await;
+                            if recorded {
+                                if let Some(guard) = &mut fill_guard {
+                                    guard.resolve();
+                                }
+                            }
                             let paused = self.pause_if_position_limit_reached().await;
                             return recorded && !paused;
                         }
@@ -3565,6 +3617,9 @@ impl GridTradingEngine {
                             .write()
                             .await
                             .insert(order.client_order_id.clone(), order);
+                        if let Some(guard) = &mut fill_guard {
+                            guard.resolve();
+                        }
                         if self.pause_if_position_limit_reached().await {
                             return false;
                         }

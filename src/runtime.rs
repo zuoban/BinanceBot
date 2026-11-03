@@ -19,6 +19,7 @@ use tokio::task::JoinHandle;
 struct PairTask {
     state: Arc<AppState>,
     engine: JoinHandle<()>,
+    engine_joined: bool,
     recovery_failed: bool,
     shutdown_tx: watch::Sender<bool>,
     background: Vec<JoinHandle<()>>,
@@ -35,6 +36,14 @@ enum RuntimeCommand {
     },
 }
 
+struct ActiveRemoval(Arc<std::sync::Mutex<Option<String>>>);
+
+impl Drop for ActiveRemoval {
+    fn drop(&mut self) {
+        *self.0.lock().unwrap() = None;
+    }
+}
+
 #[derive(Clone)]
 pub struct RuntimeHandle {
     pub(crate) states: Arc<RwLock<Vec<Arc<AppState>>>>,
@@ -44,9 +53,84 @@ pub struct RuntimeHandle {
     pub(crate) active_server: crate::config::ServerConfig,
     pub(crate) rate_limiter: Arc<RateLimiter>,
     commands: mpsc::Sender<RuntimeCommand>,
+    stop: watch::Sender<bool>,
+    active_removal: Arc<std::sync::Mutex<Option<String>>>,
+    engine_aborts:
+        Arc<std::sync::Mutex<Vec<(std::sync::Weak<AppState>, tokio::task::AbortHandle)>>>,
+    early_stops: Arc<
+        Mutex<
+            Vec<(
+                Arc<AppState>,
+                JoinHandle<(tokio::time::Instant, anyhow::Result<()>)>,
+            )>,
+        >,
+    >,
 }
 
 impl RuntimeHandle {
+    /// Stop order admission immediately; the running membership command is allowed to finish.
+    pub fn request_shutdown(&self) {
+        let _admission = self.active_removal.lock().unwrap();
+        self.global_position_limit
+            .shutdown_requested
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.stop.send_replace(true);
+    }
+
+    fn register_engine(&self, pair: &PairTask) {
+        let mut engines = self.engine_aborts.lock().unwrap();
+        engines.retain(|(state, _)| {
+            state
+                .upgrade()
+                .is_some_and(|state| !Arc::ptr_eq(&state, &pair.state))
+        });
+        engines.push((Arc::downgrade(&pair.state), pair.engine.abort_handle()));
+    }
+
+    /// Begin stopping existing engines while an admitted membership change finishes.
+    pub async fn start_early_shutdown(&self, limit: Duration) {
+        let removing = self.active_removal.lock().unwrap().clone();
+        let states = self.states.read().await.clone();
+        let mut stops = self.early_stops.lock().await;
+        for state in states {
+            if state.is_retired()
+                || removing
+                    .as_deref()
+                    .is_some_and(|symbol| state.pair_scope() == Some(symbol))
+                || stops
+                    .iter()
+                    .any(|(existing, _)| Arc::ptr_eq(existing, &state))
+            {
+                continue;
+            }
+            let abort =
+                self.engine_aborts
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find_map(|(registered, abort)| {
+                        registered
+                            .upgrade()
+                            .filter(|registered| Arc::ptr_eq(registered, &state))
+                            .map(|_| abort.clone())
+                    });
+            let Some(abort) = abort else {
+                continue;
+            };
+            let worker_state = state.clone();
+            stops.push((
+                state,
+                tokio::spawn(async move {
+                    let result = crate::lifecycle::begin_stop_engine(worker_state, limit).await;
+                    if result.1.is_err() {
+                        abort.abort();
+                    }
+                    result
+                }),
+            ));
+        }
+    }
+
     pub async fn update_global_config(
         &self,
         payload: crate::types::UpdateGlobalConfigPayload,
@@ -225,6 +309,7 @@ impl TradingRuntime {
         global_config: GlobalConfig,
     ) -> Self {
         let (commands, command_rx) = mpsc::channel(16);
+        let (stop, _) = watch::channel(false);
         let states = Arc::new(RwLock::new(
             pairs.iter().map(|pair| pair.state.clone()).collect(),
         ));
@@ -236,6 +321,10 @@ impl TradingRuntime {
                 .set(Arc::downgrade(&global_position_limit));
         }
         let rate_limiter = Arc::new(RateLimiter::default());
+        let engine_aborts = pairs
+            .iter()
+            .map(|pair| (Arc::downgrade(&pair.state), pair.engine.abort_handle()))
+            .collect();
         Self {
             pairs,
             global_position_limit: global_position_limit.clone(),
@@ -247,6 +336,10 @@ impl TradingRuntime {
                 active_server,
                 rate_limiter: rate_limiter.clone(),
                 commands,
+                stop,
+                active_removal: Arc::new(std::sync::Mutex::new(None)),
+                engine_aborts: Arc::new(std::sync::Mutex::new(engine_aborts)),
+                early_stops: Arc::new(Mutex::new(Vec::new())),
             },
             command_rx,
             trade_lock,
@@ -386,6 +479,7 @@ impl TradingRuntime {
                         pair.state.request_shutdown();
                         let _ = pair.shutdown_tx.send(true);
                     }
+                    runtime.handle.register_engine(&pair);
                     runtime.pairs.push(pair);
                     if !stopped {
                         let _ = start_tx.send(());
@@ -613,12 +707,14 @@ impl TradingRuntime {
         let stream = BinanceWsStream::new(market_rx, ticker_tx);
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let engine_state = state.clone();
+        let mut runtime_shutdown = Some(self.handle.stop.subscribe());
         let engine_task = tokio::spawn(async move {
             // Do not initialize until startup has registered the new engine.
             let permitted = if let Some(start) = start {
                 tokio::select! {
                     biased;
                     _ = Self::wait_for_startup_shutdown(&mut startup_shutdown) => false,
+                    _ = Self::wait_for_startup_shutdown(&mut runtime_shutdown) => false,
                     result = start => result.is_ok(),
                 }
             } else {
@@ -628,6 +724,10 @@ impl TradingRuntime {
                 tokio::select! {
                     biased;
                     _ = Self::wait_for_startup_shutdown(&mut startup_shutdown) => {
+                        engine_state.request_shutdown();
+                        None
+                    }
+                    _ = Self::wait_for_startup_shutdown(&mut runtime_shutdown) => {
                         engine_state.request_shutdown();
                         None
                     }
@@ -685,6 +785,7 @@ impl TradingRuntime {
         Ok(PairTask {
             state,
             engine: engine_task,
+            engine_joined: false,
             recovery_failed: false,
             shutdown_tx,
             background,
@@ -760,6 +861,7 @@ impl TradingRuntime {
             )
             .await;
         if let Ok(pair) = result {
+            self.handle.register_engine(&pair);
             self.pairs.push(pair);
             *self.handle.states.write().await = self.states();
         } else {
@@ -787,6 +889,10 @@ impl TradingRuntime {
             !self.pairs[index].recovery_failed,
             "策略重建失败，请重启程序并核实交易所状态"
         );
+        anyhow::ensure!(
+            !self.pairs[index].engine_joined,
+            "策略引擎已退出，请重启程序并核实交易所状态"
+        );
         let pair = &mut self.pairs[index];
         let control_lock = pair.state.socket_control_lock.clone();
         let control = control_lock.write().await;
@@ -798,6 +904,17 @@ impl TradingRuntime {
             pair.state.active_orders.read().await.is_empty(),
             "仍有挂单，请先撤单并等待交易所确认"
         );
+        // Claim the engine only once all potentially blocking admission checks
+        // are complete. Shutdown can stop it while removal waits for those locks.
+        let _removal = {
+            let mut active = self.handle.active_removal.lock().unwrap();
+            anyhow::ensure!(
+                !*self.handle.stop.borrow(),
+                "程序正在退出，无法修改交易对列表"
+            );
+            *active = Some(symbol.to_string());
+            ActiveRemoval(self.handle.active_removal.clone())
+        };
         pair.state.retire();
         drop(control);
         pair.state.request_shutdown();
@@ -896,6 +1013,7 @@ impl TradingRuntime {
                 .await
             {
                 Ok(replacement) => {
+                    self.handle.register_engine(&replacement);
                     self.pairs[index] = replacement;
                     *self.handle.states.write().await = self.states();
                     self.global_position_limit.check().await;
@@ -928,7 +1046,11 @@ impl TradingRuntime {
     }
 
     pub async fn run(&mut self) -> String {
+        let mut stop = self.handle.stop.subscribe();
         loop {
+            if *stop.borrow_and_update() {
+                return "Runtime shutdown requested".into();
+            }
             // A failed recovery keeps the retired state for risk accounting, but
             // its already-joined engine must not terminate the remaining runtime.
             if let Some(pair) = self
@@ -939,11 +1061,23 @@ impl TradingRuntime {
                 return format!("Strategy engine {:?} stopped", pair.state.pair_scope());
             }
             tokio::select! {
+                biased;
+                _ = stop.changed() => return "Runtime shutdown requested".into(),
                 reason = Self::wait_for_active_exit(&mut self.pairs) => {
                     return reason;
                 }
                 command = self.command_rx.recv() => {
                     let Some(command) = command else { return "Runtime command channel closed".into(); };
+                    {
+                        let _admission = self.handle.active_removal.lock().unwrap();
+                        if *self.handle.stop.borrow() {
+                            let reply = match command {
+                                RuntimeCommand::Add { reply, .. } | RuntimeCommand::Remove { reply, .. } => reply,
+                            };
+                            let _ = reply.send(Err("程序正在退出，无法修改交易对列表".into()));
+                            return "Runtime shutdown requested".into();
+                        }
+                    }
                     match command {
                         RuntimeCommand::Add { config, reply } => {
                             let result = self.add_pair(*config).await.map_err(|error| error.to_string());
@@ -964,16 +1098,20 @@ impl TradingRuntime {
     }
 
     async fn wait_for_active_exit(pairs: &mut [PairTask]) -> String {
+        if let Some(pair) = pairs.iter().find(|pair| pair.engine_joined) {
+            return format!("Strategy engine {:?} stopped", pair.state.pair_scope());
+        }
         let active: Vec<_> = pairs
             .iter_mut()
-            .filter(|pair| !pair.recovery_failed)
+            .filter(|pair| !pair.recovery_failed && !pair.engine_joined)
             .collect();
         if active.is_empty() {
             return std::future::pending().await;
         }
         let futures = active.into_iter().map(|pair| async move {
-            let result = (&mut pair.engine).await;
             let symbol = pair.state.config.read().await.exchange.symbol.clone();
+            let result = (&mut pair.engine).await;
+            pair.engine_joined = true;
             (symbol, result)
         });
         let ((symbol, result), _, _) = select_all(futures.map(Box::pin)).await;
@@ -985,6 +1123,7 @@ impl TradingRuntime {
     }
 
     pub async fn shutdown(&mut self, limit: Duration) -> anyhow::Result<()> {
+        self.handle.request_shutdown();
         self.command_rx.close();
         while let Ok(command) = self.command_rx.try_recv() {
             let reply = match command {
@@ -997,23 +1136,60 @@ impl TradingRuntime {
             pair.state.request_shutdown();
             let _ = pair.shutdown_tx.send(true);
         }
-        let results = join_all(self.pairs.iter_mut().map(|pair| async move {
-            let symbol = pair.state.config.read().await.exchange.symbol.clone();
-            let result = if pair.engine.is_finished() {
-                let paused = pair
-                    .state
-                    .pause_trading_with_reason("策略引擎退出，请核实交易所挂单")
-                    .await;
-                paused.and(Err(anyhow::anyhow!("策略引擎已退出，请核实交易所挂单")))
-            } else {
-                stop_engine(&pair.state, &mut pair.engine, limit).await
-            };
-            for task in pair.background.drain(..) {
-                task.abort();
-                let _ = task.await;
-            }
-            result.map_err(|error| format!("{}: {}", symbol, error))
-        }))
+        let mut early_stops = std::mem::take(&mut *self.handle.early_stops.lock().await);
+        let mut pair_stops = Vec::with_capacity(self.pairs.len());
+        for pair in &self.pairs {
+            let stop = early_stops
+                .iter()
+                .position(|(state, _)| Arc::ptr_eq(state, &pair.state))
+                .map(|index| early_stops.swap_remove(index).1);
+            pair_stops.push(stop);
+        }
+        let results = join_all(self.pairs.iter_mut().zip(pair_stops).map(
+            |(pair, early_stop)| async move {
+                let symbol = pair.state.config.read().await.exchange.symbol.clone();
+                let result = if pair.engine_joined {
+                    if let Some(early_stop) = early_stop {
+                        let _ = early_stop.await;
+                    }
+                    let paused = pair
+                        .state
+                        .pause_trading_with_reason("策略引擎退出，请核实交易所挂单")
+                        .await;
+                    paused.and(Err(anyhow::anyhow!("策略引擎已退出，请核实交易所挂单")))
+                } else if let Some(early_stop) = early_stop {
+                    match early_stop.await {
+                        Ok(early) => {
+                            crate::lifecycle::finish_stop_engine(
+                                &pair.state,
+                                &mut pair.engine,
+                                early,
+                            )
+                            .await
+                        }
+                        Err(error) => {
+                            pair.engine.abort();
+                            let _ = (&mut pair.engine).await;
+                            let _ = pair.state.pause_trading().await;
+                            Err(anyhow::anyhow!("停机任务失败: {error}"))
+                        }
+                    }
+                } else if pair.engine.is_finished() {
+                    let paused = pair
+                        .state
+                        .pause_trading_with_reason("策略引擎退出，请核实交易所挂单")
+                        .await;
+                    paused.and(Err(anyhow::anyhow!("策略引擎已退出，请核实交易所挂单")))
+                } else {
+                    stop_engine(&pair.state, &mut pair.engine, limit).await
+                };
+                for task in pair.background.drain(..) {
+                    task.abort();
+                    let _ = task.await;
+                }
+                result.map_err(|error| format!("{}: {}", symbol, error))
+            },
+        ))
         .await;
         let errors: Vec<_> = results.into_iter().filter_map(Result::err).collect();
         anyhow::ensure!(errors.is_empty(), "{}", errors.join("; "));
@@ -1086,6 +1262,7 @@ mod tests {
                 PairTask {
                     state: state.clone(),
                     engine,
+                    engine_joined: false,
                     recovery_failed: false,
                     shutdown_tx,
                     background: vec![],

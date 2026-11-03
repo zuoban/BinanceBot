@@ -366,15 +366,18 @@ impl GridTradingEngine {
             return Ok(());
         }
         if paper {
+            let mut active_orders = self.state.active_orders.write().await;
+            if self.state.is_shutting_down() {
+                return Ok(());
+            }
             plan.target.order_id = Some(rand::random::<i64>().saturating_abs());
-            self.state
-                .active_orders
-                .write()
-                .await
-                .insert(plan.target.client_order_id.clone(), plan.target.clone());
+            active_orders.insert(plan.target.client_order_id.clone(), plan.target.clone());
         } else {
             let price = rules.format_price(price);
             let quantity = rules.format_quantity(quantity);
+            let Some(exchange_guard) = self.state.try_exchange_submission() else {
+                return Ok(());
+            };
             let found = self
                 .client
                 .place_order(NewOrderRequest {
@@ -386,9 +389,27 @@ impl GridTradingEngine {
                     post_only: true,
                     reduce_only: true,
                 })
-                .await?;
+                .await;
+            let mut fill_guard = if found.as_ref().is_ok_and(|response| {
+                response.executed_qty > Decimal::ZERO || unresolved_filled_quantity(response)
+            }) || found
+                .as_ref()
+                .is_err_and(|error| error.execution_status_unknown())
+            {
+                Some(self.state.publish_fill_reconciliation())
+            } else {
+                None
+            };
+            exchange_guard.complete();
+            if let Some(guard) = &mut fill_guard {
+                guard.acquire().await;
+            }
+            let found = found?;
             self.settle_remainder_order(plan.target.clone(), found, Some(&mut *plan))
                 .await?;
+            if let Some(guard) = &mut fill_guard {
+                guard.resolve();
+            }
         }
         plan.phase = RemainderPhase::Complete;
         self.persist_remainder_plan(plan).await?;
@@ -412,6 +433,18 @@ impl GridTradingEngine {
     /// Also used before draining paired exits: an uncertain accepted target must
     /// reserve its inventory even when absent from an open-orders snapshot.
     pub(super) async fn adopt_remainder_target(
+        &mut self,
+        plan: &mut RemainderPlan,
+    ) -> Result<bool> {
+        let mut guard = self.state.begin_fill_reconciliation().await;
+        let result = self.adopt_remainder_target_under_gate(plan).await;
+        if result.is_ok() {
+            guard.resolve();
+        }
+        result
+    }
+
+    pub(super) async fn adopt_remainder_target_under_gate(
         &mut self,
         plan: &mut RemainderPlan,
     ) -> Result<bool> {

@@ -76,6 +76,14 @@ pub struct Database {
     #[cfg(test)]
     revision_publish_hook:
         Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
+    #[cfg(test)]
+    membership_commit_hook: Mutex<
+        Option<(
+            &'static str,
+            tokio::sync::oneshot::Sender<()>,
+            std::sync::mpsc::Receiver<()>,
+        )>,
+    >,
     today_pnl_cache: tokio::sync::Mutex<Option<TodayPnlCacheEntry>>,
     #[cfg(test)]
     hourly_stats_queries: AtomicU64,
@@ -302,6 +310,8 @@ impl Database {
             trade_clear_revisions: Mutex::new(TradeRevisions::default()),
             #[cfg(test)]
             revision_publish_hook: Mutex::new(None),
+            #[cfg(test)]
+            membership_commit_hook: Mutex::new(None),
             today_pnl_cache: tokio::sync::Mutex::new(None),
             #[cfg(test)]
             hourly_stats_queries: AtomicU64::new(0),
@@ -920,6 +930,35 @@ impl Database {
         save_config_on(&conn, &saved)
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_membership_commit_hook(
+        &self,
+        operation: &'static str,
+        reached: tokio::sync::oneshot::Sender<()>,
+        resume: std::sync::mpsc::Receiver<()>,
+    ) {
+        *self.membership_commit_hook.lock().unwrap() = Some((operation, reached, resume));
+    }
+
+    #[cfg(test)]
+    fn before_membership_commit(&self, operation: &'static str) {
+        let hook = {
+            let mut hook = self.membership_commit_hook.lock().unwrap();
+            if hook
+                .as_ref()
+                .is_some_and(|(expected, _, _)| *expected == operation)
+            {
+                hook.take()
+            } else {
+                None
+            }
+        };
+        if let Some((_, reached, resume)) = hook {
+            let _ = reached.send(());
+            let _ = resume.recv();
+        }
+    }
+
     /// Add a paused pair and arm its guard atomically; returns whether it was already dirty.
     /// The caller must use this result for startup recovery and must not arm it again.
     pub fn add_pair_config(&self, config: &AppConfig) -> Result<bool> {
@@ -942,7 +981,14 @@ impl Database {
         let mode = TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
         save_pair_status_on(&tx, &config.exchange.symbol, mode, BotStatus::Paused)?;
         let was_dirty = arm_execution_guard_on(&tx, &config.exchange.symbol, mode)?;
+        #[cfg(test)]
+        self.before_membership_commit("add");
         tx.commit()?;
+        #[cfg(test)]
+        {
+            drop(conn);
+            self.before_membership_commit("add_after");
+        }
         Ok(was_dirty)
     }
 
@@ -956,7 +1002,15 @@ impl Database {
             .position(|pair| pair.symbol == symbol)
             .context("交易对不存在")?;
         saved.pairs.remove(index);
-        save_config_on(&conn, &saved)
+        #[cfg(test)]
+        self.before_membership_commit("remove");
+        save_config_on(&conn, &saved)?;
+        #[cfg(test)]
+        {
+            drop(conn);
+            self.before_membership_commit("remove_after");
+        }
+        Ok(())
     }
 
     pub fn save_server_config_checked(
@@ -3946,6 +4000,7 @@ mod tests {
             trade_clear_revision: AtomicU64::new(0),
             trade_clear_revisions: Mutex::new(TradeRevisions::default()),
             revision_publish_hook: Mutex::new(None),
+            membership_commit_hook: Mutex::new(None),
             today_pnl_cache: tokio::sync::Mutex::new(None),
             hourly_stats_queries: AtomicU64::new(0),
             benchmark_wait_samples: std::sync::OnceLock::new(),

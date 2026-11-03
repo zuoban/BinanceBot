@@ -12,7 +12,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{
-    broadcast, mpsc, watch, Mutex, OwnedRwLockReadGuard, OwnedSemaphorePermit, RwLock, Semaphore,
+    broadcast, mpsc, watch, Mutex, OwnedRwLockReadGuard, OwnedRwLockWriteGuard,
+    OwnedSemaphorePermit, RwLock, Semaphore,
 };
 use tracing::{error, warn};
 
@@ -23,11 +24,85 @@ pub(crate) mod snapshot;
 pub(crate) struct GlobalPositionLimit {
     pub(crate) states: Arc<RwLock<Vec<Arc<AppState>>>>,
     lock: Mutex<()>,
+    submission_barrier: Arc<RwLock<()>>,
     committed_config: std::sync::RwLock<Option<crate::config::GlobalConfig>>,
     triggered: AtomicBool,
     blocked: AtomicBool,
+    pending_fill_reconciliations: AtomicU64,
+    fill_failure_generation: AtomicU64,
+    fill_recovered_generation: AtomicU64,
     pub(crate) enabled: AtomicBool,
     pub(crate) membership_ready: AtomicBool,
+    pub(crate) shutdown_requested: AtomicBool,
+}
+
+pub(crate) struct ExchangeSubmissionGuard {
+    state: Arc<AppState>,
+    global: Option<Arc<GlobalPositionLimit>>,
+    _barrier: Option<OwnedRwLockReadGuard<()>>,
+    completed: bool,
+}
+
+impl ExchangeSubmissionGuard {
+    pub(crate) fn complete(mut self) {
+        self.completed = true;
+    }
+}
+
+impl Drop for ExchangeSubmissionGuard {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.state
+                .global_position_ready
+                .store(false, Ordering::SeqCst);
+            if let Some(global) = &self.global {
+                global
+                    .fill_failure_generation
+                    .fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+}
+
+pub(crate) struct PendingFillReconciliation {
+    state: Arc<AppState>,
+    global: Option<Arc<GlobalPositionLimit>>,
+    barrier: Option<OwnedRwLockWriteGuard<()>>,
+    resolved: bool,
+}
+
+impl PendingFillReconciliation {
+    pub(crate) async fn acquire(&mut self) {
+        if let Some(global) = &self.global {
+            if global.enabled.load(Ordering::SeqCst) {
+                self.barrier = Some(global.submission_barrier.clone().write_owned().await);
+            }
+        }
+    }
+
+    pub(crate) fn resolve(&mut self) {
+        self.resolved = true;
+    }
+}
+
+impl Drop for PendingFillReconciliation {
+    fn drop(&mut self) {
+        if !self.resolved {
+            self.state
+                .global_position_ready
+                .store(false, Ordering::SeqCst);
+        }
+        if let Some(global) = &self.global {
+            if !self.resolved {
+                global
+                    .fill_failure_generation
+                    .fetch_add(1, Ordering::SeqCst);
+            }
+            global
+                .pending_fill_reconciliations
+                .fetch_sub(1, Ordering::SeqCst);
+        }
+    }
 }
 
 impl GlobalPositionLimit {
@@ -35,15 +110,21 @@ impl GlobalPositionLimit {
         Arc::new(Self {
             states,
             lock: Mutex::new(()),
+            submission_barrier: Arc::new(RwLock::new(())),
             committed_config: std::sync::RwLock::new(None),
             triggered: AtomicBool::new(false),
             blocked: AtomicBool::new(false),
+            pending_fill_reconciliations: AtomicU64::new(0),
+            fill_failure_generation: AtomicU64::new(0),
+            fill_recovered_generation: AtomicU64::new(0),
             enabled: AtomicBool::new(false),
             membership_ready: AtomicBool::new(false),
+            shutdown_requested: AtomicBool::new(false),
         })
     }
 
     async fn check_locked(&self) -> bool {
+        let fill_generation = self.fill_failure_generation.load(Ordering::SeqCst);
         let states = self.states.read().await.clone();
         let Some(first) = states.first() else {
             return self.enabled.load(Ordering::SeqCst)
@@ -165,6 +246,10 @@ impl GlobalPositionLimit {
             incomplete || position_limit_reached || zero_margin,
             Ordering::SeqCst,
         );
+        if !incomplete {
+            self.fill_recovered_generation
+                .store(fill_generation, Ordering::SeqCst);
+        }
         let first_trigger = unsafe_now && !self.triggered.swap(true, Ordering::SeqCst);
         if !unsafe_now {
             self.triggered.store(false, Ordering::SeqCst);
@@ -1335,10 +1420,69 @@ impl AppState {
         });
     }
 
+    pub(crate) fn publish_fill_reconciliation(self: &Arc<Self>) -> PendingFillReconciliation {
+        let global = self
+            .global_position_limit
+            .get()
+            .and_then(std::sync::Weak::upgrade);
+        if let Some(global) = &global {
+            global
+                .pending_fill_reconciliations
+                .fetch_add(1, Ordering::SeqCst);
+        }
+        PendingFillReconciliation {
+            state: self.clone(),
+            global,
+            barrier: None,
+            resolved: false,
+        }
+    }
+
+    pub(crate) async fn begin_fill_reconciliation(self: &Arc<Self>) -> PendingFillReconciliation {
+        let mut guard = self.publish_fill_reconciliation();
+        guard.acquire().await;
+        guard
+    }
+
+    pub(crate) fn try_exchange_submission(self: &Arc<Self>) -> Option<ExchangeSubmissionGuard> {
+        let global = self
+            .global_position_limit
+            .get()
+            .and_then(std::sync::Weak::upgrade);
+        let barrier = if let Some(global) = &global {
+            if global.enabled.load(Ordering::SeqCst) {
+                Some(global.submission_barrier.clone().try_read_owned().ok()?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if self.is_shutting_down()
+            || self.global_cancel_pending.load(Ordering::SeqCst)
+            || global.as_ref().is_some_and(|global| {
+                global.enabled.load(Ordering::SeqCst)
+                    && (global.blocked.load(Ordering::SeqCst)
+                        || global.pending_fill_reconciliations.load(Ordering::SeqCst) != 0
+                        || global.fill_failure_generation.load(Ordering::SeqCst)
+                            != global.fill_recovered_generation.load(Ordering::SeqCst)
+                        || !global.membership_ready.load(Ordering::SeqCst))
+            })
+        {
+            return None;
+        }
+        Some(ExchangeSubmissionGuard {
+            state: self.clone(),
+            global,
+            _barrier: barrier,
+            completed: false,
+        })
+    }
+
     pub(crate) fn try_order_submission(&self) -> Option<OwnedRwLockReadGuard<()>> {
         // Skip replenishment instead of waiting: the engine must stay available for
         // configuration actions and cancellation while the coordinator holds the writer.
-        if self.global_cancel_pending.load(Ordering::SeqCst) {
+        if self.is_shutting_down() || self.global_cancel_pending.load(Ordering::SeqCst) {
             return None;
         }
         if self
@@ -1348,6 +1492,9 @@ impl AppState {
             .is_some_and(|global| {
                 global.enabled.load(Ordering::SeqCst)
                     && (global.blocked.load(Ordering::SeqCst)
+                        || global.pending_fill_reconciliations.load(Ordering::SeqCst) != 0
+                        || global.fill_failure_generation.load(Ordering::SeqCst)
+                            != global.fill_recovered_generation.load(Ordering::SeqCst)
                         || !global.membership_ready.load(Ordering::SeqCst))
             })
         {
@@ -1375,6 +1522,11 @@ impl AppState {
 
     pub fn is_shutting_down(&self) -> bool {
         self.shutdown_requested.load(Ordering::SeqCst)
+            || self
+                .global_position_limit
+                .get()
+                .and_then(std::sync::Weak::upgrade)
+                .is_some_and(|global| global.shutdown_requested.load(Ordering::SeqCst))
     }
 
     pub fn setup_code(&self) -> Option<&str> {

@@ -1,6 +1,18 @@
 use super::*;
 
-fn terminal_responses_disagree(a: &BinanceOrderResponse, b: &BinanceOrderResponse) -> bool {
+fn invalid_snapshot_price(order: &BinanceOrderResponse) -> bool {
+    order.price <= Decimal::ZERO
+        && !(matches!(
+            order.status.as_str(),
+            "FILLED" | "CANCELED" | "EXPIRED" | "EXPIRED_IN_MATCH" | "REJECTED"
+        ) && order.executed_qty > Decimal::ZERO
+            && order.avg_price.is_some_and(|price| price > Decimal::ZERO))
+}
+
+pub(super) fn terminal_responses_disagree(
+    a: &BinanceOrderResponse,
+    b: &BinanceOrderResponse,
+) -> bool {
     let terminal = |order: &BinanceOrderResponse| {
         matches!(
             order.status.as_str(),
@@ -34,12 +46,11 @@ fn terminal_responses_disagree(a: &BinanceOrderResponse, b: &BinanceOrderRespons
                 .zip(b.update_time)
                 .is_some_and(|(first, second)| second < first)
             || a.orig_qty != b.orig_qty
-            || a.price != b.price
             || (a.executed_qty > Decimal::ZERO
                 && a.executed_qty == b.executed_qty
-                && a.avg_price
-                    .zip(b.avg_price)
-                    .is_some_and(|(first, second)| first != second));
+                && a.avg_price.is_some_and(|first| {
+                    first > Decimal::ZERO && b.avg_price.is_none_or(|second| second != first)
+                }));
     }
     if matches!(a.status.as_str(), "NEW" | "PARTIALLY_FILLED") && terminal(b) {
         // A fill can occur between the two queries. Leave a legitimate
@@ -55,9 +66,9 @@ fn terminal_responses_disagree(a: &BinanceOrderResponse, b: &BinanceOrderRespons
             && (b.status != "FILLED" || b.executed_qty == b.orig_qty);
         let stable_average = a.executed_qty != b.executed_qty
             || a.executed_qty == Decimal::ZERO
-            || a.avg_price
-                .zip(b.avg_price)
-                .is_none_or(|(first, second)| first == second);
+            || a.avg_price.is_none_or(|first| {
+                first <= Decimal::ZERO || b.avg_price.is_some_and(|second| second == first)
+            });
         let ordered_time = a
             .update_time
             .zip(b.update_time)
@@ -66,15 +77,36 @@ fn terminal_responses_disagree(a: &BinanceOrderResponse, b: &BinanceOrderRespons
             && valid_end
             && stable_average
             && a.orig_qty == b.orig_qty
-            && a.price == b.price
             && ordered_time);
     }
+    // Missing price fields can be completed independently; positive values
+    // already observed remain authoritative.
+    let old_avg = a.avg_price.filter(|price| *price > Decimal::ZERO);
+    let new_avg = b.avg_price.filter(|price| *price > Decimal::ZERO);
+    let price_completed = a.price <= Decimal::ZERO && b.price > Decimal::ZERO;
+    let avg_completed = old_avg.is_none() && new_avg.is_some();
+    let price_compatible = a.price == b.price
+        || (a.price <= Decimal::ZERO && b.price <= Decimal::ZERO)
+        || price_completed;
+    let avg_compatible = old_avg == new_avg || avg_completed;
+    let completed_evidence = a.status == b.status
+        && a.executed_qty > Decimal::ZERO
+        && a.executed_qty == b.executed_qty
+        && price_compatible
+        && avg_compatible
+        && (price_completed || avg_completed);
     a.status != b.status
         || a.executed_qty != b.executed_qty
         || a.orig_qty != b.orig_qty
-        || a.price != b.price
-        || a.avg_price != b.avg_price
-        || a.update_time != b.update_time
+        || !price_compatible
+        || !avg_compatible
+        || (a.update_time != b.update_time
+            && !(completed_evidence
+                && match (a.update_time, b.update_time) {
+                    (Some(first), Some(second)) => second >= first,
+                    (Some(_), None) => false,
+                    _ => true,
+                }))
 }
 
 impl GridTradingEngine {
@@ -181,6 +213,168 @@ impl GridTradingEngine {
                 error!("Could not persist order identity observations: {}", error);
                 self.report_reconciliation_state(true).await;
                 false
+            }
+        }
+    }
+
+    async fn retain_invalid_price_snapshot(
+        &mut self,
+        account: [u8; 32],
+        symbol: &str,
+        mode: TradingMode,
+        orders: &[BinanceOrderResponse],
+    ) {
+        self.report_reconciliation_state(true).await;
+        let managed_symbol = symbol.to_owned();
+        let managed = self
+            .state
+            .db
+            .run_blocking(move |db| db.load_managed_orders(&managed_symbol))
+            .await
+            .unwrap_or_default();
+        let intent_symbol = symbol.to_owned();
+        let intents = self
+            .state
+            .db
+            .run_blocking(move |db| db.load_pair_intents(&intent_symbol, mode))
+            .await
+            .unwrap_or_default();
+        let remainder = self.load_remainder_plan().await.ok().flatten();
+        let state = self.state.clone();
+        let mut active = state.active_orders.write().await;
+        let mut responses = Vec::new();
+        for found in orders
+            .iter()
+            .filter(|order| is_grid_order(&order.client_order_id))
+        {
+            let mut expected = managed
+                .iter()
+                .find(|order| order.client_order_id == found.client_order_id)
+                .or_else(|| {
+                    intents
+                        .iter()
+                        .find(|order| order.client_order_id == found.client_order_id)
+                })
+                .or_else(|| {
+                    remainder.as_ref().and_then(|plan| {
+                        plan.sources
+                            .iter()
+                            .chain(std::iter::once(&plan.target))
+                            .find(|order| order.client_order_id == found.client_order_id)
+                    })
+                })
+                .or_else(|| active.get(&found.client_order_id))
+                .cloned()
+                .unwrap_or_else(|| GridOrder {
+                    client_order_id: found.client_order_id.clone(),
+                    order_id: if found.symbol == symbol
+                        && matches!(found.side.as_str(), "BUY" | "SELL")
+                        && orders
+                            .iter()
+                            .filter(|order| order.client_order_id == found.client_order_id)
+                            .count()
+                            == 1
+                    {
+                        Some(found.order_id)
+                    } else {
+                        None
+                    },
+                    symbol: symbol.to_owned(),
+                    side: if found.side == "SELL" {
+                        OrderSide::Sell
+                    } else {
+                        OrderSide::Buy
+                    },
+                    price: found.price.max(Decimal::ZERO),
+                    quantity: found.orig_qty.max(Decimal::ZERO),
+                    amount_usdc: found.price.max(Decimal::ZERO) * found.orig_qty.max(Decimal::ZERO),
+                    status: OrderStatus::New,
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                    grid_level: 0,
+                    paired_client_order_id: None,
+                    is_take_profit: false,
+                    purpose: crate::types::OrderPurpose::Unverified,
+                    merge_sources: Vec::new(),
+                });
+            if let Some(current) = active.get(&found.client_order_id) {
+                if current.symbol == expected.symbol
+                    && current.side == expected.side
+                    && current
+                        .order_id
+                        .zip(expected.order_id)
+                        .is_none_or(|(a, b)| a == b)
+                {
+                    expected.quantity = expected.quantity.max(current.quantity);
+                    expected.price = expected.price.max(current.price);
+                    expected.amount_usdc = expected.price * expected.quantity;
+                }
+            }
+            if expected.symbol == found.symbol
+                && expected.side.as_str() == found.side
+                && expected.order_id.is_none_or(|id| id == found.order_id)
+            {
+                expected.price = expected.price.max(found.price);
+                expected.quantity = expected.quantity.max(found.orig_qty);
+                expected.amount_usdc = expected.price * expected.quantity;
+            }
+            self.track_identity_conflict(&expected, found);
+            active.insert(expected.client_order_id.clone(), expected);
+            responses.push((found.client_order_id.clone(), found.clone()));
+        }
+        let conservative: Vec<_> = managed
+            .iter()
+            .filter_map(|stored| {
+                active
+                    .get(&stored.client_order_id)
+                    .filter(|order| {
+                        order.symbol == stored.symbol
+                            && order.side == stored.side
+                            && order
+                                .order_id
+                                .zip(stored.order_id)
+                                .is_none_or(|(a, b)| a == b)
+                    })
+                    .cloned()
+            })
+            .collect();
+        drop(active);
+        let mut identities = Vec::new();
+        for (key, observations) in &self.order_identity_observations {
+            if key.0 == account {
+                if let Some(expected) = self.order_identity_conflicts.get(key) {
+                    if expected.symbol == symbol {
+                        identities.extend(
+                            observations
+                                .iter()
+                                .map(|observed| (expected.clone(), observed.clone())),
+                        );
+                    }
+                }
+            }
+        }
+        let batch = format!("snapshot:{}", uuid::Uuid::new_v4());
+        if self
+            .record_initial_order_response_snapshot(
+                account,
+                symbol,
+                &batch,
+                &responses,
+                &identities,
+            )
+            .await
+            && !conservative.is_empty()
+        {
+            if let Err(error) = self
+                .state
+                .db
+                .run_blocking(move |db| db.save_managed_orders(&conservative))
+                .await
+            {
+                error!(
+                    "Could not persist conservative invalid-snapshot reservations: {}",
+                    error
+                );
             }
         }
     }
@@ -297,6 +491,21 @@ impl GridTradingEngine {
                             && authoritative.side == expected.side
                         {
                             authoritative.order_id = expected.order_id;
+                        }
+                        for observed in std::iter::once(&expected).chain(active.get(id)) {
+                            if authoritative.symbol == observed.symbol
+                                && authoritative.side == observed.side
+                                && authoritative
+                                    .order_id
+                                    .zip(observed.order_id)
+                                    .is_none_or(|(a, b)| a == b)
+                            {
+                                authoritative.price = authoritative.price.max(observed.price);
+                                authoritative.quantity =
+                                    authoritative.quantity.max(observed.quantity);
+                                authoritative.amount_usdc =
+                                    authoritative.price * authoritative.quantity;
+                            }
                         }
                         if let Some(observed) = active.get(id).and_then(known_order_identity) {
                             if authoritative.symbol != observed.symbol
@@ -478,6 +687,55 @@ impl GridTradingEngine {
             Ok(live_orders) => {
                 let mut live_orders = live_orders;
                 self.last_orders_sync = None;
+                let invalid_price = live_orders.iter().any(|order| {
+                    is_grid_order(&order.client_order_id) && invalid_snapshot_price(order)
+                });
+                let known_risk = invalid_price
+                    || live_orders.iter().any(|order| {
+                        is_grid_order(&order.client_order_id)
+                            && (order.executed_qty > Decimal::ZERO
+                                || unresolved_filled_quantity(order))
+                    })
+                    || !pair_intents.is_empty()
+                    || remainder_plan
+                        .as_ref()
+                        .is_some_and(|plan| plan.phase == RemainderPhase::Submitting)
+                    || !self.order_identity_conflicts.is_empty();
+                let mut fill_guard = known_risk.then(|| self.state.publish_fill_reconciliation());
+                if fill_guard.is_none() {
+                    let active = match self.state.active_orders.try_read() {
+                        Ok(active) => active,
+                        Err(_) => {
+                            fill_guard = Some(self.state.publish_fill_reconciliation());
+                            self.state.active_orders.read().await
+                        }
+                    };
+                    let missing = active
+                        .keys()
+                        .any(|id| !live_orders.iter().any(|order| &order.client_order_id == id));
+                    if missing && fill_guard.is_none() {
+                        fill_guard = Some(self.state.publish_fill_reconciliation());
+                    }
+                    drop(active);
+                    if !missing {
+                        if let Some(mut guard) = fill_guard.take() {
+                            guard.resolve();
+                        }
+                    }
+                }
+                if let Some(guard) = &mut fill_guard {
+                    guard.acquire().await;
+                }
+                if invalid_price {
+                    self.retain_invalid_price_snapshot(account_key, &symbol, mode, &live_orders)
+                        .await;
+                    return false;
+                }
+                if live_orders.iter().any(|order| {
+                    is_grid_order(&order.client_order_id) && unresolved_filled_quantity(order)
+                }) {
+                    self.set_global_reconciliation_ready(false).await;
+                }
                 // Inspect duplicate client IDs before building a map: collecting
                 // into a map would discard an identity based on response order.
                 let mut groups: HashMap<&str, Vec<&BinanceOrderResponse>> = HashMap::new();
@@ -1923,6 +2181,12 @@ impl GridTradingEngine {
                     }
                 }
                 let inconsistent_fill = live_ids.values().any(unresolved_filled_quantity);
+                if live_ids.values().any(invalid_snapshot_price) {
+                    let snapshot: Vec<_> = live_ids.values().cloned().collect();
+                    self.retain_invalid_price_snapshot(account_key, &symbol, mode, &snapshot)
+                        .await;
+                    return false;
+                }
 
                 // Every live snapshot is checked against durable identities;
                 // in-memory conflict barriers do not survive a process restart.
@@ -1952,6 +2216,14 @@ impl GridTradingEngine {
                                         || existing.order_id.is_some_and(|id| id != found.order_id)
                                     {
                                         self.track_identity_conflict(existing, found);
+                                    } else {
+                                        let mut conservative = existing.clone();
+                                        conservative.price = conservative.price.max(found.price);
+                                        conservative.quantity =
+                                            conservative.quantity.max(found.orig_qty);
+                                        conservative.amount_usdc =
+                                            conservative.price * conservative.quantity;
+                                        active.insert(found.client_order_id.clone(), conservative);
                                     }
                                     continue;
                                 }
@@ -1978,6 +2250,7 @@ impl GridTradingEngine {
                                         self.track_identity_conflict(known, found);
                                     } else {
                                         order.order_id = Some(found.order_id);
+                                        order.price = order.price.max(found.price);
                                         order.quantity = order.quantity.max(found.orig_qty);
                                         order.amount_usdc = order.price * order.quantity;
                                     }
@@ -2094,10 +2367,13 @@ impl GridTradingEngine {
                                         .is_none_or(|(a, b)| a == b)
                                 {
                                     restored.order_id = durable.order_id.or(current.order_id);
+                                    restored.price = restored.price.max(current.price);
                                     restored.quantity = durable.quantity.max(current.quantity);
                                     restored.amount_usdc = restored.price * restored.quantity;
                                 }
                             }
+                            restored.price = restored.price.max(found.price);
+                            restored.amount_usdc = restored.price * restored.quantity;
                             active.insert(restored.client_order_id.clone(), restored);
                             restored_ids.insert(found.client_order_id.clone());
                         }
@@ -2179,6 +2455,12 @@ impl GridTradingEngine {
                         }
                         if let Some(order) = active.get_mut(client_id) {
                             order.order_id = Some(live_order.order_id);
+                            order.price =
+                                if position_ready && self.state.pause_epoch() == pause_epoch {
+                                    live_order.price
+                                } else {
+                                    order.price.max(live_order.price)
+                                };
                             order.quantity = quantity;
                             order.amount_usdc = order.price * order.quantity;
                             order.status = if live_order.executed_qty > Decimal::ZERO {
@@ -2227,7 +2509,8 @@ impl GridTradingEngine {
                         .await
                     {
                         error!("Could not persist reconciled orders: {}", e);
-                        persistence_ok = false;
+                        self.report_reconciliation_state(true).await;
+                        return false;
                     }
                 }
                 if !position_ready {
@@ -2368,6 +2651,15 @@ impl GridTradingEngine {
                                 unresolved_orders = true;
                                 continue;
                             }
+                            if exchange_order.executed_qty > Decimal::ZERO
+                                && exchange_order.price <= Decimal::ZERO
+                                && exchange_order
+                                    .avg_price
+                                    .is_none_or(|price| price <= Decimal::ZERO)
+                            {
+                                unresolved_orders = true;
+                                continue;
+                            }
                             terminal_orders.push((order, exchange_order));
                         }
                         Err(e) => {
@@ -2396,6 +2688,8 @@ impl GridTradingEngine {
                             .filter(|price| *price > Decimal::ZERO)
                         {
                             order.price = avg_price;
+                        } else {
+                            order.price = exchange_order.price;
                         }
                         order.amount_usdc = order.price * order.quantity;
                         if !self.on_order_filled(&mut order).await {
@@ -2424,7 +2718,7 @@ impl GridTradingEngine {
                 if persistence_ok {
                     if let Some(plan) = &mut remainder_plan {
                         if plan.phase == RemainderPhase::Submitting {
-                            if let Err(e) = self.adopt_remainder_target(plan).await {
+                            if let Err(e) = self.adopt_remainder_target_under_gate(plan).await {
                                 warn!("Remainder submission remains unresolved: {}", e);
                                 persistence_ok = false;
                             }
@@ -2433,7 +2727,11 @@ impl GridTradingEngine {
                 }
                 if !persistence_ok {
                     self.last_orders_sync = None;
-                } else if !self.drain_pair_intents(&symbol, mode).await {
+                } else if !(if fill_guard.is_some() {
+                    self.drain_pair_intents_under_gate(&symbol, mode).await
+                } else {
+                    self.drain_pair_intents(&symbol, mode).await
+                }) {
                     persistence_ok = false;
                     self.last_orders_sync = None;
                 }
@@ -2455,6 +2753,12 @@ impl GridTradingEngine {
                         persistence_ok = false;
                     }
                 }
+                if persistence_ok {
+                    if let Some(guard) = &mut fill_guard {
+                        guard.resolve();
+                    }
+                }
+                drop(fill_guard);
                 self.report_reconciliation_state(!persistence_ok).await;
                 persistence_ok
             }
