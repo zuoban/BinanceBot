@@ -1462,6 +1462,7 @@ impl Database {
             account,
             symbol,
             &[],
+            false,
             observations.iter().map(|(id, batch, response)| {
                 (client_order_id, id.as_str(), batch.as_str(), response)
             }),
@@ -1484,6 +1485,7 @@ impl Database {
             account,
             symbol,
             identities,
+            true,
             observations.iter().map(|(client_id, id, batch, response)| {
                 (client_id.as_str(), id.as_str(), batch.as_str(), response)
             }),
@@ -1495,6 +1497,7 @@ impl Database {
         account: [u8; 32],
         symbol: &str,
         identities: &[(GridOrder, crate::types::ObservedOrderIdentity)],
+        deduplicate_snapshot: bool,
         observations: impl IntoIterator<
             Item = (
                 &'a str,
@@ -1507,11 +1510,94 @@ impl Database {
         let mut conn = self.lock_reconciliation_connection("save_initial_order_responses");
         let tx = conn.transaction()?;
         Self::save_identity_observation_rows(&tx, account, identities)?;
+        let observations: Vec<_> = observations.into_iter().collect();
+        // An earlier identical snapshot already precedes every later individual
+        // query, so it supplies the same comparison evidence. Start a new
+        // snapshot batch whenever the snapshot changes.
+        let duplicate_snapshot = if deduplicate_snapshot
+            && !observations.is_empty()
+            && observations[0].2.starts_with("snapshot:")
+            && observations.iter().all(|row| row.2 == observations[0].2)
+        {
+            let last_batch: Option<String> = tx.query_row(
+                "SELECT batch_id FROM initial_order_responses WHERE account_key=?1 AND expected_symbol=?2 AND substr(batch_id,1,9)='snapshot:' ORDER BY rowid DESC LIMIT 1",
+                params![&account[..], symbol],
+                |row| row.get(0),
+            ).optional()?;
+            if let Some(last_batch) = last_batch.filter(|batch| {
+                batch.starts_with("snapshot:") && batch.as_str() != observations[0].2
+            }) {
+                let mut statement = tx.prepare("SELECT client_order_id, response_json FROM initial_order_responses WHERE account_key=?1 AND expected_symbol=?2 AND batch_id=?3 ORDER BY rowid")?;
+                let previous: Vec<(String, String)> = statement
+                    .query_map(params![&account[..], symbol, last_batch], |row| {
+                        Ok((row.get(0)?, row.get(1)?))
+                    })?
+                    .collect::<rusqlite::Result<_>>()?;
+                if previous.len() != observations.len() {
+                    false
+                } else {
+                    let mut same = true;
+                    for ((client, json), (new_client, _, _, response)) in
+                        previous.iter().zip(&observations)
+                    {
+                        if client.as_str() != *new_client
+                            || json.as_str() != serde_json::to_string(response)?
+                        {
+                            same = false;
+                            break;
+                        }
+                    }
+                    same
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        // Compare the latest evidence for this exact order identity. Queries
+        // for other identities cannot affect its transition history.
+        let duplicate_query = if deduplicate_snapshot && observations.len() == 1 {
+            let (client, observation_id, batch_id, response) = observations[0];
+            if uuid::Uuid::parse_str(observation_id).is_ok()
+                && uuid::Uuid::parse_str(batch_id).is_ok()
+            {
+                let previous: Option<(String, String)> = tx.query_row(
+                    "SELECT batch_id, response_json FROM initial_order_responses WHERE account_key=?1 AND expected_symbol=?2 AND client_order_id=?3 AND observed_client_order_id=?4 AND observed_symbol=?5 AND observed_side=?6 AND observed_order_id=?7 ORDER BY rowid DESC LIMIT 1",
+                    params![&account[..], symbol, client, response.client_order_id, response.symbol, response.side, response.order_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                ).optional()?;
+                if let Some((previous_batch, previous_json)) = previous {
+                    let same = uuid::Uuid::parse_str(&previous_batch).is_ok()
+                        && previous_batch != batch_id
+                        && previous_json == serde_json::to_string(response)?;
+                    if same {
+                        let safe: bool = tx.query_row(
+                            "SELECT (SELECT count(*) FROM initial_order_responses WHERE account_key=?1 AND expected_symbol=?2 AND batch_id=?3)=1 AND NOT EXISTS(SELECT 1 FROM initial_order_responses WHERE observation_id=?4 OR (account_key=?1 AND expected_symbol=?2 AND batch_id=?5))",
+                            params![&account[..], symbol, previous_batch, observation_id, batch_id],
+                            |row| row.get(0),
+                        )?;
+                        safe
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
         {
             let mut statement = tx.prepare(
                 "INSERT INTO initial_order_responses (account_key, expected_symbol, client_order_id, observed_client_order_id, observed_symbol, observed_side, observed_order_id, response_json, observation_id, batch_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(observation_id) DO NOTHING"
             )?;
-            for (client_order_id, observation_id, batch_id, response) in observations {
+            for (client_order_id, observation_id, batch_id, response) in observations
+                .into_iter()
+                .filter(|_| !duplicate_snapshot && !duplicate_query)
+            {
                 let json = serde_json::to_string(response)?;
                 let inserted = statement.execute(params![
                     &account[..],
@@ -1712,21 +1798,6 @@ impl Database {
             ));
         }
         Ok(observations)
-    }
-
-    pub(crate) fn delete_identity_observation_groups(
-        &self,
-        account: [u8; 32],
-        symbol: &str,
-        client_ids: &[String],
-    ) -> Result<()> {
-        let mut conn = self.lock_reconciliation_connection("delete_identity_observation_groups");
-        let tx = conn.transaction()?;
-        for id in client_ids {
-            tx.execute("DELETE FROM order_identity_observations WHERE account_key=?1 AND expected_symbol=?2 AND client_order_id=?3", params![&account[..], symbol, id])?;
-        }
-        tx.commit()?;
-        Ok(())
     }
 
     pub fn delete_managed_order(&self, client_order_id: &str) -> Result<()> {

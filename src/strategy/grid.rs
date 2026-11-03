@@ -416,8 +416,7 @@ impl GridTradingEngine {
                 responses: vec![observation],
                 identities: Vec::new(),
             });
-        self.flush_initial_order_responses(account, symbol, expected_client_id)
-            .await
+        self.flush_initial_order_responses(account, symbol).await
     }
 
     async fn record_initial_order_response_snapshot(
@@ -467,16 +466,10 @@ impl GridTradingEngine {
                 });
             }
         }
-        self.flush_initial_order_responses(account, symbol, "")
-            .await
+        self.flush_initial_order_responses(account, symbol).await
     }
 
-    async fn flush_initial_order_responses(
-        &mut self,
-        account: [u8; 32],
-        symbol: &str,
-        _expected_client_id: &str,
-    ) -> bool {
+    async fn flush_initial_order_responses(&mut self, account: [u8; 32], symbol: &str) -> bool {
         let key = (account, symbol.to_owned());
         loop {
             let Some(responses) = self
@@ -540,10 +533,7 @@ impl GridTradingEngine {
         symbol: &str,
         expected_client_id: &str,
     ) -> Option<Vec<(String, BinanceOrderResponse)>> {
-        if !self
-            .flush_initial_order_responses(account, symbol, expected_client_id)
-            .await
-        {
+        if !self.flush_initial_order_responses(account, symbol).await {
             return None;
         }
         let symbol = symbol.to_owned();
@@ -579,13 +569,8 @@ impl GridTradingEngine {
             self.last_orders_sync = None;
             return false;
         }
-        for id in client_ids {
-            if !self
-                .flush_initial_order_responses(account, symbol, id)
-                .await
-            {
-                return false;
-            }
+        if !self.flush_initial_order_responses(account, symbol).await {
+            return false;
         }
         let scope = symbol.to_owned();
         let ids = client_ids.to_vec();
@@ -631,15 +616,29 @@ impl GridTradingEngine {
             .push(evidence.clone());
         self.last_orders_sync = None;
         self.report_reconciliation_state(true).await;
+        let save_key = key.clone();
         match self
             .state
             .db
             .run_blocking(move |db| {
-                db.save_terminal_order_disagreement(key.0, &key.1, &key.2, &evidence.0, &evidence.1)
+                db.save_terminal_order_disagreement(
+                    save_key.0,
+                    &save_key.1,
+                    &save_key.2,
+                    &evidence.0,
+                    &evidence.1,
+                )
             })
             .await
         {
-            Ok(()) => true,
+            Ok(()) => {
+                let pending = self.terminal_order_disagreements.get_mut(&key).unwrap();
+                pending.pop();
+                if pending.is_empty() {
+                    self.terminal_order_disagreements.remove(&key);
+                }
+                true
+            }
             Err(error) => {
                 error!("Could not persist terminal order disagreement: {}", error);
                 false
@@ -648,30 +647,47 @@ impl GridTradingEngine {
     }
 
     async fn terminal_disagreement_blocked(&mut self, account: [u8; 32], symbol: &str) -> bool {
-        let pending: Vec<_> = self
+        while let Some((key, evidence)) = self
             .terminal_order_disagreements
             .iter()
-            .filter(|(key, _)| key.0 == account && key.1 == symbol)
-            .map(|(key, evidence)| (key.clone(), evidence.clone()))
-            .collect();
+            .find(|(key, _)| key.0 == account && key.1 == symbol)
+            .and_then(|(key, observations)| {
+                observations
+                    .first()
+                    .map(|evidence| (key.clone(), evidence.clone()))
+            })
+        {
+            let save_key = key.clone();
+            if let Err(error) = self
+                .state
+                .db
+                .run_blocking(move |db| {
+                    db.save_terminal_order_disagreement(
+                        save_key.0,
+                        &save_key.1,
+                        &save_key.2,
+                        &evidence.0,
+                        &evidence.1,
+                    )
+                })
+                .await
+            {
+                error!("Could not persist terminal order disagreement: {}", error);
+                self.last_orders_sync = None;
+                self.report_reconciliation_state(true).await;
+                return true;
+            }
+            let observations = self.terminal_order_disagreements.get_mut(&key).unwrap();
+            observations.remove(0);
+            if observations.is_empty() {
+                self.terminal_order_disagreements.remove(&key);
+            }
+        }
         let scope_symbol = symbol.to_owned();
         let result = self
             .state
             .db
-            .run_blocking(move |db| {
-                for (key, observations) in pending {
-                    for evidence in observations {
-                        db.save_terminal_order_disagreement(
-                            key.0,
-                            &key.1,
-                            &key.2,
-                            &evidence.0,
-                            &evidence.1,
-                        )?;
-                    }
-                }
-                db.load_terminal_order_disagreements(account, &scope_symbol)
-            })
+            .run_blocking(move |db| db.load_terminal_order_disagreements(account, &scope_symbol))
             .await;
         let stored_blocked = match result {
             Ok(records) => !records.is_empty(),

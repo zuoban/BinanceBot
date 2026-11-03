@@ -2,7 +2,7 @@ mod database_process_lock;
 
 use binance_grid_bot::config::AppConfig;
 use binance_grid_bot::db::Database;
-use binance_grid_bot::lifecycle::shutdown_signal;
+use binance_grid_bot::lifecycle::ShutdownSignals;
 use binance_grid_bot::runtime::TradingRuntime;
 use binance_grid_bot::server::create_managed_router;
 use clap::{Parser, Subcommand};
@@ -103,6 +103,9 @@ async fn main() -> anyhow::Result<()> {
             return Ok(());
         }
     }
+    let mut signals = ShutdownSignals::register().await?;
+    let signal = signals.wait();
+    tokio::pin!(signal);
     let _process_lock = database_process_lock::DatabaseProcessLock::acquire(&args.db)?;
     let db = Arc::new(Database::open(&args.db)?);
     let mut config = load_saved_config(&db)?;
@@ -146,7 +149,30 @@ async fn main() -> anyhow::Result<()> {
     let addr = config.server.socket_addr()?;
     // Bind before starting any engine, including initialization-time reconciliation.
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    let mut runtime = TradingRuntime::start(&config, db).await?;
+    let (startup_stop, startup_stop_rx) = watch::channel(false);
+    let mut runtime = {
+        let startup = TradingRuntime::start_interruptible(&config, db, startup_stop_rx);
+        tokio::pin!(startup);
+        tokio::select! {
+            biased;
+            reason = &mut signal => {
+                let _ = startup_stop.send(true);
+                let reason = match reason {
+                    Ok(reason) => format!("Startup interrupted by {reason}"),
+                    Err(error) => format!("Shutdown signal failed during startup: {error:#}"),
+                };
+                match startup.await {
+                    Ok(mut runtime) => {
+                        runtime.shutdown(Duration::from_secs(30)).await
+                            .map_err(|error| error.context(reason.clone()))?;
+                        return Err(anyhow::anyhow!(reason));
+                    }
+                    Err(error) => return Err(error.context(reason)),
+                }
+            }
+            result = &mut startup => result?,
+        }
+    };
     let snapshot_task = tokio::spawn(binance_grid_bot::snapshots::run_hourly_snapshots(
         runtime.handle(),
     ));
@@ -178,7 +204,7 @@ async fn main() -> anyhow::Result<()> {
         .await
     });
     let reason = tokio::select! {
-        reason = shutdown_signal() => reason.map(str::to_string),
+        reason = &mut signal => reason.map(str::to_string),
         result = &mut web_task => Err(anyhow::anyhow!("Web server stopped: {:?}", result)),
         message = runtime.run() => Err(anyhow::anyhow!(message)),
     };

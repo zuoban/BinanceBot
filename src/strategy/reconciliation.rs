@@ -143,10 +143,7 @@ impl GridTradingEngine {
     ) -> bool {
         // A pending snapshot includes both full responses and identities. Its
         // transaction must succeed before any identity-only write can proceed.
-        if !self
-            .flush_initial_order_responses(account, symbol, "")
-            .await
-        {
+        if !self.flush_initial_order_responses(account, symbol).await {
             self.report_reconciliation_state(true).await;
             return false;
         }
@@ -763,6 +760,7 @@ impl GridTradingEngine {
                             items.push(observed);
                         }
                     }
+                    duplicates.sort_by(|a, b| a[0].client_order_id.cmp(&b[0].client_order_id));
                     for mut observations in duplicates {
                         observations.sort_by(|a, b| {
                             (&a.symbol, &a.side, a.order_id).cmp(&(&b.symbol, &b.side, b.order_id))

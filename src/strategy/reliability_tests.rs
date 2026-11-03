@@ -1542,6 +1542,7 @@ async fn resolved_identity_groups_cleanup_is_atomic_across_both_tables() {
             queried_b.load(Ordering::SeqCst) > 0,
             "second group was not verified"
         );
+        assert!(snapshots.load(Ordering::SeqCst) > 0);
         assert!(first.reconciliation_blocked);
         assert!(first.last_orders_sync.is_none());
         let mut first_responses = HashMap::new();
@@ -1554,15 +1555,7 @@ async fn resolved_identity_groups_cleanup_is_atomic_across_both_tables() {
             let responses = db
                 .load_initial_order_responses(account, "SOLUSDC", client)
                 .unwrap();
-            let query_count = if client == "gb_cleanup_a" {
-                queried_a.load(Ordering::SeqCst)
-            } else {
-                queried_b.load(Ordering::SeqCst)
-            };
-            assert_eq!(
-                responses.len(),
-                1 + usize::from(query_count) + usize::from(snapshots.load(Ordering::SeqCst))
-            );
+            assert!(!responses.is_empty());
             let values: Vec<_> = responses
                 .iter()
                 .map(|response| serde_json::to_value(response).unwrap())
@@ -1605,15 +1598,7 @@ async fn resolved_identity_groups_cleanup_is_atomic_across_both_tables() {
             let responses = db
                 .load_initial_order_responses(account, "SOLUSDC", client)
                 .unwrap();
-            let query_count = if client == "gb_cleanup_a" {
-                queried_a.load(Ordering::SeqCst)
-            } else {
-                queried_b.load(Ordering::SeqCst)
-            };
-            assert_eq!(
-                responses.len(),
-                1 + usize::from(query_count) + usize::from(snapshots.load(Ordering::SeqCst))
-            );
+            assert!(!responses.is_empty());
             let values: Vec<_> = responses
                 .iter()
                 .map(|response| serde_json::to_value(response).unwrap())
@@ -2550,6 +2535,528 @@ async fn duplicate_snapshot_responses_are_written_as_one_transaction() {
     server.abort();
     drop(connection);
     drop(restarted);
+    drop(db);
+    let _ = std::fs::remove_file(path);
+}
+
+fn evidence_test_response(
+    status: &str,
+    executed_qty: Decimal,
+    update_time: i64,
+) -> BinanceOrderResponse {
+    BinanceOrderResponse {
+        order_id: 123,
+        client_order_id: "gb_evidence_timeline".into(),
+        symbol: "SOLUSDC".into(),
+        status: status.into(),
+        price: dec!(100),
+        avg_price: None,
+        orig_qty: dec!(2),
+        executed_qty,
+        side: "BUY".into(),
+        order_type: "LIMIT".into(),
+        time_in_force: "GTX".into(),
+        update_time: Some(update_time),
+    }
+}
+
+#[tokio::test]
+async fn consecutive_snapshot_evidence_is_deduplicated_without_losing_timeline() {
+    let db = database();
+    let (url, server) = exchange_server(Exchange::default()).await;
+    let mut first = engine(db.clone(), &url).await;
+    let account = first.client.account_identity_key();
+    let client = "gb_evidence_timeline";
+    let new = evidence_test_response("NEW", dec!(0), 1000);
+    let partial = evidence_test_response("PARTIALLY_FILLED", dec!(0.5), 2000);
+    let snapshot = vec![
+        (client.to_string(), new.clone()),
+        (client.to_string(), partial.clone()),
+    ];
+    let changed = vec![
+        (client.to_string(), partial.clone()),
+        (client.to_string(), new.clone()),
+    ];
+
+    assert!(
+        first
+            .record_initial_order_response_snapshot(
+                account,
+                "SOLUSDC",
+                "snapshot:first",
+                &snapshot,
+                &[]
+            )
+            .await
+    );
+    for id in ["snapshot:repeat1", "snapshot:repeat2"] {
+        assert!(
+            first
+                .record_initial_order_response_snapshot(account, "SOLUSDC", id, &snapshot, &[])
+                .await
+        );
+    }
+    let timeline = db
+        .load_initial_order_response_timeline(account, "SOLUSDC", client)
+        .unwrap();
+    assert_eq!(timeline.len(), 2);
+    assert!(timeline.iter().all(|(batch, _)| batch == "snapshot:first"));
+    drop(first);
+
+    let mut restarted = engine(db.clone(), &url).await;
+    assert!(
+        restarted
+            .record_initial_order_response_snapshot(
+                account,
+                "SOLUSDC",
+                "snapshot:restart",
+                &snapshot,
+                &[]
+            )
+            .await
+    );
+    assert_eq!(
+        db.load_initial_order_response_timeline(account, "SOLUSDC", client)
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(
+        restarted
+            .record_initial_order_response(account, "SOLUSDC", client, &new)
+            .await
+    );
+    assert!(
+        restarted
+            .record_initial_order_response_snapshot(
+                account,
+                "SOLUSDC",
+                "snapshot:after-query",
+                &snapshot,
+                &[]
+            )
+            .await
+    );
+    assert!(
+        restarted
+            .record_initial_order_response(account, "SOLUSDC", client, &new)
+            .await
+    );
+    assert!(
+        restarted
+            .record_initial_order_response(account, "SOLUSDC", client, &partial)
+            .await
+    );
+    assert!(
+        restarted
+            .record_initial_order_response_snapshot(
+                account,
+                "SOLUSDC",
+                "snapshot:after-second-query",
+                &snapshot,
+                &[]
+            )
+            .await
+    );
+    drop(restarted);
+    let mut restarted = engine(db.clone(), &url).await;
+    assert!(
+        restarted
+            .record_initial_order_response_snapshot(
+                account,
+                "SOLUSDC",
+                "snapshot:second-restart",
+                &snapshot,
+                &[]
+            )
+            .await
+    );
+    assert!(
+        restarted
+            .record_initial_order_response(account, "SOLUSDC", client, &partial)
+            .await
+    );
+    let timeline = db
+        .load_initial_order_response_timeline(account, "SOLUSDC", client)
+        .unwrap();
+    let statuses: Vec<_> = timeline
+        .iter()
+        .map(|(_, response)| response.status.as_str())
+        .collect();
+    assert_eq!(
+        statuses,
+        ["NEW", "PARTIALLY_FILLED", "NEW", "PARTIALLY_FILLED"]
+    );
+    assert_eq!(timeline[0].0, "snapshot:first");
+    assert_eq!(timeline[1].0, "snapshot:first");
+    assert!(!timeline[2].0.starts_with("snapshot:"));
+    assert!(!timeline[3].0.starts_with("snapshot:"));
+    assert_ne!(timeline[2].0, timeline[3].0);
+    assert!(
+        restarted
+            .record_initial_order_response(account, "SOLUSDC", client, &new)
+            .await
+    );
+    assert!(
+        restarted
+            .record_initial_order_response_snapshot(
+                account,
+                "SOLUSDC",
+                "snapshot:changed",
+                &changed,
+                &[]
+            )
+            .await
+    );
+    assert!(
+        restarted
+            .record_initial_order_response(account, "SOLUSDC", client, &new)
+            .await
+    );
+    assert!(
+        restarted
+            .record_initial_order_response(account, "SOLUSDC", client, &new)
+            .await
+    );
+    assert!(
+        restarted
+            .record_initial_order_response_snapshot(
+                account,
+                "SOLUSDC",
+                "snapshot:after-change",
+                &snapshot,
+                &[]
+            )
+            .await
+    );
+    let timeline = db
+        .load_initial_order_response_timeline(account, "SOLUSDC", client)
+        .unwrap();
+    let statuses: Vec<_> = timeline
+        .iter()
+        .map(|(_, response)| response.status.as_str())
+        .collect();
+    assert_eq!(
+        statuses,
+        [
+            "NEW",
+            "PARTIALLY_FILLED",
+            "NEW",
+            "PARTIALLY_FILLED",
+            "NEW",
+            "PARTIALLY_FILLED",
+            "NEW",
+            "NEW",
+            "NEW",
+            "PARTIALLY_FILLED"
+        ]
+    );
+    assert!(!timeline[4].0.starts_with("snapshot:"));
+    assert!(!timeline[7].0.starts_with("snapshot:"));
+    for (index, batch) in [(5, "snapshot:changed"), (8, "snapshot:after-change")] {
+        assert_eq!(timeline[index].0, batch);
+        assert_eq!(timeline[index + 1].0, batch);
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn interleaved_lookup_evidence_is_deduplicated_per_observed_identity() {
+    let db = database();
+    let (url, server) = exchange_server(Exchange::default()).await;
+    let mut first = engine(db.clone(), &url).await;
+    let account = first.client.account_identity_key();
+    let client = "gb_evidence_timeline";
+    let a = evidence_test_response("NEW", dec!(0), 1000);
+    let mut b = a.clone();
+    b.order_id = 456;
+    let mut changed_a = a.clone();
+    changed_a.status = "PARTIALLY_FILLED".into();
+    changed_a.executed_qty = dec!(0.5);
+    changed_a.update_time = Some(2000);
+    let snapshot = vec![
+        (client.to_string(), a.clone()),
+        (client.to_string(), b.clone()),
+    ];
+
+    assert!(
+        first
+            .record_initial_order_response_snapshot(
+                account,
+                "SOLUSDC",
+                "snapshot:identities",
+                &snapshot,
+                &[]
+            )
+            .await
+    );
+    for (index, response) in [&a, &b, &a, &b].iter().enumerate() {
+        assert!(
+            first
+                .record_initial_order_response(account, "SOLUSDC", client, response)
+                .await
+        );
+        assert!(
+            first
+                .record_initial_order_response_snapshot(
+                    account,
+                    "SOLUSDC",
+                    &format!("snapshot:identity-repeat-{index}"),
+                    &snapshot,
+                    &[]
+                )
+                .await
+        );
+    }
+    let timeline = db
+        .load_initial_order_response_timeline(account, "SOLUSDC", client)
+        .unwrap();
+    assert_eq!(timeline.len(), 4);
+    assert_eq!(
+        timeline
+            .iter()
+            .map(|(_, response)| response.order_id)
+            .collect::<Vec<_>>(),
+        [123, 456, 123, 456]
+    );
+    assert!(!timeline[2].0.starts_with("snapshot:"));
+    assert!(!timeline[3].0.starts_with("snapshot:"));
+    drop(first);
+
+    let mut restarted = engine(db.clone(), &url).await;
+    assert!(
+        restarted
+            .record_initial_order_response_snapshot(
+                account,
+                "SOLUSDC",
+                "snapshot:identity-restart",
+                &snapshot,
+                &[]
+            )
+            .await
+    );
+    for response in [&a, &b] {
+        assert!(
+            restarted
+                .record_initial_order_response(account, "SOLUSDC", client, response)
+                .await
+        );
+    }
+    assert_eq!(
+        db.load_initial_order_response_timeline(account, "SOLUSDC", client)
+            .unwrap()
+            .len(),
+        4
+    );
+    assert!(
+        restarted
+            .record_initial_order_response(account, "SOLUSDC", client, &changed_a)
+            .await
+    );
+    assert!(
+        restarted
+            .record_initial_order_response(account, "SOLUSDC", client, &b)
+            .await
+    );
+    assert!(
+        restarted
+            .record_initial_order_response(account, "SOLUSDC", client, &a)
+            .await
+    );
+    let timeline = db
+        .load_initial_order_response_timeline(account, "SOLUSDC", client)
+        .unwrap();
+    assert_eq!(timeline.len(), 6);
+    assert_eq!(timeline[4].1.order_id, 123);
+    assert_eq!(timeline[4].1.status, "PARTIALLY_FILLED");
+    assert_eq!(timeline[5].1.order_id, 123);
+    assert_eq!(timeline[5].1.status, "NEW");
+    assert!(!timeline[4].0.starts_with("snapshot:"));
+    assert!(!timeline[5].0.starts_with("snapshot:"));
+    server.abort();
+}
+
+#[tokio::test]
+async fn failed_snapshot_batch_retries_atomically_and_only_once() {
+    let path = std::env::temp_dir().join(format!("snapshot-retry-{}.db", uuid::Uuid::new_v4()));
+    let db = Arc::new(Database::open(&path).unwrap());
+    db.save_bot_status(BotStatus::Running).unwrap();
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection.execute_batch("CREATE TRIGGER reject_partial_retry BEFORE INSERT ON initial_order_responses WHEN NEW.response_json LIKE '%PARTIALLY_FILLED%' BEGIN SELECT RAISE(ABORT, 'injected failure'); END;").unwrap();
+    let (url, server) = exchange_server(Exchange::default()).await;
+    let mut first = engine(db.clone(), &url).await;
+    let account = first.client.account_identity_key();
+    let client = "gb_evidence_timeline";
+    let snapshot = vec![
+        (
+            client.to_string(),
+            evidence_test_response("NEW", dec!(0), 1000),
+        ),
+        (
+            client.to_string(),
+            evidence_test_response("PARTIALLY_FILLED", dec!(0.5), 2000),
+        ),
+    ];
+    for _ in 0..2 {
+        assert!(
+            !first
+                .record_initial_order_response_snapshot(
+                    account,
+                    "SOLUSDC",
+                    "snapshot:retry",
+                    &snapshot,
+                    &[]
+                )
+                .await
+        );
+        assert_eq!(
+            first.initial_order_responses[&(account, "SOLUSDC".to_string())].len(),
+            1
+        );
+        assert!(db
+            .load_initial_order_response_timeline(account, "SOLUSDC", client)
+            .unwrap()
+            .is_empty());
+    }
+    connection
+        .execute_batch("DROP TRIGGER reject_partial_retry")
+        .unwrap();
+    assert!(
+        first
+            .flush_initial_order_responses(account, "SOLUSDC")
+            .await
+    );
+    assert!(!first
+        .initial_order_responses
+        .contains_key(&(account, "SOLUSDC".to_string())));
+    assert!(
+        first
+            .record_initial_order_response_snapshot(
+                account,
+                "SOLUSDC",
+                "snapshot:next",
+                &snapshot,
+                &[]
+            )
+            .await
+    );
+    let timeline = db
+        .load_initial_order_response_timeline(account, "SOLUSDC", client)
+        .unwrap();
+    assert_eq!(timeline.len(), 2);
+    assert_eq!(timeline[0].1.status, "NEW");
+    assert_eq!(timeline[1].1.status, "PARTIALLY_FILLED");
+    server.abort();
+    drop(first);
+    drop(connection);
+    drop(db);
+    let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test]
+async fn terminal_disagreement_queue_retries_failures_and_removes_successes() {
+    let path = std::env::temp_dir().join(format!("terminal-retry-{}.db", uuid::Uuid::new_v4()));
+    let db = Arc::new(Database::open(&path).unwrap());
+    db.save_bot_status(BotStatus::Running).unwrap();
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection.execute_batch("CREATE TRIGGER reject_terminal_retry BEFORE INSERT ON terminal_order_disagreements BEGIN SELECT RAISE(ABORT, 'injected failure'); END;").unwrap();
+    let (url, server) = exchange_server(Exchange::default()).await;
+    let mut first = engine(db.clone(), &url).await;
+    let account = first.client.account_identity_key();
+    let client = "gb_evidence_timeline";
+    let key = (account, "SOLUSDC".to_string(), client.to_string());
+    let filled = evidence_test_response("FILLED", dec!(2), 2000);
+    let canceled = evidence_test_response("CANCELED", dec!(0), 3000);
+    let expired = evidence_test_response("EXPIRED", dec!(0), 4000);
+    assert!(
+        !first
+            .record_terminal_disagreement(account, "SOLUSDC", client, &filled, &canceled)
+            .await
+    );
+    assert!(
+        !first
+            .record_terminal_disagreement(account, "SOLUSDC", client, &filled, &expired)
+            .await
+    );
+    assert_eq!(first.terminal_order_disagreements[&key].len(), 2);
+    assert!(
+        first
+            .terminal_disagreement_blocked(account, "SOLUSDC")
+            .await
+    );
+    assert_eq!(first.terminal_order_disagreements[&key].len(), 2);
+    assert!(db
+        .load_terminal_order_disagreements(account, "SOLUSDC")
+        .unwrap()
+        .is_empty());
+
+    connection.execute_batch("DROP TRIGGER reject_terminal_retry; CREATE TRIGGER reject_expired_retry BEFORE INSERT ON terminal_order_disagreements WHEN NEW.conflicting_json LIKE '%EXPIRED%' BEGIN SELECT RAISE(ABORT, 'injected failure'); END;").unwrap();
+    assert!(
+        first
+            .terminal_disagreement_blocked(account, "SOLUSDC")
+            .await
+    );
+    assert_eq!(first.terminal_order_disagreements[&key].len(), 1);
+    assert_eq!(
+        first.terminal_order_disagreements[&key][0].1.status,
+        "EXPIRED"
+    );
+    assert_eq!(
+        db.load_terminal_order_disagreements(account, "SOLUSDC")
+            .unwrap()
+            .len(),
+        1
+    );
+    connection
+        .execute_batch("DROP TRIGGER reject_expired_retry")
+        .unwrap();
+    assert!(
+        first
+            .terminal_disagreement_blocked(account, "SOLUSDC")
+            .await
+    );
+    assert!(!first.terminal_order_disagreements.contains_key(&key));
+    assert_eq!(
+        db.load_terminal_order_disagreements(account, "SOLUSDC")
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(
+        first
+            .terminal_disagreement_blocked(account, "SOLUSDC")
+            .await
+    );
+    assert!(!first.terminal_order_disagreements.contains_key(&key));
+    assert!(
+        first
+            .record_terminal_disagreement(account, "SOLUSDC", client, &canceled, &expired)
+            .await
+    );
+    assert!(!first.terminal_order_disagreements.contains_key(&key));
+    assert_eq!(
+        db.load_terminal_order_disagreements(account, "SOLUSDC")
+            .unwrap()
+            .len(),
+        3
+    );
+    drop(first);
+    let mut restarted = engine(db.clone(), &url).await;
+    assert!(
+        restarted
+            .terminal_disagreement_blocked(account, "SOLUSDC")
+            .await
+    );
+    assert!(restarted.reconciliation_blocked);
+    assert_eq!(
+        db.load_terminal_order_disagreements(account, "SOLUSDC")
+            .unwrap()
+            .len(),
+        3
+    );
+    server.abort();
+    drop(restarted);
+    drop(connection);
     drop(db);
     let _ = std::fs::remove_file(path);
 }

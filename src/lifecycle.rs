@@ -1,31 +1,80 @@
 use crate::server::AppState;
 use crate::types::BotControlAction;
 use anyhow::{anyhow, Context, Result};
+#[cfg(not(unix))]
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio::time::{timeout_at, Instant};
 
-/// Both interactive and container shutdowns use the same order-cleanup path.
-pub async fn shutdown_signal() -> Result<&'static str> {
+/// Registered before startup so signals cannot bypass runtime cleanup.
+pub struct ShutdownSignals {
     #[cfg(unix)]
-    {
-        let mut terminate =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-        tokio::select! {
-            result = tokio::signal::ctrl_c() => {
-                result?;
-                Ok("Ctrl+C")
-            }
-            _ = terminate.recv() => Ok("SIGTERM"),
+    interrupt: tokio::signal::unix::Signal,
+    #[cfg(unix)]
+    terminate: tokio::signal::unix::Signal,
+    #[cfg(not(unix))]
+    interrupt: std::pin::Pin<Box<dyn Future<Output = std::io::Result<()>> + Send>>,
+    #[cfg(not(unix))]
+    received: bool,
+}
+
+impl ShutdownSignals {
+    pub async fn register() -> Result<Self> {
+        #[cfg(unix)]
+        {
+            Ok(Self {
+                interrupt: tokio::signal::unix::signal(
+                    tokio::signal::unix::SignalKind::interrupt(),
+                )?,
+                terminate: tokio::signal::unix::signal(
+                    tokio::signal::unix::SignalKind::terminate(),
+                )?,
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            let mut interrupt: std::pin::Pin<Box<dyn Future<Output = std::io::Result<()>> + Send>> =
+                Box::pin(tokio::signal::ctrl_c());
+            // ctrl_c installs its handler on first poll. Preserve a signal that
+            // arrives during registration for the subsequent wait.
+            let received = std::future::poll_fn(|cx| {
+                std::task::Poll::Ready(match interrupt.as_mut().poll(cx) {
+                    std::task::Poll::Ready(result) => result.map(|()| true),
+                    std::task::Poll::Pending => Ok(false),
+                })
+            })
+            .await?;
+            Ok(Self {
+                interrupt,
+                received,
+            })
         }
     }
-    #[cfg(not(unix))]
-    {
-        tokio::signal::ctrl_c().await?;
-        Ok("Ctrl+C")
+
+    pub async fn wait(&mut self) -> Result<&'static str> {
+        #[cfg(unix)]
+        {
+            tokio::select! {
+                signal = self.interrupt.recv() => signal.map(|_| "Ctrl+C").ok_or_else(|| anyhow!("SIGINT handler closed")),
+                signal = self.terminate.recv() => signal.map(|_| "SIGTERM").ok_or_else(|| anyhow!("SIGTERM handler closed")),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            if !self.received {
+                self.interrupt.as_mut().await?;
+            }
+            Ok("Ctrl+C")
+        }
     }
+}
+
+/// Both interactive and container shutdowns use the same order-cleanup path.
+pub async fn shutdown_signal() -> Result<&'static str> {
+    ShutdownSignals::register().await?.wait().await
 }
 
 /// Stop submissions immediately, then let the single engine finish any in-flight
@@ -150,15 +199,12 @@ mod tests {
             return;
         };
         tokio::runtime::Runtime::new().unwrap().block_on(async {
-            let signal = shutdown_signal();
-            tokio::pin!(signal);
-            // Poll once to install handlers before the parent sends a signal.
-            assert!(tokio::time::timeout(Duration::from_millis(1), &mut signal)
-                .await
-                .is_err());
+            let mut signals = ShutdownSignals::register().await.unwrap();
+            // The parent sends the signal before wait() is first polled.
             println!("SIGNAL_READY");
             std::io::Write::flush(&mut std::io::stdout()).unwrap();
-            assert_eq!(signal.await.unwrap(), expected);
+            std::io::Read::read_exact(&mut std::io::stdin(), &mut [0u8; 1]).unwrap();
+            assert_eq!(signals.wait().await.unwrap(), expected);
         });
     }
 
@@ -175,6 +221,7 @@ mod tests {
                     "--nocapture",
                 ])
                 .env("BINANCEBOT_TEST_SHUTDOWN_SIGNAL", expected)
+                .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
                 .spawn()
@@ -201,6 +248,7 @@ mod tests {
                 .status()
                 .unwrap()
                 .success());
+            std::io::Write::write_all(child.stdin.as_mut().unwrap(), &[1]).unwrap();
             let until = std::time::Instant::now() + Duration::from_secs(5);
             let status = loop {
                 if let Some(status) = child.try_wait().unwrap() {

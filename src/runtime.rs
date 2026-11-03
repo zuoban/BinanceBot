@@ -264,6 +264,30 @@ impl TradingRuntime {
         Self::start_impl(
             config,
             db,
+            None,
+            #[cfg(test)]
+            None,
+            #[cfg(test)]
+            None,
+            #[cfg(test)]
+            None,
+        )
+        .await
+    }
+
+    pub async fn start_interruptible(
+        config: &AppConfig,
+        db: Arc<Database>,
+        shutdown: watch::Receiver<bool>,
+    ) -> anyhow::Result<Self> {
+        Self::start_impl(
+            config,
+            db,
+            Some(shutdown),
+            #[cfg(test)]
+            None,
+            #[cfg(test)]
+            None,
             #[cfg(test)]
             None,
         )
@@ -276,13 +300,38 @@ impl TradingRuntime {
         db: Arc<Database>,
         url: String,
     ) -> anyhow::Result<Self> {
-        Self::start_impl(config, db, Some(url)).await
+        Self::start_impl(config, db, None, Some(url), None, None).await
+    }
+
+    #[cfg(test)]
+    async fn start_with_test_exchange_and_hook(
+        config: &AppConfig,
+        db: Arc<Database>,
+        url: String,
+        shutdown: watch::Receiver<bool>,
+        hook: mpsc::Sender<(String, oneshot::Sender<()>)>,
+    ) -> anyhow::Result<Self> {
+        Self::start_impl(config, db, Some(shutdown), Some(url), Some(hook), None).await
+    }
+
+    #[cfg(test)]
+    async fn start_with_test_exchange_and_prepare_hook(
+        config: &AppConfig,
+        db: Arc<Database>,
+        url: String,
+        shutdown: watch::Receiver<bool>,
+        hook: mpsc::Sender<(String, oneshot::Sender<()>)>,
+    ) -> anyhow::Result<Self> {
+        Self::start_impl(config, db, Some(shutdown), Some(url), None, Some(hook)).await
     }
 
     async fn start_impl(
         config: &AppConfig,
         db: Arc<Database>,
+        mut shutdown: Option<watch::Receiver<bool>>,
         #[cfg(test)] test_exchange_url: Option<String>,
+        #[cfg(test)] hook: Option<mpsc::Sender<(String, oneshot::Sender<()>)>>,
+        #[cfg(test)] prepare_hook: Option<mpsc::Sender<(String, oneshot::Sender<()>)>>,
     ) -> anyhow::Result<Self> {
         let trade_lock = Arc::new(Mutex::new(()));
         let mut runtime = Self::from_pairs(
@@ -296,18 +345,101 @@ impl TradingRuntime {
         {
             runtime.test_exchange_url = test_exchange_url;
         }
+        let mut startup_error = None;
         for strategy in config.strategy_configs()? {
-            let pair = runtime
-                .prepare_pair(strategy, !config.pairs.is_empty())
-                .await?;
-            runtime.pairs.push(pair);
+            if shutdown.as_ref().is_some_and(|rx| *rx.borrow()) {
+                startup_error = Some(anyhow::anyhow!("启动过程中收到退出信号"));
+                break;
+            }
+            // Preparation may have an in-flight database write. Let it finish, but
+            // block every existing engine as soon as an interruption arrives.
+            let (start_tx, start_rx) = oneshot::channel();
+            let engine_shutdown = shutdown.clone();
+            let prepared = {
+                let preparing = runtime.prepare_pair(
+                    strategy,
+                    !config.pairs.is_empty(),
+                    start_rx,
+                    engine_shutdown,
+                    #[cfg(test)]
+                    prepare_hook.clone(),
+                );
+                tokio::pin!(preparing);
+                tokio::select! {
+                    biased;
+                    _ = Self::wait_for_startup_shutdown(&mut shutdown) => {
+                        for pair in &runtime.pairs {
+                            pair.state.request_shutdown();
+                            let _ = pair.shutdown_tx.send(true);
+                        }
+                        preparing.await
+                    }
+                    result = &mut preparing => result,
+                }
+            };
+            match prepared {
+                Ok(pair) => {
+                    #[cfg(test)]
+                    let symbol = pair.state.config.read().await.exchange.symbol.clone();
+                    let stopped = shutdown.as_ref().is_some_and(|rx| *rx.borrow());
+                    if stopped {
+                        pair.state.request_shutdown();
+                        let _ = pair.shutdown_tx.send(true);
+                    }
+                    runtime.pairs.push(pair);
+                    if !stopped {
+                        let _ = start_tx.send(());
+                    }
+                    #[cfg(test)]
+                    if let Some(hook) = &hook {
+                        let (ack, received) = oneshot::channel();
+                        if hook.send((symbol, ack)).await.is_ok() {
+                            let _ = received.await;
+                        }
+                    }
+                }
+                Err(error) => {
+                    startup_error = Some(error);
+                    break;
+                }
+            }
+        }
+        if startup_error.is_none() && shutdown.as_ref().is_some_and(|rx| *rx.borrow()) {
+            startup_error = Some(anyhow::anyhow!("启动过程中收到退出信号"));
+        }
+        if let Some(error) = startup_error {
+            return match runtime.shutdown(Duration::from_secs(30)).await {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(error.context(format!("启动失败后的清理也失败: {cleanup:#}"))),
+            };
         }
         *runtime.handle.states.write().await = runtime.states();
         runtime
             .global_position_limit
             .membership_ready
             .store(true, std::sync::atomic::Ordering::SeqCst);
-        runtime.global_position_limit.check().await;
+        {
+            let check = runtime.global_position_limit.check();
+            tokio::pin!(check);
+            tokio::select! {
+                biased;
+                _ = Self::wait_for_startup_shutdown(&mut shutdown) => {
+                    for pair in &runtime.pairs {
+                        pair.state.request_shutdown();
+                        let _ = pair.shutdown_tx.send(true);
+                    }
+                    check.await;
+                }
+                _ = &mut check => {}
+            }
+        }
+        if shutdown.as_ref().is_some_and(|rx| *rx.borrow()) {
+            let error = anyhow::anyhow!("启动过程中收到退出信号");
+            return match runtime.shutdown(Duration::from_secs(30)).await {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(error.context(format!("启动中断后的清理失败: {cleanup:#}"))),
+            };
+        }
         let weak = Arc::downgrade(&runtime.global_position_limit);
         tokio::spawn(async move {
             let mut timer = tokio::time::interval(Duration::from_millis(250));
@@ -321,6 +453,20 @@ impl TradingRuntime {
             }
         });
         Ok(runtime)
+    }
+
+    async fn wait_for_startup_shutdown(shutdown: &mut Option<watch::Receiver<bool>>) {
+        if let Some(receiver) = shutdown {
+            loop {
+                if *receiver.borrow_and_update() {
+                    return;
+                }
+                if receiver.changed().await.is_err() {
+                    break;
+                }
+            }
+        }
+        std::future::pending::<()>().await;
     }
 
     pub fn handle(&self) -> RuntimeHandle {
@@ -339,9 +485,26 @@ impl TradingRuntime {
         BinanceFuturesClient::new_with_limiter(config, self.rate_limiter.clone())
     }
 
-    async fn prepare_pair(&self, strategy: AppConfig, multi: bool) -> anyhow::Result<PairTask> {
-        self.prepare_pair_with_state(strategy, multi, None, false, None)
-            .await
+    async fn prepare_pair(
+        &self,
+        strategy: AppConfig,
+        multi: bool,
+        start: oneshot::Receiver<()>,
+        startup_shutdown: Option<watch::Receiver<bool>>,
+        #[cfg(test)] prepare_hook: Option<mpsc::Sender<(String, oneshot::Sender<()>)>>,
+    ) -> anyhow::Result<PairTask> {
+        self.prepare_pair_with_state(
+            strategy,
+            multi,
+            None,
+            false,
+            None,
+            Some(start),
+            startup_shutdown,
+            #[cfg(test)]
+            prepare_hook,
+        )
+        .await
     }
 
     async fn prepare_pair_with_state(
@@ -351,6 +514,9 @@ impl TradingRuntime {
         previous_state: Option<(crate::types::PositionInfo, crate::types::AccountInfo)>,
         force_paused: bool,
         prearmed: Option<(bool, bool)>,
+        start: Option<oneshot::Receiver<()>>,
+        mut startup_shutdown: Option<watch::Receiver<bool>>,
+        #[cfg(test)] prepare_hook: Option<mpsc::Sender<(String, oneshot::Sender<()>)>>,
     ) -> anyhow::Result<PairTask> {
         let db = self.handle.db.clone();
         let (previous_unclean, has_admin) = if let Some(prearmed) = prearmed {
@@ -423,6 +589,17 @@ impl TradingRuntime {
                 )
                 .await;
         }
+        #[cfg(test)]
+        if let Some(hook) = prepare_hook {
+            let (ack, received) = oneshot::channel();
+            if hook
+                .send((strategy.exchange.symbol.clone(), ack))
+                .await
+                .is_ok()
+            {
+                let _ = received.await;
+            }
+        }
         let mut engine = GridTradingEngine::new_with_caches(
             state.clone(),
             client,
@@ -437,10 +614,29 @@ impl TradingRuntime {
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let engine_state = state.clone();
         let engine_task = tokio::spawn(async move {
-            // Shutdown may arrive while an exchange request is still initializing.
-            let initialized = tokio::select! {
-                result = engine.initialize() => Some(result),
-                _ = shutdown_rx.changed() => None,
+            // Do not initialize until startup has registered the new engine.
+            let permitted = if let Some(start) = start {
+                tokio::select! {
+                    biased;
+                    _ = Self::wait_for_startup_shutdown(&mut startup_shutdown) => false,
+                    result = start => result.is_ok(),
+                }
+            } else {
+                true
+            };
+            let initialized = if permitted {
+                tokio::select! {
+                    biased;
+                    _ = Self::wait_for_startup_shutdown(&mut startup_shutdown) => {
+                        engine_state.request_shutdown();
+                        None
+                    }
+                    _ = shutdown_rx.changed() => None,
+                    result = engine.initialize() => Some(result),
+                }
+            } else {
+                engine_state.request_shutdown();
+                None
             };
             if let Some(Err(error)) = &initialized {
                 let _ = engine_state
@@ -557,6 +753,10 @@ impl TradingRuntime {
                 None,
                 false,
                 Some((previous_unclean, has_admin)),
+                None,
+                None,
+                #[cfg(test)]
+                None,
             )
             .await;
         if let Ok(pair) = result {
@@ -682,7 +882,17 @@ impl TradingRuntime {
                 let _ = task.await;
             }
             match self
-                .prepare_pair_with_state(config, true, previous_state, true, None)
+                .prepare_pair_with_state(
+                    config,
+                    true,
+                    previous_state,
+                    true,
+                    None,
+                    None,
+                    None,
+                    #[cfg(test)]
+                    None,
+                )
                 .await
             {
                 Ok(replacement) => {
