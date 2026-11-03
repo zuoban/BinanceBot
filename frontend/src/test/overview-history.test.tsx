@@ -30,6 +30,7 @@ it('keeps missing hours and unavailable metrics as gaps', async () => {
   history.data = [{ hour: hour - 3600, groups: [{ mode: 'PAPER', asset: 'USDC', equity: '100', long: null, short: '0' }] }];
   render(<OverviewHistory />);
   expect(screen.getByRole('heading', { name: '账户权益趋势' })).toBeInTheDocument();
+  expect(screen.queryByRole('combobox', { name: '选择趋势账户' })).not.toBeInTheDocument();
   expect(screen.queryByText('做多持仓')).not.toBeInTheDocument();
   expect(screen.queryByText('做空持仓')).not.toBeInTheDocument();
   await waitFor(() => expect(chart.data).toHaveLength(24), { timeout: 10_000 });
@@ -37,4 +38,17 @@ it('keeps missing hours and unavailable metrics as gaps', async () => {
   expect(chart.data[22]).toMatchObject({ hour: hour - 3600, equity: 100 });
   expect(chart.data[23]).toMatchObject({ hour, equity: null });
   expect(chart.data.filter(point => point.equity !== null)).toHaveLength(1);
+});
+
+it('shows the account selector only when history contains multiple groups', async () => {
+  const hour = 1_800_000_000 - 1_800_000_000 % 3600;
+  history.data = [{
+    hour,
+    groups: [
+      { mode: 'PAPER', asset: 'USDC', equity: '100', long: null, short: '0' },
+      { mode: 'LIVE', asset: 'USDT', equity: '200', long: null, short: '0' },
+    ],
+  }];
+  render(<OverviewHistory />);
+  expect(await screen.findByRole('combobox', { name: '选择趋势账户' })).toBeInTheDocument();
 });

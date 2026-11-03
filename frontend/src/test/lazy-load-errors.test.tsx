@@ -25,7 +25,7 @@ it('keeps the history card usable when the chart module fails', async () => {
   render(<><button>其他功能</button><OverviewHistory /></>);
   expect(await screen.findByText('权益图加载失败，请刷新页面重试。')).toBeInTheDocument();
   expect(screen.getByRole('button', { name: '其他功能' })).toBeEnabled();
-  expect(screen.getByLabelText('选择趋势账户')).toBeInTheDocument();
+  expect(screen.getByText(/单位 USDC/)).toBeInTheDocument();
   expect(screen.getByRole('button', { name: '刷新页面' })).toBeEnabled();
 });
 
