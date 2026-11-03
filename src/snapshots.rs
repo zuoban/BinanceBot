@@ -30,7 +30,7 @@ fn fresh(now: DateTime<Utc>, updated: DateTime<Utc>, seconds: u64) -> bool {
 fn aggregate(snapshots: &[(BotSnapshot, u64)], now: DateTime<Utc>) -> Vec<SnapshotGroup> {
     let mut groups: BTreeMap<(String, String), Vec<(&BotSnapshot, u64)>> = BTreeMap::new();
     for (snapshot, sync_interval) in snapshots {
-        let mode = TradingMode::from_exchange(snapshot.dry_run, snapshot.grid_config.is_testnet);
+        let mode = TradingMode::from_dry_run(snapshot.dry_run);
         let asset = quote_asset(&snapshot.symbol).unwrap_or_else(|| {
             if snapshot.account.asset.is_empty() {
                 &snapshot.symbol

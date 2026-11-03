@@ -486,7 +486,7 @@ impl AppState {
     ) -> Arc<Self> {
         let (ws_broadcast_tx, _) = broadcast::channel(100);
         let symbol = config.exchange.symbol.clone();
-        let mode = TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
+        let mode = TradingMode::from_dry_run(config.exchange.dry_run);
         let saved_status = db.load_pair_status(&symbol, mode).and_then(|status| {
             if status.is_some() || pair_scope.is_some() {
                 Ok(status)
@@ -708,10 +708,7 @@ impl AppState {
         // Persist the trade and its cumulative statistics together.
         let current_config = self.config.read().await;
         let current_symbol = current_config.exchange.symbol.clone();
-        let current_mode = TradingMode::from_exchange(
-            current_config.exchange.dry_run,
-            current_config.exchange.is_testnet,
-        );
+        let current_mode = TradingMode::from_dry_run(current_config.exchange.dry_run);
         let telegram = current_config.telegram.clone();
         let direction = current_config.grid.direction;
         drop(current_config);
@@ -842,8 +839,7 @@ impl AppState {
             return Ok(());
         }
         let config = self.config.read().await;
-        let current_mode =
-            TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
+        let current_mode = TradingMode::from_dry_run(config.exchange.dry_run);
         let current_symbol = config.exchange.symbol.clone();
         drop(config);
         if trade.symbol == current_symbol && trade.mode == current_mode {
@@ -870,7 +866,7 @@ impl AppState {
         let _commit = self.trade_commit_lock.lock().await;
         let config = self.config.read().await;
         let symbol = config.exchange.symbol.clone();
-        let mode = TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
+        let mode = TradingMode::from_dry_run(config.exchange.dry_run);
         drop(config);
         let query_symbol = symbol.clone();
         let result = self
@@ -1012,8 +1008,7 @@ impl AppState {
         let status = *self.status.read().await;
         let previous = self.config.read().await;
         let previous_symbol = previous.exchange.symbol.clone();
-        let previous_mode =
-            TradingMode::from_exchange(previous.exchange.dry_run, previous.exchange.is_testnet);
+        let previous_mode = TradingMode::from_dry_run(previous.exchange.dry_run);
         drop(previous);
         let scope = self.pair_scope.clone();
         let saved = config.clone();
@@ -1041,7 +1036,7 @@ impl AppState {
     async fn persist_status(&self, status: BotStatus) -> anyhow::Result<()> {
         let config = self.config.read().await;
         let symbol = config.exchange.symbol.clone();
-        let mode = TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
+        let mode = TradingMode::from_dry_run(config.exchange.dry_run);
         let legacy = self.pair_scope.is_none();
         drop(config);
         self.db
@@ -1293,7 +1288,7 @@ impl AppState {
         }
         let config = self.config.read().await;
         let symbol = config.exchange.symbol.clone();
-        let mode = TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
+        let mode = TradingMode::from_dry_run(config.exchange.dry_run);
         drop(config);
         self.db
             .run_blocking(move |db| db.clear_execution_guard(&symbol, mode))
@@ -1359,8 +1354,7 @@ impl AppState {
         let _update = self.status_update_lock.lock().await;
         if let Some(expected) = expected_mode {
             let config = self.config.read().await;
-            let current =
-                TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
+            let current = TradingMode::from_dry_run(config.exchange.dry_run);
             anyhow::ensure!(
                 expected != TradingMode::Unknown && current == expected,
                 "策略运行模式已改变，无法恢复策略"
@@ -2023,7 +2017,7 @@ mod tests {
         let state = AppState::new(AppConfig::default(), db.clone(), tx);
         state.pause_trading().await.unwrap();
         let config = state.config.read().await;
-        let mode = TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
+        let mode = TradingMode::from_dry_run(config.exchange.dry_run);
         drop(config);
         let epoch = state.pause_epoch();
         let guard = state.status_update_lock.lock().await;

@@ -495,7 +495,7 @@ async fn position_limit_pauses_only_the_pair_that_reaches_it() {
 }
 
 #[tokio::test]
-async fn mode_changes_keep_pause_after_database_reopen_for_live_and_testnet() {
+async fn mode_changes_keep_pause_after_database_reopen_for_live() {
     use axum::{routing::get, Json, Router};
     use serde_json::json;
     let app = Router::new()
@@ -514,64 +514,62 @@ async fn mode_changes_keep_pause_after_database_reopen_for_live_and_testnet() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    for (is_testnet, mode) in [(false, TradingMode::Live), (true, TradingMode::Testnet)] {
-        let path = std::env::temp_dir().join(format!("mode-pause-{}.db", uuid::Uuid::new_v4()));
-        let db = Arc::new(Database::open(&path).unwrap());
-        let mut config = AppConfig::default();
-        config.exchange.is_testnet = is_testnet;
-        config.exchange.api_key = "test-key".into();
-        config.exchange.api_secret = "test-secret".into();
-        config.pairs = vec![TradingPairConfig::new("SOLUSDC".into())];
-        db.save_config(&config).unwrap();
-        // A previous unclean exit left the target mode running.
-        db.save_pair_status("SOLUSDC", mode, BotStatus::Running)
-            .unwrap();
-        let paper = config.strategy_configs().unwrap().remove(0);
-        let (tx, rx) = mpsc::channel(8);
-        let (_, ticker_rx) = broadcast::channel(8);
-        let state = AppState::new_for_pair(
-            paper.clone(),
-            db.clone(),
-            tx,
-            Arc::new(tokio::sync::Mutex::new(())),
-        );
-        state.pause_trading().await.unwrap();
-        let client = Arc::new(BinanceFuturesClient::with_base_url(
-            &paper.exchange,
-            url.clone(),
-        ));
-        let mut engine = GridTradingEngine::new(state.clone(), client, rx, ticker_rx);
-        engine.mark_retry.failed();
-        engine.ticker_retry.failed();
-        assert!(!engine.mark_retry.ready());
-        assert!(!engine.ticker_retry.ready());
-        let mut live = paper;
-        live.exchange.dry_run = false;
-        engine.apply_config(live.clone()).await.unwrap();
-        assert!(engine.mark_retry.ready());
-        assert!(engine.ticker_retry.ready());
-        assert_eq!(*state.status.read().await, BotStatus::Paused);
-        // Reopen directly, without a Shutdown action that could conceal a missing status commit.
-        let reopened = Arc::new(Database::open(&path).unwrap());
-        let (tx, _) = mpsc::channel(8);
-        let restarted = AppState::new_for_pair(
-            live,
-            reopened.clone(),
-            tx,
-            Arc::new(tokio::sync::Mutex::new(())),
-        );
-        assert_eq!(*restarted.status.read().await, BotStatus::Paused);
-        assert_eq!(
-            reopened.load_pair_status("SOLUSDC", mode).unwrap(),
-            Some(BotStatus::Paused)
-        );
-        drop(restarted);
-        drop(reopened);
-        drop(engine);
-        drop(state);
-        drop(db);
-        std::fs::remove_file(path).unwrap();
-    }
+    let mode = TradingMode::Live;
+    let path = std::env::temp_dir().join(format!("mode-pause-{}.db", uuid::Uuid::new_v4()));
+    let db = Arc::new(Database::open(&path).unwrap());
+    let mut config = AppConfig::default();
+    config.exchange.api_key = "test-key".into();
+    config.exchange.api_secret = "test-secret".into();
+    config.pairs = vec![TradingPairConfig::new("SOLUSDC".into())];
+    db.save_config(&config).unwrap();
+    // A previous unclean exit left the target mode running.
+    db.save_pair_status("SOLUSDC", mode, BotStatus::Running)
+        .unwrap();
+    let paper = config.strategy_configs().unwrap().remove(0);
+    let (tx, rx) = mpsc::channel(8);
+    let (_, ticker_rx) = broadcast::channel(8);
+    let state = AppState::new_for_pair(
+        paper.clone(),
+        db.clone(),
+        tx,
+        Arc::new(tokio::sync::Mutex::new(())),
+    );
+    state.pause_trading().await.unwrap();
+    let client = Arc::new(BinanceFuturesClient::with_base_url(
+        &paper.exchange,
+        url.clone(),
+    ));
+    let mut engine = GridTradingEngine::new(state.clone(), client, rx, ticker_rx);
+    engine.mark_retry.failed();
+    engine.ticker_retry.failed();
+    assert!(!engine.mark_retry.ready());
+    assert!(!engine.ticker_retry.ready());
+    let mut live = paper;
+    live.exchange.dry_run = false;
+    engine.apply_config(live.clone()).await.unwrap();
+    assert!(engine.mark_retry.ready());
+    assert!(engine.ticker_retry.ready());
+    assert_eq!(*state.status.read().await, BotStatus::Paused);
+    // Reopen directly, without a Shutdown action that could conceal a missing status commit.
+    let reopened = Arc::new(Database::open(&path).unwrap());
+    let (tx, _) = mpsc::channel(8);
+    let restarted = AppState::new_for_pair(
+        live,
+        reopened.clone(),
+        tx,
+        Arc::new(tokio::sync::Mutex::new(())),
+    );
+    assert_eq!(*restarted.status.read().await, BotStatus::Paused);
+    assert_eq!(
+        reopened.load_pair_status("SOLUSDC", mode).unwrap(),
+        Some(BotStatus::Paused)
+    );
+    drop(restarted);
+    drop(reopened);
+    drop(engine);
+    drop(state);
+    drop(db);
+    std::fs::remove_file(path).unwrap();
     server.abort();
 }
 

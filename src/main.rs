@@ -139,11 +139,7 @@ async fn main() -> anyhow::Result<()> {
             strategy.grid.order_amount_usdc,
             strategy.grid.buy_window,
             strategy.grid.sell_window,
-            binance_grid_bot::types::TradingMode::from_exchange(
-                strategy.exchange.dry_run,
-                strategy.exchange.is_testnet
-            )
-            .as_str()
+            binance_grid_bot::types::TradingMode::from_dry_run(strategy.exchange.dry_run).as_str()
         );
     }
     let addr = config.server.socket_addr()?;

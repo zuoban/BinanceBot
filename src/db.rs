@@ -14,7 +14,7 @@ use std::path::Path;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use tracing::info;
+use tracing::{info, warn};
 
 mod authentication;
 
@@ -552,8 +552,7 @@ impl Database {
         // Only the former single strategy inherits the legacy global status.
         if let Some(config) = self.load_config()? {
             if config.exchange.symbol == symbol
-                && TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet)
-                    == mode
+                && TradingMode::from_dry_run(config.exchange.dry_run) == mode
             {
                 return self.load_bot_status();
             }
@@ -893,6 +892,8 @@ impl Database {
             "CREATE INDEX IF NOT EXISTS idx_trades_scope ON trades (symbol, mode, timestamp DESC);",
             [],
         )?;
+        retire_legacy_testnet_config(&conn)?;
+        retire_legacy_testnet_rows(&conn)?;
 
         info!("SQLite schema verified for database: {}", self.path);
         Ok(())
@@ -979,7 +980,7 @@ impl Database {
         pair.update_from(config);
         saved.pairs.push(pair);
         save_config_on(&tx, &saved)?;
-        let mode = TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
+        let mode = TradingMode::from_dry_run(config.exchange.dry_run);
         save_pair_status_on(&tx, &config.exchange.symbol, mode, BotStatus::Paused)?;
         let was_dirty = arm_execution_guard_on(&tx, &config.exchange.symbol, mode)?;
         #[cfg(test)]
@@ -1043,7 +1044,7 @@ impl Database {
             Some(symbol) => save_pair_config_on(&tx, symbol, config)?,
             None => save_config_on(&tx, config)?,
         }
-        let mode = TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
+        let mode = TradingMode::from_dry_run(config.exchange.dry_run);
         let switching = previous_scope != (config.exchange.symbol.as_str(), mode);
         arm_execution_guard_on(&tx, &config.exchange.symbol, mode)?;
         // A different account scope always requires a fresh manual resume, even
@@ -2371,6 +2372,135 @@ fn save_pair_config_on(conn: &Connection, symbol: &str, config: &AppConfig) -> R
     save_config_on(conn, &saved)
 }
 
+/// Testnet trading was removed. A saved strategy pinned to the retired Binance
+/// testnet must not silently start trading on mainnet, so it is switched to
+/// paper mode and paused until an operator reviews it.
+fn retire_legacy_testnet_config(conn: &Connection) -> Result<()> {
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT config_json FROM app_config WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(stored) = stored else {
+        return Ok(());
+    };
+    let Ok(mut config) = serde_json::from_str::<serde_json::Value>(&stored) else {
+        return Ok(());
+    };
+    let Some(root) = config.as_object_mut() else {
+        return Ok(());
+    };
+    let mut symbols = Vec::new();
+    let mut retired = false;
+    let mut global_testnet = false;
+    if let Some(exchange) = root
+        .get_mut("exchange")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        if let Some(flag) = exchange
+            .remove("is_testnet")
+            .and_then(|value| value.as_bool())
+        {
+            retired = true;
+            global_testnet = flag;
+        }
+        if global_testnet {
+            exchange.insert("dry_run".into(), serde_json::Value::Bool(true));
+        }
+    }
+    if let Some(pairs) = root
+        .get_mut("pairs")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for pair in pairs.iter_mut() {
+            let Some(pair) = pair.as_object_mut() else {
+                continue;
+            };
+            let flag = pair
+                .get_mut("exchange")
+                .and_then(serde_json::Value::as_object_mut)
+                .and_then(|exchange| exchange.remove("is_testnet"))
+                .and_then(|value| value.as_bool());
+            retired |= flag.is_some();
+            if !flag.unwrap_or(global_testnet) {
+                continue;
+            }
+            if !pair.contains_key("exchange") {
+                pair.insert(
+                    "exchange".into(),
+                    serde_json::Value::Object(Default::default()),
+                );
+            }
+            if let Some(exchange) = pair
+                .get_mut("exchange")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                exchange.insert("dry_run".into(), serde_json::Value::Bool(true));
+            }
+            if let Some(symbol) = pair.get("symbol").and_then(|value| value.as_str()) {
+                symbols.push(symbol.to_ascii_uppercase());
+            }
+        }
+    }
+    if !retired {
+        return Ok(());
+    }
+    if global_testnet {
+        if let Some(symbol) = root
+            .get("exchange")
+            .and_then(|exchange| exchange.get("symbol"))
+            .and_then(|value| value.as_str())
+        {
+            symbols.push(symbol.to_ascii_uppercase());
+        }
+    }
+    conn.execute(
+        "UPDATE app_config SET config_json = ?1, updated_at = ?2 WHERE id = 1",
+        params![
+            serde_json::to_string_pretty(&config)?,
+            Utc::now().to_rfc3339()
+        ],
+    )?;
+    symbols.sort();
+    symbols.dedup();
+    if symbols.is_empty() {
+        return Ok(());
+    }
+    for symbol in &symbols {
+        save_pair_status_on(conn, symbol, TradingMode::Paper, BotStatus::Paused)?;
+    }
+    warn!(
+        "Retired testnet configuration now uses paper mode and stays paused until resumed: {}",
+        symbols.join(", ")
+    );
+    Ok(())
+}
+
+/// Drop the state of the retired testnet mode. Those orders can never be
+/// reconciled against mainnet, so keeping their runtime rows would only leave
+/// unreachable intent guards; trade history is kept and reads back as `UNKNOWN`.
+fn retire_legacy_testnet_rows(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "UPDATE trades SET mode = 'UNKNOWN' WHERE mode = 'TESTNET'",
+        [],
+    )?;
+    for table in [
+        "pair_runtime",
+        "pair_execution_guard",
+        "pair_intents",
+        "remainder_plans",
+        "cleared_trade_ids",
+        "cleared_pair_openings",
+        "execution_frontiers",
+        "scoped_grid_stats",
+    ] {
+        conn.execute(&format!("DELETE FROM {table} WHERE mode = 'TESTNET'"), [])?;
+    }
+    Ok(())
+}
+
 fn has_legacy_paper_history_on(conn: &Connection, symbol: &str) -> Result<bool> {
     Ok(conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM trades WHERE symbol = ?1 AND mode IN ('PAPER', 'UNKNOWN')) \
@@ -3572,13 +3702,6 @@ mod tests {
             ),
             ("symbol", now, OrderSide::Buy, "BTCUSDC", TradingMode::Paper),
             ("live", now, OrderSide::Buy, "SOLUSDC", TradingMode::Live),
-            (
-                "testnet",
-                now,
-                OrderSide::Buy,
-                "SOLUSDC",
-                TradingMode::Testnet,
-            ),
         ] {
             trade.trade_id = id.into();
             trade.client_order_id = id.into();
@@ -3715,10 +3838,6 @@ mod tests {
         assert_eq!(
             db.last_fill_for("SOLUSDC", TradingMode::Live).unwrap(),
             Some((OrderSide::Sell, dec!(119.3)))
-        );
-        assert_eq!(
-            db.last_fill_for("SOLUSDC", TradingMode::Testnet).unwrap(),
-            None
         );
         assert_eq!(
             db.get_recent_trades_for("SOLUSDC", TradingMode::Paper, 10)
@@ -3933,7 +4052,6 @@ mod tests {
         let db = Database::open(":memory:").unwrap();
         for (id, mode, pnl) in [
             ("paper", TradingMode::Paper, dec!(12)),
-            ("testnet", TradingMode::Testnet, dec!(3)),
             ("live", TradingMode::Live, dec!(-4)),
         ] {
             let trade = TradeRecord {
@@ -3972,13 +4090,6 @@ mod tests {
             db.get_recent_trades_for("SOLUSDC", TradingMode::Live, 10)
                 .unwrap()
                 .len(),
-            1
-        );
-        assert_eq!(
-            db.load_scoped_stats("SOLUSDC", TradingMode::Testnet)
-                .unwrap()
-                .unwrap()
-                .0,
             1
         );
     }
@@ -4250,49 +4361,154 @@ mod tests {
             None
         );
     }
+    #[test]
+    fn legacy_testnet_configuration_is_retired_to_paused_paper_mode() {
+        let path = std::env::temp_dir().join(format!("legacy-testnet-{}.db", uuid::Uuid::new_v4()));
+        {
+            let db = Database::open(&path).unwrap();
+            db.save_config(&AppConfig::default()).unwrap();
+            db.save_pair_status("SOLUSDC", TradingMode::Paper, BotStatus::Running)
+                .unwrap();
+            db.save_pair_status("BTCUSDT", TradingMode::Paper, BotStatus::Running)
+                .unwrap();
+            let mut legacy = serde_json::to_value(AppConfig::default()).unwrap();
+            legacy["exchange"]["is_testnet"] = serde_json::json!(true);
+            legacy["exchange"]["dry_run"] = serde_json::json!(false);
+            legacy["pairs"] = serde_json::json!([
+                {"symbol": "SOLUSDC"},
+                {"symbol": "BTCUSDT", "exchange": {"dry_run": false}}
+            ]);
+            db.conn
+                .lock()
+                .unwrap()
+                .execute(
+                    "UPDATE app_config SET config_json = ?1 WHERE id = 1",
+                    params![serde_json::to_string_pretty(&legacy).unwrap()],
+                )
+                .unwrap();
+        }
+        let db = Database::open(&path).unwrap();
+        let config = db.load_config().unwrap().unwrap();
+        assert!(config.exchange.dry_run);
+        assert!(config
+            .strategy_configs()
+            .unwrap()
+            .iter()
+            .all(|strategy| strategy.exchange.dry_run));
+        let stored: String = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT config_json FROM app_config WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!stored.contains("is_testnet"));
+        for symbol in ["SOLUSDC", "BTCUSDT"] {
+            assert_eq!(
+                db.load_pair_status(symbol, TradingMode::Paper).unwrap(),
+                Some(BotStatus::Paused)
+            );
+            assert_eq!(
+                db.load_pair_status(symbol, TradingMode::Live).unwrap(),
+                None
+            );
+        }
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn retired_testnet_rows_are_removed_and_trade_history_becomes_unknown() {
+        let path =
+            std::env::temp_dir().join(format!("legacy-testnet-rows-{}.db", uuid::Uuid::new_v4()));
+        {
+            let db = Database::open(&path).unwrap();
+            db.save_config(&AppConfig::default()).unwrap();
+            db.insert_trade(&revision_test_trade()).unwrap();
+            db.save_pair_status("SOLUSDC", TradingMode::Paper, BotStatus::Running)
+                .unwrap();
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE trades SET mode = 'TESTNET' WHERE trade_id = 'revision-trade'",
+                [],
+            )
+            .unwrap();
+            conn.execute_batch(
+                "INSERT INTO pair_runtime (symbol, mode, status, updated_at)
+                    VALUES ('SOLUSDC', 'TESTNET', '\"Running\"', '2026-01-01T00:00:00Z');
+                 INSERT INTO pair_execution_guard (symbol, mode, dirty)
+                    VALUES ('SOLUSDC', 'TESTNET', 1);",
+            )
+            .unwrap();
+        }
+        let db = Database::open(&path).unwrap();
+        let conn = db.conn.lock().unwrap();
+        let mode: String = conn
+            .query_row(
+                "SELECT mode FROM trades WHERE trade_id = 'revision-trade'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(mode, "UNKNOWN");
+        for table in ["pair_runtime", "pair_execution_guard"] {
+            let leftover: i64 = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE mode = 'TESTNET'"),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(leftover, 0, "{table}");
+        }
+        drop(conn);
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn first_exchange_mode_switch_persists_pause_across_reopen() {
-        for target in [TradingMode::Testnet, TradingMode::Live] {
-            for scoped in [false, true] {
-                let path =
-                    std::env::temp_dir().join(format!("mode-switch-{}.db", uuid::Uuid::new_v4()));
-                let mut config = AppConfig::default();
-                if scoped {
-                    config.pairs = vec![crate::config::TradingPairConfig::new("SOLUSDC".into())];
-                }
-                {
-                    let db = Database::open(&path).unwrap();
-                    db.save_config(&config).unwrap();
-                    let mut candidate = if scoped {
-                        config.strategy_configs().unwrap().remove(0)
-                    } else {
-                        config.clone()
-                    };
-                    candidate.exchange.dry_run = false;
-                    candidate.exchange.is_testnet = target == TradingMode::Testnet;
-                    assert_eq!(
-                        db.save_runtime_config(
-                            &candidate,
-                            scoped.then_some("SOLUSDC"),
-                            BotStatus::Running,
-                            ("SOLUSDC", TradingMode::Paper)
-                        )
-                        .unwrap(),
-                        (BotStatus::Paused, true)
-                    );
-                }
-                let db = Database::open(&path).unwrap();
-                assert_eq!(
-                    db.load_pair_status("SOLUSDC", target).unwrap(),
-                    Some(BotStatus::Paused)
-                );
-                if !scoped {
-                    assert_eq!(db.load_bot_status().unwrap(), Some(BotStatus::Paused));
-                }
-                drop(db);
-                std::fs::remove_file(path).unwrap();
+        let target = TradingMode::Live;
+        for scoped in [false, true] {
+            let path =
+                std::env::temp_dir().join(format!("mode-switch-{}.db", uuid::Uuid::new_v4()));
+            let mut config = AppConfig::default();
+            if scoped {
+                config.pairs = vec![crate::config::TradingPairConfig::new("SOLUSDC".into())];
             }
+            {
+                let db = Database::open(&path).unwrap();
+                db.save_config(&config).unwrap();
+                let mut candidate = if scoped {
+                    config.strategy_configs().unwrap().remove(0)
+                } else {
+                    config.clone()
+                };
+                candidate.exchange.dry_run = false;
+                assert_eq!(
+                    db.save_runtime_config(
+                        &candidate,
+                        scoped.then_some("SOLUSDC"),
+                        BotStatus::Running,
+                        ("SOLUSDC", TradingMode::Paper)
+                    )
+                    .unwrap(),
+                    (BotStatus::Paused, true)
+                );
+            }
+            let db = Database::open(&path).unwrap();
+            assert_eq!(
+                db.load_pair_status("SOLUSDC", target).unwrap(),
+                Some(BotStatus::Paused)
+            );
+            if !scoped {
+                assert_eq!(db.load_bot_status().unwrap(), Some(BotStatus::Paused));
+            }
+            drop(db);
+            std::fs::remove_file(path).unwrap();
         }
     }
 
@@ -4316,8 +4532,6 @@ mod tests {
                 .unwrap();
             db.save_pair_status("BTCUSDT", TradingMode::Paper, BotStatus::Paused)
                 .unwrap();
-            db.save_pair_status("BTCUSDT", TradingMode::Testnet, BotStatus::Running)
-                .unwrap();
         }
         let db = Database::open(&path).unwrap();
         assert_eq!(
@@ -4327,11 +4541,6 @@ mod tests {
         assert_eq!(
             db.load_pair_status("BTCUSDT", TradingMode::Paper).unwrap(),
             Some(BotStatus::Paused)
-        );
-        assert_eq!(
-            db.load_pair_status("BTCUSDT", TradingMode::Testnet)
-                .unwrap(),
-            Some(BotStatus::Running)
         );
         assert_eq!(
             db.load_pair_status("BTCUSDT", TradingMode::Live).unwrap(),
@@ -4350,11 +4559,6 @@ mod tests {
         assert_eq!(
             db.load_pair_status("SOLUSDC", TradingMode::Paper).unwrap(),
             Some(BotStatus::Running)
-        );
-        assert_eq!(
-            db.load_pair_status("SOLUSDC", TradingMode::Testnet)
-                .unwrap(),
-            None
         );
         assert_eq!(
             db.load_pair_status("SOLUSDC", TradingMode::Live).unwrap(),

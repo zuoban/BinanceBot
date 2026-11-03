@@ -1,8 +1,8 @@
 import type { Mode, Overview, Snapshot, Status } from './types';
 
-export const modeLabel: Record<Mode, string> = { PAPER: '模拟盘', TESTNET: '测试网', LIVE: '实盘', UNKNOWN: '未知模式' };
+export const modeLabel: Record<Mode, string> = { PAPER: '模拟盘', LIVE: '实盘', UNKNOWN: '未知模式' };
 export const statusLabel: Record<Status, string> = { RUNNING: '运行中', PAUSED: '已暂停', STOPPED: '已停止', ERROR: '异常' };
-export const modeOf = (s: Snapshot): Mode => s.dry_run ? 'PAPER' : s.grid_config.is_testnet ? 'TESTNET' : 'LIVE';
+export const modeOf = (s: Snapshot): Mode => s.dry_run ? 'PAPER' : 'LIVE';
 export const quoteAsset = (symbol: string) => ['USDC', 'USDT', 'FDUSD', 'BUSD'].find(a => symbol.endsWith(a)) ?? '';
 export const numeric = (value: unknown): number | null => value === null || value === undefined || value === '' || !Number.isFinite(Number(value)) ? null : Number(value);
 export function positionAmount(s: Snapshot): number | null {

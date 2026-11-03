@@ -320,7 +320,7 @@ mod tests {
             .reserve(endpoint, [2; 32], 1, RequestClass::Critical)
             .is_ok());
         assert!(limiter
-            .reserve("testnet", [1; 32], 1, RequestClass::Normal)
+            .reserve("secondary", [1; 32], 1, RequestClass::Normal)
             .is_ok());
     }
 
@@ -337,7 +337,7 @@ mod tests {
             .reserve("main", [2; 32], 1, RequestClass::PnlReconciliation)
             .is_err());
         assert!(limiter
-            .reserve("testnet", [1; 32], 1, RequestClass::PnlReconciliation)
+            .reserve("secondary", [1; 32], 1, RequestClass::PnlReconciliation)
             .is_ok());
         limiter
             .reserve("main", [2; 32], IP_NORMAL - 60, RequestClass::Normal)
@@ -522,7 +522,7 @@ mod tests {
             .reserve("main", [1; 32], 1, RequestClass::Critical)
             .is_err());
         assert!(limiter
-            .reserve("testnet", [1; 32], 1, RequestClass::Normal)
+            .reserve("secondary", [1; 32], 1, RequestClass::Normal)
             .is_ok());
         limiter
             .endpoints

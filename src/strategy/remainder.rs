@@ -4,7 +4,7 @@ use super::*;
 impl GridTradingEngine {
     pub(super) async fn load_remainder_plan(&self) -> Result<Option<RemainderPlan>> {
         let config = self.state.config.read().await.clone();
-        let mode = TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
+        let mode = TradingMode::from_dry_run(config.exchange.dry_run);
         self.state
             .db
             .run_blocking(move |db| db.load_remainder_plan(&config.exchange.symbol, mode))
@@ -175,7 +175,7 @@ impl GridTradingEngine {
         };
         let mut plan = RemainderPlan {
             symbol: config.exchange.symbol,
-            mode: TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet),
+            mode: TradingMode::from_dry_run(config.exchange.dry_run),
             sources,
             target,
             phase: RemainderPhase::Canceling,

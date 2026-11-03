@@ -1,5 +1,5 @@
 export type Decimal = string;
-export type Mode = 'PAPER' | 'TESTNET' | 'LIVE' | 'UNKNOWN';
+export type Mode = 'PAPER' | 'LIVE' | 'UNKNOWN';
 export type Status = 'RUNNING' | 'PAUSED' | 'STOPPED' | 'ERROR';
 export type Action = 'pause' | 'resume' | 'cancel_all' | 'rebalance';
 export interface ApiResponse<T> { success: boolean; data: T; message?: string }
@@ -13,7 +13,6 @@ export interface GridConfig {
   sell_window: number;
   post_only: boolean;
   dry_run: boolean;
-  is_testnet: boolean;
   min_price: Decimal | null;
   max_price: Decimal | null;
   max_position_usdc: Decimal | null;
@@ -53,7 +52,6 @@ export interface Snapshot {
 export interface AccountSnapshot {
   mode: Mode;
   snapshot: Pick<Snapshot, 'symbol' | 'dry_run' | 'account'> & {
-    grid_config: Pick<GridConfig, 'is_testnet'>;
     position: Pick<Snapshot['position'], 'size' | 'unrealized_pnl'>;
     ticker: Pick<Snapshot['ticker'], 'mark_price' | 'mark_update_time'>;
   };

@@ -419,41 +419,34 @@ async fn managed_open_price_write_failure_blocks_and_recovers_on_retry_after_res
 }
 
 #[tokio::test]
-async fn managed_open_price_change_affects_opening_order_limit_on_live_and_testnet() {
-    for testnet in [false, true] {
-        for changed in [false, true] {
-            let fake = Exchange::default();
-            let (url, server) = exchange_server(fake.clone()).await;
-            let db = database();
-            let (mut order, mut response) = managed_price_fixture();
-            order.price = dec!(90.125);
-            order.amount_usdc = order.price * order.quantity;
-            response.price = if changed { dec!(120.375) } else { order.price };
-            db.save_managed_order(&order).unwrap();
-            fake.orders
-                .lock()
-                .unwrap()
-                .insert(order.client_order_id.clone(), response.clone());
-            let mut engine = engine(db.clone(), &url).await;
-            {
-                let mut config = engine.state.config.write().await;
-                config.exchange.is_testnet = testnet;
-                config.grid.order_amount_usdc = dec!(10);
-                config.grid.max_position_usdc = Some(dec!(245));
-                config.grid.pause_on_max_position = false;
-            }
-            let exchange = engine.state.config.read().await.exchange.clone();
-            engine.client = Arc::new(BinanceFuturesClient::with_base_url(&exchange, url.clone()));
-            assert!(engine.sync_live_orders().await);
-            assert_managed_price(&engine, &db, response.price).await;
-            assert_eq!(
-                submit(&mut engine).await,
-                !changed,
-                "testnet={testnet}, changed={changed}"
-            );
-            assert_eq!(fake.posts.lock().unwrap().len(), usize::from(!changed));
-            server.abort();
+async fn managed_open_price_change_affects_opening_order_limit_on_live() {
+    for changed in [false, true] {
+        let fake = Exchange::default();
+        let (url, server) = exchange_server(fake.clone()).await;
+        let db = database();
+        let (mut order, mut response) = managed_price_fixture();
+        order.price = dec!(90.125);
+        order.amount_usdc = order.price * order.quantity;
+        response.price = if changed { dec!(120.375) } else { order.price };
+        db.save_managed_order(&order).unwrap();
+        fake.orders
+            .lock()
+            .unwrap()
+            .insert(order.client_order_id.clone(), response.clone());
+        let mut engine = engine(db.clone(), &url).await;
+        {
+            let mut config = engine.state.config.write().await;
+            config.grid.order_amount_usdc = dec!(10);
+            config.grid.max_position_usdc = Some(dec!(245));
+            config.grid.pause_on_max_position = false;
         }
+        let exchange = engine.state.config.read().await.exchange.clone();
+        engine.client = Arc::new(BinanceFuturesClient::with_base_url(&exchange, url.clone()));
+        assert!(engine.sync_live_orders().await);
+        assert_managed_price(&engine, &db, response.price).await;
+        assert_eq!(submit(&mut engine).await, !changed, "changed={changed}");
+        assert_eq!(fake.posts.lock().unwrap().len(), usize::from(!changed));
+        server.abort();
     }
 }
 
@@ -2330,11 +2323,9 @@ async fn resume_rejects_changed_and_unknown_modes_before_exchange_work() {
         reply,
     };
     paper.exchange.dry_run = false;
-    paper.exchange.is_testnet = false;
     engine.state.save_runtime_config(paper).await.unwrap();
     engine.handle_control_action(pending).await;
     assert!(response.await.unwrap().is_err());
-    assert!(resume(&mut engine, TradingMode::Testnet).await.is_err());
     assert!(resume(&mut engine, TradingMode::Unknown).await.is_err());
     assert_eq!(*engine.state.status.read().await, BotStatus::Paused);
     assert!(!engine.exchange_rules_loaded);
@@ -7959,12 +7950,8 @@ async fn conflicting_duplicate_snapshot_does_not_adopt_unknown_order() {
 #[tokio::test]
 async fn switching_to_exchange_modes_requires_manual_resume_before_orders() {
     for (source, target, previously_running) in [
-        (TradingMode::Paper, TradingMode::Testnet, false),
-        (TradingMode::Paper, TradingMode::Testnet, true),
         (TradingMode::Paper, TradingMode::Live, false),
         (TradingMode::Paper, TradingMode::Live, true),
-        (TradingMode::Testnet, TradingMode::Live, false),
-        (TradingMode::Live, TradingMode::Testnet, false),
     ] {
         let fake = Exchange::default();
         let (url, server) = exchange_server(fake.clone()).await;
@@ -7972,7 +7959,6 @@ async fn switching_to_exchange_modes_requires_manual_resume_before_orders() {
         let mut engine = engine(db.clone(), &url).await;
         let mut initial = engine.state.config.read().await.clone();
         initial.exchange.dry_run = source == TradingMode::Paper;
-        initial.exchange.is_testnet = source == TradingMode::Testnet;
         db.save_config(&initial).unwrap();
         engine
             .state
@@ -7987,7 +7973,6 @@ async fn switching_to_exchange_modes_requires_manual_resume_before_orders() {
         let epoch = engine.state.pause_epoch();
         let mut exchange = initial;
         exchange.exchange.dry_run = false;
-        exchange.exchange.is_testnet = target == TradingMode::Testnet;
         let (committed, _) = tokio::join!(
             engine.state.save_runtime_config(exchange.clone()),
             engine.state.resume_trading_silently(epoch)

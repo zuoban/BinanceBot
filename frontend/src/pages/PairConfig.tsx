@@ -10,10 +10,10 @@ import type { GridConfig } from '../lib/types';
 import { ErrorNotice, PageBreadcrumb, PageTitle } from '../components/Common';
 import { useDeleteStrategy } from '../components/DeleteStrategy';
 
-type FormValues = Omit<GridConfig, 'dry_run' | 'is_testnet' | 'post_only'> & { mode: 'PAPER' | 'TESTNET' | 'LIVE' };
+type FormValues = Omit<GridConfig, 'dry_run' | 'post_only'> & { mode: 'PAPER' | 'LIVE' };
 const defaults: FormValues = { symbol: '', direction: 'LONG', grid_interval: '0.1', order_amount_usdc: '100', buy_window: 3, sell_window: 3, mode: 'PAPER', min_price: null, max_price: null, max_position_usdc: '1000', pause_on_max_position: true };
 function toForm(c: GridConfig): FormValues {
-  return { ...c, mode: c.dry_run ? 'PAPER' : c.is_testnet ? 'TESTNET' : 'LIVE' };
+  return { ...c, mode: c.dry_run ? 'PAPER' : 'LIVE' };
 }
 export default function PairConfig() {
   const { symbol } = useParams();
@@ -43,8 +43,7 @@ export default function PairConfig() {
   }, [pathname, router]);
   const baseline = useRef<{ symbol: string; config: GridConfig & { config_version: string } } | null>(null);
   const selectedMode = Form.useWatch('mode', form);
-  const environment = selectedMode === 'TESTNET' ? 'testnet' : 'mainnet';
-  const symbols = useQuery({ queryKey: ['exchange-symbols', environment], queryFn: ({ signal }) => api<string[]>(`/api/exchange/symbols?environment=${environment}`, { signal }), enabled: adding, retry: false, refetchOnWindowFocus: false });
+  const symbols = useQuery({ queryKey: ['exchange-symbols'], queryFn: ({ signal }) => api<string[]>('/api/exchange/symbols?environment=mainnet', { signal }), enabled: adding, retry: false, refetchOnWindowFocus: false });
   const config = useQuery({ queryKey: ['config', symbol, pair?.scoped], queryFn: ({ signal }) => api<GridConfig & { config_version: string }>(pairPath(pair!, 'config'), { signal }), enabled: !!pair, refetchOnWindowFocus: false });
   useEffect(() => {
     setReady(adding);
@@ -62,7 +61,7 @@ export default function PairConfig() {
       if (!adding && (typeof baseline.current?.config.config_version !== 'string' || !baseline.current.config.config_version || baseline.current.symbol !== symbol)) throw new Error('无法确认配置版本，请重新加载策略配置');
       return post<GridConfig | string>(adding ? '/api/pairs' : pairPath(pair!, 'config'), {
         ...fields, ...(!adding && { baseline_version: baseline.current?.config.config_version }), symbol: fields.symbol.trim().toUpperCase(),
-        dry_run: mode === 'PAPER', is_testnet: mode === 'TESTNET', post_only: true,
+        dry_run: mode === 'PAPER', post_only: true,
         min_price: fields.min_price || null, max_price: fields.max_price || null, max_position_usdc: fields.max_position_usdc || null,
       });
     },
@@ -124,12 +123,12 @@ export default function PairConfig() {
       if (!result.error && result.data && symbol) { baseline.current = { symbol, config: result.data }; form.setFieldsValue(toForm(result.data)); edit.setDirty(false); mutation.reset(); }
     }}>重新加载策略配置</Button>}
     {pairs.data && !pair && !adding && <Alert type="warning" title="该交易对不存在或已移除" />}
-    <Form<FormValues> className="config-form" form={form} layout="vertical" onFinish={values => void submit(values)} onValuesChange={changed => { if (adding && changed.mode && (changed.mode === 'TESTNET' ? 'testnet' : 'mainnet') !== environment) form.setFieldValue('symbol', undefined); edit.setDirty(true); }} disabled={formDisabled}>
+    <Form<FormValues> className="config-form" form={form} layout="vertical" onFinish={values => void submit(values)} onValuesChange={() => { edit.setDirty(true); }} disabled={formDisabled}>
       <Card title="基本设置">
         <Row gutter={20}>
           <Col xs={24} md={12}><Form.Item name="symbol" label="合约交易对" rules={[{ required: true, message: '请选择交易对' }]} getValueProps={value => ({ value: value || undefined })} extra={adding && symbols.isError ? <span>交易对加载失败 <Button type="link" onClick={() => void symbols.refetch()}>重试</Button></span> : undefined}>{adding ? <Select showSearch optionFilterProp="label" placeholder={symbols.isFetching ? '正在加载交易对...' : '搜索并选择交易对'} loading={symbols.isFetching} disabled={formDisabled || symbols.isFetching || symbols.isError} notFoundContent="没有匹配的交易对" options={(symbols.data ?? []).map(value => ({ value, label: value }))} /> : <Input disabled />}</Form.Item></Col>
           <Col xs={24} md={12}><Form.Item name="direction" label="交易方向" rules={[{ required: true }]}><Select options={[{ value: 'LONG', label: '做多 · 买入开仓 / 卖出平仓' }, { value: 'SHORT', label: '做空 · 卖出开仓 / 买入平仓' }]} /></Form.Item></Col>
-          <Col xs={24} md={12}><Form.Item name="mode" label="运行模式" rules={[{ required: true }]} extra="模拟盘使用真实行情进行本地撮合。"><Select options={[{ value: 'PAPER', label: '模拟盘 / Paper Trading' }, { value: 'TESTNET', label: '测试网 / Testnet' }, { value: 'LIVE', label: '实盘 / Live' }]} /></Form.Item></Col>
+          <Col xs={24} md={12}><Form.Item name="mode" label="运行模式" rules={[{ required: true }]} extra="模拟盘使用真实行情进行本地撮合。"><Select options={[{ value: 'PAPER', label: '模拟盘 / Paper Trading' }, { value: 'LIVE', label: '实盘 / Live' }]} /></Form.Item></Col>
         </Row>
         {selectedMode === 'LIVE' && <Alert type="warning" showIcon title="实盘使用真实资金，请核对交易方向和风险限制。" />}
       </Card>

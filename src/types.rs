@@ -61,19 +61,18 @@ impl GridDirection {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum TradingMode {
-    #[default]
-    Unknown,
     Paper,
-    Testnet,
     Live,
+    #[default]
+    #[serde(other)]
+    Unknown,
 }
 
 impl TradingMode {
-    pub fn from_exchange(dry_run: bool, is_testnet: bool) -> Self {
+    /// Paper mode runs locally; every order-bearing environment is mainnet.
+    pub fn from_dry_run(dry_run: bool) -> Self {
         if dry_run {
             Self::Paper
-        } else if is_testnet {
-            Self::Testnet
         } else {
             Self::Live
         }
@@ -83,7 +82,6 @@ impl TradingMode {
         match self {
             Self::Unknown => "UNKNOWN",
             Self::Paper => "PAPER",
-            Self::Testnet => "TESTNET",
             Self::Live => "LIVE",
         }
     }
@@ -91,7 +89,6 @@ impl TradingMode {
     pub fn from_db(value: &str) -> Self {
         match value {
             "PAPER" => Self::Paper,
-            "TESTNET" => Self::Testnet,
             "LIVE" => Self::Live,
             _ => Self::Unknown,
         }
@@ -540,8 +537,11 @@ pub struct UpdateConfigPayload {
     pub post_only: Option<bool>,
     #[serde(default)]
     pub dry_run: Option<bool>,
+    /// Retired: testnet mode was removed. Only rejected so a stale client
+    /// cannot silently turn its testnet configuration into live trading.
     #[serde(default)]
     pub is_testnet: Option<bool>,
+    #[serde(default)]
     pub recv_window: Option<u64>,
     pub sync_interval_secs: Option<u64>,
     pub api_key: Option<String>,
@@ -586,7 +586,6 @@ pub struct WebConfigView {
     pub sell_window: usize,
     pub post_only: bool,
     pub dry_run: bool,
-    pub is_testnet: bool,
     pub recv_window: u64,
     pub sync_interval_secs: u64,
     pub has_api_key: bool,

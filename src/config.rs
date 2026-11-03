@@ -40,8 +40,6 @@ pub struct PairExchangeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_secret: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub is_testnet: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dry_run: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recv_window: Option<u64>,
@@ -51,9 +49,6 @@ pub struct PairExchangeConfig {
 
 impl PairExchangeConfig {
     fn apply(&self, exchange: &mut ExchangeConfig) {
-        if let Some(value) = self.is_testnet {
-            exchange.is_testnet = value;
-        }
         if let Some(value) = self.dry_run {
             exchange.dry_run = value;
         }
@@ -73,7 +68,6 @@ impl TradingPairConfig {
     pub fn update_from(&mut self, config: &AppConfig) {
         self.grid = Some(config.grid.clone());
         self.exchange = PairExchangeConfig {
-            is_testnet: Some(config.exchange.is_testnet),
             dry_run: Some(config.exchange.dry_run),
             ..Default::default()
         };
@@ -135,8 +129,6 @@ pub struct ExchangeConfig {
     pub api_key: String,
     #[serde(default)]
     pub api_secret: String,
-    #[serde(default = "default_false")]
-    pub is_testnet: bool,
     #[serde(default = "default_true")]
     pub dry_run: bool,
     #[serde(default = "default_recv_window")]
@@ -216,7 +208,6 @@ pub struct GridConfigSummary {
     pub max_price: Option<Decimal>,
     pub max_position_usdc: Option<Decimal>,
     pub pause_on_max_position: bool,
-    pub is_testnet: bool,
     pub dry_run: bool,
 }
 
@@ -226,10 +217,6 @@ fn default_true() -> bool {
 
 fn default_symbol() -> String {
     "SOLUSDC".to_string()
-}
-
-fn default_false() -> bool {
-    false
 }
 
 fn default_recv_window() -> u64 {
@@ -267,7 +254,6 @@ impl Default for AppConfig {
                 symbol: "SOLUSDC".to_string(),
                 api_key: String::new(),
                 api_secret: String::new(),
-                is_testnet: false,
                 dry_run: true,
                 recv_window: 5000,
                 sync_interval_secs: 3,
@@ -390,7 +376,6 @@ impl AppConfig {
             max_price: self.grid.max_price,
             max_position_usdc: self.grid.max_position_usdc,
             pause_on_max_position: self.grid.pause_on_max_position,
-            is_testnet: self.exchange.is_testnet,
             dry_run: self.exchange.dry_run,
         }
     }
@@ -435,7 +420,7 @@ impl ExchangeConfig {
         if !self.dry_run {
             anyhow::ensure!(
                 !self.api_key.trim().is_empty() && !self.api_secret.trim().is_empty(),
-                "实盘或测试网需要配置 API Key 和 Secret"
+                "实盘需要配置 API Key 和 Secret"
             );
         }
         Ok(())
@@ -594,7 +579,7 @@ mod tests {
                 {"symbol":"SOLUSDC", "exchange":{"api_key":"first-key", "api_secret":"first-secret", "recv_window":8000, "sync_interval_secs":7, "dry_run":false},
                  "telegram":{"enabled":true,"bot_token":"first-token","chat_id":"123"}},
                 {"symbol":"BTCUSDT", "grid":{"grid_interval":"10"},
-                 "exchange":{"api_key":"second-key","api_secret":"second-secret", "dry_run":true,"is_testnet":true},
+                 "exchange":{"api_key":"second-key","api_secret":"second-secret", "dry_run":true},
                  "telegram":{"enabled":false}}
             ]
         })).unwrap();
@@ -608,7 +593,7 @@ mod tests {
                 && strategy.exchange.sync_interval_secs == 7
                 && strategy.telegram.bot_token == "first-token"));
         assert!(!configs[0].exchange.dry_run);
-        assert!(configs[1].exchange.dry_run && configs[1].exchange.is_testnet);
+        assert!(configs[1].exchange.dry_run);
         assert_eq!(configs[1].grid.grid_interval, dec!(10));
         let serialized = serde_json::to_value(&config).unwrap();
         config.ensure_pair_list().unwrap();
@@ -707,7 +692,7 @@ mod tests {
             "pairs": [
                 {"symbol": "SOLUSDC"},
                 {"symbol": "BTCUSDT", "grid": {"grid_interval": "10", "order_amount_usdc": "200", "buy_window": 3},
-                 "exchange": {"is_testnet": true, "dry_run": false}}
+                 "exchange": {"dry_run": false}}
             ]
         })).unwrap();
         config.validate().unwrap();
@@ -719,7 +704,6 @@ mod tests {
         assert_eq!(configs[1].grid.grid_interval, dec!(10));
         assert_eq!(configs[1].grid.buy_window, 3);
         assert_eq!(configs[1].exchange.api_key, "shared-key");
-        assert!(configs[1].exchange.is_testnet);
         assert!(!configs[1].exchange.dry_run);
         assert!(configs.iter().all(|c| c.pairs.is_empty()));
         let json = serde_json::to_value(config).unwrap();

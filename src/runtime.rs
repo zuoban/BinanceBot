@@ -629,10 +629,7 @@ impl TradingRuntime {
             prearmed
         } else {
             let symbol = strategy.exchange.symbol.clone();
-            let mode = crate::types::TradingMode::from_exchange(
-                strategy.exchange.dry_run,
-                strategy.exchange.is_testnet,
-            );
+            let mode = crate::types::TradingMode::from_dry_run(strategy.exchange.dry_run);
             let previous_unclean = db
                 .run_blocking(move |db| db.arm_execution_guard(&symbol, mode))
                 .await?;
@@ -640,10 +637,7 @@ impl TradingRuntime {
         };
         let (action_tx, action_rx) = mpsc::channel(32);
         let (ticker_tx, ticker_rx) = broadcast::channel::<TickerInfo>(64);
-        let (market_tx, market_rx) = watch::channel((
-            strategy.exchange.symbol.clone(),
-            strategy.exchange.is_testnet,
-        ));
+        let (market_tx, market_rx) = watch::channel(strategy.exchange.symbol.clone());
         let client = Arc::new(self.exchange_client(&strategy.exchange));
         let state = if multi {
             AppState::new_for_pair_with_rates(

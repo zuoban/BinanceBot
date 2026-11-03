@@ -924,10 +924,6 @@ fn plans_survive_database_reopen_and_are_scoped_and_unique() {
         assert_eq!(restored.target.quantity, dec!(0.48));
         assert_eq!(restored.phase, RemainderPhase::Canceling);
         assert!(db
-            .load_remainder_plan("SOLUSDC", TradingMode::Testnet)
-            .unwrap()
-            .is_none());
-        assert!(db
             .load_remainder_plan("BTCUSDC", TradingMode::Live)
             .unwrap()
             .is_none());

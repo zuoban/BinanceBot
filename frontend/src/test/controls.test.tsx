@@ -163,7 +163,7 @@ it('submits resumes serially even when the first is not confirmed', async () => 
   expect(run).toHaveBeenNthCalledWith(2, expect.objectContaining({ symbol: 'BTCUSDC' }), 'resume', true);
 });
 
-it.each(['PAPER', 'TESTNET', 'LIVE'] as const)('binds a confirmed resume to the displayed %s mode', async mode => {
+it.each(['PAPER', 'LIVE'] as const)('binds a confirmed resume to the displayed %s mode', async mode => {
   vi.mocked(post).mockRejectedValue(new ApiError('策略运行模式已变化', 200));
   const client = new QueryClient();
   const wrapper = ({ children }: { children: React.ReactNode }) => <QueryClientProvider client={client}><App><ControlProvider>{children}</ControlProvider></App></QueryClientProvider>;

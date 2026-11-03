@@ -2292,7 +2292,6 @@ async fn last_prices_are_isolated_by_symbol_and_mode_and_never_force_out_of_boun
         (vec![dec!(118.8)], vec![])
     );
     config.exchange.dry_run = false;
-    config.exchange.is_testnet = true;
     assert_eq!(
         engine
             .window_prices(&config, &rules, dec!(118.84))

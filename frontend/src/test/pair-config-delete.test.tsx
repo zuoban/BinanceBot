@@ -32,7 +32,7 @@ beforeEach(() => {
   vi.stubGlobal('matchMedia', vi.fn().mockImplementation(query => ({ matches: false, media: query, addListener: vi.fn(), removeListener: vi.fn(), addEventListener: vi.fn(), removeEventListener: vi.fn() })));
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
 });
-function setup(request: Promise<unknown>, initialPath = '/pairs/BTCUSDC/config', configError?: Error, symbols = (path: string): Promise<string[]> => Promise.resolve(path.includes('testnet') ? ['ETHUSDT'] : ['BTCUSDC', 'SOLUSDC']), postOnly = true) {
+function setup(request: Promise<unknown>, initialPath = '/pairs/BTCUSDC/config', configError?: Error, symbols = (_path: string): Promise<string[]> => Promise.resolve(['BTCUSDC', 'SOLUSDC']), postOnly = true) {
   mocks.api.mockImplementation((path: string, init?: RequestInit) => path.startsWith('/api/exchange/symbols?') ? symbols(path) : init?.method === 'DELETE' ? request : configError ? Promise.reject(configError) : Promise.resolve({ ...pair('BTCUSDC').grid_config, post_only: postOnly, config_version: 'version-1' }));
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const router = createMemoryRouter([{ element: <Shell />, children: [
@@ -59,22 +59,15 @@ async function selectMode(user: UserEvent, label: string) {
   await user.click(await screen.findByTitle(label));
 }
 
-it('loads symbols for the selected environment and clears the selection across environments', async () => {
+it('loads symbols from the exchange and allows selecting symbol and mode', async () => {
   setup(Promise.resolve(), '/pairs/new');
   const user = userEvent.setup();
   await waitFor(() => expect(mocks.api).toHaveBeenCalledWith('/api/exchange/symbols?environment=mainnet', expect.anything()));
   await selectSymbol(user, 'SOLUSDC');
   await selectMode(user, '实盘 / Live');
   expect(screen.getByLabelText('合约交易对').closest('.ant-select-content')).toHaveAttribute('title', 'SOLUSDC');
-  await selectMode(user, '测试网 / Testnet');
-  await waitFor(() => expect(mocks.api).toHaveBeenCalledWith('/api/exchange/symbols?environment=testnet', expect.anything()));
-  expect(screen.getByLabelText('合约交易对').closest('.ant-select-content')).not.toHaveAttribute('title', 'SOLUSDC');
-  await selectSymbol(user, 'ETHUSDT');
   await selectMode(user, '模拟盘 / Paper Trading');
-  expect(screen.getByLabelText('合约交易对').closest('.ant-select-content')).not.toHaveAttribute('title', 'ETHUSDT');
-  await user.click(screen.getByLabelText('合约交易对'));
-  expect(await screen.findByTitle('SOLUSDC')).toBeInTheDocument();
-  expect(screen.queryByTitle('ETHUSDT')).not.toBeInTheDocument();
+  expect(screen.getByLabelText('合约交易对').closest('.ant-select-content')).toHaveAttribute('title', 'SOLUSDC');
 });
 
 it('shows loading, retries a failed symbol request and searches the returned symbols', async () => {

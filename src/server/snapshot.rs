@@ -24,15 +24,9 @@ pub(crate) struct AccountSnapshot {
 struct AccountSnapshotData {
     symbol: String,
     dry_run: bool,
-    grid_config: AccountGridConfig,
     ticker: AccountTicker,
     position: AccountPosition,
     account: AccountInfo,
-}
-
-#[derive(Serialize)]
-struct AccountGridConfig {
-    is_testnet: bool,
 }
 
 #[derive(Serialize)]
@@ -63,7 +57,7 @@ impl SnapshotScope {
     fn from_config(config: &AppConfig) -> Self {
         Self {
             symbol: config.exchange.symbol.clone(),
-            mode: TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet),
+            mode: TradingMode::from_dry_run(config.exchange.dry_run),
         }
     }
 }
@@ -180,13 +174,10 @@ impl AppState {
         };
         let account = self.account.read().await.clone();
         AccountSnapshot {
-            mode: TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet),
+            mode: TradingMode::from_dry_run(config.exchange.dry_run),
             snapshot: AccountSnapshotData {
                 symbol: config.exchange.symbol.clone(),
                 dry_run: config.exchange.dry_run,
-                grid_config: AccountGridConfig {
-                    is_testnet: config.exchange.is_testnet,
-                },
                 ticker,
                 position,
                 account,

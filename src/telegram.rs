@@ -413,7 +413,7 @@ mod tests {
 
     #[test]
     fn position_amount_uses_total_position_at_mark_price_in_all_modes() {
-        for mode in [TradingMode::Paper, TradingMode::Testnet, TradingMode::Live] {
+        for mode in [TradingMode::Paper, TradingMode::Live] {
             for side in [OrderSide::Buy, OrderSide::Sell] {
                 let mut trade = trade(side);
                 trade.mode = mode;
@@ -522,7 +522,7 @@ mod tests {
 
     #[test]
     fn titles_use_execution_average_without_market_or_account_data() {
-        for mode in [TradingMode::Paper, TradingMode::Testnet, TradingMode::Live] {
+        for mode in [TradingMode::Paper, TradingMode::Live] {
             for side in [OrderSide::Buy, OrderSide::Sell] {
                 let mut trade = trade(side);
                 trade.mode = mode;

@@ -216,7 +216,7 @@ it('confirms and resumes the freshly refreshed targets including newly paused li
   overview.refetch.mockResolvedValue({ data: { generated_at: '', pairs: [
     { snapshot: running, mode: 'PAPER', scoped: true },
     { snapshot: newlyPaused, mode: 'LIVE', scoped: true },
-    { snapshot: anotherPaused, mode: 'TESTNET', scoped: true },
+    { snapshot: anotherPaused, mode: 'PAPER', scoped: true },
   ] }, error: null });
   render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
   const user = userEvent.setup();
@@ -228,7 +228,7 @@ it('confirms and resumes the freshly refreshed targets including newly paused li
   await user.click(screen.getByRole('button', { name: '确认执行' }));
   await waitFor(() => expect(runBatchControls).toHaveBeenCalledWith([
     expect.objectContaining({ symbol: 'SOLUSDC', status: 'PAUSED', mode: 'LIVE', scoped: true }),
-    expect.objectContaining({ symbol: 'XRPUSDC', status: 'PAUSED', mode: 'TESTNET', scoped: true }),
+    expect.objectContaining({ symbol: 'XRPUSDC', status: 'PAUSED', mode: 'PAPER', scoped: true }),
   ], 'resume', actions.run));
 });
 

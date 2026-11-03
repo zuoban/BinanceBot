@@ -344,7 +344,6 @@ async fn test_four_argument_record_trade_live_mode_managed_order_and_pair_intent
     let mut config = AppConfig::default();
     config.exchange.symbol = "SOLUSDC".to_string();
     config.exchange.dry_run = false;
-    config.exchange.is_testnet = false;
     let db = Arc::new(Database::open(":memory:").unwrap());
     let (action_tx, _action_rx) = mpsc::channel(16);
     let state = AppState::new(config, db.clone(), action_tx);

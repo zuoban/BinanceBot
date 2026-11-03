@@ -302,7 +302,6 @@ async fn simulated_live_orders_and_fills() {
         let mut config = AppConfig::default();
         config.exchange.symbol = format!("BENCH{pair}USDT");
         config.exchange.dry_run = false;
-        config.exchange.is_testnet = false;
         config.exchange.api_key = "benchmark-key".into();
         config.exchange.api_secret = "benchmark-secret".into();
         let (tx, rx) = mpsc::channel(8);

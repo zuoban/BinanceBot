@@ -11,16 +11,12 @@ use tokio_tungstenite::connect_async;
 use tracing::{error, info, warn};
 
 pub struct BinanceWsStream {
-    config_rx: watch::Receiver<(String, bool)>,
+    config_rx: watch::Receiver<String>,
     ticker_tx: broadcast::Sender<TickerInfo>,
 }
 
-fn stream_url(symbol: &str, is_testnet: bool) -> String {
-    let host = if is_testnet {
-        "wss://fstream.binancefuture.com"
-    } else {
-        "wss://fstream.binance.com"
-    };
+fn stream_url(symbol: &str) -> String {
+    let host = "wss://fstream.binance.com";
     let symbol = symbol.to_lowercase();
     format!("{host}/market/stream?streams={symbol}@ticker/{symbol}@markPrice@1s")
 }
@@ -130,7 +126,7 @@ fn parse_market_update(
 
 impl BinanceWsStream {
     pub fn new(
-        config_rx: watch::Receiver<(String, bool)>,
+        config_rx: watch::Receiver<String>,
         ticker_tx: broadcast::Sender<TickerInfo>,
     ) -> Self {
         Self {
@@ -145,18 +141,18 @@ impl BinanceWsStream {
 
     async fn run_with_url<F>(mut self, build_url: F)
     where
-        F: Fn(&str, bool) -> String,
+        F: Fn(&str) -> String,
     {
         let mut backoff_secs = 1u64;
         let mut previous_config = None;
         let mut event_times = EventTimes::default();
         'connect: loop {
-            let (symbol, is_testnet) = self.config_rx.borrow_and_update().clone();
-            if previous_config.as_ref() != Some(&(symbol.clone(), is_testnet)) {
+            let symbol = self.config_rx.borrow_and_update().clone();
+            if previous_config.as_ref() != Some(&symbol) {
                 event_times = EventTimes::default();
-                previous_config = Some((symbol.clone(), is_testnet));
+                previous_config = Some(symbol.clone());
             }
-            let ws_url = build_url(&symbol, is_testnet);
+            let ws_url = build_url(&symbol);
             info!("Starting Binance WebSocket stream for {}", ws_url);
 
             let connection = tokio::select! {
@@ -182,7 +178,7 @@ impl BinanceWsStream {
                         let Some(msg_res) = msg_res else { break };
                         match msg_res {
                             Ok(msg) if msg.is_text() => {
-                                if *self.config_rx.borrow() != (symbol.clone(), is_testnet) {
+                                if *self.config_rx.borrow() != symbol {
                                     continue 'connect;
                                 }
                                 if let Ok(text) = msg.to_text() {
@@ -232,11 +228,9 @@ mod tests {
     #[test]
     fn combined_streams_are_routed_and_decoded_independently() {
         assert_eq!(
-            stream_url("BTCUSDT", false),
+            stream_url("BTCUSDT"),
             "wss://fstream.binance.com/market/stream?streams=btcusdt@ticker/btcusdt@markPrice@1s"
         );
-        assert!(stream_url("BTCUSDT", true)
-            .starts_with("wss://fstream.binancefuture.com/market/stream?"));
         let now = Utc::now();
         let mut times = EventTimes::default();
         let mark = format!(
@@ -335,13 +329,13 @@ mod tests {
                 }
             }
         });
-        let (config_tx, config_rx) = watch::channel(("BTCUSDT".to_string(), false));
+        let (config_tx, config_rx) = watch::channel("BTCUSDT".to_string());
         let (ticker_tx, mut ticker_rx) = broadcast::channel(8);
-        let client = tokio::spawn(BinanceWsStream::new(config_rx, ticker_tx).run_with_url(
-            move |symbol, is_testnet| {
-                format!("ws://{address}/market/stream?symbol={symbol}&testnet={is_testnet}")
-            },
-        ));
+        let client = tokio::spawn(
+            BinanceWsStream::new(config_rx, ticker_tx).run_with_url(move |symbol| {
+                format!("ws://{address}/market/stream?symbol={symbol}")
+            }),
+        );
         async fn receive(receiver: &mut broadcast::Receiver<TickerInfo>) -> TickerInfo {
             tokio::time::timeout(Duration::from_secs(4), receiver.recv())
                 .await
@@ -350,7 +344,7 @@ mod tests {
         }
         assert_eq!(receive(&mut ticker_rx).await.symbol, "BTCUSDT");
         assert_eq!(receive(&mut ticker_rx).await.symbol, "BTCUSDT");
-        config_tx.send(("ETHUSDT".into(), true)).unwrap();
+        config_tx.send("ETHUSDT".into()).unwrap();
         assert_eq!(receive(&mut ticker_rx).await.symbol, "ETHUSDT");
         assert!(ticker_rx.try_recv().is_err());
         client.abort();

@@ -85,7 +85,6 @@ async fn pair_cleanup_and_export_cover_all_modes_without_affecting_other_pairs()
     assert!(states[1].record_trade(btc.clone(), None, None, None).await);
     for (id, mode) in [
         ("sol-live", TradingMode::Live),
-        ("sol-testnet", TradingMode::Testnet),
         ("sol-unknown", TradingMode::Unknown),
     ] {
         assert!(db
@@ -154,9 +153,9 @@ async fn pair_cleanup_and_export_cover_all_modes_without_affecting_other_pairs()
         .unwrap()
         .map(Result::unwrap)
         .collect();
-    assert_eq!(rows.len(), 4);
+    assert_eq!(rows.len(), 3);
     assert!(rows.iter().all(|(symbol, _)| symbol == "SOLUSDC"));
-    for mode in ["PAPER", "LIVE", "TESTNET", "UNKNOWN"] {
+    for mode in ["PAPER", "LIVE", "UNKNOWN"] {
         assert!(rows.iter().any(|(_, value)| value == mode));
     }
     drop(exported);
@@ -171,7 +170,7 @@ async fn pair_cleanup_and_export_cover_all_modes_without_affecting_other_pairs()
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let result = response_json(response).await;
-    assert_eq!(result["data"]["deleted_trades"], 4);
+    assert_eq!(result["data"]["deleted_trades"], 3);
     let remaining = db.get_recent_trades(100).unwrap();
     assert_eq!(remaining.len(), 1);
     assert_eq!(remaining[0].trade_id, btc.trade_id);
@@ -181,12 +180,7 @@ async fn pair_cleanup_and_export_cover_all_modes_without_affecting_other_pairs()
     assert!(states[0].record_trade(sol, None, None, None).await);
     assert!(states[1].record_trade(btc, None, None, None).await);
     assert_eq!(db.get_recent_trades(100).unwrap().len(), 1);
-    for mode in [
-        TradingMode::Paper,
-        TradingMode::Live,
-        TradingMode::Testnet,
-        TradingMode::Unknown,
-    ] {
+    for mode in [TradingMode::Paper, TradingMode::Live, TradingMode::Unknown] {
         assert_eq!(
             db.last_fill_for("SOLUSDC", mode).unwrap(),
             Some((OrderSide::Buy, dec!(100)))

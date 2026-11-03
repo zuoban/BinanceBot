@@ -217,11 +217,7 @@ impl BinanceFuturesClient {
     }
 
     pub(crate) fn new_with_limiter(config: &ExchangeConfig, limiter: Arc<RateLimiter>) -> Self {
-        let base_url = if config.is_testnet {
-            "https://testnet.binancefuture.com".to_string()
-        } else {
-            "https://fapi.binance.com".to_string()
-        };
+        let base_url = "https://fapi.binance.com".to_string();
 
         let mut headers = HeaderMap::new();
         if !config.api_key.is_empty() {
@@ -1615,18 +1611,12 @@ mod tests {
     }
 
     #[test]
-    fn exchange_environment_follows_pair_configuration() {
-        let mut config = crate::config::AppConfig::default().exchange;
-        for (testnet, expected) in [
-            (false, "https://fapi.binance.com"),
-            (true, "https://testnet.binancefuture.com"),
-        ] {
-            config.is_testnet = testnet;
-            assert_eq!(
-                BinanceFuturesClient::new(&config).market_cache_key(),
-                expected
-            );
-        }
+    fn exchange_environment_uses_mainnet_url() {
+        let config = crate::config::AppConfig::default().exchange;
+        assert_eq!(
+            BinanceFuturesClient::new(&config).market_cache_key(),
+            "https://fapi.binance.com"
+        );
     }
 
     #[tokio::test]

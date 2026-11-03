@@ -71,18 +71,11 @@ async fn exchange_symbols_handler(
     Extension(limiter): Extension<Arc<RateLimiter>>,
     query: Result<Query<SymbolsQuery>, axum::extract::rejection::QueryRejection>,
 ) -> (StatusCode, Json<ApiResponse<Vec<String>>>) {
-    let is_testnet = match query {
-        Ok(Query(SymbolsQuery { environment })) if environment == "mainnet" => false,
-        Ok(Query(SymbolsQuery { environment })) if environment == "testnet" => true,
-        _ => {
-            return symbols_error(
-                StatusCode::BAD_REQUEST,
-                "无效的交易所环境，请使用 mainnet 或 testnet",
-            )
-        }
+    match query {
+        Ok(Query(SymbolsQuery { environment })) if environment == "mainnet" => {}
+        _ => return symbols_error(StatusCode::BAD_REQUEST, "无效的交易所环境，请使用 mainnet"),
     };
-    let mut config = AppConfig::default().exchange;
-    config.is_testnet = is_testnet;
+    let config = AppConfig::default().exchange;
     fetch_exchange_symbols(&BinanceFuturesClient::new_with_limiter(&config, limiter)).await
 }
 
@@ -337,7 +330,7 @@ async fn collect_pairs(states: &[Arc<AppState>]) -> Json<ApiResponse<Vec<Trading
             symbol: config.exchange.symbol.clone(),
             scoped: state.pair_scope().is_some(),
             status: *state.status.read().await,
-            mode: TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet),
+            mode: TradingMode::from_dry_run(config.exchange.dry_run),
             grid_config: config.summary(),
         });
     }
@@ -365,7 +358,7 @@ async fn collect_overview(states: &[Arc<AppState>]) -> Json<ApiResponse<Overview
         let snapshot = state.snapshot().await;
         OverviewPairView {
             scoped: state.pair_scope().is_some(),
-            mode: TradingMode::from_exchange(snapshot.dry_run, snapshot.grid_config.is_testnet),
+            mode: TradingMode::from_dry_run(snapshot.dry_run),
             snapshot,
         }
     }))
@@ -1439,7 +1432,7 @@ async fn get_trades_handler(
 ) -> Json<ApiResponse<Vec<TradeRecord>>> {
     let config = state.config.read().await;
     let symbol = config.exchange.symbol.clone();
-    let mode = TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
+    let mode = TradingMode::from_dry_run(config.exchange.dry_run);
     drop(config);
     let trades = match state
         .db
@@ -1635,7 +1628,6 @@ fn web_config_view(config: &AppConfig) -> WebConfigView {
         sell_window: config.grid.sell_window,
         post_only: config.grid.post_only,
         dry_run: config.exchange.dry_run,
-        is_testnet: config.exchange.is_testnet,
         recv_window: config.exchange.recv_window,
         sync_interval_secs: config.exchange.sync_interval_secs,
         has_api_key: has_key,
@@ -1657,6 +1649,10 @@ fn apply_config_payload(
     mut current_config: AppConfig,
     payload: UpdateConfigPayload,
 ) -> anyhow::Result<AppConfig> {
+    anyhow::ensure!(
+        !payload.is_testnet.unwrap_or(false),
+        "测试网模式已移除，请选择模拟盘或实盘"
+    );
     current_config.exchange.symbol = payload.symbol.trim().to_uppercase();
     if let Some(direction) = payload.direction {
         current_config.grid.direction = direction;
@@ -1670,9 +1666,6 @@ fn apply_config_payload(
     }
     if let Some(dry_run) = payload.dry_run {
         current_config.exchange.dry_run = dry_run;
-    }
-    if let Some(is_testnet) = payload.is_testnet {
-        current_config.exchange.is_testnet = is_testnet;
     }
     if let Some(value) = payload.recv_window {
         current_config.exchange.recv_window = value;
@@ -2498,6 +2491,7 @@ mod tests {
 
         for uri in [
             "/api/exchange/symbols",
+            "/api/exchange/symbols?environment=testnet",
             "/api/exchange/symbols?environment=invalid",
             "/api/exchange/symbols?environment=mainnet&environment=testnet",
         ] {
@@ -2649,9 +2643,7 @@ mod tests {
             assert_eq!(first["type"], "accounts");
             assert_eq!(first["data"]["pairs"].as_array().unwrap().len(), 1);
             let snapshot = &first["data"]["pairs"][0]["snapshot"];
-            assert_eq!(snapshot["grid_config"].as_object().unwrap().len(), 1);
-            assert!(snapshot["grid_config"]["is_testnet"].is_boolean());
-            assert_eq!(snapshot.as_object().unwrap().len(), 6);
+            assert_eq!(snapshot.as_object().unwrap().len(), 5);
             assert!(snapshot["ticker"]["mark_update_time"].is_string());
             assert!(snapshot["ticker"]["mark_price"].is_string());
             assert!(snapshot["position"]["size"].is_string());
@@ -3084,11 +3076,10 @@ mod tests {
         db.create_session("overview-test-token").unwrap();
         let lock = Arc::new(tokio::sync::Mutex::new(()));
         let mut states = Vec::new();
-        for (symbol, dry_run, is_testnet) in [("SOLUSDC", true, false), ("BTCUSDT", false, true)] {
+        for (symbol, dry_run) in [("SOLUSDC", true), ("BTCUSDT", false)] {
             let mut config = AppConfig::default();
             config.exchange.symbol = symbol.into();
             config.exchange.dry_run = dry_run;
-            config.exchange.is_testnet = is_testnet;
             let (tx, _) = tokio::sync::mpsc::channel(1);
             states.push(AppState::new_for_pair(config, db.clone(), tx, lock.clone()));
         }
@@ -3109,7 +3100,7 @@ mod tests {
         assert_eq!(overview.pairs.len(), 2);
         assert!(overview.pairs.iter().all(|pair| pair.scoped));
         assert_eq!(overview.pairs[0].mode, TradingMode::Paper);
-        assert_eq!(overview.pairs[1].mode, TradingMode::Testnet);
+        assert_eq!(overview.pairs[1].mode, TradingMode::Live);
         assert_eq!(overview.pairs[0].snapshot.symbol, "SOLUSDC");
         assert_eq!(overview.pairs[1].snapshot.symbol, "BTCUSDT");
         assert_eq!(
@@ -3188,6 +3179,17 @@ mod tests {
         assert_eq!(cleared.grid.min_price, None);
         assert_eq!(cleared.grid.max_price, None);
         assert_eq!(cleared.grid.max_position_usdc, None);
+    }
+
+    #[test]
+    fn retired_testnet_request_is_rejected_instead_of_trading_live() {
+        let payload: UpdateConfigPayload = serde_json::from_value(serde_json::json!({
+            "symbol": "SOLUSDC", "grid_interval": "0.1", "order_amount_usdc": "100",
+            "buy_window": 5, "sell_window": 5, "dry_run": false, "is_testnet": true
+        }))
+        .unwrap();
+        let error = apply_config_payload(AppConfig::default(), payload).unwrap_err();
+        assert!(error.to_string().contains("测试网模式已移除"));
     }
 
     #[tokio::test]

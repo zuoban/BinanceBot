@@ -311,7 +311,7 @@ pub struct GridTradingEngine {
     exchange_rules_loaded: bool,
     market_data_blocked: bool,
     last_remainder_change: Option<Instant>,
-    market_stream_tx: Option<watch::Sender<(String, bool)>>,
+    market_stream_tx: Option<watch::Sender<String>>,
 }
 
 impl Drop for GridTradingEngine {
@@ -753,7 +753,7 @@ impl GridTradingEngine {
         }
     }
 
-    pub fn set_market_stream_tx(&mut self, tx: watch::Sender<(String, bool)>) {
+    pub fn set_market_stream_tx(&mut self, tx: watch::Sender<String>) {
         self.market_stream_tx = Some(tx);
     }
 
@@ -891,7 +891,7 @@ impl GridTradingEngine {
         market: Decimal,
     ) -> Result<(Vec<Decimal>, Vec<Decimal>)> {
         let symbol = config.exchange.symbol.clone();
-        let mode = TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
+        let mode = TradingMode::from_dry_run(config.exchange.dry_run);
         let last_fill = self
             .state
             .db
@@ -977,8 +977,6 @@ impl GridTradingEngine {
                     config.grid.order_amount_usdc,
                     if config.exchange.dry_run {
                         "DRY_RUN (Paper Trading)"
-                    } else if config.exchange.is_testnet {
-                        "TESTNET"
                     } else {
                         "LIVE"
                     }
@@ -1254,8 +1252,7 @@ impl GridTradingEngine {
                 reply,
             } => {
                 let config = self.state.config.read().await.clone();
-                let current_mode =
-                    TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
+                let current_mode = TradingMode::from_dry_run(config.exchange.dry_run);
                 if expected_mode == TradingMode::Unknown || current_mode != expected_mode {
                     let _ = reply.send(Err("策略运行模式已改变，无法恢复策略".into()));
                     return;
@@ -1333,8 +1330,7 @@ impl GridTradingEngine {
                 reply,
             } => {
                 let config = self.state.config.read().await;
-                let current_mode =
-                    TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
+                let current_mode = TradingMode::from_dry_run(config.exchange.dry_run);
                 drop(config);
                 let result =
                     if expected_mode == TradingMode::Unknown || expected_mode != current_mode {
@@ -1406,12 +1402,9 @@ impl GridTradingEngine {
                             if !db.load_managed_orders(&symbol)?.is_empty() {
                                 return Ok(false);
                             }
-                            for mode in [
-                                TradingMode::Unknown,
-                                TradingMode::Paper,
-                                TradingMode::Testnet,
-                                TradingMode::Live,
-                            ] {
+                            for mode in
+                                [TradingMode::Unknown, TradingMode::Paper, TradingMode::Live]
+                            {
                                 if !db.load_pair_intents(&symbol, mode)?.is_empty()
                                     || db.load_remainder_plan(&symbol, mode)?.is_some()
                                 {
@@ -1483,12 +1476,10 @@ impl GridTradingEngine {
         resized_grid.sell_window = new_config.grid.sell_window;
         let only_window_changed =
             old_config.exchange == new_config.exchange && resized_grid == new_config.grid;
-        let market_changed = old_config.exchange.symbol != new_config.exchange.symbol
-            || old_config.exchange.is_testnet != new_config.exchange.is_testnet;
+        let market_changed = old_config.exchange.symbol != new_config.exchange.symbol;
         let mode_changed = old_config.exchange.dry_run != new_config.exchange.dry_run;
         let client_changed = old_config.exchange.api_key != new_config.exchange.api_key
             || old_config.exchange.api_secret != new_config.exchange.api_secret
-            || old_config.exchange.is_testnet != new_config.exchange.is_testnet
             || old_config.exchange.recv_window != new_config.exchange.recv_window;
 
         if !strategy_changed {
@@ -1674,10 +1665,7 @@ impl GridTradingEngine {
                 .paper_restore_failed
                 .store(false, std::sync::atomic::Ordering::SeqCst);
             if let Some(tx) = &self.market_stream_tx {
-                let _ = tx.send((
-                    new_config.exchange.symbol.clone(),
-                    new_config.exchange.is_testnet,
-                ));
+                let _ = tx.send(new_config.exchange.symbol.clone());
             }
             while let Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_)) =
                 self.ticker_rx.try_recv()
@@ -2494,7 +2482,7 @@ impl GridTradingEngine {
         if config.exchange.dry_run {
             return;
         }
-        let mode = TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
+        let mode = TradingMode::from_dry_run(config.exchange.dry_run);
         let pending_count = self.state.stats.read().await.pending_pnl_trades;
         self.client.note_pnl_reconcile_backlog(pending_count);
         if pending_count == 0 {
@@ -2669,7 +2657,7 @@ impl GridTradingEngine {
             self.account_cache.invalidate(&self.client).await;
             self.position_cache.invalidate(&self.client).await;
         }
-        let mode = TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
+        let mode = TradingMode::from_dry_run(config.exchange.dry_run);
         let recorded_id = order.client_order_id.clone();
         let recorded = if config.exchange.dry_run {
             self.state.has_recorded_paper_order(recorded_id, mode).await
@@ -2927,7 +2915,7 @@ impl GridTradingEngine {
         }
         if !config.exchange.dry_run {
             let symbol = config.exchange.symbol.clone();
-            let mode = TradingMode::from_exchange(false, config.exchange.is_testnet);
+            let mode = TradingMode::from_dry_run(false);
             match self
                 .state
                 .db
@@ -2946,7 +2934,7 @@ impl GridTradingEngine {
         self.trim_closing_orders_to_position().await;
         if !config.exchange.dry_run {
             let symbol = config.exchange.symbol.clone();
-            let mode = TradingMode::from_exchange(false, config.exchange.is_testnet);
+            let mode = TradingMode::from_dry_run(false);
             match self
                 .state
                 .db
@@ -4007,7 +3995,7 @@ impl GridTradingEngine {
         let config = self.state.config.read().await.clone();
         let is_dry_run = config.exchange.dry_run;
         let symbol = config.exchange.symbol.clone();
-        let mode = TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet);
+        let mode = TradingMode::from_dry_run(config.exchange.dry_run);
         let pause_epoch = self.state.pause_epoch();
         let was_running =
             !pause_already_persisted && *self.state.status.read().await == BotStatus::Running;
@@ -4647,7 +4635,7 @@ mod tests {
         engine.state.active_orders.write().await.clear();
         db.save_remainder_plan(&crate::types::RemainderPlan {
             symbol: "SOLUSDC".into(),
-            mode: TradingMode::Testnet,
+            mode: TradingMode::Live,
             sources: vec![order.clone()],
             target: order,
             phase: crate::types::RemainderPhase::Canceling,
@@ -4793,7 +4781,7 @@ mod tests {
         let (reply, response) = tokio::sync::oneshot::channel();
         engine
             .handle_control_action(BotControlAction::Resume {
-                expected_mode: TradingMode::from_exchange(false, config.exchange.is_testnet),
+                expected_mode: TradingMode::from_dry_run(false),
                 expected_epoch: engine.state.pause_epoch(),
                 reply,
             })
@@ -4892,10 +4880,7 @@ mod tests {
             .state
             .action_tx
             .send(BotControlAction::Rebalance {
-                expected_mode: TradingMode::from_exchange(
-                    config.exchange.dry_run,
-                    config.exchange.is_testnet,
-                ),
+                expected_mode: TradingMode::from_dry_run(config.exchange.dry_run),
                 reply,
             })
             .await
@@ -4923,10 +4908,7 @@ mod tests {
         let (reply, result) = tokio::sync::oneshot::channel();
         engine
             .handle_control_action(BotControlAction::Rebalance {
-                expected_mode: TradingMode::from_exchange(
-                    config.exchange.dry_run,
-                    config.exchange.is_testnet,
-                ),
+                expected_mode: TradingMode::from_dry_run(config.exchange.dry_run),
                 reply,
             })
             .await;
@@ -4985,7 +4967,7 @@ mod tests {
         let state = engine.state.clone();
         let expected_mode = {
             let config = state.config.read().await;
-            TradingMode::from_exchange(config.exchange.dry_run, config.exchange.is_testnet)
+            TradingMode::from_dry_run(config.exchange.dry_run)
         };
         let (reply, result) = tokio::sync::oneshot::channel();
         let rebuilding = tokio::spawn(async move {

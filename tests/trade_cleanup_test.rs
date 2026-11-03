@@ -129,7 +129,6 @@ async fn cleanup_requires_auth_and_confirmation_then_clears_every_scope() {
     }
     for (id, symbol, mode) in [
         (65, "SOLUSDC", TradingMode::Live),
-        (66, "SOLUSDC", TradingMode::Testnet),
         (67, "ETHUSDT", TradingMode::Paper),
         (68, "SOLUSDC", TradingMode::Unknown),
     ] {
@@ -182,7 +181,7 @@ async fn cleanup_requires_auth_and_confirmation_then_clears_every_scope() {
             .await
             .unwrap();
         assert_eq!(response.status(), expected);
-        assert_eq!(db.get_recent_trades(100).unwrap().len(), 69);
+        assert_eq!(db.get_recent_trades(100).unwrap().len(), 68);
         assert_eq!(state.stats.read().await.total_trades, 65);
     }
 
@@ -204,7 +203,7 @@ async fn cleanup_requires_auth_and_confirmation_then_clears_every_scope() {
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let result: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(result["success"], true);
-    assert_eq!(result["data"]["deleted_trades"], 69);
+    assert_eq!(result["data"]["deleted_trades"], 68);
     assert_eq!(result["data"]["snapshot"]["recent_trades"], json!([]));
     assert_eq!(result["data"]["snapshot"]["stats"]["total_trades"], 0);
     assert!(result["data"]["snapshot"]["hourly_trade_stats"]["buckets"]
@@ -228,7 +227,6 @@ async fn cleanup_requires_auth_and_confirmation_then_clears_every_scope() {
     for (symbol, mode) in [
         ("SOLUSDC", TradingMode::Paper),
         ("SOLUSDC", TradingMode::Live),
-        ("SOLUSDC", TradingMode::Testnet),
         ("SOLUSDC", TradingMode::Unknown),
         ("ETHUSDT", TradingMode::Paper),
     ] {

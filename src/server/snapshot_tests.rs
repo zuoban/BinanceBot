@@ -53,8 +53,6 @@ async fn overview_today_pnl_covers_history_modes_boundaries_and_cache_invalidati
     db.insert_trade(&pending).unwrap();
     db.insert_trade(&trade("aggregate-4", "BTCUSDC", TradingMode::Paper, now))
         .unwrap();
-    db.insert_trade(&trade("aggregate-5", "BTCUSDC", TradingMode::Testnet, now))
-        .unwrap();
     db.insert_trade(&trade("aggregate-6", "BTCUSDC", TradingMode::Unknown, now))
         .unwrap();
     db.insert_trade(&trade(
@@ -74,7 +72,7 @@ async fn overview_today_pnl_covers_history_modes_boundaries_and_cache_invalidati
     let result = db.cached_today_pnl(now).await.unwrap();
     assert_eq!(result.window_start, start);
     assert_eq!(result.window_end, now);
-    assert_eq!(result.groups.len(), 4);
+    assert_eq!(result.groups.len(), 3);
     let group = result
         .groups
         .iter()
@@ -361,7 +359,6 @@ async fn scope_changes_isolate_trade_modes_and_symbols() {
         let mut config = state.config.write().await;
         config.exchange.symbol = "BTCUSDT".into();
         config.exchange.dry_run = true;
-        config.exchange.is_testnet = true;
     }
     state.refresh_current_scope().await;
     let btc = state.snapshot_at(now).await;
@@ -535,11 +532,10 @@ async fn snapshot_push_continues_while_the_trading_engine_waits_for_rest() {
 #[tokio::test]
 async fn account_snapshot_matches_full_snapshot_without_chart_queries() {
     let state = fixture();
-    for (dry_run, is_testnet) in [(true, false), (false, true), (false, false)] {
+    for dry_run in [true, false] {
         {
             let mut config = state.config.write().await;
             config.exchange.dry_run = dry_run;
-            config.exchange.is_testnet = is_testnet;
         }
         {
             let mut ticker = state.ticker.write().await;
@@ -559,11 +555,10 @@ async fn account_snapshot_matches_full_snapshot_without_chart_queries() {
         assert_eq!(
             account,
             serde_json::json!({
-                "mode": TradingMode::from_exchange(full.dry_run, full.grid_config.is_testnet),
+                "mode": TradingMode::from_dry_run(full.dry_run),
                 "snapshot": {
                     "symbol": full.symbol,
                     "dry_run": full.dry_run,
-                    "grid_config": { "is_testnet": full.grid_config.is_testnet },
                     "ticker": {
                         "mark_price": full.ticker.mark_price,
                         "mark_update_time": full.ticker.mark_update_time,
@@ -588,11 +583,11 @@ async fn account_snapshot_waits_for_scope_transitions_and_trade_commits() {
     assert!(tokio::time::timeout(Duration::from_millis(50), &mut task)
         .await
         .is_err());
-    state.config.write().await.exchange.is_testnet = true;
+    state.config.write().await.exchange.dry_run = false;
     drop(scope);
     assert_eq!(
-        serde_json::to_value(task.await.unwrap()).unwrap()["snapshot"]["grid_config"]["is_testnet"],
-        true
+        serde_json::to_value(task.await.unwrap()).unwrap()["snapshot"]["dry_run"],
+        false
     );
 
     let commit = state.trade_commit_lock.lock().await;

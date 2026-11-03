@@ -21,7 +21,7 @@ vi.mock('../lib/api', () => ({
 
 afterEach(() => { vi.clearAllMocks(); });
 
-it.each(['PAPER', 'TESTNET', 'LIVE'] as const)('binds the rebalance confirmation to displayed %s mode', async mode => {
+it.each(['PAPER', 'LIVE'] as const)('binds the rebalance confirmation to displayed %s mode', async mode => {
   confirm.mockResolvedValue(true);
   vi.mocked(post).mockResolvedValue(undefined);
   const client = new QueryClient();

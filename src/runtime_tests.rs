@@ -56,8 +56,7 @@ fn fixture_with_unresponsive_engine(
     };
     db.save_config(&config).unwrap();
     for strategy in config.strategy_configs().unwrap() {
-        let mode =
-            TradingMode::from_exchange(strategy.exchange.dry_run, strategy.exchange.is_testnet);
+        let mode = TradingMode::from_dry_run(strategy.exchange.dry_run);
         db.arm_execution_guard(&strategy.exchange.symbol, mode)
             .unwrap();
     }
@@ -949,13 +948,12 @@ async fn request(
 }
 
 #[tokio::test]
-async fn symbols_route_shares_runtime_limiter_and_isolates_environments() {
+async fn symbols_route_shares_runtime_limiter() {
     use crate::exchange::rate_limit::RequestClass;
 
     let runtime = fixture();
     let handle = runtime.handle();
     let mainnet = "https://fapi.binance.com";
-    let testnet = "https://testnet.binancefuture.com";
     let config = AppConfig::default().exchange;
     let trading_client = runtime.exchange_client(&config);
     assert!(Arc::ptr_eq(&trading_client.limiter(), &handle.rate_limiter));
@@ -967,24 +965,6 @@ async fn symbols_route_shares_runtime_limiter_and_isolates_environments() {
     let (status, _) = request(
         &router,
         "/api/exchange/symbols?environment=mainnet",
-        "GET",
-        Value::Null,
-        true,
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_GATEWAY);
-    assert!(handle
-        .rate_limiter
-        .reserve(testnet, [7; 32], 1, RequestClass::Normal)
-        .is_ok());
-
-    handle
-        .rate_limiter
-        .reserve(testnet, [7; 32], 1799, RequestClass::Normal)
-        .unwrap();
-    let (status, _) = request(
-        &router,
-        "/api/exchange/symbols?environment=testnet",
         "GET",
         Value::Null,
         true,
@@ -3090,14 +3070,13 @@ async fn interrupt_during_pair_preparation_blocks_orders_and_cleans_up_guards() 
         ..Default::default()
     };
     config.exchange.dry_run = false;
-    config.exchange.is_testnet = true;
     config.exchange.api_key = "test-key".into();
     config.exchange.api_secret = "test-secret".into();
     let db = Arc::new(Database::open(&path).unwrap());
     db.initialize_admin_password("test-password").unwrap();
     db.save_config(&config).unwrap();
     for symbol in ["SOLUSDC", "BTCUSDT", "ETHUSDT"] {
-        db.save_pair_status(symbol, TradingMode::Testnet, BotStatus::Running)
+        db.save_pair_status(symbol, TradingMode::Live, BotStatus::Running)
             .unwrap();
     }
     let (interrupt_tx, interrupt_rx) = watch::channel(false);
@@ -3137,12 +3116,12 @@ async fn interrupt_during_pair_preparation_blocks_orders_and_cleans_up_guards() 
     let connection = rusqlite::Connection::open(&path).unwrap();
     for symbol in ["SOLUSDC", "BTCUSDT"] {
         assert_eq!(
-            db.load_pair_status(symbol, TradingMode::Testnet).unwrap(),
+            db.load_pair_status(symbol, TradingMode::Live).unwrap(),
             Some(BotStatus::Paused)
         );
         let dirty: i64 = connection
             .query_row(
-                "SELECT dirty FROM pair_execution_guard WHERE symbol = ?1 AND mode = 'TESTNET'",
+                "SELECT dirty FROM pair_execution_guard WHERE symbol = ?1 AND mode = 'LIVE'",
                 [symbol],
                 |row| row.get(0),
             )
@@ -3150,8 +3129,7 @@ async fn interrupt_during_pair_preparation_blocks_orders_and_cleans_up_guards() 
         assert_eq!(dirty, 0, "{symbol} guard was not cleared after cleanup");
     }
     assert_eq!(
-        db.load_pair_status("ETHUSDT", TradingMode::Testnet)
-            .unwrap(),
+        db.load_pair_status("ETHUSDT", TradingMode::Live).unwrap(),
         Some(BotStatus::Running)
     );
     let unstarted_guards: i64 = connection
