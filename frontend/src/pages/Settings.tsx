@@ -85,26 +85,41 @@ function GlobalSettings() {
       if (!result.error && result.data) { fill(result.data); edit.setDirty(false); mutation.reset(); }
     }}>重新加载全局设置</Button>}
     <Form form={form} layout="vertical" disabled={!ready || edit.saving} onValuesChange={() => edit.setDirty(true)} onFinish={v => void submit(v)}>
-      <Card title="交易所连接"><Alert type="info" showIcon title={`密钥不会回显，留空将保留已有值。${query.data?.has_api_key ? `当前 API Key：${query.data.api_key_preview}` : '尚未配置 API Key。'}运行模式由 API Key 决定：已配置以实盘运行，未配置以模拟盘运行。`} />
-        <Row gutter={20} className="settings-fields">
+      <Card title="交易所连接" className="settings-card">
+        <Alert type="info" showIcon title={`密钥不会回显，留空将保留已有值。${query.data?.has_api_key ? `当前 API Key：${query.data.api_key_preview}` : '尚未配置 API Key。'}运行模式由 API Key 决定：已配置以实盘运行，未配置以模拟盘运行。`} />
+        <Row gutter={[20, 16]} className="settings-fields">
           <Col xs={24} md={12}><Form.Item name="api_key" label="API Key"><Input.Password autoComplete="off" placeholder="留空保留已保存的值" /></Form.Item></Col>
           <Col xs={24} md={12}><Form.Item name="api_secret" label="API Secret"><Input.Password autoComplete="new-password" placeholder="留空保留已保存的值" /></Form.Item></Col>
-          <Col xs={24} md={12}><Form.Item name="recv_window" label="请求有效窗口（毫秒）" extra="交易所接受已签名请求的时间窗口。" rules={[{ required: true }]}><InputNumber min={1} precision={0} style={{ width: '100%' }} /></Form.Item></Col>
-          <Col xs={24} md={12}><Form.Item name="sync_interval_secs" label="同步间隔（秒）" extra="策略定期同步订单、账户和持仓的间隔。" rules={[{ required: true }]}><InputNumber min={1} precision={0} style={{ width: '100%' }} /></Form.Item></Col>
-          <Col span={24}><Form.Item name="clear_api_credentials" valuePropName="checked"><Checkbox>清除已保存的 API Key 和 Secret（清除后所有交易对将以模拟盘运行）</Checkbox></Form.Item></Col>
+          <Col xs={24} md={12}><Form.Item name="recv_window" label="请求有效窗口（毫秒）" extra="交易所接受已签名请求的时间窗口。" rules={[{ required: true }]}><InputNumber min={1} precision={0} className="full-width-input" /></Form.Item></Col>
+          <Col xs={24} md={12}><Form.Item name="sync_interval_secs" label="同步间隔（秒）" extra="策略定期同步订单、账户和持仓的间隔。" rules={[{ required: true }]}><InputNumber min={1} precision={0} className="full-width-input" /></Form.Item></Col>
         </Row>
+        <div className="settings-card-footer">
+          <Form.Item name="clear_api_credentials" valuePropName="checked" className="settings-checkbox-item"><Checkbox>清除已保存的 API Key 和 Secret（清除后所有交易对将以模拟盘运行）</Checkbox></Form.Item>
+        </div>
       </Card>
-      <Card title="全局风控" className="form-card"><Row gutter={20}>
-        <Col xs={24} md={12}><Form.Item name="global_max_position_notional" label="全局最大持仓金额" extra="留空表示关闭；所有已配置策略的持仓绝对金额直接相加（包括不同模式和计价资产，不进行汇率换算），达到后暂停所有策略。" rules={[{ validator: (_, value: string | null | undefined) => !value || (/^\d+(\.\d+)?$/.test(value) && /[1-9]/.test(value)) ? Promise.resolve() : Promise.reject(new Error('请输入大于 0 的金额')) }]}><InputNumber stringMode min="0" style={{ width: '100%' }} /></Form.Item></Col>
-        <Col xs={24} md={12}><Form.Item name="pause_on_zero_available_margin" label="可用保证金不足时暂停" valuePropName="checked" extra="开启后，任意已配置策略的可用保证金小于或等于零时，暂停所有策略、撤销机器人挂单并保留持仓。"><Switch checkedChildren="开启" unCheckedChildren="关闭" /></Form.Item></Col>
-      </Row></Card>
-      <Card title="Telegram 通知" className="form-card"><Row gutter={20}>
-        <Col span={24}><Form.Item name="telegram_enabled" label="通知开关" valuePropName="checked"><Switch checkedChildren="开启" unCheckedChildren="关闭" /></Form.Item></Col>
-        <Col xs={24} md={12}><Form.Item name="telegram_bot_token" label="Bot Token" extra={query.data?.has_telegram_bot_token ? '已保存 Token，留空保持不变。' : '尚未配置 Token。'}><Input.Password autoComplete="new-password" /></Form.Item></Col>
-        <Col xs={24} md={12}><Form.Item name="telegram_chat_id" label="Chat ID" extra="向机器人发送消息后，可通过 Telegram Bot API 的 getUpdates 获取会话 ID。"><Input /></Form.Item></Col>
-        <Col span={24}><Form.Item name="clear_telegram_credentials" valuePropName="checked"><Checkbox>清除 Telegram 凭证（请先关闭通知）</Checkbox></Form.Item></Col>
-      </Row></Card>
-      <div className="save-bar"><span className="muted" role="status">{edit.dirty ? '有未保存的修改' : '所有修改已保存'}</span><Space wrap><Button onClick={async () => { if (edit.dirty && !await modal.confirm({ title: '放弃未保存的修改？', okText: '还原', cancelText: '继续编辑' })) return; if (query.data) fill(query.data); edit.setDirty(false); }}>还原</Button><Button type="primary" htmlType="submit" loading={mutation.isPending}>保存全局设置</Button></Space></div>
+      <Row gutter={[20, 20]} className="settings-grid-row">
+        <Col xs={24} xl={12} className="settings-grid-col">
+          <Card title="全局风控" className="settings-card settings-card-fill">
+            <Row gutter={[20, 16]}>
+              <Col span={24}><Form.Item name="global_max_position_notional" label="全局最大持仓金额" extra="留空表示关闭；所有已配置策略的持仓绝对金额直接相加（包括不同模式和计价资产，不进行汇率换算），达到后暂停所有策略。" rules={[{ validator: (_, value: string | null | undefined) => !value || (/^\d+(\.\d+)?$/.test(value) && /[1-9]/.test(value)) ? Promise.resolve() : Promise.reject(new Error('请输入大于 0 的金额')) }]}><InputNumber stringMode min="0" className="full-width-input" /></Form.Item></Col>
+              <Col span={24}><Form.Item name="pause_on_zero_available_margin" label="可用保证金不足时暂停" valuePropName="checked" className="settings-last-item" extra="开启后，任意已配置策略的可用保证金小于或等于零时，暂停所有策略、撤销机器人挂单并保留持仓。"><Switch checkedChildren="开启" unCheckedChildren="关闭" /></Form.Item></Col>
+            </Row>
+          </Card>
+        </Col>
+        <Col xs={24} xl={12} className="settings-grid-col">
+          <Card title="Telegram 通知" className="settings-card settings-card-fill">
+            <Row gutter={[16, 16]}>
+              <Col span={24}><Form.Item name="telegram_enabled" label="通知开关" valuePropName="checked"><Switch checkedChildren="开启" unCheckedChildren="关闭" /></Form.Item></Col>
+              <Col xs={24} sm={12}><Form.Item name="telegram_bot_token" label="Bot Token" extra={query.data?.has_telegram_bot_token ? '已保存 Token，留空保持不变。' : '尚未配置 Token。'}><Input.Password autoComplete="new-password" /></Form.Item></Col>
+              <Col xs={24} sm={12}><Form.Item name="telegram_chat_id" label="Chat ID" extra="向机器人发送消息后，可通过 Telegram Bot API 的 getUpdates 获取会话 ID。"><Input /></Form.Item></Col>
+            </Row>
+            <div className="settings-card-footer">
+              <Form.Item name="clear_telegram_credentials" valuePropName="checked" className="settings-checkbox-item"><Checkbox>清除 Telegram 凭证（请先关闭通知）</Checkbox></Form.Item>
+            </div>
+          </Card>
+        </Col>
+      </Row>
+      <div className={`save-bar${edit.dirty ? ' save-bar-dirty' : ''}`}><span className="muted" role="status">{edit.dirty ? '有未保存的修改' : '所有修改已保存'}</span><Space wrap><Button onClick={async () => { if (edit.dirty && !await modal.confirm({ title: '放弃未保存的修改？', okText: '还原', cancelText: '继续编辑' })) return; if (query.data) fill(query.data); edit.setDirty(false); }}>还原</Button><Button type="primary" htmlType="submit" loading={mutation.isPending}>保存全局设置</Button></Space></div>
     </Form>
   </>;
 }
@@ -114,13 +129,13 @@ function ServerSettings() {
   const edit = useContext(EditContext);
   const { message, modal } = App.useApp();
   const query = useQuery({ queryKey: ['server-config'], queryFn: ({ signal }) => api<ServerConfig>('/api/server/config', { signal }) });
-  const baseline = useRef<string | null>(null);
-  useEffect(() => { if (query.data && !ready) { baseline.current = query.data.version; form.setFieldsValue(query.data.saved); setReady(true); } }, [query.data, ready, form]);
+  const baseline = useRef<ServerConfig | null>(null);
+  useEffect(() => { if (query.data && !ready) { baseline.current = query.data; form.setFieldsValue(query.data.saved); setReady(true); } }, [query.data, ready, form]);
   useEffect(() => () => { edit.setDirty(false); edit.setSaving(false); }, [edit.setDirty, edit.setSaving]);
   const mutation = useMutation({
-    mutationFn: (values: ServerConfig['saved']) => post<ServerConfig>('/api/server/config', { ...values, baseline_version: baseline.current }),
+    mutationFn: (values: ServerConfig['saved']) => post<ServerConfig>('/api/server/config', { ...values, baseline_version: baseline.current?.version ?? null }),
     onMutate: () => edit.setSaving(true),
-    onSuccess: data => { baseline.current = data.version; form.setFieldsValue(data.saved); edit.setDirty(false); message.success('服务设置已保存，重启后生效'); void query.refetch(); },
+    onSuccess: data => { baseline.current = data; form.setFieldsValue(data.saved); edit.setDirty(false); message.success('服务设置已保存，重启后生效'); void query.refetch(); },
     onError: error => message.error(error.message),
     onSettled: () => edit.setSaving(false),
   });
@@ -128,31 +143,47 @@ function ServerSettings() {
     {mutation.error?.message.includes('服务设置已被其他请求修改') && <Button onClick={async () => {
       if (!await modal.confirm({ title: '重新加载服务设置？', content: '重新加载会放弃当前未保存的修改，请先记录需要保留的内容。', okText: '重新加载', cancelText: '继续编辑' })) return;
       const result = await query.refetch();
-      if (!result.error && result.data) { baseline.current = result.data.version; form.setFieldsValue(result.data.saved); edit.setDirty(false); mutation.reset(); }
+      if (!result.error && result.data) { baseline.current = result.data; form.setFieldsValue(result.data.saved); edit.setDirty(false); mutation.reset(); }
     }}>重新加载服务设置</Button>}
-    <Card title="监听设置"><Alert type="info" title={`当前监听：${query.data?.active.host ?? '--'}:${query.data?.active.port ?? '--'}。修改后重启生效；使用 Docker 时请同时调整代理配置。`} />
+    <Card title="监听设置" className="settings-card"><Alert type="info" showIcon title={`当前监听：${query.data?.active.host ?? '--'}:${query.data?.active.port ?? '--'}。修改后重启生效；使用 Docker 时请同时调整代理配置。`} />
       <Form form={form} layout="vertical" className="settings-fields" disabled={!ready || edit.saving} onValuesChange={() => edit.setDirty(true)} onFinish={v => mutation.mutate(v)}>
-        <Row gutter={20}><Col xs={24} md={12}><Form.Item name="host" label="监听地址" rules={[{ required: true }]}><Input /></Form.Item></Col>
-          <Col xs={24} md={12}><Form.Item name="port" label="端口" rules={[{ required: true }]}><InputNumber min={1} max={65535} precision={0} style={{ width: '100%' }} /></Form.Item></Col></Row>
-        <Button type="primary" htmlType="submit" loading={mutation.isPending}>保存监听设置</Button>
+        <Row gutter={[20, 16]}><Col xs={24} md={12}><Form.Item name="host" label="监听地址" className="settings-last-item" rules={[{ required: true }]}><Input /></Form.Item></Col>
+          <Col xs={24} md={12}><Form.Item name="port" label="端口" className="settings-last-item" rules={[{ required: true }]}><InputNumber min={1} max={65535} precision={0} className="full-width-input" /></Form.Item></Col></Row>
+        <div className="settings-card-footer settings-card-actions">
+          <span className="muted" role="status">{edit.dirty ? '有未保存的修改' : '修改后需重启后端生效'}</span>
+          <Space wrap>
+            <Button onClick={async () => { if (edit.dirty && !await modal.confirm({ title: '放弃未保存的修改？', okText: '还原', cancelText: '继续编辑' })) return; if (baseline.current) form.setFieldsValue(baseline.current.saved); edit.setDirty(false); }}>还原</Button>
+            <Button type="primary" htmlType="submit" loading={mutation.isPending}>保存监听设置</Button>
+          </Space>
+        </div>
       </Form>
     </Card>
   </>;
 }
 function SecuritySettings() {
-  return <Card title="管理员密码">
-    <Alert type="warning" showIcon title="管理员密码通过服务端启动参数配置，不保存在数据库中。" description={<>
-      <p>使用命令行参数 <code>--admin-password &lt;密码&gt;</code>，或设置环境变量 <code>ADMIN_PASSWORD</code>，然后重启后端。</p>
-      <p>未设置密码时不启用认证，所有能访问该端口的人都可以操作控制台。请仅在受信任网络或本机使用，并优先通过环境变量提供密码，避免密码出现在进程列表中。</p>
-      <p>修改密码后需重启后端；重启会清除所有登录会话，需要使用新密码重新登录。</p>
-    </>} />
+  return <Card title="管理员密码" className="settings-card">
+    <Alert type="warning" showIcon title="管理员密码通过服务端启动参数配置，不保存在数据库中。" />
+    <dl className="security-guide">
+      <div>
+        <dt>启动参数与环境变量</dt>
+        <dd>使用命令行参数 <code>--admin-password &lt;密码&gt;</code>，或设置环境变量 <code>ADMIN_PASSWORD</code>，然后重启后端。</dd>
+      </div>
+      <div>
+        <dt>访问边界与安全建议</dt>
+        <dd>未设置密码时不启用认证，所有能访问该端口的人都可以操作控制台。请仅在受信任网络或本机使用，并优先通过环境变量提供密码，避免密码出现在进程列表中。</dd>
+      </div>
+      <div>
+        <dt>密码轮换与会话失效</dt>
+        <dd>修改密码后需重启后端；重启会清除所有登录会话，需要使用新密码重新登录。</dd>
+      </div>
+    </dl>
   </Card>;
 }
 export default function Settings() {
   const edit = useContext(EditContext);
   const { modal } = App.useApp();
   const [active, setActive] = useState('global');
-  return <><PageTitle title="全局设置" description="交易所连接、通知和控制台安全设置。" />
+  return <div className="settings-page"><PageTitle title="全局设置" description="交易所连接、通知和控制台安全设置" />
     <Tabs className="settings-tabs" activeKey={active} onChange={async key => {
       if (edit.saving) return;
       if (edit.dirty && !await modal.confirm({ title: '放弃未保存的修改？', okText: '放弃修改', cancelText: '继续编辑' })) return;
@@ -163,5 +194,5 @@ export default function Settings() {
       { key: 'database', label: '数据库操作', children: <LoadErrorBoundary label="数据库操作" onReload={() => window.location.reload()}><Suspense fallback={<div className="history-empty" role="status">正在加载数据库操作…</div>}><DatabaseSettings /></Suspense></LoadErrorBoundary> },
       { key: 'security', label: '账户安全', children: <SecuritySettings /> },
     ]} />
-  </>;
+  </div>;
 }

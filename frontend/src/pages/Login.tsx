@@ -21,10 +21,9 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
   return <main className="login-page">
     <div className="login-theme"><ThemeSwitch /></div>
     <aside className="login-brand">
-      <div className="login-grid" aria-hidden="true" />
       <div className="login-brand-content">
         <img src="/logo.svg" alt="" className="login-logo" />
-        <div><strong>GRID CONSOLE</strong><span>BINANCE FUTURES</span></div>
+        <div><strong>Grid Console</strong><span>Binance Futures</span></div>
       </div>
     </aside>
     <section className="login-form"><div className="login-form-content">

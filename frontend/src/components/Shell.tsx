@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, Outlet, useBlocker, useLocation, useNavigate } from 'react-router-dom';
-import { App, Button, Dropdown, Layout, Select, Space } from 'antd';
+import { App, Button, Dropdown, Layout, Select } from 'antd';
 import { AppstoreOutlined, BulbOutlined, LogoutOutlined, MenuOutlined, SettingOutlined } from '@ant-design/icons';
 import { useLiveAccounts, useOverview, usePairs } from '../lib/queries';
 import { AccountsContext, EditContext, useSession } from '../lib/session';
@@ -53,9 +53,9 @@ export default function Shell() {
   return <EditContext.Provider value={context}><AccountsContext.Provider value={accounts}><ControlProvider><Layout className="app-layout">
     <Layout.Header className="topbar">
       <div className="topbar-main">
-        <Link className="topbar-brand" to="/" aria-label="Grid Console 首页"><span className="topbar-brand-name"><strong>GRID CONSOLE</strong><small>BINANCE FUTURES</small></span></Link>
+        <Link className="topbar-brand" to="/" aria-label="Grid Console 首页"><img className="topbar-logo" src="/logo.svg" alt="" /><span className="topbar-brand-name"><strong>Grid Console</strong><small>Binance Futures</small></span></Link>
       </div>
-      <Space className="topbar-actions">{pairs.data?.[0] && <ModeTag mode={pairs.data[0].mode} />}{selected === 'pair' && symbol !== 'new' && <Select className="topbar-pair-select" aria-label="切换交易对" title={symbol} popupMatchSelectWidth={false} value={symbol} options={pairs.data?.map(p => ({ value: p.symbol, label: p.symbol }))} onChange={value => navigate(`/pairs/${value}${location.pathname.endsWith('/config') ? '/config' : ''}`)} />}
+      <div className="topbar-actions">{pairs.data?.[0] && <ModeTag mode={pairs.data[0].mode} />}{selected === 'pair' && symbol !== 'new' && <Select className="topbar-pair-select" aria-label="切换交易对" title={symbol} popupMatchSelectWidth={false} value={symbol} options={pairs.data?.map(p => ({ value: p.symbol, label: p.symbol }))} onChange={value => navigate(`/pairs/${value}${location.pathname.endsWith('/config') ? '/config' : ''}`)} />}
         <Dropdown placement="bottomRight" trigger={['click']} menu={{
           items: [
             { key: 'overview', icon: <AppstoreOutlined aria-hidden="true" />, label: '策略总览' }, { key: 'settings', icon: <SettingOutlined aria-hidden="true" />, label: '全局设置' },
@@ -72,7 +72,7 @@ export default function Shell() {
         }}>
           <Button className="topbar-menu" type="text" icon={<MenuOutlined />} aria-label="打开主导航" />
         </Dropdown>
-      </Space>
+      </div>
     </Layout.Header>
     <Layout.Content className="content"><Outlet /></Layout.Content>
     <Layout.Footer className="footer"><span>版本 v{import.meta.env.VITE_APP_VERSION}</span></Layout.Footer>

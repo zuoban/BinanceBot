@@ -47,14 +47,18 @@ export function DatabaseSettings() {
     finally { lock.current = false; setBusy(null); edit.setSaving(false); }
   };
 
-  return <Card title="数据库操作">
-    <p className="muted">选择需要导出或清空的数据类别。成交历史及统计覆盖全部币种和全部模式。</p>
-    <p className="muted">导出的是脱敏分析快照：交易所 API 密钥、Telegram 令牌和聊天 ID 会被清空，登录会话会被移除。快照不能作为完整恢复备份。</p>
-    <Checkbox.Group options={options} value={targets} disabled={busy !== null} onChange={values => setTargets(values as DatabaseTarget[])} />
-    <div style={{ marginTop: 16 }}><Space wrap>
-      <Button loading={busy === 'selected'} disabled={busy !== null || targets.length === 0} onClick={() => void run('selected')}>导出所选数据分析快照</Button>
-      <Button danger loading={busy === 'clear'} disabled={busy !== null || targets.length === 0} onClick={() => void run('clear')}>清空所选数据</Button>
+  return <Card title="数据库操作" className="settings-card">
+    <div className="database-intro">
+      <p className="muted">选择需要导出或清空的数据类别。成交历史及统计覆盖全部币种和全部模式。</p>
+      <p className="muted">导出的是脱敏分析快照：交易所 API 密钥、Telegram 令牌和聊天 ID 会被清空，登录会话会被移除。快照不能作为完整恢复备份。</p>
+    </div>
+    <Checkbox.Group className="database-targets" options={options} value={targets} disabled={busy !== null} onChange={values => setTargets(values as DatabaseTarget[])} />
+    <div className="settings-card-footer database-actions">
+      <Space wrap>
+        <Button loading={busy === 'selected'} disabled={busy !== null || targets.length === 0} onClick={() => void run('selected')}>导出所选数据分析快照</Button>
+        <Button danger loading={busy === 'clear'} disabled={busy !== null || targets.length === 0} onClick={() => void run('clear')}>清空所选数据</Button>
+      </Space>
       <Button loading={busy === 'all'} disabled={busy !== null} onClick={() => void run('all')}>导出全库分析快照</Button>
-    </Space></div>
+    </div>
   </Card>;
 }

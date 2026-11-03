@@ -2,7 +2,7 @@ import type { ReactNode } from 'react';
 
 export function LoadingScreen({ label = '正在准备工作台' }: { label?: string }) {
   return <div className="loading-screen" role="status" aria-live="polite">
-    <div className="loading-brand"><img className="brand-symbol" src="/logo.svg" alt="" /><span>GRID CONSOLE<small>STRATEGY WORKSPACE</small></span></div>
+    <div className="loading-brand"><img className="brand-symbol" src="/logo.svg" alt="" /><span>Grid Console<small>Strategy Workspace</small></span></div>
     <div className="loading-indicator"><span /><span /><span /></div>
     <p>{label}</p>
   </div>;

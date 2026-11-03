@@ -111,11 +111,11 @@ export default function PairConfig() {
     }
   };
   const formDisabled = !ready || edit.saving || deletion.busy;
-  return <>
+  return <div className="config-page">
     <PageBreadcrumb disabled={edit.saving} items={adding
       ? [{ label: '策略总览', to: '/' }, { label: '新增交易对' }]
       : [{ label: '策略总览', to: '/' }, { label: symbol, to: `/pairs/${symbol}` }, { label: '策略参数' }]} />
-    <PageTitle title={adding ? '新增交易对' : `${symbol} 策略参数`} description={adding ? '新策略创建后保持暂停，检查参数后手动恢复。' : '参数保存后立即生效，请先核对策略设置。'} />
+    <PageTitle title={adding ? '新增交易对' : `${symbol} 策略参数`} description={adding ? '新策略创建后保持暂停，检查参数后手动恢复' : '参数保存后立即生效，请先核对策略设置'} />
     <ErrorNotice error={pairs.error || config.error} retry={() => { if (!adding) void config.refetch(); }} />
     <ErrorNotice error={mutation.error} />
     {!adding && (mutation.error instanceof ApiError && mutation.error.status === 409 || mutation.error?.message.includes('无法确认配置版本')) && <Button onClick={async () => {
@@ -126,36 +126,44 @@ export default function PairConfig() {
     {pairs.data && !pair && !adding && <Alert type="warning" title="该交易对不存在或已移除" />}
     <Form<FormValues> className="config-form" form={form} layout="vertical" onFinish={values => void submit(values)} onValuesChange={() => { edit.setDirty(true); }} disabled={formDisabled}>
       <Card title="基本设置">
-        <Row gutter={20}>
+        {live && <Alert type="warning" showIcon className="config-live-alert" title="实盘使用真实资金，请核对交易方向和风险限制。" />}
+        <Row gutter={[20, 16]}>
           <Col xs={24} md={12}><Form.Item name="symbol" label="合约交易对" rules={[{ required: true, message: '请选择交易对' }]} getValueProps={value => ({ value: value || undefined })} extra={adding && symbols.isError ? <span>交易对加载失败 <Button type="link" onClick={() => void symbols.refetch()}>重试</Button></span> : undefined}>{adding ? <Select showSearch optionFilterProp="label" placeholder={symbols.isFetching ? '正在加载交易对...' : '搜索并选择交易对'} loading={symbols.isFetching} disabled={formDisabled || symbols.isFetching || symbols.isError} notFoundContent="没有匹配的交易对" options={(symbols.data ?? []).map(value => ({ value, label: value }))} /> : <Input disabled />}</Form.Item></Col>
           <Col xs={24} md={12}><Form.Item name="direction" label="交易方向" rules={[{ required: true }]}><Select options={[{ value: 'LONG', label: '做多 · 买入开仓 / 卖出平仓' }, { value: 'SHORT', label: '做空 · 卖出开仓 / 买入平仓' }]} /></Form.Item></Col>
         </Row>
-        {live && <Alert type="warning" showIcon title="实盘使用真实资金，请核对交易方向和风险限制。" />}
       </Card>
       <Card title="网格参数" className="form-card">
-        <Row gutter={20}>
-          <Col xs={24} md={12}><Form.Item name="grid_interval" label="网格间距" extra="相邻网格价格的固定差值，单位为报价资产。" rules={[{ required: true, message: '请输入网格间距' }]}><InputNumber stringMode min="0.0000000001" style={{ width: '100%' }} /></Form.Item></Col>
-          <Col xs={24} md={12}><Form.Item name="order_amount_usdc" label="每格金额（报价资产）" rules={[{ required: true, message: '请输入每格金额' }]}><InputNumber stringMode min="0.0000000001" style={{ width: '100%' }} /></Form.Item></Col>
-          <Col xs={24} md={12}><Form.Item name="buy_window" label="买单窗口" extra="当前价格下方预挂的买单数量，范围为 1–50。" rules={[{ required: true }]}><InputNumber min={1} max={50} precision={0} style={{ width: '100%' }} /></Form.Item></Col>
-          <Col xs={24} md={12}><Form.Item name="sell_window" label="卖单窗口" extra="当前价格上方预挂的卖单数量，范围为 1–50。" rules={[{ required: true }]}><InputNumber min={1} max={50} precision={0} style={{ width: '100%' }} /></Form.Item></Col>
+        <Row gutter={[20, 16]}>
+          <Col xs={24} md={12}><Form.Item name="grid_interval" label="网格间距" extra="相邻网格价格的固定差值，单位为报价资产。" rules={[{ required: true, message: '请输入网格间距' }]}><InputNumber stringMode min="0.0000000001" className="full-width-input" /></Form.Item></Col>
+          <Col xs={24} md={12}><Form.Item name="order_amount_usdc" label="每格金额（报价资产）" rules={[{ required: true, message: '请输入每格金额' }]}><InputNumber stringMode min="0.0000000001" className="full-width-input" /></Form.Item></Col>
+          <Col xs={24} md={12}><Form.Item name="buy_window" label="买单窗口" extra="当前价格下方预挂的买单数量，范围为 1–50。" rules={[{ required: true }]}><InputNumber min={1} max={50} precision={0} className="full-width-input" /></Form.Item></Col>
+          <Col xs={24} md={12}><Form.Item name="sell_window" label="卖单窗口" extra="当前价格上方预挂的卖单数量，范围为 1–50。" rules={[{ required: true }]}><InputNumber min={1} max={50} precision={0} className="full-width-input" /></Form.Item></Col>
         </Row>
       </Card>
-      <Card title="仓位限制" className="form-card"><Row gutter={20}>
-          <Col xs={24} md={12}><Form.Item name="max_position_usdc" label="最大持仓名义价值" extra="留空表示不设置；选择暂停策略时须填写大于 0 的上限。" dependencies={['pause_on_max_position']} rules={[({ getFieldValue }) => ({ validator: (_, value) => !getFieldValue('pause_on_max_position') || (value != null && value !== '' && Number(value) > 0) ? Promise.resolve() : Promise.reject(new Error('暂停策略需要大于 0 的持仓上限')) })]}><InputNumber stringMode min="0" style={{ width: '100%' }} /></Form.Item></Col>
-          <Col xs={24} md={12}><Form.Item name="pause_on_max_position" label="持仓上限处理方式" extra="限制开仓会保留平仓订单；选择暂停策略时，当前持仓名义价值达到上限，或下一笔完整开仓单成交后预计超过上限，会暂停策略并尝试撤销机器人挂单，需手动恢复。撤单可能失败，请检查交易所挂单。仅挂单占用额度不会触发暂停。" valuePropName="checked"><Switch checkedChildren="暂停策略" unCheckedChildren="限制开仓" /></Form.Item></Col>
-        </Row>
-      </Card>
-      <Card title="价格范围与订单" className="form-card"><Row gutter={20}>
-          <Col xs={24} md={12}><Form.Item name="min_price" label="最低价格（可选）"><InputNumber stringMode min="0" style={{ width: '100%' }} /></Form.Item></Col>
-          <Col xs={24} md={12}><Form.Item name="max_price" label="最高价格（可选）"><InputNumber stringMode min="0" style={{ width: '100%' }} /></Form.Item></Col>
-          <Col span={24}><p className="muted">订单仅作为挂单成交（Post Only）；如果订单会立即成交，交易所会拒绝该订单。</p></Col>
-        </Row>
-      </Card>
-      <div className="save-bar"><span className="muted" role="status">{edit.dirty ? '有未保存的修改' : '所有修改已保存'}</span><Space wrap>
+      <Row gutter={[20, 20]} className="settings-grid-row">
+        <Col xs={24} xl={12} className="settings-grid-col">
+          <Card title="仓位限制" className="settings-card-fill">
+            <Row gutter={[20, 16]}>
+              <Col span={24}><Form.Item name="max_position_usdc" label="最大持仓名义价值" extra="留空表示不设置；选择暂停策略时须填写大于 0 的上限。" dependencies={['pause_on_max_position']} rules={[({ getFieldValue }) => ({ validator: (_, value) => !getFieldValue('pause_on_max_position') || (value != null && value !== '' && Number(value) > 0) ? Promise.resolve() : Promise.reject(new Error('暂停策略需要大于 0 的持仓上限')) })]}><InputNumber stringMode min="0" className="full-width-input" /></Form.Item></Col>
+              <Col span={24}><Form.Item name="pause_on_max_position" label="持仓上限处理方式" extra="限制开仓会保留平仓订单；选择暂停策略时，当前持仓名义价值达到上限，或下一笔完整开仓单成交后预计超过上限，会暂停策略并尝试撤销机器人挂单，需手动恢复。撤单可能失败，请检查交易所挂单。仅挂单占用额度不会触发暂停。" valuePropName="checked"><Switch checkedChildren="暂停策略" unCheckedChildren="限制开仓" /></Form.Item></Col>
+            </Row>
+          </Card>
+        </Col>
+        <Col xs={24} xl={12} className="settings-grid-col">
+          <Card title="价格范围与订单" className="settings-card-fill">
+            <Row gutter={[20, 16]}>
+              <Col span={24}><Form.Item name="min_price" label="最低价格（可选）"><InputNumber stringMode min="0" className="full-width-input" /></Form.Item></Col>
+              <Col span={24}><Form.Item name="max_price" label="最高价格（可选）"><InputNumber stringMode min="0" className="full-width-input" /></Form.Item></Col>
+            </Row>
+            <div className="settings-card-footer config-card-note"><p className="muted">订单仅作为挂单成交（Post Only）；如果订单会立即成交，交易所会拒绝该订单。</p></div>
+          </Card>
+        </Col>
+      </Row>
+      <div className={`save-bar${edit.dirty ? ' save-bar-dirty' : ''}`}><span className="muted" role="status">{edit.dirty ? '有未保存的修改' : adding ? '确认参数后保存并添加交易对' : '所有修改已保存'}</span><Space wrap>
         <Button onClick={async () => { if (edit.dirty && !await modal.confirm({ title: '放弃未保存的修改？', okText: '还原', cancelText: '继续编辑' })) return; if (adding) form.setFieldsValue(defaults); else if (baseline.current?.symbol === symbol) form.setFieldsValue(baseline.current.config); edit.setDirty(false); }}>还原</Button>
         <Button type="primary" htmlType="submit" loading={mutation.isPending}>{adding ? '保存并添加' : '保存并立即生效'}</Button>
       </Space></div>
       {!adding && <Card className="danger-zone" title="删除策略"><p>删除前请暂停策略、等待挂单撤销并平仓；删除不会自动平仓，历史记录会保留。</p><Button danger disabled={edit.saving} loading={deletion.busy} onClick={() => void remove()}>删除策略</Button></Card>}
     </Form>
-  </>;
+  </div>;
 }

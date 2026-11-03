@@ -28,7 +28,7 @@ export default function PairDetail() {
   const currentPair = pair && s ? { ...pair, status: s.status, grid_config: s.grid_config, mode: modeOf(s) } : pair;
   return <div className="pair-detail">
     <PageBreadcrumb items={[{ label: '策略总览', to: '/' }, { label: symbol ?? '策略详情' }]} />
-    <PageTitle title={symbol ?? '策略详情'} description="行情、网格与成交，随策略实时更新。"
+    <PageTitle title={symbol ?? '策略详情'} description="行情、网格与成交，随策略实时更新"
       extra={<div className="detail-actions">{currentPair && <PairControls pair={currentPair} stale={query.stale || !!query.error} />}<Button icon={<SettingOutlined />} onClick={() => navigate(`/pairs/${symbol}/config`)}>策略参数</Button></div>} />
     <ErrorNotice error={pairs.error || query.error} retry={() => { void pairs.refetch(); void query.refetch(); }} />
     {pairs.data && !pair && <Alert type="warning" title="该交易对不存在或已移除" />}

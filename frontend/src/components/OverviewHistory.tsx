@@ -33,7 +33,7 @@ export function OverviewHistory() {
       <div className="history-caption"><span>单位 {asset} · 近 24 小时 · 北京时间</span><span>最近记录 {latest ? formatDate(latest.hour) : '--'}</span></div>
       <div className="history-plot chart" aria-label={`近24小时${asset ?? ''}账户权益折线图，最近记录 ${latest ? `${formatDate(latest.hour)}，权益 ${formatValue(latest.equity)}` : '暂无'}`}>
         <LoadErrorBoundary label="权益图" onReload={() => window.location.reload()}>
-          <Suspense fallback={<div className="history-empty" style={{ minHeight: 180 }} role="status">正在加载图表…</div>}>
+          <Suspense fallback={<div className="history-empty history-plot-loading" role="status">正在加载图表…</div>}>
             <OverviewHistoryChart data={data} ticks={ticks} asset={asset} formatValue={formatValue} formatDate={formatDate} />
           </Suspense>
         </LoadErrorBoundary>
