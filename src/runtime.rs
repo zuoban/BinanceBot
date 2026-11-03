@@ -973,16 +973,19 @@ impl TradingRuntime {
                             Ok(())
                         }
                     }
-                    failure => {
+                    Ok(None) => {
                         state
                             .global_position_ready
                             .store(false, std::sync::atomic::Ordering::SeqCst);
                         self.global_position_limit.check().await;
-                        match failure {
-                            Ok(None) => Err(anyhow::anyhow!("无法确认交易所持仓，请稍后重试")),
-                            Err(error) => Err(error.context("查询交易所持仓失败，无法移除交易对")),
-                            Ok(Some(_)) => unreachable!(),
-                        }
+                        Err(anyhow::anyhow!("无法确认交易所持仓，请稍后重试"))
+                    }
+                    Err(error) => {
+                        state
+                            .global_position_ready
+                            .store(false, std::sync::atomic::Ordering::SeqCst);
+                        self.global_position_limit.check().await;
+                        Err(error.context("查询交易所持仓失败，无法移除交易对"))
                     }
                 }
             };

@@ -795,7 +795,6 @@ impl GridTradingEngine {
                                     || !matches!(order.side.as_str(), "BUY" | "SELL")
                             })
                             || orders.iter().skip(1).any(|order| {
-                                let first = orders[0];
                                 order.symbol != first.symbol
                                     || order.side != first.side
                                     || order.order_id != first.order_id
