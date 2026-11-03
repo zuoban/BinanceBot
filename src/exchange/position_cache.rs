@@ -65,7 +65,9 @@ impl PositionCache {
                     received_instant: Instant::now(),
                 });
             }
-            let snapshot = cached.as_ref().expect("position snapshot just loaded");
+            let Some(snapshot) = cached.as_ref() else {
+                continue;
+            };
             let position =
                 one_way_position_ref(&snapshot.positions, symbol).map(|position| position.cloned());
             let received_instant = snapshot.received_instant;

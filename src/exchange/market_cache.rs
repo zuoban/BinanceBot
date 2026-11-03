@@ -94,7 +94,9 @@ impl MarketCache {
                 }
             }
         }
-        let snapshot = entry.snapshot.as_ref().expect("snapshot populated");
+        let Some(snapshot) = entry.snapshot.as_ref() else {
+            return Err(anyhow!("shared mark-price snapshot missing"));
+        };
         if let Some(price) = snapshot.prices.get(symbol) {
             return Ok((*price, snapshot.requested_at));
         }
