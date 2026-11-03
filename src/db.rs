@@ -66,6 +66,13 @@ pub(crate) struct DatabaseWaitSamples {
     pub(crate) connection: Mutex<Vec<f64>>,
 }
 
+#[cfg(test)]
+type MembershipHook = (
+    &'static str,
+    tokio::sync::oneshot::Sender<()>,
+    std::sync::mpsc::Receiver<()>,
+);
+
 pub struct Database {
     conn: Mutex<Connection>,
     path: String,
@@ -77,13 +84,7 @@ pub struct Database {
     revision_publish_hook:
         Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
     #[cfg(test)]
-    membership_commit_hook: Mutex<
-        Option<(
-            &'static str,
-            tokio::sync::oneshot::Sender<()>,
-            std::sync::mpsc::Receiver<()>,
-        )>,
-    >,
+    membership_commit_hook: Mutex<Option<MembershipHook>>,
     today_pnl_cache: tokio::sync::Mutex<Option<TodayPnlCacheEntry>>,
     #[cfg(test)]
     hourly_stats_queries: AtomicU64,
@@ -1482,6 +1483,7 @@ impl Database {
         }
         Ok(orders)
     }
+    #[cfg(test)]
     pub(crate) fn save_initial_order_responses(
         &self,
         account: [u8; 32],
@@ -1505,6 +1507,7 @@ impl Database {
     }
 
     // Reuse each observation ID on retry; allocate a fresh ID for every new observation.
+    #[cfg(test)]
     pub(crate) fn save_identified_initial_order_responses(
         &self,
         account: [u8; 32],
@@ -1682,6 +1685,7 @@ impl Database {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn load_initial_order_responses(
         &self,
         account: [u8; 32],

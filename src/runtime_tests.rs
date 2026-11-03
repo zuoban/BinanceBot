@@ -1177,7 +1177,7 @@ async fn early_shutdown_aborts_unresponsive_engine_before_membership_commit_retu
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir(&directory).unwrap();
-        let db = Arc::new(Database::open(&directory.join("bot.db")).unwrap());
+        let db = Arc::new(Database::open(directory.join("bot.db")).unwrap());
         let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
         let mut runtime =
             fixture_with_unresponsive_engine(db.clone(), false, false, Some(observed_tx), true);

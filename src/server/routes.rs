@@ -690,7 +690,10 @@ async fn dispatch_pair(
         return StatusCode::NOT_FOUND.into_response();
     };
     // The selected router enforces each resource's HTTP methods and WebSocket authentication.
-    *req.uri_mut() = format!("/{}", resource).parse().unwrap();
+    let Ok(uri) = format!("/{}", resource).parse() else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    *req.uri_mut() = uri;
     pair_resource_routes()
         .route(
             "/config",
@@ -1027,13 +1030,23 @@ async fn clear_multi_trade_history_handler(
                     primary_snapshot = Some(snapshot);
                 }
             }
+            let Some(snapshot) = primary_snapshot else {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiResponse {
+                        success: false,
+                        data: None,
+                        message: Some("没有可用的交易对状态".into()),
+                    }),
+                );
+            };
             (
                 StatusCode::OK,
                 Json(ApiResponse {
                     success: true,
                     data: Some(ClearTradeHistoryResponse {
                         deleted_trades,
-                        snapshot: primary_snapshot.unwrap(),
+                        snapshot,
                     }),
                     message: Some(format!(
                         "已清理 {} 笔历史成交记录，全部交易对累计统计已重置",
@@ -2322,8 +2335,8 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, token: String) {
                 let preparation = tokio::spawn(async move {
                     if let Err(message) = prepare_control(&prepare_state, &action.0).await {
                         let _ = prepare_results.send(serde_json::json!({"type":"control", "action":name, "success":false, "data":null, "message":message}).to_string());
-                    } else {
-                        let _ = prepare_queue.send((name.unwrap(), action, pending_pause));
+                    } else if let Some(action_name) = name {
+                        let _ = prepare_queue.send((action_name, action, pending_pause));
                     }
                 });
                 if preparation.await.is_err() {

@@ -69,8 +69,10 @@ fn paper_trade_and_state_roll_back_on_database_failures() {
     let editor = rusqlite::Connection::open(&path).unwrap();
     let initial = paper_state("SOLUSDC", 1, 900);
     let other = paper_state("BTCUSDC", 3, 700);
-    let mut stats = GridStats::default();
-    stats.total_trades = 1;
+    let mut stats = GridStats {
+        total_trades: 1,
+        ..Default::default()
+    };
     for (id, symbol, state) in [("first", "SOLUSDC", &initial), ("other", "BTCUSDC", &other)] {
         assert!(db
             .insert_trade_with_paper_recovery(

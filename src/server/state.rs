@@ -1586,7 +1586,7 @@ mod tests {
                 let count = if i == 1 { 10 } else { 1 };
                 attempts.by_source.insert(
                     IpAddr::V4(std::net::Ipv4Addr::from(i)),
-                    std::iter::repeat(Instant::now()).take(count).collect(),
+                    std::iter::repeat_n(Instant::now(), count).collect(),
                 );
             }
         }
@@ -1606,9 +1606,11 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         let state = AppState::new(AppConfig::default(), db.clone(), tx);
         let trade = cache_test_trade("cancel-paper-fill", 1, TradingMode::Paper);
-        let mut position = PositionInfo::default();
-        position.size = dec!(1);
-        position.entry_price = dec!(100);
+        let position = PositionInfo {
+            size: dec!(1),
+            entry_price: dec!(100),
+            ..Default::default()
+        };
         let mut account = state.account.read().await.clone();
         account.available_balance = dec!(9900);
         let position_guard = state.position.write().await;

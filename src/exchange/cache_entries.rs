@@ -3,9 +3,10 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 type Entry<T> = Arc<Mutex<Option<T>>>;
+type CacheEntryMap<T> = HashMap<[u8; 32], (u64, Entry<T>)>;
 
 pub(super) struct CacheEntries<T> {
-    entries: Mutex<HashMap<[u8; 32], (u64, Entry<T>)>>,
+    entries: Mutex<CacheEntryMap<T>>,
 }
 impl<T> Default for CacheEntries<T> {
     fn default() -> Self {

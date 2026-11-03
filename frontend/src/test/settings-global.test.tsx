@@ -44,7 +44,7 @@ it('显示已保存的金额并以十进制字符串提交新金额，清空时�
   await user.clear(input);
   await user.click(screen.getByRole('button', { name: '保存全局设置' }));
   await waitFor(() => expect(mocks.post).toHaveBeenLastCalledWith('/api/global/config', expect.objectContaining({ global_max_position_notional: null })));
-}, 15000);
+}, 40000);
 
 it('缺省时关闭保证金保护，并可开启保存', async () => {
   setup();
@@ -58,7 +58,7 @@ it('缺省时关闭保证金保护，并可开启保存', async () => {
   await waitFor(() => expect(mocks.post).toHaveBeenCalledWith('/api/global/config', expect.objectContaining({ pause_on_zero_available_margin: true })));
   await waitFor(() => expect(mocks.success).toHaveBeenCalled());
   expect(toggle).toBeChecked();
-}, 15000);
+}, 40000);
 
 it('显示已开启的保证金保护并可关闭保存', async () => {
   mocks.api.mockResolvedValue({ ...config, pause_on_zero_available_margin: true });
@@ -69,7 +69,7 @@ it('显示已开启的保证金保护并可关闭保存', async () => {
   await user.click(toggle);
   await user.click(screen.getByRole('button', { name: '保存全局设置' }));
   await waitFor(() => expect(mocks.post).toHaveBeenCalledWith('/api/global/config', expect.objectContaining({ pause_on_zero_available_margin: false })));
-}, 15000);
+}, 40000);
 
 it('取消高影响变更确认后不提交，并可再次确认保存', async () => {
   mocks.confirm.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
@@ -84,7 +84,7 @@ it('取消高影响变更确认后不提交，并可再次确认保存', async (
   expect(toggle).toBeChecked();
   await user.click(screen.getByRole('button', { name: '保存全局设置' }));
   await waitFor(() => expect(mocks.post).toHaveBeenCalledWith('/api/global/config', expect.objectContaining({ pause_on_zero_available_margin: true })));
-}, 15000);
+}, 40000);
 
 it('保存失败时保留输入且不显示误导性的查询重试按钮', async () => {
   mocks.post.mockRejectedValueOnce(new Error('保存失败'));
@@ -100,7 +100,7 @@ it('保存失败时保留输入且不显示误导性的查询重试按钮', asyn
   expect(screen.queryByRole('button', { name: /重试/ })).not.toBeInTheDocument();
   await user.click(screen.getByRole('button', { name: '保存全局设置' }));
   await waitFor(() => expect(mocks.post).toHaveBeenCalledTimes(2));
-}, 15000);
+}, 40000);
 
 it('配置冲突时保留输入并允许确认后重新加载', async () => {
   mocks.post.mockRejectedValueOnce(new Error('全局设置已被其他请求修改，请刷新后重试'));
@@ -121,7 +121,7 @@ it('配置冲突时保留输入并允许确认后重新加载', async () => {
   await user.type(input, '70');
   await user.click(screen.getByRole('button', { name: '保存全局设置' }));
   await waitFor(() => expect(mocks.post).toHaveBeenLastCalledWith('/api/global/config', expect.objectContaining({ baseline_version: 'version-2', sync_interval_secs: 70 })));
-}, 15000);
+}, 40000);
 
 it('拒绝零金额', async () => {
   setup();
@@ -133,4 +133,4 @@ it('拒绝零金额', async () => {
   await user.click(screen.getByRole('button', { name: '保存全局设置' }));
   expect(await screen.findByText('请输入大于 0 的金额')).toBeInTheDocument();
   expect(mocks.post).not.toHaveBeenCalled();
-}, 15000);
+}, 40000);

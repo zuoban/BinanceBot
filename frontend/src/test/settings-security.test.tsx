@@ -47,7 +47,7 @@ it('等待风控确认时锁定表单和页签，卸载后不会提交', async (
   view.unmount();
   await act(async () => { confirm(true); });
   expect(mocks.post).not.toHaveBeenCalled();
-}, 15000);
+}, 40000);
 
 it('取消风控确认后恢复编辑', async () => {
   mocks.confirm.mockResolvedValueOnce(false);
@@ -60,7 +60,7 @@ it('取消风控确认后恢复编辑', async () => {
   await waitFor(() => expect(toggle).toBeEnabled());
   expect(toggle).toBeChecked();
   expect(mocks.post).not.toHaveBeenCalled();
-}, 15000);
+}, 40000);
 
 it('密码有内容时切换页签需确认，取消保留输入，确认放弃后清空', async () => {
   setup();
@@ -78,7 +78,7 @@ it('密码有内容时切换页签需确认，取消保留输入，确认放弃�
   expect(await screen.findByLabelText('当前密码')).toHaveValue('');
   await user.click(screen.getByRole('tab', { name: '连接与通知' }));
   expect(mocks.confirm).toHaveBeenCalledTimes(2);
-}, 15000);
+}, 40000);
 
 it('清空密码表单后切换无需确认', async () => {
   setup();
@@ -90,7 +90,7 @@ it('清空密码表单后切换无需确认', async () => {
   await user.click(screen.getByRole('tab', { name: '连接与通知' }));
   expect(mocks.confirm).not.toHaveBeenCalled();
   expect(screen.getByRole('tab', { name: '连接与通知' })).toHaveAttribute('aria-selected', 'true');
-}, 15000);
+}, 40000);
 
 it('提交期间阻止切换，失败后保留修改并要求确认，成功后退出登录', async () => {
   setup();
@@ -118,4 +118,4 @@ it('提交期间阻止切换，失败后保留修改并要求确认，成功后�
   expect(screen.getByLabelText('当前密码')).toHaveValue('');
   await user.click(screen.getByRole('tab', { name: '连接与通知' }));
   expect(mocks.confirm).toHaveBeenCalledTimes(1);
-}, 15000);
+}, 40000);

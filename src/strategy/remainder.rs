@@ -512,7 +512,7 @@ impl GridTradingEngine {
             self.account_cache.invalidate(&self.client).await;
             self.position_cache.invalidate(&self.client).await;
             self.last_account_sync = None;
-            self.track_identity_conflict(&trusted, &found);
+            self.track_identity_conflict(&trusted, found);
             self.state
                 .active_orders
                 .write()

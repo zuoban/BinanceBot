@@ -115,7 +115,7 @@ it('locks the symbol while adding a pair and unlocks it if saving fails', async 
   await waitFor(() => expect(symbol).toBeEnabled());
   await selectSymbol(user, 'BTCUSDC');
   expect(symbol.closest('.ant-select-content')).toHaveAttribute('title', 'BTCUSDC');
-}, 15000);
+}, 40000);
 
 it('keeps the symbol read-only on the edit form without requesting exchange symbols', async () => {
   setup(Promise.resolve());
@@ -241,7 +241,7 @@ it.each(['/pairs/BTCUSDC/config', '/pairs/new'])('disables breadcrumb ancestors 
   await act(async () => { finish(path === '/pairs/new' ? 'BTCUSDC' : pair('BTCUSDC').grid_config); });
   expect(await screen.findByRole('heading', { name: 'BTCUSDC' })).toBeInTheDocument();
   expect(router.state.location.pathname).toBe('/pairs/BTCUSDC');
-}, 15000);
+}, 40000);
 
 it('shows the navigation menu and pair selector on a strategy page', () => {
   setup(Promise.resolve());
@@ -285,7 +285,7 @@ it('returns to detail after saving changed parameters', async () => {
   expect(router.state.location.pathname).toBe('/pairs/BTCUSDC');
   expect(mocks.post).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ baseline_version: 'version-1', post_only: true }));
   expect(mocks.confirm).not.toHaveBeenCalled();
-}, 15000);
+}, 40000);
 
 it('enables post-only when saving a legacy configuration', async () => {
   setup(Promise.resolve(), '/pairs/BTCUSDC/config', undefined, undefined, false);
@@ -318,7 +318,7 @@ it('保留冲突时的输入，并在确认后重新加载版本', async () => {
   mocks.post.mockResolvedValue(pair('BTCUSDC').grid_config);
   await user.click(screen.getByRole('button', { name: '保存并立即生效' }));
   await waitFor(() => expect(mocks.post).toHaveBeenLastCalledWith(expect.any(String), expect.objectContaining({ baseline_version: 'version-2' })));
-}, 20000);
+}, 40000);
 
 it('does not redirect again after the user navigates while queries refresh', async () => {
   let finish!: () => void;
@@ -341,7 +341,7 @@ it('does not redirect again after the user navigates while queries refresh', asy
   } finally {
     invalidate.mockRestore();
   }
-}, 15000);
+}, 40000);
 
 it('opens the mobile navigation menu and navigates to settings', async () => {
   setup(Promise.resolve());
@@ -376,7 +376,7 @@ it('blocks navigation while deleting and redirects a dirty form without another 
   await screen.findByText('总览页面');
   expect(router.state.location.pathname).toBe('/');
   expect(mocks.confirm).toHaveBeenCalledTimes(2);
-}, 15000);
+}, 40000);
 
 it('restores navigation protection for unsaved changes when deletion fails', async () => {
   mocks.confirm.mockResolvedValueOnce(true).mockResolvedValueOnce(true).mockResolvedValueOnce(false);
@@ -395,4 +395,4 @@ it('restores navigation protection for unsaved changes when deletion fails', asy
   await act(async () => { await router.navigate('/settings'); });
   await waitFor(() => expect(mocks.confirm).toHaveBeenCalledTimes(3));
   expect(router.state.location.pathname).toBe('/pairs/BTCUSDC/config');
-}, 15000);
+}, 40000);

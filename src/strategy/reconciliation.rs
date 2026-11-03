@@ -760,7 +760,6 @@ impl GridTradingEngine {
                 let active = state.active_orders.read().await;
                 let mut duplicates: Vec<_> = groups
                     .values()
-                    .cloned()
                     .filter(|orders| {
                         let first = orders[0];
                         let known = [
@@ -810,6 +809,7 @@ impl GridTradingEngine {
                                     || order.update_time != first.update_time
                             })
                     })
+                    .cloned()
                     .collect();
                 let mut restore_orders = Vec::new();
                 let mut active_to_persist = Vec::new();

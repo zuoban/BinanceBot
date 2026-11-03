@@ -283,6 +283,9 @@ struct InitialOrderResponseBatch {
     identities: Vec<(GridOrder, ObservedOrderIdentity)>,
 }
 
+type TerminalDisagreements =
+    HashMap<([u8; 32], String, String), Vec<(BinanceOrderResponse, BinanceOrderResponse)>>;
+
 pub struct GridTradingEngine {
     state: Arc<AppState>,
     client: Arc<BinanceFuturesClient>,
@@ -303,8 +306,7 @@ pub struct GridTradingEngine {
     order_identity_observations: HashMap<([u8; 32], String), Vec<ObservedOrderIdentity>>,
     provisional_order_observations: HashMap<([u8; 32], String), Vec<ObservedOrderIdentity>>,
     loaded_identity_scopes: HashSet<([u8; 32], String)>,
-    terminal_order_disagreements:
-        HashMap<([u8; 32], String, String), Vec<(BinanceOrderResponse, BinanceOrderResponse)>>,
+    terminal_order_disagreements: TerminalDisagreements,
     initial_order_responses: HashMap<([u8; 32], String), Vec<InitialOrderResponseBatch>>,
     exchange_rules_loaded: bool,
     market_data_blocked: bool,
@@ -495,10 +497,13 @@ impl GridTradingEngine {
                 .await
             {
                 Ok(()) => {
-                    let batches = self.initial_order_responses.get_mut(&key).unwrap();
-                    batches.remove(0);
-                    if batches.is_empty() {
-                        self.initial_order_responses.remove(&key);
+                    if let Some(batches) = self.initial_order_responses.get_mut(&key) {
+                        if !batches.is_empty() {
+                            batches.remove(0);
+                        }
+                        if batches.is_empty() {
+                            self.initial_order_responses.remove(&key);
+                        }
                     }
                 }
                 Err(error) => {
@@ -509,22 +514,6 @@ impl GridTradingEngine {
                 }
             }
         }
-    }
-
-    async fn load_initial_order_responses(
-        &mut self,
-        account: [u8; 32],
-        symbol: &str,
-        expected_client_id: &str,
-    ) -> Option<Vec<BinanceOrderResponse>> {
-        self.load_initial_order_response_timeline(account, symbol, expected_client_id)
-            .await
-            .map(|responses| {
-                responses
-                    .into_iter()
-                    .map(|(_, response)| response)
-                    .collect()
-            })
     }
 
     async fn load_initial_order_response_timeline(
@@ -632,10 +621,11 @@ impl GridTradingEngine {
             .await
         {
             Ok(()) => {
-                let pending = self.terminal_order_disagreements.get_mut(&key).unwrap();
-                pending.pop();
-                if pending.is_empty() {
-                    self.terminal_order_disagreements.remove(&key);
+                if let Some(pending) = self.terminal_order_disagreements.get_mut(&key) {
+                    pending.pop();
+                    if pending.is_empty() {
+                        self.terminal_order_disagreements.remove(&key);
+                    }
                 }
                 true
             }
@@ -677,10 +667,13 @@ impl GridTradingEngine {
                 self.report_reconciliation_state(true).await;
                 return true;
             }
-            let observations = self.terminal_order_disagreements.get_mut(&key).unwrap();
-            observations.remove(0);
-            if observations.is_empty() {
-                self.terminal_order_disagreements.remove(&key);
+            if let Some(observations) = self.terminal_order_disagreements.get_mut(&key) {
+                if !observations.is_empty() {
+                    observations.remove(0);
+                }
+                if observations.is_empty() {
+                    self.terminal_order_disagreements.remove(&key);
+                }
             }
         }
         let scope_symbol = symbol.to_owned();

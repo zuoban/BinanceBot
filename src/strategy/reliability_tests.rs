@@ -5839,7 +5839,7 @@ async fn repeated_lookup_of_same_observed_id_preserves_disagreeing_terminal_resp
                     let count = queries.fetch_add(1, Ordering::SeqCst);
                     Json(json!({"orderId":456,"clientOrderId":"gb_repeated_observed_id","symbol":"SOLUSDC",
                         "status":"CANCELED","price":"100","avgPrice":"100","origQty":"2",
-                        "executedQty":if count % 2 == 0 {"0"} else {"0.5"},
+                        "executedQty":if count.is_multiple_of(2) {"0"} else {"0.5"},
                         "updateTime":1000,"side":"BUY","type":"LIMIT","timeInForce":"GTX"}))
                 }
             }

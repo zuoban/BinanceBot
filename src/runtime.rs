@@ -44,6 +44,24 @@ impl Drop for ActiveRemoval {
     }
 }
 
+type EngineAbortEntry = (std::sync::Weak<AppState>, tokio::task::AbortHandle);
+type EarlyStopEntry = (
+    Arc<AppState>,
+    JoinHandle<(tokio::time::Instant, anyhow::Result<()>)>,
+);
+
+#[derive(Default)]
+struct PreparePairOptions {
+    multi: bool,
+    previous_state: Option<(crate::types::PositionInfo, crate::types::AccountInfo)>,
+    force_paused: bool,
+    prearmed: Option<(bool, bool)>,
+    start: Option<oneshot::Receiver<()>>,
+    startup_shutdown: Option<watch::Receiver<bool>>,
+    #[cfg(test)]
+    prepare_hook: Option<mpsc::Sender<(String, oneshot::Sender<()>)>>,
+}
+
 #[derive(Clone)]
 pub struct RuntimeHandle {
     pub(crate) states: Arc<RwLock<Vec<Arc<AppState>>>>,
@@ -55,16 +73,8 @@ pub struct RuntimeHandle {
     commands: mpsc::Sender<RuntimeCommand>,
     stop: watch::Sender<bool>,
     active_removal: Arc<std::sync::Mutex<Option<String>>>,
-    engine_aborts:
-        Arc<std::sync::Mutex<Vec<(std::sync::Weak<AppState>, tokio::task::AbortHandle)>>>,
-    early_stops: Arc<
-        Mutex<
-            Vec<(
-                Arc<AppState>,
-                JoinHandle<(tokio::time::Instant, anyhow::Result<()>)>,
-            )>,
-        >,
-    >,
+    engine_aborts: Arc<std::sync::Mutex<Vec<EngineAbortEntry>>>,
+    early_stops: Arc<Mutex<Vec<EarlyStopEntry>>>,
 }
 
 impl RuntimeHandle {
@@ -589,14 +599,14 @@ impl TradingRuntime {
     ) -> anyhow::Result<PairTask> {
         self.prepare_pair_with_state(
             strategy,
-            multi,
-            None,
-            false,
-            None,
-            Some(start),
-            startup_shutdown,
-            #[cfg(test)]
-            prepare_hook,
+            PreparePairOptions {
+                multi,
+                start: Some(start),
+                startup_shutdown,
+                #[cfg(test)]
+                prepare_hook,
+                ..Default::default()
+            },
         )
         .await
     }
@@ -604,15 +614,17 @@ impl TradingRuntime {
     async fn prepare_pair_with_state(
         &self,
         strategy: AppConfig,
-        multi: bool,
-        previous_state: Option<(crate::types::PositionInfo, crate::types::AccountInfo)>,
-        force_paused: bool,
-        prearmed: Option<(bool, bool)>,
-        start: Option<oneshot::Receiver<()>>,
-        mut startup_shutdown: Option<watch::Receiver<bool>>,
-        #[cfg(test)] prepare_hook: Option<mpsc::Sender<(String, oneshot::Sender<()>)>>,
+        options: PreparePairOptions,
     ) -> anyhow::Result<PairTask> {
         let db = self.handle.db.clone();
+        let multi = options.multi;
+        let previous_state = options.previous_state;
+        let force_paused = options.force_paused;
+        let prearmed = options.prearmed;
+        let start = options.start;
+        let mut startup_shutdown = options.startup_shutdown;
+        #[cfg(test)]
+        let prepare_hook = options.prepare_hook;
         let (previous_unclean, has_admin) = if let Some(prearmed) = prearmed {
             prearmed
         } else {
@@ -850,14 +862,11 @@ impl TradingRuntime {
         let result = self
             .prepare_pair_with_state(
                 config,
-                true,
-                None,
-                false,
-                Some((previous_unclean, has_admin)),
-                None,
-                None,
-                #[cfg(test)]
-                None,
+                PreparePairOptions {
+                    multi: true,
+                    prearmed: Some((previous_unclean, has_admin)),
+                    ..Default::default()
+                },
             )
             .await;
         if let Ok(pair) = result {
@@ -1001,14 +1010,12 @@ impl TradingRuntime {
             match self
                 .prepare_pair_with_state(
                     config,
-                    true,
-                    previous_state,
-                    true,
-                    None,
-                    None,
-                    None,
-                    #[cfg(test)]
-                    None,
+                    PreparePairOptions {
+                        multi: true,
+                        previous_state,
+                        force_paused: true,
+                        ..Default::default()
+                    },
                 )
                 .await
             {
