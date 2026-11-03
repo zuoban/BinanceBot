@@ -102,3 +102,4 @@
 - 异步跨任务分派与 JoinHandle 隔离：在 HTTP 控制接口（如 `post_config_handler`、`post_managed_config_handler`）中使用 `tokio::spawn` 隔离执行持久化逻辑时，接收 `JoinHandle` 结果后绝不能直接调用 `.expect(...)`。当异步任务在停机或极端异常下被中止（Cancelled）或内部 Panic 时，`.expect(...)` 会直接导致外部 Web 线程崩溃；必须使用 `match task.await` 将 JoinError 转换为可控的 HTTP 500 业务响应。
 - 摘要十六进制编码与分配优化：计算基于 HMAC-SHA256 的版本或指纹（如 `config_version`）时，避免使用 `.into_bytes().iter().map(|b| format!("{b:02x}")).collect()`，该写法在单次调用中会产生 32 次小字符串分配与重组开销；直接采用 `hex::encode` 能实现单次预分配直接格式化，提高性能并消除无谓的堆内存碎片。
 - 动态路由聚合容错：在构建多交易对路由（`create_multi_router`）时，避免无条件对交易对列表和作用域调用 `.expect(...)`；若配置列表为空或交易对作用域未就绪，应安全降级返回空路由或跳过未就绪项，提升动态路由构建的防御能力。
+- 前端路由实体可空性与非空断言防御：在基于 URL 参数（如 `/pairs/:symbol`）匹配实体对象（如 `pair`）的详情页面中，绝不能直接使用非空断言（`pair!.mode` 或 `pair!.symbol`）传递给顶层 hooks 或派生计算变量。当用户直接访问不存在的交易对 URL 或交易对在其他标签页被移除时，直接解包会触发 React 运行时崩溃白屏，导致预设的“交易对不存在”警告提示无法正常展现；所有根据 URL 派生的对象必须安全判空降级（`s && pair ? ... : undefined`）。

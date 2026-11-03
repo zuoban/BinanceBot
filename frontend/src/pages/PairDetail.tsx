@@ -19,7 +19,7 @@ export default function PairDetail() {
   const query = usePairSnapshot(pair);
   const controls = useControls();
   const s = query.data, asset = quoteAsset(symbol ?? '');
-  const account = s && accountGroups([{ snapshot: s, mode: pair!.mode, scoped: pair!.scoped, account_observation_stale: query.stale }])[0];
+  const account = s && pair ? accountGroups([{ snapshot: s, mode: pair.mode, scoped: pair.scoped, account_observation_stale: query.stale }])[0] : undefined;
   const today = s ? todayTradeCounts(s) : null;
   useDocumentTitle(`${s && Number(s.ticker.mark_price) > 0 ? price(s.ticker.mark_price) : '--'} | ${today?.buy ?? '--'}B | ${today?.sell ?? '--'}S`);
   const todayPnl = today && s?.hourly_trade_stats && s.hourly_trade_stats.pending_pnl_count === 0 ? s.hourly_trade_stats.realized_pnl : null;
@@ -68,7 +68,7 @@ export default function PairDetail() {
           ]} /></Card>
         </> },
         { key: 'orders', label: `挂单 (${s.active_orders.length})`, children: <Card><OrdersTable orders={s.active_orders} mark={s.ticker.mark_price} /></Card> },
-        { key: 'trades', label: '成交历史', children: <Card title="最近成交" extra={<HistoryActions symbol={pair!.symbol} />}><Alert type="info" title={`此处展示当前模式的最近成交；导出和清理作用于 ${pair!.symbol} 的全部模式。`} /><TradesTable trades={s.recent_trades} /></Card> },
+        { key: 'trades', label: '成交历史', children: <Card title="最近成交" extra={pair ? <HistoryActions symbol={pair.symbol} /> : null}><Alert type="info" title={`此处展示当前模式的最近成交；导出和清理作用于 ${symbol ?? ''} 的全部模式。`} /><TradesTable trades={s.recent_trades} /></Card> },
         { key: 'logs', label: '运行日志', children: <Card><LogsTable logs={s.recent_logs} /></Card> },
       ]} />
     </>}
