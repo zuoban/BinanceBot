@@ -441,6 +441,8 @@ async fn auth_status_reports_database_errors_instead_of_false_state() {
 async fn protected_route_reports_session_read_failure_without_treating_it_as_expiration() {
     let fixture = AuthTestDatabase::new();
     fixture.db.create_session("valid-token").unwrap();
+    // Never validated before the table disappears, so the session cache cannot answer for it.
+    fixture.db.create_session("cold-token").unwrap();
     let (action_tx, _action_rx) = mpsc::channel(16);
     let state = state_with_password(fixture.db.clone(), action_tx, "correct-password");
     let app = create_router(state);
@@ -472,7 +474,7 @@ async fn protected_route_reports_session_read_failure_without_treating_it_as_exp
         .external
         .execute_batch("ALTER TABLE auth_sessions RENAME TO auth_sessions_unavailable")
         .unwrap();
-    let response = app.oneshot(request("valid-token")).await.unwrap();
+    let response = app.oneshot(request("cold-token")).await.unwrap();
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();

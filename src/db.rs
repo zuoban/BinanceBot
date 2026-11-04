@@ -84,6 +84,7 @@ pub struct Database {
     #[cfg(test)]
     membership_commit_hook: Mutex<Option<MembershipHook>>,
     today_pnl_cache: tokio::sync::Mutex<Option<TodayPnlCacheEntry>>,
+    session_cache: authentication::SessionCache,
     #[cfg(test)]
     hourly_stats_queries: AtomicU64,
     #[cfg(test)]
@@ -312,6 +313,7 @@ impl Database {
             #[cfg(test)]
             membership_commit_hook: Mutex::new(None),
             today_pnl_cache: tokio::sync::Mutex::new(None),
+            session_cache: Default::default(),
             #[cfg(test)]
             hourly_stats_queries: AtomicU64::new(0),
             #[cfg(test)]
@@ -4265,6 +4267,7 @@ mod tests {
             revision_publish_hook: Mutex::new(None),
             membership_commit_hook: Mutex::new(None),
             today_pnl_cache: tokio::sync::Mutex::new(None),
+            session_cache: Default::default(),
             hourly_stats_queries: AtomicU64::new(0),
             benchmark_wait_samples: std::sync::OnceLock::new(),
         };

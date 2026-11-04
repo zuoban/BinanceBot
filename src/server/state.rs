@@ -1112,6 +1112,9 @@ impl AppState {
         if token.is_empty() {
             return Ok(false);
         }
+        if self.db.session_recently_validated(token) {
+            return Ok(true);
+        }
         let token = token.to_string();
         self.db
             .run_blocking(move |db| db.is_session_valid(&token))
