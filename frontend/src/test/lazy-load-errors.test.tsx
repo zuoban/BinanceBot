@@ -1,5 +1,5 @@
 import { Suspense, lazy } from 'react';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { App } from 'antd';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -11,7 +11,7 @@ import Settings from '../pages/Settings';
 vi.mock('../components/OverviewHistoryChart', () => { throw new Error('chart module unavailable'); });
 vi.mock('../components/DatabaseSettings', () => { throw new Error('database module unavailable'); });
 vi.mock('../lib/queries', () => ({
-  useOverviewHistory: () => ({ data: [{ hour: Math.floor(Date.now() / 3600000) * 3600, groups: [{ mode: 'PAPER', asset: 'USDC', equity: '100' }] }], isPending: false, error: null }),
+  useOverviewHistory: () => ({ data: { snapshots: [{ hour: Math.floor(Date.now() / 3600000) * 3600, groups: [{ mode: 'PAPER', asset: 'USDC', account_id: null, equity: '100' }] }], current_accounts: [{ mode: 'PAPER', asset: 'USDC', account_id: null }] }, isPending: false, error: null }),
 }));
 vi.mock('../lib/api', () => ({ api: vi.fn().mockResolvedValue({}), post: vi.fn() }));
 
@@ -21,12 +21,14 @@ beforeEach(() => {
   vi.spyOn(console, 'error').mockImplementation(() => {});
 });
 
-it('keeps the history card usable when the chart module fails', async () => {
+it('offers recovery for both history charts when the module fails at Beijing midnight', async () => {
+  const realNow = Date.now;
+  const offset = Date.UTC(2026, 0, 1, 16, 30) - realNow();
+  vi.spyOn(Date, 'now').mockImplementation(() => realNow() + offset);
   render(<><button>其他功能</button><OverviewHistory /></>);
-  expect(await screen.findByText('权益图加载失败，请刷新页面重试。')).toBeInTheDocument();
+  await waitFor(() => expect(screen.getAllByRole('alert')).toHaveLength(2));
   expect(screen.getByRole('button', { name: '其他功能' })).toBeEnabled();
-  expect(screen.getByText(/单位 USDC/)).toBeInTheDocument();
-  expect(screen.getByRole('button', { name: '刷新页面' })).toBeEnabled();
+  for (const alert of screen.getAllByRole('alert')) expect(within(alert).getByRole('button', { name: '刷新页面' })).toBeEnabled();
 });
 
 it('keeps the settings tabs usable when the database module fails', async () => {

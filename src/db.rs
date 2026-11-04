@@ -325,6 +325,28 @@ impl Database {
     pub fn path(&self) -> &str {
         &self.path
     }
+    pub(crate) fn history_account_id(&self, identity: [u8; 32]) -> Result<String> {
+        let conn = self.conn.lock().unwrap();
+        if let Some(id) = conn
+            .query_row(
+                "SELECT account_id FROM history_account_ids WHERE identity = ?1",
+                params![identity.as_slice()],
+                |row| row.get(0),
+            )
+            .optional()?
+        {
+            return Ok(id);
+        }
+        conn.execute(
+            "INSERT OR IGNORE INTO history_account_ids (identity, account_id) VALUES (?1, ?2)",
+            params![identity.as_slice(), uuid::Uuid::new_v4().to_string()],
+        )?;
+        Ok(conn.query_row(
+            "SELECT account_id FROM history_account_ids WHERE identity = ?1",
+            params![identity.as_slice()],
+            |row| row.get(0),
+        )?)
+    }
 
     pub fn save_hourly_account_snapshot(
         &self,
@@ -436,7 +458,8 @@ impl Database {
                 params![serde_json::to_string(&config)?],
             )?;
         }
-        snapshot.execute_batch("DELETE FROM auth_sessions; VACUUM;")?;
+        snapshot
+            .execute_batch("DELETE FROM auth_sessions; DELETE FROM history_account_ids; VACUUM;")?;
         // VACUUM removes credentials from freed pages and old config payloads too.
         Ok(snapshot.serialize(rusqlite::DatabaseName::Main)?.to_vec())
     }
@@ -579,6 +602,11 @@ impl Database {
             CREATE TABLE IF NOT EXISTS account_hourly_snapshots (
                 hour INTEGER PRIMARY KEY,
                 payload TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS history_account_ids (
+                identity BLOB PRIMARY KEY,
+                account_id TEXT NOT NULL UNIQUE
             );
 
             CREATE TABLE IF NOT EXISTS pair_runtime (
@@ -3414,6 +3442,47 @@ mod tests {
                 .unwrap();
             assert_eq!(count, expected, "{table}");
         }
+    }
+
+    #[test]
+    fn history_identity_survives_reopen_and_is_removed_from_analysis_export() {
+        let directory =
+            std::env::temp_dir().join(format!("history-identities-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("source.db");
+        let identity = [42_u8; 32];
+        let other = [43_u8; 32];
+        let first = {
+            let db = Database::open(&path).unwrap();
+            let first = db.history_account_id(identity).unwrap();
+            assert!(uuid::Uuid::parse_str(&first).is_ok());
+            assert_ne!(first, db.history_account_id(other).unwrap());
+            let recovery_identity = [44_u8; 32];
+            db.conn.lock().unwrap().execute(
+                "INSERT INTO terminal_order_disagreements VALUES (?1, 'SOLUSDC', 'test', '{}', '{}')",
+                params![recovery_identity.as_slice()],
+            ).unwrap();
+            let exported = db.export_analysis_snapshot().unwrap();
+            assert!(!exported
+                .windows(identity.len())
+                .any(|bytes| bytes == identity));
+            let exported_path = directory.join("export.db");
+            std::fs::write(&exported_path, &exported).unwrap();
+            let copy = Connection::open(&exported_path).unwrap();
+            let preserved: Vec<u8> = copy
+                .query_row(
+                    "SELECT account_key FROM terminal_order_disagreements",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(preserved.as_slice(), recovery_identity.as_slice());
+            first
+        };
+        let reopened = Database::open(&path).unwrap();
+        assert_eq!(first, reopened.history_account_id(identity).unwrap());
+        drop(reopened);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

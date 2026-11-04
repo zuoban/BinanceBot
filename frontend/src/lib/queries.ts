@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, pairPath, socketUrl, tokenStore } from './api';
-import type { AccountFrame, HourlySnapshot, Overview, Pair, Snapshot, SocketMessage } from './types';
+import type { AccountFrame, OverviewHistoryData, Overview, Pair, Snapshot, SocketMessage } from './types';
 
 const SOCKET_LIVE_MS = 5000;
 const HTTP_FALLBACK_MS = 3000;
@@ -14,7 +14,7 @@ export function useOverview() {
   return useQuery({ queryKey: ['overview'], queryFn: ({ signal }) => api<Overview>('/api/overview', { signal }), refetchInterval: 3000 });
 }
 export function useOverviewHistory() {
-  return useQuery({ queryKey: ['overview-history'], queryFn: ({ signal }) => api<HourlySnapshot[]>('/api/overview/history', { signal }), refetchInterval: 60_000 });
+  return useQuery({ queryKey: ['overview-history'], queryFn: ({ signal }) => api<OverviewHistoryData>('/api/overview/history', { signal }), refetchInterval: 60_000 });
 }
 
 type SocketDataByType = { [Message in SocketMessage as Message['type']]: Message['data'] };

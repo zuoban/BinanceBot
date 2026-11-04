@@ -314,8 +314,16 @@ impl BinanceFuturesClient {
     // Recovery records belong to the exchange account, independent of request
     // timing settings or changes to the API secret for the same API key.
     pub(crate) fn account_identity_key(&self) -> [u8; 32] {
+        Self::identity_key(&self.base_url, &self._api_key)
+    }
+
+    pub(crate) fn configured_account_identity(config: &ExchangeConfig) -> [u8; 32] {
+        Self::identity_key("https://fapi.binance.com", &config.api_key)
+    }
+
+    fn identity_key(base_url: &str, api_key: &str) -> [u8; 32] {
         let mut hash = Sha256::new();
-        for value in [self.base_url.as_bytes(), self._api_key.as_bytes()] {
+        for value in [base_url.as_bytes(), api_key.as_bytes()] {
             hash.update((value.len() as u64).to_be_bytes());
             hash.update(value);
         }

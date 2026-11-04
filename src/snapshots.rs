@@ -3,13 +3,15 @@ use crate::types::{quote_asset, BotSnapshot, TradingMode};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotGroup {
     pub mode: TradingMode,
     pub asset: String,
+    #[serde(default)]
+    pub account_id: Option<String>,
     pub equity: Option<Decimal>,
     pub long: Option<Decimal>,
     pub short: Option<Decimal>,
@@ -21,15 +23,32 @@ pub struct HourlySnapshot {
     pub groups: Vec<SnapshotGroup>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct HistoryAccount {
+    pub mode: TradingMode,
+    pub asset: String,
+    pub account_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OverviewHistory {
+    pub snapshots: Vec<HourlySnapshot>,
+    pub current_accounts: Vec<HistoryAccount>,
+}
+
 fn fresh(now: DateTime<Utc>, updated: DateTime<Utc>, seconds: u64) -> bool {
     now.signed_duration_since(updated)
         .to_std()
         .is_ok_and(|age| age < Duration::from_secs(seconds))
 }
 
-fn aggregate(snapshots: &[(BotSnapshot, u64)], now: DateTime<Utc>) -> Vec<SnapshotGroup> {
-    let mut groups: BTreeMap<(String, String), Vec<(&BotSnapshot, u64)>> = BTreeMap::new();
-    for (snapshot, sync_interval) in snapshots {
+fn aggregate(
+    snapshots: &[(BotSnapshot, u64, Option<String>)],
+    now: DateTime<Utc>,
+) -> Vec<SnapshotGroup> {
+    let mut groups: BTreeMap<(String, String, Option<String>), Vec<(&BotSnapshot, u64)>> =
+        BTreeMap::new();
+    for (snapshot, sync_interval, account_id) in snapshots {
         let mode = snapshot.mode;
         let asset = quote_asset(&snapshot.symbol).unwrap_or_else(|| {
             if snapshot.account.asset.is_empty() {
@@ -39,13 +58,17 @@ fn aggregate(snapshots: &[(BotSnapshot, u64)], now: DateTime<Utc>) -> Vec<Snapsh
             }
         });
         groups
-            .entry((mode.as_str().to_owned(), asset.to_owned()))
+            .entry((
+                mode.as_str().to_owned(),
+                asset.to_owned(),
+                account_id.clone(),
+            ))
             .or_default()
             .push((snapshot, *sync_interval));
     }
     groups
         .into_iter()
-        .map(|((mode, asset), snapshots)| {
+        .map(|((mode, asset, account_id), snapshots)| {
             let mode = TradingMode::from_db(&mode);
             let latest = snapshots
                 .iter()
@@ -112,12 +135,140 @@ fn aggregate(snapshots: &[(BotSnapshot, u64)], now: DateTime<Utc>) -> Vec<Snapsh
             SnapshotGroup {
                 mode,
                 asset,
+                account_id,
                 equity,
                 long: valid.then_some(long),
                 short: valid.then_some(short),
             }
         })
         .collect()
+}
+
+async fn resolve_account_id(
+    handle: &RuntimeHandle,
+    cache: &mut HashMap<[u8; 32], String>,
+    identity: [u8; 32],
+) -> anyhow::Result<String> {
+    if let Some(id) = cache.get(&identity) {
+        return Ok(id.clone());
+    }
+    let id = handle
+        .db
+        .run_blocking(move |db| db.history_account_id(identity))
+        .await?;
+    cache.insert(identity, id.clone());
+    Ok(id)
+}
+
+pub(crate) async fn current_accounts(
+    handle: &RuntimeHandle,
+) -> anyhow::Result<Vec<HistoryAccount>> {
+    // Global changes hold this lock until persistence or rollback is complete.
+    let (states, committed) = {
+        let _membership = handle.membership_lock.lock().await;
+        let states: Vec<_> = handle
+            .states
+            .read()
+            .await
+            .iter()
+            .filter(|state| !state.is_retired())
+            .cloned()
+            .collect();
+        let config = handle
+            .db
+            .run_blocking(|db| db.load_config())
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("无法读取全局配置"))?;
+        (states, config.strategy_configs()?)
+    };
+    let mut accounts = BTreeMap::new();
+    let mut identities = HashMap::new();
+    for state in states {
+        let config = match state.pair_scope() {
+            Some(symbol) => committed
+                .iter()
+                .find(|config| config.exchange.symbol == symbol),
+            None => committed.first(),
+        };
+        let Some(config) = config else { continue };
+        let symbol = config.exchange.symbol.as_str();
+        let mode = config.exchange.trading_mode();
+        let account_id = if mode == TradingMode::Live {
+            let key = crate::exchange::client::BinanceFuturesClient::configured_account_identity(
+                &config.exchange,
+            );
+            Some(resolve_account_id(handle, &mut identities, key).await?)
+        } else {
+            None
+        };
+        let asset = if let Some(asset) = quote_asset(symbol) {
+            asset.to_owned()
+        } else {
+            let account = state.account.read().await;
+            if account.asset.is_empty() {
+                symbol.to_owned()
+            } else {
+                account.asset.clone()
+            }
+        };
+        accounts
+            .entry((mode.as_str().to_owned(), asset.clone(), account_id.clone()))
+            .or_insert(HistoryAccount {
+                mode,
+                asset,
+                account_id,
+            });
+    }
+    Ok(accounts.into_values().collect())
+}
+
+pub(crate) async fn collect_hourly(
+    handle: &RuntimeHandle,
+) -> anyhow::Result<Option<Vec<(BotSnapshot, u64, Option<String>)>>> {
+    // Never queue behind an in-progress configuration or membership change.
+    let Ok(_membership) = handle.membership_lock.try_lock() else {
+        return Ok(None);
+    };
+    let states: Vec<_> = handle
+        .states
+        .read()
+        .await
+        .iter()
+        .filter(|state| !state.is_retired())
+        .cloned()
+        .collect();
+    let mut updates = Vec::with_capacity(states.len());
+    for state in &states {
+        let Ok(update) = state.config_update_lock.try_lock() else {
+            return Ok(None);
+        };
+        updates.push(update);
+    }
+    let observations = futures_util::future::join_all(states.iter().map(|state| async {
+        let snapshot = state.snapshot().await;
+        let config = state.config.read().await;
+        let identity = (snapshot.mode == TradingMode::Live).then(|| {
+            crate::exchange::client::BinanceFuturesClient::configured_account_identity(
+                &config.exchange,
+            )
+        });
+        (snapshot, config.exchange.sync_interval_secs, identity)
+    }))
+    .await;
+    let mut identities = HashMap::new();
+    let mut snapshots = Vec::with_capacity(observations.len());
+    for (snapshot, interval, identity) in observations {
+        let account_id = match identity {
+            Some(identity) => Some(resolve_account_id(handle, &mut identities, identity).await?),
+            None => None,
+        };
+        snapshots.push((snapshot, interval, account_id));
+    }
+    Ok(Some(snapshots))
+}
+
+fn within_capture_window(hour: i64, now: DateTime<Utc>) -> bool {
+    now.timestamp() >= hour && now.timestamp() - hour < 60
 }
 
 pub async fn run_hourly_snapshots(handle: RuntimeHandle) {
@@ -134,18 +285,28 @@ pub async fn run_hourly_snapshots(handle: RuntimeHandle) {
         let delay = u64::try_from(next - now).unwrap_or(1).max(1);
         tokio::time::sleep(Duration::from_secs(delay)).await;
         let now = Utc::now();
-        // Do not assign current values to an earlier hour after a long suspension.
-        if now.timestamp() - next >= 60 {
+        // Never attach observations collected outside the first minute to this hour.
+        if !within_capture_window(next, now) {
             continue;
         }
-        let states = handle.states.read().await.clone();
-        let snapshots = futures_util::future::join_all(states.iter().map(|state| async {
-            let snapshot = state.snapshot().await;
-            let interval = state.config.read().await.exchange.sync_interval_secs;
-            (snapshot, interval)
-        }))
-        .await;
-        let groups = aggregate(&snapshots, Utc::now());
+        let deadline = DateTime::from_timestamp(next + 60, 0).unwrap();
+        let remaining = (deadline - now).to_std().unwrap_or_default();
+        let snapshots = match tokio::time::timeout(remaining, collect_hourly(&handle)).await {
+            Ok(Ok(Some(snapshots))) => snapshots,
+            Ok(Ok(None)) | Err(_) => continue,
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "Could not identify account snapshots");
+                continue;
+            }
+        };
+        let now = Utc::now();
+        if !within_capture_window(next, now) {
+            continue;
+        }
+        let groups = aggregate(&snapshots, now);
+        if !within_capture_window(next, Utc::now()) {
+            continue;
+        }
         if let Err(error) = handle
             .db
             .run_blocking(move |db| db.save_hourly_account_snapshot(next, &groups))
@@ -164,12 +325,33 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::mpsc;
 
+    #[test]
+    fn hourly_capture_rejects_observations_outside_first_minute() {
+        let hour = 1_800_000_000;
+        assert!(!within_capture_window(
+            hour,
+            DateTime::from_timestamp(hour - 1, 0).unwrap()
+        ));
+        assert!(within_capture_window(
+            hour,
+            DateTime::from_timestamp(hour, 0).unwrap()
+        ));
+        assert!(within_capture_window(
+            hour,
+            DateTime::from_timestamp(hour + 59, 999_999_999).unwrap()
+        ));
+        assert!(!within_capture_window(
+            hour,
+            DateTime::from_timestamp(hour + 60, 0).unwrap()
+        ));
+    }
+
     fn aggregate(snapshots: &[BotSnapshot], now: DateTime<Utc>) -> Vec<SnapshotGroup> {
         super::aggregate(
             &snapshots
                 .iter()
                 .cloned()
-                .map(|snapshot| (snapshot, 3))
+                .map(|snapshot| (snapshot, 3, None))
                 .collect::<Vec<_>>(),
             now,
         )
@@ -221,6 +403,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn distinct_live_identities_never_share_equity_or_positions() {
+        let mut first = sample("BTCUSDC", false).await;
+        let mut second = sample("ETHUSDC", false).await;
+        first.account.margin_balance = dec!(100);
+        second.account.margin_balance = dec!(200);
+        first.position.size = dec!(1);
+        second.position.size = dec!(-2);
+        let groups = super::aggregate(
+            &[
+                (first, 3, Some("first".into())),
+                (second, 3, Some("second".into())),
+            ],
+            Utc::now(),
+        );
+        assert_eq!(groups.len(), 2);
+        let first = groups
+            .iter()
+            .find(|group| group.account_id.as_deref() == Some("first"))
+            .unwrap();
+        let second = groups
+            .iter()
+            .find(|group| group.account_id.as_deref() == Some("second"))
+            .unwrap();
+        assert_eq!(
+            (first.equity, first.long, first.short),
+            (Some(dec!(100)), Some(dec!(10)), Some(dec!(0)))
+        );
+        assert_eq!(
+            (second.equity, second.long, second.short),
+            (Some(dec!(200)), Some(dec!(0)), Some(dec!(20)))
+        );
+    }
+
+    #[test]
+    fn legacy_live_groups_have_no_identity() {
+        let group: SnapshotGroup = serde_json::from_str(
+            r#"{"mode":"LIVE","asset":"USDC","equity":"100","long":null,"short":null}"#,
+        )
+        .unwrap();
+        assert_eq!(group.mode, TradingMode::Live);
+        assert_eq!(group.account_id, None);
+    }
+
+    #[tokio::test]
     async fn missing_prices_and_stale_live_accounts_remain_unknown() {
         let mut live = sample("BTCUSDC", false).await;
         live.account.update_time = Utc::now() - chrono::Duration::minutes(1);
@@ -246,12 +472,12 @@ mod tests {
         let mut live = sample("BTCUSDC", false).await;
         live.account.update_time = now - chrono::Duration::seconds(55);
         live.position.update_time = Some(now - chrono::Duration::seconds(55));
-        let group = super::aggregate(&[(live.clone(), 60)], now).remove(0);
+        let group = super::aggregate(&[(live.clone(), 60, None)], now).remove(0);
         assert_eq!(
             (group.equity, group.long, group.short),
             (Some(dec!(110)), Some(dec!(0)), Some(dec!(0)))
         );
-        let group = super::aggregate(&[(live, 3)], now).remove(0);
+        let group = super::aggregate(&[(live, 3, None)], now).remove(0);
         assert_eq!((group.equity, group.long, group.short), (None, None, None));
     }
 
@@ -322,6 +548,7 @@ mod tests {
         let group = SnapshotGroup {
             mode: TradingMode::Paper,
             asset: "USDC".into(),
+            account_id: None,
             equity: Some(dec!(100)),
             long: Some(dec!(0)),
             short: Some(dec!(0)),

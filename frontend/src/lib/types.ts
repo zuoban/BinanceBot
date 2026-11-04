@@ -61,10 +61,12 @@ export type SocketMessage =
   | { type: 'accounts'; data: AccountFrame };
 export interface TodayPnl { window_start: string; window_end: string; groups: { symbol: string; mode: Mode; realized_pnl: Decimal; pending_pnl_count: number }[] }
 export interface Overview { generated_at: string; pairs: { scoped: boolean; mode: Mode; snapshot: Snapshot; account_observation_stale?: boolean }[]; today_pnl?: TodayPnl | null }
+export interface HistoryAccount { mode: Mode; asset: string; account_id: string | null }
 export interface HourlySnapshot {
   hour: number;
-  groups: { mode: Mode; asset: string; equity: Decimal | null; long: Decimal | null; short: Decimal | null }[];
+  groups: (HistoryAccount & { equity: Decimal | null; long: Decimal | null; short: Decimal | null })[];
 }
+export interface OverviewHistoryData { snapshots: HourlySnapshot[]; current_accounts: HistoryAccount[] }
 export interface GlobalConfig {
   version: string;
   recv_window: number; sync_interval_secs: number; global_max_position_notional: Decimal | null; pause_on_zero_available_margin: boolean; has_api_key: boolean; has_api_secret: boolean;

@@ -73,6 +73,7 @@ export default function PairConfig() {
       navigate(`/pairs/${targetSymbol}`, { replace: true });
       void client.invalidateQueries({ queryKey: ['pairs'] });
       void client.invalidateQueries({ queryKey: ['overview'] });
+      if (adding) void client.resetQueries({ queryKey: ['overview-history'] });
       void client.invalidateQueries({ queryKey: ['config', symbol] });
     },
     onError: error => message.error(error.message),

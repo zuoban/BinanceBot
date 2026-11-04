@@ -1620,6 +1620,7 @@ impl GridTradingEngine {
         self.client = new_client;
         if client_changed {
             self.state.position.write().await.update_time = None;
+            self.state.account.write().await.update_time = chrono::DateTime::<Utc>::default();
         }
         if fetch_rules {
             *self.state.rules.write().await = new_rules;
@@ -5014,6 +5015,63 @@ mod tests {
         );
         assert!(engine.state.active_orders.read().await.is_empty());
         assert!(db.load_managed_orders("SOLUSDC").unwrap().is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn live_credential_switch_invalidates_old_balance_until_reconciled() {
+        let mut config = AppConfig::default();
+        config.exchange.api_key = "old-key".into();
+        config.exchange.api_secret = "old-secret".into();
+        config.grid.grid_interval = dec!(1);
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        db.save_config(&config).unwrap();
+        let fake = PairExchange::default();
+        let (url, server) = pair_exchange_server(fake.clone()).await;
+        let mut engine = pair_recovery_engine(&config, db, url).await;
+        let state = engine.state.clone();
+        let mut old_account = state.account.write().await;
+        old_account.asset = "USDC".into();
+        old_account.margin_balance = dec!(321);
+        old_account.update_time = Utc::now();
+
+        config.exchange.api_key = "new-key".into();
+        config.exchange.api_secret = "new-secret".into();
+        let switching = tokio::spawn(async move {
+            let result = engine.apply_config(config).await;
+            (engine, result)
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if state.config.read().await.exchange.api_key == "new-key" {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        fake.fail_open_orders.store(100, Ordering::SeqCst);
+        drop(old_account);
+
+        let (mut engine, result) =
+            tokio::time::timeout(std::time::Duration::from_secs(10), switching)
+                .await
+                .unwrap()
+                .unwrap();
+        assert!(result.is_err());
+        let snapshot = state.snapshot().await;
+        assert_eq!(snapshot.account.margin_balance, dec!(321));
+        assert_eq!(
+            snapshot.account.update_time,
+            chrono::DateTime::<Utc>::default()
+        );
+
+        fake.fail_open_orders.store(0, Ordering::SeqCst);
+        assert!(engine.sync_account_and_position().await);
+        let account = state.account.read().await;
+        assert_eq!(account.margin_balance, dec!(10000));
+        assert!(account.update_time > chrono::DateTime::<Utc>::default());
         server.abort();
     }
 

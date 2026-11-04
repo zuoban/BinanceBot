@@ -1942,20 +1942,119 @@ async fn overview_history_returns_saved_snapshots() {
     let group = crate::snapshots::SnapshotGroup {
         mode: TradingMode::Paper,
         asset: "USDC".into(),
+        account_id: None,
         equity: Some(rust_decimal_macros::dec!(100)),
         long: Some(rust_decimal_macros::dec!(20)),
         short: Some(rust_decimal_macros::dec!(0)),
     };
-    runtime
-        .handle
-        .db
-        .save_hourly_account_snapshot(hour, &[group])
-        .unwrap();
+    for saved_hour in [hour - 8 * 24 * 3600, hour - 6 * 24 * 3600 - 12 * 3600, hour] {
+        runtime
+            .handle
+            .db
+            .save_hourly_account_snapshot(saved_hour, std::slice::from_ref(&group))
+            .unwrap();
+    }
     let router = create_managed_router(runtime.handle()).await;
     let (status, body) = request(&router, "/api/overview/history", "GET", Value::Null, true).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["data"][0]["hour"], hour);
-    assert_eq!(body["data"][0]["groups"][0]["asset"], "USDC");
+    let snapshots = body["data"]["snapshots"].as_array().unwrap();
+    assert_eq!(snapshots.len(), 2);
+    assert_eq!(snapshots[0]["hour"], hour - 6 * 24 * 3600 - 12 * 3600);
+    assert_eq!(snapshots[1]["hour"], hour);
+    assert_eq!(snapshots[0]["groups"][0]["asset"], "USDC");
+    let current = body["data"]["current_accounts"].as_array().unwrap();
+    assert!(current.iter().any(|account| account["asset"] == "USDC"
+        && account["mode"] == "PAPER"
+        && account["account_id"].is_null()));
+    assert!(current
+        .iter()
+        .any(|account| account["asset"] == "USDT" && account["mode"] == "PAPER"));
+}
+
+#[tokio::test]
+async fn history_waits_for_global_commit_and_lists_live_account_without_snapshots() {
+    let runtime = fixture();
+    let handle = runtime.handle();
+    let guard = handle.membership_lock.lock().await;
+    for state in runtime.states() {
+        let mut config = state.config.write().await;
+        config.exchange.api_key = "history-new-key".into();
+        config.exchange.api_secret = "history-new-secret".into();
+    }
+    let mut committed = handle.db.load_config().unwrap().unwrap();
+    committed.exchange.api_key = "history-new-key".into();
+    committed.exchange.api_secret = "history-new-secret".into();
+    handle.db.save_config(&committed).unwrap();
+    let router = create_managed_router(handle.clone()).await;
+    let mut request_task = tokio::spawn(async move {
+        request(&router, "/api/overview/history", "GET", Value::Null, true).await
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), &mut request_task)
+            .await
+            .is_err()
+    );
+    drop(guard);
+    let (_, body) = request_task.await.unwrap();
+    assert!(body["data"]["snapshots"].as_array().unwrap().is_empty());
+    let accounts = body["data"]["current_accounts"].as_array().unwrap();
+    assert_eq!(accounts.len(), 2);
+    let id = accounts[0]["account_id"].as_str().unwrap();
+    assert!(uuid::Uuid::parse_str(id).is_ok());
+    assert_eq!(accounts[1]["account_id"], id);
+    let serialized = body.to_string();
+    assert!(!serialized.contains("history-new-key"));
+    assert!(!serialized.contains("history-new-secret"));
+}
+
+#[tokio::test]
+async fn history_lists_current_account_for_legacy_single_pair_runtime() {
+    let runtime = fixture();
+    let handle = runtime.handle();
+    let mut config = AppConfig::default();
+    config.exchange.symbol = "BTCUSDC".into();
+    handle.db.save_config(&config).unwrap();
+    let (sender, _receiver) = mpsc::channel(1);
+    let state = AppState::new(config, handle.db.clone(), sender);
+    *handle.states.write().await = vec![state];
+
+    let accounts = crate::snapshots::current_accounts(&handle).await.unwrap();
+    assert_eq!(accounts.len(), 1);
+    assert_eq!(accounts[0].mode, TradingMode::Paper);
+    assert_eq!(accounts[0].asset, "USDC");
+    assert!(accounts[0].account_id.is_none());
+}
+
+#[tokio::test]
+async fn history_api_ignores_pair_update_lock_and_hourly_capture_skips_it() {
+    let runtime = fixture();
+    let handle = runtime.handle();
+    let state = runtime.states()[0].clone();
+    {
+        let global = handle.membership_lock.lock().await;
+        assert!(crate::snapshots::collect_hourly(&handle)
+            .await
+            .unwrap()
+            .is_none());
+        drop(global);
+    }
+    let guard = state.config_update_lock.lock().await;
+    assert!(crate::snapshots::collect_hourly(&handle)
+        .await
+        .unwrap()
+        .is_none());
+    let router = create_managed_router(handle).await;
+    let (_, body) = tokio::time::timeout(
+        Duration::from_secs(1),
+        request(&router, "/api/overview/history", "GET", Value::Null, true),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        body["data"]["current_accounts"].as_array().unwrap().len(),
+        2
+    );
+    drop(guard);
 }
 
 #[tokio::test]

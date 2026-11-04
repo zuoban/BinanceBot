@@ -28,11 +28,13 @@ export function useDeleteStrategy() {
       message.success('策略已删除，历史记录保留');
       void client.invalidateQueries({ queryKey: ['pairs'] });
       void client.invalidateQueries({ queryKey: ['overview'] });
+      void client.resetQueries({ queryKey: ['overview-history'] });
       return true;
     } catch (error) {
       if (deleteStarted) {
         void client.invalidateQueries({ queryKey: ['pairs'] });
         void client.invalidateQueries({ queryKey: ['overview'] });
+        void client.resetQueries({ queryKey: ['overview-history'] });
       }
       const uncertain = deleteStarted && error instanceof ApiError && error.kind === 'invalid-response';
       message.error(`${(error as Error).message}${uncertain ? '；删除结果可能已生效，请刷新状态或查看日志后再操作' : ''}`);

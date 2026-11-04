@@ -1270,7 +1270,7 @@ a {
   margin-left: 4px;
 }
 
-/* Overview 24h equity chart */
+/* Overview equity charts */
 .overview-history {
   margin: 0 0 24px;
   overflow: hidden;
@@ -1367,16 +1367,44 @@ a {
 .history-caption {
   display: flex;
   flex-wrap: wrap;
+  align-items: baseline;
   justify-content: space-between;
-  gap: 4px 12px;
-  padding: 12px 0 8px;
+  gap: 4px 16px;
+  padding: 16px 0 8px;
   color: var(--text-secondary);
   font-size: 12px;
   line-height: 16px;
+  font-variant-numeric: tabular-nums;
+}
+
+.history-caption-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+  min-width: 0;
+}
+
+.history-caption h3 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 20px;
+}
+
+.history-daily {
+  margin-top: 20px;
+  border-top: 1px solid var(--border-hairline);
 }
 
 .history-plot {
   position: relative;
+}
+
+.history-plot .recharts-surface:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .history-empty {

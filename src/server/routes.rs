@@ -725,13 +725,21 @@ async fn get_managed_overview_handler(
 
 async fn get_overview_history_handler(
     State(handle): State<RuntimeHandle>,
-) -> Json<ApiResponse<Vec<crate::snapshots::HourlySnapshot>>> {
-    let since = chrono::Utc::now().timestamp() - 24 * 3600;
-    match handle
-        .db
-        .run_blocking(move |db| db.hourly_account_snapshots(since))
-        .await
-    {
+) -> Json<ApiResponse<crate::snapshots::OverviewHistory>> {
+    let since = chrono::Utc::now().timestamp() - 7 * 24 * 3600;
+    let result = async {
+        let current_accounts = crate::snapshots::current_accounts(&handle).await?;
+        let snapshots = handle
+            .db
+            .run_blocking(move |db| db.hourly_account_snapshots(since))
+            .await?;
+        Ok::<_, anyhow::Error>(crate::snapshots::OverviewHistory {
+            snapshots,
+            current_accounts,
+        })
+    }
+    .await;
+    match result {
         Ok(data) => Json(ApiResponse {
             success: true,
             data: Some(data),

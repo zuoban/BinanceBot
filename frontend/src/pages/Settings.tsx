@@ -42,7 +42,10 @@ function GlobalSettings() {
     onMutate: () => edit.setSaving(true),
     onSuccess: data => { client.setQueryData(['global-config'], data); fill(data); edit.setDirty(false); message.success('全局设置已保存，所有交易对立即生效'); },
     onError: error => message.error(error.message),
-    onSettled: () => { submitting.current = false; edit.setSaving(false); },
+    onSettled: (_data, _error, values) => {
+      if (values.api_key?.trim() || values.clear_api_credentials) void client.resetQueries({ queryKey: ['overview-history'] });
+      submitting.current = false; edit.setSaving(false);
+    },
   });
   const submit = async (values: GlobalForm) => {
     if (submitting.current) return;
