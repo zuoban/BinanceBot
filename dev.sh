@@ -62,7 +62,7 @@ if [[ -n "$backend_port" && -z "${API_PROXY_TARGET:-}" ]]; then
   export API_PROXY_TARGET="http://127.0.0.1:$backend_port"
 fi
 printf '正在启动前端，请访问 Vite 输出的地址。按 Ctrl+C 停止。\n'
-(cd "$ROOT_DIR/frontend" && exec npm run dev) &
+(cd "$ROOT_DIR/frontend" && exec npm run dev -- --host 0.0.0.0) &
 frontend_pid=$!
 
 while kill -0 "$backend_pid" 2>/dev/null && kill -0 "$frontend_pid" 2>/dev/null; do
