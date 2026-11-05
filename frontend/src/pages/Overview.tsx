@@ -5,7 +5,7 @@ import { ArrowDownOutlined, ArrowRightOutlined, ArrowUpOutlined, EyeOutlined, Pl
 import { useOverview } from '../lib/queries';
 import { AccountsContext } from '../lib/session';
 import { accountGroups, comparePositionAmount, modeLabel, numeric, number as fixedNumber, positionAmount, positionGroups, price as fixedPrice, quoteAsset, todayCount, todayPnlGroups, todayTradeCounts, trimFractionZeros } from '../lib/format';
-import { ErrorNotice, Pnl, StatusTag } from '../components/Common';
+import { ErrorNotice, PageTitle, Pnl, SignalChip, StatusTag } from '../components/Common';
 import { runBatchControls, useControls } from '../components/Controls';
 import type { Pair, Trade } from '../lib/types';
 import { OverviewLoading } from '../components/Loading';
@@ -116,14 +116,21 @@ export default function OverviewPage() {
   const today = counts.every(c => c !== null) ? counts.reduce<{ buy: number; sell: number }>((sum, c) => ({ buy: sum.buy + c!.buy, sell: sum.sell + c!.sell }), { buy: 0, sell: 0 }) : null;
   const pnlGroups = todayPnlGroups(overview.data?.today_pnl);
   return <>
-    <div className="section-heading"><h2>策略运行概览</h2></div>
+    <PageTitle title="策略运行概览" description="账户、持仓与全部策略的实时状态" />
     <ErrorNotice error={overview.error} retry={() => void overview.refetch()} />
-    <div className="overview-banner" aria-label="策略运行概览">
-      {stale && <div className="overview-summary"><span className="sync-warning">数据暂未更新，请检查连接</span></div>}
+    <section className="overview-banner" aria-label="策略运行概览">
+      <div className="signal-strip">
+        {stale && <SignalChip tier="yellow">数据暂未更新，请检查连接</SignalChip>}
+        {overview.data && pairs.some(p => p.mode === 'LIVE') && <SignalChip tier="orange">含实盘策略</SignalChip>}
+        {overview.data && pairs.some(p => p.status === 'ERROR') && <SignalChip tier="red">异常 {pairs.filter(p => p.status === 'ERROR').length}</SignalChip>}
+        {overview.data && pairs.some(p => p.status === 'PAUSED') && <SignalChip tier="blue">已暂停 {pairs.filter(p => p.status === 'PAUSED').length}</SignalChip>}
+        {overview.data && !stale && pairs.length > 0 && pairs.every(p => p.status === 'RUNNING') && <SignalChip tier="calm">全部策略运行正常</SignalChip>}
+        {overview.data && pairs.some(p => p.status === 'STOPPED') && <SignalChip tier="blue">已停止 {pairs.filter(p => p.status === 'STOPPED').length}</SignalChip>}
+      </div>
       <div className="overview-stats">
         <div className="overview-stat"><span>运行中</span><strong>{overview.data ? pairs.filter(p => p.status === 'RUNNING').length : '--'}</strong></div>
         <div className="overview-stat"><span>策略总数</span><strong>{overview.data ? pairs.length : '--'}</strong></div>
-        <div className="overview-stat"><span>今日成交</span><strong>{overview.data && today ? today.buy + today.sell : '--'}<small> 笔</small></strong></div>
+        <div className="overview-stat"><span>今日成交</span><strong>{overview.data && today ? today.buy + today.sell : '--'}<small> 笔</small></strong><em className="overview-trade-breakdown">买单 {overview.data && today ? today.buy : '--'} 笔 / 卖单 {overview.data && today ? today.sell : '--'} 笔</em></div>
         <div className="overview-stat overview-pnl" aria-label="今日已实现盈亏">
           <span>今日已实现盈亏</span>
           {!pnlGroups ? <strong>--</strong> : !pnlGroups.length ? <strong>0</strong> : pnlGroups.map(group => <div className="overview-pnl-group" key={group.key}>
@@ -131,23 +138,22 @@ export default function OverviewPage() {
             {group.pending > 0 && <span>盈亏待同步</span>}
           </div>)}
         </div>
-        <div className="overview-trade-breakdown"><span>买单 {overview.data && today ? today.buy : '--'} 笔 / 卖单 {overview.data && today ? today.sell : '--'} 笔</span>{overview.data && <span className="overview-status-links"><span>已暂停 {pairs.filter(p => p.status === 'PAUSED').length}</span><span>异常 {pairs.filter(p => p.status === 'ERROR').length}</span></span>}</div>
       </div>
-    </div>
+    </section>
     {overview.isPending && !overview.data ? <OverviewLoading addPairLink={addPairLink} /> : !overview.data ? <section className="strategies-section" aria-labelledby="strategies-heading"><div className="section-heading"><h2 id="strategies-heading">交易策略</h2>{addPairLink}</div></section> : <>
     <div className="overview-finances">
     <section className="overview-finance-group" aria-labelledby="accounts-heading">
     <div className="section-heading"><h2 id="accounts-heading">账户概览</h2></div>
-    <Row gutter={[16, 16]} className="account-row">
+    <Row gutter={[16, 16]}>
       {accountGroups(accounts).map(group => <Col xs={24} xl={12} key={group.key}><Card className="account-card finance-card" size="small">
         <div className="section-line finance-card-heading"><span>保证金余额</span></div>
         <div className="finance-card-primary"><Statistic value={group.equity ?? '--'} formatter={() => number(group.equity)} suffix={group.asset} />
           <span className="finance-card-note muted">{group.cny !== null ? `≈ ¥${number(group.cny)}` : '人民币估值待更新'}</span></div>
-        <div className="finance-metrics finance-metrics-primary">
+        <div className="finance-metrics">
           <div><span>可用余额</span><strong>{number(group.available)} <small>{group.asset}</small></strong></div>
           <div><span>可用比例（按钱包余额）</span><strong>{group.ratio !== null ? `${number(group.ratio)}%` : '--'}</strong></div>
         </div>
-        <div className="finance-metrics finance-metrics-secondary" aria-label={`${group.asset}账户资产`}>
+        <div className="finance-metrics" aria-label={`${group.asset}账户资产`}>
           <div><span>钱包余额</span><strong>{number(group.wallet)}</strong></div>
           <div><span>未实现盈亏</span><strong>{group.unrealized === null ? '--' : <Pnl value={group.unrealized} />}</strong></div>
         </div>
@@ -157,7 +163,7 @@ export default function OverviewPage() {
     </section>
     {entries.length > 0 && <section className="overview-finance-group" aria-labelledby="positions-heading">
       <div className="section-heading"><h2 id="positions-heading">持仓概览</h2><span className="muted">按标记价格计算 · 全部策略</span></div>
-      <Row gutter={[16, 16]} className="position-row">
+      <Row gutter={[16, 16]}>
         {positionGroups(entries).map(group => <Col xs={24} xl={12} key={group.key}>
           <Card className="position-summary finance-card" size="small">
             <div className="section-line finance-card-heading"><span>总持仓金额 / {group.asset}</span></div>
@@ -165,11 +171,11 @@ export default function OverviewPage() {
               <Statistic value={group.total ?? '--'} formatter={() => number(group.total)} suffix={group.asset} />
               <span className="finance-card-note muted">按标记价格估值</span>
             </div>
-            <div className="finance-metrics finance-metrics-primary">
+            <div className="finance-metrics">
               <div><span>做多持仓金额</span><strong className="position-long">{number(group.long)}</strong></div>
               <div><span>做空持仓金额</span><strong className="position-short">{number(group.short)}</strong></div>
             </div>
-            <div className="finance-metrics finance-metrics-secondary">
+            <div className="finance-metrics">
               <div><span>多空比（金额占比）</span><strong>{group.total !== null && group.total > 0 && group.long !== null && group.short !== null ? `${number(group.long / group.total * 100, 1)}% / ${number(group.short / group.total * 100, 1)}%` : '--'}</strong></div>
               <div><span>覆盖策略</span><strong>{group.count} <small>个</small></strong></div>
             </div>

@@ -27,13 +27,13 @@ export default function OverviewHistoryChart({ data, ticks, asset, formatValue, 
     cursor: { stroke: 'var(--border-strong)', strokeDasharray: '3 4' },
     contentStyle: { background: 'var(--bg-raised)', borderColor: 'var(--border-strong)', borderRadius: 8, color: 'var(--text-primary)', fontSize: 12 },
     labelStyle: { color: 'var(--text-primary)', marginBottom: 4 },
-    itemStyle: { color: 'var(--text-primary)', fontFamily: '"DM Mono", monospace' },
+    itemStyle: { color: 'var(--text-primary)', fontFamily: 'ui-monospace, "SF Mono", Menlo, Consolas, monospace' },
   };
   return <ResponsiveContainer width="100%" height={200}>
     <LineChart data={data} margin={{ top: 12, right: daily ? 28 : 12, bottom: 0, left: 4 }}>
       <CartesianGrid vertical={false} stroke="var(--border-hairline)" />
-      <XAxis dataKey="hour" ticks={ticks} tickFormatter={daily ? formatDay : formatHour} tickLine={false} axisLine={false} interval={daily ? 'equidistantPreserveEnd' : 'preserveEnd'} minTickGap={daily ? 24 : 12} tick={{ fontSize: 11, fontFamily: '"DM Mono", monospace', fill: 'var(--text-muted)' }} />
-      <YAxis width="auto" domain={['auto', 'auto']} tickFormatter={axisValue} tickLine={false} axisLine={false} tick={{ fontSize: 11, fontFamily: '"DM Mono", monospace', fill: 'var(--text-muted)' }} tickCount={3} />
+      <XAxis dataKey="hour" ticks={ticks} tickFormatter={daily ? formatDay : formatHour} tickLine={false} axisLine={false} interval={daily ? 'equidistantPreserveEnd' : 'preserveEnd'} minTickGap={daily ? 24 : 12} tick={{ fontSize: 11, fontFamily: 'ui-monospace, "SF Mono", Menlo, Consolas, monospace', fill: 'var(--text-muted)' }} />
+      <YAxis width="auto" domain={['auto', 'auto']} tickFormatter={axisValue} tickLine={false} axisLine={false} tick={{ fontSize: 11, fontFamily: 'ui-monospace, "SF Mono", Menlo, Consolas, monospace', fill: 'var(--text-muted)' }} tickCount={3} />
       <Tooltip {...tooltip} />
       <Line name="账户权益" dataKey="equity" stroke={discrete ? 'none' : 'var(--history-equity)'} strokeWidth={2} dot={<HistoryDot data={data} discrete={discrete} />} activeDot={{ r: 4, fill: 'var(--history-equity)' }} connectNulls={false} isAnimationActive={false} />
     </LineChart>

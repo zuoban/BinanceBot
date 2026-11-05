@@ -22,7 +22,7 @@ vi.mock('../lib/queries', () => {
   return { usePairs: () => ({ data: [pair('BTCUSDC'), pair('ETHUSDC')] }), useOverview: () => ({ data: undefined }), useLiveAccounts: () => [] };
 });
 vi.mock('../components/Controls', () => ({ ControlProvider: ({ children }: { children: React.ReactNode }) => children, useControls: () => ({ results: {} }) }));
-vi.mock('../components/ThemeSwitch', () => ({ ThemeSwitch: () => null, themeLabels: { system: '跟随系统', light: '浅色', dark: '深色' } }));
+vi.mock('../components/ThemeSwitch', () => ({ ThemeSwitch: () => null, ThemeSegmented: () => null, themeLabels: { system: '跟随系统', light: '浅色', dark: '深色' } }));
 
 beforeEach(() => {
   vi.clearAllMocks();

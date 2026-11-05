@@ -133,7 +133,7 @@ export default function PairConfig() {
           <Col xs={24} md={12}><Form.Item name="direction" label="交易方向" rules={[{ required: true }]}><Select options={[{ value: 'LONG', label: '做多 · 买入开仓 / 卖出平仓' }, { value: 'SHORT', label: '做空 · 卖出开仓 / 买入平仓' }]} /></Form.Item></Col>
         </Row>
       </Card>
-      <Card title="网格参数" className="form-card">
+      <Card title="网格参数">
         <Row gutter={[20, 16]}>
           <Col xs={24} md={12}><Form.Item name="grid_interval" label="网格间距" extra="相邻网格价格的固定差值，单位为报价资产。" rules={[{ required: true, message: '请输入网格间距' }]}><InputNumber stringMode min="0.0000000001" className="full-width-input" /></Form.Item></Col>
           <Col xs={24} md={12}><Form.Item name="order_amount_usdc" label="每格金额（报价资产）" rules={[{ required: true, message: '请输入每格金额' }]}><InputNumber stringMode min="0.0000000001" className="full-width-input" /></Form.Item></Col>

@@ -105,7 +105,7 @@ function GlobalSettings() {
           <Card title="全局风控" className="settings-card settings-card-fill">
             <Row gutter={[20, 16]}>
               <Col span={24}><Form.Item name="global_max_position_notional" label="全局最大持仓金额" extra="留空表示关闭；所有已配置策略的持仓绝对金额直接相加（包括不同模式和计价资产，不进行汇率换算），达到后暂停所有策略。" rules={[{ validator: (_, value: string | null | undefined) => !value || (/^\d+(\.\d+)?$/.test(value) && /[1-9]/.test(value)) ? Promise.resolve() : Promise.reject(new Error('请输入大于 0 的金额')) }]}><InputNumber stringMode min="0" className="full-width-input" /></Form.Item></Col>
-              <Col span={24}><Form.Item name="pause_on_zero_available_margin" label="可用保证金不足时暂停" valuePropName="checked" className="settings-last-item" extra="开启后，任意已配置策略的可用保证金小于或等于零时，暂停所有策略、撤销机器人挂单并保留持仓。"><Switch checkedChildren="开启" unCheckedChildren="关闭" /></Form.Item></Col>
+              <Col span={24}><Form.Item name="pause_on_zero_available_margin" label="可用保证金不足时暂停" valuePropName="checked" extra="开启后，任意已配置策略的可用保证金小于或等于零时，暂停所有策略、撤销机器人挂单并保留持仓。"><Switch checkedChildren="开启" unCheckedChildren="关闭" /></Form.Item></Col>
             </Row>
           </Card>
         </Col>
@@ -150,8 +150,8 @@ function ServerSettings() {
     }}>重新加载服务设置</Button>}
     <Card title="监听设置" className="settings-card"><Alert type="info" showIcon title={`当前监听：${query.data?.active.host ?? '--'}:${query.data?.active.port ?? '--'}。修改后重启生效；使用 Docker 时请同时调整代理配置。`} />
       <Form form={form} layout="vertical" className="settings-fields" disabled={!ready || edit.saving} onValuesChange={() => edit.setDirty(true)} onFinish={v => mutation.mutate(v)}>
-        <Row gutter={[20, 16]}><Col xs={24} md={12}><Form.Item name="host" label="监听地址" className="settings-last-item" rules={[{ required: true }]}><Input /></Form.Item></Col>
-          <Col xs={24} md={12}><Form.Item name="port" label="端口" className="settings-last-item" rules={[{ required: true }]}><InputNumber min={1} max={65535} precision={0} className="full-width-input" /></Form.Item></Col></Row>
+        <Row gutter={[20, 16]}><Col xs={24} md={12}><Form.Item name="host" label="监听地址" rules={[{ required: true }]}><Input /></Form.Item></Col>
+          <Col xs={24} md={12}><Form.Item name="port" label="端口" rules={[{ required: true }]}><InputNumber min={1} max={65535} precision={0} className="full-width-input" /></Form.Item></Col></Row>
         <div className="settings-card-footer settings-card-actions">
           <span className="muted" role="status">{edit.dirty ? '有未保存的修改' : '修改后需重启后端生效'}</span>
           <Space wrap>

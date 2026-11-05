@@ -1,9 +1,9 @@
 import { useNavigate, useParams } from 'react-router-dom';
-import { Alert, Button, Card, Col, Descriptions, Row, Space, Statistic, Tabs, Tag } from 'antd';
+import { Alert, Button, Card, Col, Descriptions, Row, Statistic, Tabs } from 'antd';
 import { SettingOutlined } from '@ant-design/icons';
 import { usePairSnapshot, usePairs } from '../lib/queries';
 import { accountGroups, modeOf, number, numeric, price, quoteAsset, todayTradeCounts } from '../lib/format';
-import { ErrorNotice, PageBreadcrumb, PageTitle, Pnl, StatusTag } from '../components/Common';
+import { ErrorNotice, ModeTag, PageBreadcrumb, PageTitle, Pnl, SignalChip, StatusTag } from '../components/Common';
 import { PairControls, useControls } from '../components/Controls';
 import { DepthChart, HourlyChart } from '../components/Charts';
 import { LogsTable, OrdersTable, TradesTable } from '../components/DataTables';
@@ -33,7 +33,7 @@ export default function PairDetail() {
     <ErrorNotice error={pairs.error || query.error} retry={() => { void pairs.refetch(); void query.refetch(); }} />
     {pairs.data && !pair && <Alert type="warning" title="该交易对不存在或已移除" />}
     {controls.results[symbol ?? ''] && <Alert type="info" title={controls.results[symbol ?? '']} />}
-    {pair && <div className="detail-status"><Space wrap><StatusTag status={currentPair!.status} /><Tag color={query.live ? 'success' : 'warning'}>{query.live ? '实时连接' : 'HTTP 自动刷新'}</Tag></Space><span className="muted">{query.dataUpdatedAt ? `最近同步 ${new Date(query.dataUpdatedAt).toLocaleTimeString('zh-CN')}` : '等待首次快照'}</span></div>}
+    {pair && <div className="detail-status signal-strip"><StatusTag status={currentPair!.status} /><ModeTag mode={currentPair!.mode} /><SignalChip tier={query.live ? 'calm' : 'yellow'}>{query.live ? '实时连接' : 'HTTP 自动刷新'}</SignalChip><span className="muted">{query.dataUpdatedAt ? `最近同步 ${new Date(query.dataUpdatedAt).toLocaleTimeString('zh-CN')}` : '等待首次快照'}</span></div>}
     {query.stale && s && <Alert type="warning" showIcon title="快照暂未更新，数值可能已过期；仍可撤单并暂停。" />}
     {!s && (pairs.isPending || (pair && query.isPending)) && <DetailLoading />}
     {s && <>
@@ -43,7 +43,7 @@ export default function PairDetail() {
         <Col xs={24} sm={12} xl={6}><Card><Statistic title={`持仓未实现 / ${asset}`} value={s.position.unrealized_pnl} formatter={() => <Pnl value={s.position.unrealized_pnl} />} /><div className="muted">持仓数量 {price(s.position.size)}</div></Card></Col>
         <Col xs={24} sm={12} xl={6}><Card><Statistic title={`账户权益 / ${account?.asset || asset}`} value={account?.equity ?? '--'} precision={2} /><div className="muted">≈ ¥{number(account?.cny)} · 可用 {number(account?.available)}</div></Card></Col>
       </Row>
-      <Tabs defaultActiveKey="monitor" items={[
+      <Tabs className="detail-tabs" defaultActiveKey="monitor" items={[
         { key: 'monitor', label: '实时监控', children: <>
           <Row gutter={[20, 20]}><Col xs={24} xl={14}><Card title="今日成交"><div className="today-trade-summary" aria-label="今日成交汇总">
             <div><span>成交总数</span><strong>{today ? today.buy + today.sell : '--'} <small>笔</small></strong></div>

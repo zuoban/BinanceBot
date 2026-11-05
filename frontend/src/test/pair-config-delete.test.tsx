@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { UserEvent } from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -25,7 +25,7 @@ vi.mock('../lib/queries', async () => {
   return { usePairs: () => ({ data: [pair('BTCUSDC'), pair('ETHUSDC')] }), useOverview: () => ({ data: undefined }), useLiveAccounts: () => [], usePairSnapshot: () => ({ data: undefined, isPending: false, refetch: vi.fn() }) };
 });
 vi.mock('../components/Controls', () => ({ ControlProvider: ({ children }: { children: React.ReactNode }) => children, PairControls: () => null, useControls: () => ({ results: {} }) }));
-vi.mock('../components/ThemeSwitch', () => ({ ThemeSwitch: () => null, themeLabels: { system: '跟随系统', light: '浅色', dark: '深色' } }));
+vi.mock('../components/ThemeSwitch', () => ({ ThemeSwitch: () => null, ThemeSegmented: () => null, themeLabels: { system: '跟随系统', light: '浅色', dark: '深色' } }));
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -61,7 +61,7 @@ it('loads symbols from the exchange and allows selecting a symbol', async () => 
   await waitFor(() => expect(mocks.api).toHaveBeenCalledWith('/api/exchange/symbols?environment=mainnet', expect.anything()));
   await selectSymbol(user, 'SOLUSDC');
   expect(screen.getByLabelText('合约交易对').closest('.ant-select-content')).toHaveAttribute('title', 'SOLUSDC');
-  expect(screen.getByText('模拟盘')).toBeInTheDocument();
+  expect(within(screen.getByRole('complementary')).getByText('模拟盘')).toBeInTheDocument();
 });
 
 it('shows loading, retries a failed symbol request and searches the returned symbols', async () => {
@@ -229,10 +229,43 @@ it.each(['/pairs/BTCUSDC/config', '/pairs/new'])('disables breadcrumb ancestors 
   expect(router.state.location.pathname).toBe('/pairs/BTCUSDC');
 }, 40000);
 
-it('shows the navigation menu and pair selector on a strategy page', () => {
+it('lists the pairs in the sidebar and marks the current strategy', () => {
   setup(Promise.resolve());
-  expect(screen.getByRole('button', { name: '打开主导航' })).toBeInTheDocument();
-  expect(screen.getByLabelText('切换交易对')).toBeInTheDocument();
+  const sidebar = within(screen.getByRole('complementary'));
+  expect(sidebar.getByRole('link', { name: '策略总览' })).toHaveAttribute('href', '/');
+  expect(sidebar.getByRole('link', { name: '全局设置' })).toHaveAttribute('href', '/settings');
+  const pairs = sidebar.getByRole('navigation', { name: '交易对' });
+  expect(within(pairs).getByRole('link', { name: /BTCUSDC/ })).toHaveAttribute('aria-current', 'page');
+  expect(within(pairs).getByRole('link', { name: /ETHUSDC/ })).not.toHaveAttribute('aria-current');
+});
+
+it('keeps the config page when switching pairs from the sidebar', () => {
+  setup(Promise.resolve());
+  const pairs = within(screen.getByRole('complementary')).getByRole('navigation', { name: '交易对' });
+  expect(within(pairs).getByRole('link', { name: /ETHUSDC/ })).toHaveAttribute('href', '/pairs/ETHUSDC/config');
+});
+
+it('does not run a palette command when Enter commits an IME candidate', async () => {
+  const router = setup(Promise.resolve());
+  const user = userEvent.setup();
+  await user.keyboard('{Control>}k{/Control}');
+  const search = await screen.findByRole('combobox', { name: '搜索命令' });
+  await user.type(search, 'ETHUSDC');
+  fireEvent.keyDown(search, { key: 'Enter', keyCode: 229 });
+  expect(router.state.location.pathname).toBe('/pairs/BTCUSDC/config');
+  await user.keyboard('{Enter}');
+  await waitFor(() => expect(router.state.location.pathname).toBe('/pairs/ETHUSDC'));
+});
+
+it('switches pairs from the command palette with the keyboard', async () => {
+  const router = setup(Promise.resolve());
+  const user = userEvent.setup();
+  await user.keyboard('{Control>}k{/Control}');
+  const search = await screen.findByRole('combobox', { name: '搜索命令' });
+  await user.type(search, 'ETHUSDC');
+  expect(screen.getAllByRole('option')[0]).toHaveAttribute('aria-selected', 'true');
+  await user.keyboard('{Enter}');
+  await waitFor(() => expect(router.state.location.pathname).toBe('/pairs/ETHUSDC'));
 });
 
 it('returns to the strategy detail page', async () => {
@@ -329,13 +362,12 @@ it('does not redirect again after the user navigates while queries refresh', asy
   }
 }, 40000);
 
-it('opens the mobile navigation menu and navigates to settings', async () => {
+it('opens the mobile navigation drawer and navigates to settings', async () => {
   setup(Promise.resolve());
   const user = userEvent.setup();
   await user.click(screen.getByRole('button', { name: '打开主导航' }));
-  const menu = await screen.findByRole('menu');
-  expect(within(menu).getAllByRole('menuitem').map(item => item.textContent)).toEqual(['策略总览', '全局设置', '主题：跟随系统', '退出']);
-  await user.click(within(menu).getByRole('menuitem', { name: '全局设置' }));
+  const drawer = await screen.findByRole('dialog');
+  await user.click(within(drawer).getByRole('link', { name: '全局设置' }));
   expect(await screen.findByText('设置页面')).toBeInTheDocument();
 });
 

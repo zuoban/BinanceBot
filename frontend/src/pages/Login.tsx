@@ -25,6 +25,13 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
         <img src="/logo.svg" alt="" className="login-logo" />
         <div><strong>Grid Console</strong><span>Binance Futures</span></div>
       </div>
+      <svg className="login-ladder" viewBox="0 0 320 220" aria-hidden="true" focusable="false">
+        {[20, 44, 68, 92].map(y => <g key={y}><line x1="24" x2="296" y1={y} y2={y} className="ladder-sell" /><rect x="24" y={y - 3} width="6" height="6" className="ladder-sell-mark" /></g>)}
+        <line x1="0" x2="320" y1="116" y2="116" className="ladder-mark" />
+        <rect x="236" y="104" width="84" height="24" rx="4" className="ladder-mark-tag" />
+        <text x="278" y="120" textAnchor="middle" className="ladder-mark-text">MARK</text>
+        {[140, 164, 188, 212].map(y => <g key={y}><line x1="24" x2="296" y1={y} y2={y} className="ladder-buy" /><rect x="24" y={y - 3} width="6" height="6" className="ladder-buy-mark" /></g>)}
+      </svg>
     </aside>
     <section className="login-form"><div className="login-form-content">
       <Typography.Title level={2}>{configured ? '登录交易控制台' : '无需登录'}</Typography.Title>

@@ -189,6 +189,23 @@ it.each([
 });
 
 
+it('only reports normal operation when every strategy is running', () => {
+  const running = snapshot('BTCUSDC'); running.status = 'RUNNING';
+  overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: running, mode: 'PAPER', scoped: true }] };
+  const { unmount } = render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+  expect(screen.getByText('全部策略运行正常')).toBeInTheDocument();
+  unmount();
+  overview.data = { generated_at: new Date().toISOString(), pairs: [] };
+  const empty = render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+  expect(screen.queryByText('全部策略运行正常')).not.toBeInTheDocument();
+  empty.unmount();
+  const stopped = snapshot('BTCUSDC'); stopped.status = 'STOPPED';
+  overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: stopped, mode: 'PAPER', scoped: true }] };
+  render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+  expect(screen.queryByText('全部策略运行正常')).not.toBeInTheDocument();
+  expect(screen.getByText('已停止 1')).toBeInTheDocument();
+});
+
 it('summarizes statuses and lets the user clear a search with no results', async () => {
   const running = snapshot('BTCUSDC'); running.status = 'RUNNING';
   const error = snapshot('SOLUSDC'); error.status = 'ERROR';

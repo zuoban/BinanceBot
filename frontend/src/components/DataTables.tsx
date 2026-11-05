@@ -5,7 +5,7 @@ import { number, price, relativeTime, time } from '../lib/format';
 import type { Log, Order, Trade } from '../lib/types';
 import { Pnl } from './Common';
 
-const side = (value: string) => <Tag color={value === 'BUY' ? 'green' : 'red'}>{value === 'BUY' ? '买入' : '卖出'}</Tag>;
+const side = (value: string) => <span className={`side-tag side-${value === 'BUY' ? 'buy' : 'sell'}`}><span aria-hidden="true">{value === 'BUY' ? '↑' : '↓'}</span>{value === 'BUY' ? '买入' : '卖出'}</span>;
 const purposeLabel: Record<string, string> = { GRID: '网格', TAKE_PROFIT: '止盈', REMAINDER: '余量合并', LEGACY: '历史订单' };
 export function OrdersTable({ orders, mark }: { orders: Order[]; mark?: string }) {
   const columns: ColumnsType<Order> = [
@@ -42,7 +42,7 @@ export function TradesTable({ trades, overview = false }: { trades: Trade[]; ove
     { title: '成交方式', render: (_, t) => t.pnl_verified ? (t.is_maker ? 'Maker' : 'Taker') : <Tag>待同步</Tag> },
     { title: '备注', dataIndex: 'note', ellipsis: true },
   ];
-  return <div className={overview ? 'overview-trades-table' : undefined}>
+  return <div>
     {!overview && <p className="table-scroll-hint">左右滑动查看完整成交信息</p>}
     {overview && <p className="overview-trades-scroll-hint">左右滑动查看完整成交信息</p>}
     <div className={overview ? 'overview-trades-desktop' : undefined}><Table<Trade> rowKey="trade_id" columns={columns} dataSource={trades} size="small" scroll={{ x: 1000 }} pagination={overview ? false : { pageSize: 15, showSizeChanger: false, hideOnSinglePage: true }} /></div>
@@ -59,7 +59,7 @@ export function TradesTable({ trades, overview = false }: { trades: Trade[]; ove
 export function LogsTable({ logs }: { logs: Log[] }) {
   return <><p className="table-scroll-hint">左右滑动查看完整日志</p><Table<Log> rowKey={l => `${l.timestamp}-${l.level}-${l.message}`} dataSource={logs} size="small" scroll={{ x: 600 }} pagination={{ pageSize: 30, showSizeChanger: false }} columns={[
     { title: '时间（北京）', dataIndex: 'timestamp', render: time, width: 185 },
-    { title: '级别', dataIndex: 'level', width: 90, filters: ['INFO', 'WARN', 'ERROR', 'DEBUG'].map(value => ({ text: value, value })), onFilter: (v, l) => l.level === v, render: v => <Tag color={v === 'ERROR' ? 'error' : v === 'WARN' ? 'warning' : 'default'}>{v}</Tag> },
+    { title: '级别', dataIndex: 'level', width: 90, filters: ['INFO', 'WARN', 'ERROR', 'DEBUG'].map(value => ({ text: value, value })), onFilter: (v, l) => l.level === v, render: v => <span className={`log-level log-level-${String(v).toLowerCase()}`}>{v}</span> },
     { title: '内容', dataIndex: 'message', className: 'log-message' },
   ]} /></>;
 }

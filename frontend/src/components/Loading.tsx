@@ -37,7 +37,6 @@ export function OverviewPageLoading() {
     <div className="overview-banner skeleton-overview-banner" aria-hidden="true">
       <div className="overview-stats">
         {[0, 1, 2, 3].map(item => <div className="overview-stat" key={item}><SkeletonLine width="72px" size="small" /><SkeletonLine width="48px" size="large" /></div>)}
-        <div className="overview-trade-breakdown"><SkeletonLine width="150px" size="small" /><SkeletonLine width="90px" size="small" /></div>
       </div>
     </div>
     <OverviewLoading />

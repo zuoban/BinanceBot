@@ -1,52 +1,67 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-10-30T05:47:14.827742Z",
+  "generatedAt": "2026-11-05T07:14:34Z",
   "title": "Design System: Grid Console",
   "extensions": {
     "colorMeta": {
-      "pine": {
+      "signal-blue": {
         "role": "primary",
-        "displayName": "深松绿",
-        "canonical": "#176e59",
+        "displayName": "信号蓝",
+        "canonical": "#1d4ed8",
         "tonalRamp": [
-          "oklch(15% 0.029 172.2)",
-          "oklch(25% 0.048 172.2)",
-          "oklch(35% 0.067 172.2)",
-          "oklch(45% 0.086 172.2)",
-          "oklch(58% 0.086 172.2)",
-          "oklch(70% 0.086 172.2)",
-          "oklch(82% 0.052 172.2)",
-          "oklch(95% 0.014 172.2)"
+          "oklch(15% 0.110 264.4)",
+          "oklch(25% 0.200 264.4)",
+          "oklch(35% 0.200 264.4)",
+          "oklch(45% 0.200 264.4)",
+          "oklch(58% 0.200 264.4)",
+          "oklch(70% 0.200 264.4)",
+          "oklch(82% 0.200 264.4)",
+          "oklch(95% 0.110 264.4)"
         ]
       },
-      "pine-dark": {
+      "signal-blue-dark": {
         "role": "primary",
-        "displayName": "深松绿深色",
-        "canonical": "#174d40",
+        "displayName": "信号蓝（深色主题）",
+        "canonical": "#6ea0ff",
         "tonalRamp": [
-          "oklch(15% 0.020 173.9)",
-          "oklch(25% 0.034 173.9)",
-          "oklch(35% 0.047 173.9)",
-          "oklch(45% 0.061 173.9)",
-          "oklch(58% 0.061 173.9)",
-          "oklch(70% 0.061 173.9)",
-          "oklch(82% 0.036 173.9)",
-          "oklch(95% 0.010 173.9)"
+          "oklch(15% 0.082 262.2)",
+          "oklch(25% 0.149 262.2)",
+          "oklch(35% 0.149 262.2)",
+          "oklch(45% 0.149 262.2)",
+          "oklch(58% 0.149 262.2)",
+          "oklch(70% 0.149 262.2)",
+          "oklch(82% 0.149 262.2)",
+          "oklch(95% 0.082 262.2)"
         ]
       },
-      "mist": {
+      "rail": {
         "role": "neutral",
-        "displayName": "雾灰绿",
-        "canonical": "#f4f6f3",
+        "displayName": "深海军蓝侧栏",
+        "canonical": "#0b1424",
         "tonalRamp": [
-          "oklch(15% 0.001 134.8)",
-          "oklch(25% 0.002 134.8)",
-          "oklch(35% 0.003 134.8)",
-          "oklch(45% 0.004 134.8)",
-          "oklch(58% 0.004 134.8)",
-          "oklch(70% 0.004 134.8)",
-          "oklch(82% 0.003 134.8)",
-          "oklch(95% 0.001 134.8)"
+          "oklch(15% 0.019 261.3)",
+          "oklch(25% 0.035 261.3)",
+          "oklch(35% 0.035 261.3)",
+          "oklch(45% 0.035 261.3)",
+          "oklch(58% 0.035 261.3)",
+          "oklch(70% 0.035 261.3)",
+          "oklch(82% 0.035 261.3)",
+          "oklch(95% 0.019 261.3)"
+        ]
+      },
+      "ground": {
+        "role": "neutral",
+        "displayName": "冷灰蓝工作区",
+        "canonical": "#f2f5f9",
+        "tonalRamp": [
+          "oklch(15% 0.003 255.5)",
+          "oklch(25% 0.006 255.5)",
+          "oklch(35% 0.006 255.5)",
+          "oklch(45% 0.006 255.5)",
+          "oklch(58% 0.006 255.5)",
+          "oklch(70% 0.006 255.5)",
+          "oklch(82% 0.006 255.5)",
+          "oklch(95% 0.003 255.5)"
         ]
       },
       "surface": {
@@ -66,253 +81,272 @@
       },
       "text": {
         "role": "neutral",
-        "displayName": "深墨绿文字",
-        "canonical": "#23352f",
+        "displayName": "墨蓝正文",
+        "canonical": "#0f1a2b",
         "tonalRamp": [
-          "oklch(15% 0.009 171.9)",
-          "oklch(25% 0.014 171.9)",
-          "oklch(35% 0.020 171.9)",
-          "oklch(45% 0.026 171.9)",
-          "oklch(58% 0.026 171.9)",
-          "oklch(70% 0.026 171.9)",
-          "oklch(82% 0.016 171.9)",
-          "oklch(95% 0.004 171.9)"
+          "oklch(15% 0.021 258.8)",
+          "oklch(25% 0.037 258.8)",
+          "oklch(35% 0.037 258.8)",
+          "oklch(45% 0.037 258.8)",
+          "oklch(58% 0.037 258.8)",
+          "oklch(70% 0.037 258.8)",
+          "oklch(82% 0.037 258.8)",
+          "oklch(95% 0.021 258.8)"
         ]
       },
       "muted": {
         "role": "neutral",
-        "displayName": "柔和绿灰文字",
-        "canonical": "#66796d",
+        "displayName": "次要文字",
+        "canonical": "#44546a",
         "tonalRamp": [
-          "oklch(15% 0.010 157.6)",
-          "oklch(25% 0.016 157.6)",
-          "oklch(35% 0.023 157.6)",
-          "oklch(45% 0.029 157.6)",
-          "oklch(58% 0.029 157.6)",
-          "oklch(70% 0.029 157.6)",
-          "oklch(82% 0.017 157.6)",
-          "oklch(95% 0.005 157.6)"
+          "oklch(15% 0.023 256.4)",
+          "oklch(25% 0.042 256.4)",
+          "oklch(35% 0.042 256.4)",
+          "oklch(45% 0.042 256.4)",
+          "oklch(58% 0.042 256.4)",
+          "oklch(70% 0.042 256.4)",
+          "oklch(82% 0.042 256.4)",
+          "oklch(95% 0.023 256.4)"
         ]
       },
       "border": {
         "role": "neutral",
-        "displayName": "浅绿灰边框",
-        "canonical": "#e8ede9",
+        "displayName": "细边框",
+        "canonical": "#e1e7ef",
         "tonalRamp": [
-          "oklch(15% 0.003 151.9)",
-          "oklch(25% 0.004 151.9)",
-          "oklch(35% 0.006 151.9)",
-          "oklch(45% 0.008 151.9)",
-          "oklch(58% 0.008 151.9)",
-          "oklch(70% 0.008 151.9)",
-          "oklch(82% 0.005 151.9)",
-          "oklch(95% 0.001 151.9)"
+          "oklch(15% 0.007 255.5)",
+          "oklch(25% 0.013 255.5)",
+          "oklch(35% 0.013 255.5)",
+          "oklch(45% 0.013 255.5)",
+          "oklch(58% 0.013 255.5)",
+          "oklch(70% 0.013 255.5)",
+          "oklch(82% 0.013 255.5)",
+          "oklch(95% 0.007 255.5)"
         ]
       },
       "long": {
-        "role": "semantic",
+        "role": "secondary",
         "displayName": "做多绿",
-        "canonical": "#238367",
+        "canonical": "#0f7a52",
         "tonalRamp": [
-          "oklch(15% 0.033 169.0)",
-          "oklch(25% 0.054 169.0)",
-          "oklch(35% 0.076 169.0)",
-          "oklch(45% 0.098 169.0)",
-          "oklch(58% 0.098 169.0)",
-          "oklch(70% 0.098 169.0)",
-          "oklch(82% 0.059 169.0)",
-          "oklch(95% 0.016 169.0)"
+          "oklch(15% 0.061 161.0)",
+          "oklch(25% 0.110 161.0)",
+          "oklch(35% 0.110 161.0)",
+          "oklch(45% 0.110 161.0)",
+          "oklch(58% 0.110 161.0)",
+          "oklch(70% 0.110 161.0)",
+          "oklch(82% 0.110 161.0)",
+          "oklch(95% 0.061 161.0)"
         ]
       },
       "short": {
-        "role": "semantic",
-        "displayName": "暖陶红",
-        "canonical": "#c26b55",
+        "role": "secondary",
+        "displayName": "做空砖红",
+        "canonical": "#b4382c",
         "tonalRamp": [
-          "oklch(15% 0.039 35.2)",
-          "oklch(25% 0.065 35.2)",
-          "oklch(35% 0.090 35.2)",
-          "oklch(45% 0.116 35.2)",
-          "oklch(58% 0.116 35.2)",
-          "oklch(70% 0.116 35.2)",
-          "oklch(82% 0.070 35.2)",
-          "oklch(95% 0.019 35.2)"
+          "oklch(15% 0.089 29.2)",
+          "oklch(25% 0.162 29.2)",
+          "oklch(35% 0.162 29.2)",
+          "oklch(45% 0.162 29.2)",
+          "oklch(58% 0.162 29.2)",
+          "oklch(70% 0.162 29.2)",
+          "oklch(82% 0.162 29.2)",
+          "oklch(95% 0.089 29.2)"
         ]
       },
-      "dark-background": {
-        "role": "neutral",
-        "displayName": "深色背景",
-        "canonical": "#101a17",
+      "warn-yellow": {
+        "role": "tertiary",
+        "displayName": "黄色信号",
+        "canonical": "#8a5a00",
         "tonalRamp": [
-          "oklch(15% 0.005 174.2)",
-          "oklch(25% 0.009 174.2)",
-          "oklch(35% 0.012 174.2)",
-          "oklch(45% 0.016 174.2)",
-          "oklch(58% 0.016 174.2)",
-          "oklch(70% 0.016 174.2)",
-          "oklch(82% 0.009 174.2)",
-          "oklch(95% 0.003 174.2)"
+          "oklch(15% 0.059 73.3)",
+          "oklch(25% 0.108 73.3)",
+          "oklch(35% 0.108 73.3)",
+          "oklch(45% 0.108 73.3)",
+          "oklch(58% 0.108 73.3)",
+          "oklch(70% 0.108 73.3)",
+          "oklch(82% 0.108 73.3)",
+          "oklch(95% 0.059 73.3)"
+        ]
+      },
+      "warn-orange": {
+        "role": "tertiary",
+        "displayName": "橙色信号",
+        "canonical": "#b04a05",
+        "tonalRamp": [
+          "oklch(15% 0.082 45.7)",
+          "oklch(25% 0.149 45.7)",
+          "oklch(35% 0.149 45.7)",
+          "oklch(45% 0.149 45.7)",
+          "oklch(58% 0.149 45.7)",
+          "oklch(70% 0.149 45.7)",
+          "oklch(82% 0.149 45.7)",
+          "oklch(95% 0.082 45.7)"
+        ]
+      },
+      "dark-ground": {
+        "role": "neutral",
+        "displayName": "深色工作区",
+        "canonical": "#0a1220",
+        "tonalRamp": [
+          "oklch(15% 0.017 261.1)",
+          "oklch(25% 0.031 261.1)",
+          "oklch(35% 0.031 261.1)",
+          "oklch(45% 0.031 261.1)",
+          "oklch(58% 0.031 261.1)",
+          "oklch(70% 0.031 261.1)",
+          "oklch(82% 0.031 261.1)",
+          "oklch(95% 0.017 261.1)"
         ]
       },
       "dark-surface": {
         "role": "neutral",
         "displayName": "深色表面",
-        "canonical": "#192723",
+        "canonical": "#101a2b",
         "tonalRamp": [
-          "oklch(15% 0.007 175.0)",
-          "oklch(25% 0.011 175.0)",
-          "oklch(35% 0.016 175.0)",
-          "oklch(45% 0.021 175.0)",
-          "oklch(58% 0.021 175.0)",
-          "oklch(70% 0.021 175.0)",
-          "oklch(82% 0.012 175.0)",
-          "oklch(95% 0.003 175.0)"
+          "oklch(15% 0.020 260.6)",
+          "oklch(25% 0.037 260.6)",
+          "oklch(35% 0.037 260.6)",
+          "oklch(45% 0.037 260.6)",
+          "oklch(58% 0.037 260.6)",
+          "oklch(70% 0.037 260.6)",
+          "oklch(82% 0.037 260.6)",
+          "oklch(95% 0.020 260.6)"
         ]
       },
       "dark-text": {
         "role": "neutral",
-        "displayName": "深色主题文字",
-        "canonical": "#dce9e1",
+        "displayName": "深色正文",
+        "canonical": "#e6edf7",
         "tonalRamp": [
-          "oklch(15% 0.006 159.1)",
-          "oklch(25% 0.010 159.1)",
-          "oklch(35% 0.014 159.1)",
-          "oklch(45% 0.017 159.1)",
-          "oklch(58% 0.017 159.1)",
-          "oklch(70% 0.017 159.1)",
-          "oklch(82% 0.010 159.1)",
-          "oklch(95% 0.003 159.1)"
+          "oklch(15% 0.008 257.2)",
+          "oklch(25% 0.015 257.2)",
+          "oklch(35% 0.015 257.2)",
+          "oklch(45% 0.015 257.2)",
+          "oklch(58% 0.015 257.2)",
+          "oklch(70% 0.015 257.2)",
+          "oklch(82% 0.015 257.2)",
+          "oklch(95% 0.008 257.2)"
         ]
+      }
+    },
+    "typographyMeta": {
+      "body": {
+        "displayName": "正文",
+        "purpose": "系统无衬线加苹方与微软雅黑，界面文字与表单。"
       },
-      "dark-primary": {
-        "role": "primary",
-        "displayName": "深色主题主色",
-        "canonical": "#69bb98",
-        "tonalRamp": [
-          "oklch(15% 0.032 164.5)",
-          "oklch(25% 0.054 164.5)",
-          "oklch(35% 0.075 164.5)",
-          "oklch(45% 0.096 164.5)",
-          "oklch(58% 0.096 164.5)",
-          "oklch(70% 0.096 164.5)",
-          "oklch(82% 0.058 164.5)",
-          "oklch(95% 0.016 164.5)"
-        ]
+      "headline": {
+        "displayName": "页面标题",
+        "purpose": "26px、600 字重，每页一个。"
+      },
+      "numeric": {
+        "displayName": "数值",
+        "purpose": "等宽数字并开启 tabular-nums，用于价格、数量、金额与交易对。"
       }
     },
     "shadows": [
       {
-        "name": "strategy-hover",
-        "value": "0 12px 30px #213e2f0d",
-        "purpose": "策略卡悬停"
+        "name": "overlay",
+        "value": "0 12px 32px rgba(15, 26, 43, 0.14)",
+        "purpose": "下拉、弹出层与命令面板；深色主题为 0 16px 40px rgba(0, 0, 0, 0.55)。"
       },
       {
-        "name": "save-bar",
-        "value": "0 8px 28px #2a40321a",
-        "purpose": "浮动保存栏"
+        "name": "save-bar-dirty",
+        "value": "0 8px 24px rgba(15, 26, 43, 0.12)",
+        "purpose": "有未保存修改时吸底的保存栏。卡片本身不使用阴影。"
       }
     ],
     "motion": [
       {
-        "name": "strategy-hover",
-        "value": "box-shadow .2s, transform .2s",
-        "purpose": "策略卡悬停；遵循减少动态效果设置"
+        "name": "ease-out",
+        "value": "cubic-bezier(0.22, 1, 0.36, 1)",
+        "purpose": "悬停与状态变化，150ms 左右；减少动态效果时关闭。"
       }
     ],
     "breakpoints": [
       {
-        "name": "navigation",
-        "value": "991px"
+        "name": "drawer",
+        "value": "900px"
+      },
+      {
+        "name": "metrics-two-column",
+        "value": "1319px"
+      },
+      {
+        "name": "finance-side-by-side",
+        "value": "1280px"
       },
       {
         "name": "mobile",
         "value": "600px"
-      },
-      {
-        "name": "compact",
-        "value": "400px"
       }
-    ],
-    "typographyMeta": {
-      "body": {
-        "displayName": "正文",
-        "purpose": "页面和 Ant Design 控件"
-      },
-      "headline": {
-        "displayName": "页面标题",
-        "purpose": "页面主标题"
-      },
-      "numeric": {
-        "displayName": "数值",
-        "purpose": "金额、价格与统计数据"
-      },
-      "label": {
-        "displayName": "辅助标签",
-        "purpose": "英文辅助标签"
-      }
-    }
+    ]
   },
   "components": [
     {
-      "name": "Primary Button",
-      "kind": "button",
-      "description": "用于主要操作的深松绿按钮。",
-      "html": "<button class=\"ds-primary\">新增交易对</button>",
-      "css": ".ds-primary{border:1px solid #176e59;border-radius:8px;background:#176e59;color:#fff;padding:4px 15px;height:32px;font:14px \"DM Sans\",\"PingFang SC\",sans-serif;cursor:pointer;transition:background .2s,border-color .2s}.ds-primary:hover{background:#238367;border-color:#238367}.ds-primary:focus-visible{outline:2px solid #69bb98;outline-offset:2px}.ds-primary:active{background:#174d40}"
-    },
-    {
-      "name": "Secondary Button",
-      "kind": "button",
-      "description": "用于次要操作的边框按钮。",
-      "html": "<button class=\"ds-secondary\">暂停</button>",
-      "css": ".ds-secondary{border:1px solid #d9dfda;border-radius:8px;background:#fff;color:#23352f;padding:4px 15px;height:32px;font:14px \"DM Sans\",\"PingFang SC\",sans-serif;cursor:pointer}.ds-secondary:hover{border-color:#176e59;color:#176e59}.ds-secondary:focus-visible{outline:2px solid #69bb98;outline-offset:2px}"
-    },
-    {
-      "name": "Search Input",
-      "kind": "input",
-      "description": "交易对搜索及其他文本输入。",
-      "html": "<input class=\"ds-input\" aria-label=\"搜索交易对\" placeholder=\"搜索交易对\">",
-      "css": ".ds-input{height:32px;padding:4px 11px;border:1px solid #d9dfda;border-radius:8px;background:#fff;color:#23352f;font:14px \"DM Sans\",\"PingFang SC\",sans-serif}.ds-input::placeholder{color:#94a49a}.ds-input:hover{border-color:#69bb98}.ds-input:focus-visible{border-color:#176e59;outline:2px solid #a2dfbb;outline-offset:1px}"
-    },
-    {
-      "name": "Selected Navigation",
-      "kind": "nav",
-      "description": "侧栏当前菜单项。",
-      "html": "<nav class=\"ds-nav\"><a class=\"ds-nav-item\" href=\"#\" aria-current=\"page\">策略总览</a></nav>",
-      "css": ".ds-nav{padding:0 10px;font:500 14px \"DM Sans\",\"PingFang SC\",sans-serif}.ds-nav-item{display:block;padding:10px 16px;border-radius:8px;background:#e5f0eb;color:#176e59;text-decoration:none}.ds-nav-item:hover{color:#174d40}.ds-nav-item:focus-visible{outline:2px solid #238367;outline-offset:2px}"
-    },
-    {
-      "name": "Status Tag",
+      "name": "信号标签",
       "kind": "chip",
-      "description": "以文字和颜色共同表达运行状态。",
-      "html": "<span class=\"ds-tag\">运行中</span>",
-      "css": ".ds-tag{display:inline-block;padding:0 7px;border:1px solid #b7eb8f;border-radius:4px;background:#f6ffed;color:#389e0d;font:12px/20px \"DM Sans\",\"PingFang SC\",sans-serif}"
+      "refersTo": "signal-chip",
+      "description": "统一的状态标签：图标加文字，分正常、蓝、黄、橙、红五级。",
+      "html": "<span class=\"ds-signal ds-signal-yellow\">⚠ 数据暂未更新，请检查连接</span>",
+      "css": ".ds-signal{display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 10px;border-radius:6px;border:1px solid #f1dc9b;background:#fff7e0;color:#8a5a00;font:500 12px system-ui}"
     },
     {
-      "name": "Strategy Card",
+      "name": "侧栏交易对",
+      "kind": "nav",
+      "refersTo": "sidebar-pair",
+      "description": "深色侧栏中的交易对行：状态点、等宽交易对、方向箭头；当前项使用选中底色。",
+      "html": "<a class=\"ds-pair\"><span class=\"ds-dot\"></span><span>BTCUSDC</span><span>↑</span></a>",
+      "css": ".ds-pair{display:flex;align-items:center;gap:10px;min-height:34px;padding:0 10px;border-radius:8px;background:#1b2f55;color:#e6edf7;font:500 13px ui-monospace,Menlo,monospace}.ds-dot{width:8px;height:8px;border-radius:50%;background:#3fcf96}"
+    },
+    {
+      "name": "主按钮",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "信号蓝填充，8px 圆角，36px 高；深色主题使用深色文字以保证对比度。",
+      "html": "<button class=\"ds-btn\">保存并立即生效</button>",
+      "css": ".ds-btn{height:36px;padding:0 16px;border:0;border-radius:8px;background:#1d4ed8;color:#fff;font:500 14px system-ui}"
+    },
+    {
+      "name": "策略指标带",
       "kind": "card",
-      "description": "以方向色、标记价格和指标分组展示策略。",
-      "html": "<div class=\"ds-card\"><strong>SOLUSDC ↑</strong><p>标记价格</p><b>111.86</b><div class=\"ds-card-metric\">持仓金额 <span>0 USDC</span></div></div>",
-      "css": ".ds-card{padding:20px;border:1px solid #e7ede8;border-left:3px solid #238367;border-radius:12px;background:linear-gradient(135deg,#f0f8f2,#fff 45%);color:#183d30;font-family:\"DM Sans\",\"PingFang SC\",sans-serif;transition:box-shadow .2s,transform .2s}.ds-card:hover{box-shadow:0 12px 30px #213e2f0d;transform:translateY(-2px)}.ds-card p{margin:24px 0 8px;color:#94a49a;font-size:12px}.ds-card b{font:500 27px \"DM Mono\",monospace}.ds-card-metric{display:flex;justify-content:space-between;margin-top:18px;padding-top:18px;border-top:1px solid #eff2ef;color:#8b9c91;font-size:11px}.ds-card-metric span{color:#30483d;font:500 14px \"DM Mono\",monospace}@media(prefers-reduced-motion:reduce){.ds-card{transition:none}}"
+      "refersTo": "strategy-metrics",
+      "description": "策略卡内的指标，用 1px 分隔线分成四列。",
+      "html": "<div class=\"ds-m\"><div><span>持仓金额</span><strong>204.07</strong></div><div><span>开仓价格</span><strong>96.1676</strong></div></div>",
+      "css": ".ds-m{display:grid;grid-template-columns:repeat(2,1fr);border-top:1px solid #e1e7ef}.ds-m>div{padding:12px 20px;display:flex;flex-direction:column;gap:3px}.ds-m span{font-size:12px;color:#44546a}.ds-m strong{font:500 13px ui-monospace,Menlo,monospace}"
     }
   ],
   "narrative": {
-    "northStar": "沉稳的交易工作台",
-    "overview": "界面沉稳、清晰，以任务和数据可读性为先。信息密度适中，使用克制的色彩、边框和卡片组织账户与策略信息；按钮、卡片和输入框保持清晰、便于操作。",
+    "northStar": "市场天气预报",
+    "overview": "平时安静，异常时分级。状态沿用气象预警的四级信号语法（蓝、黄、橙、红），每一级都带图标和文字，不单靠颜色。深海军蓝侧栏固定为深色，右侧是偏冷的浅灰蓝工作区，操作色只用信号蓝。",
     "keyCharacteristics": [
-      "深松绿与雾灰绿构成工作台的基础，暖陶红区分做空及负值。",
-      "数字使用等宽字体和表格数字，便于扫描比较。",
-      "浅色、深色和跟随系统三种主题共存。"
+      "左侧固定侧栏加 ⌘K 命令面板",
+      "五级信号标签统一表达状态",
+      "卡片只用 1px 边框，不用阴影",
+      "数字使用等宽字体与 tabular-nums",
+      "浅色、深色、跟随系统三种主题"
     ],
-    "rules": [],
+    "rules": [
+      {
+        "name": "图标加文字规则",
+        "body": "每个状态、方向和风险同时给图标和文字，颜色只是第三条通道。",
+        "section": "colors"
+      },
+      {
+        "name": "平面规则",
+        "body": "面板只用 1px 边框分层；阴影只给浮层和吸底保存栏。",
+        "section": "elevation"
+      }
+    ],
     "dos": [
-      "保持浅色和深色主题中的状态及数据可读性。",
-      "用文字或图标补充交易方向和状态色。",
-      "保持数字对齐、支持窄屏及长数值换行。"
+      "Do 每个状态同时给图标和文字。",
+      "Do 数字右对齐、等宽、支持窄屏换行。",
+      "Do 实盘、模拟盘和数据过期始终可见。"
     ],
     "donts": [
-      "仅凭颜色传达方向、风险或运行状态。",
-      "让装饰或动画妨碍数据扫描及操作。"
+      "Don't 仅凭颜色传达方向、风险或运行状态。",
+      "Don't 在卡片里再嵌套卡片，或用阴影代替边框。",
+      "Don't 让装饰或动画妨碍数据扫描及操作。"
     ]
   }
 }
