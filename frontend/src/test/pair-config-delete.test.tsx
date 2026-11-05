@@ -470,16 +470,20 @@ it('restores navigation protection for unsaved changes when deletion fails', asy
   expect(router.state.location.pathname).toBe('/pairs/BTCUSDC/config');
 }, 40000);
 
-it('fetches symbol preview on /pairs/new, auto-fills mark price and validates tick_size multiples', async () => {
+it('fetches symbol preview on /pairs/new, shows latest price, auto-fills mark price and validates tick_size multiples', async () => {
   setup(Promise.resolve(), '/pairs/new');
   mocks.api.mockImplementation((path: string) => {
     if (path.startsWith('/api/exchange/symbols?')) return Promise.resolve(['BTCUSDC', 'SOLUSDC']);
-    if (path.startsWith('/api/exchange/symbol-preview?')) return Promise.resolve({ symbol: 'SOLUSDC', mark_price: '142.3500', tick_size: '0.1', step_size: '0.01', min_qty: '0.01', min_notional: '5' });
+    if (path.startsWith('/api/exchange/symbol-preview?')) return Promise.resolve({ symbol: 'SOLUSDC', last_price: '142.4000', mark_price: '142.3500', tick_size: '0.1', step_size: '0.01', min_qty: '0.01', min_notional: '5' });
     return Promise.resolve({ version: 'v1', has_api_key: false, has_api_secret: false });
   });
   const user = userEvent.setup();
   await selectSymbol(user, 'SOLUSDC');
+  expect(await screen.findByText('最新价格：142.4 USDC')).toBeInTheDocument();
   expect(await screen.findByText('以当前标记价 142.35 为参考')).toBeInTheDocument();
+  expect(screen.getByLabelText('网格间距')).toHaveValue('1.4');
+  expect(screen.getByText('+0.32%')).toBeInTheDocument();
+  expect(screen.getByText('-0.67%')).toBeInTheDocument();
   expect(screen.getByText('价格步长 0.1')).toBeInTheDocument();
   expect(screen.getByText('数量步长 0.01')).toBeInTheDocument();
   expect(screen.getByText('最小名义金额 5 USDC')).toBeInTheDocument();

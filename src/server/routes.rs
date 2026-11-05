@@ -76,6 +76,7 @@ struct SymbolPreviewQuery {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ExchangeSymbolPreview {
     pub symbol: String,
+    pub last_price: Option<rust_decimal::Decimal>,
     pub mark_price: Option<rust_decimal::Decimal>,
     pub tick_size: rust_decimal::Decimal,
     pub step_size: rust_decimal::Decimal,
@@ -176,8 +177,9 @@ async fn fetch_exchange_symbol_preview(
     client: &BinanceFuturesClient,
     symbol: &str,
 ) -> (StatusCode, Json<ApiResponse<ExchangeSymbolPreview>>) {
-    let (info_res, mark_res) = tokio::join!(
+    let (info_res, last_res, mark_res) = tokio::join!(
         client.get_exchange_info(Some(symbol)),
+        client.get_ticker_price(symbol),
         client.get_mark_price(symbol)
     );
     let info = match info_res {
@@ -201,6 +203,9 @@ async fn fetch_exchange_symbol_preview(
     else {
         return symbol_preview_error(StatusCode::BAD_GATEWAY, "交易对精度规则缺失");
     };
+    let last_price = last_res
+        .ok()
+        .filter(|price| *price > rust_decimal::Decimal::ZERO);
     let mark_price = mark_res
         .ok()
         .filter(|price| *price > rust_decimal::Decimal::ZERO);
@@ -210,6 +215,7 @@ async fn fetch_exchange_symbol_preview(
             success: true,
             data: Some(ExchangeSymbolPreview {
                 symbol: rules.symbol,
+                last_price,
                 mark_price,
                 tick_size: rules.tick_size,
                 step_size: rules.step_size,
@@ -2692,6 +2698,16 @@ mod tests {
                 }),
             )
             .route(
+                "/fapi/v1/ticker/price",
+                get(|| async {
+                    Json(serde_json::json!({
+                        "symbol": "SOLUSDC",
+                        "price": "142.40",
+                        "time": 1700000000000i64
+                    }))
+                }),
+            )
+            .route(
                 "/fapi/v1/premiumIndex",
                 get(|| async {
                     Json(serde_json::json!({
@@ -2712,6 +2728,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let preview = response.data.expect("preview data");
         assert_eq!(preview.symbol, "SOLUSDC");
+        assert_eq!(preview.last_price, Some(rust_decimal_macros::dec!(142.40)));
         assert_eq!(preview.mark_price, Some(rust_decimal_macros::dec!(142.35)));
         assert_eq!(preview.tick_size, rust_decimal_macros::dec!(0.01));
         assert_eq!(preview.step_size, rust_decimal_macros::dec!(0.01));

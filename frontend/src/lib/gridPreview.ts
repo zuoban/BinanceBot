@@ -90,6 +90,20 @@ export function tickSizeError(interval: unknown, tickSize: unknown): string | nu
   return null;
 }
 
+/** Default `grid_interval` at 1% of `markPrice`, quantized to the nearest positive integer multiple of `tickSize` when provided. */
+export function defaultGridInterval(markPrice: unknown, tickSize?: unknown): string | null {
+  const mark = parse(markPrice);
+  if (!mark || mark.n === 0n) return null;
+  const target: Fixed = { n: mark.n, s: mark.s + 2 };
+  const tick = parse(tickSize);
+  if (!tick || tick.n === 0n) return format(target.n, target.s);
+  const scale = Math.max(target.s, tick.s);
+  const targetScaled = rescale(target, scale), tickScaled = rescale(tick, scale);
+  const steps = (targetScaled + tickScaled / 2n) / tickScaled;
+  const clamped = steps > 0n ? steps : 1n;
+  return format(clamped * tick.n, tick.s);
+}
+
 export interface SymbolSizingRules { stepSize?: unknown; minQty?: unknown; minNotional?: unknown }
 export interface LevelOrderSizing { quantity: string; notional: string; error: string | null }
 
@@ -135,4 +149,20 @@ export function orderAmountError(amount: unknown, referencePrice?: unknown, rule
     return orderSizing(referencePrice, amount, rules)?.error ?? null;
   }
   return null;
+}
+
+/** Signed percentage distance `(price - reference) / reference * 100`. */
+export function priceDiffPercent(price: unknown, reference: unknown): string | null {
+  const p = parse(price), r = parse(reference);
+  if (!p || !r || p.n === 0n || r.n === 0n) return null;
+  const scale = Math.max(p.s, r.s);
+  const pScaled = rescale(p, scale), rScaled = rescale(r, scale);
+  const diff = pScaled - rScaled;
+  if (diff === 0n) return '0%';
+  const sign = diff > 0n ? '+' : '-';
+  const absDiff = diff > 0n ? diff : -diff;
+  const rounded2 = (absDiff * 10000n + rScaled / 2n) / rScaled;
+  if (rounded2 > 0n) return `${sign}${format(rounded2, 2)}%`;
+  const rounded4 = (absDiff * 1000000n + rScaled / 2n) / rScaled;
+  return rounded4 > 0n ? `${sign}${format(rounded4, 4)}%` : `${sign}<0.0001%`;
 }

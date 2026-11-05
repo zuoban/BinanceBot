@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Form, Input } from 'antd';
 import type { FormInstance } from 'antd';
-import { exceeds, exposure, gridPreview, orderSizing, sumDecimals, tickSizeError } from '../lib/gridPreview';
+import { exceeds, exposure, gridPreview, orderSizing, priceDiffPercent, sumDecimals, tickSizeError } from '../lib/gridPreview';
 import { trimFractionZeros } from '../lib/format';
 
 /** Live ladder of the orders the engine would place, from the form values and a reference price. */
@@ -39,9 +39,9 @@ export function GridPreview<Values>({ form, markPrice, tickSize, stepSize, minQt
     {tickError ? <p className="grid-preview-warning" role="alert">{tickError}</p>
       : !preview ? <p className="muted grid-preview-empty">填写网格间距、买卖窗口{hasMark ? '' : '和参考价格'}后显示将挂出的价位。</p> : <>
       <ol className="grid-preview-ladder" aria-label="预计挂单价位，由高到低">
-        {[...preview.sells].reverse().map(price => { const s = sizeAt(price); return <li key={`s${price}`} className="grid-preview-sell"><span>卖{s && <small className="grid-preview-qty"> · {s.quantity} ({s.notional} {quote})</small>}</span><strong>{price}</strong></li>; })}
+        {[...preview.sells].reverse().map(price => { const s = sizeAt(price), diff = priceDiffPercent(price, reference); return <li key={`s${price}`} className="grid-preview-sell"><span>卖{s && <small className="grid-preview-qty"> · {s.quantity} ({s.notional} {quote})</small>}</span><span className="grid-preview-price">{diff && <small className="grid-preview-diff">{diff}</small>}<strong>{price}</strong></span></li>; })}
         <li className="grid-preview-mark"><span>参考价</span><strong>{reference}</strong></li>
-        {preview.buys.map(price => { const s = sizeAt(price); return <li key={`b${price}`} className="grid-preview-buy"><span>买{s && <small className="grid-preview-qty"> · {s.quantity} ({s.notional} {quote})</small>}</span><strong>{price}</strong></li>; })}
+        {preview.buys.map(price => { const s = sizeAt(price), diff = priceDiffPercent(price, reference); return <li key={`b${price}`} className="grid-preview-buy"><span>买{s && <small className="grid-preview-qty"> · {s.quantity} ({s.notional} {quote})</small>}</span><span className="grid-preview-price">{diff && <small className="grid-preview-diff">{diff}</small>}<strong>{price}</strong></span></li>; })}
       </ol>
       <p className="muted">共 {orders} 个挂单。{(preview.buyClipped || preview.sellClipped) && '价格区间限制了部分价位。'}{worstCase && ` ${openingLabel}全部成交时新增名义价值约 ${worstCase} ${quote}。`}</p>
       {overLimit && <p className="grid-preview-warning" role="alert">{openingLabel}全部成交的名义价值超过最大持仓名义价值 {String(values?.max_position_usdc)} {quote}，达到上限后将{values?.pause_on_max_position ? '暂停策略' : '限制开仓'}。</p>}

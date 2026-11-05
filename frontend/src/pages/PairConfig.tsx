@@ -10,8 +10,8 @@ import type { GlobalConfig, GridConfig } from '../lib/types';
 import { ErrorNotice, PageBreadcrumb, PageTitle } from '../components/Common';
 import { useDeleteStrategy } from '../components/DeleteStrategy';
 import { GridPreview } from '../components/GridPreview';
-import { orderAmountError, priceRangeError, tickSizeError } from '../lib/gridPreview';
-import { quoteAsset } from '../lib/format';
+import { defaultGridInterval, orderAmountError, priceRangeError, tickSizeError } from '../lib/gridPreview';
+import { quoteAsset, trimFractionZeros } from '../lib/format';
 import { describeNewGridConfig, diffGridConfig } from '../lib/configDiff';
 
 type FormValues = Omit<GridConfig, 'post_only'>;
@@ -45,6 +45,8 @@ export default function PairConfig() {
     return () => { unsubscribe?.(); invalidate(); };
   }, [pathname, router]);
   const baseline = useRef<{ symbol: string; config: GridConfig & { config_version: string } } | null>(null);
+  const customInterval = useRef(false);
+  const appliedSymbol = useRef<string | undefined>(undefined);
   const global = useQuery({ queryKey: ['global-config'], queryFn: ({ signal }) => api<GlobalConfig>('/api/global/config', { signal }), refetchOnWindowFocus: false });
   // Unknown state (for example a failed global-config request) is confirmed as live.
   const live = global.data ? global.data.has_api_key && global.data.has_api_secret : pair ? pair.mode === 'LIVE' : true;
@@ -53,6 +55,8 @@ export default function PairConfig() {
   useEffect(() => {
     setReady(adding);
     baseline.current = null;
+    customInterval.current = false;
+    appliedSymbol.current = undefined;
     form.resetFields();
     if (adding) form.setFieldsValue(defaults);
   }, [symbol, adding, form]);
@@ -134,12 +138,26 @@ export default function PairConfig() {
   const formDisabled = !ready || edit.saving || deletion.busy;
   const watchedSymbol = Form.useWatch('symbol', form) as string | undefined;
   const selectedSymbol = adding ? watchedSymbol?.trim().toUpperCase() : symbol;
-  const symbolPreview = useQuery({ queryKey: ['symbol-preview', selectedSymbol], queryFn: ({ signal }) => api<{ symbol: string; mark_price?: string | null; tick_size?: string; step_size?: string; min_qty?: string; min_notional?: string }>(`/api/exchange/symbol-preview?environment=mainnet&symbol=${encodeURIComponent(selectedSymbol!)}`, { signal }), enabled: adding && !!selectedSymbol, retry: false, refetchOnWindowFocus: false });
-  const effectiveMark = adding ? symbolPreview.data?.mark_price ?? undefined : markPrice;
+  const quote = quoteAsset(selectedSymbol ?? '');
+  const symbolPreview = useQuery({ queryKey: ['symbol-preview', selectedSymbol], queryFn: ({ signal }) => api<{ symbol: string; last_price?: string | null; mark_price?: string | null; tick_size?: string; step_size?: string; min_qty?: string; min_notional?: string }>(`/api/exchange/symbol-preview?environment=mainnet&symbol=${encodeURIComponent(selectedSymbol!)}`, { signal }), enabled: adding && !!selectedSymbol, retry: false, refetchOnWindowFocus: false });
+  const previewLast = symbolPreview.data?.last_price && Number(symbolPreview.data.last_price) > 0 ? symbolPreview.data.last_price : undefined;
+  const previewMark = symbolPreview.data?.mark_price && Number(symbolPreview.data.mark_price) > 0 ? symbolPreview.data.mark_price : undefined;
+  const latestPrice = adding ? (previewLast ?? previewMark) : undefined;
+  const effectiveMark = adding ? (previewMark ?? previewLast) : markPrice;
   const tickSize = adding ? symbolPreview.data?.tick_size : config.data?.tick_size;
   const stepSize = adding ? symbolPreview.data?.step_size : config.data?.step_size;
   const minQty = adding ? symbolPreview.data?.min_qty : config.data?.min_qty;
   const minNotional = adding ? symbolPreview.data?.min_notional : config.data?.min_notional;
+  useEffect(() => {
+    if (!adding || !ready || edit.saving || submission.current || !selectedSymbol || !effectiveMark) return;
+    if (customInterval.current || appliedSymbol.current === selectedSymbol) return;
+    const nextInterval = defaultGridInterval(effectiveMark, tickSize);
+    if (nextInterval) {
+      appliedSymbol.current = selectedSymbol;
+      form.setFieldValue('grid_interval', nextInterval);
+      void form.validateFields(['grid_interval', 'order_amount_usdc']).catch(() => {});
+    }
+  }, [adding, ready, edit.saving, selectedSymbol, effectiveMark, tickSize, form]);
   useEffect(() => { if ((tickSize || stepSize || minNotional) && ready) void form.validateFields(['grid_interval', 'order_amount_usdc']).catch(() => {}); }, [tickSize, stepSize, minNotional, effectiveMark, ready, form]);
   return <div className="config-page">
     <PageBreadcrumb disabled={edit.saving} items={adding
@@ -154,11 +172,11 @@ export default function PairConfig() {
       if (!result.error && result.data && symbol) { baseline.current = { symbol, config: result.data }; form.setFieldsValue(result.data); edit.setDirty(false); mutation.reset(); }
     }}>重新加载策略配置</Button>}
     {pairs.data && !pair && !adding && <Alert type="warning" title="该交易对不存在或已移除" />}
-    <Form<FormValues> className="config-form" form={form} layout="vertical" onFinish={values => void submit(values)} onValuesChange={() => { edit.setDirty(true); }} disabled={formDisabled}>
+    <Form<FormValues> className="config-form" form={form} layout="vertical" onFinish={values => void submit(values)} onValuesChange={changed => { if ('symbol' in changed) { if (!customInterval.current) form.setFieldValue('grid_interval', defaults.grid_interval); customInterval.current = false; appliedSymbol.current = undefined; } else if ('grid_interval' in changed) customInterval.current = true; edit.setDirty(true); }} disabled={formDisabled}>
       <Card title="基本设置">
         {live && <Alert type="warning" showIcon className="config-live-alert" title="实盘使用真实资金，请核对交易方向和风险限制。" />}
         <Row gutter={[20, 16]}>
-          <Col xs={24} md={12}><Form.Item name="symbol" label="合约交易对" rules={[{ required: true, message: '请选择交易对' }]} getValueProps={value => ({ value: value || undefined })} extra={adding && symbols.isError ? <span>交易对加载失败 <Button type="link" onClick={() => void symbols.refetch()}>重试</Button></span> : undefined}>{adding ? <Select showSearch optionFilterProp="label" placeholder={symbols.isFetching ? '正在加载交易对...' : '搜索并选择交易对'} loading={symbols.isFetching} disabled={formDisabled || symbols.isFetching || symbols.isError} notFoundContent="没有匹配的交易对" options={(symbols.data ?? []).map(value => ({ value, label: value }))} /> : <Input disabled />}</Form.Item></Col>
+          <Col xs={24} md={12}><Form.Item name="symbol" label="合约交易对" rules={[{ required: true, message: '请选择交易对' }]} getValueProps={value => ({ value: value || undefined })} extra={adding && symbols.isError ? <span>交易对加载失败 <Button type="link" onClick={() => void symbols.refetch()}>重试</Button></span> : adding && selectedSymbol ? (symbolPreview.isFetching ? '正在获取最新价格...' : latestPrice && Number(latestPrice) > 0 ? `最新价格：${trimFractionZeros(String(latestPrice))}${quote ? ` ${quote}` : ''}` : undefined) : undefined}>{adding ? <Select showSearch optionFilterProp="label" placeholder={symbols.isFetching ? '正在加载交易对...' : '搜索并选择交易对'} loading={symbols.isFetching} disabled={formDisabled || symbols.isFetching || symbols.isError} notFoundContent="没有匹配的交易对" options={(symbols.data ?? []).map(value => ({ value, label: value }))} /> : <Input disabled />}</Form.Item></Col>
           <Col xs={24} md={12}><Form.Item name="direction" label="交易方向" rules={[{ required: true }]}><Select options={[{ value: 'LONG', label: '做多 · 买入开仓 / 卖出平仓' }, { value: 'SHORT', label: '做空 · 卖出开仓 / 买入平仓' }]} /></Form.Item></Col>
         </Row>
       </Card>
@@ -170,7 +188,7 @@ export default function PairConfig() {
           <Col xs={24} md={12}><Form.Item name="sell_window" label="卖单窗口" extra="当前价格上方预挂的卖单数量，范围为 1–50。" rules={[{ required: true }]}><InputNumber min={1} max={50} precision={0} className="full-width-input" /></Form.Item></Col>
         </Row>
       </Card>
-      <GridPreview key={selectedSymbol ?? 'new'} form={form} markPrice={effectiveMark} tickSize={tickSize} stepSize={stepSize} minQty={minQty} minNotional={minNotional} quote={quoteAsset(selectedSymbol ?? '') || '报价资产'} />
+      <GridPreview key={selectedSymbol ?? 'new'} form={form} markPrice={effectiveMark} tickSize={tickSize} stepSize={stepSize} minQty={minQty} minNotional={minNotional} quote={quote || '报价资产'} />
       <Row gutter={[20, 20]} className="settings-grid-row">
         <Col xs={24} xl={12} className="settings-grid-col">
           <Card title="仓位限制" className="settings-card-fill">
@@ -193,7 +211,7 @@ export default function PairConfig() {
       <div className={`save-bar${edit.dirty ? ' save-bar-dirty' : ''}`}>
         <SaveBarStatus form={form} adding={adding} dirty={edit.dirty} symbol={symbol} baseline={baseline.current} />
         <Space wrap>
-        <Button onClick={async () => { if (edit.dirty && !await modal.confirm({ title: '放弃未保存的修改？', okText: '还原', cancelText: '继续编辑' })) return; if (adding) form.setFieldsValue(defaults); else if (baseline.current?.symbol === symbol) form.setFieldsValue(baseline.current.config); edit.setDirty(false); }}>还原</Button>
+        <Button onClick={async () => { if (edit.dirty && !await modal.confirm({ title: '放弃未保存的修改？', okText: '还原', cancelText: '继续编辑' })) return; if (adding) { customInterval.current = false; appliedSymbol.current = undefined; form.setFieldsValue(defaults); } else if (baseline.current?.symbol === symbol) form.setFieldsValue(baseline.current.config); edit.setDirty(false); }}>还原</Button>
         <Button type="primary" htmlType="submit" loading={mutation.isPending}>{adding ? '保存并添加' : '保存并立即生效'}</Button>
       </Space></div>
       {!adding && <Card className="danger-zone" title="删除策略"><p>删除前请暂停策略、等待挂单撤销并平仓；删除不会自动平仓，历史记录会保留。</p><Button danger disabled={edit.saving} loading={deletion.busy} onClick={() => void remove()}>删除策略</Button></Card>}

@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { exceeds, exposure, gridPreview, orderAmountError, orderSizing, priceRangeError, sumDecimals, tickSizeError } from '../lib/gridPreview';
+import { defaultGridInterval, exceeds, exposure, gridPreview, orderAmountError, orderSizing, priceDiffPercent, priceRangeError, sumDecimals, tickSizeError } from '../lib/gridPreview';
 
 const base = { interval: '0.5', buyWindow: 3, sellWindow: 3 };
 
@@ -55,6 +55,11 @@ it('validates that the grid interval is a positive integer multiple of tick_size
   expect(tickSizeError('0.30', '0.1')).toBeNull();
   expect(tickSizeError('0.15', '0.1')).toBe('网格间距 0.15 必须是价格步长 0.1 的正整数倍');
   expect(tickSizeError('0.005', '0.01')).toBe('网格间距 0.005 必须是价格步长 0.01 的正整数倍');
+  expect(defaultGridInterval('142.3500', '0.1')).toBe('1.4');
+  expect(defaultGridInterval('142.3500', '0.01')).toBe('1.42');
+  expect(defaultGridInterval('0.004', '0.001')).toBe('0.001');
+  expect(defaultGridInterval('142.35')).toBe('1.4235');
+  expect(defaultGridInterval('')).toBeNull();
 });
 
 it('truncates order quantity by stepSize and flags orders below minQty or minNotional', () => {
@@ -75,4 +80,14 @@ it('sums truncated notionals and validates orderAmountError against minNotional 
     .toBe('按数量步长 0.001 截断后数量为 0，低于最小下单量 0.001，该档将无法挂单');
   expect(orderAmountError('100', '80000', { stepSize: '0.001', minQty: '0.001', minNotional: '50' }))
     .toBeNull();
+});
+
+it('computes signed percentage distance from the reference price', () => {
+  expect(priceDiffPercent('100.5', '100')).toBe('+0.5%');
+  expect(priceDiffPercent('99', '100')).toBe('-1%');
+  expect(priceDiffPercent('142.4', '142.35')).toBe('+0.04%');
+  expect(priceDiffPercent('142.3', '142.35')).toBe('-0.04%');
+  expect(priceDiffPercent('80001', '80000')).toBe('+0.0013%');
+  expect(priceDiffPercent('100', '100')).toBe('0%');
+  expect(priceDiffPercent('100', '')).toBeNull();
 });
