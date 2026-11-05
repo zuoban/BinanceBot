@@ -1,5 +1,8 @@
+import { createElement } from 'react';
+import { render, screen } from '@testing-library/react';
 import { expect, it } from 'vitest';
-import { todayHourlyData } from '../components/Charts';
+import { DepthChart, todayHourlyData } from '../components/Charts';
+import { snapshot } from './fixtures';
 
 it('shows all Beijing hours and leaves future hours without counts', () => {
   const data = todayHourlyData({
@@ -16,4 +19,16 @@ it('shows all Beijing hours and leaves future hours without counts', () => {
   expect(data[1]).toEqual({ hour: '00:00', 买入: 0, 卖出: 0 });
   expect(data[2]).toEqual({ hour: '23:00', 买入: null, 卖出: null });
   expect(data[23]).toEqual({ hour: '02:00', 买入: null, 卖出: null });
+});
+
+it('renders live grid depth levels with percentage distance from mark price', () => {
+  const s = snapshot('SOLUSDC');
+  s.ticker.mark_price = '100';
+  s.active_orders = [
+    { client_order_id: 's1', order_id: 1, symbol: 'SOLUSDC', side: 'SELL', price: '101.5', quantity: '1', amount_usdc: '101.5', status: 'NEW', created_at: '2026-11-05T00:00:00Z', grid_level: 1, is_take_profit: false, purpose: 'GRID', merge_sources: [] },
+    { client_order_id: 'b1', order_id: 2, symbol: 'SOLUSDC', side: 'BUY', price: '98.5', quantity: '1', amount_usdc: '98.5', status: 'NEW', created_at: '2026-11-05T00:00:00Z', grid_level: -1, is_take_profit: false, purpose: 'GRID', merge_sources: [] },
+  ];
+  render(createElement(DepthChart, { snapshot: s }));
+  expect(screen.getByText('+1.5%')).toBeInTheDocument();
+  expect(screen.getByText('-1.5%')).toBeInTheDocument();
 });

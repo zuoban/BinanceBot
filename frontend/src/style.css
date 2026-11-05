@@ -417,7 +417,9 @@ kbd {
 .grid-level { display: flex; align-items: center; gap: 12px; min-height: 32px; padding: 0 8px; border-radius: 6px; font-size: 12px; line-height: 16px; color: var(--text-secondary); }
 .grid-level > span:first-child { flex: 0 0 auto; white-space: nowrap; }
 .grid-level strong { flex: 0 0 auto; color: var(--text-primary); font: 500 12px/16px var(--font-mono); font-variant-numeric: tabular-nums; }
-.grid-level-quantity { font-family: var(--font-mono); color: var(--text-muted); margin-left: 6px; }
+.grid-level-quantity, .grid-level-diff { font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--text-muted); }
+.grid-level-quantity { margin-left: 6px; }
+.grid-level-diff { flex: 0 0 auto; }
 .grid-level-line { flex: 1 1 auto; min-width: 20px; border-top: 1px dashed var(--border-strong); }
 .grid-level-buy > span:first-child { color: var(--positive); }
 .grid-level-sell > span:first-child { color: var(--negative); }

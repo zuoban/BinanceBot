@@ -2,6 +2,7 @@ import { theme } from 'antd';
 import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import type { Snapshot } from '../lib/types';
 import { price, todayCount } from '../lib/format';
+import { priceDiffPercent } from '../lib/gridPreview';
 import { NoData } from './Common';
 
 export function todayHourlyData(stats: NonNullable<Snapshot['hourly_trade_stats']>, now = Date.now()) {
@@ -36,15 +37,18 @@ export function DepthChart({ snapshot }: { snapshot: Snapshot }) {
   const orders = snapshot.active_orders;
   if (!orders.length) return <NoData />;
   const mark = Number(snapshot.ticker.mark_price);
+  const hasMark = Number.isFinite(mark) && mark > 0;
   const entries = orders.map(order => ({ kind: 'order' as const, value: Number(order.price), order }));
   const rows: ({ kind: 'order'; value: number; order: typeof orders[number] } | { kind: 'mark'; value: number })[] = entries;
-  if (Number.isFinite(mark) && mark > 0) rows.push({ kind: 'mark', value: mark });
+  if (hasMark) rows.push({ kind: 'mark', value: mark });
   rows.sort((a, b) => b.value - a.value);
   return <div className="grid-levels" role="region" aria-label="按价格从高到低排列的实时网格挂单" tabIndex={0}>
-    {rows.map(row => row.kind === 'mark'
-      ? <div className="grid-level grid-level-mark" key="mark"><span>标记价</span><span className="grid-level-line" /><strong>{price(row.value)}</strong></div>
-      : <div className={`grid-level grid-level-${row.order.side.toLowerCase()}`} key={row.order.client_order_id}>
-        <span>{row.order.side === 'BUY' ? '买单' : '卖单'} <span className="grid-level-quantity">{price(row.order.quantity)}</span></span><span className="grid-level-line" /><strong>{price(row.order.price)}</strong>
-      </div>)}
+    {rows.map(row => {
+      if (row.kind === 'mark') return <div className="grid-level grid-level-mark" key="mark"><span>标记价</span><span className="grid-level-line" /><strong>{price(row.value)}</strong></div>;
+      const diff = hasMark ? priceDiffPercent(row.order.price, snapshot.ticker.mark_price) : null;
+      return <div className={`grid-level grid-level-${row.order.side.toLowerCase()}`} key={row.order.client_order_id}>
+        <span>{row.order.side === 'BUY' ? '买单' : '卖单'} <span className="grid-level-quantity">{price(row.order.quantity)}</span></span><span className="grid-level-line" />{diff && <span className="grid-level-diff">{diff}</span>}<strong>{price(row.order.price)}</strong>
+      </div>;
+    })}
   </div>;
 }
