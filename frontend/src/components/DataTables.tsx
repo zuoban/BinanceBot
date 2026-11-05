@@ -65,11 +65,11 @@ export function TradesTable({ trades: allTrades, overview = false }: { trades: T
     trades.map(t => [time(t.timestamp), t.side === 'BUY' ? '买入' : '卖出', t.price, t.quantity, t.amount_usdc, t.pnl_verified ? t.realized_pnl : '待同步', t.pnl_verified ? t.commission : '待同步', t.pnl_verified ? (t.is_maker ? 'Maker' : 'Taker') : '待同步', t.note]),
   ));
   useEffect(() => {
-    if (!overview || !trades.length) return;
+    if (!trades.length) return;
     setNow(Date.now());
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
-  }, [overview, trades.length]);
+  }, [trades.length]);
   const columns: ColumnsType<Trade> = [
     ...(overview ? [{ title: '交易对', dataIndex: 'symbol', className: 'trade-symbol', width: 130 }] : []),
     { title: '方向', dataIndex: 'side', render: side, width: 90, fixed: overview ? undefined : 'left' },
@@ -88,7 +88,7 @@ export function TradesTable({ trades: allTrades, overview = false }: { trades: T
     {overview && <p className="overview-trades-scroll-hint">左右滑动查看完整成交信息</p>}
     <div className={overview ? 'overview-trades-desktop' : 'table-desktop'}><Table<Trade> rowKey="trade_id" columns={columns} dataSource={trades} size="small" scroll={{ x: 1000 }} pagination={overview ? false : { pageSize: 15, showSizeChanger: false, hideOnSinglePage: true }} /></div>
     {!overview && <div className="table-mobile">{trades.length ? <ul className="trade-list" aria-label="成交列表">{trades.slice(0, 50).map(trade => <li className="trade-list-item" key={trade.trade_id}>
-      <div className="trade-list-heading">{side(trade.side)}<strong><Copyable value={trade.price}>{price(trade.price)}</Copyable></strong><span className="trade-list-time" title={`${time(trade.timestamp)}（北京时间）`}>{relativeTime(trade.timestamp, now)}</span></div>
+      <div className="trade-list-heading">{side(trade.side)}<strong><Copyable value={trade.price}>{price(trade.price)}</Copyable></strong><span className="trade-list-time" title={Number.isFinite(Date.parse(trade.timestamp)) ? `${time(trade.timestamp)}（北京时间）` : undefined}>{relativeTime(trade.timestamp, now)}</span></div>
       <dl>
         <div><dt>数量</dt><dd>{price(trade.quantity)}</dd></div>
         <div><dt>金额</dt><dd>{number(trade.amount_usdc)}</dd></div>

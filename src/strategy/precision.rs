@@ -23,7 +23,7 @@ pub struct SymbolRules {
 impl Default for SymbolRules {
     fn default() -> Self {
         Self {
-            symbol: "SOLUSDC".to_string(),
+            symbol: String::new(),
             tick_size: dec!(0.01),
             price_scale: 2,
             min_price: dec!(0.1),

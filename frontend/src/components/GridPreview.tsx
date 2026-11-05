@@ -13,8 +13,11 @@ export function GridPreview<Values>({ form, markPrice, tickSize, quote }: { form
   const cleanTick = tickSize && Number(tickSize) > 0 ? trimFractionZeros(String(tickSize)) : null;
   const tickError = values && cleanTick ? tickSizeError(values.grid_interval, cleanTick) : null;
   const preview = values && !tickError ? gridPreview({ reference, interval: values.grid_interval, buyWindow: values.buy_window, sellWindow: values.sell_window, min: values.min_price, max: values.max_price }) : null;
+  const short = values?.direction === 'SHORT';
+  const openingLabel = short ? '卖单' : '买单';
+  const openingCount = preview ? (short ? preview.sells.length : preview.buys.length) : 0;
   const orders = preview ? preview.buys.length + preview.sells.length : 0;
-  const worstCase = preview && values ? exposure(values.order_amount_usdc, preview.buys.length) : null;
+  const worstCase = preview && values ? exposure(values.order_amount_usdc, openingCount) : null;
   const overLimit = exceeds(worstCase, values?.max_position_usdc);
   return <section className="grid-preview" aria-label="网格预览">
     <div className="grid-preview-head">
@@ -32,8 +35,8 @@ export function GridPreview<Values>({ form, markPrice, tickSize, quote }: { form
         <li className="grid-preview-mark"><span>参考价</span><strong>{reference}</strong></li>
         {preview.buys.map(price => <li key={`b${price}`} className="grid-preview-buy"><span>买</span><strong>{price}</strong></li>)}
       </ol>
-      <p className="muted">共 {orders} 个挂单。{(preview.buyClipped || preview.sellClipped) && '价格区间限制了部分价位。'}{worstCase && ` 买单全部成交时新增名义价值约 ${worstCase} ${quote}。`}</p>
-      {overLimit && <p className="grid-preview-warning" role="alert">买单全部成交的名义价值超过最大持仓名义价值 {String(values?.max_position_usdc)} {quote}，达到上限后将{values?.pause_on_max_position ? '暂停策略' : '限制开仓'}。</p>}
+      <p className="muted">共 {orders} 个挂单。{(preview.buyClipped || preview.sellClipped) && '价格区间限制了部分价位。'}{worstCase && ` ${openingLabel}全部成交时新增名义价值约 ${worstCase} ${quote}。`}</p>
+      {overLimit && <p className="grid-preview-warning" role="alert">{openingLabel}全部成交的名义价值超过最大持仓名义价值 {String(values?.max_position_usdc)} {quote}，达到上限后将{values?.pause_on_max_position ? '暂停策略' : '限制开仓'}。</p>}
     </>}
   </section>;
 }

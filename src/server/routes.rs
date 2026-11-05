@@ -137,6 +137,7 @@ async fn fetch_exchange_symbols(
 }
 
 async fn exchange_symbol_preview_handler(
+    Extension(limiter): Extension<Arc<RateLimiter>>,
     query: Result<Query<SymbolPreviewQuery>, axum::extract::rejection::QueryRejection>,
 ) -> (StatusCode, Json<ApiResponse<ExchangeSymbolPreview>>) {
     let SymbolPreviewQuery {
@@ -152,7 +153,7 @@ async fn exchange_symbol_preview_handler(
         return symbol_preview_error(StatusCode::BAD_REQUEST, "无效的交易对代码");
     }
     let config = AppConfig::default().exchange;
-    let client = BinanceFuturesClient::new_with_limiter(&config, Arc::new(RateLimiter::default()));
+    let client = BinanceFuturesClient::new_with_limiter(&config, limiter);
     fetch_exchange_symbol_preview(&client, &symbol).await
 }
 
@@ -339,14 +340,15 @@ fn pair_resource_routes() -> Router<Arc<AppState>> {
 }
 
 fn create_base_router(state: Arc<AppState>, history_clear: bool) -> Router {
+    let limiter = Arc::new(RateLimiter::default());
     let mut api_protected = Router::new()
         .route(
             "/api/exchange/symbols",
-            get(exchange_symbols_handler).layer(Extension(Arc::new(RateLimiter::default()))),
+            get(exchange_symbols_handler).layer(Extension(limiter.clone())),
         )
         .route(
             "/api/exchange/symbol-preview",
-            get(exchange_symbol_preview_handler),
+            get(exchange_symbol_preview_handler).layer(Extension(limiter)),
         )
         .route("/api/status", get(get_status_handler))
         .route("/api/orders", get(get_orders_handler))
@@ -483,7 +485,7 @@ pub async fn create_managed_router(handle: RuntimeHandle) -> Router {
         )
         .route(
             "/api/exchange/symbol-preview",
-            get(exchange_symbol_preview_handler),
+            get(exchange_symbol_preview_handler).layer(Extension(handle.rate_limiter.clone())),
         )
         .route(
             "/api/pairs",
@@ -1699,8 +1701,10 @@ async fn get_config_handler(
     let config = state.config.read().await;
     let mut view = web_config_view(&config);
     view.config_version = pair_config_version(&config, state.config_instance);
-    view.tick_size =
-        Some(state.rules.read().await.tick_size).filter(|tick| *tick > rust_decimal::Decimal::ZERO);
+    let rules = state.rules.read().await;
+    view.tick_size = (rules.symbol.eq_ignore_ascii_case(&config.exchange.symbol)
+        && rules.tick_size > rust_decimal::Decimal::ZERO)
+        .then_some(rules.tick_size);
     Json(ApiResponse {
         success: true,
         data: Some(view),
@@ -2539,6 +2543,24 @@ mod tests {
         AppState::new_for_pair_with_admin_auth(config, db, action_tx, trade_lock, test_admin_auth())
     }
 
+    #[tokio::test]
+    async fn config_view_omits_tick_size_until_symbol_rules_match_pair_symbol() {
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let (tx, _) = tokio::sync::mpsc::channel(1);
+        let state = AppState::new(AppConfig::default(), db, tx);
+        let initial = get_config_handler(State(state.clone())).await;
+        assert_eq!(initial.0.data.unwrap().tick_size, None);
+        {
+            let mut rules = state.rules.write().await;
+            rules.symbol = "SOLUSDC".into();
+            rules.tick_size = rust_decimal_macros::dec!(0.05);
+        }
+        let loaded = get_config_handler(State(state)).await;
+        assert_eq!(
+            loaded.0.data.unwrap().tick_size,
+            Some(rust_decimal_macros::dec!(0.05))
+        );
+    }
     #[tokio::test]
     async fn control_requires_confirmation_mode_and_propagates_engine_rejections() {
         let db = Arc::new(Database::open(":memory:").unwrap());

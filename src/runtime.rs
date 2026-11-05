@@ -897,6 +897,7 @@ impl TradingRuntime {
             )
             .await;
         if let Ok(pair) = result {
+            *pair.state.rules.write().await = rules;
             self.handle.register_engine(&pair);
             self.pairs.push(pair);
             *self.handle.states.write().await = self.states();

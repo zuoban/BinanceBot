@@ -167,7 +167,7 @@ export default function PairConfig() {
           <Col xs={24} md={12}><Form.Item name="sell_window" label="卖单窗口" extra="当前价格上方预挂的卖单数量，范围为 1–50。" rules={[{ required: true }]}><InputNumber min={1} max={50} precision={0} className="full-width-input" /></Form.Item></Col>
         </Row>
       </Card>
-      <GridPreview form={form} markPrice={effectiveMark} tickSize={tickSize} quote={quoteAsset(selectedSymbol ?? '') || '报价资产'} />
+      <GridPreview key={selectedSymbol ?? 'new'} form={form} markPrice={effectiveMark} tickSize={tickSize} quote={quoteAsset(selectedSymbol ?? '') || '报价资产'} />
       <Row gutter={[20, 20]} className="settings-grid-row">
         <Col xs={24} xl={12} className="settings-grid-col">
           <Card title="仓位限制" className="settings-card-fill">
@@ -202,9 +202,10 @@ function SaveBarStatus({ form, adding, dirty, symbol, baseline }: { form: FormIn
   const watched = Form.useWatch([], form) as FormValues | undefined;
   const [showChanges, setShowChanges] = useState(false);
   const pending = !adding && dirty && watched && baseline && baseline.symbol === symbol ? diffGridConfig(baseline.config, watched) : [];
+  const expanded = showChanges && pending.length > 0;
   return <div className="save-bar-status">
     <span className="muted" role="status">{dirty ? (pending.length ? `已修改 ${pending.length} 项` : '有未保存的修改') : adding ? '确认参数后保存并添加交易对' : '所有修改已保存'}</span>
-    {pending.length > 0 && <Button type="link" size="small" aria-expanded={showChanges} aria-controls="pending-changes" onClick={() => setShowChanges(value => !value)}>{showChanges ? '收起' : '查看'}</Button>}
-    {pending.length > 0 && showChanges && <ul id="pending-changes" className="save-bar-changes">{pending.map(change => <li key={change.key} className={change.risky ? 'confirm-risky' : undefined}><span>{change.label}</span><span><s>{change.before}</s> → <strong>{change.after}</strong></span></li>)}</ul>}
+    {pending.length > 0 && <Button type="link" size="small" aria-expanded={expanded} aria-controls="pending-changes" onClick={() => setShowChanges(value => !value)}>{expanded ? '收起' : '查看'}</Button>}
+    {expanded && <ul id="pending-changes" className="save-bar-changes">{pending.map(change => <li key={change.key} className={change.risky ? 'confirm-risky' : undefined}><span>{change.label}</span><span><s>{change.before}</s> → <strong>{change.after}</strong></span></li>)}</ul>}
   </div>;
 }

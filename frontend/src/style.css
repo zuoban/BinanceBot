@@ -93,7 +93,7 @@ body {
 ::-webkit-scrollbar-track { background: transparent; }
 
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.sidebar :focus-visible, .sidebar-drawer :focus-visible, .mobilebar :focus-visible { outline-color: var(--rail-accent); }
+.sidebar :focus-visible, .sidebar-drawer :focus-visible, .mobilebar :focus-visible, .bottombar :focus-visible { outline-color: var(--rail-accent); }
 
 code {
   padding: 1px 6px;
@@ -618,7 +618,6 @@ kbd {
   .ant-card-head-title { white-space: normal; }
   .ant-card-head-wrapper { gap: 8px; }
   .ant-card-extra { text-align: right; white-space: normal; }
-  .save-bar-dirty { bottom: 8px; }
   .history-metric { align-items: flex-start; }
   .history-point-hourly { display: none; }
   .skeleton-detail-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -737,7 +736,7 @@ kbd {
 .bottombar { display: none; }
 @media (max-width: 900px) {
   .bottombar { position: fixed; bottom: 0; left: 0; right: 0; z-index: 10; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); height: 56px; background: var(--rail-bg); color: var(--rail-text); border-top: 1px solid var(--rail-line); }
-  .bottombar-item { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; min-height: 56px; padding: 0; border: 0; background: none; color: var(--rail-muted); font: 500 11px/1 var(--font-sans); text-decoration: none; cursor: pointer; }
+  .bottombar-item { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; min-height: 56px; padding: 0; border: 0; background: none; color: var(--rail-muted); font: 500 11px/1 var(--font-sans); text-decoration: none; cursor: pointer; outline-offset: -2px; }
   .bottombar-item .anticon { font-size: 16px; }
   .bottombar-item:hover { color: var(--rail-text); }
   .bottombar-item-active, .bottombar-item-active:hover { color: #fff; background: var(--rail-active); }

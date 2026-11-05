@@ -1,5 +1,5 @@
 /** A cell that a spreadsheet would execute as a formula must be neutralised before export. */
-const risky = /^[=+\-@\t\r]/;
+const risky = /^[\t\r]|^\s*[=+\-@]/;
 /** A plain signed decimal is data, not a formula, and must stay numeric (negative PnL). */
 const plainNumber = /^[+-]?\d+(\.\d+)?$/;
 

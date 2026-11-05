@@ -56,7 +56,7 @@ export default function Shell() {
   useEffect(() => { setDrawer(false); }, [location.pathname]);
   const mode = pairs.data?.[0]?.mode;
   const page = location.pathname.startsWith('/settings') ? 'settings' : location.pathname.startsWith('/pairs/') ? 'pair' : 'overview';
-  const sidebarProps = { pairs: pairs.data, pending: pairs.isPending, symbol, pathname: location.pathname, mode, authEnabled, saving, onSearch: () => { setDrawer(false); setPalette(true); }, onLogout: () => void logOut() };
+  const sidebarProps = { pairs: pairs.data, pending: pairs.isPending, symbol, pathname: location.pathname, mode, authEnabled, saving, onNavigate: () => setDrawer(false), onSearch: () => { setDrawer(false); setPalette(true); }, onLogout: () => void logOut() };
   return <EditContext.Provider value={context}><AccountsContext.Provider value={accounts}><ControlProvider><div className="app-layout">
     <a className="skip-link" href="#main">跳到主内容</a>
     <aside className="sidebar"><SidebarBody idPrefix="rail" {...sidebarProps} /></aside>
@@ -72,7 +72,7 @@ export default function Shell() {
     <main className="content" id="main"><Outlet /></main>
     <nav className="bottombar" aria-label="底部导航">
       <Link to="/" className={`bottombar-item${page === 'overview' ? ' bottombar-item-active' : ''}`} aria-current={page === 'overview' ? 'page' : undefined}><AppstoreOutlined aria-hidden="true" /><span>总览</span></Link>
-      <button type="button" className={`bottombar-item${page === 'pair' ? ' bottombar-item-active' : ''}`} aria-label="切换或查看交易对" onClick={() => setDrawer(true)}><LineChartOutlined aria-hidden="true" /><span>交易对</span></button>
+      <button type="button" className={`bottombar-item${page === 'pair' ? ' bottombar-item-active' : ''}`} aria-label="切换或查看交易对" aria-expanded={drawer} onClick={() => setDrawer(open => !open)}><LineChartOutlined aria-hidden="true" /><span>交易对</span></button>
       <Link to="/settings" className={`bottombar-item${page === 'settings' ? ' bottombar-item-active' : ''}`} aria-current={page === 'settings' ? 'page' : undefined}><SettingOutlined aria-hidden="true" /><span>设置</span></Link>
     </nav>
     <PaletteHost open={palette} setOpen={setPalette} pairs={pairs.data} stale={!!overview.error || Date.now() - overview.dataUpdatedAt > 10_000} authEnabled={authEnabled} saving={saving} onLogout={() => void logOut()} />
@@ -111,8 +111,9 @@ function PaletteHost({ open, setOpen, pairs, stale, authEnabled, saving, onLogou
       if (event.key === 'g') { lead = Date.now(); return; }
       if (lead && Date.now() - lead < 1200) {
         lead = 0;
-        if (event.key === 'o') navigate('/'); else if (event.key === 's') navigate('/settings'); else if (event.key === 'n') navigate('/pairs/new');
-        return;
+        if (event.key === 'o') { navigate('/'); return; }
+        if (event.key === 's') { navigate('/settings'); return; }
+        if (event.key === 'n') { navigate('/pairs/new'); return; }
       }
       if ((event.key === '[' || event.key === ']') && symbols.length > 1 && current) {
         const index = symbols.indexOf(current);
@@ -143,9 +144,10 @@ function PaletteHost({ open, setOpen, pairs, stale, authEnabled, saving, onLogou
       ...(authEnabled ? [{ key: 'logout', group: '账户', label: '退出登录', keywords: 'logout 退出', icon: <LogoutOutlined />, disabled: saving, run: onLogout }] : []),
       { key: 'shortcuts', group: '帮助', label: '键盘快捷键', hint: '?', keywords: 'help shortcuts 快捷键 帮助', icon: <QuestionCircleOutlined />, run: () => setHelp(true) },
     ];
-    const byKey = new Map(all.map(command => [command.key, command]));
-    const recents = recent.flatMap(key => { const command = byKey.get(key); return command && !command.disabled ? [{ ...command, group: '最近使用', key: `recent-${command.key}`, run: command.run }] : []; });
-    return [...recents, ...all.map(command => ({ ...command, run: () => { remember(command.key); command.run(); } }))];
+    const wrapped = all.map(command => ({ ...command, run: () => { remember(command.key); command.run(); } }));
+    const byKey = new Map(wrapped.map(command => [command.key, command]));
+    const recents = recent.flatMap(key => { const command = byKey.get(key); return command && !command.disabled ? [{ ...command, group: '最近使用', key: `recent-${command.key}` }] : []; });
+    return [...recents, ...wrapped];
   }, [pairs, navigate, run, preference, setPreference, authEnabled, saving, onLogout, stale, recent, remember]);
   return <>
     <CommandPalette open={open} onClose={() => setOpen(false)} commands={commands} />
@@ -162,25 +164,25 @@ function PaletteHost({ open, setOpen, pairs, stale, authEnabled, saving, onLogou
   </>;
 }
 
-interface SidebarProps { idPrefix: string; pairs: Pair[] | undefined; pending: boolean; symbol: string | undefined; pathname: string; mode: Mode | undefined; authEnabled: boolean; saving: boolean; onSearch: () => void; onLogout: () => void }
+interface SidebarProps { idPrefix: string; pairs: Pair[] | undefined; pending: boolean; symbol: string | undefined; pathname: string; mode: Mode | undefined; authEnabled: boolean; saving: boolean; onNavigate: () => void; onSearch: () => void; onLogout: () => void }
 
-function SidebarBody({ idPrefix, pairs, pending, symbol, pathname, mode, authEnabled, saving, onSearch, onLogout }: SidebarProps) {
+function SidebarBody({ idPrefix, pairs, pending, symbol, pathname, mode, authEnabled, saving, onNavigate, onSearch, onLogout }: SidebarProps) {
   const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
   const page = pathname.startsWith('/settings') ? 'settings' : pathname.startsWith('/pairs/') ? 'pair' : 'overview';
   return <div className="sidebar-inner">
-    <Link className="sidebar-brand" to="/" aria-label="Grid Console 首页"><img className="sidebar-logo" src="/logo.svg" alt="" /><span className="sidebar-brand-name"><strong>Grid Console</strong><small>Binance Futures</small></span></Link>
+    <Link className="sidebar-brand" to="/" aria-label="Grid Console 首页" onClick={onNavigate}><img className="sidebar-logo" src="/logo.svg" alt="" /><span className="sidebar-brand-name"><strong>Grid Console</strong><small>Binance Futures</small></span></Link>
     <button type="button" className="sidebar-search" onClick={onSearch} aria-label="打开命令面板"><SearchOutlined aria-hidden="true" /><span>搜索与跳转</span><kbd aria-hidden="true">{isMac ? '⌘K' : 'Ctrl K'}</kbd></button>
     <nav className="sidebar-nav" aria-label="主导航">
-      <Link to="/" className={`sidebar-link${page === 'overview' ? ' sidebar-link-active' : ''}`} aria-current={page === 'overview' ? 'page' : undefined}><AppstoreOutlined aria-hidden="true" />策略总览</Link>
-      <Link to="/settings" className={`sidebar-link${page === 'settings' ? ' sidebar-link-active' : ''}`} aria-current={page === 'settings' ? 'page' : undefined}><SettingOutlined aria-hidden="true" />全局设置</Link>
+      <Link to="/" onClick={onNavigate} className={`sidebar-link${page === 'overview' ? ' sidebar-link-active' : ''}`} aria-current={page === 'overview' ? 'page' : undefined}><AppstoreOutlined aria-hidden="true" />策略总览</Link>
+      <Link to="/settings" onClick={onNavigate} className={`sidebar-link${page === 'settings' ? ' sidebar-link-active' : ''}`} aria-current={page === 'settings' ? 'page' : undefined}><SettingOutlined aria-hidden="true" />全局设置</Link>
     </nav>
-    <div className="sidebar-section"><span id={`${idPrefix}-pairs-label`}>交易对</span><Link to="/pairs/new" className="sidebar-add" aria-label="新增交易对" title="新增交易对"><PlusOutlined aria-hidden="true" /></Link></div>
+    <div className="sidebar-section"><span id={`${idPrefix}-pairs-label`}>交易对</span><Link to="/pairs/new" onClick={onNavigate} className="sidebar-add" aria-label="新增交易对" title="新增交易对"><PlusOutlined aria-hidden="true" /></Link></div>
     <nav className="sidebar-pairs" aria-labelledby={`${idPrefix}-pairs-label`}>
       {pending && !pairs && [0, 1, 2].map(item => <div className="sidebar-pair-skeleton" key={item} aria-hidden="true" />)}
       {pairs?.map(pair => {
         const short = pair.grid_config.direction === 'SHORT';
         const active = pair.symbol === symbol;
-        return <Link key={pair.symbol} to={`/pairs/${pair.symbol}${pathname.endsWith('/config') ? '/config' : ''}`} className={`sidebar-pair${active ? ' sidebar-pair-active' : ''}`} aria-current={active ? 'page' : undefined}>
+        return <Link key={pair.symbol} to={`/pairs/${pair.symbol}${pathname.endsWith('/config') ? '/config' : ''}`} onClick={onNavigate} className={`sidebar-pair${active ? ' sidebar-pair-active' : ''}`} aria-current={active ? 'page' : undefined}>
           <span className={`status-dot status-dot-${pair.status.toLowerCase()}`} aria-hidden="true" />
           <span className="sidebar-pair-symbol">{pair.symbol}</span>
           <span className={`sidebar-pair-side ${short ? 'short' : 'long'}`} aria-hidden="true">{short ? <ArrowDownOutlined /> : <ArrowUpOutlined />}</span>
