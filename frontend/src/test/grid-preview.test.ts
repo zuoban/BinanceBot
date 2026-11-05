@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { exceeds, exposure, gridPreview, priceRangeError, tickSizeError } from '../lib/gridPreview';
+import { exceeds, exposure, gridPreview, orderSizing, priceRangeError, tickSizeError } from '../lib/gridPreview';
 
 const base = { interval: '0.5', buyWindow: 3, sellWindow: 3 };
 
@@ -55,4 +55,13 @@ it('validates that the grid interval is a positive integer multiple of tick_size
   expect(tickSizeError('0.30', '0.1')).toBeNull();
   expect(tickSizeError('0.15', '0.1')).toBe('网格间距 0.15 必须是价格步长 0.1 的正整数倍');
   expect(tickSizeError('0.005', '0.01')).toBe('网格间距 0.005 必须是价格步长 0.01 的正整数倍');
+});
+
+it('truncates order quantity by stepSize and flags orders below minQty or minNotional', () => {
+  expect(orderSizing('80000', '100', { stepSize: '0.001', minQty: '0.001', minNotional: '5' }))
+    .toEqual({ quantity: '0.001', notional: '80', error: null });
+  expect(orderSizing('80000', '50', { stepSize: '0.001', minQty: '0.001', minNotional: '5' }))
+    .toEqual({ quantity: '0', notional: '0', error: '按数量步长 0.001 截断后数量为 0，低于最小下单量 0.001，该档将无法挂单' });
+  expect(orderSizing('100', '4.5', { stepSize: '0.01', minQty: '0.01', minNotional: '5' }))
+    .toEqual({ quantity: '0.04', notional: '4', error: '按数量步长截断后实际金额为 4，低于最小名义金额 5，该档将无法挂单' });
 });

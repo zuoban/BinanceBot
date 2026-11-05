@@ -592,6 +592,12 @@ pub struct WebConfigView {
     pub pause_on_max_position: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tick_size: Option<Decimal>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step_size: Option<Decimal>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_qty: Option<Decimal>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_notional: Option<Decimal>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

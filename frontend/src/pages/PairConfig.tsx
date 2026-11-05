@@ -49,7 +49,7 @@ export default function PairConfig() {
   // Unknown state (for example a failed global-config request) is confirmed as live.
   const live = global.data ? global.data.has_api_key && global.data.has_api_secret : pair ? pair.mode === 'LIVE' : true;
   const symbols = useQuery({ queryKey: ['exchange-symbols'], queryFn: ({ signal }) => api<string[]>('/api/exchange/symbols?environment=mainnet', { signal }), enabled: adding, retry: false, refetchOnWindowFocus: false });
-  const config = useQuery({ queryKey: ['config', symbol, pair?.scoped], queryFn: ({ signal }) => api<GridConfig & { config_version: string; tick_size?: string }>(pairPath(pair!, 'config'), { signal }), enabled: !!pair, refetchOnWindowFocus: false });
+  const config = useQuery({ queryKey: ['config', symbol, pair?.scoped], queryFn: ({ signal }) => api<GridConfig & { config_version: string; tick_size?: string; step_size?: string; min_qty?: string; min_notional?: string }>(pairPath(pair!, 'config'), { signal }), enabled: !!pair, refetchOnWindowFocus: false });
   useEffect(() => {
     setReady(adding);
     baseline.current = null;
@@ -134,9 +134,12 @@ export default function PairConfig() {
   const formDisabled = !ready || edit.saving || deletion.busy;
   const watchedSymbol = Form.useWatch('symbol', form) as string | undefined;
   const selectedSymbol = adding ? watchedSymbol?.trim().toUpperCase() : symbol;
-  const symbolPreview = useQuery({ queryKey: ['symbol-preview', selectedSymbol], queryFn: ({ signal }) => api<{ symbol: string; mark_price?: string | null; tick_size?: string }>(`/api/exchange/symbol-preview?environment=mainnet&symbol=${encodeURIComponent(selectedSymbol!)}`, { signal }), enabled: adding && !!selectedSymbol, retry: false, refetchOnWindowFocus: false });
+  const symbolPreview = useQuery({ queryKey: ['symbol-preview', selectedSymbol], queryFn: ({ signal }) => api<{ symbol: string; mark_price?: string | null; tick_size?: string; step_size?: string; min_qty?: string; min_notional?: string }>(`/api/exchange/symbol-preview?environment=mainnet&symbol=${encodeURIComponent(selectedSymbol!)}`, { signal }), enabled: adding && !!selectedSymbol, retry: false, refetchOnWindowFocus: false });
   const effectiveMark = adding ? symbolPreview.data?.mark_price ?? undefined : markPrice;
   const tickSize = adding ? symbolPreview.data?.tick_size : config.data?.tick_size;
+  const stepSize = adding ? symbolPreview.data?.step_size : config.data?.step_size;
+  const minQty = adding ? symbolPreview.data?.min_qty : config.data?.min_qty;
+  const minNotional = adding ? symbolPreview.data?.min_notional : config.data?.min_notional;
   useEffect(() => { if (tickSize && ready) void form.validateFields(['grid_interval']).catch(() => {}); }, [tickSize, ready, form]);
   return <div className="config-page">
     <PageBreadcrumb disabled={edit.saving} items={adding
@@ -167,7 +170,7 @@ export default function PairConfig() {
           <Col xs={24} md={12}><Form.Item name="sell_window" label="卖单窗口" extra="当前价格上方预挂的卖单数量，范围为 1–50。" rules={[{ required: true }]}><InputNumber min={1} max={50} precision={0} className="full-width-input" /></Form.Item></Col>
         </Row>
       </Card>
-      <GridPreview key={selectedSymbol ?? 'new'} form={form} markPrice={effectiveMark} tickSize={tickSize} quote={quoteAsset(selectedSymbol ?? '') || '报价资产'} />
+      <GridPreview key={selectedSymbol ?? 'new'} form={form} markPrice={effectiveMark} tickSize={tickSize} stepSize={stepSize} minQty={minQty} minNotional={minNotional} quote={quoteAsset(selectedSymbol ?? '') || '报价资产'} />
       <Row gutter={[20, 20]} className="settings-grid-row">
         <Col xs={24} xl={12} className="settings-grid-col">
           <Card title="仓位限制" className="settings-card-fill">

@@ -658,6 +658,7 @@ kbd {
 .grid-preview-ladder strong { font: 500 13px var(--font-mono); font-variant-numeric: tabular-nums; }
 .grid-preview-sell span { color: var(--negative); }
 .grid-preview-buy span { color: var(--positive); }
+.grid-preview-qty { color: var(--text-muted); font: 400 12px var(--font-mono); }
 .grid-preview-mark { margin: 4px 0; background: var(--sig-yellow-bg); color: var(--sig-yellow); font-weight: 600; }
 .grid-preview-warning { margin: 8px 0 0; padding: 8px 12px; border-radius: 8px; background: var(--sig-yellow-bg); color: var(--sig-yellow); font-size: 13px; }
 

@@ -79,6 +79,7 @@ pub struct ExchangeSymbolPreview {
     pub mark_price: Option<rust_decimal::Decimal>,
     pub tick_size: rust_decimal::Decimal,
     pub step_size: rust_decimal::Decimal,
+    pub min_qty: rust_decimal::Decimal,
     pub min_notional: rust_decimal::Decimal,
 }
 
@@ -212,6 +213,7 @@ async fn fetch_exchange_symbol_preview(
                 mark_price,
                 tick_size: rules.tick_size,
                 step_size: rules.step_size,
+                min_qty: rules.min_qty,
                 min_notional: rules.min_notional,
             }),
             message: None,
@@ -1702,9 +1704,13 @@ async fn get_config_handler(
     let mut view = web_config_view(&config);
     view.config_version = pair_config_version(&config, state.config_instance);
     let rules = state.rules.read().await;
-    view.tick_size = (rules.symbol.eq_ignore_ascii_case(&config.exchange.symbol)
-        && rules.tick_size > rust_decimal::Decimal::ZERO)
-        .then_some(rules.tick_size);
+    if rules.symbol.eq_ignore_ascii_case(&config.exchange.symbol) {
+        view.tick_size = (rules.tick_size > rust_decimal::Decimal::ZERO).then_some(rules.tick_size);
+        view.step_size = (rules.step_size > rust_decimal::Decimal::ZERO).then_some(rules.step_size);
+        view.min_qty = (rules.min_qty > rust_decimal::Decimal::ZERO).then_some(rules.min_qty);
+        view.min_notional =
+            (rules.min_notional > rust_decimal::Decimal::ZERO).then_some(rules.min_notional);
+    }
     Json(ApiResponse {
         success: true,
         data: Some(view),
@@ -1770,6 +1776,9 @@ fn web_config_view(config: &AppConfig) -> WebConfigView {
         max_position_usdc: config.grid.max_position_usdc,
         pause_on_max_position: config.grid.pause_on_max_position,
         tick_size: None,
+        step_size: None,
+        min_qty: None,
+        min_notional: None,
     };
 
     view
@@ -2555,11 +2564,11 @@ mod tests {
             rules.symbol = "SOLUSDC".into();
             rules.tick_size = rust_decimal_macros::dec!(0.05);
         }
-        let loaded = get_config_handler(State(state)).await;
-        assert_eq!(
-            loaded.0.data.unwrap().tick_size,
-            Some(rust_decimal_macros::dec!(0.05))
-        );
+        let loaded = get_config_handler(State(state)).await.0.data.unwrap();
+        assert_eq!(loaded.tick_size, Some(rust_decimal_macros::dec!(0.05)));
+        assert_eq!(loaded.step_size, Some(rust_decimal_macros::dec!(0.01)));
+        assert_eq!(loaded.min_qty, Some(rust_decimal_macros::dec!(0.01)));
+        assert_eq!(loaded.min_notional, Some(rust_decimal_macros::dec!(5.0)));
     }
     #[tokio::test]
     async fn control_requires_confirmation_mode_and_propagates_engine_rejections() {
@@ -2706,6 +2715,7 @@ mod tests {
         assert_eq!(preview.mark_price, Some(rust_decimal_macros::dec!(142.35)));
         assert_eq!(preview.tick_size, rust_decimal_macros::dec!(0.01));
         assert_eq!(preview.step_size, rust_decimal_macros::dec!(0.01));
+        assert_eq!(preview.min_qty, rust_decimal_macros::dec!(0.01));
         assert_eq!(preview.min_notional, rust_decimal_macros::dec!(5.0));
         server.abort();
 

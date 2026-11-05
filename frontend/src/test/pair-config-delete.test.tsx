@@ -474,18 +474,24 @@ it('fetches symbol preview on /pairs/new, auto-fills mark price and validates ti
   setup(Promise.resolve(), '/pairs/new');
   mocks.api.mockImplementation((path: string) => {
     if (path.startsWith('/api/exchange/symbols?')) return Promise.resolve(['BTCUSDC', 'SOLUSDC']);
-    if (path.startsWith('/api/exchange/symbol-preview?')) return Promise.resolve({ symbol: 'SOLUSDC', mark_price: '142.3500', tick_size: '0.1', step_size: '0.01', min_notional: '5' });
+    if (path.startsWith('/api/exchange/symbol-preview?')) return Promise.resolve({ symbol: 'SOLUSDC', mark_price: '142.3500', tick_size: '0.1', step_size: '0.01', min_qty: '0.01', min_notional: '5' });
     return Promise.resolve({ version: 'v1', has_api_key: false, has_api_secret: false });
   });
   const user = userEvent.setup();
   await selectSymbol(user, 'SOLUSDC');
   expect(await screen.findByText('以当前标记价 142.35 为参考')).toBeInTheDocument();
   expect(screen.getByText('价格步长 0.1')).toBeInTheDocument();
+  expect(screen.getByText('数量步长 0.01')).toBeInTheDocument();
+  expect(screen.getByText('最小名义金额 5 USDC')).toBeInTheDocument();
+  const amount = screen.getByLabelText('每格金额（报价资产）');
+  await user.clear(amount);
+  await user.type(amount, '4');
+  expect(await screen.findByText(/全部 6 档均无法挂单：按数量步长截断后实际金额为/)).toBeInTheDocument();
   const interval = screen.getByLabelText('网格间距');
   await user.clear(interval);
   await user.type(interval, '0.15');
   expect(await screen.findAllByText('网格间距 0.15 必须是价格步长 0.1 的正整数倍')).not.toHaveLength(0);
-});
+}, 40000);
 
 it('opens the keyboard shortcut help with ? and navigates from the bottom bar', async () => {
   const router = setup(Promise.resolve());
