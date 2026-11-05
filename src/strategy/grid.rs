@@ -3876,7 +3876,7 @@ impl GridTradingEngine {
                     a.client_order_id == b.client_order_id
                         && a.symbol == b.symbol
                         && a.side == b.side
-                        && !a.order_id.zip(b.order_id).is_some_and(|(a, b)| a != b)
+                        && a.order_id.zip(b.order_id).is_none_or(|(a, b)| a == b)
                 };
                 let identities_agree = compatible(durable, &current)
                     && expected.is_none_or(|expected| {

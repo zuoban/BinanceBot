@@ -518,8 +518,10 @@ async fn mode_changes_keep_pause_after_database_reopen_for_live() {
     let mode = TradingMode::Live;
     let path = std::env::temp_dir().join(format!("mode-pause-{}.db", uuid::Uuid::new_v4()));
     let db = Arc::new(Database::open(&path).unwrap());
-    let mut config = AppConfig::default();
-    config.pairs = vec![TradingPairConfig::new("SOLUSDC".into())];
+    let config = AppConfig {
+        pairs: vec![TradingPairConfig::new("SOLUSDC".into())],
+        ..Default::default()
+    };
     db.save_config(&config).unwrap();
     // A previous unclean exit left the target mode running.
     db.save_pair_status("SOLUSDC", mode, BotStatus::Running)

@@ -42,12 +42,13 @@ fn fresh(now: DateTime<Utc>, updated: DateTime<Utc>, seconds: u64) -> bool {
         .is_ok_and(|age| age < Duration::from_secs(seconds))
 }
 
+type SnapshotBucketKey = (String, String, Option<String>);
+
 fn aggregate(
     snapshots: &[(BotSnapshot, u64, Option<String>)],
     now: DateTime<Utc>,
 ) -> Vec<SnapshotGroup> {
-    let mut groups: BTreeMap<(String, String, Option<String>), Vec<(&BotSnapshot, u64)>> =
-        BTreeMap::new();
+    let mut groups: BTreeMap<SnapshotBucketKey, Vec<(&BotSnapshot, u64)>> = BTreeMap::new();
     for (snapshot, sync_interval, account_id) in snapshots {
         let mode = snapshot.mode;
         let asset = quote_asset(&snapshot.symbol).unwrap_or_else(|| {
