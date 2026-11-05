@@ -46,6 +46,17 @@ export function exposure(amount: unknown, count: number): string | null {
   const value = parse(amount);
   return value ? format(value.n * BigInt(count), value.s) : null;
 }
+
+/** Exact sum of plain decimal strings. */
+export function sumDecimals(values: string[]): string | null {
+  if (!values.length) return '0';
+  const parsed = values.map(parse);
+  if (parsed.some(item => !item)) return null;
+  const list = parsed as Fixed[];
+  const scale = Math.max(...list.map(item => item.s));
+  const total = list.reduce((acc, item) => acc + rescale(item, scale), 0n);
+  return format(total, scale);
+}
 /** Compare two decimal strings; null when either is not a plain decimal. */
 export function exceeds(value: string | null, limit: unknown): boolean {
   const a = parse(value), b = parse(limit);
@@ -107,4 +118,21 @@ export function orderSizing(price: unknown, amount: unknown, rules?: SymbolSizin
     return { quantity, notional, error: `按数量步长截断后实际金额为 ${notional}，低于最小名义金额 ${format(minNotional.n, minNotional.s)}，该档将无法挂单` };
   }
   return { quantity, notional, error: null };
+}
+
+/** Validates `order_amount_usdc` against `minNotional` and (when `referencePrice` is known) `stepSize` / `minQty` truncation. */
+export function orderAmountError(amount: unknown, referencePrice?: unknown, rules?: SymbolSizingRules): string | null {
+  const a = parse(amount);
+  if (!a || a.n === 0n) return null;
+  const minNotional = parse(rules?.minNotional);
+  if (minNotional && minNotional.n > 0n) {
+    const scale = Math.max(a.s, minNotional.s);
+    if (rescale(a, scale) < rescale(minNotional, scale)) {
+      return `每格金额不能低于最小名义金额 ${format(minNotional.n, minNotional.s)}`;
+    }
+  }
+  if (referencePrice !== null && referencePrice !== undefined && String(referencePrice).trim() !== '') {
+    return orderSizing(referencePrice, amount, rules)?.error ?? null;
+  }
+  return null;
 }

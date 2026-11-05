@@ -10,7 +10,7 @@ import type { GlobalConfig, GridConfig } from '../lib/types';
 import { ErrorNotice, PageBreadcrumb, PageTitle } from '../components/Common';
 import { useDeleteStrategy } from '../components/DeleteStrategy';
 import { GridPreview } from '../components/GridPreview';
-import { priceRangeError, tickSizeError } from '../lib/gridPreview';
+import { orderAmountError, priceRangeError, tickSizeError } from '../lib/gridPreview';
 import { quoteAsset } from '../lib/format';
 import { describeNewGridConfig, diffGridConfig } from '../lib/configDiff';
 
@@ -140,7 +140,7 @@ export default function PairConfig() {
   const stepSize = adding ? symbolPreview.data?.step_size : config.data?.step_size;
   const minQty = adding ? symbolPreview.data?.min_qty : config.data?.min_qty;
   const minNotional = adding ? symbolPreview.data?.min_notional : config.data?.min_notional;
-  useEffect(() => { if (tickSize && ready) void form.validateFields(['grid_interval']).catch(() => {}); }, [tickSize, ready, form]);
+  useEffect(() => { if ((tickSize || stepSize || minNotional) && ready) void form.validateFields(['grid_interval', 'order_amount_usdc']).catch(() => {}); }, [tickSize, stepSize, minNotional, effectiveMark, ready, form]);
   return <div className="config-page">
     <PageBreadcrumb disabled={edit.saving} items={adding
       ? [{ label: '策略总览', to: '/' }, { label: '新增交易对' }]
@@ -165,7 +165,7 @@ export default function PairConfig() {
       <Card title="网格参数">
         <Row gutter={[20, 16]}>
           <Col xs={24} md={12}><Form.Item name="grid_interval" label="网格间距" dependencies={['symbol']} extra="相邻网格价格的固定差值，单位为报价资产。" rules={[{ required: true, message: '请输入网格间距' }, () => ({ validator: (_, value) => { const error = tickSize ? tickSizeError(value, tickSize) : null; return error ? Promise.reject(new Error(error)) : Promise.resolve(); } })]}><InputNumber stringMode min="0.0000000001" className="full-width-input" /></Form.Item></Col>
-          <Col xs={24} md={12}><Form.Item name="order_amount_usdc" label="每格金额（报价资产）" rules={[{ required: true, message: '请输入每格金额' }]}><InputNumber stringMode min="0.0000000001" className="full-width-input" /></Form.Item></Col>
+          <Col xs={24} md={12}><Form.Item name="order_amount_usdc" label="每格金额（报价资产）" dependencies={['symbol']} rules={[{ required: true, message: '请输入每格金额' }, () => ({ validator: (_, value) => { const error = orderAmountError(value, effectiveMark, { stepSize, minQty, minNotional }); return error ? Promise.reject(new Error(error)) : Promise.resolve(); } })]}><InputNumber stringMode min="0.0000000001" className="full-width-input" /></Form.Item></Col>
           <Col xs={24} md={12}><Form.Item name="buy_window" label="买单窗口" extra="当前价格下方预挂的买单数量，范围为 1–50。" rules={[{ required: true }]}><InputNumber min={1} max={50} precision={0} className="full-width-input" /></Form.Item></Col>
           <Col xs={24} md={12}><Form.Item name="sell_window" label="卖单窗口" extra="当前价格上方预挂的卖单数量，范围为 1–50。" rules={[{ required: true }]}><InputNumber min={1} max={50} precision={0} className="full-width-input" /></Form.Item></Col>
         </Row>

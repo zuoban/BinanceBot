@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Form, Input } from 'antd';
 import type { FormInstance } from 'antd';
-import { exceeds, exposure, gridPreview, orderSizing, tickSizeError } from '../lib/gridPreview';
+import { exceeds, exposure, gridPreview, orderSizing, sumDecimals, tickSizeError } from '../lib/gridPreview';
 import { trimFractionZeros } from '../lib/format';
 
 /** Live ladder of the orders the engine would place, from the form values and a reference price. */
@@ -19,9 +19,11 @@ export function GridPreview<Values>({ form, markPrice, tickSize, stepSize, minQt
   const unplaceable = preview && cleanStep ? [...preview.sells, ...preview.buys].flatMap(price => { const s = sizeAt(price); return s?.error ? [s.error] : []; }) : [];
   const short = values?.direction === 'SHORT';
   const openingLabel = short ? '卖单' : '买单';
-  const openingCount = preview ? (short ? preview.sells.length : preview.buys.length) : 0;
+  const openingPrices = preview ? (short ? preview.sells : preview.buys) : [];
   const orders = preview ? preview.buys.length + preview.sells.length : 0;
-  const worstCase = preview && values ? exposure(values.order_amount_usdc, openingCount) : null;
+  const worstCase = preview && values ? (cleanStep
+    ? sumDecimals(openingPrices.flatMap(price => { const s = sizeAt(price); return s && !s.error ? [s.notional] : []; }))
+    : exposure(values.order_amount_usdc, openingPrices.length)) : null;
   const overLimit = exceeds(worstCase, values?.max_position_usdc);
   return <section className="grid-preview" aria-label="网格预览">
     <div className="grid-preview-head">
