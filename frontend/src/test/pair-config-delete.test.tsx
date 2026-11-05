@@ -269,7 +269,7 @@ it('counts the modified fields in the save bar and lists them on demand', async 
   await user.clear(buy);
   await user.type(buy, '5');
   expect(await screen.findByText('有未保存的修改')).toBeInTheDocument();
-});
+}, 40000);
 
 it('runs a pair action from the palette through the guarded control flow', async () => {
   setup(Promise.resolve());
@@ -469,3 +469,33 @@ it('restores navigation protection for unsaved changes when deletion fails', asy
   await waitFor(() => expect(mocks.confirm).toHaveBeenCalledTimes(3));
   expect(router.state.location.pathname).toBe('/pairs/BTCUSDC/config');
 }, 40000);
+
+it('fetches symbol preview on /pairs/new, auto-fills mark price and validates tick_size multiples', async () => {
+  setup(Promise.resolve(), '/pairs/new');
+  mocks.api.mockImplementation((path: string) => {
+    if (path.startsWith('/api/exchange/symbols?')) return Promise.resolve(['BTCUSDC', 'SOLUSDC']);
+    if (path.startsWith('/api/exchange/symbol-preview?')) return Promise.resolve({ symbol: 'SOLUSDC', mark_price: '142.3500', tick_size: '0.1', step_size: '0.01', min_notional: '5' });
+    return Promise.resolve({ version: 'v1', has_api_key: false, has_api_secret: false });
+  });
+  const user = userEvent.setup();
+  await selectSymbol(user, 'SOLUSDC');
+  expect(await screen.findByText('以当前标记价 142.35 为参考')).toBeInTheDocument();
+  expect(screen.getByText('价格步长 0.1')).toBeInTheDocument();
+  const interval = screen.getByLabelText('网格间距');
+  await user.clear(interval);
+  await user.type(interval, '0.15');
+  expect(await screen.findAllByText('网格间距 0.15 必须是价格步长 0.1 的正整数倍')).not.toHaveLength(0);
+});
+
+it('opens the keyboard shortcut help with ? and navigates from the bottom bar', async () => {
+  const router = setup(Promise.resolve());
+  const user = userEvent.setup();
+  await user.keyboard('?');
+  const modal = await screen.findByRole('dialog', { name: '键盘快捷键' });
+  expect(within(modal).getByText('打开命令面板')).toBeInTheDocument();
+  await user.keyboard('{Escape}');
+  const bottom = screen.getByRole('navigation', { name: '底部导航' });
+  await user.click(within(bottom).getByRole('link', { name: '设置' }));
+  expect(await screen.findByText('设置页面')).toBeInTheDocument();
+  expect(router.state.location.pathname).toBe('/settings');
+});

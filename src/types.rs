@@ -590,6 +590,8 @@ pub struct WebConfigView {
     pub max_price: Option<Decimal>,
     pub max_position_usdc: Option<Decimal>,
     pub pause_on_max_position: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tick_size: Option<Decimal>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

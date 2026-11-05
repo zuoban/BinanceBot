@@ -67,6 +67,21 @@ struct SymbolsQuery {
     environment: String,
 }
 
+#[derive(Deserialize)]
+struct SymbolPreviewQuery {
+    environment: String,
+    symbol: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ExchangeSymbolPreview {
+    pub symbol: String,
+    pub mark_price: Option<rust_decimal::Decimal>,
+    pub tick_size: rust_decimal::Decimal,
+    pub step_size: rust_decimal::Decimal,
+    pub min_notional: rust_decimal::Decimal,
+}
+
 async fn exchange_symbols_handler(
     Extension(limiter): Extension<Arc<RateLimiter>>,
     query: Result<Query<SymbolsQuery>, axum::extract::rejection::QueryRejection>,
@@ -119,6 +134,88 @@ async fn fetch_exchange_symbols(
             symbols_error(StatusCode::BAD_GATEWAY, "获取交易所交易对失败，请稍后重试")
         }
     }
+}
+
+async fn exchange_symbol_preview_handler(
+    query: Result<Query<SymbolPreviewQuery>, axum::extract::rejection::QueryRejection>,
+) -> (StatusCode, Json<ApiResponse<ExchangeSymbolPreview>>) {
+    let SymbolPreviewQuery {
+        environment: _,
+        symbol,
+    } = match query {
+        Ok(Query(q)) if q.environment == "mainnet" => q,
+        _ => return symbol_preview_error(StatusCode::BAD_REQUEST, "无效的交易所环境或交易对参数"),
+    };
+    let symbol = symbol.trim().to_ascii_uppercase();
+    if symbol.is_empty() || symbol.len() > 20 || !symbol.chars().all(|c| c.is_ascii_alphanumeric())
+    {
+        return symbol_preview_error(StatusCode::BAD_REQUEST, "无效的交易对代码");
+    }
+    let config = AppConfig::default().exchange;
+    let client = BinanceFuturesClient::new_with_limiter(&config, Arc::new(RateLimiter::default()));
+    fetch_exchange_symbol_preview(&client, &symbol).await
+}
+
+fn symbol_preview_error(
+    status: StatusCode,
+    message: &str,
+) -> (StatusCode, Json<ApiResponse<ExchangeSymbolPreview>>) {
+    (
+        status,
+        Json(ApiResponse {
+            success: false,
+            data: None,
+            message: Some(message.to_string()),
+        }),
+    )
+}
+
+async fn fetch_exchange_symbol_preview(
+    client: &BinanceFuturesClient,
+    symbol: &str,
+) -> (StatusCode, Json<ApiResponse<ExchangeSymbolPreview>>) {
+    let (info_res, mark_res) = tokio::join!(
+        client.get_exchange_info(Some(symbol)),
+        client.get_mark_price(symbol)
+    );
+    let info = match info_res {
+        Ok(info) => info,
+        Err(error) => {
+            warn!(%error, symbol, "获取交易对规则失败");
+            return symbol_preview_error(StatusCode::BAD_GATEWAY, "获取交易对规则失败，请稍后重试");
+        }
+    };
+    let Some(item) = info
+        .symbols
+        .iter()
+        .find(|item| item.symbol.eq_ignore_ascii_case(symbol))
+    else {
+        return symbol_preview_error(StatusCode::NOT_FOUND, "交易对不存在");
+    };
+    if item.status != "TRADING" {
+        return symbol_preview_error(StatusCode::BAD_REQUEST, "该交易对当前未处于交易状态");
+    }
+    let Some(rules) = crate::strategy::precision::SymbolRules::from_exchange_info(&info, symbol)
+    else {
+        return symbol_preview_error(StatusCode::BAD_GATEWAY, "交易对精度规则缺失");
+    };
+    let mark_price = mark_res
+        .ok()
+        .filter(|price| *price > rust_decimal::Decimal::ZERO);
+    (
+        StatusCode::OK,
+        Json(ApiResponse {
+            success: true,
+            data: Some(ExchangeSymbolPreview {
+                symbol: rules.symbol,
+                mark_price,
+                tick_size: rules.tick_size,
+                step_size: rules.step_size,
+                min_notional: rules.min_notional,
+            }),
+            message: None,
+        }),
+    )
 }
 
 fn extract_token(headers: &HeaderMap) -> Option<String> {
@@ -246,6 +343,10 @@ fn create_base_router(state: Arc<AppState>, history_clear: bool) -> Router {
         .route(
             "/api/exchange/symbols",
             get(exchange_symbols_handler).layer(Extension(Arc::new(RateLimiter::default()))),
+        )
+        .route(
+            "/api/exchange/symbol-preview",
+            get(exchange_symbol_preview_handler),
         )
         .route("/api/status", get(get_status_handler))
         .route("/api/orders", get(get_orders_handler))
@@ -379,6 +480,10 @@ pub async fn create_managed_router(handle: RuntimeHandle) -> Router {
         .route(
             "/api/exchange/symbols",
             get(exchange_symbols_handler).layer(Extension(handle.rate_limiter.clone())),
+        )
+        .route(
+            "/api/exchange/symbol-preview",
+            get(exchange_symbol_preview_handler),
         )
         .route(
             "/api/pairs",
@@ -1594,6 +1699,8 @@ async fn get_config_handler(
     let config = state.config.read().await;
     let mut view = web_config_view(&config);
     view.config_version = pair_config_version(&config, state.config_instance);
+    view.tick_size =
+        Some(state.rules.read().await.tick_size).filter(|tick| *tick > rust_decimal::Decimal::ZERO);
     Json(ApiResponse {
         success: true,
         data: Some(view),
@@ -1658,6 +1765,7 @@ fn web_config_view(config: &AppConfig) -> WebConfigView {
         max_price: config.grid.max_price,
         max_position_usdc: config.grid.max_position_usdc,
         pause_on_max_position: config.grid.pause_on_max_position,
+        tick_size: None,
     };
 
     view
@@ -2527,6 +2635,92 @@ mod tests {
         assert!(response.data.is_none());
         assert!(response.message.is_some());
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn symbol_preview_returns_mark_price_and_rules_and_validates_inputs() {
+        let app = Router::new()
+            .route(
+                "/fapi/v1/exchangeInfo",
+                get(|| async {
+                    Json(serde_json::json!({
+                        "symbols": [{
+                            "symbol": "SOLUSDC",
+                            "status": "TRADING",
+                            "baseAsset": "SOL",
+                            "quoteAsset": "USDC",
+                            "pricePrecision": 2,
+                            "quantityPrecision": 2,
+                            "filters": [
+                                {"filterType": "PRICE_FILTER", "minPrice": "0.10", "maxPrice": "100000.00", "tickSize": "0.01"},
+                                {"filterType": "LOT_SIZE", "minQty": "0.01", "maxQty": "100000.00", "stepSize": "0.01"},
+                                {"filterType": "MIN_NOTIONAL", "notional": "5.0"}
+                            ]
+                        }]
+                    }))
+                }),
+            )
+            .route(
+                "/fapi/v1/premiumIndex",
+                get(|| async {
+                    Json(serde_json::json!({
+                        "symbol": "SOLUSDC",
+                        "markPrice": "142.35",
+                        "indexPrice": "142.30",
+                        "lastFundingRate": "0.0001",
+                        "nextFundingTime": 1700000000000i64,
+                        "time": 1700000000000i64
+                    }))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = BinanceFuturesClient::with_base_url(&AppConfig::default().exchange, url);
+        let (status, Json(response)) = fetch_exchange_symbol_preview(&client, "SOLUSDC").await;
+        assert_eq!(status, StatusCode::OK);
+        let preview = response.data.expect("preview data");
+        assert_eq!(preview.symbol, "SOLUSDC");
+        assert_eq!(preview.mark_price, Some(rust_decimal_macros::dec!(142.35)));
+        assert_eq!(preview.tick_size, rust_decimal_macros::dec!(0.01));
+        assert_eq!(preview.step_size, rust_decimal_macros::dec!(0.01));
+        assert_eq!(preview.min_notional, rust_decimal_macros::dec!(5.0));
+        server.abort();
+
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        db.create_session("symbols-test-token").unwrap();
+        let (tx, _) = tokio::sync::mpsc::channel(1);
+        let router = create_router(auth_state(AppConfig::default(), db, tx));
+        let unauth = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/exchange/symbol-preview?environment=mainnet&symbol=SOLUSDC")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+
+        for uri in [
+            "/api/exchange/symbol-preview?environment=testnet&symbol=SOLUSDC",
+            "/api/exchange/symbol-preview?environment=mainnet&symbol=",
+            "/api/exchange/symbol-preview?environment=mainnet&symbol=SOL-USDC",
+        ] {
+            let bad = router
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(uri)
+                        .header("Authorization", "Bearer symbols-test-token")
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(bad.status(), StatusCode::BAD_REQUEST, "{uri}");
+        }
     }
 
     #[tokio::test]

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, Outlet, useBlocker, useLocation, useNavigate } from 'react-router-dom';
-import { App, Button, Drawer } from 'antd';
-import { AppstoreOutlined, ArrowDownOutlined, ArrowUpOutlined, BulbOutlined, EditOutlined, LineChartOutlined, LogoutOutlined, MenuOutlined, PauseOutlined, PlayCircleOutlined, PlusOutlined, ReloadOutlined, SearchOutlined, SettingOutlined, StopOutlined } from '@ant-design/icons';
+import { App, Button, Drawer, Modal } from 'antd';
+import { AppstoreOutlined, ArrowDownOutlined, ArrowUpOutlined, BulbOutlined, EditOutlined, LineChartOutlined, LogoutOutlined, MenuOutlined, PauseOutlined, PlayCircleOutlined, PlusOutlined, QuestionCircleOutlined, ReloadOutlined, SearchOutlined, SettingOutlined, StopOutlined } from '@ant-design/icons';
 import { useLiveAccounts, useOverview, usePairs } from '../lib/queries';
 import { AccountsContext, EditContext, useSession } from '../lib/session';
 import { accountGroups, number, statusLabel, trimFractionZeros } from '../lib/format';
@@ -55,8 +55,10 @@ export default function Shell() {
   const [drawer, setDrawer] = useState(false), [palette, setPalette] = useState(false);
   useEffect(() => { setDrawer(false); }, [location.pathname]);
   const mode = pairs.data?.[0]?.mode;
+  const page = location.pathname.startsWith('/settings') ? 'settings' : location.pathname.startsWith('/pairs/') ? 'pair' : 'overview';
   const sidebarProps = { pairs: pairs.data, pending: pairs.isPending, symbol, pathname: location.pathname, mode, authEnabled, saving, onSearch: () => { setDrawer(false); setPalette(true); }, onLogout: () => void logOut() };
   return <EditContext.Provider value={context}><AccountsContext.Provider value={accounts}><ControlProvider><div className="app-layout">
+    <a className="skip-link" href="#main">跳到主内容</a>
     <aside className="sidebar"><SidebarBody idPrefix="rail" {...sidebarProps} /></aside>
     <header className="mobilebar">
       <Link className="sidebar-brand" to="/" aria-label="Grid Console 首页"><img className="sidebar-logo" src="/logo.svg" alt="" /><span>Grid Console</span></Link>
@@ -68,6 +70,11 @@ export default function Shell() {
     </header>
     <Drawer open={drawer} onClose={() => setDrawer(false)} placement="left" size={280} closable={false} className="sidebar-drawer" title={null} styles={{ body: { padding: 0 } }} aria-label="主导航"><SidebarBody idPrefix="drawer" {...sidebarProps} /></Drawer>
     <main className="content" id="main"><Outlet /></main>
+    <nav className="bottombar" aria-label="底部导航">
+      <Link to="/" className={`bottombar-item${page === 'overview' ? ' bottombar-item-active' : ''}`} aria-current={page === 'overview' ? 'page' : undefined}><AppstoreOutlined aria-hidden="true" /><span>总览</span></Link>
+      <button type="button" className={`bottombar-item${page === 'pair' ? ' bottombar-item-active' : ''}`} aria-label="切换或查看交易对" onClick={() => setDrawer(true)}><LineChartOutlined aria-hidden="true" /><span>交易对</span></button>
+      <Link to="/settings" className={`bottombar-item${page === 'settings' ? ' bottombar-item-active' : ''}`} aria-current={page === 'settings' ? 'page' : undefined}><SettingOutlined aria-hidden="true" /><span>设置</span></Link>
+    </nav>
     <PaletteHost open={palette} setOpen={setPalette} pairs={pairs.data} stale={!!overview.error || Date.now() - overview.dataUpdatedAt > 10_000} authEnabled={authEnabled} saving={saving} onLogout={() => void logOut()} />
   </div></ControlProvider></AccountsContext.Provider></EditContext.Provider>;
 }
@@ -84,6 +91,7 @@ function PaletteHost({ open, setOpen, pairs, stale, authEnabled, saving, onLogou
   const { run } = useControls();
   const { preference, setPreference } = useTheme();
   const [recent, setRecent] = useState<string[]>(readRecent);
+  const [help, setHelp] = useState(false);
   const remember = useCallback((key: string) => {
     setRecent(current => {
       const next = [key, ...current.filter(item => item !== key)].slice(0, 5);
@@ -99,6 +107,7 @@ function PaletteHost({ open, setOpen, pairs, stale, authEnabled, saving, onLogou
     const onKey = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key?.toLowerCase() === 'k') { event.preventDefault(); setOpen(value => !value); return; }
       if (event.metaKey || event.ctrlKey || event.altKey || typing(event.target) || document.querySelector('.ant-modal-root, .ant-drawer-open')) return;
+      if (event.key === '?') { event.preventDefault(); setHelp(true); return; }
       if (event.key === 'g') { lead = Date.now(); return; }
       if (lead && Date.now() - lead < 1200) {
         lead = 0;
@@ -132,12 +141,25 @@ function PaletteHost({ open, setOpen, pairs, stale, authEnabled, saving, onLogou
       }),
       ...(Object.entries(themeLabels) as [ThemePreference, string][]).map(([key, label]) => ({ key: `theme-${key}`, group: '外观', label: `主题：${label}`, hint: preference === key ? '当前' : undefined, keywords: 'theme dark light 主题 深色 浅色', icon: <BulbOutlined />, run: () => setPreference(key) })),
       ...(authEnabled ? [{ key: 'logout', group: '账户', label: '退出登录', keywords: 'logout 退出', icon: <LogoutOutlined />, disabled: saving, run: onLogout }] : []),
+      { key: 'shortcuts', group: '帮助', label: '键盘快捷键', hint: '?', keywords: 'help shortcuts 快捷键 帮助', icon: <QuestionCircleOutlined />, run: () => setHelp(true) },
     ];
     const byKey = new Map(all.map(command => [command.key, command]));
     const recents = recent.flatMap(key => { const command = byKey.get(key); return command && !command.disabled ? [{ ...command, group: '最近使用', key: `recent-${command.key}`, run: command.run }] : []; });
     return [...recents, ...all.map(command => ({ ...command, run: () => { remember(command.key); command.run(); } }))];
   }, [pairs, navigate, run, preference, setPreference, authEnabled, saving, onLogout, stale, recent, remember]);
-  return <CommandPalette open={open} onClose={() => setOpen(false)} commands={commands} />;
+  return <>
+    <CommandPalette open={open} onClose={() => setOpen(false)} commands={commands} />
+    <Modal open={help} onCancel={() => setHelp(false)} footer={null} title="键盘快捷键" width={440} destroyOnHidden>
+      <dl className="shortcut-list">
+        <div><dt>打开命令面板</dt><dd><kbd>⌘K</kbd> / <kbd>Ctrl K</kbd></dd></div>
+        <div><dt>查看快捷键说明</dt><dd><kbd>?</kbd></dd></div>
+        <div><dt>前往策略总览</dt><dd><kbd>g</kbd> <kbd>o</kbd></dd></div>
+        <div><dt>前往全局设置</dt><dd><kbd>g</kbd> <kbd>s</kbd></dd></div>
+        <div><dt>前往新增交易对</dt><dd><kbd>g</kbd> <kbd>n</kbd></dd></div>
+        <div><dt>切换上 / 下一个交易对</dt><dd><kbd>[</kbd> / <kbd>]</kbd></dd></div>
+      </dl>
+    </Modal>
+  </>;
 }
 
 interface SidebarProps { idPrefix: string; pairs: Pair[] | undefined; pending: boolean; symbol: string | undefined; pathname: string; mode: Mode | undefined; authEnabled: boolean; saving: boolean; onSearch: () => void; onLogout: () => void }

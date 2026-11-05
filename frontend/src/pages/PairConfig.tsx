@@ -1,7 +1,7 @@
 import { useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
 import { UNSAFE_DataRouterContext, useLocation, useNavigate, useParams } from 'react-router-dom';
-import { Alert, App, Button, Card, Col, Form, Input, InputNumber, Row, Select, Space, Switch } from 'antd';
+import { Alert, App, Button, Card, Col, Form, Input, InputNumber, Row, Select, Space, Switch, type FormInstance } from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, ApiError, pairPath, post } from '../lib/api';
 import { useOverview, usePairs } from '../lib/queries';
@@ -10,7 +10,7 @@ import type { GlobalConfig, GridConfig } from '../lib/types';
 import { ErrorNotice, PageBreadcrumb, PageTitle } from '../components/Common';
 import { useDeleteStrategy } from '../components/DeleteStrategy';
 import { GridPreview } from '../components/GridPreview';
-import { priceRangeError } from '../lib/gridPreview';
+import { priceRangeError, tickSizeError } from '../lib/gridPreview';
 import { quoteAsset } from '../lib/format';
 import { describeNewGridConfig, diffGridConfig } from '../lib/configDiff';
 
@@ -49,7 +49,7 @@ export default function PairConfig() {
   // Unknown state (for example a failed global-config request) is confirmed as live.
   const live = global.data ? global.data.has_api_key && global.data.has_api_secret : pair ? pair.mode === 'LIVE' : true;
   const symbols = useQuery({ queryKey: ['exchange-symbols'], queryFn: ({ signal }) => api<string[]>('/api/exchange/symbols?environment=mainnet', { signal }), enabled: adding, retry: false, refetchOnWindowFocus: false });
-  const config = useQuery({ queryKey: ['config', symbol, pair?.scoped], queryFn: ({ signal }) => api<GridConfig & { config_version: string }>(pairPath(pair!, 'config'), { signal }), enabled: !!pair, refetchOnWindowFocus: false });
+  const config = useQuery({ queryKey: ['config', symbol, pair?.scoped], queryFn: ({ signal }) => api<GridConfig & { config_version: string; tick_size?: string }>(pairPath(pair!, 'config'), { signal }), enabled: !!pair, refetchOnWindowFocus: false });
   useEffect(() => {
     setReady(adding);
     baseline.current = null;
@@ -132,9 +132,12 @@ export default function PairConfig() {
     }
   };
   const formDisabled = !ready || edit.saving || deletion.busy;
-  const watched = Form.useWatch([], form) as FormValues | undefined;
-  const pending = !adding && edit.dirty && watched && baseline.current?.symbol === symbol ? diffGridConfig(baseline.current.config, watched) : [];
-  const [showChanges, setShowChanges] = useState(false);
+  const watchedSymbol = Form.useWatch('symbol', form) as string | undefined;
+  const selectedSymbol = adding ? watchedSymbol?.trim().toUpperCase() : symbol;
+  const symbolPreview = useQuery({ queryKey: ['symbol-preview', selectedSymbol], queryFn: ({ signal }) => api<{ symbol: string; mark_price?: string | null; tick_size?: string }>(`/api/exchange/symbol-preview?environment=mainnet&symbol=${encodeURIComponent(selectedSymbol!)}`, { signal }), enabled: adding && !!selectedSymbol, retry: false, refetchOnWindowFocus: false });
+  const effectiveMark = adding ? symbolPreview.data?.mark_price ?? undefined : markPrice;
+  const tickSize = adding ? symbolPreview.data?.tick_size : config.data?.tick_size;
+  useEffect(() => { if (tickSize && ready) void form.validateFields(['grid_interval']).catch(() => {}); }, [tickSize, ready, form]);
   return <div className="config-page">
     <PageBreadcrumb disabled={edit.saving} items={adding
       ? [{ label: '策略总览', to: '/' }, { label: '新增交易对' }]
@@ -158,13 +161,13 @@ export default function PairConfig() {
       </Card>
       <Card title="网格参数">
         <Row gutter={[20, 16]}>
-          <Col xs={24} md={12}><Form.Item name="grid_interval" label="网格间距" extra="相邻网格价格的固定差值，单位为报价资产。" rules={[{ required: true, message: '请输入网格间距' }]}><InputNumber stringMode min="0.0000000001" className="full-width-input" /></Form.Item></Col>
+          <Col xs={24} md={12}><Form.Item name="grid_interval" label="网格间距" dependencies={['symbol']} extra="相邻网格价格的固定差值，单位为报价资产。" rules={[{ required: true, message: '请输入网格间距' }, () => ({ validator: (_, value) => { const error = tickSize ? tickSizeError(value, tickSize) : null; return error ? Promise.reject(new Error(error)) : Promise.resolve(); } })]}><InputNumber stringMode min="0.0000000001" className="full-width-input" /></Form.Item></Col>
           <Col xs={24} md={12}><Form.Item name="order_amount_usdc" label="每格金额（报价资产）" rules={[{ required: true, message: '请输入每格金额' }]}><InputNumber stringMode min="0.0000000001" className="full-width-input" /></Form.Item></Col>
           <Col xs={24} md={12}><Form.Item name="buy_window" label="买单窗口" extra="当前价格下方预挂的买单数量，范围为 1–50。" rules={[{ required: true }]}><InputNumber min={1} max={50} precision={0} className="full-width-input" /></Form.Item></Col>
           <Col xs={24} md={12}><Form.Item name="sell_window" label="卖单窗口" extra="当前价格上方预挂的卖单数量，范围为 1–50。" rules={[{ required: true }]}><InputNumber min={1} max={50} precision={0} className="full-width-input" /></Form.Item></Col>
         </Row>
       </Card>
-      <GridPreview form={form} markPrice={markPrice} quote={quoteAsset(adding ? String(form.getFieldValue('symbol') ?? '') : symbol ?? '') || '报价资产'} />
+      <GridPreview form={form} markPrice={effectiveMark} tickSize={tickSize} quote={quoteAsset(selectedSymbol ?? '') || '报价资产'} />
       <Row gutter={[20, 20]} className="settings-grid-row">
         <Col xs={24} xl={12} className="settings-grid-col">
           <Card title="仓位限制" className="settings-card-fill">
@@ -185,16 +188,23 @@ export default function PairConfig() {
         </Col>
       </Row>
       <div className={`save-bar${edit.dirty ? ' save-bar-dirty' : ''}`}>
-        <div className="save-bar-status">
-          <span className="muted" role="status">{edit.dirty ? (pending.length ? `已修改 ${pending.length} 项` : '有未保存的修改') : adding ? '确认参数后保存并添加交易对' : '所有修改已保存'}</span>
-          {pending.length > 0 && <Button type="link" size="small" aria-expanded={showChanges} aria-controls="pending-changes" onClick={() => setShowChanges(value => !value)}>{showChanges ? '收起' : '查看'}</Button>}
-          {pending.length > 0 && showChanges && <ul id="pending-changes" className="save-bar-changes">{pending.map(change => <li key={change.key} className={change.risky ? 'confirm-risky' : undefined}><span>{change.label}</span><span><s>{change.before}</s> → <strong>{change.after}</strong></span></li>)}</ul>}
-        </div>
+        <SaveBarStatus form={form} adding={adding} dirty={edit.dirty} symbol={symbol} baseline={baseline.current} />
         <Space wrap>
         <Button onClick={async () => { if (edit.dirty && !await modal.confirm({ title: '放弃未保存的修改？', okText: '还原', cancelText: '继续编辑' })) return; if (adding) form.setFieldsValue(defaults); else if (baseline.current?.symbol === symbol) form.setFieldsValue(baseline.current.config); edit.setDirty(false); }}>还原</Button>
         <Button type="primary" htmlType="submit" loading={mutation.isPending}>{adding ? '保存并添加' : '保存并立即生效'}</Button>
       </Space></div>
       {!adding && <Card className="danger-zone" title="删除策略"><p>删除前请暂停策略、等待挂单撤销并平仓；删除不会自动平仓，历史记录会保留。</p><Button danger disabled={edit.saving} loading={deletion.busy} onClick={() => void remove()}>删除策略</Button></Card>}
     </Form>
+  </div>;
+}
+
+function SaveBarStatus({ form, adding, dirty, symbol, baseline }: { form: FormInstance<FormValues>; adding: boolean; dirty: boolean; symbol: string | undefined; baseline: { symbol: string; config: GridConfig } | null }) {
+  const watched = Form.useWatch([], form) as FormValues | undefined;
+  const [showChanges, setShowChanges] = useState(false);
+  const pending = !adding && dirty && watched && baseline && baseline.symbol === symbol ? diffGridConfig(baseline.config, watched) : [];
+  return <div className="save-bar-status">
+    <span className="muted" role="status">{dirty ? (pending.length ? `已修改 ${pending.length} 项` : '有未保存的修改') : adding ? '确认参数后保存并添加交易对' : '所有修改已保存'}</span>
+    {pending.length > 0 && <Button type="link" size="small" aria-expanded={showChanges} aria-controls="pending-changes" onClick={() => setShowChanges(value => !value)}>{showChanges ? '收起' : '查看'}</Button>}
+    {pending.length > 0 && showChanges && <ul id="pending-changes" className="save-bar-changes">{pending.map(change => <li key={change.key} className={change.risky ? 'confirm-risky' : undefined}><span>{change.label}</span><span><s>{change.before}</s> → <strong>{change.after}</strong></span></li>)}</ul>}
   </div>;
 }

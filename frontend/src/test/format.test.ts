@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { accountGroups, availableRatio, comparePositionAmount, positionAmount, positionGroups, relativeTime, todayCount, todayPnlGroups, trimFractionZeros } from '../lib/format';
+import { accountGroups, ageText, availableRatio, comparePositionAmount, positionAmount, positionGroups, relativeTime, todayCount, todayPnlGroups, trimFractionZeros } from '../lib/format';
 import { snapshot } from './fixtures';
 
 it('removes only insignificant fractional zeros', () => {
@@ -165,8 +165,7 @@ describe('position amount sorting', () => {
   });
 });
 
-it('describes data age without ever reading as the future', async () => {
-  const { ageText } = await import('../lib/format');
+it('describes data age without ever reading as the future', () => {
   const now = 1_000_000_000_000;
   expect(ageText(now + 40, now)).toBe('刚刚');
   expect(ageText(now - 1500, now)).toBe('刚刚');

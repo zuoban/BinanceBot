@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { exceeds, exposure, gridPreview } from '../lib/gridPreview';
+import { exceeds, exposure, gridPreview, priceRangeError, tickSizeError } from '../lib/gridPreview';
 
 const base = { interval: '0.5', buyWindow: 3, sellWindow: 3 };
 
@@ -38,8 +38,7 @@ it('computes exposure exactly and compares against the limit', () => {
   expect(exceeds('100', null)).toBe(false);
 });
 
-it('validates the price range like the backend does', async () => {
-  const { priceRangeError } = await import('../lib/gridPreview');
+it('validates the price range like the backend does', () => {
   expect(priceRangeError('min', null, null)).toBeNull();
   expect(priceRangeError('min', '', '')).toBeNull();
   expect(priceRangeError('min', '0', null)).toBe('价格下限必须大于 0');
@@ -48,4 +47,12 @@ it('validates the price range like the backend does', async () => {
   expect(priceRangeError('max', '100.5', '100.50')).toBe('价格下限必须小于上限');
   expect(priceRangeError('min', '99.99', '100')).toBeNull();
   expect(priceRangeError('min', '90', null)).toBeNull();
+});
+
+it('validates that the grid interval is a positive integer multiple of tick_size', () => {
+  expect(tickSizeError('0.1', null)).toBeNull();
+  expect(tickSizeError('0.1', '0.01')).toBeNull();
+  expect(tickSizeError('0.30', '0.1')).toBeNull();
+  expect(tickSizeError('0.15', '0.1')).toBe('网格间距 0.15 必须是价格步长 0.1 的正整数倍');
+  expect(tickSizeError('0.005', '0.01')).toBe('网格间距 0.005 必须是价格步长 0.01 的正整数倍');
 });

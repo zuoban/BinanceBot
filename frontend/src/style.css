@@ -725,3 +725,22 @@ kbd {
 .paper-guide ol { margin: 10px 0 8px; padding-left: 20px; display: grid; gap: 6px; font-size: 13px; line-height: 1.6; }
 .paper-guide a { color: var(--accent); }
 .paper-guide .muted { margin: 0; }
+
+/* ---------- Skip link, shortcut modal & mobile bottom tab bar ---------- */
+.skip-link { position: fixed; top: -48px; left: 16px; z-index: 100; padding: 8px 14px; border-radius: 8px; background: var(--accent); color: #fff; font-weight: 600; text-decoration: none; transition: top 150ms var(--ease-out); }
+.skip-link:focus { top: 12px; }
+.grid-preview-meta { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.shortcut-list { display: grid; gap: 8px; margin: 12px 0 0; }
+.shortcut-list > div { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 6px 10px; border-radius: 8px; background: var(--bg-raised); }
+.shortcut-list dt { color: var(--text-secondary); font-size: 13px; }
+.shortcut-list dd { margin: 0; display: flex; align-items: center; gap: 4px; }
+.bottombar { display: none; }
+@media (max-width: 900px) {
+  .bottombar { position: fixed; bottom: 0; left: 0; right: 0; z-index: 10; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); height: 56px; background: var(--rail-bg); color: var(--rail-text); border-top: 1px solid var(--rail-line); }
+  .bottombar-item { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; min-height: 56px; padding: 0; border: 0; background: none; color: var(--rail-muted); font: 500 11px/1 var(--font-sans); text-decoration: none; cursor: pointer; }
+  .bottombar-item .anticon { font-size: 16px; }
+  .bottombar-item:hover { color: var(--rail-text); }
+  .bottombar-item-active, .bottombar-item-active:hover { color: #fff; background: var(--rail-active); }
+  .content { padding-bottom: 84px; }
+  .save-bar-dirty { bottom: 68px; }
+}

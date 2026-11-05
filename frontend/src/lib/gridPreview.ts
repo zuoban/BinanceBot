@@ -66,3 +66,15 @@ export function priceRangeError(field: 'min' | 'max', min: unknown, max: unknown
   }
   return null;
 }
+
+/** Mirrors `SymbolRules::validate_grid_interval`: the interval must be a positive integer multiple of `tick_size`. */
+export function tickSizeError(interval: unknown, tickSize: unknown): string | null {
+  const iv = parse(interval), tick = parse(tickSize);
+  if (!iv || !tick || iv.n === 0n || tick.n === 0n) return null;
+  const scale = Math.max(iv.s, tick.s);
+  const ivScaled = rescale(iv, scale), tickScaled = rescale(tick, scale);
+  if (ivScaled < tickScaled || ivScaled % tickScaled !== 0n) {
+    return `网格间距 ${format(iv.n, iv.s)} 必须是价格步长 ${format(tick.n, tick.s)} 的正整数倍`;
+  }
+  return null;
+}
