@@ -53,3 +53,16 @@ export function exceeds(value: string | null, limit: unknown): boolean {
   const scale = Math.max(a.s, b.s);
   return rescale(a, scale) > rescale(b, scale);
 }
+
+/** Mirrors `GridConfig::validate` for the price range: both bounds positive, minimum below maximum. */
+export function priceRangeError(field: 'min' | 'max', min: unknown, max: unknown): string | null {
+  const own = parse(field === 'min' ? min : max);
+  const raw = field === 'min' ? min : max;
+  if (raw !== null && raw !== undefined && raw !== '' && (!own || own.n === 0n)) return field === 'min' ? '价格下限必须大于 0' : '价格上限必须大于 0';
+  const lower = parse(min), upper = parse(max);
+  if (lower && upper && lower.n !== 0n && upper.n !== 0n) {
+    const scale = Math.max(lower.s, upper.s);
+    if (rescale(lower, scale) >= rescale(upper, scale)) return '价格下限必须小于上限';
+  }
+  return null;
+}

@@ -10,6 +10,7 @@ import type { GlobalConfig, GridConfig } from '../lib/types';
 import { ErrorNotice, PageBreadcrumb, PageTitle } from '../components/Common';
 import { useDeleteStrategy } from '../components/DeleteStrategy';
 import { GridPreview } from '../components/GridPreview';
+import { priceRangeError } from '../lib/gridPreview';
 import { quoteAsset } from '../lib/format';
 import { describeNewGridConfig, diffGridConfig } from '../lib/configDiff';
 
@@ -173,8 +174,8 @@ export default function PairConfig() {
         <Col xs={24} xl={12} className="settings-grid-col">
           <Card title="价格范围与订单" className="settings-card-fill">
             <Row gutter={[20, 16]}>
-              <Col span={24}><Form.Item name="min_price" label="最低价格（可选）"><InputNumber stringMode min="0" className="full-width-input" /></Form.Item></Col>
-              <Col span={24}><Form.Item name="max_price" label="最高价格（可选）"><InputNumber stringMode min="0" className="full-width-input" /></Form.Item></Col>
+              <Col span={24}><Form.Item name="min_price" label="最低价格（可选）" dependencies={['max_price']} rules={[({ getFieldValue }) => ({ validator: (_, value) => { const error = priceRangeError('min', value, getFieldValue('max_price')); return error ? Promise.reject(new Error(error)) : Promise.resolve(); } })]}><InputNumber stringMode min="0" className="full-width-input" /></Form.Item></Col>
+              <Col span={24}><Form.Item name="max_price" label="最高价格（可选）" dependencies={['min_price']} rules={[({ getFieldValue }) => ({ validator: (_, value) => { const error = priceRangeError('max', getFieldValue('min_price'), value); return error ? Promise.reject(new Error(error)) : Promise.resolve(); } })]}><InputNumber stringMode min="0" className="full-width-input" /></Form.Item></Col>
             </Row>
             <div className="settings-card-footer config-card-note"><p className="muted">订单仅作为挂单成交（Post Only）；如果订单会立即成交，交易所会拒绝该订单。</p></div>
           </Card>

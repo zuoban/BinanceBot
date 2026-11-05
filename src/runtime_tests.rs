@@ -3517,10 +3517,11 @@ async fn concurrent_safety_pause_prevents_shutdown_recovery() {
 
 #[tokio::test]
 async fn credential_probes_reject_incomplete_input_without_network_or_persistence() {
-    let runtime = fixture();
-    let handle = runtime.handle();
-    let router = create_managed_router(handle.clone()).await;
-    let before = serde_json::to_value(handle.db.load_config().unwrap().unwrap()).unwrap();
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    let before = {
+        let runtime = fixture_with_database(db.clone(), false, false);
+        serde_json::to_value(runtime.handle().db.load_config().unwrap().unwrap()).unwrap()
+    };
     for (path, body, expected) in [
         (
             "/api/global/test-exchange",
@@ -3538,6 +3539,9 @@ async fn credential_probes_reject_incomplete_input_without_network_or_persistenc
             "请填写 Bot Token 和 Chat ID",
         ),
     ] {
+        // Each case gets a fresh runtime, so the per-kind cooldown never interferes.
+        let runtime = fixture_with_database(db.clone(), false, false);
+        let router = create_managed_router(runtime.handle()).await;
         let (status, response) = request(&router, path, "POST", body, true).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(response["success"], false, "{path}");
@@ -3546,6 +3550,45 @@ async fn credential_probes_reject_incomplete_input_without_network_or_persistenc
             "{path}: {response}"
         );
     }
-    let after = serde_json::to_value(handle.db.load_config().unwrap().unwrap()).unwrap();
+    let after = serde_json::to_value(db.load_config().unwrap().unwrap()).unwrap();
     assert_eq!(after, before);
+}
+
+#[tokio::test]
+async fn credential_probes_are_throttled_per_kind_and_independently() {
+    let runtime = fixture();
+    let handle = runtime.handle();
+    let router = create_managed_router(handle.clone()).await;
+    let incomplete = json!({"api_key": "only-a-key"});
+    let (_, first) = request(
+        &router,
+        "/api/global/test-exchange",
+        "POST",
+        incomplete.clone(),
+        true,
+    )
+    .await;
+    assert!(first["message"].as_str().unwrap().contains("请同时填写"));
+    let (_, second) = request(
+        &router,
+        "/api/global/test-exchange",
+        "POST",
+        incomplete,
+        true,
+    )
+    .await;
+    assert!(second["message"].as_str().unwrap().contains("测试过于频繁"));
+    // A different probe is not blocked by the exchange cooldown.
+    let (_, telegram) = request(
+        &router,
+        "/api/global/test-telegram",
+        "POST",
+        json!({"bot_token": "123:abc"}),
+        true,
+    )
+    .await;
+    assert!(telegram["message"]
+        .as_str()
+        .unwrap()
+        .contains("请填写 Bot Token"));
 }

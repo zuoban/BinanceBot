@@ -973,12 +973,55 @@ fn resolve_telegram_probe(
     Ok(config)
 }
 
+/// Probes talk to the exchange with credentials the engine does not use, so they get their own
+/// request budget and a short cooldown: repeated clicks must never consume the engine's weight.
+const PROBE_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(3);
+
+#[derive(Default)]
+pub(crate) struct ProbeGate(std::sync::Mutex<Option<std::time::Instant>>);
+
+impl ProbeGate {
+    #[cfg(test)]
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// Err carries the whole seconds left to wait (at least one).
+    fn enter(&self, now: std::time::Instant) -> Result<(), u64> {
+        let mut last = self.0.lock().unwrap();
+        if let Some(wait) = last
+            .and_then(|at| PROBE_COOLDOWN.checked_sub(now.saturating_duration_since(at)))
+            .filter(|wait| !wait.is_zero())
+        {
+            return Err(wait.as_secs() + 1);
+        }
+        *last = Some(now);
+        Ok(())
+    }
+}
+
+/// One gate per probe kind, owned by the runtime so tests and instances never share cooldowns.
+#[derive(Default)]
+pub(crate) struct ProbeGates {
+    pub(crate) exchange: ProbeGate,
+    pub(crate) telegram: ProbeGate,
+}
+
+fn probe_throttled(gate: &ProbeGate) -> Option<Json<ApiResponse<String>>> {
+    gate.enter(std::time::Instant::now())
+        .err()
+        .map(|wait| probe_failure(format!("测试过于频繁，请 {wait} 秒后再试")))
+}
+
 /// Verify that the (possibly unsaved) API credentials can read the futures account.
 /// Nothing is persisted, and failures never echo signed URLs or credentials.
 async fn test_exchange_handler(
     State(handle): State<RuntimeHandle>,
     Json(payload): Json<TestExchangePayload>,
 ) -> Json<ApiResponse<String>> {
+    if let Some(throttled) = probe_throttled(&handle.probes.exchange) {
+        return throttled;
+    }
     let saved = match handle.db.run_blocking(|db| db.load_config()).await {
         Ok(Some(config)) => config.exchange,
         _ => return probe_failure("无法读取全局设置"),
@@ -987,7 +1030,7 @@ async fn test_exchange_handler(
         Ok(config) => config,
         Err(message) => return probe_failure(message),
     };
-    let client = BinanceFuturesClient::new_with_limiter(&config, handle.rate_limiter.clone());
+    let client = BinanceFuturesClient::new_with_limiter(&config, Arc::new(RateLimiter::default()));
     if let Err(error) = client.sync_server_time().await {
         return probe_failure(sanitized_probe_error("无法连接币安", &error));
     }
@@ -1013,6 +1056,9 @@ async fn test_telegram_handler(
     State(handle): State<RuntimeHandle>,
     Json(payload): Json<TestTelegramPayload>,
 ) -> Json<ApiResponse<String>> {
+    if let Some(throttled) = probe_throttled(&handle.probes.telegram) {
+        return throttled;
+    }
     let saved = match handle.db.run_blocking(|db| db.load_config()).await {
         Ok(Some(config)) => config.telegram,
         _ => return probe_failure("无法读取全局设置"),
@@ -2342,6 +2388,22 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, token: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn probe_gate_allows_one_call_per_cooldown_and_reports_the_wait() {
+        let gate = ProbeGate::new();
+        let start = std::time::Instant::now();
+        assert_eq!(gate.enter(start), Ok(()));
+        assert_eq!(
+            gate.enter(start + std::time::Duration::from_millis(400)),
+            Err(3)
+        );
+        assert_eq!(
+            gate.enter(start + PROBE_COOLDOWN - std::time::Duration::from_millis(10)),
+            Err(1)
+        );
+        assert_eq!(gate.enter(start + PROBE_COOLDOWN), Ok(()));
+    }
     use crate::config::AppConfig;
     use crate::db::Database;
     use crate::types::BotStatus;

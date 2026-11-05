@@ -314,6 +314,30 @@
       "description": "策略卡内的指标，用 1px 分隔线分成四列。",
       "html": "<div class=\"ds-m\"><div><span>持仓金额</span><strong>204.07</strong></div><div><span>开仓价格</span><strong>96.1676</strong></div></div>",
       "css": ".ds-m{display:grid;grid-template-columns:repeat(2,1fr);border-top:1px solid #e1e7ef}.ds-m>div{padding:12px 20px;display:flex;flex-direction:column;gap:3px}.ds-m span{font-size:12px;color:#44546a}.ds-m strong{font:500 13px ui-monospace,Menlo,monospace}"
+    },
+    {
+      "name": "信号按钮",
+      "kind": "chip",
+      "refersTo": "signal-button",
+      "description": "可点击的信号标签，用于筛选列表；选中时 aria-pressed 并加 2px 描边。",
+      "html": "<button class=\"ds-sig ds-sig-red ds-sig-on\" aria-pressed=\"true\">✕ 异常 1</button>",
+      "css": ".ds-sig{display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 10px;border-radius:6px;border:1px solid #f3c6bf;background:#fdf0ee;color:#b4382c;font:500 12px system-ui;cursor:pointer}.ds-sig-on{box-shadow:0 0 0 2px #b4382c}"
+    },
+    {
+      "name": "网格预览",
+      "kind": "custom",
+      "refersTo": "grid-preview",
+      "description": "按价格由高到低列出将挂出的卖单、参考价和买单，参考价为黄色基准线。",
+      "html": "<ol class=\"ds-ladder\"><li class=\"s\"><span>卖</span><strong>96.6</strong></li><li class=\"m\"><span>参考价</span><strong>96.5</strong></li><li class=\"b\"><span>买</span><strong>96.4</strong></li></ol>",
+      "css": ".ds-ladder{list-style:none;margin:0;padding:0;max-width:420px}.ds-ladder li{display:flex;justify-content:space-between;min-height:28px;padding:0 10px;align-items:center;font-size:12px}.ds-ladder strong{font:500 13px ui-monospace,Menlo,monospace}.ds-ladder .s span{color:#b4382c}.ds-ladder .b span{color:#0f7a52}.ds-ladder .m{background:#fff7e0;color:#8a5a00;font-weight:600;border-radius:6px}"
+    },
+    {
+      "name": "变更确认列表",
+      "kind": "custom",
+      "refersTo": "confirm-changes",
+      "description": "实盘保存确认中逐项列出修改前后的值，高风险字段为黄色底。",
+      "html": "<dl class=\"ds-chg\"><div class=\"r\"><dt>最大持仓名义价值</dt><dd><s>2000</s> → <strong>300</strong></dd></div></dl>",
+      "css": ".ds-chg{display:grid;gap:6px;margin:0}.ds-chg>div{display:flex;justify-content:space-between;padding:6px 10px;border-radius:8px;background:#f6f8fb}.ds-chg .r{background:#fff7e0}.ds-chg dt{font-size:13px;color:#8a5a00;font-weight:600}.ds-chg dd{margin:0;font:500 13px ui-monospace,Menlo,monospace}.ds-chg s{color:#5f6f85;font-weight:400}"
     }
   ],
   "narrative": {
@@ -324,7 +348,11 @@
       "五级信号标签统一表达状态",
       "卡片只用 1px 边框，不用阴影",
       "数字使用等宽字体与 tabular-nums",
-      "浅色、深色、跟随系统三种主题"
+      "浅色、深色、跟随系统三种主题",
+      "信号标签可点击筛选，筛选状态写入网址",
+      "命令面板可执行带确认的策略操作",
+      "实盘保存确认逐项列出旧值和新值",
+      "策略参数页预览将挂出的价位"
     ],
     "rules": [
       {

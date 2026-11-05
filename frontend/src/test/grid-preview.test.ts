@@ -37,3 +37,15 @@ it('computes exposure exactly and compares against the limit', () => {
   expect(exceeds('100.01', '100')).toBe(true);
   expect(exceeds('100', null)).toBe(false);
 });
+
+it('validates the price range like the backend does', async () => {
+  const { priceRangeError } = await import('../lib/gridPreview');
+  expect(priceRangeError('min', null, null)).toBeNull();
+  expect(priceRangeError('min', '', '')).toBeNull();
+  expect(priceRangeError('min', '0', null)).toBe('价格下限必须大于 0');
+  expect(priceRangeError('max', null, '0')).toBe('价格上限必须大于 0');
+  expect(priceRangeError('min', '100', '100')).toBe('价格下限必须小于上限');
+  expect(priceRangeError('max', '100.5', '100.50')).toBe('价格下限必须小于上限');
+  expect(priceRangeError('min', '99.99', '100')).toBeNull();
+  expect(priceRangeError('min', '90', null)).toBeNull();
+});
