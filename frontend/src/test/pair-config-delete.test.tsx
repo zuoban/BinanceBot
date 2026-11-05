@@ -246,6 +246,31 @@ it('keeps the config page when switching pairs from the sidebar', () => {
   expect(within(pairs).getByRole('link', { name: /ETHUSDC/ })).toHaveAttribute('href', '/pairs/ETHUSDC/config');
 });
 
+it('counts the modified fields in the save bar and lists them on demand', async () => {
+  setup(Promise.resolve());
+  const user = userEvent.setup();
+  const interval = await screen.findByLabelText('网格间距');
+  await waitFor(() => expect(interval).toBeEnabled());
+  expect(screen.getByText('所有修改已保存')).toBeInTheDocument();
+  await user.clear(interval);
+  await user.type(interval, '0.7');
+  const buy = screen.getByLabelText('买单窗口');
+  await user.clear(buy);
+  await user.type(buy, '9');
+  expect(await screen.findByText('已修改 2 项')).toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: '查看' }));
+  expect(screen.getByRole('button', { name: '收起' })).toHaveAttribute('aria-expanded', 'true');
+  const items = within(document.getElementById('pending-changes')!).getAllByRole('listitem').map(item => item.textContent);
+  expect(items[0]).toContain('网格间距');
+  expect(items[0]).toContain('0.7');
+  expect(items[1]).toContain('买单窗口');
+  await user.clear(interval);
+  await user.type(interval, '0.1');
+  await user.clear(buy);
+  await user.type(buy, '5');
+  expect(await screen.findByText('有未保存的修改')).toBeInTheDocument();
+});
+
 it('runs a pair action from the palette through the guarded control flow', async () => {
   setup(Promise.resolve());
   const user = userEvent.setup();

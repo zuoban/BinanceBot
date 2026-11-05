@@ -132,6 +132,9 @@ export default function PairConfig() {
     }
   };
   const formDisabled = !ready || edit.saving || deletion.busy;
+  const watched = Form.useWatch([], form) as FormValues | undefined;
+  const pending = !adding && edit.dirty && watched && baseline.current?.symbol === symbol ? diffGridConfig(baseline.current.config, watched) : [];
+  const [showChanges, setShowChanges] = useState(false);
   return <div className="config-page">
     <PageBreadcrumb disabled={edit.saving} items={adding
       ? [{ label: '策略总览', to: '/' }, { label: '新增交易对' }]
@@ -181,7 +184,13 @@ export default function PairConfig() {
           </Card>
         </Col>
       </Row>
-      <div className={`save-bar${edit.dirty ? ' save-bar-dirty' : ''}`}><span className="muted" role="status">{edit.dirty ? '有未保存的修改' : adding ? '确认参数后保存并添加交易对' : '所有修改已保存'}</span><Space wrap>
+      <div className={`save-bar${edit.dirty ? ' save-bar-dirty' : ''}`}>
+        <div className="save-bar-status">
+          <span className="muted" role="status">{edit.dirty ? (pending.length ? `已修改 ${pending.length} 项` : '有未保存的修改') : adding ? '确认参数后保存并添加交易对' : '所有修改已保存'}</span>
+          {pending.length > 0 && <Button type="link" size="small" aria-expanded={showChanges} aria-controls="pending-changes" onClick={() => setShowChanges(value => !value)}>{showChanges ? '收起' : '查看'}</Button>}
+          {pending.length > 0 && showChanges && <ul id="pending-changes" className="save-bar-changes">{pending.map(change => <li key={change.key} className={change.risky ? 'confirm-risky' : undefined}><span>{change.label}</span><span><s>{change.before}</s> → <strong>{change.after}</strong></span></li>)}</ul>}
+        </div>
+        <Space wrap>
         <Button onClick={async () => { if (edit.dirty && !await modal.confirm({ title: '放弃未保存的修改？', okText: '还原', cancelText: '继续编辑' })) return; if (adding) form.setFieldsValue(defaults); else if (baseline.current?.symbol === symbol) form.setFieldsValue(baseline.current.config); edit.setDirty(false); }}>还原</Button>
         <Button type="primary" htmlType="submit" loading={mutation.isPending}>{adding ? '保存并添加' : '保存并立即生效'}</Button>
       </Space></div>

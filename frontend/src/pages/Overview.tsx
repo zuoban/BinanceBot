@@ -5,7 +5,7 @@ import { ArrowDownOutlined, ArrowRightOutlined, ArrowUpOutlined, EyeOutlined, Pl
 import { useOverview } from '../lib/queries';
 import { useUrlParams } from '../lib/urlState';
 import { AccountsContext } from '../lib/session';
-import { accountGroups, comparePositionAmount, modeLabel, numeric, number as fixedNumber, positionAmount, positionGroups, price as fixedPrice, quoteAsset, todayCount, todayPnlGroups, todayTradeCounts, trimFractionZeros } from '../lib/format';
+import { ageText, accountGroups, comparePositionAmount, modeLabel, numeric, number as fixedNumber, positionAmount, positionGroups, price as fixedPrice, quoteAsset, todayCount, todayPnlGroups, todayTradeCounts, trimFractionZeros } from '../lib/format';
 import { ErrorNotice, PageTitle, Pnl, SignalButton, SignalChip, StatusTag } from '../components/Common';
 import { runBatchControls, useControls } from '../components/Controls';
 import type { Pair, Trade } from '../lib/types';
@@ -13,6 +13,7 @@ import { OverviewLoading } from '../components/Loading';
 import { OverviewHistory } from '../components/OverviewHistory';
 import { StrategyMenu, StrategyToggle } from '../components/StrategyMenu';
 import { BatchResultDrawer, type BatchReport } from '../components/BatchResultDrawer';
+import { PaperGuide } from '../components/PaperGuide';
 import { TradesTable } from '../components/DataTables';
 
 const number = (value: unknown, digits?: number) => trimFractionZeros(fixedNumber(value, digits));
@@ -118,9 +119,11 @@ export default function OverviewPage() {
   return <>
     <PageTitle title="策略运行概览" description="账户、持仓与全部策略的实时状态" />
     <ErrorNotice error={overview.error} retry={() => void overview.refetch()} />
-    <section className="overview-banner" aria-label="策略运行概览">
+    {overview.data && pairs.length > 0 && pairs.every(p => p.mode === 'PAPER') && <PaperGuide firstSymbol={pairs[0].symbol} />}
+    <section className={`overview-banner${stale ? ' is-stale' : ''}`} aria-label="策略运行概览">
       <div className="signal-strip">
         {stale && <SignalChip tier="yellow">数据暂未更新，请检查连接</SignalChip>}
+        {stale && overview.dataUpdatedAt > 0 && <span className="muted freshness">上次更新于 {ageText(overview.dataUpdatedAt, now)}</span>}
         {overview.data && pairs.some(p => p.mode === 'LIVE') && <SignalButton tier="orange" active={statusFilter === 'LIVE'} onClick={() => setStatusFilter(statusFilter === 'LIVE' ? 'all' : 'LIVE')}>实盘策略 {pairs.filter(p => p.mode === 'LIVE').length}</SignalButton>}
         {overview.data && pairs.some(p => p.status === 'ERROR') && <SignalButton tier="red" active={statusFilter === 'ERROR'} onClick={() => setStatusFilter(statusFilter === 'ERROR' ? 'all' : 'ERROR')}>异常 {pairs.filter(p => p.status === 'ERROR').length}</SignalButton>}
         {overview.data && pairs.some(p => p.status === 'PAUSED') && <SignalButton tier="blue" active={statusFilter === 'PAUSED'} onClick={() => setStatusFilter(statusFilter === 'PAUSED' ? 'all' : 'PAUSED')}>已暂停 {pairs.filter(p => p.status === 'PAUSED').length}</SignalButton>}
@@ -141,7 +144,7 @@ export default function OverviewPage() {
       </div>
     </section>
     {overview.isPending && !overview.data ? <OverviewLoading addPairLink={addPairLink} /> : !overview.data ? <section className="strategies-section" aria-labelledby="strategies-heading"><div className="section-heading"><h2 id="strategies-heading">交易策略</h2>{addPairLink}</div></section> : <>
-    <div className="overview-finances">
+    <div className={`overview-finances${stale ? ' is-stale' : ''}`}>
     <section className="overview-finance-group" aria-labelledby="accounts-heading">
     <div className="section-heading"><h2 id="accounts-heading">账户概览</h2></div>
     <Row gutter={[16, 16]}>
@@ -185,7 +188,7 @@ export default function OverviewPage() {
       </Row>
     </section>}
     </div>
-    <section className="strategies-section" aria-labelledby="strategies-heading">
+    <section className={`strategies-section${stale ? ' is-stale' : ''}`} aria-labelledby="strategies-heading">
     <div className="section-heading"><h2 id="strategies-heading">交易策略</h2>
       <div className="strategy-heading-actions">
         <Dropdown trigger={['click']} disabled={batchBusy || controls.busy.size > 0} menu={{ items: [{ key: 'resume', label: '全部恢复' }, { key: 'pause', label: '全部暂停' }], onClick: ({ key }) => void batch(key as 'pause' | 'resume') }}>

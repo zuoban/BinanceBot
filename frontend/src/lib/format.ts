@@ -51,6 +51,12 @@ export function relativeTime(value: string, now = Date.now()) {
   const [amount, unit] = seconds < 60 ? [seconds, '秒'] : seconds < 3600 ? [Math.floor(seconds / 60), '分钟'] : seconds < 86400 ? [Math.floor(seconds / 3600), '小时'] : [Math.floor(seconds / 86400), '天'];
   return `${amount}${unit}${timestamp > now ? '后' : '前'}`;
 }
+/** How long ago a past moment was; a clock a hair ahead of `now` still reads as just now. */
+export function ageText(updatedAt: number, now = Date.now()) {
+  const seconds = Math.max(0, Math.floor((now - updatedAt) / 1000));
+  if (seconds < 2) return '刚刚';
+  return relativeTime(new Date(now - seconds * 1000).toISOString(), now);
+}
 export const beijingDay = (value: number) => new Date(value + 8 * 3600_000).toISOString().slice(0, 10);
 export function todayTradeCounts(s: Snapshot, now = Date.now()) {
   const stats = s.hourly_trade_stats;

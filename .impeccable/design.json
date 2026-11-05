@@ -338,6 +338,14 @@
       "description": "实盘保存确认中逐项列出修改前后的值，高风险字段为黄色底。",
       "html": "<dl class=\"ds-chg\"><div class=\"r\"><dt>最大持仓名义价值</dt><dd><s>2000</s> → <strong>300</strong></dd></div></dl>",
       "css": ".ds-chg{display:grid;gap:6px;margin:0}.ds-chg>div{display:flex;justify-content:space-between;padding:6px 10px;border-radius:8px;background:#f6f8fb}.ds-chg .r{background:#fff7e0}.ds-chg dt{font-size:13px;color:#8a5a00;font-weight:600}.ds-chg dd{margin:0;font:500 13px ui-monospace,Menlo,monospace}.ds-chg s{color:#5f6f85;font-weight:400}"
+    },
+    {
+      "name": "表格工具栏",
+      "kind": "custom",
+      "refersTo": "table-toolbar",
+      "description": "表格上方的分段筛选、计数和导出按钮。",
+      "html": "<div class=\"ds-tb\"><span class=\"seg\">全部 买入 卖出</span><span class=\"n\">显示 5 / 5 条</span><button>导出 CSV</button></div>",
+      "css": ".ds-tb{display:flex;align-items:center;gap:14px;flex-wrap:wrap}.ds-tb .seg{padding:2px 8px;border-radius:6px;background:#e9eef5;font-size:12px}.ds-tb .n{margin-right:auto;font-size:12px;color:#44546a}.ds-tb button{height:28px;padding:0 10px;border:1px solid #cbd5e1;border-radius:6px;background:#fff;font:500 12px system-ui}"
     }
   ],
   "narrative": {
@@ -352,7 +360,9 @@
       "信号标签可点击筛选，筛选状态写入网址",
       "命令面板可执行带确认的策略操作",
       "实盘保存确认逐项列出旧值和新值",
-      "策略参数页预览将挂出的价位"
+      "策略参数页预览将挂出的价位",
+      "数据过期时数值降到 70% 不透明度并显示更新时间",
+      "表格可筛选并导出当前结果，窄屏改为卡片"
     ],
     "rules": [
       {

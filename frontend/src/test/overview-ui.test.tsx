@@ -236,6 +236,43 @@ it('clears search, sort and status together with one click', async () => {
   expect(screen.getByRole('link', { name: 'BTCUSDC' })).toBeInTheDocument();
 });
 
+it('shows the validate-first guide only while every strategy is on paper and remembers dismissal', async () => {
+  localStorage.removeItem('binance_bot_paper_guide_dismissed');
+  const paper = snapshot('BTCUSDC');
+  overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: paper, mode: 'PAPER', scoped: true }] };
+  const first = render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+  expect(screen.getByRole('complementary', { name: '新手指引' })).toBeInTheDocument();
+  expect(screen.getByRole('link', { name: /打开 BTCUSDC 的策略参数/ })).toHaveAttribute('href', '/pairs/BTCUSDC/config');
+  await userEvent.setup().click(screen.getByRole('button', { name: '关闭新手指引' }));
+  expect(screen.queryByRole('complementary', { name: '新手指引' })).not.toBeInTheDocument();
+  first.unmount();
+  render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+  expect(screen.queryByRole('complementary', { name: '新手指引' })).not.toBeInTheDocument();
+  localStorage.removeItem('binance_bot_paper_guide_dismissed');
+});
+
+it('hides the guide once any strategy is live', () => {
+  localStorage.removeItem('binance_bot_paper_guide_dismissed');
+  overview.data = { generated_at: new Date().toISOString(), pairs: [
+    { snapshot: snapshot('BTCUSDC'), mode: 'PAPER', scoped: true }, { snapshot: snapshot('ETHUSDC', 'LIVE'), mode: 'LIVE', scoped: true },
+  ] };
+  render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+  expect(screen.queryByRole('complementary', { name: '新手指引' })).not.toBeInTheDocument();
+});
+
+it('marks the summary as stale and shows how old the data is', () => {
+  vi.useFakeTimers();
+  try {
+    overview.dataUpdatedAt = Date.now() - 42_000;
+    overview.data = { generated_at: '', pairs: [{ snapshot: snapshot('BTCUSDC'), mode: 'PAPER', scoped: true }] };
+    render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+    expect(screen.getByLabelText('策略运行概览')).toHaveClass('is-stale');
+    expect(screen.getByText(/上次更新于 4\d秒前/)).toBeInTheDocument();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 it('restores search and sort from the URL', () => {
   overview.data = { generated_at: new Date().toISOString(), pairs: ['BTCUSDC', 'ETHUSDC'].map(symbol => ({ snapshot: snapshot(symbol), mode: 'PAPER' as const, scoped: true })) };
   render(<MemoryRouter initialEntries={['/?q=eth&sort=symbol']}><App><OverviewPage /></App></MemoryRouter>);

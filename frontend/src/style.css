@@ -686,3 +686,42 @@ kbd {
   .batch-results .ant-btn { min-height: 36px; }
   .palette-item { min-height: 44px; }
 }
+
+/* ---------- Table toolbar and copy ---------- */
+.table-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; margin-bottom: 12px; }
+.table-toolbar .muted { margin-right: auto; }
+.copyable { display: inline-flex; align-items: center; gap: 6px; padding: 0; border: 0; background: none; color: inherit; font: inherit; cursor: copy; }
+.copyable .anticon { font-size: 11px; color: var(--text-muted); opacity: 0; transition: opacity 150ms var(--ease-out); }
+.copyable:hover .anticon, .copyable:focus-visible .anticon { opacity: 1; }
+@media (pointer: coarse) { .copyable .anticon { opacity: 0.6; } }
+
+/* ---------- Stale data ---------- */
+.freshness { font-family: var(--font-mono); }
+.is-stale .overview-stat strong, .is-stale .ant-statistic-content, .is-stale .finance-metrics strong,
+.is-stale .strategy-price strong, .is-stale .strategy-metrics strong { opacity: 0.7; }
+
+/* ---------- Save bar change list ---------- */
+.save-bar-status { display: flex; align-items: center; flex-wrap: wrap; gap: 0 8px; min-width: 0; }
+.save-bar-changes { flex-basis: 100%; display: grid; gap: 4px; margin: 8px 0 0; padding: 0; list-style: none; }
+.save-bar-changes li { display: flex; justify-content: space-between; gap: 16px; padding: 4px 10px; border-radius: 6px; background: var(--bg-card); font-size: 12px; }
+.save-bar-changes li > span:last-child { font-family: var(--font-mono); }
+.save-bar-changes s { color: var(--text-muted); }
+.save-bar-changes .confirm-risky { background: transparent; box-shadow: inset 0 0 0 1px var(--sig-yellow-line); }
+
+/* ---------- Desktop table / mobile card list swap ---------- */
+.table-mobile { display: none; }
+.table-mobile .trade-list-heading strong { font-weight: 500; }
+.table-mobile .log-message { margin: 8px 0 0; }
+@media (max-width: 600px) {
+  .table-desktop { display: none; }
+  .table-mobile { display: block; }
+  .table-toolbar .ant-btn { min-height: 36px; }
+}
+
+/* ---------- First-run guide ---------- */
+.paper-guide { margin-bottom: 16px; padding: 16px 20px; border: 1px solid var(--sig-blue-line); border-radius: 12px; background: var(--sig-blue-bg); }
+.paper-guide-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.paper-guide h2 { margin: 0; font-size: 15px; font-weight: 600; color: var(--sig-blue); }
+.paper-guide ol { margin: 10px 0 8px; padding-left: 20px; display: grid; gap: 6px; font-size: 13px; line-height: 1.6; }
+.paper-guide a { color: var(--accent); }
+.paper-guide .muted { margin: 0; }

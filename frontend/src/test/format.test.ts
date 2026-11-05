@@ -164,3 +164,12 @@ describe('position amount sorting', () => {
     expect(positionAmount(s)).toBe(202);
   });
 });
+
+it('describes data age without ever reading as the future', async () => {
+  const { ageText } = await import('../lib/format');
+  const now = 1_000_000_000_000;
+  expect(ageText(now + 40, now)).toBe('刚刚');
+  expect(ageText(now - 1500, now)).toBe('刚刚');
+  expect(ageText(now - 42_000, now)).toBe('42秒前');
+  expect(ageText(now - 125_000, now)).toBe('2分钟前');
+});
