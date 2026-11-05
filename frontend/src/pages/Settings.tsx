@@ -7,10 +7,27 @@ import { EditContext } from '../lib/session';
 import type { GlobalConfig, ServerConfig } from '../lib/types';
 import { ErrorNotice, PageTitle } from '../components/Common';
 import { LoadErrorBoundary } from '../components/LoadErrorBoundary';
+import { useUrlParam } from '../lib/urlState';
 
 const DatabaseSettings = lazy(() => import('../components/DatabaseSettings').then(module => ({ default: module.DatabaseSettings })));
 
 type GlobalForm = GlobalConfig & { api_key?: string; api_secret?: string; telegram_bot_token?: string; clear_api_credentials: boolean; clear_telegram_credentials: boolean };
+/** Verify unsaved credentials against the exchange or Telegram; nothing is persisted by the probe. */
+function ProbeButton({ label, path, body, disabled }: { label: string; path: string; body: () => Record<string, unknown>; disabled?: boolean }) {
+  const { message } = App.useApp();
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
+  const run = async () => {
+    setBusy(true); setResult(null);
+    try { setResult({ ok: true, text: await post<string>(path, body()) }); }
+    catch (error) { const text = (error as Error).message; setResult({ ok: false, text }); message.error(text); }
+    finally { setBusy(false); }
+  };
+  return <div className="probe">
+    <Button onClick={() => void run()} loading={busy} disabled={disabled}>{label}</Button>
+    <span className={`probe-result${result ? (result.ok ? ' probe-ok' : ' probe-fail') : ''}`} role="status">{result ? `${result.ok ? '✓' : '✕'} ${result.text}` : ''}</span>
+  </div>;
+}
 function GlobalSettings() {
   const [form] = Form.useForm<GlobalForm>();
   const edit = useContext(EditContext);
@@ -97,6 +114,8 @@ function GlobalSettings() {
           <Col xs={24} md={12}><Form.Item name="sync_interval_secs" label="同步间隔（秒）" extra="策略定期同步订单、账户和持仓的间隔。" rules={[{ required: true }]}><InputNumber min={1} precision={0} className="full-width-input" /></Form.Item></Col>
         </Row>
         <div className="settings-card-footer">
+          <ProbeButton label="测试连接" path="/api/global/test-exchange" disabled={!ready || edit.saving}
+            body={() => ({ api_key: form.getFieldValue('api_key'), api_secret: form.getFieldValue('api_secret'), recv_window: form.getFieldValue('recv_window') })} />
           <Form.Item name="clear_api_credentials" valuePropName="checked" className="settings-checkbox-item"><Checkbox>清除已保存的 API Key 和 Secret（清除后所有交易对将以模拟盘运行）</Checkbox></Form.Item>
         </div>
       </Card>
@@ -117,6 +136,8 @@ function GlobalSettings() {
               <Col xs={24} sm={12}><Form.Item name="telegram_chat_id" label="Chat ID" extra="向机器人发送消息后，可通过 Telegram Bot API 的 getUpdates 获取会话 ID。"><Input /></Form.Item></Col>
             </Row>
             <div className="settings-card-footer">
+              <ProbeButton label="发送测试消息" path="/api/global/test-telegram" disabled={!ready || edit.saving}
+                body={() => ({ bot_token: form.getFieldValue('telegram_bot_token'), chat_id: form.getFieldValue('telegram_chat_id') })} />
               <Form.Item name="clear_telegram_credentials" valuePropName="checked" className="settings-checkbox-item"><Checkbox>清除 Telegram 凭证（请先关闭通知）</Checkbox></Form.Item>
             </div>
           </Card>
@@ -185,7 +206,7 @@ function SecuritySettings() {
 export default function Settings() {
   const edit = useContext(EditContext);
   const { modal } = App.useApp();
-  const [active, setActive] = useState('global');
+  const [active, setActive] = useUrlParam<string>('tab', 'global', ['global', 'server', 'database', 'security']);
   return <div className="settings-page"><PageTitle title="全局设置" description="交易所连接、通知和控制台安全设置" />
     <Tabs className="settings-tabs" activeKey={active} onChange={async key => {
       if (edit.saving) return;

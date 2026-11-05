@@ -10,6 +10,7 @@ import { LogsTable, OrdersTable, TradesTable } from '../components/DataTables';
 import { HistoryActions } from '../components/HistoryActions';
 import { DetailLoading } from '../components/Loading';
 import { useDocumentTitle } from '../lib/documentTitle';
+import { useUrlParam } from '../lib/urlState';
 
 export default function PairDetail() {
   const { symbol } = useParams();
@@ -18,6 +19,7 @@ export default function PairDetail() {
   const pair = pairs.data?.find(p => p.symbol === symbol);
   const query = usePairSnapshot(pair);
   const controls = useControls();
+  const [tab, setTab] = useUrlParam<string>('tab', 'monitor', ['monitor', 'orders', 'trades', 'logs']);
   const s = query.data, asset = quoteAsset(symbol ?? '');
   const account = s && pair ? accountGroups([{ snapshot: s, mode: pair.mode, scoped: pair.scoped, account_observation_stale: query.stale }])[0] : undefined;
   const today = s ? todayTradeCounts(s) : null;
@@ -43,7 +45,7 @@ export default function PairDetail() {
         <Col xs={24} sm={12} xl={6}><Card><Statistic title={`持仓未实现 / ${asset}`} value={s.position.unrealized_pnl} formatter={() => <Pnl value={s.position.unrealized_pnl} />} /><div className="muted">持仓数量 {price(s.position.size)}</div></Card></Col>
         <Col xs={24} sm={12} xl={6}><Card><Statistic title={`账户权益 / ${account?.asset || asset}`} value={account?.equity ?? '--'} precision={2} /><div className="muted">≈ ¥{number(account?.cny)} · 可用 {number(account?.available)}</div></Card></Col>
       </Row>
-      <Tabs className="detail-tabs" defaultActiveKey="monitor" items={[
+      <Tabs className="detail-tabs" activeKey={tab} onChange={setTab} items={[
         { key: 'monitor', label: '实时监控', children: <>
           <Row gutter={[20, 20]}><Col xs={24} xl={14}><Card title="今日成交"><div className="today-trade-summary" aria-label="今日成交汇总">
             <div><span>成交总数</span><strong>{today ? today.buy + today.sell : '--'} <small>笔</small></strong></div>

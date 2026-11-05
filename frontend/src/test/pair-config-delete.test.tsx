@@ -13,7 +13,7 @@ import { pair } from './fixtures';
 
 const mocks = vi.hoisted(() => {
   const confirm = vi.fn(), success = vi.fn(), error = vi.fn();
-  return { confirm, success, error, api: vi.fn(), post: vi.fn(), app: { modal: { confirm }, message: { success, error } } };
+  return { confirm, success, error, run: vi.fn(), api: vi.fn(), post: vi.fn(), app: { modal: { confirm }, message: { success, error } } };
 });
 vi.mock('antd', async importOriginal => {
   const antd = await importOriginal<typeof import('antd')>();
@@ -24,11 +24,12 @@ vi.mock('../lib/queries', async () => {
   const { pair } = await import('./fixtures');
   return { usePairs: () => ({ data: [pair('BTCUSDC'), pair('ETHUSDC')] }), useOverview: () => ({ data: undefined }), useLiveAccounts: () => [], usePairSnapshot: () => ({ data: undefined, isPending: false, refetch: vi.fn() }) };
 });
-vi.mock('../components/Controls', () => ({ ControlProvider: ({ children }: { children: React.ReactNode }) => children, PairControls: () => null, useControls: () => ({ results: {} }) }));
+vi.mock('../components/Controls', () => ({ ControlProvider: ({ children }: { children: React.ReactNode }) => children, PairControls: () => null, useControls: () => ({ results: {}, run: mocks.run }) }));
 vi.mock('../components/ThemeSwitch', () => ({ ThemeSwitch: () => null, ThemeSegmented: () => null, themeLabels: { system: '跟随系统', light: '浅色', dark: '深色' } }));
 
 beforeEach(() => {
   vi.clearAllMocks();
+  localStorage.clear();
   vi.stubGlobal('matchMedia', vi.fn().mockImplementation(query => ({ matches: false, media: query, addListener: vi.fn(), removeListener: vi.fn(), addEventListener: vi.fn(), removeEventListener: vi.fn() })));
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
 });
@@ -245,6 +246,33 @@ it('keeps the config page when switching pairs from the sidebar', () => {
   expect(within(pairs).getByRole('link', { name: /ETHUSDC/ })).toHaveAttribute('href', '/pairs/ETHUSDC/config');
 });
 
+it('runs a pair action from the palette through the guarded control flow', async () => {
+  setup(Promise.resolve());
+  const user = userEvent.setup();
+  await user.keyboard('{Control>}k{/Control}');
+  const search = await screen.findByRole('combobox', { name: '搜索命令' });
+  await user.type(search, '恢复 ETHUSDC');
+  await user.keyboard('{Enter}');
+  expect(mocks.run).toHaveBeenCalledWith(expect.objectContaining({ symbol: 'ETHUSDC' }), 'resume');
+});
+
+it('jumps between pages and pairs with keyboard shortcuts but not while typing', async () => {
+  const router = setup(Promise.resolve());
+  const user = userEvent.setup();
+  await user.keyboard('gs');
+  await waitFor(() => expect(router.state.location.pathname).toBe('/settings'));
+  await act(async () => { await router.navigate('/pairs/BTCUSDC'); });
+  await user.keyboard('{]}');
+  await waitFor(() => expect(router.state.location.pathname).toBe('/pairs/ETHUSDC'));
+  await user.keyboard('{[}');
+  await waitFor(() => expect(router.state.location.pathname).toBe('/pairs/BTCUSDC'));
+  await act(async () => { await router.navigate('/pairs/BTCUSDC/config'); });
+  const input = await screen.findByLabelText('网格间距');
+  await user.click(input);
+  await user.keyboard('{]}');
+  expect(router.state.location.pathname).toBe('/pairs/BTCUSDC/config');
+});
+
 it('does not run a palette command when Enter commits an IME candidate', async () => {
   const router = setup(Promise.resolve());
   const user = userEvent.setup();
@@ -263,7 +291,9 @@ it('switches pairs from the command palette with the keyboard', async () => {
   await user.keyboard('{Control>}k{/Control}');
   const search = await screen.findByRole('combobox', { name: '搜索命令' });
   await user.type(search, 'ETHUSDC');
-  expect(screen.getAllByRole('option')[0]).toHaveAttribute('aria-selected', 'true');
+  const options = screen.getAllByRole('option');
+  expect(options[0]).toHaveTextContent('ETHUSDC');
+  expect(options[0]).toHaveAttribute('aria-selected', 'true');
   await user.keyboard('{Enter}');
   await waitFor(() => expect(router.state.location.pathname).toBe('/pairs/ETHUSDC'));
 });

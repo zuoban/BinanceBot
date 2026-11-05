@@ -17,7 +17,8 @@ async function confirmControlState(pair: Pair, action: Action): Promise<boolean>
 }
 
 export type ControlResult = 'confirmed' | 'cancellation_unconfirmed' | 'state_unconfirmed' | 'request_unconfirmed' | 'failed' | 'not_submitted';
-interface ControlState { busy: Set<string>; results: Record<string, string>; run: (pair: Pair, action: Action, confirmed?: boolean) => Promise<ControlResult> }
+export const pendingLabel: Record<Action, string> = { pause: '暂停中…', resume: '恢复中…', cancel_all: '撤单中…', rebalance: '重建中…' };
+interface ControlState { busy: Set<string>; pending: Record<string, Action>; results: Record<string, string>; run: (pair: Pair, action: Action, confirmed?: boolean) => Promise<ControlResult> }
 export async function runBatchControls(pairs: Pair[], action: 'pause' | 'resume', run: ControlState['run']): Promise<{ pair: Pair; result: Exclude<ControlResult, 'confirmed'> }[]> {
   const outcomes: { pair: Pair; result: Exclude<ControlResult, 'confirmed'> }[] = [];
   const record = (pair: Pair, result: ControlResult) => {
@@ -40,6 +41,7 @@ export function ControlProvider({ children }: { children: React.ReactNode }) {
   const client = useQueryClient();
   const locked = useRef(new Set<string>());
   const [busy, setBusy] = useState(new Set<string>());
+  const [pending, setPending] = useState<Record<string, Action>>({});
   const [results, setResults] = useState<Record<string, string>>({});
   const run = async (pair: Pair, action: Action, confirmed = false): Promise<ControlResult> => {
     if (locked.current.has(pair.symbol)) return 'not_submitted';
@@ -56,6 +58,7 @@ export function ControlProvider({ children }: { children: React.ReactNode }) {
         if (!accepted) return 'not_submitted';
       }
       setResults(r => ({ ...r, [pair.symbol]: '正在提交…' }));
+      setPending(p => ({ ...p, [pair.symbol]: action }));
       submitted = true;
       await post(pairPath(pair, 'control'), action === 'resume' || action === 'rebalance' ? { action, expected_mode: pair.mode } : { action });
       const observedState = await confirmControlState(pair, action).catch(() => false);
@@ -80,21 +83,23 @@ export function ControlProvider({ children }: { children: React.ReactNode }) {
       return 'failed';
     } finally {
       locked.current.delete(pair.symbol); setBusy(new Set(locked.current));
+      setPending(p => { const { [pair.symbol]: _done, ...rest } = p; return rest; });
       void client.invalidateQueries({ queryKey: ['pairs'] });
       void client.invalidateQueries({ queryKey: ['overview'] });
       void client.invalidateQueries({ queryKey: ['snapshot', pair.symbol] });
     }
   };
-  return <Context.Provider value={{ busy, results, run }}>{children}</Context.Provider>;
+  return <Context.Provider value={{ busy, pending, results, run }}>{children}</Context.Provider>;
 }
 export function PairControls({ pair, compact = false, stale = false }: { pair: Pair; compact?: boolean; stale?: boolean }) {
-  const { busy, run } = useControls();
+  const { busy, pending, run } = useControls();
   const running = pair.status === 'RUNNING';
+  const active = pending[pair.symbol];
   return <Space>
     <Tooltip title={stale && !running ? '状态过期，恢复前请刷新' : undefined}>
       <Button size={compact ? 'small' : 'middle'} loading={busy.has(pair.symbol)} disabled={stale && !running}
         icon={running ? <PauseOutlined /> : <PlayCircleOutlined />} onClick={() => void run(pair, running ? 'pause' : 'resume')}>
-        {running ? '暂停' : '恢复'}
+        {active ? pendingLabel[active] : running ? '暂停' : '恢复'}
       </Button>
     </Tooltip>
     <Dropdown trigger={['click']} menu={{ items: [

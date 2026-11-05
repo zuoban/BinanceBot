@@ -632,3 +632,57 @@ kbd {
   *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0s !important; }
   .loading-indicator span { animation: none !important; opacity: 0.6 !important; transform: none !important; }
 }
+
+/* ---------- Interaction additions ---------- */
+.strategy-card-actions { align-items: center; }
+.strategy-toggle.ant-btn { min-width: 76px; }
+.confirm-changes p { margin: 0 0 10px; }
+.confirm-changes dl { display: grid; gap: 6px; margin: 0; }
+.confirm-changes dl > div { display: flex; justify-content: space-between; gap: 16px; padding: 6px 10px; border-radius: 8px; background: var(--bg-raised); }
+.confirm-changes dt { color: var(--text-secondary); font-size: 13px; }
+.confirm-changes dd { margin: 0; font: 500 13px var(--font-mono); text-align: right; }
+.confirm-changes dd s { color: var(--text-muted); font-weight: 400; }
+.confirm-changes .confirm-risky { background: var(--sig-yellow-bg); }
+.confirm-changes .confirm-risky dt { color: var(--sig-yellow); font-weight: 600; }
+.signal-button { font-family: inherit; cursor: pointer; transition: box-shadow 150ms var(--ease-out), filter 150ms var(--ease-out); }
+.signal-button:hover { filter: brightness(0.97); }
+.signal-active { box-shadow: 0 0 0 2px var(--sig-fg); }
+
+/* ---------- Grid preview ---------- */
+.grid-preview { margin-bottom: 20px; padding: 18px 20px; border: 1px solid var(--border-hairline); border-radius: 12px; background: var(--bg-card); }
+.grid-preview-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+.grid-preview-head h3 { margin: 0; font-size: 15px; font-weight: 600; }
+.grid-preview-reference { width: 160px; font-family: var(--font-mono); }
+.grid-preview-empty { margin: 0; }
+.grid-preview-ladder { margin: 0 0 10px; padding: 0; list-style: none; max-height: 320px; max-width: 420px; overflow-y: auto; }
+.grid-preview-ladder li { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 28px; padding: 0 10px; border-radius: 6px; font-size: 12px; }
+.grid-preview-ladder strong { font: 500 13px var(--font-mono); font-variant-numeric: tabular-nums; }
+.grid-preview-sell span { color: var(--negative); }
+.grid-preview-buy span { color: var(--positive); }
+.grid-preview-mark { margin: 4px 0; background: var(--sig-yellow-bg); color: var(--sig-yellow); font-weight: 600; }
+.grid-preview-warning { margin: 8px 0 0; padding: 8px 12px; border-radius: 8px; background: var(--sig-yellow-bg); color: var(--sig-yellow); font-size: 13px; }
+
+/* ---------- Settings probes ---------- */
+.probe { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+.probe-result { font-size: 13px; color: var(--text-secondary); overflow-wrap: anywhere; }
+.probe-ok { color: var(--sig-calm); }
+.probe-fail { color: var(--sig-red); }
+
+/* ---------- Batch result drawer ---------- */
+.batch-results { display: grid; gap: 10px; margin: 16px 0 0; padding: 0; list-style: none; }
+.batch-results li { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 12px 14px; border: 1px solid var(--border-hairline); border-radius: 10px; }
+.batch-results-head { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; min-width: 0; }
+.batch-results-head a { font: 600 14px var(--font-mono); text-decoration: none; }
+.batch-results-head a:hover { color: var(--accent); }
+
+/* ---------- Touch targets on coarse pointers ---------- */
+@media (pointer: coarse), (max-width: 600px) {
+  .strategy-card-actions .ant-btn { min-height: 40px; min-width: 40px; }
+  .strategy-toggle.ant-btn { min-width: 88px; }
+  .strategy-card-actions .ant-btn-icon-only { width: 40px; }
+  .sidebar-link, .sidebar-pair { min-height: 44px; }
+  .sidebar-add { width: 36px; height: 36px; }
+  .signal-button { min-height: 36px; }
+  .batch-results .ant-btn { min-height: 36px; }
+  .palette-item { min-height: 44px; }
+}

@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react';
-import { App } from 'antd';
+import { App, Input } from 'antd';
 import { useQueryClient } from '@tanstack/react-query';
 import { api, ApiError } from '../lib/api';
 import type { Pair } from '../lib/types';
@@ -16,12 +16,18 @@ export function useDeleteStrategy() {
     let deleteStarted = false;
     try {
       if (beforeConfirm && !await beforeConfirm()) return false;
-      const accepted = await modal.confirm({
+      // A live strategy may still hold a position: the delete button stays disabled until the symbol is typed back.
+      const live = pair.mode === 'LIVE';
+      const dialog = modal.confirm({
         title: `删除 ${pair.symbol} 策略？`,
-        content: '请先暂停策略、等待挂单撤销并平仓。删除不会自动平仓，成交历史和恢复数据会保留；至少需要保留一个交易对。',
-        okText: '确认删除', okButtonProps: { danger: true }, cancelText: '取消',
+        content: <div>
+          <p>请先暂停策略、等待挂单撤销并平仓。删除不会自动平仓，成交历史和恢复数据会保留；至少需要保留一个交易对。</p>
+          {live && <Input aria-label="输入交易对名称以确认删除" placeholder={`输入 ${pair.symbol} 以确认`} autoComplete="off"
+            onChange={event => dialog.update({ okButtonProps: { danger: true, disabled: event.target.value.trim().toUpperCase() !== pair.symbol.toUpperCase() } })} />}
+        </div>,
+        okText: '确认删除', okButtonProps: { danger: true, disabled: live }, cancelText: '取消',
       });
-      if (!accepted) return false;
+      if (!await dialog) return false;
       // Engine shutdown can take 30 seconds, with additional time for failure recovery and persistence.
       deleteStarted = true;
       await api(`/api/pairs/${encodeURIComponent(pair.symbol)}`, { method: 'DELETE', body: JSON.stringify({ confirm: true }), timeoutMs: 90_000 });

@@ -64,6 +64,12 @@ impl TelegramNotifier {
             .await
     }
 
+    /// Deliver a fixed probe message so credentials can be verified before they are saved.
+    pub async fn send_test_message(&self, config: &TelegramConfig) -> Result<()> {
+        self.send_message(config, format_test_message(Utc::now()))
+            .await
+    }
+
     async fn send_message(&self, config: &TelegramConfig, text: String) -> Result<()> {
         if config.bot_token.trim().is_empty() || config.chat_id.trim().is_empty() {
             return Err(anyhow!("Bot Token or Chat ID is empty"));
@@ -276,6 +282,13 @@ fn format_global_risk_message(reason: &str, now: DateTime<Utc>) -> String {
     )
 }
 
+fn format_test_message(now: DateTime<Utc>) -> String {
+    let time = now
+        .with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap())
+        .format("%Y-%m-%d %H:%M:%S");
+    format!("<b>✅ Grid Console 测试消息</b>\n通知渠道可用。\n时间：{time}（北京时间）")
+}
+
 fn escape_html(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -308,6 +321,17 @@ mod tests {
         assert_eq!(
             format_global_risk_message("余额 < 0 & 风控", now),
             "<b>⚠️ 全局风控已触发</b>\n原因：余额 &lt; 0 &amp; 风控\n时间：2026-10-12 02:26:00（北京时间）"
+        );
+    }
+
+    #[test]
+    fn test_message_uses_beijing_time() {
+        let now = DateTime::parse_from_rfc3339("2026-10-11T18:26:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(
+            format_test_message(now),
+            "<b>✅ Grid Console 测试消息</b>\n通知渠道可用。\n时间：2026-10-12 02:26:00（北京时间）"
         );
     }
 

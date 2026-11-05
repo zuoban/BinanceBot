@@ -14,6 +14,10 @@ const signalIcon: Record<Signal, React.ReactNode> = { calm: <CheckCircleFilled /
 export function SignalChip({ tier, children, title }: { tier: Signal; children: React.ReactNode; title?: string }) {
   return <span className={`signal signal-${tier}`} title={title}><span className="signal-icon" aria-hidden="true">{signalIcon[tier]}</span>{children}</span>;
 }
+/** A signal chip that filters the list below it; the pressed state is exposed to assistive tech. */
+export function SignalButton({ tier, active, onClick, children }: { tier: Signal; active: boolean; onClick: () => void; children: React.ReactNode }) {
+  return <button type="button" className={`signal signal-${tier} signal-button${active ? ' signal-active' : ''}`} aria-pressed={active} title={active ? '点击取消筛选' : '点击筛选'} onClick={onClick}><span className="signal-icon" aria-hidden="true">{signalIcon[tier]}</span>{children}</button>;
+}
 export const ModeTag = ({ mode }: { mode: Mode }) => <SignalChip tier={mode === 'LIVE' ? 'orange' : mode === 'UNKNOWN' ? 'yellow' : 'blue'}>{modeLabel[mode]}</SignalChip>;
 const statusMeta: Record<Status, { tier: Signal; icon: React.ReactNode }> = {
   RUNNING: { tier: 'calm', icon: <CheckCircleFilled /> },

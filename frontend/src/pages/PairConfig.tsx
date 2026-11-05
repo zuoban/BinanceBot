@@ -4,11 +4,14 @@ import { UNSAFE_DataRouterContext, useLocation, useNavigate, useParams } from 'r
 import { Alert, App, Button, Card, Col, Form, Input, InputNumber, Row, Select, Space, Switch } from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, ApiError, pairPath, post } from '../lib/api';
-import { usePairs } from '../lib/queries';
+import { useOverview, usePairs } from '../lib/queries';
 import { EditContext } from '../lib/session';
 import type { GlobalConfig, GridConfig } from '../lib/types';
 import { ErrorNotice, PageBreadcrumb, PageTitle } from '../components/Common';
 import { useDeleteStrategy } from '../components/DeleteStrategy';
+import { GridPreview } from '../components/GridPreview';
+import { quoteAsset } from '../lib/format';
+import { describeNewGridConfig, diffGridConfig } from '../lib/configDiff';
 
 type FormValues = Omit<GridConfig, 'post_only'>;
 const defaults: FormValues = { symbol: '', direction: 'LONG', grid_interval: '0.1', order_amount_usdc: '100', buy_window: 3, sell_window: 3, min_price: null, max_price: null, max_position_usdc: '1000', pause_on_max_position: true };
@@ -19,7 +22,9 @@ export default function PairConfig() {
   const { pathname } = useLocation();
   const router = useContext(UNSAFE_DataRouterContext)?.router;
   const pairs = usePairs();
+  const overview = useOverview();
   const pair = pairs.data?.find(p => p.symbol === symbol);
+  const markPrice = overview.data?.pairs.find(entry => entry.snapshot.symbol === symbol)?.snapshot.ticker.mark_price;
   const [form] = Form.useForm<FormValues>();
   const edit = useContext(EditContext);
   const client = useQueryClient();
@@ -104,7 +109,21 @@ export default function PairConfig() {
     try {
       const latest = await global.refetch();
       const currentLive = latest.data ? latest.data.has_api_key && latest.data.has_api_secret : pair ? pair.mode === 'LIVE' : true;
-      if (currentLive && !await modal.confirm({ title: '保存实盘配置？', content: '请核对交易对、方向、网格和持仓限制。实盘使用真实资金。', okText: '确认保存', cancelText: '取消' })) return;
+      const changes = adding || !baseline.current ? null : diffGridConfig(baseline.current.config, values);
+      if (currentLive && !await modal.confirm({
+        title: adding ? '添加实盘交易对？' : '保存实盘配置？',
+        content: <div className="confirm-changes">
+          <p>实盘使用真实资金，请核对以下{changes ? '修改' : '参数'}。</p>
+          {changes?.length === 0 && <p className="muted">未检测到参数修改，将按当前参数重新保存。</p>}
+          <dl>
+            {(changes ?? describeNewGridConfig(values).map(item => ({ key: item.label, label: item.label, before: '', after: item.value, risky: item.risky }))).map(item => <div key={item.key} className={item.risky ? 'confirm-risky' : undefined}>
+              <dt>{item.label}</dt>
+              <dd>{item.before ? <><s>{item.before}</s> → <strong>{item.after}</strong></> : <strong>{item.after}</strong>}</dd>
+            </div>)}
+          </dl>
+        </div>,
+        okText: '确认保存', cancelText: '取消',
+      })) return;
       if (page.current !== currentPage || submission.current !== currentSubmission) return;
       await mutation.mutateAsync(values).catch(() => { /* Mutation errors are reported by onError. */ });
     } finally {
@@ -141,6 +160,7 @@ export default function PairConfig() {
           <Col xs={24} md={12}><Form.Item name="sell_window" label="卖单窗口" extra="当前价格上方预挂的卖单数量，范围为 1–50。" rules={[{ required: true }]}><InputNumber min={1} max={50} precision={0} className="full-width-input" /></Form.Item></Col>
         </Row>
       </Card>
+      <GridPreview form={form} markPrice={markPrice} quote={quoteAsset(adding ? String(form.getFieldValue('symbol') ?? '') : symbol ?? '') || '报价资产'} />
       <Row gutter={[20, 20]} className="settings-grid-row">
         <Col xs={24} xl={12} className="settings-grid-col">
           <Card title="仓位限制" className="settings-card-fill">

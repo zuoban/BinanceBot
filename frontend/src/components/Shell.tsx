@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, Outlet, useBlocker, useLocation, useNavigate } from 'react-router-dom';
 import { App, Button, Drawer } from 'antd';
-import { AppstoreOutlined, ArrowDownOutlined, ArrowUpOutlined, BulbOutlined, EditOutlined, LineChartOutlined, LogoutOutlined, MenuOutlined, PlusOutlined, SearchOutlined, SettingOutlined } from '@ant-design/icons';
+import { AppstoreOutlined, ArrowDownOutlined, ArrowUpOutlined, BulbOutlined, EditOutlined, LineChartOutlined, LogoutOutlined, MenuOutlined, PauseOutlined, PlayCircleOutlined, PlusOutlined, ReloadOutlined, SearchOutlined, SettingOutlined, StopOutlined } from '@ant-design/icons';
 import { useLiveAccounts, useOverview, usePairs } from '../lib/queries';
 import { AccountsContext, EditContext, useSession } from '../lib/session';
 import { accountGroups, number, statusLabel, trimFractionZeros } from '../lib/format';
 import type { Mode, Pair } from '../lib/types';
-import { ControlProvider } from './Controls';
+import { ControlProvider, useControls } from './Controls';
 import { CommandPalette, type Command } from './CommandPalette';
 import { ThemeSegmented, themeLabels } from './ThemeSwitch';
 import { useTheme, type ThemePreference } from '../lib/theme';
@@ -14,18 +14,19 @@ import { defaultTitle, useDocumentTitle } from '../lib/documentTitle';
 import { ModeTag } from './Common';
 
 export default function Shell() {
-  const navigate = useNavigate(), location = useLocation();
+  const location = useLocation();
   const pairs = usePairs();
   const overview = useOverview();
   const accounts = useLiveAccounts(overview.data, overview.dataUpdatedAt);
   const [dirty, setDirty] = useState(false), [saving, setSaving] = useState(false);
   const { modal, message } = App.useApp();
   const { logout, authEnabled } = useSession();
-  const { preference, setPreference } = useTheme();
   const groups = accountGroups(accounts);
-  useDocumentTitle(location.pathname.match(/^\/pairs\/(?!new\/?$)[^/]+\/?$/) ? null : groups.length ? groups.map(group => {
+  const alert = !!overview.error || accounts.some(entry => entry.account_observation_stale || entry.snapshot.status === 'ERROR');
+  const withAlert = (title: string) => alert ? `⚠ ${title}` : title;
+  useDocumentTitle(location.pathname.match(/^\/pairs\/(?!new\/?$)[^/]+\/?$/) ? null : withAlert(groups.length ? groups.map(group => {
     return `${trimFractionZeros(number(group.equity))} | ${group.ratio === null ? '--' : `${trimFractionZeros(number(group.ratio))}%`}`;
-  }).join(' / ') : defaultTitle);
+  }).join(' / ') : defaultTitle));
   const blocker = useBlocker(({ currentLocation, nextLocation }) => (dirty || saving) && currentLocation.pathname !== nextLocation.pathname);
   useEffect(() => {
     if (blocker.state !== 'blocked') return;
@@ -53,24 +54,6 @@ export default function Shell() {
   }, [dirty, saving, logout, modal, message]);
   const [drawer, setDrawer] = useState(false), [palette, setPalette] = useState(false);
   useEffect(() => { setDrawer(false); }, [location.pathname]);
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); setPalette(open => !open); }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, []);
-  const commands = useMemo<Command[]>(() => [
-    { key: 'go-overview', group: '页面', label: '策略总览', keywords: 'overview home 总览 首页', icon: <AppstoreOutlined />, run: () => navigate('/') },
-    { key: 'go-settings', group: '页面', label: '全局设置', keywords: 'settings 设置 api telegram', icon: <SettingOutlined />, run: () => navigate('/settings') },
-    { key: 'go-new', group: '页面', label: '新增交易对', keywords: 'new add 新增 添加', icon: <PlusOutlined />, run: () => navigate('/pairs/new') },
-    ...(pairs.data ?? []).flatMap(pair => [
-      { key: `pair-${pair.symbol}`, group: '交易对', label: pair.symbol, hint: `${statusLabel[pair.status]} · ${pair.grid_config.direction === 'SHORT' ? '做空' : '做多'}`, keywords: '策略 查看', icon: <LineChartOutlined />, run: () => navigate(`/pairs/${pair.symbol}`) },
-      { key: `config-${pair.symbol}`, group: '交易对', label: `${pair.symbol} 策略参数`, hint: '编辑', keywords: 'config 配置 参数', icon: <EditOutlined />, run: () => navigate(`/pairs/${pair.symbol}/config`) },
-    ]),
-    ...(Object.entries(themeLabels) as [ThemePreference, string][]).map(([key, label]) => ({ key: `theme-${key}`, group: '外观', label: `主题：${label}`, hint: preference === key ? '当前' : undefined, keywords: 'theme dark light 主题 深色 浅色', icon: <BulbOutlined />, run: () => setPreference(key) })),
-    ...(authEnabled ? [{ key: 'logout', group: '账户', label: '退出登录', keywords: 'logout 退出', icon: <LogoutOutlined />, disabled: saving, run: () => void logOut() }] : []),
-  ], [pairs.data, navigate, preference, setPreference, authEnabled, saving, logOut]);
   const mode = pairs.data?.[0]?.mode;
   const sidebarProps = { pairs: pairs.data, pending: pairs.isPending, symbol, pathname: location.pathname, mode, authEnabled, saving, onSearch: () => { setDrawer(false); setPalette(true); }, onLogout: () => void logOut() };
   return <EditContext.Provider value={context}><AccountsContext.Provider value={accounts}><ControlProvider><div className="app-layout">
@@ -85,8 +68,76 @@ export default function Shell() {
     </header>
     <Drawer open={drawer} onClose={() => setDrawer(false)} placement="left" size={280} closable={false} className="sidebar-drawer" title={null} styles={{ body: { padding: 0 } }} aria-label="主导航"><SidebarBody idPrefix="drawer" {...sidebarProps} /></Drawer>
     <main className="content" id="main"><Outlet /></main>
-    <CommandPalette open={palette} onClose={() => setPalette(false)} commands={commands} />
+    <PaletteHost open={palette} setOpen={setPalette} pairs={pairs.data} stale={!!overview.error || Date.now() - overview.dataUpdatedAt > 10_000} authEnabled={authEnabled} saving={saving} onLogout={() => void logOut()} />
   </div></ControlProvider></AccountsContext.Provider></EditContext.Provider>;
+}
+
+const recentKey = 'binance_bot_recent_commands';
+const readRecent = (): string[] => { try { const value = JSON.parse(localStorage.getItem(recentKey) ?? '[]'); return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string').slice(0, 5) : []; } catch { return []; } };
+
+interface HostProps { open: boolean; setOpen: (open: boolean | ((value: boolean) => boolean)) => void; pairs: Pair[] | undefined; stale: boolean; authEnabled: boolean; saving: boolean; onLogout: () => void }
+
+/** Owns the command list, the global shortcuts and the recently-used order. Lives inside ControlProvider to reuse its guarded actions. */
+function PaletteHost({ open, setOpen, pairs, stale, authEnabled, saving, onLogout }: HostProps) {
+  const navigate = useNavigate();
+  const { pathname } = useLocation();
+  const { run } = useControls();
+  const { preference, setPreference } = useTheme();
+  const [recent, setRecent] = useState<string[]>(readRecent);
+  const remember = useCallback((key: string) => {
+    setRecent(current => {
+      const next = [key, ...current.filter(item => item !== key)].slice(0, 5);
+      try { localStorage.setItem(recentKey, JSON.stringify(next)); } catch { /* Recent commands are a convenience only. */ }
+      return next;
+    });
+  }, []);
+  const symbols = useMemo(() => pairs?.map(pair => pair.symbol) ?? [], [pairs]);
+  const current = pathname.match(/^\/pairs\/([^/]+)/)?.[1];
+  useEffect(() => {
+    const typing = (target: EventTarget | null) => target instanceof HTMLElement && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName));
+    let lead = 0;
+    const onKey = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key?.toLowerCase() === 'k') { event.preventDefault(); setOpen(value => !value); return; }
+      if (event.metaKey || event.ctrlKey || event.altKey || typing(event.target) || document.querySelector('.ant-modal-root, .ant-drawer-open')) return;
+      if (event.key === 'g') { lead = Date.now(); return; }
+      if (lead && Date.now() - lead < 1200) {
+        lead = 0;
+        if (event.key === 'o') navigate('/'); else if (event.key === 's') navigate('/settings'); else if (event.key === 'n') navigate('/pairs/new');
+        return;
+      }
+      if ((event.key === '[' || event.key === ']') && symbols.length > 1 && current) {
+        const index = symbols.indexOf(current);
+        if (index < 0) return;
+        const next = symbols[(index + (event.key === ']' ? 1 : -1) + symbols.length) % symbols.length];
+        navigate(`/pairs/${next}${pathname.endsWith('/config') ? '/config' : ''}`);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [navigate, setOpen, symbols, current, pathname]);
+  const commands = useMemo<Command[]>(() => {
+    const all: Command[] = [
+      { key: 'go-overview', group: '页面', label: '策略总览', hint: 'g o', keywords: 'overview home 总览 首页', icon: <AppstoreOutlined />, run: () => navigate('/') },
+      { key: 'go-settings', group: '页面', label: '全局设置', hint: 'g s', keywords: 'settings 设置 api telegram', icon: <SettingOutlined />, run: () => navigate('/settings') },
+      { key: 'go-new', group: '页面', label: '新增交易对', hint: 'g n', keywords: 'new add 新增 添加', icon: <PlusOutlined />, run: () => navigate('/pairs/new') },
+      ...(pairs ?? []).flatMap(pair => {
+        const running = pair.status === 'RUNNING';
+        return [
+          { key: `pair-${pair.symbol}`, group: '交易对', label: pair.symbol, hint: `${statusLabel[pair.status]} · ${pair.grid_config.direction === 'SHORT' ? '做空' : '做多'}`, keywords: '策略 查看', icon: <LineChartOutlined />, run: () => navigate(`/pairs/${pair.symbol}`) },
+          { key: `config-${pair.symbol}`, group: '交易对', label: `${pair.symbol} 策略参数`, hint: '编辑', keywords: 'config 配置 参数', icon: <EditOutlined />, run: () => navigate(`/pairs/${pair.symbol}/config`) },
+          { key: `toggle-${pair.symbol}`, group: '操作', label: `${running ? '暂停' : '恢复'} ${pair.symbol}`, hint: pair.mode === 'LIVE' && !running ? '实盘 · 需确认' : undefined, keywords: running ? 'pause 暂停 停止' : 'resume 恢复 启动', icon: running ? <PauseOutlined /> : <PlayCircleOutlined />, disabled: stale && !running, run: () => void run(pair, running ? 'pause' : 'resume') },
+          { key: `rebalance-${pair.symbol}`, group: '操作', label: `重建 ${pair.symbol} 网格`, hint: '需确认', keywords: 'rebalance 重建 网格', icon: <ReloadOutlined />, disabled: stale || !running, run: () => void run(pair, 'rebalance') },
+          { key: `cancel-${pair.symbol}`, group: '操作', label: `撤单并暂停 ${pair.symbol}`, hint: '需确认', keywords: 'cancel 撤单', icon: <StopOutlined />, run: () => void run(pair, 'cancel_all') },
+        ];
+      }),
+      ...(Object.entries(themeLabels) as [ThemePreference, string][]).map(([key, label]) => ({ key: `theme-${key}`, group: '外观', label: `主题：${label}`, hint: preference === key ? '当前' : undefined, keywords: 'theme dark light 主题 深色 浅色', icon: <BulbOutlined />, run: () => setPreference(key) })),
+      ...(authEnabled ? [{ key: 'logout', group: '账户', label: '退出登录', keywords: 'logout 退出', icon: <LogoutOutlined />, disabled: saving, run: onLogout }] : []),
+    ];
+    const byKey = new Map(all.map(command => [command.key, command]));
+    const recents = recent.flatMap(key => { const command = byKey.get(key); return command && !command.disabled ? [{ ...command, group: '最近使用', key: `recent-${command.key}`, run: command.run }] : []; });
+    return [...recents, ...all.map(command => ({ ...command, run: () => { remember(command.key); command.run(); } }))];
+  }, [pairs, navigate, run, preference, setPreference, authEnabled, saving, onLogout, stale, recent, remember]);
+  return <CommandPalette open={open} onClose={() => setOpen(false)} commands={commands} />;
 }
 
 interface SidebarProps { idPrefix: string; pairs: Pair[] | undefined; pending: boolean; symbol: string | undefined; pathname: string; mode: Mode | undefined; authEnabled: boolean; saving: boolean; onSearch: () => void; onLogout: () => void }

@@ -21,9 +21,9 @@ beforeEach(() => {
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
 });
 vi.mock('../lib/queries', () => ({ useOverview: () => overview, useOverviewHistory: () => ({ data: { snapshots: [], current_accounts: [] }, isPending: false, error: null }) }));
-const actions = vi.hoisted(() => ({ run: vi.fn(), remove: vi.fn(), busy: new Set<string>(), deleting: false }));
+const actions = vi.hoisted(() => ({ run: vi.fn(), remove: vi.fn(), busy: new Set<string>(), pending: {} as Record<string, string>, deleting: false }));
 vi.mock('../components/DeleteStrategy', () => ({ useDeleteStrategy: () => ({ remove: actions.remove, busy: actions.deleting }) }));
-vi.mock('../components/Controls', () => ({ useControls: () => ({ busy: actions.busy, results: {}, run: actions.run }), runBatchControls: vi.fn() }));
+vi.mock('../components/Controls', () => ({ useControls: () => ({ busy: actions.busy, pending: actions.pending, results: {}, run: actions.run }), runBatchControls: vi.fn(), pendingLabel: { pause: '暂停中…', resume: '恢复中…', cancel_all: '撤单中…', rebalance: '重建中…' } }));
 
 it('places the add link in the strategy section and navigates to it', async () => {
   overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: snapshot('BTCUSDC'), mode: 'PAPER', scoped: true }] };
@@ -117,13 +117,12 @@ it('opens the selected strategy configuration from its card', async () => {
   expect(screen.getByText('2000 USDC')).toBeInTheDocument();
   expect(screen.getByText('暂停策略')).toBeInTheDocument();
   expect(screen.getByRole('link', { name: /查看完整配置/ })).toHaveAttribute('href', '/pairs/BTCUSDC/config');
-  await userEvent.setup().click(screen.getByRole('button', { name: 'BTCUSDC 更多操作' }));
-  expect(screen.getByRole('menuitem', { name: '查看策略' })).toBeInTheDocument();
-  await userEvent.setup().click(screen.getByRole('menuitem', { name: '暂停策略' }));
+  await userEvent.setup().click(screen.getByRole('button', { name: '暂停 BTCUSDC' }));
   expect(actions.run).toHaveBeenCalledWith(expect.objectContaining({ symbol: 'BTCUSDC' }), 'pause');
   await userEvent.setup().click(screen.getByRole('button', { name: 'BTCUSDC 更多操作' }));
-  await userEvent.setup().click(screen.getByRole('menuitem', { name: '删除策略' }));
-  expect(actions.remove).toHaveBeenCalledWith(expect.objectContaining({ symbol: 'BTCUSDC' }));
+  expect(screen.getByRole('menuitem', { name: '查看策略' })).toBeInTheDocument();
+  expect(screen.queryByRole('menuitem', { name: '删除策略' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('menuitem', { name: /暂停策略|恢复策略/ })).not.toBeInTheDocument();
 });
 
 it('navigates when the strategy menu item is activated', async () => {
@@ -204,6 +203,45 @@ it('only reports normal operation when every strategy is running', () => {
   render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
   expect(screen.queryByText('全部策略运行正常')).not.toBeInTheDocument();
   expect(screen.getByText('已停止 1')).toBeInTheDocument();
+});
+
+it('filters the strategy list from the signal strip and keeps the filter in the URL', async () => {
+  const running = snapshot('BTCUSDC'); running.status = 'RUNNING';
+  const error = snapshot('SOLUSDC'); error.status = 'ERROR';
+  overview.data = { generated_at: new Date().toISOString(), pairs: [running, error].map(s => ({ snapshot: s, mode: 'PAPER' as const, scoped: true })) };
+  function Location() { const l = useLocation(); return <output data-testid="url">{l.pathname}{l.search}</output>; }
+  render(<MemoryRouter><App><OverviewPage /><Location /></App></MemoryRouter>);
+  const user = userEvent.setup();
+  const chip = within(screen.getByLabelText('策略运行概览')).getByRole('button', { name: /异常 1/ });
+  expect(chip).toHaveAttribute('aria-pressed', 'false');
+  await user.click(chip);
+  expect(chip).toHaveAttribute('aria-pressed', 'true');
+  expect(screen.getByTestId('url')).toHaveTextContent('?status=ERROR');
+  expect(screen.queryByRole('link', { name: 'BTCUSDC' })).not.toBeInTheDocument();
+  expect(screen.getByRole('link', { name: 'SOLUSDC' })).toBeInTheDocument();
+  await user.click(chip);
+  expect(screen.getByTestId('url')).not.toHaveTextContent('status=');
+  expect(screen.getByRole('link', { name: 'BTCUSDC' })).toBeInTheDocument();
+});
+
+it('clears search, sort and status together with one click', async () => {
+  const running = snapshot('BTCUSDC'); running.status = 'RUNNING';
+  const error = snapshot('SOLUSDC'); error.status = 'ERROR';
+  overview.data = { generated_at: new Date().toISOString(), pairs: [running, error].map(s => ({ snapshot: s, mode: 'PAPER' as const, scoped: true })) };
+  function Location() { const l = useLocation(); return <output data-testid="url">{l.pathname}{l.search}</output>; }
+  render(<MemoryRouter initialEntries={['/?q=sol&sort=symbol&status=ERROR']}><App><OverviewPage /><Location /></App></MemoryRouter>);
+  await userEvent.setup().click(screen.getAllByRole('button', { name: '清除筛选' })[0]);
+  expect(screen.getByTestId('url')).toHaveTextContent(/^\/$/);
+  expect(screen.getByRole('textbox', { name: '搜索交易对' })).toHaveValue('');
+  expect(screen.getByRole('link', { name: 'BTCUSDC' })).toBeInTheDocument();
+});
+
+it('restores search and sort from the URL', () => {
+  overview.data = { generated_at: new Date().toISOString(), pairs: ['BTCUSDC', 'ETHUSDC'].map(symbol => ({ snapshot: snapshot(symbol), mode: 'PAPER' as const, scoped: true })) };
+  render(<MemoryRouter initialEntries={['/?q=eth&sort=symbol']}><App><OverviewPage /></App></MemoryRouter>);
+  expect(screen.getByRole('textbox', { name: '搜索交易对' })).toHaveValue('eth');
+  expect(screen.getByRole('link', { name: 'ETHUSDC' })).toBeInTheDocument();
+  expect(screen.queryByRole('link', { name: 'BTCUSDC' })).not.toBeInTheDocument();
 });
 
 it('summarizes statuses and lets the user clear a search with no results', async () => {
@@ -317,9 +355,10 @@ it('reports a refresh failure without submitting stale pause targets', async () 
   expect(runBatchControls).not.toHaveBeenCalled();
 });
 
-it('distinguishes failed submissions from unconfirmed pause and cancellation results', async () => {
-  const s = snapshot('SOLUSDC'); s.status = 'RUNNING';
-  overview.data = { generated_at: '', pairs: [{ snapshot: s, mode: 'PAPER', scoped: true }] };
+it('lists each batch outcome per strategy and only offers a retry when nothing was submitted', async () => {
+  const all = ['SOLUSDC', 'BNBUSDC', 'BTCUSDC', 'ETHUSDC', 'XRPUSDC', 'ADAUSDC'].map(symbol => { const item = snapshot(symbol); item.status = 'RUNNING'; return item; });
+  const s = all[0];
+  overview.data = { generated_at: '', pairs: all.map(item => ({ snapshot: item, mode: 'PAPER' as const, scoped: true })) };
   overview.refetch.mockResolvedValue({ data: overview.data, error: null });
   const target = { symbol: s.symbol, status: s.status, mode: 'PAPER' as const, grid_config: s.grid_config, scoped: true };
   vi.mocked(runBatchControls).mockResolvedValue([
@@ -334,7 +373,21 @@ it('distinguishes failed submissions from unconfirmed pause and cancellation res
   await user.click(screen.getByRole('button', { name: /全部策略操作/ }));
   await user.click(screen.getByText('全部暂停'));
   await user.click(await screen.findByRole('button', { name: '确认执行' }));
-  expect(await screen.findByText('提交前出错，未提交：SOLUSDC；请求结果不明，操作可能已生效：BNBUSDC；操作进行中，未提交：XRPUSDC；暂停状态及撤单结果未确认：BTCUSDC；已暂停，撤单结果未确认：ETHUSDC。请检查状态、交易所挂单和日志')).toBeInTheDocument();
+  const drawer = await screen.findByRole('dialog');
+  expect(within(drawer).getByText('全部暂停：1/6 已确认')).toBeInTheDocument();
+  const rows = within(drawer).getAllByRole('listitem');
+  expect(rows.map(row => within(row).getByRole('link').textContent)).toEqual(['SOLUSDC', 'BNBUSDC', 'XRPUSDC', 'BTCUSDC', 'ETHUSDC']);
+  expect(within(rows[0]).getByText('提交前出错，未提交')).toBeInTheDocument();
+  expect(within(rows[1]).getByText('请求结果不明，操作可能已生效')).toBeInTheDocument();
+  expect(within(rows[3]).getByText('暂停状态及撤单结果未确认')).toBeInTheDocument();
+  expect(within(rows[4]).getByText('已暂停，撤单结果未确认')).toBeInTheDocument();
+  // Only strategies that were certainly not submitted may be retried; uncertain ones must be checked first.
+  expect(within(rows[0]).getByRole('button', { name: '重试暂停' })).toBeInTheDocument();
+  expect(within(rows[2]).getByRole('button', { name: '重试暂停' })).toBeInTheDocument();
+  expect(within(rows[1]).queryByRole('button')).not.toBeInTheDocument();
+  expect(within(rows[3]).queryByRole('button')).not.toBeInTheDocument();
+  await user.click(within(rows[0]).getByRole('button', { name: '重试暂停' }));
+  expect(actions.run).toHaveBeenCalledWith(expect.objectContaining({ symbol: 'SOLUSDC' }), 'pause');
 });
 it('shows today’s executed buy and sell counts instead of active orders on the strategy card', () => {
   const s = snapshot('BTCUSDC');
@@ -505,5 +558,5 @@ it('disables rebuilding a paused strategy while keeping resume available', async
   render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
   await userEvent.setup().click(screen.getByRole('button', { name: 'BTCUSDC 更多操作' }));
   expect(screen.getByRole('menuitem', { name: /重建 BTCUSDC 网格/ })).toHaveAttribute('aria-disabled', 'true');
-  expect(screen.getByRole('menuitem', { name: /恢复策略/ })).not.toHaveAttribute('aria-disabled', 'true');
+  expect(screen.getByRole('button', { name: '恢复 BTCUSDC' })).toBeEnabled();
 });

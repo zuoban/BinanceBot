@@ -411,6 +411,8 @@ pub async fn create_managed_router(handle: RuntimeHandle) -> Router {
             "/api/global/config",
             get(get_global_config_handler).post(post_global_config_handler),
         )
+        .route("/api/global/test-exchange", post(test_exchange_handler))
+        .route("/api/global/test-telegram", post(test_telegram_handler))
         .route(
             "/api/server/config",
             get(get_server_config_handler).post(post_server_config_handler),
@@ -900,6 +902,142 @@ fn web_global_config_view(
         telegram_enabled: view.telegram_enabled,
         has_telegram_bot_token: view.has_telegram_bot_token,
         telegram_chat_id: view.telegram_chat_id,
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct TestExchangePayload {
+    api_key: Option<String>,
+    api_secret: Option<String>,
+    recv_window: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TestTelegramPayload {
+    bot_token: Option<String>,
+    chat_id: Option<String>,
+}
+
+fn probe_failure(message: impl Into<String>) -> Json<ApiResponse<String>> {
+    Json(ApiResponse {
+        success: false,
+        data: None,
+        message: Some(message.into()),
+    })
+}
+
+fn non_blank(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// Resolve probe credentials: a non-blank override wins, otherwise the saved value is used.
+fn resolve_exchange_probe(
+    saved: &crate::config::ExchangeConfig,
+    payload: TestExchangePayload,
+) -> Result<crate::config::ExchangeConfig, String> {
+    let mut config = saved.clone();
+    if let Some(key) = non_blank(payload.api_key) {
+        config.api_key = key;
+    }
+    if let Some(secret) = non_blank(payload.api_secret) {
+        config.api_secret = secret;
+    }
+    if let Some(window) = payload.recv_window {
+        config.recv_window = window;
+    }
+    if config.api_key.trim().is_empty() || config.api_secret.trim().is_empty() {
+        return Err("请同时填写 API Key 和 Secret（或先保存后再测试）".into());
+    }
+    if !(1..=60_000).contains(&config.recv_window) {
+        return Err("请求有效窗口必须在 1-60000 毫秒之间".into());
+    }
+    Ok(config)
+}
+
+fn resolve_telegram_probe(
+    saved: &crate::config::TelegramConfig,
+    payload: TestTelegramPayload,
+) -> Result<crate::config::TelegramConfig, String> {
+    let mut config = saved.clone();
+    if let Some(token) = non_blank(payload.bot_token) {
+        config.bot_token = token;
+    }
+    if let Some(chat_id) = non_blank(payload.chat_id) {
+        config.chat_id = chat_id;
+    }
+    if config.bot_token.trim().is_empty() || config.chat_id.trim().is_empty() {
+        return Err("请填写 Bot Token 和 Chat ID（或先保存后再测试）".into());
+    }
+    Ok(config)
+}
+
+/// Verify that the (possibly unsaved) API credentials can read the futures account.
+/// Nothing is persisted, and failures never echo signed URLs or credentials.
+async fn test_exchange_handler(
+    State(handle): State<RuntimeHandle>,
+    Json(payload): Json<TestExchangePayload>,
+) -> Json<ApiResponse<String>> {
+    let saved = match handle.db.run_blocking(|db| db.load_config()).await {
+        Ok(Some(config)) => config.exchange,
+        _ => return probe_failure("无法读取全局设置"),
+    };
+    let config = match resolve_exchange_probe(&saved, payload) {
+        Ok(config) => config,
+        Err(message) => return probe_failure(message),
+    };
+    let client = BinanceFuturesClient::new_with_limiter(&config, handle.rate_limiter.clone());
+    if let Err(error) = client.sync_server_time().await {
+        return probe_failure(sanitized_probe_error("无法连接币安", &error));
+    }
+    match client.get_account().await {
+        Ok(_) => Json(ApiResponse {
+            success: true,
+            data: Some("连接成功：API Key 有效，可读取合约账户".into()),
+            message: None,
+        }),
+        Err(error) => probe_failure(sanitized_probe_error("账户验证失败", &error)),
+    }
+}
+
+fn sanitized_probe_error(prefix: &str, error: &anyhow::Error) -> String {
+    if error.downcast_ref::<reqwest::Error>().is_some() {
+        return format!("{prefix}：网络请求失败，请检查网络后重试");
+    }
+    format!("{prefix}：{error}")
+}
+
+/// Send one fixed probe message with the (possibly unsaved) Telegram credentials.
+async fn test_telegram_handler(
+    State(handle): State<RuntimeHandle>,
+    Json(payload): Json<TestTelegramPayload>,
+) -> Json<ApiResponse<String>> {
+    let saved = match handle.db.run_blocking(|db| db.load_config()).await {
+        Ok(Some(config)) => config.telegram,
+        _ => return probe_failure("无法读取全局设置"),
+    };
+    let config = match resolve_telegram_probe(&saved, payload) {
+        Ok(config) => config,
+        Err(message) => return probe_failure(message),
+    };
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => return probe_failure("无法创建网络客户端"),
+    };
+    match crate::telegram::TelegramNotifier::new(client)
+        .send_test_message(&config)
+        .await
+    {
+        Ok(()) => Json(ApiResponse {
+            success: true,
+            data: Some("测试消息已发送，请在 Telegram 中查看".into()),
+            message: None,
+        }),
+        Err(error) => probe_failure(format!("测试消息发送失败：{error}")),
     }
 }
 

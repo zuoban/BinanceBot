@@ -2,26 +2,27 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { StrategyMenu } from '../components/StrategyMenu';
+import { useDeleteStrategy } from '../components/DeleteStrategy';
 import type * as Api from '../lib/api';
 import { pair } from './fixtures';
 
-const mocks = vi.hoisted(() => ({ confirm: vi.fn(), success: vi.fn(), error: vi.fn(), api: vi.fn() }));
+const mocks = vi.hoisted(() => ({ confirm: vi.fn(), success: vi.fn(), error: vi.fn(), warning: vi.fn(), api: vi.fn() }));
 vi.mock('antd', () => ({
-  App: { useApp: () => ({ modal: { confirm: mocks.confirm }, message: { success: mocks.success, error: mocks.error } }) },
-  Button: ({ children, 'aria-label': label }: React.PropsWithChildren<{ 'aria-label': string }>) => <button aria-label={label}>{children}</button>,
-  Dropdown: ({ menu }: { menu: { items: { key?: string; label?: string }[]; onClick: (info: { key: string }) => void } }) => <div>{menu.items.filter(item => item.key).map(item => <button key={item.key} onClick={() => menu.onClick({ key: item.key! })}>{item.label}</button>)}</div>,
+  App: { useApp: () => ({ modal: { confirm: mocks.confirm }, message: { success: mocks.success, error: mocks.error, warning: mocks.warning } }) },
+  Input: ({ onChange, 'aria-label': label }: { onChange: (event: { target: { value: string } }) => void; 'aria-label': string }) => <input aria-label={label} onChange={event => onChange({ target: { value: event.target.value } })} />,
 }));
 vi.mock('../lib/api', async importOriginal => ({ ...await importOriginal<typeof Api>(), api: mocks.api }));
-vi.mock('react-router-dom', () => ({ useNavigate: () => vi.fn() }));
-vi.mock('../components/Controls', () => ({ useControls: () => ({ busy: new Set(), run: vi.fn() }) }));
 
 beforeEach(() => vi.clearAllMocks());
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
-function setup() {
+function Harness({ mode = 'PAPER' }: { mode?: 'PAPER' | 'LIVE' }) {
+  const deletion = useDeleteStrategy();
+  return <button onClick={() => void deletion.remove({ ...pair('BTCUSDC'), mode })}>删除策略</button>;
+}
+function setup(mode: 'PAPER' | 'LIVE' = 'PAPER') {
   const client = new QueryClient();
   const invalidate = vi.spyOn(client, 'invalidateQueries');
-  render(<QueryClientProvider client={client}><StrategyMenu pair={pair('BTCUSDC')} stale={false} /></QueryClientProvider>);
+  render(<QueryClientProvider client={client}><Harness mode={mode} /></QueryClientProvider>);
   return invalidate;
 }
 
@@ -91,4 +92,29 @@ it('explains an uncertain deletion after a timeout', async () => {
   await waitFor(() => expect(mocks.error).toHaveBeenCalledWith('请求未完成，操作可能已生效；请刷新状态或查看日志后再操作'));
   expect(invalidate).toHaveBeenCalledWith({ queryKey: ['pairs'] });
   expect(invalidate).toHaveBeenCalledWith({ queryKey: ['overview'] });
+});
+
+it('keeps the delete button disabled for a live strategy until the symbol is typed back', async () => {
+  const update = vi.fn();
+  let resolve!: (value: boolean) => void;
+  mocks.confirm.mockReturnValue(Object.assign(new Promise<boolean>(r => { resolve = r; }), { update }));
+  setup('LIVE');
+  await userEvent.setup().click(screen.getByRole('button', { name: '删除策略' }));
+  const options = mocks.confirm.mock.calls[0][0];
+  expect(options.okButtonProps).toMatchObject({ danger: true, disabled: true });
+  render(options.content);
+  const input = screen.getByLabelText('输入交易对名称以确认删除');
+  await userEvent.setup().type(input, 'btcusd');
+  expect(update).toHaveBeenLastCalledWith({ okButtonProps: { danger: true, disabled: true } });
+  await userEvent.setup().type(input, 'c');
+  expect(update).toHaveBeenLastCalledWith({ okButtonProps: { danger: true, disabled: false } });
+  resolve(false);
+  await waitFor(() => expect(mocks.api).not.toHaveBeenCalled());
+});
+
+it('does not require typing for a paper strategy', async () => {
+  mocks.confirm.mockResolvedValue(false);
+  setup('PAPER');
+  await userEvent.setup().click(screen.getByRole('button', { name: '删除策略' }));
+  expect(mocks.confirm.mock.calls[0][0].okButtonProps).toMatchObject({ danger: true, disabled: false });
 });

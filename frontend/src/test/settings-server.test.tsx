@@ -7,6 +7,7 @@ import type * as Antd from 'antd';
 import { beforeEach, expect, it, vi } from 'vitest';
 import { EditContext } from '../lib/session';
 import type { ServerConfig } from '../lib/types';
+import { MemoryRouter } from 'react-router-dom';
 import Settings from '../pages/Settings';
 
 const mocks = vi.hoisted(() => ({ api: vi.fn(), post: vi.fn(), confirm: vi.fn(), success: vi.fn(), error: vi.fn() }));
@@ -37,7 +38,7 @@ function setup() {
   function Wrapper() {
     const [dirty, setDirty] = useState(false);
     const [saving, setSaving] = useState(false);
-    return <QueryClientProvider client={client}><EditContext.Provider value={{ dirty, setDirty, saving, setSaving }}><Settings /></EditContext.Provider></QueryClientProvider>;
+    return <QueryClientProvider client={client}><EditContext.Provider value={{ dirty, setDirty, saving, setSaving }}><MemoryRouter><Settings /></MemoryRouter></EditContext.Provider></QueryClientProvider>;
   }
   return { client, ...render(<Wrapper />) };
 }

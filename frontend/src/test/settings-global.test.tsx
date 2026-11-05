@@ -2,6 +2,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeEach, expect, it, vi } from 'vitest';
+import { MemoryRouter } from 'react-router-dom';
 import Settings from '../pages/Settings';
 
 const mocks = vi.hoisted(() => ({ api: vi.fn(), post: vi.fn(), success: vi.fn(), error: vi.fn(), confirm: vi.fn() }));
@@ -28,7 +29,7 @@ beforeEach(() => {
 
 function setup() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(<QueryClientProvider client={client}><Settings /></QueryClientProvider>);
+  render(<QueryClientProvider client={client}><MemoryRouter><Settings /></MemoryRouter></QueryClientProvider>);
 }
 
 it('显示已保存的金额并以十进制字符串提交新金额，清空时提交 null', async () => {
@@ -133,4 +134,31 @@ it('拒绝零金额', async () => {
   await user.click(screen.getByRole('button', { name: '保存全局设置' }));
   expect(await screen.findByText('请输入大于 0 的金额')).toBeInTheDocument();
   expect(mocks.post).not.toHaveBeenCalled();
+}, 40000);
+
+it('测试连接使用表单中尚未保存的凭据，且不保存设置', async () => {
+  setup();
+  const user = userEvent.setup();
+  const key = await screen.findByLabelText('API Key');
+  await waitFor(() => expect(key).toBeEnabled());
+  await user.type(key, 'new-key');
+  await user.type(screen.getByLabelText('API Secret'), 'new-secret');
+  mocks.post.mockResolvedValueOnce('连接成功：API Key 有效，可读取合约账户');
+  await user.click(screen.getByRole('button', { name: '测试连接' }));
+  await waitFor(() => expect(mocks.post).toHaveBeenCalledWith('/api/global/test-exchange', expect.objectContaining({ api_key: 'new-key', api_secret: 'new-secret', recv_window: 5000 })));
+  expect(await screen.findByText(/连接成功/)).toBeInTheDocument();
+  expect(mocks.post).not.toHaveBeenCalledWith('/api/global/config', expect.anything());
+}, 40000);
+
+it('测试失败时显示后端给出的原因', async () => {
+  setup();
+  const user = userEvent.setup();
+  const token = await screen.findByLabelText('Bot Token');
+  await waitFor(() => expect(token).toBeEnabled());
+  await user.type(token, '123:abc');
+  mocks.post.mockRejectedValueOnce(new Error('请填写 Bot Token 和 Chat ID（或先保存后再测试）'));
+  await user.click(screen.getByRole('button', { name: '发送测试消息' }));
+  await waitFor(() => expect(mocks.post).toHaveBeenCalledWith('/api/global/test-telegram', expect.objectContaining({ bot_token: '123:abc' })));
+  expect(await screen.findByText(/请填写 Bot Token 和 Chat ID/)).toBeInTheDocument();
+  expect(mocks.error).toHaveBeenCalled();
 }, 40000);

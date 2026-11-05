@@ -1916,6 +1916,8 @@ async fn management_authenticates_add_remove_server_settings_and_pair_resources(
         ("/api/pairs/BTCUSDT/config", "GET", Value::Null),
         ("/api/global/config", "GET", Value::Null),
         ("/api/global/config", "POST", json!({"recv_window":8000})),
+        ("/api/global/test-exchange", "POST", json!({})),
+        ("/api/global/test-telegram", "POST", json!({})),
     ] {
         assert_eq!(
             request(&router, path, method, body, false).await.0,
@@ -3511,4 +3513,39 @@ async fn concurrent_safety_pause_prevents_shutdown_recovery() {
         assert_eq!(db.load_bot_status().unwrap(), Some(BotStatus::Paused));
     }
     std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn credential_probes_reject_incomplete_input_without_network_or_persistence() {
+    let runtime = fixture();
+    let handle = runtime.handle();
+    let router = create_managed_router(handle.clone()).await;
+    let before = serde_json::to_value(handle.db.load_config().unwrap().unwrap()).unwrap();
+    for (path, body, expected) in [
+        (
+            "/api/global/test-exchange",
+            json!({"api_key": "only-a-key"}),
+            "请同时填写 API Key 和 Secret",
+        ),
+        (
+            "/api/global/test-exchange",
+            json!({"api_key": "k", "api_secret": "s", "recv_window": 0}),
+            "请求有效窗口必须在 1-60000 毫秒之间",
+        ),
+        (
+            "/api/global/test-telegram",
+            json!({"bot_token": "123:abc"}),
+            "请填写 Bot Token 和 Chat ID",
+        ),
+    ] {
+        let (status, response) = request(&router, path, "POST", body, true).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["success"], false, "{path}");
+        assert!(
+            response["message"].as_str().unwrap().contains(expected),
+            "{path}: {response}"
+        );
+    }
+    let after = serde_json::to_value(handle.db.load_config().unwrap().unwrap()).unwrap();
+    assert_eq!(after, before);
 }

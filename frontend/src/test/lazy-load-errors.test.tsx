@@ -6,6 +6,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeEach, expect, it, vi } from 'vitest';
 import { LoadErrorBoundary } from '../components/LoadErrorBoundary';
 import { OverviewHistory } from '../components/OverviewHistory';
+import { MemoryRouter } from 'react-router-dom';
 import Settings from '../pages/Settings';
 
 vi.mock('../components/OverviewHistoryChart', () => { throw new Error('chart module unavailable'); });
@@ -33,7 +34,7 @@ it('offers recovery for both history charts when the module fails at Beijing mid
 
 it('keeps the settings tabs usable when the database module fails', async () => {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(<QueryClientProvider client={client}><App><Settings /></App></QueryClientProvider>);
+  render(<QueryClientProvider client={client}><MemoryRouter><App><Settings /></App></MemoryRouter></QueryClientProvider>);
   const user = userEvent.setup();
   await user.click(screen.getByRole('tab', { name: '数据库操作' }));
   expect(await screen.findByText('数据库操作加载失败，请刷新页面重试。')).toBeInTheDocument();

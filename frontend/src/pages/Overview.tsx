@@ -3,14 +3,16 @@ import { Link, useNavigate } from 'react-router-dom';
 import { App, Button, Card, Col, Dropdown, Empty, Input, Popover, Row, Select, Space, Statistic } from 'antd';
 import { ArrowDownOutlined, ArrowRightOutlined, ArrowUpOutlined, EyeOutlined, PlusOutlined, SearchOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { useOverview } from '../lib/queries';
+import { useUrlParams } from '../lib/urlState';
 import { AccountsContext } from '../lib/session';
 import { accountGroups, comparePositionAmount, modeLabel, numeric, number as fixedNumber, positionAmount, positionGroups, price as fixedPrice, quoteAsset, todayCount, todayPnlGroups, todayTradeCounts, trimFractionZeros } from '../lib/format';
-import { ErrorNotice, PageTitle, Pnl, SignalChip, StatusTag } from '../components/Common';
+import { ErrorNotice, PageTitle, Pnl, SignalButton, SignalChip, StatusTag } from '../components/Common';
 import { runBatchControls, useControls } from '../components/Controls';
 import type { Pair, Trade } from '../lib/types';
 import { OverviewLoading } from '../components/Loading';
 import { OverviewHistory } from '../components/OverviewHistory';
-import { StrategyMenu } from '../components/StrategyMenu';
+import { StrategyMenu, StrategyToggle } from '../components/StrategyMenu';
+import { BatchResultDrawer, type BatchReport } from '../components/BatchResultDrawer';
 import { TradesTable } from '../components/DataTables';
 
 const number = (value: unknown, digits?: number) => trimFractionZeros(fixedNumber(value, digits));
@@ -53,9 +55,16 @@ export default function OverviewPage() {
   const accounts = useContext(AccountsContext);
   const { modal, message } = App.useApp();
   const controls = useControls();
-  const [search, setSearch] = useState('');
-  const [sort, setSort] = useState('position');
+  const [{ q: search, sort, status: statusFilter }, updateFilters] = useUrlParams({
+    q: { fallback: '' },
+    sort: { fallback: 'position', allowed: ['position', 'symbol', 'today', 'orders'] },
+    status: { fallback: 'all', allowed: ['all', 'RUNNING', 'PAUSED', 'ERROR', 'STOPPED', 'LIVE'] },
+  });
+  const setSearch = (value: string) => updateFilters({ q: value });
+  const setSort = (value: string) => updateFilters({ sort: value });
+  const setStatusFilter = (value: string) => updateFilters({ status: value });
   const [batchBusy, setBatchBusy] = useState(false);
+  const [report, setReport] = useState<BatchReport | null>(null);
   const [tradesExpanded, setTradesExpanded] = useState(false);
   const [now, setNow] = useState(Date.now());
   useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(timer); }, []);
@@ -93,25 +102,16 @@ export default function OverviewPage() {
         if (!selected.length) { message.info('当前没有可暂停的策略'); return; }
       }
       const outcomes = await runBatchControls(selected, action, controls.run);
-      const groups = [
-        { result: 'failed', label: '提交前出错，未提交' },
-        { result: 'request_unconfirmed', label: '请求结果不明，操作可能已生效' },
-        { result: 'not_submitted', label: '操作进行中，未提交' },
-        { result: 'state_unconfirmed', label: action === 'pause' ? '暂停状态及撤单结果未确认' : '恢复状态未确认' },
-        { result: 'cancellation_unconfirmed', label: '已暂停，撤单结果未确认' },
-      ];
-      const details = groups.flatMap(({ result, label }) => {
-        const symbols = outcomes.filter(outcome => outcome.result === result).map(outcome => outcome.pair.symbol);
-        return symbols.length ? [`${label}：${symbols.join('、')}`] : [];
-      });
-      if (details.length) message.warning(`${details.join('；')}。请检查状态、交易所挂单和日志`);
+      if (outcomes.length) setReport({ action, total: selected.length, outcomes });
+      else message.success(`已${action === 'pause' ? '暂停' : '恢复'} ${selected.length} 个策略`);
     } catch (error) {
       message.error(`批量操作失败：${error instanceof Error ? error.message : String(error)}`);
     } finally { batchLock.current = false; setBatchBusy(false); }
   };
-  const visible = entries.filter(e => e.snapshot.symbol.includes(search.toUpperCase().trim()))
+  const matchesStatus = (e: typeof entries[number]) => statusFilter === 'all' || (statusFilter === 'LIVE' ? e.mode === 'LIVE' : e.snapshot.status === statusFilter);
+  const visible = entries.filter(e => e.snapshot.symbol.includes(search.toUpperCase().trim()) && matchesStatus(e))
     .sort((a, b) => sort === 'position' ? comparePositionAmount(a.snapshot, b.snapshot) : sort === 'today' ? (todayCount(b.snapshot) ?? -1) - (todayCount(a.snapshot) ?? -1) : sort === 'orders' ? b.snapshot.active_orders.length - a.snapshot.active_orders.length : a.snapshot.symbol.localeCompare(b.snapshot.symbol));
-  const clearFilters = () => { setSearch(''); setSort('position'); };
+  const clearFilters = () => updateFilters({ q: '', sort: 'position', status: 'all' });
   const counts = entries.map(e => todayTradeCounts(e.snapshot));
   const today = counts.every(c => c !== null) ? counts.reduce<{ buy: number; sell: number }>((sum, c) => ({ buy: sum.buy + c!.buy, sell: sum.sell + c!.sell }), { buy: 0, sell: 0 }) : null;
   const pnlGroups = todayPnlGroups(overview.data?.today_pnl);
@@ -121,11 +121,11 @@ export default function OverviewPage() {
     <section className="overview-banner" aria-label="策略运行概览">
       <div className="signal-strip">
         {stale && <SignalChip tier="yellow">数据暂未更新，请检查连接</SignalChip>}
-        {overview.data && pairs.some(p => p.mode === 'LIVE') && <SignalChip tier="orange">含实盘策略</SignalChip>}
-        {overview.data && pairs.some(p => p.status === 'ERROR') && <SignalChip tier="red">异常 {pairs.filter(p => p.status === 'ERROR').length}</SignalChip>}
-        {overview.data && pairs.some(p => p.status === 'PAUSED') && <SignalChip tier="blue">已暂停 {pairs.filter(p => p.status === 'PAUSED').length}</SignalChip>}
+        {overview.data && pairs.some(p => p.mode === 'LIVE') && <SignalButton tier="orange" active={statusFilter === 'LIVE'} onClick={() => setStatusFilter(statusFilter === 'LIVE' ? 'all' : 'LIVE')}>实盘策略 {pairs.filter(p => p.mode === 'LIVE').length}</SignalButton>}
+        {overview.data && pairs.some(p => p.status === 'ERROR') && <SignalButton tier="red" active={statusFilter === 'ERROR'} onClick={() => setStatusFilter(statusFilter === 'ERROR' ? 'all' : 'ERROR')}>异常 {pairs.filter(p => p.status === 'ERROR').length}</SignalButton>}
+        {overview.data && pairs.some(p => p.status === 'PAUSED') && <SignalButton tier="blue" active={statusFilter === 'PAUSED'} onClick={() => setStatusFilter(statusFilter === 'PAUSED' ? 'all' : 'PAUSED')}>已暂停 {pairs.filter(p => p.status === 'PAUSED').length}</SignalButton>}
         {overview.data && !stale && pairs.length > 0 && pairs.every(p => p.status === 'RUNNING') && <SignalChip tier="calm">全部策略运行正常</SignalChip>}
-        {overview.data && pairs.some(p => p.status === 'STOPPED') && <SignalChip tier="blue">已停止 {pairs.filter(p => p.status === 'STOPPED').length}</SignalChip>}
+        {overview.data && pairs.some(p => p.status === 'STOPPED') && <SignalButton tier="blue" active={statusFilter === 'STOPPED'} onClick={() => setStatusFilter(statusFilter === 'STOPPED' ? 'all' : 'STOPPED')}>已停止 {pairs.filter(p => p.status === 'STOPPED').length}</SignalButton>}
       </div>
       <div className="overview-stats">
         <div className="overview-stat"><span>运行中</span><strong>{overview.data ? pairs.filter(p => p.status === 'RUNNING').length : '--'}</strong></div>
@@ -197,7 +197,7 @@ export default function OverviewPage() {
     <div className="filter-bar">
       <Input prefix={<SearchOutlined />} placeholder="搜索交易对" aria-label="搜索交易对" allowClear value={search} onChange={e => setSearch(e.target.value)} />
       <Select aria-label="策略排序" value={sort} onChange={setSort} options={[{ value: 'position', label: '按持仓金额排序' }, { value: 'symbol', label: '按交易对排序' }, { value: 'today', label: '按今日成交排序' }, { value: 'orders', label: '按挂单数排序' }]} />
-      {(search || sort !== 'position') && <Button type="text" onClick={clearFilters}>清除筛选</Button>}
+      {(search || sort !== 'position' || statusFilter !== 'all') && <Button type="text" onClick={clearFilters}>清除筛选</Button>}
     </div>
     <Row gutter={[20, 20]}>
       {visible.map(({ snapshot: s, mode: m, scoped }) => {
@@ -225,7 +225,7 @@ export default function OverviewPage() {
               </dl>
               <Link to={`/pairs/${s.symbol}/config`}>查看完整配置 <ArrowRightOutlined /></Link>
             </div>
-          }><Button type="text" size="small" icon={<EyeOutlined />} aria-label={`查看 ${s.symbol} 策略配置`} /></Popover><StrategyMenu pair={pair} stale={stale} /></Space></div>
+          }><Button type="text" size="small" icon={<EyeOutlined />} aria-label={`查看 ${s.symbol} 策略配置`} /></Popover><StrategyToggle pair={pair} stale={stale} /><StrategyMenu pair={pair} stale={stale} /></Space></div>
           <div className="strategy-price"><span className="muted">标记价格 / {quote}</span><strong>{Number(s.ticker.mark_price) > 0 ? price(s.ticker.mark_price) : '--'}</strong></div>
           <div className="strategy-metrics" aria-label={`${s.symbol} 策略指标`}>
             <div><span>持仓金额 / {quote}</span><strong>{number(positionAmount(s))}</strong></div>
@@ -254,6 +254,7 @@ export default function OverviewPage() {
       {recentTrades.length > 5 && <div className="overview-trades-toggle"><Button type="text" aria-expanded={tradesExpanded} aria-controls="recent-trades-list" onClick={() => setTradesExpanded(value => !value)}>{tradesExpanded ? '收起' : '展开最近 20 条'}</Button></div>}
     </Card>
     <OverviewHistory />
+    <BatchResultDrawer report={report} onClose={() => setReport(null)} onRetry={(pair, action) => void controls.run(pair, action)} />
     </>}
   </>;
 }
