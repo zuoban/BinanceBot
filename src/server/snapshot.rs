@@ -226,15 +226,19 @@ impl AppState {
         let status = *self.status.read().await;
         let ticker = self.ticker.read().await.clone();
         let mut stats = self.stats.read().await.clone();
-        let position = self.position.read().await.clone();
-        let local_account = self.account.read().await;
-        let account = self.account_view(
-            &config.exchange.symbol,
-            config.exchange.trading_mode(),
-            &position,
-            &local_account,
-        );
-        drop(local_account);
+        let (position, account) = {
+            // Valuation updates take position -> account without the commit lock.
+            // Keep both reads together until the shared valuation is published.
+            let position = self.position.read().await;
+            let local_account = self.account.read().await;
+            let account = self.account_view(
+                &config.exchange.symbol,
+                config.exchange.trading_mode(),
+                &position,
+                &local_account,
+            );
+            (position.clone(), account)
+        };
         let account_cny_rate = self.cny_rates.get(&account.asset).await;
         let mut active_orders: Vec<_> = self.active_orders.read().await.values().cloned().collect();
         active_orders.sort_by_key(|order| std::cmp::Reverse(order.price));

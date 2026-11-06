@@ -875,7 +875,7 @@ pub fn sweep(
             }
         }
     }
-    rows.sort_by(|a, b| b.report.net_total.cmp(&a.report.net_total));
+    rows.sort_by_key(|row| std::cmp::Reverse(row.report.net_total));
     Ok(rows)
 }
 
@@ -1375,7 +1375,7 @@ mod tests {
             &candles,
         )
         .unwrap();
-        assert_eq!(rows.len(), 3 * 2 * 1 * 2);
+        assert_eq!(rows.len(), 3 * 2 * 2);
         assert!(rows
             .windows(2)
             .all(|w| w[0].report.net_total >= w[1].report.net_total));

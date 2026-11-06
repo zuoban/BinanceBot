@@ -16,6 +16,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 #[derive(Parser)]
 #[command(
     name = "binance-grid-bot",
+    version,
     about = "High-performance Binance Futures Grid Trading Bot API and SQLite Storage"
 )]
 struct CliArgs {
@@ -41,7 +42,7 @@ struct CliArgs {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    Backtest(binance_grid_bot::strategy::backtest::BacktestArgs),
+    Backtest(Box<binance_grid_bot::strategy::backtest::BacktestArgs>),
     /// Initialize an empty legacy paper subledger without depositing shared funds.
     #[command(
         long_about = "Initialize a legacy paper subledger with an empty position and a 10000 accounting baseline. This does not add funds to the shared paper account. Historical positions and balances are NOT restored. Only paper trading is affected.\n\nStop the bot before running this command, including any older version that does not honor the process lock. Use a database file with a single hard link. The strategy remains paused after restart; resume it manually after reviewing the new baseline. Existing paper snapshots and scopes without historical paper trades are rejected."

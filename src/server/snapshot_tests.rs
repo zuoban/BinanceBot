@@ -536,6 +536,108 @@ async fn snapshot_push_continues_while_the_trading_engine_waits_for_rest() {
 }
 
 #[tokio::test]
+async fn snapshot_holds_position_until_account_valuation_is_published() {
+    use crate::types::PositionInfo;
+    use std::cell::Cell;
+    use std::future::{poll_fn, Future};
+    use std::task::Poll;
+
+    for leverage in [1, 2] {
+        let state = fixture();
+        let symbol = state.config.read().await.exchange.symbol.clone();
+        let old_time = state.account.read().await.update_time;
+        let new_time = old_time + chrono::Duration::seconds(1);
+        let initial_margin = dec!(100) / Decimal::from(leverage);
+        {
+            let mut position = state.position.write().await;
+            *position = PositionInfo {
+                symbol: symbol.clone(),
+                size: dec!(1),
+                entry_price: dec!(100),
+                mark_price: dec!(100),
+                leverage,
+                // Legacy paper positions take their valuation time from the account.
+                update_time: None,
+                ..Default::default()
+            };
+            state.account.write().await.available_balance = dec!(10000) - initial_margin;
+        }
+        assert_eq!(state.current_account().await.margin_balance, dec!(10000));
+        let observer_account = state.account.read().await.clone();
+        let observe_shared = || {
+            state
+                .db
+                .shared_paper_account("BTCUSDC", &PositionInfo::default(), &observer_account)
+                .unwrap()
+        };
+        assert_eq!(observe_shared().margin_balance, dec!(10000));
+
+        // Stop the snapshot after it reads the position, at the account read.
+        // Poll each future explicitly so the boundary needs no scheduler timing.
+        let account_blocker = state.account.write().await;
+        let snapshot = state.collect_snapshot(None, test_time());
+        tokio::pin!(snapshot);
+        poll_fn(|cx| {
+            assert!(snapshot.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+
+        let valuation_has_position = Cell::new(false);
+        let valuation = async {
+            let config = state.config.read().await;
+            let mut position = state.position.write().await;
+            valuation_has_position.set(true);
+            let mut account = state.account.write().await;
+            position.mark_price = dec!(110);
+            position.unrealized_pnl = dec!(10);
+            account.unrealized_profit = dec!(10);
+            account.margin_balance = dec!(10010);
+            account.available_balance = dec!(10010) - dec!(110) / Decimal::from(leverage);
+            account.update_time = new_time;
+            state
+                .db
+                .shared_paper_account(&config.exchange.symbol, &position, &account)
+                .unwrap()
+        };
+        tokio::pin!(valuation);
+        poll_fn(|cx| {
+            assert!(valuation.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        assert!(
+            !valuation_has_position.get(),
+            "a pending snapshot must retain its position read through account publication"
+        );
+
+        drop(account_blocker);
+        let (snapshot, published) = tokio::join!(snapshot, valuation);
+        let snapshot = snapshot.unwrap();
+        assert_eq!(snapshot.position.unrealized_pnl, dec!(0));
+        assert_eq!(snapshot.position.update_time, None);
+        assert_eq!(snapshot.account.unrealized_profit, dec!(0));
+        assert_eq!(snapshot.account.margin_balance, dec!(10000));
+        assert_eq!(snapshot.account.update_time, old_time);
+        assert_eq!(published.unrealized_profit, dec!(10));
+        assert_eq!(published.margin_balance, dec!(10010));
+        assert_eq!(published.update_time, new_time);
+        assert_eq!(observe_shared().margin_balance, dec!(10010));
+
+        let fresh = state.collect_snapshot(None, test_time()).await.unwrap();
+        assert_eq!(fresh.position.unrealized_pnl, dec!(10));
+        assert_eq!(fresh.account.margin_balance, dec!(10010));
+        assert_eq!(fresh.account.update_time, new_time);
+        assert_eq!(observe_shared().margin_balance, dec!(10010));
+        // At 1x the increased position margin offsets the gain; at 2x it does not.
+        assert_eq!(
+            fresh.account.available_balance - snapshot.account.available_balance,
+            dec!(10) - dec!(10) / Decimal::from(leverage)
+        );
+    }
+}
+
+#[tokio::test]
 async fn account_snapshot_matches_full_snapshot_without_chart_queries() {
     let state = fixture();
     for paper in [true, false] {

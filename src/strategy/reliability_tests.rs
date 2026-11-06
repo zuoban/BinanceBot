@@ -2643,6 +2643,144 @@ async fn immediate_fills_suspend_later_openings_and_cancel_existing_window_order
 }
 
 #[tokio::test]
+async fn closed_submission_gates_do_not_block_protective_opening_cancellation_or_allow_posts() {
+    for direction in [GridDirection::Long, GridDirection::Short] {
+        for gate in ["pending_fill", "blocked", "configuration"] {
+            for entry in ["maintenance", "ticker", "placement", "sync_unready"] {
+                // This exchange fixture reports a long position during reconciliation.
+                if direction == GridDirection::Short && entry == "sync_unready" {
+                    continue;
+                }
+                let fake = Exchange::default();
+                let db = database();
+                let (mut opening, mut accepted) = managed_price_fixture();
+                opening.side = direction.opening_side();
+                opening.quantity = dec!(1);
+                opening.amount_usdc = opening.price;
+                accepted.side = opening.side.as_str().into();
+                accepted.orig_qty = opening.quantity;
+                db.save_managed_order(&opening).unwrap();
+                fake.orders
+                    .lock()
+                    .unwrap()
+                    .insert(opening.client_order_id.clone(), accepted.clone());
+                let mut exit = opening.clone();
+                exit.client_order_id = "gb_closed_gate_exit".into();
+                exit.order_id = Some(124);
+                exit.side = direction.closing_side();
+                exit.price = if direction == GridDirection::Long {
+                    dec!(120)
+                } else {
+                    dec!(80)
+                };
+                exit.amount_usdc = exit.price * exit.quantity;
+                accepted.client_order_id = exit.client_order_id.clone();
+                accepted.order_id = 124;
+                accepted.side = exit.side.as_str().into();
+                accepted.price = exit.price;
+                db.save_managed_order(&exit).unwrap();
+                fake.orders
+                    .lock()
+                    .unwrap()
+                    .insert(exit.client_order_id.clone(), accepted);
+                let (url, server) = exchange_server(fake.clone()).await;
+                let mut engine = engine(db.clone(), &url).await;
+                let second = self::engine(database(), &url).await;
+                let global = test_pair_global_limit(&engine, &second).await;
+                {
+                    let mut config = engine.state.config.write().await;
+                    config.grid.direction = direction;
+                    config.grid.max_position_usdc = Some(dec!(100));
+                    config.grid.cancel_opening_on_max_position = true;
+                }
+                engine.state.position.write().await.size = direction.sign();
+                let _pending =
+                    (gate == "pending_fill").then(|| second.state.publish_fill_reconciliation());
+                let _configuration = if gate == "configuration" {
+                    Some(
+                        engine
+                            .state
+                            .order_submission_lock
+                            .clone()
+                            .write_owned()
+                            .await,
+                    )
+                } else {
+                    None
+                };
+                if gate == "blocked" {
+                    second
+                        .state
+                        .global_position_initialized
+                        .store(false, Ordering::SeqCst);
+                    second
+                        .state
+                        .global_position_ready
+                        .store(false, Ordering::SeqCst);
+                    global.check().await;
+                }
+                assert!(engine.state.try_order_submission().is_none());
+
+                match entry {
+                    "maintenance" => engine.maintain_grid_window().await,
+                    "ticker" => {
+                        let mut update = engine.state.ticker.read().await.clone();
+                        update.mark_update_time = Utc::now();
+                        engine.handle_ticker_update(update).await;
+                    }
+                    "placement" => {
+                        assert!(
+                            !engine
+                                .place_grid_order(
+                                    direction.opening_side(),
+                                    dec!(99),
+                                    "gb_blocked_new".into(),
+                                    -1,
+                                    None
+                                )
+                                .await
+                        );
+                    }
+                    "sync_unready" => {
+                        fake.account_unavailable.store(true, Ordering::SeqCst);
+                        engine.sync_cycle().await;
+                        assert!(engine.last_account_sync.is_none());
+                    }
+                    _ => unreachable!(),
+                }
+
+                assert!(
+                    fake.posts.lock().unwrap().is_empty(),
+                    "direction={direction:?}, gate={gate}, entry={entry}"
+                );
+                assert_eq!(
+                    fake.orders.lock().unwrap()[&opening.client_order_id].status,
+                    "CANCELED"
+                );
+                assert_eq!(
+                    fake.orders.lock().unwrap()[&exit.client_order_id].status,
+                    "NEW"
+                );
+                let active = engine.state.active_orders.read().await;
+                assert_eq!(
+                    active.len(),
+                    1,
+                    "direction={direction:?}, gate={gate}, entry={entry}"
+                );
+                assert_eq!(active[&exit.client_order_id].price, exit.price);
+                assert_eq!(active[&exit.client_order_id].quantity, exit.quantity);
+                drop(active);
+                let saved = db.load_managed_orders("SOLUSDC").unwrap();
+                assert_eq!(saved.len(), 1);
+                assert_eq!(saved[0].client_order_id, exit.client_order_id);
+                assert!(db.get_recent_trades(10).unwrap().is_empty());
+                server.abort();
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn pending_or_failing_remainder_recovery_cannot_block_opening_cancellation() {
     for failing in [false, true] {
         let fake = Exchange::default();
@@ -2777,6 +2915,12 @@ async fn protective_opening_cancellation_retries_unconfirmed_orders_and_preserve
         .min_liquidation_distance_pct = Some(dec!(10));
     engine.state.position.write().await.liquidation_price = dec!(95);
     engine.state.ticker.write().await.update_time = Utc::now() - chrono::Duration::seconds(16);
+    let _configuration = engine
+        .state
+        .order_submission_lock
+        .clone()
+        .write_owned()
+        .await;
 
     engine.maintain_grid_window().await;
 

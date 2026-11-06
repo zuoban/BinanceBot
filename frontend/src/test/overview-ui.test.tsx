@@ -436,7 +436,7 @@ it('lists each batch outcome per strategy and only offers a retry when nothing w
   await user.click(screen.getByRole('button', { name: /全部策略操作/ }));
   await user.click(screen.getByText('全部暂停'));
   await user.click(await screen.findByRole('button', { name: '确认执行' }));
-  const drawer = await screen.findByRole('dialog');
+  const drawer = await screen.findByLabelText('批量操作结果', { selector: '[role="dialog"]' });
   expect(within(drawer).getByText('全部暂停：1/6 已确认')).toBeInTheDocument();
   const rows = within(drawer).getAllByRole('listitem');
   expect(rows.map(row => within(row).getByRole('link').textContent)).toEqual(['SOLUSDC', 'BNBUSDC', 'XRPUSDC', 'BTCUSDC', 'ETHUSDC']);

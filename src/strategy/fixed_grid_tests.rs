@@ -307,6 +307,98 @@ async fn fresh_mark_cancels_openings_with_stale_last_trade_without_repricing_exi
 }
 
 #[tokio::test]
+async fn opening_protection_uses_fresh_position_marks_and_suspends_without_fresh_marks() {
+    for direction in [GridDirection::Long, GridDirection::Short] {
+        for source in [
+            "position_close",
+            "position_safe",
+            "stale",
+            "future",
+            "missing",
+        ] {
+            let mut engine = paper_engine().await;
+            {
+                let mut config = engine.state.config.write().await;
+                config.grid.direction = direction;
+                config.grid.min_liquidation_distance_pct = Some(dec!(10));
+            }
+            let now = Utc::now();
+            let safe_mark = if direction == GridDirection::Long {
+                dec!(140)
+            } else {
+                dec!(60)
+            };
+            {
+                let mut ticker = engine.state.ticker.write().await;
+                ticker.last_price = safe_mark;
+                ticker.update_time = now;
+                ticker.mark_price = if source == "missing" {
+                    Decimal::ZERO
+                } else {
+                    safe_mark
+                };
+                ticker.mark_update_time = if source == "future" {
+                    now + chrono::Duration::seconds(60)
+                } else {
+                    now - chrono::Duration::seconds(16)
+                };
+            }
+            {
+                let mut position = engine.state.position.write().await;
+                position.size = direction.sign() * dec!(2);
+                position.liquidation_price = dec!(100);
+                position.mark_price = if source == "position_close" {
+                    if direction == GridDirection::Long {
+                        dec!(105)
+                    } else {
+                        dec!(95)
+                    }
+                } else if source == "missing" {
+                    Decimal::ZERO
+                } else {
+                    safe_mark
+                };
+                position.update_time = Some(match source {
+                    "stale" => now - chrono::Duration::seconds(31),
+                    "future" => now + chrono::Duration::seconds(60),
+                    _ => now,
+                });
+            }
+            let opening = order("mark_opening", direction.opening_side(), dec!(99), dec!(1));
+            let exit = order("mark_exit", direction.closing_side(), dec!(150), dec!(1));
+            for pending in [opening.clone(), exit.clone()] {
+                engine
+                    .state
+                    .active_orders
+                    .write()
+                    .await
+                    .insert(pending.client_order_id.clone(), pending);
+            }
+            let _configuration = engine
+                .state
+                .order_submission_lock
+                .clone()
+                .write_owned()
+                .await;
+
+            engine.maintain_grid_window().await;
+
+            assert_eq!(*engine.state.status.read().await, BotStatus::Running);
+            let active = engine.state.active_orders.read().await;
+            let suspended = source != "position_safe";
+            assert_eq!(
+                active.contains_key(&opening.client_order_id),
+                !suspended,
+                "direction={direction:?}, source={source}"
+            );
+            assert_eq!(active.len(), if suspended { 1 } else { 2 });
+            assert_eq!(active[&exit.client_order_id].price, exit.price);
+            assert_eq!(active[&exit.client_order_id].quantity, exit.quantity);
+        }
+    }
+}
+
+#[tokio::test]
 async fn cancel_opening_at_limit_keeps_running_and_keeps_exits() {
     let mut engine = paper_engine().await;
     {

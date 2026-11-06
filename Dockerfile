@@ -1,7 +1,7 @@
 # -------------------------------------------------------------------
 # Stage 1: Build binary with cargo
 # -------------------------------------------------------------------
-FROM rust:1.88-bookworm AS builder
+FROM rust:1.98.1-bookworm AS builder
 WORKDIR /usr/src/app
 
 # Copy dependency specifications first to leverage Docker layer caching
@@ -9,12 +9,12 @@ COPY Cargo.toml Cargo.lock ./
 RUN mkdir src \
     && echo "fn main() {}" > src/main.rs \
     && echo "" > src/lib.rs \
-    && cargo build --release \
+    && cargo build --release --locked \
     && rm -rf src
 
 # Copy source code and build actual binary
 COPY src ./src
-RUN touch src/main.rs src/lib.rs && cargo build --release
+RUN touch src/main.rs src/lib.rs && cargo build --release --locked
 
 # -------------------------------------------------------------------
 # Stage 2: Minimal runtime image

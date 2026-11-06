@@ -934,9 +934,11 @@ impl Database {
             "CREATE INDEX IF NOT EXISTS idx_trades_scope ON trades (symbol, mode, timestamp DESC);",
             [],
         )?;
-        retire_legacy_testnet_config(&conn)?;
-        retire_legacy_dry_run_intent(&conn)?;
-        retire_legacy_testnet_rows(&conn)?;
+        let tx = conn.transaction()?;
+        retire_legacy_testnet_config(&tx)?;
+        retire_legacy_dry_run_intent(&tx)?;
+        retire_legacy_testnet_rows(&tx)?;
+        tx.commit()?;
 
         info!("SQLite schema verified for database: {}", self.path);
         Ok(())
@@ -2443,9 +2445,9 @@ fn save_pair_config_on(conn: &Connection, symbol: &str, config: &AppConfig) -> R
     save_config_on(conn, &saved)
 }
 
-/// Testnet trading was removed. A saved strategy pinned to the retired Binance
-/// testnet must not silently start trading on mainnet, so it is switched to
-/// paper mode and paused until an operator reviews it.
+/// Testnet trading was removed. Credentials now select one global mode, so any
+/// saved testnet strategy moves all configured strategies to paused paper mode.
+/// Keep non-testnet recovery state intact for an operator to review.
 fn retire_legacy_testnet_config(conn: &Connection) -> Result<()> {
     let stored: Option<String> = conn
         .query_row(
@@ -2463,10 +2465,8 @@ fn retire_legacy_testnet_config(conn: &Connection) -> Result<()> {
     let Some(root) = config.as_object_mut() else {
         return Ok(());
     };
-    let mut symbols = Vec::new();
     let mut retired = false;
     let mut paper_required = false;
-    let mut global_testnet = false;
     if let Some(exchange) = root
         .get_mut("exchange")
         .and_then(serde_json::Value::as_object_mut)
@@ -2476,7 +2476,6 @@ fn retire_legacy_testnet_config(conn: &Connection) -> Result<()> {
             .and_then(|value| value.as_bool())
         {
             retired = true;
-            global_testnet = flag;
             paper_required |= flag;
         }
     }
@@ -2494,34 +2493,13 @@ fn retire_legacy_testnet_config(conn: &Connection) -> Result<()> {
                 .and_then(|exchange| exchange.remove("is_testnet"))
                 .and_then(|value| value.as_bool());
             retired |= flag.is_some();
-            if !flag.unwrap_or(global_testnet) {
-                continue;
-            }
-            if !pair.contains_key("exchange") {
-                pair.insert(
-                    "exchange".into(),
-                    serde_json::Value::Object(Default::default()),
-                );
-            }
-            if let Some(exchange) = pair
-                .get_mut("exchange")
-                .and_then(serde_json::Value::as_object_mut)
-            {
-                let testnet = flag.unwrap_or(global_testnet);
-                paper_required |= testnet;
-                if testnet {
-                    exchange.remove("api_key");
-                    exchange.remove("api_secret");
-                }
-            }
-            if let Some(symbol) = pair.get("symbol").and_then(|value| value.as_str()) {
-                symbols.push(symbol.to_ascii_uppercase());
-            }
+            paper_required |= flag.unwrap_or(false);
         }
     }
     if !retired {
         return Ok(());
     }
+    let mut symbols = Vec::new();
     if paper_required {
         if let Some(exchange) = root
             .get_mut("exchange")
@@ -2530,14 +2508,33 @@ fn retire_legacy_testnet_config(conn: &Connection) -> Result<()> {
             exchange.remove("api_key");
             exchange.remove("api_secret");
         }
-    }
-    if global_testnet {
-        if let Some(symbol) = root
-            .get("exchange")
-            .and_then(|exchange| exchange.get("symbol"))
-            .and_then(|value| value.as_str())
+        if let Some(pairs) = root
+            .get_mut("pairs")
+            .and_then(serde_json::Value::as_array_mut)
         {
-            symbols.push(symbol.to_ascii_uppercase());
+            for pair in pairs {
+                // Startup promotes the first pair's credentials to the global
+                // exchange. No legacy override may restore live mode.
+                if let Some(exchange) = pair
+                    .get_mut("exchange")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    exchange.remove("api_key");
+                    exchange.remove("api_secret");
+                }
+                if let Some(symbol) = pair.get("symbol").and_then(serde_json::Value::as_str) {
+                    symbols.push(symbol.to_ascii_uppercase());
+                }
+            }
+        }
+        if symbols.is_empty() {
+            if let Some(symbol) = root
+                .get("exchange")
+                .and_then(|exchange| exchange.get("symbol"))
+                .and_then(serde_json::Value::as_str)
+            {
+                symbols.push(symbol.to_ascii_uppercase());
+            }
         }
     }
     conn.execute(
@@ -4594,6 +4591,95 @@ mod tests {
             None
         );
     }
+
+    fn save_legacy_config(db: &Database, config: &serde_json::Value) {
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT OR REPLACE INTO app_config (id, symbol, config_json, updated_at)
+                 VALUES (1, 'SOLUSDC', ?1, 'legacy')",
+                params![serde_json::to_string_pretty(config).unwrap()],
+            )
+            .unwrap();
+    }
+
+    fn legacy_mixed_testnet_config() -> serde_json::Value {
+        let mut config = serde_json::to_value(AppConfig::default()).unwrap();
+        config["exchange"]["api_key"] = serde_json::json!("root-key");
+        config["exchange"]["api_secret"] = serde_json::json!("root-secret");
+        config["exchange"]["is_testnet"] = serde_json::json!(false);
+        config["exchange"]["dry_run"] = serde_json::json!(false);
+        config["pairs"] = serde_json::json!([
+            {"symbol": "SOLUSDC", "exchange": {
+                "api_key": "live-key", "api_secret": "live-secret",
+                "is_testnet": false, "dry_run": false
+            }},
+            {"symbol": "BTCUSDT", "exchange": {
+                "api_key": "testnet-key", "api_secret": "testnet-secret",
+                "is_testnet": true, "dry_run": false
+            }}
+        ]);
+        config
+    }
+
+    fn assert_retired_testnet_paused(db: &Database, symbols: &[&str]) -> AppConfig {
+        let mut config = db.load_config().unwrap().unwrap();
+        assert!(config.exchange.api_key.is_empty());
+        assert!(config.exchange.api_secret.is_empty());
+        assert!(config
+            .pairs
+            .iter()
+            .all(|pair| { pair.exchange.api_key.is_none() && pair.exchange.api_secret.is_none() }));
+        // Exercise the same promotion and strategy resolution used at startup.
+        config.ensure_pair_list().unwrap();
+        config.validate().unwrap();
+        let strategies = config.strategy_configs().unwrap();
+        assert_eq!(strategies.len(), symbols.len());
+        for (strategy, symbol) in strategies.iter().zip(symbols) {
+            assert_eq!(strategy.exchange.symbol.as_str(), *symbol);
+            assert_eq!(strategy.exchange.trading_mode(), TradingMode::Paper);
+            assert!(strategy.exchange.api_key.is_empty());
+            assert!(strategy.exchange.api_secret.is_empty());
+            assert_eq!(
+                db.load_pair_status(symbol, TradingMode::Paper).unwrap(),
+                Some(BotStatus::Paused)
+            );
+        }
+        config
+    }
+
+    fn non_testnet_recovery_rows(db: &Database) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
+        let conn = db.conn.lock().unwrap();
+        [
+            "paper_accounts",
+            "pair_execution_guard",
+            "trades",
+            "scoped_grid_stats",
+            "pair_intents",
+            "remainder_plans",
+            "execution_frontiers",
+            "managed_orders",
+            "account_hourly_snapshots",
+        ]
+        .iter()
+        .map(|table| {
+            let mut statement = conn
+                .prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))
+                .unwrap();
+            let columns = statement.column_count();
+            let rows = statement
+                .query_map([], |row| {
+                    (0..columns)
+                        .map(|index| row.get::<_, rusqlite::types::Value>(index))
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                })
+                .unwrap();
+            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        })
+        .collect()
+    }
+
     #[test]
     fn legacy_testnet_configuration_is_retired_to_paused_paper_mode() {
         let path = std::env::temp_dir().join(format!("legacy-testnet-{}.db", uuid::Uuid::new_v4()));
@@ -4622,15 +4708,7 @@ mod tests {
                 .unwrap();
         }
         let db = Database::open(&path).unwrap();
-        let config = db.load_config().unwrap().unwrap();
-        assert!(config.exchange.is_paper());
-        assert!(config.exchange.api_key.is_empty());
-        assert!(config.exchange.api_secret.is_empty());
-        assert!(config
-            .strategy_configs()
-            .unwrap()
-            .iter()
-            .all(|strategy| strategy.exchange.is_paper()));
+        assert_retired_testnet_paused(&db, &["SOLUSDC", "BTCUSDT"]);
         let stored: String = db
             .conn
             .lock()
@@ -4654,6 +4732,334 @@ mod tests {
         }
         drop(db);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn legacy_root_testnet_without_pairs_pauses_existing_paper_runtime() {
+        let path = std::env::temp_dir().join(format!("root-testnet-{}.db", uuid::Uuid::new_v4()));
+        {
+            let db = Database::open(&path).unwrap();
+            let mut config = serde_json::to_value(AppConfig::default()).unwrap();
+            config["exchange"]["is_testnet"] = serde_json::json!(true);
+            config["exchange"]["dry_run"] = serde_json::json!(false);
+            config["exchange"]["api_key"] = serde_json::json!("testnet-key");
+            config["exchange"]["api_secret"] = serde_json::json!("testnet-secret");
+            save_legacy_config(&db, &config);
+            db.save_bot_status(BotStatus::Running).unwrap();
+            db.save_pair_status("SOLUSDC", TradingMode::Paper, BotStatus::Running)
+                .unwrap();
+        }
+        let db = Database::open(&path).unwrap();
+        assert_retired_testnet_paused(&db, &["SOLUSDC"]);
+        assert!(db.load_paper_state("SOLUSDC").unwrap().is_none());
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn legacy_first_pair_testnet_clears_credentials_for_all_pairs() {
+        let path = std::env::temp_dir().join(format!("pair-testnet-{}.db", uuid::Uuid::new_v4()));
+        {
+            let db = Database::open(&path).unwrap();
+            let mut config = legacy_mixed_testnet_config();
+            config["pairs"][0]["exchange"]["is_testnet"] = serde_json::json!(true);
+            config["pairs"][1]["exchange"]["is_testnet"] = serde_json::json!(false);
+            save_legacy_config(&db, &config);
+            for symbol in ["SOLUSDC", "BTCUSDT"] {
+                db.save_pair_status(symbol, TradingMode::Paper, BotStatus::Running)
+                    .unwrap();
+            }
+        }
+        let db = Database::open(&path).unwrap();
+        assert_retired_testnet_paused(&db, &["SOLUSDC", "BTCUSDT"]);
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn legacy_first_live_second_testnet_pauses_paper_and_preserves_recovery_across_reopen() {
+        for paper_intent in [false, true] {
+            let path =
+                std::env::temp_dir().join(format!("mixed-testnet-{}.db", uuid::Uuid::new_v4()));
+            let position = PositionInfo {
+                symbol: "SOLUSDC".into(),
+                size: dec!(2),
+                entry_price: dec!(100),
+                mark_price: dec!(100),
+                leverage: 1,
+                ..PositionInfo::default()
+            };
+            let account = AccountInfo {
+                asset: "USDC".into(),
+                total_wallet_balance: dec!(9876),
+                available_balance: dec!(9676),
+                margin_balance: dec!(9876),
+                ..AccountInfo::default()
+            };
+            let before;
+            {
+                let db = Database::open(&path).unwrap();
+                let mut config = legacy_mixed_testnet_config();
+                config["pairs"][0]["exchange"]["dry_run"] = serde_json::json!(paper_intent);
+                save_legacy_config(&db, &config);
+                for symbol in ["SOLUSDC", "BTCUSDT"] {
+                    for mode in [TradingMode::Live, TradingMode::Paper] {
+                        db.save_pair_status(symbol, mode, BotStatus::Running)
+                            .unwrap();
+                        db.arm_execution_guard(symbol, mode).unwrap();
+                        // Clean LIVE/Running is eligible for automatic startup recovery.
+                        if mode == TradingMode::Live {
+                            db.clear_execution_guard(symbol, mode).unwrap();
+                        }
+                    }
+                }
+                let child = GridOrder {
+                    client_order_id: "saved-live-child".into(),
+                    order_id: None,
+                    symbol: "SOLUSDC".into(),
+                    side: OrderSide::Sell,
+                    price: dec!(101),
+                    quantity: dec!(1),
+                    amount_usdc: dec!(101),
+                    status: crate::types::OrderStatus::New,
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                    grid_level: 0,
+                    paired_client_order_id: Some("revision-order".into()),
+                    is_take_profit: true,
+                    purpose: crate::types::OrderPurpose::TakeProfit,
+                    merge_sources: Vec::new(),
+                };
+                let mut live_trade = revision_test_trade();
+                live_trade.mode = TradingMode::Live;
+                db.insert_trade_with_recovery(
+                    &live_trade,
+                    &GridStats::default(),
+                    Some(&child),
+                    None,
+                )
+                .unwrap();
+                db.save_managed_order(&child).unwrap();
+                let mut remainder = child.clone();
+                remainder.client_order_id = "saved-live-remainder".into();
+                remainder.purpose = crate::types::OrderPurpose::Remainder;
+                db.save_remainder_plan(&RemainderPlan {
+                    symbol: "SOLUSDC".into(),
+                    mode: TradingMode::Live,
+                    sources: vec![child.clone()],
+                    target: remainder,
+                    phase: crate::types::RemainderPhase::Canceling,
+                })
+                .unwrap();
+                let mut paper_trade = revision_test_trade();
+                paper_trade.trade_id = "saved-paper-trade".into();
+                paper_trade.client_order_id = "saved-paper-order".into();
+                let mut paper_child = child.clone();
+                paper_child.client_order_id = "saved-paper-child".into();
+                paper_child.paired_client_order_id = Some(paper_trade.client_order_id.clone());
+                db.insert_trade_with_recovery(
+                    &paper_trade,
+                    &GridStats::default(),
+                    Some(&paper_child),
+                    None,
+                )
+                .unwrap();
+                let conn = db.conn.lock().unwrap();
+                conn.execute(
+                    "INSERT INTO paper_accounts VALUES ('SOLUSDC', ?1, ?2)",
+                    params![
+                        serde_json::to_string(&position).unwrap(),
+                        serde_json::to_string(&account).unwrap()
+                    ],
+                )
+                .unwrap();
+                conn.execute_batch(
+                    "INSERT INTO execution_frontiers VALUES (
+                         'SOLUSDC', 'LIVE', 'BUY', '100', '2026-01-01T00:00:00Z'
+                     );
+                     INSERT INTO account_hourly_snapshots VALUES (1, '[]');",
+                )
+                .unwrap();
+                drop(conn);
+                before = non_testnet_recovery_rows(&db);
+            }
+            for _ in 0..2 {
+                let db = Database::open(&path).unwrap();
+                let normalized = assert_retired_testnet_paused(&db, &["SOLUSDC", "BTCUSDT"]);
+                for symbol in ["SOLUSDC", "BTCUSDT"] {
+                    assert_eq!(
+                        db.load_pair_status(symbol, TradingMode::Live).unwrap(),
+                        Some(BotStatus::Running)
+                    );
+                }
+                assert_eq!(non_testnet_recovery_rows(&db), before);
+                let (saved_position, saved_account) =
+                    db.load_paper_state("SOLUSDC").unwrap().unwrap();
+                assert_eq!(saved_position.size, position.size);
+                assert_eq!(saved_position.entry_price, position.entry_price);
+                assert_eq!(
+                    saved_account.total_wallet_balance,
+                    account.total_wallet_balance
+                );
+                assert_eq!(saved_account.available_balance, account.available_balance);
+                assert!(db.load_paper_state("BTCUSDT").unwrap().is_none());
+                // Match main's save after ensure_pair_list, then restart again.
+                db.save_config(&normalized).unwrap();
+            }
+            let db = Database::open(&path).unwrap();
+            db.save_pair_status("SOLUSDC", TradingMode::Paper, BotStatus::Running)
+                .unwrap();
+            drop(db);
+            let db = Database::open(&path).unwrap();
+            let mut normalized = db.load_config().unwrap().unwrap();
+            normalized.ensure_pair_list().unwrap();
+            assert!(normalized.exchange.is_paper());
+            assert_eq!(
+                db.load_pair_status("SOLUSDC", TradingMode::Paper).unwrap(),
+                Some(BotStatus::Running)
+            );
+            assert_eq!(non_testnet_recovery_rows(&db), before);
+            drop(db);
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn legacy_live_only_config_keeps_credentials_and_running_state() {
+        for legacy_flags in [false, true] {
+            let path = std::env::temp_dir()
+                .join(format!("live-only-migration-{}.db", uuid::Uuid::new_v4()));
+            {
+                let db = Database::open(&path).unwrap();
+                let mut config = legacy_mixed_testnet_config();
+                config["pairs"][1]["exchange"]["is_testnet"] = serde_json::json!(false);
+                if !legacy_flags {
+                    config["exchange"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("is_testnet");
+                    for pair in config["pairs"].as_array_mut().unwrap() {
+                        pair["exchange"]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("is_testnet");
+                    }
+                }
+                save_legacy_config(&db, &config);
+                for symbol in ["SOLUSDC", "BTCUSDT"] {
+                    db.save_pair_status(symbol, TradingMode::Live, BotStatus::Running)
+                        .unwrap();
+                    db.arm_execution_guard(symbol, TradingMode::Live).unwrap();
+                    db.clear_execution_guard(symbol, TradingMode::Live).unwrap();
+                }
+            }
+            for _ in 0..2 {
+                let db = Database::open(&path).unwrap();
+                let mut config = db.load_config().unwrap().unwrap();
+                assert_eq!(config.exchange.api_key, "root-key");
+                assert_eq!(config.exchange.api_secret, "root-secret");
+                assert_eq!(
+                    config.pairs[0].exchange.api_key.as_deref(),
+                    Some("live-key")
+                );
+                assert_eq!(
+                    config.pairs[0].exchange.api_secret.as_deref(),
+                    Some("live-secret")
+                );
+                assert_eq!(
+                    config.pairs[1].exchange.api_key.as_deref(),
+                    Some("testnet-key")
+                );
+                assert_eq!(
+                    config.pairs[1].exchange.api_secret.as_deref(),
+                    Some("testnet-secret")
+                );
+                config.ensure_pair_list().unwrap();
+                assert_eq!(config.exchange.api_key, "live-key");
+                assert_eq!(config.exchange.api_secret, "live-secret");
+                for strategy in config.strategy_configs().unwrap() {
+                    assert_eq!(strategy.exchange.trading_mode(), TradingMode::Live);
+                    assert_eq!(
+                        db.load_pair_status(&strategy.exchange.symbol, TradingMode::Live)
+                            .unwrap(),
+                        Some(BotStatus::Running)
+                    );
+                    assert_eq!(
+                        db.load_pair_status(&strategy.exchange.symbol, TradingMode::Paper)
+                            .unwrap(),
+                        None
+                    );
+                    assert!(!db
+                        .arm_execution_guard(&strategy.exchange.symbol, TradingMode::Live)
+                        .unwrap());
+                    db.clear_execution_guard(&strategy.exchange.symbol, TradingMode::Live)
+                        .unwrap();
+                }
+            }
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn legacy_testnet_migration_rolls_back_configuration_and_all_pauses_on_failure() {
+        for trigger in [
+            "CREATE TRIGGER reject_migration BEFORE UPDATE ON app_config
+             BEGIN SELECT RAISE(ABORT, 'reject config migration'); END;",
+            "CREATE TRIGGER reject_migration BEFORE INSERT ON pair_runtime
+             WHEN NEW.symbol = 'SOLUSDC' AND NEW.mode = 'PAPER'
+             BEGIN SELECT RAISE(ABORT, 'reject second pause'); END;",
+        ] {
+            let path = std::env::temp_dir().join(format!(
+                "testnet-migration-rollback-{}.db",
+                uuid::Uuid::new_v4()
+            ));
+            let legacy = legacy_mixed_testnet_config();
+            {
+                let db = Database::open(&path).unwrap();
+                save_legacy_config(&db, &legacy);
+                for symbol in ["SOLUSDC", "BTCUSDT"] {
+                    db.save_pair_status(symbol, TradingMode::Paper, BotStatus::Running)
+                        .unwrap();
+                }
+                db.conn.lock().unwrap().execute_batch(trigger).unwrap();
+            }
+            assert!(Database::open(&path).is_err());
+            let conn = Connection::open(&path).unwrap();
+            let stored: String = conn
+                .query_row(
+                    "SELECT config_json FROM app_config WHERE id = 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&stored).unwrap(),
+                legacy
+            );
+            for symbol in ["SOLUSDC", "BTCUSDT"] {
+                let status: String = conn
+                    .query_row(
+                        "SELECT status FROM pair_runtime WHERE symbol = ?1 AND mode = 'PAPER'",
+                        params![symbol],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    serde_json::from_str::<BotStatus>(&status).unwrap(),
+                    BotStatus::Running
+                );
+            }
+            conn.execute_batch("DROP TRIGGER reject_migration;")
+                .unwrap();
+            drop(conn);
+            let db = Database::open(&path).unwrap();
+            assert_retired_testnet_paused(&db, &["SOLUSDC", "BTCUSDT"]);
+            drop(db);
+            let db = Database::open(&path).unwrap();
+            assert_retired_testnet_paused(&db, &["SOLUSDC", "BTCUSDT"]);
+            drop(db);
+            std::fs::remove_file(path).unwrap();
+        }
     }
 
     #[test]

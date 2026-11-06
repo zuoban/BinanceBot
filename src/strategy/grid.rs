@@ -859,27 +859,63 @@ impl GridTradingEngine {
     /// value is at the cap in cancel-opening mode, or the mark price is within the configured
     /// distance of the liquidation price.
     async fn opening_suspended_at_limit(&self, config: &crate::config::AppConfig) -> bool {
-        let position = self.state.position.read().await.clone();
-        let ticker = self.state.ticker.read().await.clone();
-        let price = position_valuation_price(&position, &ticker);
-        if price <= Decimal::ZERO {
+        let cap = config.grid.max_position_usdc.filter(|limit| {
+            *limit > Decimal::ZERO
+                && config.grid.cancel_opening_on_max_position
+                && !config.grid.pause_on_max_position
+        });
+        if cap.is_none() && config.grid.min_liquidation_distance_pct.is_none() {
             return false;
         }
-        if config.grid.cancel_opening_on_max_position && !config.grid.pause_on_max_position {
-            if let Some(limit) = config
-                .grid
-                .max_position_usdc
-                .filter(|limit| *limit > Decimal::ZERO)
-            {
-                if position.size.abs() * price >= limit {
-                    return true;
-                }
-            }
+        let (size, liquidation_price, position_mark_price, position_update_time) = {
+            let position = self.state.position.read().await;
+            (
+                position.size,
+                position.liquidation_price,
+                position.mark_price,
+                position.update_time,
+            )
+        };
+        let liquidation_guard =
+            config.grid.min_liquidation_distance_pct.is_some() && liquidation_price > Decimal::ZERO;
+        if size.is_zero() || (cap.is_none() && !liquidation_guard) {
+            return false;
+        }
+        let (mark_price, mark_update_time) = {
+            let ticker = self.state.ticker.read().await;
+            (ticker.mark_price, ticker.mark_update_time)
+        };
+        let now = Utc::now();
+        let fresh = |time, max_age| {
+            let age = now.signed_duration_since(time);
+            age >= chrono::Duration::zero() && age < chrono::Duration::seconds(max_age)
+        };
+        // Market marks follow the existing 15-second market-data freshness limit.
+        // Position marks follow the account reconciliation freshness allowance.
+        let position_max_age = config
+            .exchange
+            .sync_interval_secs
+            .saturating_mul(3)
+            .max(30)
+            .min(i64::MAX as u64) as i64;
+        let price = if mark_price > Decimal::ZERO && fresh(mark_update_time, 15) {
+            mark_price
+        } else if position_mark_price > Decimal::ZERO
+            && position_update_time.is_some_and(|time| fresh(time, position_max_age))
+        {
+            position_mark_price
+        } else {
+            // Last trades cannot establish liquidation distance. Keep openings
+            // suspended until a fresh mark can establish that protection is safe.
+            return true;
+        };
+        if cap.is_some_and(|limit| size.abs() * price >= limit) {
+            return true;
         }
         liquidation_too_close(
-            position.size,
+            size,
             price,
-            position.liquidation_price,
+            liquidation_price,
             config.grid.min_liquidation_distance_pct,
         )
     }
@@ -887,6 +923,9 @@ impl GridTradingEngine {
     /// Cancel only idle opening orders; partial executions retain their existing protection.
     /// Keep this outside fill recording so cancellation cannot recurse through another fill.
     async fn cancel_suspended_opening_orders(&mut self, config: &crate::config::AppConfig) -> bool {
+        if self.state.is_shutting_down() || *self.state.status.read().await != BotStatus::Running {
+            return true;
+        }
         if !self.opening_suspended_at_limit(config).await {
             return true;
         }
@@ -1881,6 +1920,11 @@ impl GridTradingEngine {
             self.update_paper_valuation().await;
         }
 
+        let config = self.state.config.read().await.clone();
+        if !self.cancel_suspended_opening_orders(&config).await {
+            return;
+        }
+
         if self.pause_if_position_limit_reached().await {
             return;
         }
@@ -2006,6 +2050,13 @@ impl GridTradingEngine {
             finish_sync!("paused_after_ticker");
             return;
         }
+        // Cancellation remains available when the following reconciliation cannot
+        // establish replenishment readiness, including the sync performed on resume.
+        self.cancel_suspended_opening_orders(&config).await;
+        if self.state.pause_epoch() != pause_epoch {
+            finish_sync!("paused_after_opening_protection");
+            return;
+        }
 
         let account_ready = if !paper {
             let orders_ready = self
@@ -2048,14 +2099,16 @@ impl GridTradingEngine {
             return;
         }
 
+        let openings_protected = self.cancel_suspended_opening_orders(&config).await;
         if self.pause_if_position_limit_reached().await {
             finish_sync!("position_limit");
             return;
         }
         self.trim_closing_orders_to_position().await;
 
-        let maintain_window =
-            *self.state.status.read().await == BotStatus::Running && account_ready;
+        let maintain_window = *self.state.status.read().await == BotStatus::Running
+            && account_ready
+            && openings_protected;
         if maintain_window {
             self.maintain_grid_window().await;
         }
@@ -2995,14 +3048,8 @@ impl GridTradingEngine {
 
     /// Ensure the active pre-placed order window matches buy_window and sell_window
     async fn maintain_grid_window(&mut self) {
-        if self.state.try_order_submission().is_none() {
-            return;
-        }
         let config = self.state.config.read().await.clone();
         if self.state.is_shutting_down() || *self.state.status.read().await != BotStatus::Running {
-            return;
-        }
-        if self.pause_if_position_limit_reached().await {
             return;
         }
         // Opposite positions require cancellation even while prices are stale.
@@ -3012,6 +3059,12 @@ impl GridTradingEngine {
         // Risk cancellation needs a valuation price, not a fresh last-trade price or
         // a completed replenishment workflow. Never reprice orders through this path.
         if !self.cancel_suspended_opening_orders(&config).await {
+            return;
+        }
+        if self.state.try_order_submission().is_none() {
+            return;
+        }
+        if self.pause_if_position_limit_reached().await {
             return;
         }
         if !self.market_data_ready().await {
@@ -3350,13 +3403,7 @@ impl GridTradingEngine {
         paired_client_order_id: Option<String>,
         order_quantity: Option<Decimal>,
     ) -> bool {
-        let Some(_submission) = self.state.try_order_submission() else {
-            return false;
-        };
         if self.state.is_shutting_down() || *self.state.status.read().await != BotStatus::Running {
-            return false;
-        }
-        if self.pause_if_position_limit_reached().await {
             return false;
         }
         if !self.position_direction_ready().await {
@@ -3367,6 +3414,12 @@ impl GridTradingEngine {
             && self.opening_suspended_at_limit(&config).await
         {
             self.cancel_suspended_opening_orders(&config).await;
+            return false;
+        }
+        let Some(_submission) = self.state.try_order_submission() else {
+            return false;
+        };
+        if self.pause_if_position_limit_reached().await {
             return false;
         }
         let rules = self.state.rules.read().await.clone();
