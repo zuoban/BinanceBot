@@ -111,7 +111,7 @@ export default function OverviewPage() {
   };
   const matchesStatus = (e: typeof entries[number]) => statusFilter === 'all' || (statusFilter === 'LIVE' ? e.mode === 'LIVE' : e.snapshot.status === statusFilter);
   const visible = entries.filter(e => e.snapshot.symbol.includes(search.toUpperCase().trim()) && matchesStatus(e))
-    .sort((a, b) => sort === 'position' ? comparePositionAmount(a.snapshot, b.snapshot) : sort === 'today' ? (todayCount(b.snapshot) ?? -1) - (todayCount(a.snapshot) ?? -1) : sort === 'orders' ? b.snapshot.active_orders.length - a.snapshot.active_orders.length : a.snapshot.symbol.localeCompare(b.snapshot.symbol));
+    .sort((a, b) => sort === 'position' ? Number(b.snapshot.status === 'RUNNING') - Number(a.snapshot.status === 'RUNNING') || comparePositionAmount(a.snapshot, b.snapshot) : sort === 'today' ? (todayCount(b.snapshot) ?? -1) - (todayCount(a.snapshot) ?? -1) : sort === 'orders' ? b.snapshot.active_orders.length - a.snapshot.active_orders.length : a.snapshot.symbol.localeCompare(b.snapshot.symbol));
   const clearFilters = () => updateFilters({ q: '', sort: 'position', status: 'all' });
   const counts = entries.map(e => todayTradeCounts(e.snapshot));
   const today = counts.every(c => c !== null) ? counts.reduce<{ buy: number; sell: number }>((sum, c) => ({ buy: sum.buy + c!.buy, sell: sum.sell + c!.sell }), { buy: 0, sell: 0 }) : null;
@@ -199,7 +199,7 @@ export default function OverviewPage() {
     </div>
     <div className="filter-bar">
       <Input prefix={<SearchOutlined />} placeholder="搜索交易对" aria-label="搜索交易对" allowClear value={search} onChange={e => setSearch(e.target.value)} />
-      <Select aria-label="策略排序" value={sort} onChange={setSort} options={[{ value: 'position', label: '按持仓金额排序' }, { value: 'symbol', label: '按交易对排序' }, { value: 'today', label: '按今日成交排序' }, { value: 'orders', label: '按挂单数排序' }]} />
+      <Select aria-label="策略排序" value={sort} onChange={setSort} options={[{ value: 'position', label: '按状态与持仓排序' }, { value: 'symbol', label: '按交易对排序' }, { value: 'today', label: '按今日成交排序' }, { value: 'orders', label: '按挂单数排序' }]} />
       {(search || sort !== 'position' || statusFilter !== 'all') && <Button type="text" onClick={clearFilters}>清除筛选</Button>}
     </div>
     <Row gutter={[20, 20]}>

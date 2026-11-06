@@ -25,6 +25,32 @@ const actions = vi.hoisted(() => ({ run: vi.fn(), remove: vi.fn(), busy: new Set
 vi.mock('../components/DeleteStrategy', () => ({ useDeleteStrategy: () => ({ remove: actions.remove, busy: actions.deleting }) }));
 vi.mock('../components/Controls', () => ({ useControls: () => ({ busy: actions.busy, pending: actions.pending, results: {}, run: actions.run }), runBatchControls: vi.fn(), pendingLabel: { pause: '暂停中…', resume: '恢复中…', cancel_all: '撤单中…', rebalance: '重建中…' } }));
 
+it('orders running strategies first, then by absolute position amount, and updates after a status change', () => {
+  const strategies = [
+    ['BTCUSDC', 'PAUSED', '100'],
+    ['BNBUSDC', 'PAUSED', '1'],
+    ['SOLUSDC', 'RUNNING', '2'],
+    ['ZECUSDC', 'RUNNING', '-3'],
+    ['ADAUSDC', 'RUNNING', '2'],
+    ['ETHUSDC', 'RUNNING', '0'],
+    ['XRPUSDC', 'RUNNING', 'invalid'],
+  ] as const;
+  const pairs = strategies.map(([symbol, status, size]) => {
+    const s = snapshot(symbol);
+    s.status = status;
+    s.position.size = size;
+    return { snapshot: s, mode: s.mode, scoped: true };
+  });
+  overview.data = { generated_at: new Date().toISOString(), pairs };
+  const page = <MemoryRouter><App><OverviewPage /></App></MemoryRouter>;
+  const { rerender } = render(page);
+  const symbols = () => [...screen.getByRole('region', { name: '交易策略' }).querySelectorAll('.pair-name')].map(link => link.textContent);
+  expect(symbols()).toEqual(['ZECUSDC', 'ADAUSDC', 'SOLUSDC', 'ETHUSDC', 'XRPUSDC', 'BTCUSDC', 'BNBUSDC']);
+  pairs[0].snapshot.status = 'RUNNING';
+  rerender(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+  expect(symbols()).toEqual(['BTCUSDC', 'ZECUSDC', 'ADAUSDC', 'SOLUSDC', 'ETHUSDC', 'XRPUSDC', 'BNBUSDC']);
+});
+
 it('places the add link in the strategy section and navigates to it', async () => {
   overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: snapshot('BTCUSDC'), mode: 'PAPER', scoped: true }] };
   overview.isPending = false;
