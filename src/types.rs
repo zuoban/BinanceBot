@@ -440,6 +440,12 @@ pub struct UpdateGlobalConfigPayload {
     )]
     pub global_max_position_notional: Option<Option<Decimal>>,
     pub pause_on_zero_available_margin: Option<bool>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_decimal_update",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub min_available_margin_pct: Option<Option<Decimal>>,
 }
 
 fn deserialize_optional_decimal_update<'de, D>(
@@ -455,6 +461,9 @@ impl UpdateGlobalConfigPayload {
     pub fn apply_to(self, config: &mut crate::config::GlobalConfig) {
         if let Some(value) = self.pause_on_zero_available_margin {
             config.pause_on_zero_available_margin = value;
+        }
+        if let Some(value) = self.min_available_margin_pct {
+            config.min_available_margin_pct = value;
         }
         if let Some(value) = self.global_max_position_notional {
             config.global_max_position_notional = value;
@@ -502,6 +511,7 @@ impl UpdateGlobalConfigPayload {
 pub struct WebGlobalConfigView {
     pub version: String,
     pub pause_on_zero_available_margin: bool,
+    pub min_available_margin_pct: Option<Decimal>,
     pub global_max_position_notional: Option<Decimal>,
     pub recv_window: u64,
     pub sync_interval_secs: u64,
@@ -552,6 +562,11 @@ pub struct UpdateConfigPayload {
     pub max_position_usdc: Option<Decimal>,
     #[serde(default)]
     pub pause_on_max_position: Option<bool>,
+    #[serde(default)]
+    pub cancel_opening_on_max_position: Option<bool>,
+    /// Replaces the saved value; omitted or null clears it.
+    #[serde(default)]
+    pub min_liquidation_distance_pct: Option<Decimal>,
 }
 
 impl UpdateConfigPayload {
@@ -590,6 +605,8 @@ pub struct WebConfigView {
     pub max_price: Option<Decimal>,
     pub max_position_usdc: Option<Decimal>,
     pub pause_on_max_position: bool,
+    pub cancel_opening_on_max_position: bool,
+    pub min_liquidation_distance_pct: Option<Decimal>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tick_size: Option<Decimal>,
     #[serde(skip_serializing_if = "Option::is_none")]

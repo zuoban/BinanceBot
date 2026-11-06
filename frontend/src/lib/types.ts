@@ -16,6 +16,8 @@ export interface GridConfig {
   max_price: Decimal | null;
   max_position_usdc: Decimal | null;
   pause_on_max_position: boolean;
+  cancel_opening_on_max_position: boolean;
+  min_liquidation_distance_pct: Decimal | null;
 }
 export interface Pair { symbol: string; scoped: boolean; status: Status; mode: Mode; grid_config: GridConfig }
 export interface Order {
@@ -69,7 +71,7 @@ export interface HourlySnapshot {
 export interface OverviewHistoryData { snapshots: HourlySnapshot[]; current_accounts: HistoryAccount[] }
 export interface GlobalConfig {
   version: string;
-  recv_window: number; sync_interval_secs: number; global_max_position_notional: Decimal | null; pause_on_zero_available_margin: boolean; has_api_key: boolean; has_api_secret: boolean;
+  recv_window: number; sync_interval_secs: number; global_max_position_notional: Decimal | null; pause_on_zero_available_margin: boolean; min_available_margin_pct: Decimal | null; has_api_key: boolean; has_api_secret: boolean;
   api_key_preview: string; telegram_enabled: boolean; has_telegram_bot_token: boolean; telegram_chat_id: string;
 }
 export interface ServerConfig { version: string; saved: { host: string; port: number }; active: { host: string; port: number } }

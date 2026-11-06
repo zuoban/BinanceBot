@@ -29,6 +29,7 @@ struct Exchange {
     position_flat: Arc<AtomicBool>,
     fill_on_submit: Arc<AtomicU8>,
     position_large: Arc<AtomicBool>,
+    liquidation_close_after_submission: Arc<AtomicBool>,
     block_submit: Arc<AtomicBool>,
     submit_started: Arc<tokio::sync::Notify>,
     release_submit: Arc<tokio::sync::Notify>,
@@ -157,7 +158,9 @@ async fn exchange_server(fake: Exchange) -> (String, JoinHandle<()>) {
                 return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"msg":"unavailable"})));
             }
             let amount = if fake.position_flat.load(Ordering::SeqCst) { "0" } else if fake.position_large.load(Ordering::SeqCst) { "2" } else { "1" };
-            (StatusCode::OK, Json(json!([{"symbol":"SOLUSDC", "positionAmt":amount, "entryPrice":"100", "markPrice":"100.5", "unRealizedProfit":"0.5", "liquidationPrice":"0", "leverage":"1"}])))
+            let liquidation = if fake.liquidation_close_after_submission.load(Ordering::SeqCst)
+                && !fake.posts.lock().unwrap().is_empty() { "95" } else { "0" };
+            (StatusCode::OK, Json(json!([{"symbol":"SOLUSDC", "positionAmt":amount, "entryPrice":"100", "markPrice":"100.5", "unRealizedProfit":"0.5", "liquidationPrice":liquidation, "leverage":"1"}])))
         }))
         .route("/fapi/v2/account", get(|State(fake): State<Exchange>| async move {
             if fake.block_account.load(Ordering::SeqCst) {
@@ -2556,6 +2559,258 @@ async fn immediate_partial_and_full_fills_pause_when_position_reaches_limit() {
         assert_eq!(db.load_bot_status().unwrap(), Some(BotStatus::Paused));
         server.abort();
     }
+}
+
+#[tokio::test]
+async fn immediate_fills_suspend_later_openings_and_cancel_existing_window_orders() {
+    for response in [1, 2] {
+        let fake = Exchange::default();
+        fake.fill_on_submit.store(response, Ordering::SeqCst);
+        fake.liquidation_close_after_submission
+            .store(true, Ordering::SeqCst);
+        let db = database();
+        for (id, order_id, side, price) in [
+            ("gb_guard_opening", 123, OrderSide::Buy, dec!(99)),
+            ("gb_guard_exit", 124, OrderSide::Sell, dec!(101)),
+        ] {
+            let (mut order, mut accepted) = managed_price_fixture();
+            order.client_order_id = id.into();
+            order.order_id = Some(order_id);
+            order.side = side;
+            order.price = price;
+            order.quantity = dec!(1);
+            order.amount_usdc = price;
+            order.paired_client_order_id = None;
+            accepted.client_order_id = id.into();
+            accepted.order_id = order_id;
+            accepted.side = side.as_str().into();
+            accepted.price = price;
+            accepted.orig_qty = order.quantity;
+            db.save_managed_order(&order).unwrap();
+            fake.orders.lock().unwrap().insert(id.into(), accepted);
+        }
+        let (url, server) = exchange_server(fake.clone()).await;
+        let mut engine = engine(db.clone(), &url).await;
+        {
+            let mut config = engine.state.config.write().await;
+            config.grid.buy_window = 3;
+            config.grid.min_liquidation_distance_pct = Some(dec!(10));
+        }
+
+        engine.maintain_grid_window().await;
+
+        assert_eq!(*engine.state.status.read().await, BotStatus::Running);
+        assert_eq!(
+            engine.state.position.read().await.liquidation_price,
+            dec!(95)
+        );
+        let submitted = fake.posts.lock().unwrap().clone();
+        assert_eq!(submitted.len(), 1, "response={response}");
+        assert_eq!(fake.orders.lock().unwrap()[&submitted[0]].side, "BUY");
+        assert_eq!(
+            fake.orders.lock().unwrap()["gb_guard_opening"].status,
+            "CANCELED"
+        );
+        assert_eq!(fake.orders.lock().unwrap()["gb_guard_exit"].status, "NEW");
+        let active = engine.state.active_orders.read().await;
+        assert!(active.contains_key("gb_guard_exit"));
+        assert!(!active.contains_key("gb_guard_opening"));
+        assert!(!active
+            .values()
+            .any(|order| order.side == OrderSide::Buy && order.status == OrderStatus::New));
+        if response == 1 {
+            assert_eq!(active[&submitted[0]].status, OrderStatus::PartiallyFilled);
+            assert_eq!(active[&submitted[0]].quantity, dec!(0.5));
+            assert_eq!(
+                fake.orders.lock().unwrap()[&submitted[0]].status,
+                "PARTIALLY_FILLED"
+            );
+        }
+        drop(active);
+        assert!(
+            !engine
+                .place_grid_order(OrderSide::Buy, dec!(98), "gb_guard_later".into(), -1, None)
+                .await
+        );
+        assert_eq!(fake.posts.lock().unwrap().len(), 1);
+        assert!(db
+            .load_managed_orders("SOLUSDC")
+            .unwrap()
+            .iter()
+            .any(|order| order.client_order_id == "gb_guard_exit"));
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn pending_or_failing_remainder_recovery_cannot_block_opening_cancellation() {
+    for failing in [false, true] {
+        let fake = Exchange::default();
+        let db = database();
+        let (mut opening, mut accepted) = managed_price_fixture();
+        opening.price = dec!(100);
+        opening.quantity = dec!(1);
+        opening.amount_usdc = opening.price;
+        accepted.price = opening.price;
+        accepted.orig_qty = opening.quantity;
+        db.save_managed_order(&opening).unwrap();
+        fake.orders
+            .lock()
+            .unwrap()
+            .insert(opening.client_order_id.clone(), accepted.clone());
+        let mut exit = opening.clone();
+        exit.client_order_id = "gb_recovery_exit".into();
+        exit.order_id = Some(124);
+        exit.side = OrderSide::Sell;
+        exit.price = dec!(101);
+        exit.amount_usdc = exit.price;
+        accepted.client_order_id = exit.client_order_id.clone();
+        accepted.order_id = 124;
+        accepted.side = "SELL".into();
+        accepted.price = exit.price;
+        db.save_managed_order(&exit).unwrap();
+        fake.orders
+            .lock()
+            .unwrap()
+            .insert(exit.client_order_id.clone(), accepted);
+        let mut target = exit.clone();
+        target.client_order_id = "gb_pending_remainder_guard".into();
+        target.order_id = None;
+        target.purpose = OrderPurpose::Remainder;
+        let mut missing_source = exit.clone();
+        missing_source.client_order_id = "gb_missing_remainder_source".into();
+        missing_source.order_id = Some(125);
+        let phase = if failing {
+            RemainderPhase::Canceling
+        } else {
+            RemainderPhase::Submitting
+        };
+        db.save_remainder_plan(&RemainderPlan {
+            symbol: "SOLUSDC".into(),
+            mode: TradingMode::Live,
+            sources: if failing {
+                vec![missing_source]
+            } else {
+                vec![]
+            },
+            target,
+            phase,
+        })
+        .unwrap();
+        let (url, server) = exchange_server(fake.clone()).await;
+        let mut engine = engine(db.clone(), &url).await;
+        engine
+            .state
+            .config
+            .write()
+            .await
+            .grid
+            .min_liquidation_distance_pct = Some(dec!(10));
+        engine.state.position.write().await.liquidation_price = dec!(95);
+        engine.last_account_sync = None;
+
+        engine.maintain_grid_window().await;
+
+        assert_eq!(*engine.state.status.read().await, BotStatus::Running);
+        assert!(fake.posts.lock().unwrap().is_empty());
+        assert_eq!(
+            fake.orders.lock().unwrap()[&opening.client_order_id].status,
+            "CANCELED"
+        );
+        assert_eq!(
+            fake.orders.lock().unwrap()[&exit.client_order_id].status,
+            "NEW"
+        );
+        let active = engine.state.active_orders.read().await;
+        assert_eq!(active.len(), 1);
+        assert!(active.contains_key(&exit.client_order_id));
+        drop(active);
+        assert_eq!(
+            db.load_remainder_plan("SOLUSDC", TradingMode::Live)
+                .unwrap()
+                .unwrap()
+                .phase,
+            phase
+        );
+        assert_eq!(
+            db.load_managed_orders("SOLUSDC").unwrap()[0].client_order_id,
+            exit.client_order_id
+        );
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn protective_opening_cancellation_retries_unconfirmed_orders_and_preserves_exits() {
+    let fake = Exchange::default();
+    fake.cancel_fails.store(true, Ordering::SeqCst);
+    let db = database();
+    let (opening, mut accepted) = managed_price_fixture();
+    db.save_managed_order(&opening).unwrap();
+    fake.orders
+        .lock()
+        .unwrap()
+        .insert(opening.client_order_id.clone(), accepted.clone());
+    let mut exit = opening.clone();
+    exit.client_order_id = "gb_stale_guard_exit".into();
+    exit.order_id = Some(124);
+    exit.side = OrderSide::Sell;
+    exit.price = dec!(120);
+    exit.amount_usdc = exit.price * exit.quantity;
+    accepted.client_order_id = exit.client_order_id.clone();
+    accepted.order_id = 124;
+    accepted.side = "SELL".into();
+    accepted.price = exit.price;
+    db.save_managed_order(&exit).unwrap();
+    fake.orders
+        .lock()
+        .unwrap()
+        .insert(exit.client_order_id.clone(), accepted);
+    let (url, server) = exchange_server(fake.clone()).await;
+    let mut engine = engine(db.clone(), &url).await;
+    engine
+        .state
+        .config
+        .write()
+        .await
+        .grid
+        .min_liquidation_distance_pct = Some(dec!(10));
+    engine.state.position.write().await.liquidation_price = dec!(95);
+    engine.state.ticker.write().await.update_time = Utc::now() - chrono::Duration::seconds(16);
+
+    engine.maintain_grid_window().await;
+
+    assert_eq!(*engine.state.status.read().await, BotStatus::Running);
+    assert!(engine.last_orders_sync.is_none());
+    assert_eq!(engine.state.active_orders.read().await.len(), 2);
+    assert_eq!(db.load_managed_orders("SOLUSDC").unwrap().len(), 2);
+    assert!(fake.posts.lock().unwrap().is_empty());
+    assert!(db.get_recent_trades(10).unwrap().is_empty());
+    fake.cancel_fails.store(false, Ordering::SeqCst);
+    fake.fill_on_cancel.store(true, Ordering::SeqCst);
+
+    engine.maintain_grid_window().await;
+
+    assert_eq!(*engine.state.status.read().await, BotStatus::Running);
+    let active = engine.state.active_orders.read().await;
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[&exit.client_order_id].price, exit.price);
+    assert_eq!(active[&exit.client_order_id].quantity, exit.quantity);
+    drop(active);
+    assert_eq!(
+        db.load_managed_orders("SOLUSDC").unwrap()[0].client_order_id,
+        exit.client_order_id
+    );
+    assert!(fake.posts.lock().unwrap().is_empty());
+    let trades = db.get_recent_trades(10).unwrap();
+    assert_eq!(trades.len(), 1);
+    assert_eq!(trades[0].client_order_id, opening.client_order_id);
+    assert_eq!(trades[0].quantity, opening.quantity);
+    assert_eq!(
+        fake.orders.lock().unwrap()[&opening.client_order_id].status,
+        "FILLED"
+    );
+    server.abort();
 }
 
 #[tokio::test]

@@ -41,6 +41,7 @@ struct CliArgs {
 
 #[derive(Subcommand, Debug)]
 enum Command {
+    Backtest(binance_grid_bot::strategy::backtest::BacktestArgs),
     /// Initialize an empty legacy paper subledger without depositing shared funds.
     #[command(
         long_about = "Initialize a legacy paper subledger with an empty position and a 10000 accounting baseline. This does not add funds to the shared paper account. Historical positions and balances are NOT restored. Only paper trading is affected.\n\nStop the bot before running this command, including any older version that does not honor the process lock. Use a database file with a single hard link. The strategy remains paused after restart; resume it manually after reviewing the new baseline. Existing paper snapshots and scopes without historical paper trades are rejected."
@@ -72,9 +73,12 @@ async fn main() -> anyhow::Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "binance_grid_bot=info".into()),
         )
-        .with(tracing_subscriber::fmt::layer())
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
     let args = CliArgs::parse();
+    if let Some(Command::Backtest(backtest)) = &args.command {
+        return binance_grid_bot::strategy::backtest::run_cli(backtest).await;
+    }
     if let Some(Command::MigrateLegacyPaper {
         db,
         symbol,

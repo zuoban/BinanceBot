@@ -13,6 +13,8 @@ const fields: { key: keyof Editable; label: string; risky: boolean; show: (confi
   { key: 'max_price', label: '最高价格', risky: true, show: c => c.max_price ? String(c.max_price) : '未设置' },
   { key: 'max_position_usdc', label: '最大持仓名义价值', risky: true, show: c => c.max_position_usdc ? String(c.max_position_usdc) : '未设置' },
   { key: 'pause_on_max_position', label: '持仓上限处理方式', risky: true, show: c => c.pause_on_max_position ? '暂停策略' : '限制开仓' },
+  { key: 'min_liquidation_distance_pct', label: '强平距离阈值', risky: true, show: c => c.min_liquidation_distance_pct ? `${c.min_liquidation_distance_pct}%` : '未设置' },
+  { key: 'cancel_opening_on_max_position', label: '达到上限时仅撤开仓单', risky: true, show: c => c.cancel_opening_on_max_position ? '开启' : '关闭' },
 ];
 
 const blank = (value: unknown) => value === null || value === undefined || value === '';

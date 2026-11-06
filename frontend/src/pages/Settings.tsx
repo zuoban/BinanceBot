@@ -52,6 +52,7 @@ function GlobalSettings() {
       baseline_version: baseline.current?.version, recv_window: v.recv_window, sync_interval_secs: v.sync_interval_secs,
       global_max_position_notional: v.global_max_position_notional ?? null,
       pause_on_zero_available_margin: v.pause_on_zero_available_margin ?? false,
+      min_available_margin_pct: v.min_available_margin_pct || null,
       api_key: v.api_key?.trim() || null, api_secret: v.api_secret?.trim() || null,
       telegram_bot_token: v.telegram_bot_token?.trim() || null, telegram_chat_id: v.telegram_chat_id?.trim() || '',
       telegram_enabled: !!v.telegram_enabled, clear_api_credentials: !!v.clear_api_credentials, clear_telegram_credentials: !!v.clear_telegram_credentials,
@@ -74,6 +75,9 @@ function GlobalSettings() {
     }
     if (!!values.pause_on_zero_available_margin !== !!baseline.current?.pause_on_zero_available_margin) {
       changes.push(`保证金不足时暂停：${values.pause_on_zero_available_margin ? '开启' : '关闭'}`);
+    }
+    if ((values.min_available_margin_pct || null) !== (baseline.current?.min_available_margin_pct || null)) {
+      changes.push(`可用保证金比例下限：${values.min_available_margin_pct ? `${values.min_available_margin_pct}%` : '关闭'}`);
     }
     if (!baseline.current?.has_api_key && (values.api_key?.trim() || values.api_secret?.trim())) changes.push('配置 API Key 和 Secret（所有交易对将以实盘运行并保持暂停）');
     if (values.clear_api_credentials) changes.push('清除已保存的 API Key 和 Secret（所有交易对将以模拟盘运行并保持暂停）');
@@ -125,6 +129,7 @@ function GlobalSettings() {
             <Row gutter={[20, 16]}>
               <Col span={24}><Form.Item name="global_max_position_notional" label="全局最大持仓金额" extra="留空表示关闭；所有已配置策略的持仓绝对金额直接相加（包括不同模式和计价资产，不进行汇率换算），达到后暂停所有策略。" rules={[{ validator: (_, value: string | null | undefined) => !value || (/^\d+(\.\d+)?$/.test(value) && /[1-9]/.test(value)) ? Promise.resolve() : Promise.reject(new Error('请输入大于 0 的金额')) }]}><InputNumber stringMode min="0" className="full-width-input" /></Form.Item></Col>
               <Col span={24}><Form.Item name="pause_on_zero_available_margin" label="可用保证金不足时暂停" valuePropName="checked" extra="开启后，任意已配置策略的可用保证金小于或等于零时，暂停所有策略、撤销机器人挂单并保留持仓。"><Switch checkedChildren="开启" unCheckedChildren="关闭" /></Form.Item></Col>
+              <Col span={24}><Form.Item name="min_available_margin_pct" label="可用保证金比例下限（%）" extra="留空表示关闭。任意已配置策略的可用保证金占保证金余额的比例小于或等于该值时，暂停所有策略、撤销机器人挂单并保留持仓，处理方式与“可用保证金不足时暂停”相同。" rules={[{ validator: (_, value: string | null | undefined) => !value || (Number(value) > 0 && Number(value) < 100) ? Promise.resolve() : Promise.reject(new Error('请输入大于 0 且小于 100 的百分比')) }]}><InputNumber stringMode min="0" max="100" className="full-width-input" /></Form.Item></Col>
             </Row>
           </Card>
         </Col>

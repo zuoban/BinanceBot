@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { defaultGridInterval, exceeds, exposure, gridPreview, orderAmountError, orderSizing, priceDiffPercent, priceRangeError, sumDecimals, tickSizeError } from '../lib/gridPreview';
+import { defaultGridInterval, exceeds, exposure, gridPreview, orderAmountError, orderSizing, priceDiffPercent, priceRangeError, capCoverage, spacingBelowRoundTripFee, spacingPercent, sumDecimals, tickSizeError } from '../lib/gridPreview';
 
 const base = { interval: '0.5', buyWindow: 3, sellWindow: 3 };
 
@@ -90,4 +90,27 @@ it('computes signed percentage distance from the reference price', () => {
   expect(priceDiffPercent('80001', '80000')).toBe('+0.0013%');
   expect(priceDiffPercent('100', '100')).toBe('0%');
   expect(priceDiffPercent('100', '')).toBeNull();
+});
+
+it('flags spacing below the 0.04% Maker round-trip fee estimate, exactly at the boundary included', () => {
+  expect(spacingBelowRoundTripFee('0.03', '100')).toBe(true);
+  expect(spacingBelowRoundTripFee('0.04', '100')).toBe(false);
+  expect(spacingBelowRoundTripFee('1', '100')).toBe(false);
+  expect(spacingBelowRoundTripFee('x', '100')).toBe(false);
+  expect(spacingPercent('1', '100')).toBe('1');
+  expect(spacingPercent('0.03', '100')).toBe('0.03');
+});
+
+it('measures how far price must move one way to fill the position cap', () => {
+  // floor(1600 / 200) = 8 levels x 50 / 75000 = 0.5333%
+  expect(capCoverage('1600', '200', '50', '75000')).toEqual({ levels: 8, percent: '0.5333', tight: true });
+  // 64 levels x 50 / 75000 = 4.2667%
+  expect(capCoverage('12800', '200', '50', '75000')).toEqual({ levels: 64, percent: '4.2667', tight: false });
+  // Exactly 3% is not tight: 30 levels x 1 / 1000.
+  expect(capCoverage('6000', '200', '1', '1000')).toMatchObject({ percent: '3', tight: false });
+  expect(capCoverage('5800', '200', '1', '1000')).toMatchObject({ levels: 29, tight: true });
+  // Not even one order fits, or inputs are unusable: no figure (the over-limit warning covers it).
+  expect(capCoverage('100', '200', '50', '75000')).toBeNull();
+  expect(capCoverage(null, '200', '50', '75000')).toBeNull();
+  expect(capCoverage('1600', '0', '50', '75000')).toBeNull();
 });

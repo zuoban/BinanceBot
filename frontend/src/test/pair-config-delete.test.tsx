@@ -497,6 +497,7 @@ it('fetches symbol preview on /pairs/new, shows latest price, auto-fills mark pr
   expect(await screen.findAllByText('网格间距 0.15 必须是价格步长 0.1 的正整数倍')).not.toHaveLength(0);
 }, 40000);
 
+
 it('opens the keyboard shortcut help with ? and navigates from the bottom bar', async () => {
   const router = setup(Promise.resolve());
   const user = userEvent.setup();

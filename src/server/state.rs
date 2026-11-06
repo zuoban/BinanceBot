@@ -138,7 +138,10 @@ impl GlobalPositionLimit {
         let limit = config
             .global_max_position_notional
             .filter(|v| *v > Decimal::ZERO);
-        let margin_guard = config.pause_on_zero_available_margin;
+        let margin_pct = config
+            .min_available_margin_pct
+            .filter(|pct| *pct > Decimal::ZERO);
+        let margin_guard = config.pause_on_zero_available_margin || margin_pct.is_some();
         if limit.is_none() && !margin_guard {
             self.enabled.store(false, Ordering::SeqCst);
             self.blocked.store(false, Ordering::SeqCst);
@@ -177,7 +180,13 @@ impl GlobalPositionLimit {
                             || age > chrono::Duration::seconds(max_age)))
                 {
                     member_incomplete = true;
-                } else if account.available_balance <= Decimal::ZERO {
+                } else if account.available_balance <= Decimal::ZERO
+                    || margin_pct.is_some_and(|pct| {
+                        account.margin_balance > Decimal::ZERO
+                            && account.available_balance * Decimal::ONE_HUNDRED
+                                <= pct * account.margin_balance
+                    })
+                {
                     zero_margin = true;
                 }
             }
@@ -261,7 +270,7 @@ impl GlobalPositionLimit {
         }
         let mut reasons = Vec::new();
         if zero_margin {
-            reasons.push("可用保证金已达到零".to_string());
+            reasons.push("可用保证金已达到零或低于设定比例".to_string());
         }
         if incomplete {
             reasons.push("全局风控数据不可用或已过期".to_string());
@@ -318,7 +327,10 @@ impl GlobalPositionLimit {
             config
                 .global_max_position_notional
                 .is_some_and(|v| v > Decimal::ZERO)
-                || config.pause_on_zero_available_margin,
+                || config.pause_on_zero_available_margin
+                || config
+                    .min_available_margin_pct
+                    .is_some_and(|pct| pct > Decimal::ZERO),
             Ordering::SeqCst,
         );
         *self.committed_config.write().unwrap() = Some(config);
@@ -2432,6 +2444,40 @@ mod tests {
             .global_position_ready
             .store(true, Ordering::SeqCst);
         assert!(!global.check().await);
+    }
+
+    #[tokio::test]
+    async fn margin_ratio_guard_pauses_only_at_or_below_threshold() {
+        let fixture = notification_fixture(false, false).await;
+        {
+            let mut config = fixture.state.config.write().await;
+            config.min_available_margin_pct = Some(dec!(10));
+            // Live accounts are read as stored; paper accounts come from the shared ledger.
+            config.exchange.api_key = "key".into();
+            config.exchange.api_secret = "secret".into();
+        }
+        fixture
+            .state
+            .global_position_initialized
+            .store(true, Ordering::SeqCst);
+        fixture
+            .state
+            .global_position_ready
+            .store(true, Ordering::SeqCst);
+        let global = GlobalPositionLimit::new(Arc::new(RwLock::new(vec![fixture.state.clone()])));
+        global.membership_ready.store(true, Ordering::SeqCst);
+        {
+            let mut account = fixture.state.account.write().await;
+            account.asset = "USDC".into();
+            account.margin_balance = dec!(1000);
+            account.available_balance = dec!(101);
+            account.update_time = Utc::now();
+        }
+        assert!(!global.check().await);
+        assert_eq!(*fixture.state.status.read().await, BotStatus::Running);
+        fixture.state.account.write().await.available_balance = dec!(100);
+        assert!(global.check().await);
+        assert_eq!(*fixture.state.status.read().await, BotStatus::Paused);
     }
 
     #[tokio::test]

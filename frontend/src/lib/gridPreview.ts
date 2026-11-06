@@ -151,6 +151,47 @@ export function orderAmountError(amount: unknown, referencePrice?: unknown, rule
   return null;
 }
 
+/** Informational capacity threshold; it does not predict profitability or the next cap event. */
+export const CAP_DROP_WARN_PERCENT = 3;
+
+/**
+ * Flat-position capacity estimate from target notionals:
+ * floor(cap / amount) levels x spacing / reference. This excludes existing positions,
+ * pending orders and quantity rounding; `tight` only marks estimates below the reference threshold.
+ * Null when an input is not a plain decimal or not even one order fits under the cap.
+ */
+export function capCoverage(cap: unknown, amount: unknown, interval: unknown, reference: unknown): { levels: number; percent: string; tight: boolean } | null {
+  const c = parse(cap), a = parse(amount), i = parse(interval), r = parse(reference);
+  if (!c || !a || !i || !r || a.n === 0n || i.n === 0n || r.n === 0n) return null;
+  const amountScale = Math.max(c.s, a.s);
+  const levels = rescale(c, amountScale) / rescale(a, amountScale);
+  if (levels === 0n) return null;
+  const scale = Math.max(i.s, r.s);
+  const move = levels * rescale(i, scale), ref = rescale(r, scale);
+  return {
+    levels: Number(levels),
+    percent: format((move * 1000000n + ref / 2n) / ref, 4),
+    tight: move * 100n < BigInt(CAP_DROP_WARN_PERCENT) * ref,
+  };
+}
+
+/** Grid spacing as a percentage of the reference price (up to 4 decimals); null when either is not a plain decimal. */
+export function spacingPercent(interval: unknown, reference: unknown): string | null {
+  const i = parse(interval), r = parse(reference);
+  if (!i || !r || i.n === 0n || r.n === 0n) return null;
+  const scale = Math.max(i.s, r.s);
+  const iScaled = rescale(i, scale), rScaled = rescale(r, scale);
+  return format((iScaled * 1000000n + rScaled / 2n) / rScaled, 4);
+}
+
+/** True when spacing is below the Maker round-trip fee estimate of 0.04% (2 × 0.02%) of the reference price. */
+export function spacingBelowRoundTripFee(interval: unknown, reference: unknown): boolean {
+  const i = parse(interval), r = parse(reference);
+  if (!i || !r || i.n === 0n || r.n === 0n) return false;
+  const scale = Math.max(i.s, r.s);
+  return rescale(i, scale) * 2500n < rescale(r, scale);
+}
+
 /** Signed percentage distance `(price - reference) / reference * 100`. */
 export function priceDiffPercent(price: unknown, reference: unknown): string | null {
   const p = parse(price), r = parse(reference);

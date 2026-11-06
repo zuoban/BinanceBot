@@ -1238,15 +1238,8 @@ async fn early_shutdown_aborts_unresponsive_engine_before_membership_commit_retu
         }
         handle.request_shutdown();
         handle.start_early_shutdown(Duration::from_millis(50)).await;
-        loop {
-            let symbol = tokio::time::timeout(Duration::from_secs(5), observed_rx.recv())
-                .await
-                .unwrap()
-                .unwrap();
-            if symbol == "BTCUSDT" {
-                break;
-            }
-        }
+        // Pause persistence shares this deadline, so abort may precede delivery of
+        // the shutdown command. Termination must not depend on observing that message.
         tokio::time::timeout(Duration::from_secs(5), async {
             while !abort.is_finished() {
                 tokio::task::yield_now().await;

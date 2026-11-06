@@ -167,6 +167,29 @@ fn update_paper_account(
     };
 }
 
+/// Distance from `mark` to `liquidation` as a percentage of `mark`, only on the losing side of
+/// the position (below mark for longs, above for shorts). Binance reports 0 when no liquidation
+/// price applies, which never counts as close.
+fn liquidation_too_close(
+    size: Decimal,
+    mark: Decimal,
+    liquidation: Decimal,
+    threshold_pct: Option<Decimal>,
+) -> bool {
+    let Some(threshold) = threshold_pct else {
+        return false;
+    };
+    if size.is_zero() || mark <= Decimal::ZERO || liquidation <= Decimal::ZERO {
+        return false;
+    }
+    let gap = if size > Decimal::ZERO {
+        mark - liquidation
+    } else {
+        liquidation - mark
+    };
+    gap * Decimal::ONE_HUNDRED <= threshold * mark
+}
+
 fn position_valuation_price(position: &PositionInfo, ticker: &TickerInfo) -> Decimal {
     if ticker.mark_price > Decimal::ZERO {
         ticker.mark_price
@@ -830,6 +853,63 @@ impl GridTradingEngine {
         ))
         .await;
         true
+    }
+
+    /// True while opening must be suspended without pausing the strategy: the filled position
+    /// value is at the cap in cancel-opening mode, or the mark price is within the configured
+    /// distance of the liquidation price.
+    async fn opening_suspended_at_limit(&self, config: &crate::config::AppConfig) -> bool {
+        let position = self.state.position.read().await.clone();
+        let ticker = self.state.ticker.read().await.clone();
+        let price = position_valuation_price(&position, &ticker);
+        if price <= Decimal::ZERO {
+            return false;
+        }
+        if config.grid.cancel_opening_on_max_position && !config.grid.pause_on_max_position {
+            if let Some(limit) = config
+                .grid
+                .max_position_usdc
+                .filter(|limit| *limit > Decimal::ZERO)
+            {
+                if position.size.abs() * price >= limit {
+                    return true;
+                }
+            }
+        }
+        liquidation_too_close(
+            position.size,
+            price,
+            position.liquidation_price,
+            config.grid.min_liquidation_distance_pct,
+        )
+    }
+
+    /// Cancel only idle opening orders; partial executions retain their existing protection.
+    /// Keep this outside fill recording so cancellation cannot recurse through another fill.
+    async fn cancel_suspended_opening_orders(&mut self, config: &crate::config::AppConfig) -> bool {
+        if !self.opening_suspended_at_limit(config).await {
+            return true;
+        }
+        let mut openings: Vec<_> = self
+            .state
+            .active_orders
+            .read()
+            .await
+            .values()
+            .filter(|order| {
+                order.side == config.grid.direction.opening_side() && is_window_order(order)
+            })
+            .cloned()
+            .collect();
+        openings.sort_by(|a, b| a.client_order_id.cmp(&b.client_order_id));
+        let mut canceled = true;
+        for order in openings {
+            if *self.state.status.read().await != BotStatus::Running {
+                return false;
+            }
+            canceled &= self.cancel_single_order(&order).await;
+        }
+        canceled
     }
 
     async fn pause_for_position_limit(&mut self, reason: String) {
@@ -2929,6 +3009,11 @@ impl GridTradingEngine {
         if !self.position_direction_ready().await {
             return;
         }
+        // Risk cancellation needs a valuation price, not a fresh last-trade price or
+        // a completed replenishment workflow. Never reprice orders through this path.
+        if !self.cancel_suspended_opening_orders(&config).await {
+            return;
+        }
         if !self.market_data_ready().await {
             return;
         }
@@ -3058,6 +3143,15 @@ impl GridTradingEngine {
         desired_sell_prices.retain(|price| {
             !has_nearby_grid_order(&reserved_sells, *price, grid_interval, rules.tick_size)
         });
+        // At the cap in cancel-opening mode, an empty opening band makes the prune
+        // below cancel opening-side window orders while exits stay on the book.
+        if self.opening_suspended_at_limit(&config).await {
+            if config.grid.direction == GridDirection::Long {
+                desired_buy_prices.clear();
+            } else {
+                desired_sell_prices.clear();
+            }
+        }
 
         if self
             .prune_grid_window(&desired_buy_prices, &desired_sell_prices)
@@ -3269,6 +3363,12 @@ impl GridTradingEngine {
             return false;
         }
         let config = self.state.config.read().await.clone();
+        if side == config.grid.direction.opening_side()
+            && self.opening_suspended_at_limit(&config).await
+        {
+            self.cancel_suspended_opening_orders(&config).await;
+            return false;
+        }
         let rules = self.state.rules.read().await.clone();
         let symbol = config.exchange.symbol.clone();
         let Some(full_quantity) = order_quantity
@@ -3604,7 +3704,8 @@ impl GridTradingEngine {
                                 }
                             }
                             let paused = self.pause_if_position_limit_reached().await;
-                            return recorded && !paused;
+                            let protected = self.cancel_suspended_opening_orders(&config).await;
+                            return recorded && !paused && protected;
                         }
                         if !self.prepare_partial_adoption(&mut order, &resp).await {
                             return false;
@@ -3631,6 +3732,9 @@ impl GridTradingEngine {
                             guard.resolve();
                         }
                         if self.pause_if_position_limit_reached().await {
+                            return false;
+                        }
+                        if !self.cancel_suspended_opening_orders(&config).await {
                             return false;
                         }
                     }

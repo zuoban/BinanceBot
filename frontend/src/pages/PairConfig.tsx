@@ -15,7 +15,7 @@ import { quoteAsset, trimFractionZeros } from '../lib/format';
 import { describeNewGridConfig, diffGridConfig } from '../lib/configDiff';
 
 type FormValues = Omit<GridConfig, 'post_only'>;
-const defaults: FormValues = { symbol: '', direction: 'LONG', grid_interval: '0.1', order_amount_usdc: '100', buy_window: 3, sell_window: 3, min_price: null, max_price: null, max_position_usdc: '1000', pause_on_max_position: true };
+const defaults: FormValues = { symbol: '', direction: 'LONG', grid_interval: '0.1', order_amount_usdc: '100', buy_window: 3, sell_window: 3, min_price: null, max_price: null, max_position_usdc: '1000', pause_on_max_position: true, cancel_opening_on_max_position: false, min_liquidation_distance_pct: null };
 export default function PairConfig() {
   const { symbol } = useParams();
   const adding = !symbol;
@@ -71,7 +71,7 @@ export default function PairConfig() {
       return post<GridConfig | string>(adding ? '/api/pairs' : pairPath(pair!, 'config'), {
         ...fields, ...(!adding && { baseline_version: baseline.current?.config.config_version }), symbol: fields.symbol.trim().toUpperCase(),
         post_only: true,
-        min_price: fields.min_price || null, max_price: fields.max_price || null, max_position_usdc: fields.max_position_usdc || null,
+        min_price: fields.min_price || null, max_price: fields.max_price || null, max_position_usdc: fields.max_position_usdc || null, min_liquidation_distance_pct: fields.min_liquidation_distance_pct || null,
       });
     },
     onMutate: () => edit.setSaving(true),
@@ -172,7 +172,7 @@ export default function PairConfig() {
       if (!result.error && result.data && symbol) { baseline.current = { symbol, config: result.data }; form.setFieldsValue(result.data); edit.setDirty(false); mutation.reset(); }
     }}>重新加载策略配置</Button>}
     {pairs.data && !pair && !adding && <Alert type="warning" title="该交易对不存在或已移除" />}
-    <Form<FormValues> className="config-form" form={form} layout="vertical" onFinish={values => void submit(values)} onValuesChange={changed => { if ('symbol' in changed) { if (!customInterval.current) form.setFieldValue('grid_interval', defaults.grid_interval); customInterval.current = false; appliedSymbol.current = undefined; } else if ('grid_interval' in changed) customInterval.current = true; edit.setDirty(true); }} disabled={formDisabled}>
+    <Form<FormValues> className="config-form" form={form} layout="vertical" onFinish={values => void submit(values)} onValuesChange={changed => { if ('symbol' in changed) { if (!customInterval.current) form.setFieldValue('grid_interval', defaults.grid_interval); customInterval.current = false; appliedSymbol.current = undefined; } else if ('grid_interval' in changed) customInterval.current = true; if (changed.pause_on_max_position) form.setFieldValue('cancel_opening_on_max_position', false); else if (changed.cancel_opening_on_max_position) form.setFieldValue('pause_on_max_position', false); edit.setDirty(true); }} disabled={formDisabled}>
       <Card title="基本设置">
         {live && <Alert type="warning" showIcon className="config-live-alert" title="实盘使用真实资金，请核对交易方向和风险限制。" />}
         <Row gutter={[20, 16]}>
@@ -193,8 +193,10 @@ export default function PairConfig() {
         <Col xs={24} xl={12} className="settings-grid-col">
           <Card title="仓位限制" className="settings-card-fill">
             <Row gutter={[20, 16]}>
-              <Col span={24}><Form.Item name="max_position_usdc" label="最大持仓名义价值" extra="留空表示不设置；选择暂停策略时须填写大于 0 的上限。" dependencies={['pause_on_max_position']} rules={[({ getFieldValue }) => ({ validator: (_, value) => !getFieldValue('pause_on_max_position') || (value != null && value !== '' && Number(value) > 0) ? Promise.resolve() : Promise.reject(new Error('暂停策略需要大于 0 的持仓上限')) })]}><InputNumber stringMode min="0" className="full-width-input" /></Form.Item></Col>
+              <Col span={24}><Form.Item name="max_position_usdc" label="最大持仓名义价值" extra="留空表示不设置；选择暂停策略或仅撤销开仓单时须填写大于 0 的上限。" dependencies={['pause_on_max_position', 'cancel_opening_on_max_position']} rules={[({ getFieldValue }) => ({ validator: (_, value) => !(getFieldValue('pause_on_max_position') || getFieldValue('cancel_opening_on_max_position')) || (value != null && value !== '' && Number(value) > 0) ? Promise.resolve() : Promise.reject(new Error(getFieldValue('pause_on_max_position') ? '暂停策略需要大于 0 的持仓上限' : '撤销开仓单需要大于 0 的持仓上限')) })]}><InputNumber stringMode min="0" className="full-width-input" /></Form.Item></Col>
               <Col span={24}><Form.Item name="pause_on_max_position" label="持仓上限处理方式" extra="限制开仓会保留平仓订单；选择暂停策略时，当前持仓名义价值达到上限，或下一笔完整开仓单成交后预计超过上限，会暂停策略并尝试撤销机器人挂单，需手动恢复。撤单可能失败，请检查交易所挂单。仅挂单占用额度不会触发暂停。" valuePropName="checked"><Switch checkedChildren="暂停策略" unCheckedChildren="限制开仓" /></Form.Item></Col>
+              <Col span={24}><Form.Item name="cancel_opening_on_max_position" label="达到上限时仅撤开仓单" extra="开启后，持仓名义价值达到上限时只撤销开仓方向的挂单，策略保持运行并继续维护平仓单，回落到上限以下后自动恢复开仓。与「暂停策略」互斥，开启一项会关闭另一项。" valuePropName="checked"><Switch checkedChildren="撤开仓单" unCheckedChildren="关闭" /></Form.Item></Col>
+              <Col span={24}><Form.Item name="min_liquidation_distance_pct" label="强平距离阈值（%）" extra="留空表示不启用。持仓的标记价格距强平价不超过该百分比（占标记价）时，只撤销开仓方向的挂单并保持运行，继续维护平仓单；距离回升后自动恢复开仓。依赖交易所返回的强平价，模拟盘或无强平价时不生效。" rules={[{ validator: (_, value) => value == null || value === '' || (Number(value) > 0 && Number(value) < 100) ? Promise.resolve() : Promise.reject(new Error('请输入大于 0 且小于 100 的百分比')) }]}><InputNumber stringMode min="0" max="100" className="full-width-input" /></Form.Item></Col>
             </Row>
           </Card>
         </Col>

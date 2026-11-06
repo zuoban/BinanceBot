@@ -119,6 +119,236 @@ async fn max_position_pause_cancels_both_sides_and_survives_restart() {
     assert_eq!(*restored.state.status.read().await, BotStatus::Paused);
 }
 
+#[test]
+fn liquidation_distance_is_measured_on_the_losing_side_only() {
+    // Long: liquidation below mark. 100 -> 92 is an 8% gap.
+    assert!(liquidation_too_close(
+        dec!(1),
+        dec!(100),
+        dec!(92),
+        Some(dec!(8))
+    ));
+    assert!(!liquidation_too_close(
+        dec!(1),
+        dec!(100),
+        dec!(91.9),
+        Some(dec!(8))
+    ));
+    // Short: liquidation above mark.
+    assert!(liquidation_too_close(
+        dec!(-1),
+        dec!(100),
+        dec!(108),
+        Some(dec!(8))
+    ));
+    assert!(!liquidation_too_close(
+        dec!(-1),
+        dec!(100),
+        dec!(108.1),
+        Some(dec!(8))
+    ));
+    // A long whose reported liquidation is already above mark is past liquidation.
+    assert!(liquidation_too_close(
+        dec!(1),
+        dec!(100),
+        dec!(105),
+        Some(dec!(8))
+    ));
+    // Flat, unreported (0) and disabled never trigger.
+    assert!(!liquidation_too_close(
+        dec!(0),
+        dec!(100),
+        dec!(99),
+        Some(dec!(8))
+    ));
+    assert!(!liquidation_too_close(
+        dec!(1),
+        dec!(100),
+        dec!(0),
+        Some(dec!(8))
+    ));
+    assert!(!liquidation_too_close(dec!(1), dec!(100), dec!(99), None));
+}
+
+#[tokio::test]
+async fn liquidation_proximity_cancels_openings_and_keeps_exits_running() {
+    let mut engine = paper_engine().await;
+    {
+        let mut config = engine.state.config.write().await;
+        config.grid.min_liquidation_distance_pct = Some(dec!(10));
+    }
+    {
+        let mut ticker = engine.state.ticker.write().await;
+        ticker.last_price = dec!(100.05);
+        ticker.mark_price = dec!(100);
+    }
+    {
+        let mut position = engine.state.position.write().await;
+        position.size = dec!(2);
+        position.liquidation_price = dec!(95);
+    }
+    for pending in [
+        order("limit_buy", OrderSide::Buy, dec!(99.9), dec!(1)),
+        order("limit_sell", OrderSide::Sell, dec!(100.1), dec!(1)),
+    ] {
+        engine
+            .state
+            .active_orders
+            .write()
+            .await
+            .insert(pending.client_order_id.clone(), pending);
+    }
+
+    engine.maintain_grid_window().await;
+    assert_eq!(*engine.state.status.read().await, BotStatus::Running);
+    let remaining = orders(&engine).await;
+    assert!(remaining.iter().all(|o| o.side == OrderSide::Sell));
+    assert!(!remaining.is_empty());
+
+    // Price recovers: 100 -> liquidation 80 is a 20% gap, openings resume.
+    engine.state.position.write().await.liquidation_price = dec!(80);
+    engine.maintain_grid_window().await;
+    assert!(orders(&engine)
+        .await
+        .iter()
+        .any(|o| o.side == OrderSide::Buy));
+}
+
+#[tokio::test]
+async fn fresh_mark_cancels_openings_with_stale_last_trade_without_repricing_exits() {
+    for direction in [GridDirection::Long, GridDirection::Short] {
+        for at_cap in [false, true] {
+            let mut engine = paper_engine().await;
+            {
+                let mut config = engine.state.config.write().await;
+                config.grid.direction = direction;
+                config.grid.cancel_opening_on_max_position = at_cap;
+                config.grid.max_position_usdc = Some(dec!(1000));
+                config.grid.min_liquidation_distance_pct = Some(dec!(10));
+            }
+            {
+                let mut ticker = engine.state.ticker.write().await;
+                ticker.last_price = dec!(100.05);
+                ticker.mark_price = dec!(100);
+                ticker.update_time = Utc::now() - chrono::Duration::seconds(16);
+                ticker.mark_update_time = Utc::now();
+            }
+            {
+                let mut position = engine.state.position.write().await;
+                position.size = direction.sign() * if at_cap { dec!(10) } else { dec!(2) };
+                position.liquidation_price = if at_cap {
+                    Decimal::ZERO
+                } else if direction == GridDirection::Long {
+                    dec!(95)
+                } else {
+                    dec!(105)
+                };
+            }
+            let opening_price = if direction == GridDirection::Long {
+                dec!(99)
+            } else {
+                dec!(101)
+            };
+            let partial_price = if direction == GridDirection::Long {
+                dec!(98)
+            } else {
+                dec!(102)
+            };
+            let opening = order(
+                "stale_opening",
+                direction.opening_side(),
+                opening_price,
+                dec!(1),
+            );
+            let mut partial = order(
+                "stale_partial",
+                direction.opening_side(),
+                partial_price,
+                dec!(0.5),
+            );
+            partial.status = OrderStatus::PartiallyFilled;
+            let exit_price = if direction == GridDirection::Long {
+                dec!(120)
+            } else {
+                dec!(80)
+            };
+            let exit = order("stale_exit", direction.closing_side(), exit_price, dec!(1));
+            for pending in [opening.clone(), partial.clone(), exit.clone()] {
+                engine
+                    .state
+                    .active_orders
+                    .write()
+                    .await
+                    .insert(pending.client_order_id.clone(), pending);
+            }
+
+            engine.maintain_grid_window().await;
+
+            assert_eq!(*engine.state.status.read().await, BotStatus::Running);
+            let remaining = engine.state.active_orders.read().await;
+            assert_eq!(
+                remaining.len(),
+                2,
+                "direction={direction:?}, at_cap={at_cap}"
+            );
+            assert!(!remaining.contains_key(&opening.client_order_id));
+            assert_eq!(
+                remaining[&partial.client_order_id].status,
+                OrderStatus::PartiallyFilled
+            );
+            assert_eq!(
+                remaining[&partial.client_order_id].quantity,
+                partial.quantity
+            );
+            assert_eq!(remaining[&exit.client_order_id].price, exit.price);
+            assert_eq!(remaining[&exit.client_order_id].quantity, exit.quantity);
+        }
+    }
+}
+
+#[tokio::test]
+async fn cancel_opening_at_limit_keeps_running_and_keeps_exits() {
+    let mut engine = paper_engine().await;
+    {
+        let mut config = engine.state.config.write().await;
+        config.grid.max_position_usdc = Some(dec!(1000));
+        config.grid.cancel_opening_on_max_position = true;
+    }
+    {
+        let mut ticker = engine.state.ticker.write().await;
+        ticker.last_price = dec!(100.05);
+        ticker.mark_price = dec!(100);
+    }
+    engine.state.position.write().await.size = dec!(10);
+    for pending in [
+        order("limit_buy", OrderSide::Buy, dec!(99.9), dec!(1)),
+        order("limit_sell", OrderSide::Sell, dec!(100.1), dec!(1)),
+    ] {
+        engine
+            .state
+            .active_orders
+            .write()
+            .await
+            .insert(pending.client_order_id.clone(), pending);
+    }
+
+    engine.maintain_grid_window().await;
+    assert_eq!(*engine.state.status.read().await, BotStatus::Running);
+    let remaining = orders(&engine).await;
+    assert!(remaining.iter().all(|o| o.side == OrderSide::Sell));
+    assert!(remaining
+        .iter()
+        .any(|o| o.client_order_id == "gb_limit_sell"));
+
+    // Below the cap, opening orders are placed again.
+    engine.state.position.write().await.size = dec!(1);
+    engine.maintain_grid_window().await;
+    assert!(orders(&engine)
+        .await
+        .iter()
+        .any(|o| o.side == OrderSide::Buy));
+}
+
 #[tokio::test]
 async fn max_position_pause_ignores_pending_exposure_and_uses_mark_price() {
     let mut engine = paper_engine().await;

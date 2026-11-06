@@ -22,7 +22,7 @@ const initial: ServerConfig = {
   saved: { host: '127.0.0.1', port: 8080 },
   active: { host: '127.0.0.1', port: 8080 },
 };
-const globalConfig = { version: 'g1', recv_window: 5000, sync_interval_secs: 30, global_max_position_notional: null, pause_on_zero_available_margin: false };
+const globalConfig = { version: 'g1', recv_window: 5000, sync_interval_secs: 30, global_max_position_notional: null, pause_on_zero_available_margin: false, min_available_margin_pct: null };
 
 beforeEach(() => {
   vi.clearAllMocks();

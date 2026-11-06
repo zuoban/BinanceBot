@@ -18,6 +18,9 @@ pub struct AppConfig {
     pub global_max_position_notional: Option<Decimal>,
     #[serde(default)]
     pub pause_on_zero_available_margin: bool,
+    /// Pause all strategies when available balance falls to this percentage of margin balance.
+    #[serde(default)]
+    pub min_available_margin_pct: Option<Decimal>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,6 +85,7 @@ pub struct GlobalConfig {
     pub telegram: TelegramConfig,
     pub global_max_position_notional: Option<Decimal>,
     pub pause_on_zero_available_margin: bool,
+    pub min_available_margin_pct: Option<Decimal>,
 }
 
 impl GlobalConfig {
@@ -94,6 +98,7 @@ impl GlobalConfig {
             telegram: config.telegram.clone(),
             global_max_position_notional: config.global_max_position_notional,
             pause_on_zero_available_margin: config.pause_on_zero_available_margin,
+            min_available_margin_pct: config.min_available_margin_pct,
         }
     }
 
@@ -105,6 +110,7 @@ impl GlobalConfig {
         config.telegram = self.telegram.clone();
         config.global_max_position_notional = self.global_max_position_notional;
         config.pause_on_zero_available_margin = self.pause_on_zero_available_margin;
+        config.min_available_margin_pct = self.min_available_margin_pct;
     }
 }
 
@@ -159,6 +165,17 @@ pub struct GridConfig {
     /// Pause and cancel managed orders at the limit or before an opening order would exceed it.
     #[serde(default)]
     pub pause_on_max_position: bool,
+
+    /// At the limit, cancel only opening-side orders and keep the strategy running so
+    /// reduce-only exits stay on the book. Mutually exclusive with `pause_on_max_position`.
+    #[serde(default)]
+    pub cancel_opening_on_max_position: bool,
+
+    /// Stop opening (cancel opening-side orders, keep exits) while the mark price is within
+    /// this percentage of the position's liquidation price. Inactive without a position or
+    /// a reported liquidation price.
+    #[serde(default)]
+    pub min_liquidation_distance_pct: Option<Decimal>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -193,6 +210,8 @@ pub struct GridConfigSummary {
     pub max_price: Option<Decimal>,
     pub max_position_usdc: Option<Decimal>,
     pub pause_on_max_position: bool,
+    pub cancel_opening_on_max_position: bool,
+    pub min_liquidation_distance_pct: Option<Decimal>,
 }
 
 fn default_symbol() -> String {
@@ -250,6 +269,7 @@ impl Default for AppConfig {
             telegram: TelegramConfig::default(),
             global_max_position_notional: None,
             pause_on_zero_available_margin: false,
+            min_available_margin_pct: None,
         }
     }
 }
@@ -267,6 +287,8 @@ impl Default for GridConfig {
             max_price: None,
             max_position_usdc: Some(dec!(2000.0)),
             pause_on_max_position: false,
+            cancel_opening_on_max_position: false,
+            min_liquidation_distance_pct: None,
         }
     }
 }
@@ -330,6 +352,7 @@ impl AppConfig {
 
     pub fn validate(&self) -> anyhow::Result<()> {
         validate_global_position_limit(self.global_max_position_notional)?;
+        validate_min_available_margin_pct(self.min_available_margin_pct)?;
         if !self.pairs.is_empty() {
             for config in self.strategy_configs()? {
                 config
@@ -358,12 +381,14 @@ impl AppConfig {
             max_price: self.grid.max_price,
             max_position_usdc: self.grid.max_position_usdc,
             pause_on_max_position: self.grid.pause_on_max_position,
+            cancel_opening_on_max_position: self.grid.cancel_opening_on_max_position,
+            min_liquidation_distance_pct: self.grid.min_liquidation_distance_pct,
         }
     }
 }
 
 impl GridConfig {
-    fn validate(&self) -> anyhow::Result<()> {
+    pub(crate) fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(self.grid_interval > Decimal::ZERO, "网格间距必须大于 0");
         anyhow::ensure!(self.order_amount_usdc > Decimal::ZERO, "每格金额必须大于 0");
         anyhow::ensure!(self.post_only, "滑动网格策略必须开启 Post-Only Maker 挂单");
@@ -387,6 +412,20 @@ impl GridConfig {
             !self.pause_on_max_position || self.max_position_usdc.is_some(),
             "启用达到上限时暂停策略前，请设置最大持仓名义价值"
         );
+        anyhow::ensure!(
+            !self.cancel_opening_on_max_position || self.max_position_usdc.is_some(),
+            "启用达到上限时撤销开仓单前，请设置最大持仓名义价值"
+        );
+        anyhow::ensure!(
+            !(self.pause_on_max_position && self.cancel_opening_on_max_position),
+            "达到上限时暂停策略与仅撤销开仓单不能同时启用"
+        );
+        if let Some(distance) = self.min_liquidation_distance_pct {
+            anyhow::ensure!(
+                distance > Decimal::ZERO && distance < dec!(100),
+                "强平距离阈值必须大于 0 且小于 100（百分比）"
+            );
+        }
         Ok(())
     }
 }
@@ -432,6 +471,16 @@ impl TelegramConfig {
 pub(crate) fn validate_global_position_limit(limit: Option<Decimal>) -> anyhow::Result<()> {
     if let Some(limit) = limit {
         anyhow::ensure!(limit > Decimal::ZERO, "全局最大持仓金额必须大于 0");
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_min_available_margin_pct(pct: Option<Decimal>) -> anyhow::Result<()> {
+    if let Some(pct) = pct {
+        anyhow::ensure!(
+            pct > Decimal::ZERO && pct < dec!(100),
+            "可用保证金比例阈值必须大于 0 且小于 100（百分比）"
+        );
     }
     Ok(())
 }
@@ -674,6 +723,18 @@ mod tests {
         config.grid.max_position_usdc = Some(dec!(1000));
         config.validate().unwrap();
         assert!(config.summary().pause_on_max_position);
+    }
+
+    #[test]
+    fn cancel_opening_requires_a_limit_and_excludes_pause() {
+        let mut config = AppConfig::default();
+        config.grid.cancel_opening_on_max_position = true;
+        config.grid.max_position_usdc = None;
+        assert!(config.validate().is_err());
+        config.grid.max_position_usdc = Some(dec!(1000));
+        config.validate().unwrap();
+        config.grid.pause_on_max_position = true;
+        assert!(config.validate().is_err());
     }
 
     #[test]

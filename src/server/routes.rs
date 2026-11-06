@@ -981,6 +981,15 @@ async fn post_global_config_handler(
             message: Some(error.to_string()),
         });
     }
+    if let Err(error) =
+        crate::config::validate_min_available_margin_pct(payload.min_available_margin_pct.flatten())
+    {
+        return Json(ApiResponse {
+            success: false,
+            data: None,
+            message: Some(error.to_string()),
+        });
+    }
     match handle.update_global_config(payload).await {
         Ok(global) => {
             let mut config = AppConfig::default();
@@ -1009,6 +1018,7 @@ fn web_global_config_view(
         version: crate::db::config_version(global),
         global_max_position_notional: global.global_max_position_notional,
         pause_on_zero_available_margin: global.pause_on_zero_available_margin,
+        min_available_margin_pct: global.min_available_margin_pct,
         recv_window: view.recv_window,
         sync_interval_secs: view.sync_interval_secs,
         has_api_key: view.has_api_key,
@@ -1732,6 +1742,7 @@ fn pair_config_version(config: &AppConfig, instance: u128) -> String {
         &config.telegram,
         config.global_max_position_notional,
         config.pause_on_zero_available_margin,
+        config.min_available_margin_pct,
     ))
 }
 
@@ -1781,6 +1792,8 @@ fn web_config_view(config: &AppConfig) -> WebConfigView {
         max_price: config.grid.max_price,
         max_position_usdc: config.grid.max_position_usdc,
         pause_on_max_position: config.grid.pause_on_max_position,
+        cancel_opening_on_max_position: config.grid.cancel_opening_on_max_position,
+        min_liquidation_distance_pct: config.grid.min_liquidation_distance_pct,
         tick_size: None,
         step_size: None,
         min_qty: None,
@@ -1833,6 +1846,10 @@ fn apply_config_payload(
     if let Some(enabled) = payload.pause_on_max_position {
         current_config.grid.pause_on_max_position = enabled;
     }
+    if let Some(enabled) = payload.cancel_opening_on_max_position {
+        current_config.grid.cancel_opening_on_max_position = enabled;
+    }
+    current_config.grid.min_liquidation_distance_pct = payload.min_liquidation_distance_pct;
 
     if let Some(key) = payload.api_key.filter(|_| !payload.clear_api_credentials) {
         let key_trimmed = key.trim().to_string();

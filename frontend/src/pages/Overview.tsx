@@ -223,7 +223,7 @@ export default function OverviewPage() {
                 <div><dt>最低价格</dt><dd>{s.grid_config.min_price == null ? '未设置' : trimFractionZeros(s.grid_config.min_price)}</dd></div>
                 <div><dt>最高价格</dt><dd>{s.grid_config.max_price == null ? '未设置' : trimFractionZeros(s.grid_config.max_price)}</dd></div>
                 <div><dt>最大持仓名义价值</dt><dd>{s.grid_config.max_position_usdc == null ? '未设置' : `${trimFractionZeros(s.grid_config.max_position_usdc)} ${quote}`}</dd></div>
-                <div><dt>持仓上限处理方式</dt><dd>{s.grid_config.pause_on_max_position ? '暂停策略' : '限制开仓'}</dd></div>
+                <div><dt>持仓上限处理方式</dt><dd>{s.grid_config.pause_on_max_position ? '暂停策略' : s.grid_config.cancel_opening_on_max_position ? '仅撤开仓单' : '限制开仓'}</dd></div>
                 <div><dt>仅挂单</dt><dd>{s.grid_config.post_only ? '开启' : '关闭'}</dd></div>
               </dl>
               <Link to={`/pairs/${s.symbol}/config`}>查看完整配置 <ArrowRightOutlined /></Link>

@@ -1,3 +1,4 @@
+pub mod backtest;
 pub mod grid;
 pub mod precision;
 
