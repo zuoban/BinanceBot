@@ -15,6 +15,7 @@ use std::sync::Mutex;
 use tracing::{info, warn};
 
 mod authentication;
+mod paper;
 
 pub(crate) fn beijing_midnight(now: DateTime<Utc>) -> DateTime<Utc> {
     let beijing = FixedOffset::east_opt(8 * 3600).unwrap();
@@ -85,6 +86,7 @@ pub struct Database {
     membership_commit_hook: Mutex<Option<MembershipHook>>,
     today_pnl_cache: tokio::sync::Mutex<Option<TodayPnlCacheEntry>>,
     session_cache: authentication::SessionCache,
+    paper_ledger: Mutex<Option<paper::PaperLedger>>,
     #[cfg(test)]
     hourly_stats_queries: AtomicU64,
     #[cfg(test)]
@@ -314,6 +316,7 @@ impl Database {
             membership_commit_hook: Mutex::new(None),
             today_pnl_cache: tokio::sync::Mutex::new(None),
             session_cache: Default::default(),
+            paper_ledger: Mutex::new(None),
             #[cfg(test)]
             hourly_stats_queries: AtomicU64::new(0),
             #[cfg(test)]
@@ -1148,8 +1151,14 @@ impl Database {
 
     pub fn insert_trade(&self, trade: &TradeRecord) -> Result<bool> {
         let conn = self.lock_connection("insert_trade");
+        let mut paper_ledger = matches!(trade.mode, TradingMode::Paper | TradingMode::Unknown)
+            .then(|| self.paper_ledger.lock().unwrap());
         let inserted = insert_trade_on(&conn, trade)?;
         if inserted {
+            if let Some(ledger) = paper_ledger.as_mut().and_then(|guard| guard.as_mut()) {
+                ledger.record_legacy(&trade.symbol);
+            }
+            drop(paper_ledger);
             #[cfg(test)]
             self.before_revision_publish();
             let mut revisions = self.trade_revisions.lock().unwrap();
@@ -1312,7 +1321,21 @@ impl Database {
                 params![parent],
             )?;
         }
+        // Hold the ledger lock through commit so readers cannot observe a
+        // committed transaction without its corresponding cached contribution.
+        let mut paper_ledger = matches!(trade.mode, TradingMode::Paper | TradingMode::Unknown)
+            .then(|| self.paper_ledger.lock().unwrap());
         tx.commit()?;
+        if inserted {
+            if let Some(ledger) = paper_ledger.as_mut().and_then(|guard| guard.as_mut()) {
+                if let Some((position, account)) = paper_state {
+                    ledger.commit(&trade.symbol, position, account);
+                } else {
+                    ledger.record_legacy(&trade.symbol);
+                }
+            }
+        }
+        drop(paper_ledger);
         if inserted {
             #[cfg(test)]
             self.before_revision_publish();
@@ -1389,7 +1412,11 @@ impl Database {
             ],
         )?;
         save_pair_status_on(&tx, symbol, TradingMode::Paper, BotStatus::Paused)?;
+        let mut ledger = self.paper_ledger.lock().unwrap();
         tx.commit()?;
+        if let Some(ledger) = ledger.as_mut() {
+            ledger.commit(symbol, &position, &account);
+        }
         Ok(())
     }
 
@@ -4268,6 +4295,7 @@ mod tests {
             membership_commit_hook: Mutex::new(None),
             today_pnl_cache: tokio::sync::Mutex::new(None),
             session_cache: Default::default(),
+            paper_ledger: Mutex::new(None),
             hourly_stats_queries: AtomicU64::new(0),
             benchmark_wait_samples: std::sync::OnceLock::new(),
         };

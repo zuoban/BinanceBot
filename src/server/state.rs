@@ -163,7 +163,7 @@ impl GlobalPositionLimit {
                 committed.apply_to(&mut config);
             }
             if margin_guard {
-                let account = state.account.read().await.clone();
+                let account = state.current_account().await;
                 let max_age = config
                     .exchange
                     .sync_interval_secs
@@ -380,6 +380,8 @@ pub struct AppState {
     pub ticker: RwLock<TickerInfo>,
     pub stats: RwLock<GridStats>,
     pub position: RwLock<PositionInfo>,
+    // Paper mode stores a symbol's durable PnL subledger here; consumers use
+    // `current_account` or `account_view` for the shared asset balance.
     pub account: RwLock<AccountInfo>,
     pub cny_rates: Arc<CnyRateCache>,
     pub active_orders: RwLock<HashMap<String, GridOrder>>,
@@ -568,6 +570,15 @@ impl AppState {
         } else {
             (PositionInfo::default(), initial_account)
         };
+        if config.exchange.is_paper() && !paper_restore_failed {
+            if let Err(error) =
+                db.shared_paper_account(&symbol, &initial_position, &initial_account)
+            {
+                error!(%symbol, %error, "Could not restore shared paper account; starting paused");
+                initial_status = BotStatus::Paused;
+                paper_restore_failed = true;
+            }
+        }
 
         // Preload recent trades from SQLite database
         let saved_trades = db
@@ -646,6 +657,42 @@ impl AppState {
                     .expect("Failed to build Telegram HTTP client"),
             ),
         })
+    }
+
+    pub(crate) fn account_view(
+        &self,
+        symbol: &str,
+        mode: TradingMode,
+        position: &PositionInfo,
+        local: &AccountInfo,
+    ) -> AccountInfo {
+        if mode != TradingMode::Paper {
+            return local.clone();
+        }
+        if self.paper_restore_failed.load(Ordering::SeqCst) {
+            return AccountInfo::default();
+        }
+        match self.db.shared_paper_account(symbol, position, local) {
+            Ok(account) => account,
+            Err(error) => {
+                error!(%symbol, %error, "Could not restore shared paper account");
+                self.paper_restore_failed.store(true, Ordering::SeqCst);
+                AccountInfo::default()
+            }
+        }
+    }
+
+    pub(crate) async fn current_account(&self) -> AccountInfo {
+        let _commit = self.trade_commit_lock.lock().await;
+        let config = self.config.read().await;
+        let position = self.position.read().await;
+        let local = self.account.read().await;
+        self.account_view(
+            &config.exchange.symbol,
+            config.exchange.trading_mode(),
+            &position,
+            &local,
+        )
     }
 
     pub async fn record_trade(
@@ -792,6 +839,12 @@ impl AppState {
                 let mut current_account = self.account.write().await;
                 *current_position = position;
                 *current_account = account;
+                self.account_view(
+                    &current_symbol,
+                    current_mode,
+                    &current_position,
+                    &current_account,
+                );
             }
             if telegram.enabled {
                 let symbol = trade.symbol.clone();
@@ -823,7 +876,7 @@ impl AppState {
         }
 
         if telegram.enabled {
-            let account = self.account.read().await.clone();
+            let account = self.current_account().await;
             let position = self.position.read().await.clone();
             let ticker = self.ticker.read().await.clone();
             let cny_rate = self.cny_rates.get(&account.asset).await;
@@ -831,7 +884,6 @@ impl AppState {
                 &trade,
                 notification_stats.as_ref(),
                 &account,
-                position.unrealized_pnl,
                 cny_rate.as_ref(),
                 Utc::now(),
             )
@@ -2350,7 +2402,7 @@ mod tests {
             .write()
             .await
             .pause_on_zero_available_margin = true;
-        fixture.state.account.write().await.available_balance = Decimal::ZERO;
+        fixture.state.account.write().await.total_wallet_balance = Decimal::ZERO;
         assert!(!global.check().await);
         assert_eq!(*fixture.state.status.read().await, BotStatus::Running);
         let new = crate::config::GlobalConfig::from_app(&*fixture.state.config.read().await);
@@ -2394,7 +2446,7 @@ mod tests {
                 .store(true, Ordering::SeqCst);
             state.global_position_ready.store(true, Ordering::SeqCst);
         }
-        second.state.account.write().await.available_balance = Decimal::ZERO;
+        second.state.account.write().await.total_wallet_balance = Decimal::ZERO;
         let global = GlobalPositionLimit::new(Arc::new(RwLock::new(vec![
             first.state.clone(),
             second.state.clone(),
@@ -2412,7 +2464,7 @@ mod tests {
                 .unwrap(),
             Some(BotControlAction::GlobalRiskCancel)
         ));
-        second.state.account.write().await.available_balance = dec!(1);
+        second.state.account.write().await.total_wallet_balance = dec!(1);
         assert!(second.state.resume_trading().await.is_err());
         second
             .state
@@ -2449,7 +2501,7 @@ mod tests {
             .state
             .global_position_initialized
             .store(true, Ordering::SeqCst);
-        fixture.state.account.write().await.available_balance = -Decimal::ONE;
+        fixture.state.account.write().await.total_wallet_balance = -Decimal::ONE;
         fixture
             .state
             .global_position_ready
@@ -2466,6 +2518,48 @@ mod tests {
             .pause_on_zero_available_margin = true;
         assert!(global.check().await);
         assert_eq!(*fixture.state.status.read().await, BotStatus::Paused);
+    }
+
+    #[tokio::test]
+    async fn zero_margin_guard_uses_combined_paper_positions() {
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let commit = Arc::new(Mutex::new(()));
+        let mut states = Vec::new();
+        let mut receivers = Vec::new();
+        for (symbol, size, price) in [
+            ("SOLUSDC", dec!(60), dec!(100)),
+            ("BNBUSDC", dec!(-20), dec!(200)),
+        ] {
+            let mut config = AppConfig::default();
+            config.exchange.symbol = symbol.into();
+            config.pause_on_zero_available_margin = true;
+            let (tx, rx) = mpsc::channel(8);
+            let state = AppState::new_for_pair(config, db.clone(), tx, commit.clone());
+            *state.position.write().await = PositionInfo {
+                symbol: symbol.into(),
+                size,
+                entry_price: price,
+                mark_price: price,
+                ..Default::default()
+            };
+            state.account.write().await.available_balance = dec!(10000) - size.abs() * price;
+            state
+                .global_position_initialized
+                .store(true, Ordering::SeqCst);
+            state.global_position_ready.store(true, Ordering::SeqCst);
+            states.push(state);
+            receivers.push(rx);
+        }
+        let global = GlobalPositionLimit::new(Arc::new(RwLock::new(states.clone())));
+        global.membership_ready.store(true, Ordering::SeqCst);
+        assert!(global.check().await);
+        for state in states {
+            assert_eq!(*state.status.read().await, BotStatus::Paused);
+            assert_eq!(
+                state.current_account().await.available_balance,
+                Decimal::ZERO
+            );
+        }
     }
 
     async fn notification_fixture(enabled: bool, reject: bool) -> NotificationFixture {
@@ -2619,7 +2713,7 @@ mod tests {
             .await
             .pause_on_zero_available_margin = true;
         fixture.state.account.write().await.asset = "USDC".into();
-        fixture.state.account.write().await.available_balance = Decimal::ZERO;
+        fixture.state.account.write().await.total_wallet_balance = Decimal::ZERO;
         fixture
             .state
             .global_position_initialized

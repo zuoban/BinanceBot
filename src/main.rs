@@ -41,9 +41,9 @@ struct CliArgs {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Initialize a legacy paper account with an empty position and 10000 balance.
+    /// Initialize an empty legacy paper subledger without depositing shared funds.
     #[command(
-        long_about = "Initialize a legacy paper account with an empty position and 10000 balance. Historical positions and balances are NOT restored. Only paper trading is affected.\n\nStop the bot before running this command, including any older version that does not honor the process lock. Use a database file with a single hard link. The strategy remains paused after restart; resume it manually after reviewing the new baseline. Existing paper snapshots and scopes without historical paper trades are rejected."
+        long_about = "Initialize a legacy paper subledger with an empty position and a 10000 accounting baseline. This does not add funds to the shared paper account. Historical positions and balances are NOT restored. Only paper trading is affected.\n\nStop the bot before running this command, including any older version that does not honor the process lock. Use a database file with a single hard link. The strategy remains paused after restart; resume it manually after reviewing the new baseline. Existing paper snapshots and scopes without historical paper trades are rejected."
     )]
     MigrateLegacyPaper {
         /// Path to an existing SQLite database file
@@ -104,7 +104,7 @@ async fn main() -> anyhow::Result<()> {
             );
             let _process_lock = database_process_lock::DatabaseProcessLock::acquire(&db)?;
             Database::open(&db)?.initialize_legacy_paper_account(&symbol)?;
-            println!("Initialized paper account for {} with an empty position and 10000 balance. Historical positions and balances were not restored. Restart the bot and manually resume the paused strategy after reviewing the baseline.", symbol);
+            println!("Initialized paper subledger for {} with an empty position and a 10000 accounting baseline; no funds were added to the shared paper account. Historical positions and balances were not restored. Restart the bot and manually resume the paused strategy after reviewing the baseline.", symbol);
             return Ok(());
         }
     }

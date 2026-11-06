@@ -1308,3 +1308,126 @@ async fn inconsistent_individual_lookup_revokes_readiness_before_next_lookup() {
     assert!(!sync.await.unwrap());
     server.abort();
 }
+
+#[tokio::test]
+async fn paper_pairs_share_capital_pnl_and_position_margin() {
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    let commit = Arc::new(tokio::sync::Mutex::new(()));
+    let mut engines = Vec::new();
+    for (symbol, direction, price) in [
+        ("SOLUSDC", GridDirection::Long, dec!(100)),
+        ("BNBUSDC", GridDirection::Short, dec!(200)),
+    ] {
+        let mut config = AppConfig::default();
+        config.exchange.symbol = symbol.into();
+        config.grid.direction = direction;
+        let (tx, rx) = mpsc::channel(8);
+        let (_, ticker_rx) = broadcast::channel(8);
+        let state = AppState::new_for_pair(config.clone(), db.clone(), tx, commit.clone());
+        *state.ticker.write().await = ticker(symbol, price);
+        engines.push(GridTradingEngine::new(
+            state,
+            Arc::new(BinanceFuturesClient::new(&config.exchange)),
+            rx,
+            ticker_rx,
+        ));
+    }
+    let mut short = engines.pop().unwrap();
+    let mut long = engines.pop().unwrap();
+    let fill = |id: &str, symbol: &str, side, price, quantity| GridOrder {
+        client_order_id: id.into(),
+        order_id: None,
+        symbol: symbol.into(),
+        side,
+        price,
+        quantity,
+        amount_usdc: price * quantity,
+        status: OrderStatus::New,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        grid_level: 0,
+        paired_client_order_id: None,
+        is_take_profit: false,
+        purpose: OrderPurpose::Grid,
+        merge_sources: Vec::new(),
+    };
+    let mut long_open = fill(
+        "shared-long-open",
+        "SOLUSDC",
+        OrderSide::Buy,
+        dec!(100),
+        dec!(2),
+    );
+    let mut short_open = fill(
+        "shared-short-open",
+        "BNBUSDC",
+        OrderSide::Sell,
+        dec!(200),
+        dec!(1),
+    );
+    let (first, second) = tokio::join!(
+        long.on_order_filled(&mut long_open),
+        short.on_order_filled(&mut short_open),
+    );
+    assert!(first && second);
+    let account = long.state.snapshot().await.account;
+    assert_eq!(account.total_wallet_balance, dec!(10000));
+    assert_eq!(account.available_balance, dec!(9600));
+
+    long.handle_ticker_update(ticker("SOLUSDC", dec!(110)))
+        .await;
+    short
+        .handle_ticker_update(ticker("BNBUSDC", dec!(190)))
+        .await;
+    let account = short.state.snapshot().await.account;
+    assert_eq!(account.unrealized_profit, dec!(30));
+    assert_eq!(account.margin_balance, dec!(10030));
+    assert_eq!(account.available_balance, dec!(9620));
+
+    let mut long_close = fill(
+        "shared-long-close",
+        "SOLUSDC",
+        OrderSide::Sell,
+        dec!(110),
+        dec!(1),
+    );
+    let mut short_close = fill(
+        "shared-short-close",
+        "BNBUSDC",
+        OrderSide::Buy,
+        dec!(190),
+        dec!(1),
+    );
+    let (first, second) = tokio::join!(
+        long.on_order_filled(&mut long_close),
+        short.on_order_filled(&mut short_close),
+    );
+    assert!(first && second);
+    assert!(short.on_order_filled(&mut short_close).await);
+
+    let mut config = AppConfig::default();
+    config.exchange.symbol = "BTCUSDC".into();
+    let (tx, _) = mpsc::channel(8);
+    let added = AppState::new_for_pair(config, db.clone(), tx, commit.clone());
+    for state in [&long.state, &short.state, &added] {
+        let snapshot = state.snapshot().await;
+        assert_eq!(snapshot.account.total_wallet_balance, dec!(10020));
+        assert_eq!(snapshot.account.unrealized_profit, dec!(10));
+        assert_eq!(snapshot.account.margin_balance, dec!(10030));
+        assert_eq!(snapshot.account.available_balance, dec!(9920));
+        let frame = serde_json::to_value(state.account_snapshot().await).unwrap();
+        assert_eq!(
+            frame["snapshot"]["account"],
+            serde_json::to_value(snapshot.account).unwrap()
+        );
+    }
+
+    let mut config = AppConfig::default();
+    config.exchange.symbol = "BTCUSDT".into();
+    let (tx, _) = mpsc::channel(8);
+    let other_asset = AppState::new_for_pair(config, db, tx, commit);
+    let account = other_asset.snapshot().await.account;
+    assert_eq!(account.asset, "USDT");
+    assert_eq!(account.total_wallet_balance, dec!(10000));
+    assert_eq!(account.available_balance, dec!(10000));
+}

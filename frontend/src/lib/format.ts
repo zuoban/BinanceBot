@@ -91,7 +91,7 @@ export function accountGroups(entries: Overview['pairs'], now = Date.now()) {
     const group = groups.get(key) ?? { mode, asset, snapshots: [], observed: [], observationStale: false };
     group.snapshots.push(s);
     if (!account_observation_stale) group.observed.push(s);
-    group.observationStale ||= !!account_observation_stale;
+    group.observationStale ||= !!account_observation_stale || (mode === 'PAPER' && !s.account.asset);
     groups.set(key, group);
   }
   return [...groups.values()].map(({ mode, asset, snapshots, observed, observationStale }) => {
@@ -100,27 +100,25 @@ export function accountGroups(entries: Overview['pairs'], now = Date.now()) {
       const age = now - Date.parse(timestamp);
       return age >= -5_000 && age < maxAge;
     };
-    const latest = [...observed].filter(s => recent(s.account.update_time, 30_000))
+    const latest = [...observed].filter(s => recent(s.account.update_time, mode === 'PAPER' ? Infinity : 30_000))
       .sort((a, b) => Date.parse(b.account.update_time) - Date.parse(a.account.update_time))[0];
-    const fresh = !!latest;
     const account = latest ?? snapshots[0];
-    const unavailable = mode === 'PAPER' ? observationStale : !fresh;
-    // Paper wallet balances are local ledger state; open positions also need a
-    // recent valuation and a recent mark price to make equity meaningful.
+    const unavailable = !latest || (mode === 'PAPER' && observationStale);
+    // A shared paper account can include positions outside this page's symbol.
+    // Its valuation time follows the oldest open position's mark price.
     const paperValued = snapshots.every(s => {
       const size = numeric(s.position.size);
       if (size === null) return false;
       if (size === 0) return true;
       return recent(s.account.update_time, 30_000) && recent(s.ticker.mark_update_time, 15_000) && (numeric(s.ticker.mark_price) ?? 0) > 0;
     });
-    const sum = (values: (number | null)[]) => values.every(v => v !== null) ? values.reduce<number>((a, b) => a + b!, 0) : null;
-    const equity = mode === 'PAPER' ? paperValued ? sum(snapshots.map(s => {
-      const wallet = numeric(s.account.total_wallet_balance), pnl = numeric(s.position.unrealized_pnl);
-      return wallet === null || pnl === null ? null : wallet + pnl;
-    })) : null : fresh ? numeric(account.account.margin_balance) : null;
-    const available = mode === 'PAPER' ? paperValued ? sum(snapshots.map(s => numeric(s.account.available_balance))) : null : fresh ? numeric(account.account.available_balance) : null;
-    const wallet = mode === 'PAPER' ? sum(snapshots.map(s => numeric(s.account.total_wallet_balance))) : fresh ? numeric(account.account.total_wallet_balance) : null;
-    const unrealized = mode === 'PAPER' ? paperValued ? sum(snapshots.map(s => numeric(s.position.unrealized_pnl))) : null : fresh ? numeric(account.account.unrealized_profit) : null;
+    const sharedPosition = numeric(account.account.margin_balance) !== numeric(account.account.available_balance)
+      || (numeric(account.account.unrealized_profit) ?? 0) !== 0;
+    const valued = !unavailable && (mode !== 'PAPER' || (paperValued && (!sharedPosition || recent(account.account.update_time, 15_000))));
+    const equity = valued ? numeric(account.account.margin_balance) : null;
+    const available = valued ? numeric(account.account.available_balance) : null;
+    const wallet = unavailable ? null : numeric(account.account.total_wallet_balance);
+    const unrealized = valued ? numeric(account.account.unrealized_profit) : null;
     const rate = account.account_cny_rate?.asset === asset ? numeric(account.account_cny_rate.cny_per_unit) : null;
     return { key: `${mode}:${asset}`, mode, asset, count: snapshots.length, equity: unavailable ? null : equity, available: unavailable ? null : available, wallet: unavailable ? null : wallet, unrealized: unavailable ? null : unrealized, ratio: unavailable ? null : availableRatio(available, wallet), cny: !unavailable && equity !== null && rate !== null ? equity * rate : null };
   });

@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
+// Legacy PAPER history summed independent symbol balances; keep that series separate.
+const PAPER_SHARED_ACCOUNT_ID: &str = "paper-shared-v1";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotGroup {
     pub mode: TradingMode,
@@ -75,29 +78,27 @@ fn aggregate(
                 .iter()
                 .filter(|(s, interval)| {
                     s.account.asset == asset
-                        && fresh(
-                            now,
-                            s.account.update_time,
-                            interval.saturating_add(15).max(30),
-                        )
+                        && (mode == TradingMode::Paper
+                            || fresh(
+                                now,
+                                s.account.update_time,
+                                interval.saturating_add(15).max(30),
+                            ))
                 })
                 .max_by_key(|(s, _)| s.account.update_time)
                 .copied();
             let equity = if mode == TradingMode::Paper {
-                if snapshots.iter().all(|(s, _)| {
+                if snapshots.iter().all(|(s, interval)| {
                     s.account.asset == asset
                         && (s.position.size.is_zero()
-                            || (s.ticker.mark_price > Decimal::ZERO
+                            || (fresh(
+                                now,
+                                s.account.update_time,
+                                interval.saturating_add(15).max(30),
+                            ) && s.ticker.mark_price > Decimal::ZERO
                                 && fresh(now, s.ticker.mark_update_time, 15)))
                 }) {
-                    Some(
-                        snapshots
-                            .iter()
-                            .map(|(s, _)| {
-                                s.account.total_wallet_balance + s.position.unrealized_pnl
-                            })
-                            .sum(),
-                    )
+                    latest.map(|(s, _)| s.account.margin_balance)
                 } else {
                     None
                 }
@@ -199,6 +200,8 @@ pub(crate) async fn current_accounts(
                 &config.exchange,
             );
             Some(resolve_account_id(handle, &mut identities, key).await?)
+        } else if mode == TradingMode::Paper {
+            Some(PAPER_SHARED_ACCOUNT_ID.to_owned())
         } else {
             None
         };
@@ -261,6 +264,7 @@ pub(crate) async fn collect_hourly(
     for (snapshot, interval, identity) in observations {
         let account_id = match identity {
             Some(identity) => Some(resolve_account_id(handle, &mut identities, identity).await?),
+            None if snapshot.mode == TradingMode::Paper => Some(PAPER_SHARED_ACCOUNT_ID.to_owned()),
             None => None,
         };
         snapshots.push((snapshot, interval, account_id));
@@ -367,23 +371,26 @@ mod tests {
         }
         let (tx, _rx) = mpsc::channel(1);
         let state = AppState::new(config, Arc::new(Database::open(":memory:").unwrap()), tx);
-        state.account.write().await.asset = quote_asset(symbol).unwrap_or(symbol).into();
-        state.account.write().await.total_wallet_balance = dec!(100);
-        state.account.write().await.margin_balance = dec!(110);
-        state.account.write().await.update_time = Utc::now();
         state.ticker.write().await.mark_price = dec!(10);
         state.ticker.write().await.mark_update_time = Utc::now();
         if !paper {
             state.position.write().await.update_time = Some(Utc::now());
         }
-        state.snapshot().await
+        let mut snapshot = state.snapshot().await;
+        snapshot.account.asset = quote_asset(symbol).unwrap_or(symbol).into();
+        snapshot.account.total_wallet_balance = dec!(100);
+        snapshot.account.margin_balance = dec!(110);
+        snapshot.account.update_time = Utc::now();
+        snapshot
     }
 
     #[tokio::test]
-    async fn groups_separate_modes_sum_paper_and_deduplicate_live_equity() {
+    async fn groups_separate_modes_and_deduplicate_shared_account_equity() {
         let mut paper1 = sample("BTCUSDC", true).await;
         paper1.position.size = dec!(2);
         paper1.position.unrealized_pnl = dec!(5);
+        paper1.account.margin_balance = dec!(999);
+        paper1.account.update_time -= chrono::Duration::seconds(1);
         let mut paper2 = sample("ETHUSDC", true).await;
         paper2.position.size = dec!(-3);
         let mut live1 = sample("BTCUSDC", false).await;
@@ -396,11 +403,71 @@ mod tests {
             .iter()
             .find(|g| g.mode == TradingMode::Paper)
             .unwrap();
-        assert_eq!(paper.equity, Some(dec!(205)));
+        assert_eq!(paper.equity, Some(dec!(110)));
         assert_eq!(paper.long, Some(dec!(20)));
         assert_eq!(paper.short, Some(dec!(30)));
         let live = groups.iter().find(|g| g.mode == TradingMode::Live).unwrap();
         assert_eq!(live.equity, Some(dec!(600)));
+    }
+
+    #[tokio::test]
+    async fn adding_paper_symbols_preserves_capital_and_covers_all_positions() {
+        let mut first = sample("BTCUSDC", true).await;
+        first.account.total_wallet_balance = dec!(10020);
+        first.account.margin_balance = dec!(10035);
+        first.position.size = dec!(2);
+        first.position.unrealized_pnl = dec!(10);
+        let mut second = sample("ETHUSDC", true).await;
+        second.account = first.account.clone();
+        second.position.size = dec!(-3);
+        second.position.unrealized_pnl = dec!(5);
+        let now = Utc::now();
+        let initial = aggregate(&[first.clone()], now).remove(0);
+        let shared = aggregate(&[first, second], now).remove(0);
+        assert_eq!(initial.equity, Some(dec!(10035)));
+        assert_eq!(shared.equity, initial.equity);
+        assert_eq!(
+            (shared.long, shared.short),
+            (Some(dec!(20)), Some(dec!(30)))
+        );
+    }
+
+    #[tokio::test]
+    async fn flat_paper_ledgers_use_the_latest_shared_balance_without_expiry() {
+        let mut old = sample("BTCUSDC", true).await;
+        let mut latest = sample("ETHUSDC", true).await;
+        let now = Utc::now();
+        old.account.update_time = now - chrono::Duration::minutes(2);
+        latest.account.update_time = now - chrono::Duration::minutes(1);
+        latest.account.margin_balance = dec!(10020);
+        assert_eq!(aggregate(&[old, latest], now)[0].equity, Some(dec!(10020)));
+    }
+
+    #[tokio::test]
+    async fn fresh_paper_symbols_do_not_mask_stale_open_valuations_or_marks() {
+        let mut stale = sample("BTCUSDC", true).await;
+        let mut current = sample("ETHUSDC", true).await;
+        let now = Utc::now();
+        stale.position.size = dec!(2);
+        stale.account.update_time = now - chrono::Duration::seconds(31);
+        current.account.update_time = now;
+        let group = aggregate(&[stale.clone(), current.clone()], now).remove(0);
+        assert_eq!(group.equity, None);
+        assert_eq!((group.long, group.short), (Some(dec!(20)), Some(dec!(0))));
+        stale.account.update_time = now;
+        stale.ticker.mark_update_time = now - chrono::Duration::seconds(15);
+        let group = aggregate(&[stale.clone(), current.clone()], now).remove(0);
+        assert_eq!((group.equity, group.long, group.short), (None, None, None));
+        stale.ticker.mark_update_time = now;
+        assert_eq!(aggregate(&[stale, current], now)[0].equity, Some(dec!(110)));
+    }
+
+    #[tokio::test]
+    async fn missing_paper_account_does_not_display_a_partial_shared_balance() {
+        let mut missing = sample("BTCUSDC", true).await;
+        let current = sample("ETHUSDC", true).await;
+        missing.account = Default::default();
+        assert_eq!(aggregate(&[missing, current], Utc::now())[0].equity, None);
     }
 
     #[tokio::test]
@@ -516,11 +583,11 @@ mod tests {
         let fdusd = groups.iter().find(|g| g.asset == "FDUSD").unwrap();
         assert_eq!(
             (usdc.equity, usdc.long, usdc.short),
-            (Some(dec!(100)), Some(dec!(20)), Some(dec!(0)))
+            (Some(dec!(110)), Some(dec!(20)), Some(dec!(0)))
         );
         assert_eq!(
             (fdusd.equity, fdusd.long, fdusd.short),
-            (Some(dec!(100)), Some(dec!(0)), Some(dec!(30)))
+            (Some(dec!(110)), Some(dec!(0)), Some(dec!(30)))
         );
     }
 
@@ -540,6 +607,30 @@ mod tests {
         let group = aggregate(&[fdusd], Utc::now()).remove(0);
         assert_eq!(group.asset, "FDUSD");
         assert_eq!(group.equity, None);
+    }
+
+    #[test]
+    fn paper_history_retains_legacy_values_under_a_separate_identity() {
+        let db = Database::open(":memory:").unwrap();
+        let legacy: SnapshotGroup = serde_json::from_str(
+            r#"{"mode":"PAPER","asset":"USDC","equity":"20000","long":"20","short":"30"}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.account_id, None);
+        let mut shared = legacy.clone();
+        shared.account_id = Some(PAPER_SHARED_ACCOUNT_ID.to_owned());
+        shared.equity = Some(dec!(10000));
+        db.save_hourly_account_snapshot(3600, &[legacy]).unwrap();
+        db.save_hourly_account_snapshot(7200, &[shared]).unwrap();
+        let saved = db.hourly_account_snapshots(0).unwrap();
+        assert_eq!(saved.len(), 2);
+        assert_eq!(saved[0].groups[0].account_id, None);
+        assert_eq!(saved[0].groups[0].equity, Some(dec!(20000)));
+        assert_eq!(
+            saved[1].groups[0].account_id.as_deref(),
+            Some(PAPER_SHARED_ACCOUNT_ID)
+        );
+        assert_eq!(saved[1].groups[0].equity, Some(dec!(10000)));
     }
 
     #[test]

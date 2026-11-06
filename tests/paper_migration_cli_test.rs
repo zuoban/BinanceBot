@@ -97,12 +97,6 @@ fn migration_requires_confirmation_and_exclusive_lock() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    let stdout = String::from_utf8_lossy(&result.stdout);
-    assert!(
-        stdout.contains("empty position")
-            && stdout.contains("10000")
-            && stdout.contains("not restored")
-    );
     assert_eq!(paper_account_count(&fixture.database), 1);
     assert!(!migrate(&fixture.database, "SOLUSDC", Some(phrase))
         .status

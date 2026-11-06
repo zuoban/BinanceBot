@@ -136,7 +136,12 @@ fn buy_exposure_usdc(position_size: Decimal, mark_price: Decimal, orders: &[Grid
 
 // Paper accounts have no exchange-provided leverage until one is explicitly set.
 // Treat the default zero as 1x so a missing leverage never understates margin.
-fn update_paper_account(position: &mut PositionInfo, account: &mut AccountInfo, price: Decimal) {
+fn update_paper_account(
+    position: &mut PositionInfo,
+    account: &mut AccountInfo,
+    ticker: &TickerInfo,
+) {
+    let price = ticker.grid_reference_price();
     if price > Decimal::ZERO {
         position.mark_price = price;
     }
@@ -155,7 +160,11 @@ fn update_paper_account(position: &mut PositionInfo, account: &mut AccountInfo, 
     account.unrealized_profit = position.unrealized_pnl;
     account.margin_balance = account.total_wallet_balance + position.unrealized_pnl;
     account.available_balance = account.margin_balance - position_margin;
-    account.update_time = Utc::now();
+    account.update_time = if ticker.mark_price > Decimal::ZERO {
+        ticker.mark_update_time
+    } else {
+        ticker.update_time
+    };
 }
 
 fn position_valuation_price(position: &PositionInfo, ticker: &TickerInfo) -> Decimal {
@@ -1055,6 +1064,9 @@ impl GridTradingEngine {
             }
             Err(e) => warn!("Failed to fetch initial mark price: {}", e),
         }
+        if config.exchange.is_paper() {
+            self.update_paper_valuation().await;
+        }
 
         // Fetch 24hr stats
         if let Ok(t24) = self.client.get_24hr_ticker(&symbol).await {
@@ -1674,7 +1686,11 @@ impl GridTradingEngine {
         drop(scope_transition);
 
         let ready = if new_config.exchange.is_paper() {
-            true
+            self.update_paper_valuation().await;
+            !self
+                .state
+                .paper_restore_failed
+                .load(std::sync::atomic::Ordering::SeqCst)
         } else {
             self.sync_live_orders().await && self.sync_account_and_position().await
         };
@@ -1716,12 +1732,30 @@ impl GridTradingEngine {
         Ok(())
     }
 
+    async fn update_paper_valuation(&self) {
+        let config = self.state.config.read().await;
+        let ticker = self.state.ticker.read().await;
+        let mut position = self.state.position.write().await;
+        let mut account = self.state.account.write().await;
+        update_paper_account(&mut position, &mut account, &ticker);
+        if let Err(error) =
+            self.state
+                .db
+                .shared_paper_account(&config.exchange.symbol, &position, &account)
+        {
+            error!(%error, "Could not value shared paper account");
+            self.state
+                .paper_restore_failed
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
     async fn handle_ticker_update(&mut self, ticker_update: TickerInfo) {
         if ticker_update.symbol != self.state.config.read().await.exchange.symbol {
             return;
         }
 
-        let (last_updated, mark_updated, valuation_price) = {
+        let (last_updated, mark_updated) = {
             let mut ticker = self.state.ticker.write().await;
             let now = Utc::now();
             let fresh = |time| {
@@ -1748,7 +1782,7 @@ impl GridTradingEngine {
                 ticker.mark_update_time = ticker_update.mark_update_time;
             }
             ticker.symbol = ticker_update.symbol.clone();
-            (last_updated, mark_updated, ticker.grid_reference_price())
+            (last_updated, mark_updated)
         };
         // Rejected market events cannot change risk inputs or trigger paper fills.
         if !last_updated && !mark_updated {
@@ -1764,9 +1798,7 @@ impl GridTradingEngine {
         // Update unrealized PnL for current position
         let paper = self.state.config.read().await.exchange.is_paper();
         if paper {
-            let mut pos = self.state.position.write().await;
-            let mut account = self.state.account.write().await;
-            update_paper_account(&mut pos, &mut account, valuation_price);
+            self.update_paper_valuation().await;
         }
 
         if self.pause_if_position_limit_reached().await {
@@ -1991,9 +2023,7 @@ impl GridTradingEngine {
                 drop(ticker);
 
                 if paper {
-                    let mut pos = self.state.position.write().await;
-                    let mut account = self.state.account.write().await;
-                    update_paper_account(&mut pos, &mut account, price);
+                    self.update_paper_valuation().await;
                 }
             }
             Ok(_) => {
@@ -2808,7 +2838,7 @@ impl GridTradingEngine {
             let ticker = self.state.ticker.read().await.clone();
             let mut acc = self.state.account.read().await.clone();
             acc.total_wallet_balance += simulated_pnl;
-            update_paper_account(&mut pos, &mut acc, ticker.grid_reference_price());
+            update_paper_account(&mut pos, &mut acc, &ticker);
             paper_state = Some((pos, acc));
         }
 

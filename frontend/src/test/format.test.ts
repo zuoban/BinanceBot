@@ -22,7 +22,7 @@ describe('account and trade summaries', () => {
     expect(availableRatio(80, 0)).toBeNull();
     expect(availableRatio(null, 100)).toBeNull();
   });
-  it('sums independent paper accounts but deduplicates shared live accounts', () => {
+  it('deduplicates shared paper and live balances without mixing their modes', () => {
     const paperA = snapshot('SOLUSDC'), paperB = snapshot('BTCUSDC');
     const liveA = snapshot('ETHUSDC', 'LIVE'), liveB = snapshot('XRPUSDC', 'LIVE');
     liveB.account.margin_balance = '200';
@@ -34,8 +34,59 @@ describe('account and trade summaries', () => {
       { snapshot: paperA, mode: 'PAPER', scoped: true }, { snapshot: paperB, mode: 'PAPER', scoped: true },
       { snapshot: liveA, mode: 'LIVE', scoped: true }, { snapshot: liveB, mode: 'LIVE', scoped: true },
     ]);
-    expect(groups.find(g => g.mode === 'PAPER')).toMatchObject({ equity: 210, available: 160, wallet: 200, unrealized: 10 });
+    expect(groups.find(g => g.mode === 'PAPER')).toMatchObject({ equity: 105, available: 80, wallet: 100, unrealized: 5 });
     expect(groups.find(g => g.mode === 'LIVE')).toMatchObject({ equity: 200, available: 175, wallet: 250, unrealized: -50 });
+  });
+  it('does not add capital or repeat shared pnl when a paper symbol is added', () => {
+    const first = snapshot('BTCUSDC'), second = snapshot('ETHUSDC'), otherAsset = snapshot('BTCUSDT');
+    first.account = { ...first.account, total_wallet_balance: '10020', margin_balance: '10035', available_balance: '9800', unrealized_profit: '15' };
+    second.account = { ...first.account };
+    first.position.size = '1';
+    first.position.unrealized_pnl = '10';
+    second.position.size = '-1';
+    second.position.unrealized_pnl = '5';
+    otherAsset.account.asset = 'USDT';
+    const entry = (s: typeof first) => ({ snapshot: s, mode: s.mode, scoped: true });
+    const initial = accountGroups([entry(first)])[0];
+    const groups = accountGroups([entry(first), entry(second), entry(otherAsset)]);
+    expect(groups.find(g => g.key === 'PAPER:USDC')).toMatchObject({ equity: initial.equity, wallet: initial.wallet, available: initial.available, unrealized: initial.unrealized, count: 2 });
+    expect(groups.find(g => g.key === 'PAPER:USDC')).toMatchObject({ equity: 10035, wallet: 10020, available: 9800, unrealized: 15 });
+    expect(groups.find(g => g.key === 'PAPER:USDT')).toMatchObject({ equity: 105, wallet: 100 });
+  });
+  it('takes the newest paper ledger even when flat observations are old', () => {
+    const now = Date.now(), old = snapshot('BTCUSDC'), current = snapshot('ETHUSDC');
+    old.account.update_time = new Date(now - 120_000).toISOString();
+    current.account.update_time = new Date(now - 60_000).toISOString();
+    current.account = { ...current.account, total_wallet_balance: '10020', margin_balance: '10020', available_balance: '10020', unrealized_profit: '0' };
+    const entries = [old, current].map(s => ({ snapshot: s, mode: s.mode, scoped: true }));
+    expect(accountGroups(entries, now)[0]).toMatchObject({ equity: 10020, wallet: 10020, available: 10020, unrealized: 0 });
+    expect(accountGroups([...entries].reverse(), now)[0].equity).toBe(10020);
+  });
+  it('does not let a fresh paper symbol hide another stale open valuation or failed observation', () => {
+    const now = Date.now(), old = snapshot('BTCUSDC'), current = snapshot('ETHUSDC');
+    old.position.size = '1';
+    old.account.update_time = new Date(now - 31_000).toISOString();
+    const entries = [old, current].map(s => ({ snapshot: s, mode: s.mode, scoped: true }));
+    expect(accountGroups(entries, now)[0]).toMatchObject({ equity: null, available: null, unrealized: null, wallet: 100 });
+    old.account.update_time = new Date(now).toISOString();
+    old.ticker.mark_update_time = new Date(now - 15_000).toISOString();
+    expect(accountGroups(entries, now)[0].equity).toBeNull();
+    old.ticker.mark_update_time = new Date(now).toISOString();
+    expect(accountGroups(entries, now)[0].equity).toBe(105);
+    expect(accountGroups([{ ...entries[0], account_observation_stale: true }, entries[1]], now)[0]).toMatchObject({ equity: null, wallet: null });
+    old.account.asset = '';
+    old.account.total_wallet_balance = '0';
+    expect(accountGroups(entries, now)[0]).toMatchObject({ equity: null, available: null, wallet: null, unrealized: null });
+  });
+  it('hides stale shared valuations when the current symbol is flat', () => {
+    const now = Date.now(), s = snapshot('BTCUSDC');
+    s.position.size = '0';
+    s.position.unrealized_pnl = '0';
+    s.account = { ...s.account, total_wallet_balance: '10000', margin_balance: '10020', available_balance: '9800', unrealized_profit: '20', update_time: new Date(now - 15_000).toISOString() };
+    const entries = [{ snapshot: s, mode: s.mode, scoped: true }];
+    expect(accountGroups(entries, now)[0]).toMatchObject({ wallet: 10000, equity: null, available: null, unrealized: null });
+    s.account.update_time = new Date(now - 14_999).toISOString();
+    expect(accountGroups(entries, now)[0]).toMatchObject({ equity: 10020, available: 9800, unrealized: 20 });
   });
   it('does not display a stale live account or yesterday’s trade total', () => {
     const s = snapshot('SOLUSDC', 'LIVE');
@@ -61,11 +112,15 @@ describe('account and trade summaries', () => {
   it('keeps a flat paper ledger but rejects stale open-position valuations', () => {
     const now = Date.now(), s = snapshot('SOLUSDC');
     const entries = [{ snapshot: s, mode: 'PAPER' as const, scoped: true }];
+    s.position.unrealized_pnl = '0';
+    s.account = { ...s.account, margin_balance: '100', available_balance: '100', unrealized_profit: '0' };
     s.account.update_time = new Date(now - 60_000).toISOString();
     s.ticker.mark_update_time = new Date(now - 60_000).toISOString();
-    expect(accountGroups(entries, now)[0]).toMatchObject({ equity: 105, available: 80, wallet: 100 });
+    expect(accountGroups(entries, now)[0]).toMatchObject({ equity: 100, available: 100, wallet: 100 });
     expect(accountGroups([{ ...entries[0], account_observation_stale: true }], now)[0]).toMatchObject({ equity: null, available: null, wallet: null });
     s.position.size = '1';
+    s.position.unrealized_pnl = '5';
+    s.account = { ...s.account, margin_balance: '105', available_balance: '4', unrealized_profit: '5' };
     expect(accountGroups(entries, now)[0]).toMatchObject({ equity: null, available: null, unrealized: null, wallet: 100 });
     s.account.update_time = new Date(now).toISOString();
     expect(accountGroups(entries, now)[0].equity).toBeNull();

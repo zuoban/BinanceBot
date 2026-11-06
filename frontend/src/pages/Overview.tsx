@@ -160,7 +160,7 @@ export default function OverviewPage() {
           <div><span>钱包余额</span><strong>{number(group.wallet)}</strong></div>
           <div><span>未实现盈亏</span><strong>{group.unrealized === null ? '--' : <Pnl value={group.unrealized} />}</strong></div>
         </div>
-        {group.mode !== 'PAPER' && <div className="muted">{group.count} 个策略共用账户 · 去重展示</div>}
+        <div className="muted">{group.count} 个策略共用账户 · 去重展示</div>
       </Card></Col>)}
     </Row>
     </section>

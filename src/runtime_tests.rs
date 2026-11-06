@@ -1967,7 +1967,7 @@ async fn overview_history_returns_saved_snapshots() {
     let current = body["data"]["current_accounts"].as_array().unwrap();
     assert!(current.iter().any(|account| account["asset"] == "USDC"
         && account["mode"] == "PAPER"
-        && account["account_id"].is_null()));
+        && account["account_id"] == "paper-shared-v1"));
     assert!(current
         .iter()
         .any(|account| account["asset"] == "USDT" && account["mode"] == "PAPER"));
@@ -2024,7 +2024,12 @@ async fn history_lists_current_account_for_legacy_single_pair_runtime() {
     assert_eq!(accounts.len(), 1);
     assert_eq!(accounts[0].mode, TradingMode::Paper);
     assert_eq!(accounts[0].asset, "USDC");
-    assert!(accounts[0].account_id.is_none());
+    assert_eq!(accounts[0].account_id.as_deref(), Some("paper-shared-v1"));
+    let captured = crate::snapshots::collect_hourly(&handle)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(captured[0].2.as_deref(), Some("paper-shared-v1"));
 }
 
 #[tokio::test]

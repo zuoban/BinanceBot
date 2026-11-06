@@ -438,20 +438,35 @@ it('shows today’s executed buy and sell counts instead of active orders on the
 });
 
 
-it('shows exchange asset balances and available balance', () => {
-  const s = snapshot('BTCUSDC', 'LIVE');
+it.each(['PAPER', 'LIVE'] as const)('shows shared %s asset balances once when a symbol is added', mode => {
+  const s = snapshot('BTCUSDC', mode);
   s.account.total_wallet_balance = '1289.95';
   s.account.unrealized_profit = '-525.02';
   s.account.margin_balance = '764.93';
   s.account.available_balance = '300';
-  overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: s, mode: 'LIVE', scoped: true }] };
-  render(<MemoryRouter><AccountsContext.Provider value={overview.data.pairs}><App><OverviewPage /></App></AccountsContext.Provider></MemoryRouter>);
+  const entries = [{ snapshot: s, mode, scoped: true }];
+  overview.data = { generated_at: new Date().toISOString(), pairs: entries };
+  const page = () => <MemoryRouter><AccountsContext.Provider value={entries}><App><OverviewPage /></App></AccountsContext.Provider></MemoryRouter>;
+  const { rerender } = render(page());
   const assets = screen.getByLabelText('USDC账户资产');
   expect(within(assets).getByText('钱包余额').parentElement).toHaveTextContent('1,289.95');
   expect(within(assets).getByText('未实现盈亏').parentElement).toHaveTextContent('-525.02');
   expect(screen.getByText('保证金余额').closest('.account-card')).toHaveTextContent('764.93');
   expect(screen.getByText('可用余额').parentElement).toHaveTextContent('300 USDC');
   expect(within(assets).queryByText('可转出')).not.toBeInTheDocument();
+  const second = snapshot('ETHUSDC', mode);
+  second.account = { ...s.account };
+  s.position.size = '3';
+  second.position.size = '-1';
+  entries.push({ snapshot: second, mode, scoped: true });
+  rerender(page());
+  expect(screen.getAllByText('保证金余额')).toHaveLength(1);
+  const shared = screen.getByText('保证金余额').closest('.account-card') as HTMLElement;
+  expect(shared.querySelector('.ant-statistic-content-value')).toHaveTextContent('764.93');
+  expect(within(shared).getByText('钱包余额').parentElement).toHaveTextContent('1,289.95');
+  expect(within(shared).getByText('未实现盈亏').parentElement).toHaveTextContent('-525.02');
+  expect(within(shared).getByText('可用余额').parentElement).toHaveTextContent('300 USDC');
+  expect(screen.getByText('总持仓金额 / USDC').closest('.position-summary')).toHaveTextContent('404');
 });
 
 it('shows grouped today pnl and pending trades across all strategies', () => {

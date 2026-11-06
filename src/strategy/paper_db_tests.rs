@@ -88,6 +88,10 @@ fn paper_trade_and_state_roll_back_on_database_failures() {
     let other_before =
         serde_json::to_value(db.load_paper_state("BTCUSDC").unwrap().unwrap()).unwrap();
     let stats_before = db.load_scoped_stats("SOLUSDC", TradingMode::Paper).unwrap();
+    let shared_before = db
+        .shared_paper_account("SOLUSDC", &initial.0, &initial.1)
+        .unwrap();
+    assert_eq!(shared_before.total_wallet_balance, dec!(-8400));
     stats.total_trades = 2;
     let changed = paper_state("SOLUSDC", 2, 800);
 
@@ -107,6 +111,13 @@ fn paper_trade_and_state_roll_back_on_database_failures() {
         assert_eq!(serde_json::to_value(db.load_paper_state("SOLUSDC").unwrap().unwrap()).unwrap(), before);
         assert_eq!(serde_json::to_value(db.load_paper_state("BTCUSDC").unwrap().unwrap()).unwrap(), other_before);
         assert!(db.load_pair_intents("SOLUSDC", TradingMode::Paper).unwrap().is_empty());
+        let shared_after = db
+            .shared_paper_account("BTCUSDC", &other.0, &other.1)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(shared_after).unwrap(),
+            serde_json::to_value(&shared_before).unwrap()
+        );
         editor.execute_batch(&format!("DROP TRIGGER {trigger};")).unwrap();
     }
     drop(editor);
@@ -352,4 +363,359 @@ async fn legacy_paper_account_starts_paused_and_cannot_resume() {
         assert!(error.contains("模拟盘仓位和余额未能恢复"), "{error}");
         assert_eq!(*state.status.read().await, BotStatus::Paused);
     }
+}
+
+#[test]
+fn shared_paper_wallet_has_one_baseline_and_publishes_commits_immediately() {
+    let db = Database::open(":memory:").unwrap();
+    let sol = paper_state("SOLUSDC", 0, 10000);
+    let btc = paper_state("BTCUSDC", 0, 10000);
+    for (symbol, state) in [("SOLUSDC", &sol), ("BTCUSDC", &btc)] {
+        let shared = db.shared_paper_account(symbol, &state.0, &state.1).unwrap();
+        assert_eq!(shared.total_wallet_balance, dec!(10000));
+        assert_eq!(shared.available_balance, dec!(10000));
+    }
+    let earned = paper_state("SOLUSDC", 0, 10005);
+    let lost = paper_state("BTCUSDC", 0, 9997);
+    for (id, symbol, state) in [("earned", "SOLUSDC", &earned), ("lost", "BTCUSDC", &lost)] {
+        assert!(db
+            .insert_trade_with_paper_recovery(
+                &trade(id, symbol, TradingMode::Paper),
+                &GridStats::default(),
+                None,
+                None,
+                Some(state),
+            )
+            .unwrap());
+    }
+    // Both writes must be reflected even though only this old SOL snapshot is published.
+    let shared = db.shared_paper_account("SOLUSDC", &sol.0, &sol.1).unwrap();
+    assert_eq!(shared.total_wallet_balance, dec!(10002));
+    assert_eq!(shared.available_balance, dec!(10002));
+    assert_eq!(
+        db.load_paper_state("SOLUSDC")
+            .unwrap()
+            .unwrap()
+            .1
+            .total_wallet_balance,
+        dec!(10005)
+    );
+    assert_eq!(
+        db.load_paper_state("BTCUSDC")
+            .unwrap()
+            .unwrap()
+            .1
+            .total_wallet_balance,
+        dec!(9997)
+    );
+}
+
+#[test]
+fn shared_paper_margin_combines_long_and_short_positions_and_isolates_assets() {
+    let db = Database::open(":memory:").unwrap();
+    let mut long = paper_state("SOLUSDC", 2, 10000);
+    long.0.mark_price = dec!(110);
+    long.0.unrealized_pnl = dec!(20);
+    long.0.leverage = 2;
+    let mut short = paper_state("BTCUSDC", -3, 10000);
+    short.0.entry_price = dec!(200);
+    short.0.mark_price = dec!(190);
+    short.0.unrealized_pnl = dec!(30);
+    db.shared_paper_account("SOLUSDC", &long.0, &long.1)
+        .unwrap();
+    let shared = db
+        .shared_paper_account("BTCUSDC", &short.0, &short.1)
+        .unwrap();
+    assert_eq!(shared.total_wallet_balance, dec!(10000));
+    assert_eq!(shared.unrealized_profit, dec!(50));
+    assert_eq!(shared.margin_balance, dec!(10050));
+    assert_eq!(shared.available_balance, dec!(9370));
+
+    let mut other_asset = paper_state("ETHUSDT", -2, 10007);
+    other_asset.1.asset = "USDT".into();
+    other_asset.0.entry_price = dec!(50);
+    other_asset.0.unrealized_pnl = dec!(-4);
+    let separate = db
+        .shared_paper_account("ETHUSDT", &other_asset.0, &other_asset.1)
+        .unwrap();
+    assert_eq!(separate.total_wallet_balance, dec!(10007));
+    assert_eq!(separate.unrealized_profit, dec!(-4));
+    assert_eq!(separate.margin_balance, dec!(10003));
+    assert_eq!(separate.available_balance, dec!(9903));
+    let unchanged = db
+        .shared_paper_account("SOLUSDC", &long.0, &long.1)
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(unchanged).unwrap(),
+        serde_json::to_value(shared).unwrap()
+    );
+}
+
+#[test]
+fn shared_paper_freshness_tracks_the_oldest_open_position() {
+    let db = Database::open(":memory:").unwrap();
+    let now = Utc::now();
+    let old = now - chrono::Duration::minutes(2);
+    let recent = now - chrono::Duration::seconds(2);
+    let mut stale = paper_state("SOLUSDC", 2, 10000);
+    stale.1.update_time = old;
+    let mut fresh = paper_state("BTCUSDC", -1, 10000);
+    fresh.1.update_time = now;
+    fresh.0.update_time = Some(recent);
+    let mut flat = paper_state("ETHUSDC", 0, 10000);
+    flat.1.update_time = now;
+    db.shared_paper_account("SOLUSDC", &stale.0, &stale.1)
+        .unwrap();
+    assert_eq!(
+        db.shared_paper_account("BTCUSDC", &fresh.0, &fresh.1)
+            .unwrap()
+            .update_time,
+        old
+    );
+    assert_eq!(
+        db.shared_paper_account("ETHUSDC", &flat.0, &flat.1)
+            .unwrap()
+            .update_time,
+        old
+    );
+    stale.1.update_time = now;
+    assert_eq!(
+        db.shared_paper_account("SOLUSDC", &stale.0, &stale.1)
+            .unwrap()
+            .update_time,
+        recent
+    );
+    // A late publication cannot replace a fresher valuation.
+    stale.1.update_time = old;
+    assert_eq!(
+        db.shared_paper_account("SOLUSDC", &stale.0, &stale.1)
+            .unwrap()
+            .update_time,
+        recent
+    );
+}
+
+#[test]
+fn shared_paper_wallet_restores_inactive_subledgers_after_history_cleanup() {
+    for cleanup in 0..3 {
+        let path =
+            std::env::temp_dir().join(format!("paper-shared-{}.sqlite", uuid::Uuid::new_v4()));
+        let db = Database::open(&path).unwrap();
+        let inactive = paper_state("SOLUSDC", 0, 10017);
+        let mut open = paper_state("BTCUSDC", 2, 9995);
+        open.0.mark_price = dec!(105);
+        open.0.unrealized_pnl = dec!(7);
+        for (id, symbol, state) in [
+            ("inactive", "SOLUSDC", &inactive),
+            ("open", "BTCUSDC", &open),
+        ] {
+            db.insert_trade_with_paper_recovery(
+                &trade(id, symbol, TradingMode::Paper),
+                &GridStats::default(),
+                None,
+                None,
+                Some(state),
+            )
+            .unwrap();
+        }
+        db.insert_trade(&trade("live", "ETHUSDC", TradingMode::Live))
+            .unwrap();
+        match cleanup {
+            1 => {
+                db.clear_trade_history_for_symbol("SOLUSDC").unwrap();
+            }
+            2 => {
+                db.clear_trade_history().unwrap();
+            }
+            _ => {}
+        }
+        drop(db);
+        let reopened = Database::open(&path).unwrap();
+        // Neither persisted symbol is running or published in this process.
+        let added = paper_state("ETHUSDC", 0, 10000);
+        let shared = reopened
+            .shared_paper_account("ETHUSDC", &added.0, &added.1)
+            .unwrap();
+        assert_eq!(shared.total_wallet_balance, dec!(10012));
+        assert_eq!(shared.unrealized_profit, dec!(7));
+        assert_eq!(shared.margin_balance, dec!(10019));
+        assert_eq!(shared.available_balance, dec!(9809));
+        drop(reopened);
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+fn duplicate_paper_trades_cannot_change_shared_wallet_or_holdings() {
+    let db = Database::open(":memory:").unwrap();
+    let initial = paper_state("SOLUSDC", 2, 10005);
+    let changed = paper_state("SOLUSDC", 4, 9990);
+    let fill = trade("duplicate", "SOLUSDC", TradingMode::Paper);
+    assert!(db
+        .insert_trade_with_paper_recovery(&fill, &GridStats::default(), None, None, Some(&initial),)
+        .unwrap());
+    let before = db
+        .shared_paper_account("SOLUSDC", &initial.0, &initial.1)
+        .unwrap();
+    for cleared in [false, true] {
+        if cleared {
+            db.clear_trade_history().unwrap();
+        }
+        assert!(!db
+            .insert_trade_with_paper_recovery(
+                &fill,
+                &GridStats::default(),
+                None,
+                None,
+                Some(&changed),
+            )
+            .unwrap());
+        let after = db
+            .shared_paper_account("SOLUSDC", &changed.0, &changed.1)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(after).unwrap(),
+            serde_json::to_value(&before).unwrap()
+        );
+    }
+}
+
+#[test]
+fn shared_paper_legacy_failure_is_asset_scoped_and_migration_adds_no_capital() {
+    let db = Database::open(":memory:").unwrap();
+    let earned = paper_state("BTCUSDC", 0, 10005);
+    db.insert_trade_with_paper_recovery(
+        &trade("earned", "BTCUSDC", TradingMode::Paper),
+        &GridStats::default(),
+        None,
+        None,
+        Some(&earned),
+    )
+    .unwrap();
+    db.insert_trade(&trade("legacy", "SOLUSDC", TradingMode::Unknown))
+        .unwrap();
+    db.clear_trade_history_for_symbol("SOLUSDC").unwrap();
+    let mut usdt = paper_state("ETHUSDT", 0, 10000);
+    usdt.1.asset = "USDT".into();
+    assert_eq!(
+        db.shared_paper_account("ETHUSDT", &usdt.0, &usdt.1)
+            .unwrap()
+            .total_wallet_balance,
+        dec!(10000)
+    );
+    assert!(db
+        .shared_paper_account("BTCUSDC", &earned.0, &earned.1)
+        .is_err());
+    db.initialize_legacy_paper_account("SOLUSDC").unwrap();
+    assert_eq!(
+        db.shared_paper_account("BTCUSDC", &earned.0, &earned.1)
+            .unwrap()
+            .total_wallet_balance,
+        dec!(10005)
+    );
+    // Legacy rows introduced after initialization must also fail closed.
+    db.insert_trade(&trade("later-legacy", "XRPUSDC", TradingMode::Paper))
+        .unwrap();
+    assert!(db
+        .shared_paper_account("BTCUSDC", &earned.0, &earned.1)
+        .is_err());
+    db.initialize_legacy_paper_account("XRPUSDC").unwrap();
+    assert_eq!(
+        db.shared_paper_account("BTCUSDC", &earned.0, &earned.1)
+            .unwrap()
+            .total_wallet_balance,
+        dec!(10005)
+    );
+}
+
+#[test]
+fn concurrent_paper_commits_and_publications_keep_each_symbols_contribution() {
+    let db = Database::open(":memory:").unwrap();
+    let baseline = paper_state("ETHUSDC", 0, 10000);
+    db.shared_paper_account("ETHUSDC", &baseline.0, &baseline.1)
+        .unwrap();
+    std::thread::scope(|scope| {
+        for (symbol, delta) in [("SOLUSDC", 1), ("BTCUSDC", -2)] {
+            let db = &db;
+            scope.spawn(move || {
+                for index in 1..=40 {
+                    let state = paper_state(symbol, 0, 10000 + delta * index);
+                    db.insert_trade_with_paper_recovery(
+                        &trade(&format!("{symbol}-{index}"), symbol, TradingMode::Paper),
+                        &GridStats::default(),
+                        None,
+                        None,
+                        Some(&state),
+                    )
+                    .unwrap();
+                    db.shared_paper_account(symbol, &state.0, &state.1).unwrap();
+                }
+            });
+        }
+    });
+    let shared = db
+        .shared_paper_account("ETHUSDC", &baseline.0, &baseline.1)
+        .unwrap();
+    assert_eq!(shared.total_wallet_balance, dec!(9960));
+    assert_eq!(shared.available_balance, dec!(9960));
+}
+
+#[test]
+fn registered_paper_baseline_survives_analysis_history_until_restart() {
+    let path = std::env::temp_dir().join(format!("paper-known-{}.sqlite", uuid::Uuid::new_v4()));
+    let db = Database::open(&path).unwrap();
+    let initial = paper_state("SOLUSDC", 0, 10000);
+    db.shared_paper_account("SOLUSDC", &initial.0, &initial.1)
+        .unwrap();
+    db.insert_trade(&trade("analysis", "SOLUSDC", TradingMode::Paper))
+        .unwrap();
+    assert_eq!(
+        db.shared_paper_account("SOLUSDC", &initial.0, &initial.1)
+            .unwrap()
+            .total_wallet_balance,
+        dec!(10000)
+    );
+    drop(db);
+    let reopened = Database::open(&path).unwrap();
+    assert!(reopened
+        .shared_paper_account("SOLUSDC", &initial.0, &initial.1)
+        .is_err());
+    drop(reopened);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn failed_paper_migration_does_not_clear_cached_legacy_failure() {
+    let path = std::env::temp_dir().join(format!(
+        "paper-failed-migration-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let db = Database::open(&path).unwrap();
+    let editor = rusqlite::Connection::open(&path).unwrap();
+    db.insert_trade(&trade("legacy", "SOLUSDC", TradingMode::Paper))
+        .unwrap();
+    db.save_pair_status("SOLUSDC", TradingMode::Paper, BotStatus::Running)
+        .unwrap();
+    let mut separate = paper_state("ETHUSDT", 0, 10000);
+    separate.1.asset = "USDT".into();
+    db.shared_paper_account("ETHUSDT", &separate.0, &separate.1)
+        .unwrap();
+    let initial = paper_state("SOLUSDC", 0, 10000);
+    assert!(db
+        .shared_paper_account("SOLUSDC", &initial.0, &initial.1)
+        .is_err());
+    editor.execute_batch("CREATE TRIGGER reject_pause BEFORE UPDATE ON pair_runtime BEGIN SELECT RAISE(ABORT, 'pause failure'); END;").unwrap();
+    assert!(db.initialize_legacy_paper_account("SOLUSDC").is_err());
+    assert!(db
+        .shared_paper_account("SOLUSDC", &initial.0, &initial.1)
+        .is_err());
+    assert_eq!(
+        db.shared_paper_account("ETHUSDT", &separate.0, &separate.1)
+            .unwrap()
+            .total_wallet_balance,
+        dec!(10000)
+    );
+    drop(editor);
+    drop(db);
+    std::fs::remove_file(path).unwrap();
 }

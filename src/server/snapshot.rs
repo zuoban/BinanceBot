@@ -164,14 +164,19 @@ impl AppState {
                 mark_update_time: ticker.mark_update_time,
             }
         };
-        let position = {
-            let position = self.position.read().await;
-            AccountPosition {
-                size: position.size,
-                unrealized_pnl: position.unrealized_pnl,
-            }
+        let position = self.position.read().await;
+        let local_account = self.account.read().await;
+        let account = self.account_view(
+            &config.exchange.symbol,
+            config.exchange.trading_mode(),
+            &position,
+            &local_account,
+        );
+        drop(local_account);
+        let position = AccountPosition {
+            size: position.size,
+            unrealized_pnl: position.unrealized_pnl,
         };
-        let account = self.account.read().await.clone();
         AccountSnapshot {
             mode: config.exchange.trading_mode(),
             snapshot: AccountSnapshotData {
@@ -222,7 +227,14 @@ impl AppState {
         let ticker = self.ticker.read().await.clone();
         let mut stats = self.stats.read().await.clone();
         let position = self.position.read().await.clone();
-        let account = self.account.read().await.clone();
+        let local_account = self.account.read().await;
+        let account = self.account_view(
+            &config.exchange.symbol,
+            config.exchange.trading_mode(),
+            &position,
+            &local_account,
+        );
+        drop(local_account);
         let account_cny_rate = self.cny_rates.get(&account.asset).await;
         let mut active_orders: Vec<_> = self.active_orders.read().await.values().cloned().collect();
         active_orders.sort_by_key(|order| std::cmp::Reverse(order.price));

@@ -129,7 +129,6 @@ impl TradeNotificationContext {
         trade: &TradeRecord,
         hourly_stats: Option<&HourlyTradeStats>,
         account: &AccountInfo,
-        unrealized_pnl: Decimal,
         cny_rate: Option<&CnyRate>,
         now: DateTime<Utc>,
     ) -> Self {
@@ -140,16 +139,19 @@ impl TradeNotificationContext {
         let today_count = hourly_stats.map(|stats| stats.buckets.iter().map(side_count).sum());
         let hour_count = hourly_stats.and_then(|stats| stats.buckets.last().map(side_count));
         let age = now - account.update_time;
-        let fresh = trade.mode == TradingMode::Paper
-            || (age >= Duration::zero() && age < Duration::seconds(30));
+        let flat_paper = trade.mode == TradingMode::Paper
+            && account.margin_balance == account.available_balance
+            && account.unrealized_profit.is_zero();
+        let max_age = if trade.mode == TradingMode::Paper {
+            15
+        } else {
+            30
+        };
+        let fresh = flat_paper || (age >= Duration::zero() && age < Duration::seconds(max_age));
         let matching_asset = account.asset == quote_asset(&trade.symbol);
-        let account_equity =
-            (fresh && matching_asset).then_some(if trade.mode == TradingMode::Paper {
-                account.total_wallet_balance + unrealized_pnl
-            } else {
-                account.margin_balance
-            });
-        let wallet_balance = (fresh && matching_asset).then_some(account.total_wallet_balance);
+        let account_equity = (fresh && matching_asset).then_some(account.margin_balance);
+        let wallet_balance = ((trade.mode == TradingMode::Paper || fresh) && matching_asset)
+            .then_some(account.total_wallet_balance);
         let available_balance = (fresh && matching_asset).then_some(account.available_balance);
         let cny_per_unit = cny_rate
             .filter(|rate| {
@@ -396,7 +398,6 @@ mod tests {
             trade,
             Some(&stats),
             &account(trade.timestamp),
-            dec!(1254.48),
             Some(&rate),
             trade.timestamp,
         )
@@ -585,14 +586,8 @@ mod tests {
                 ..account(trade.timestamp)
             },
         ] {
-            let context = TradeNotificationContext::for_trade(
-                &trade,
-                None,
-                &account,
-                Decimal::ZERO,
-                None,
-                trade.timestamp,
-            );
+            let context =
+                TradeNotificationContext::for_trade(&trade, None, &account, None, trade.timestamp);
             assert_eq!(context.account_equity, None);
             assert_eq!(context.available_balance, None);
             let message = format_trade_message(&trade, &context);
@@ -603,21 +598,16 @@ mod tests {
     }
 
     #[test]
-    fn paper_equity_includes_unrealized_pnl_and_missing_rate_stays_unknown() {
+    fn paper_context_uses_shared_account_equity() {
         let mut trade = trade(OrderSide::Buy);
         trade.mode = TradingMode::Paper;
-        let context = TradeNotificationContext::for_trade(
-            &trade,
-            None,
-            &account(trade.timestamp - Duration::hours(1)),
-            dec!(500),
-            None,
-            trade.timestamp,
-        );
-        assert_eq!(context.account_equity, Some(dec!(10500)));
-        let message = format_trade_message(&trade, &context);
-        assert!(message.contains("账户权益：10500.00 USDC｜</b>--"));
-        assert!(message.ends_with("可用余额：3878.03 USDC｜38.78%"));
+        let shared = account(trade.timestamp);
+        let context =
+            TradeNotificationContext::for_trade(&trade, None, &shared, None, trade.timestamp);
+        assert_eq!(context.account_equity, Some(shared.margin_balance));
+        assert_eq!(context.available_balance, Some(shared.available_balance));
+        assert_eq!(context.wallet_balance, Some(shared.total_wallet_balance));
+        assert_eq!(context.cny_per_unit, None);
     }
 
     #[test]
@@ -650,7 +640,6 @@ mod tests {
                 &trade,
                 None,
                 &account(trade.timestamp),
-                Decimal::ZERO,
                 Some(&rate),
                 trade.timestamp,
             );
@@ -722,7 +711,6 @@ mod tests {
                 &fill,
                 Some(&stats),
                 &account(timestamp),
-                Decimal::ZERO,
                 None,
                 timestamp,
             );
@@ -758,7 +746,6 @@ mod tests {
             &fill,
             Some(&stats),
             &account(fill.timestamp),
-            Decimal::ZERO,
             None,
             fill.timestamp,
         );
