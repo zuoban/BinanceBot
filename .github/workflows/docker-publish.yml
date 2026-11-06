@@ -3,10 +3,8 @@ name: Publish Docker Image to GitHub Packages
 on:
   push:
     branches: [ "main" ]
-    tags: [ 'v*.*.*' ]
   release:
     types: [ published ]
-  workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io
@@ -38,6 +36,7 @@ jobs:
         working-directory: frontend
 
   build:
+    if: github.event_name == 'release'
     needs: checks
     strategy:
       matrix:
@@ -92,13 +91,13 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE }}
+          flavor: latest=false
           tags: |
-            type=ref,event=branch
             type=ref,event=tag
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=latest,enable=${{ !github.event.release.prerelease }}
 
       - name: Build and push ${{ matrix.platform }} image
         id: build
@@ -167,13 +166,13 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE }}
+          flavor: latest=false
           tags: |
-            type=ref,event=branch
             type=ref,event=tag
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=latest,enable=${{ !github.event.release.prerelease }}
 
       - name: Create multi-platform image
         env:
