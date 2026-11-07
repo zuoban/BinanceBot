@@ -41,10 +41,10 @@ export default function PairDetail() {
     {!s && (pairs.isPending || (pair && query.isPending)) && <DetailLoading />}
     {s && <>
       <Row gutter={[16, 16]} className={`metric-row${query.stale ? ' is-stale' : ''}`}>
-        <Col xs={24} sm={12} xl={6}><Card><Statistic title={`标记价格 / ${asset}`} value={positivePrice(s.ticker.mark_price)} /><div className="muted">最新成交 {positivePrice(s.ticker.last_price)}</div></Card></Col>
-        <Col xs={24} sm={12} xl={6}><Card><Statistic title={`已实现盈亏 / ${asset}`} value={s.stats.total_realized_pnl} formatter={() => <Pnl value={s.stats.total_realized_pnl} />} /><div className="muted">扣费后 {number(netPnl)}</div></Card></Col>
-        <Col xs={24} sm={12} xl={6}><Card><Statistic title={`持仓未实现 / ${asset}`} value={s.position.unrealized_pnl} formatter={() => <Pnl value={s.position.unrealized_pnl} />} /><div className="muted">持仓数量 {price(s.position.size)}</div></Card></Col>
-        <Col xs={24} sm={12} xl={6}><Card><Statistic title={`账户权益 / ${account?.asset || asset}`} value={account?.equity ?? '--'} formatter={() => number(account?.equity)} /><div className="muted">{cnyText(account?.cny)} · 可用 {number(account?.available)}</div></Card></Col>
+        <Col xs={12} xl={6} className="metric-col"><Card><Statistic title={`标记价格 / ${asset}`} value={positivePrice(s.ticker.mark_price)} /><div className="muted">最新成交 {positivePrice(s.ticker.last_price)}</div></Card></Col>
+        <Col xs={12} xl={6} className="metric-col"><Card><Statistic title={`已实现盈亏 / ${asset}`} value={s.stats.total_realized_pnl} formatter={() => <Pnl value={s.stats.total_realized_pnl} />} /><div className="muted">扣费后 {number(netPnl)}</div></Card></Col>
+        <Col xs={12} xl={6} className="metric-col"><Card><Statistic title={`持仓未实现 / ${asset}`} value={s.position.unrealized_pnl} formatter={() => <Pnl value={s.position.unrealized_pnl} />} /><div className="muted">持仓数量 {price(s.position.size)}</div></Card></Col>
+        <Col xs={12} xl={6} className="metric-col"><Card><Statistic title={`账户权益 / ${account?.asset || asset}`} value={account?.equity ?? '--'} formatter={() => number(account?.equity)} /><div className="muted">{cnyText(account?.cny)} · 可用 {number(account?.available)}</div></Card></Col>
       </Row>
       <Tabs className="detail-tabs" activeKey={tab} onChange={setTab} items={[
         { key: 'monitor', label: '实时监控', children: <>

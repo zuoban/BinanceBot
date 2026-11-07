@@ -34,7 +34,7 @@ export function Pnl({ value, compact = false }: { value: unknown; compact?: bool
     return <span className={n < 0 ? 'negative numeric' : 'positive numeric'}>{n.toLocaleString('en-US', { maximumSignificantDigits: 3 })}</span>;
   }
   const text = compact ? compactNumber(value) : number(value);
-  return <span className={text.startsWith('-') ? 'negative numeric' : text === '--' ? 'numeric' : 'positive numeric'}>{text}</span>;
+  return <span className={text === '--' ? 'numeric' : text.startsWith('-') ? 'negative numeric' : 'positive numeric'}>{text}</span>;
 }
 export const NoData = () => <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无数据" />;
 export function PageBreadcrumb({ items, disabled = false }: { items: { label: string; to?: string }[]; disabled?: boolean }) {
@@ -44,7 +44,7 @@ export function PageBreadcrumb({ items, disabled = false }: { items: { label: st
   })}</ol></nav>;
 }
 export function PageTitle({ title, description, extra }: { title: string; description?: string; extra?: React.ReactNode }) {
-  return <div className="page-heading"><div><h1>{title}</h1>{description && <p>{description}</p>}</div><Space wrap>{extra}</Space></div>;
+  return <div className="page-heading"><div><h1>{title}</h1>{description && <p>{description}</p>}</div>{extra != null && extra !== false && <Space wrap>{extra}</Space>}</div>;
 }
 export function isConfigConflict(error: Error | null | undefined, messageFragment: string): boolean {
   return (error as { status?: number } | null | undefined)?.status === 409 || Boolean(error?.message.includes(messageFragment));
