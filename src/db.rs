@@ -2337,11 +2337,7 @@ fn save_raw_config_value_on(conn: &Connection, config: &serde_json::Value) -> Re
 }
 
 fn parse_order_side(side: &str) -> Result<OrderSide> {
-    match side {
-        "BUY" => Ok(OrderSide::Buy),
-        "SELL" => Ok(OrderSide::Sell),
-        _ => anyhow::bail!("Invalid order side: {}", side),
-    }
+    OrderSide::from_exchange_str(side).with_context(|| format!("Invalid order side: {}", side))
 }
 
 fn parse_stats_row(
@@ -2716,10 +2712,6 @@ fn insert_trade_on(conn: &Connection, trade: &TradeRecord) -> Result<bool> {
     if cleared {
         return Ok(false);
     }
-    let side_str = match trade.side {
-        OrderSide::Buy => "BUY",
-        OrderSide::Sell => "SELL",
-    };
     let inserted = conn
         .execute(
             r#"
@@ -2734,7 +2726,7 @@ fn insert_trade_on(conn: &Connection, trade: &TradeRecord) -> Result<bool> {
                 trade.client_order_id,
                 trade.symbol,
                 trade.mode.as_str(),
-                side_str,
+                trade.side.as_str(),
                 trade.price.to_string(),
                 trade.quantity.to_string(),
                 trade.amount_usdc.to_string(),

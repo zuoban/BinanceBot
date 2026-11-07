@@ -248,7 +248,7 @@ function ServerSettings() {
         <div className="settings-card-footer settings-card-actions">
           <span className="muted" role="status">{edit.dirty ? '有未保存的修改' : '修改后需重启后端生效'}</span>
           <Space wrap>
-            <FormRevertButton activeRef={mounted} onReset={mutation.reset} onRevert={() => { if (baseline.current) form.setFieldsValue(baseline.current.saved); }} />
+            <FormRevertButton activeRef={mounted} onReset={mutation.reset} onRevert={() => { if (baseline.current) fill(baseline.current); }} />
             <Button type="primary" htmlType="submit" loading={mutation.isPending}>保存监听设置</Button>
           </Space>
         </div>
@@ -279,11 +279,25 @@ export default function Settings() {
   const edit = useContext(EditContext);
   const { modal } = App.useApp();
   const [active, setActive] = useUrlParam<string>('tab', 'global', ['global', 'server', 'database', 'security']);
+  const switching = useRef(false);
+  const savingRef = useRef(edit.saving);
+  savingRef.current = edit.saving;
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
   return <div className="settings-page"><PageTitle title="全局设置" description="交易所连接、通知和控制台安全设置" />
     <Tabs className="settings-tabs" activeKey={active} onChange={async key => {
-      if (edit.saving) return;
-      if (edit.dirty && !await modal.confirm({ title: '放弃未保存的修改？', okText: '放弃修改', cancelText: '继续编辑' })) return;
-      edit.setDirty(false); setActive(key);
+      if (switching.current || savingRef.current) return;
+      switching.current = true;
+      try {
+        if (edit.dirty && !await modal.confirm({ title: '放弃未保存的修改？', okText: '放弃修改', cancelText: '继续编辑' })) return;
+        if (!mounted.current || savingRef.current) return;
+        edit.setDirty(false); setActive(key);
+      } finally {
+        switching.current = false;
+      }
     }} destroyOnHidden items={[
       { key: 'global', label: '连接与通知', children: <GlobalSettings /> },
       { key: 'server', label: '服务设置', children: <ServerSettings /> },

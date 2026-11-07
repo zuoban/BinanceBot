@@ -1380,13 +1380,7 @@ async fn get_status_handler(
 async fn get_orders_handler(
     State(state): State<Arc<AppState>>,
 ) -> Json<ApiResponse<Vec<GridOrder>>> {
-    let mut orders: Vec<GridOrder> = state.active_orders.read().await.values().cloned().collect();
-    orders.sort_by(|a, b| {
-        b.price
-            .cmp(&a.price)
-            .then_with(|| a.client_order_id.cmp(&b.client_order_id))
-    });
-    json_ok(orders)
+    json_ok(state.sorted_active_orders().await)
 }
 
 async fn get_trades_handler(
@@ -1546,9 +1540,7 @@ fn mask_api_key_preview(api_key: &str) -> String {
 }
 
 fn web_config_view(config: &AppConfig) -> WebConfigView {
-    let has_key = !config.exchange.api_key.trim().is_empty();
-    let has_secret = !config.exchange.api_secret.trim().is_empty();
-    let key_preview = mask_api_key_preview(&config.exchange.api_key);
+    let global = web_global_config_view(&crate::config::GlobalConfig::from_app(config));
 
     WebConfigView {
         config_version: String::new(),
@@ -1559,14 +1551,14 @@ fn web_config_view(config: &AppConfig) -> WebConfigView {
         buy_window: config.grid.buy_window,
         sell_window: config.grid.sell_window,
         post_only: config.grid.post_only,
-        recv_window: config.exchange.recv_window,
-        sync_interval_secs: config.exchange.sync_interval_secs,
-        has_api_key: has_key,
-        has_api_secret: has_secret,
-        api_key_preview: key_preview,
-        telegram_enabled: config.telegram.enabled,
-        has_telegram_bot_token: !config.telegram.bot_token.trim().is_empty(),
-        telegram_chat_id: config.telegram.chat_id.clone(),
+        recv_window: global.recv_window,
+        sync_interval_secs: global.sync_interval_secs,
+        has_api_key: global.has_api_key,
+        has_api_secret: global.has_api_secret,
+        api_key_preview: global.api_key_preview,
+        telegram_enabled: global.telegram_enabled,
+        has_telegram_bot_token: global.has_telegram_bot_token,
+        telegram_chat_id: global.telegram_chat_id,
         min_price: config.grid.min_price,
         max_price: config.grid.max_price,
         max_position_usdc: config.grid.max_position_usdc,
@@ -1603,20 +1595,6 @@ fn apply_config_payload(
     if let Some(post_only) = payload.post_only {
         current_config.grid.post_only = post_only;
     }
-    if let Some(value) = payload.recv_window {
-        current_config.exchange.recv_window = value;
-    }
-    if let Some(value) = payload.sync_interval_secs {
-        current_config.exchange.sync_interval_secs = value;
-    }
-    if payload.clear_api_credentials {
-        current_config.exchange.api_key.clear();
-        current_config.exchange.api_secret.clear();
-    }
-    if payload.clear_telegram_credentials {
-        current_config.telegram.bot_token.clear();
-        current_config.telegram.chat_id.clear();
-    }
     current_config.grid.min_price = payload.min_price;
     current_config.grid.max_price = payload.max_price;
     current_config.grid.max_position_usdc = payload.max_position_usdc;
@@ -1628,26 +1606,21 @@ fn apply_config_payload(
     }
     current_config.grid.min_liquidation_distance_pct = payload.min_liquidation_distance_pct;
 
-    if !payload.clear_api_credentials {
-        if let Some(key) = non_blank(payload.api_key) {
-            current_config.exchange.api_key = key;
-        }
-        if let Some(secret) = non_blank(payload.api_secret) {
-            current_config.exchange.api_secret = secret;
-        }
+    let mut global = crate::config::GlobalConfig::from_app(&current_config);
+    UpdateGlobalConfigPayload {
+        recv_window: payload.recv_window,
+        sync_interval_secs: payload.sync_interval_secs,
+        api_key: payload.api_key,
+        api_secret: payload.api_secret,
+        clear_api_credentials: payload.clear_api_credentials,
+        clear_telegram_credentials: payload.clear_telegram_credentials,
+        telegram_enabled: payload.telegram_enabled,
+        telegram_bot_token: payload.telegram_bot_token,
+        telegram_chat_id: payload.telegram_chat_id,
+        ..Default::default()
     }
-
-    if let Some(enabled) = payload.telegram_enabled {
-        current_config.telegram.enabled = enabled;
-    }
-    if !payload.clear_telegram_credentials {
-        if let Some(token) = non_blank(payload.telegram_bot_token) {
-            current_config.telegram.bot_token = token;
-        }
-        if let Some(chat_id) = non_blank(payload.telegram_chat_id) {
-            current_config.telegram.chat_id = chat_id;
-        }
-    }
+    .apply_to(&mut global);
+    global.apply_to(&mut current_config);
     current_config.validate()?;
     Ok(current_config)
 }

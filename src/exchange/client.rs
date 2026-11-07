@@ -230,10 +230,8 @@ impl BinanceFuturesClient {
     pub(crate) async fn get_all_mark_prices_for_fallback(
         &self,
     ) -> Result<Vec<BinanceMarkPriceWithSymbol>> {
-        self.reserve(10, RequestClass::MarketFallback)?;
-        let url = format!("{}/fapi/v1/premiumIndex", self.base_url);
-        let resp = self.send(self.client.get(&url)).await?.error_for_status()?;
-        Ok(resp.json().await?)
+        self.get_public_json(10, RequestClass::MarketFallback, "/fapi/v1/premiumIndex")
+            .await
     }
 
     pub fn new(config: &ExchangeConfig) -> Self {
@@ -313,10 +311,9 @@ impl BinanceFuturesClient {
 
     /// Synchronize local timestamp with Binance Futures server time
     pub async fn sync_server_time(&self) -> Result<i64> {
-        self.reserve(1, RequestClass::Normal)?;
-        let url = format!("{}/fapi/v1/time", self.base_url);
-        let resp = self.send(self.client.get(&url)).await?.error_for_status()?;
-        let server_time: BinanceServerTime = resp.json().await?;
+        let server_time: BinanceServerTime = self
+            .get_public_json(1, RequestClass::Normal, "/fapi/v1/time")
+            .await?;
 
         let local_now = Utc::now().timestamp_millis();
         let offset = server_time.server_time - local_now;
@@ -453,6 +450,38 @@ impl BinanceFuturesClient {
         Ok(response)
     }
 
+    async fn get_public_json<T: serde::de::DeserializeOwned>(
+        &self,
+        weight: u64,
+        class: RequestClass,
+        path_and_query: &str,
+    ) -> Result<T> {
+        self.reserve(weight, class)?;
+        let url = format!("{}{}", self.base_url, path_and_query);
+        let resp = self.send(self.client.get(&url)).await?.error_for_status()?;
+        Ok(resp.json().await?)
+    }
+
+    async fn get_signed_json<T: serde::de::DeserializeOwned>(
+        &self,
+        weight: u64,
+        class: RequestClass,
+        path: &str,
+        query: &str,
+        context: &str,
+        include_status: bool,
+    ) -> Result<T> {
+        self.reserve(weight, class)?;
+        let url = self.signed_url(path, query);
+        let resp = ensure_success(
+            self.send(self.client.get(&url)).await?,
+            context,
+            include_status,
+        )
+        .await?;
+        Ok(resp.json().await?)
+    }
+
     /// Fetch exchange info (symbol filters)
     pub async fn get_exchange_info(&self, symbol: Option<&str>) -> Result<BinanceExchangeInfo> {
         self.reserve(1, RequestClass::Normal)?;
@@ -485,10 +514,13 @@ impl BinanceFuturesClient {
         symbol: &str,
         class: RequestClass,
     ) -> Result<Decimal> {
-        self.reserve(1, class)?;
-        let url = format!("{}/fapi/v1/ticker/price?symbol={}", self.base_url, symbol);
-        let resp = self.send(self.client.get(&url)).await?.error_for_status()?;
-        let ticker: BinanceTickerPrice = resp.json().await?;
+        let ticker: BinanceTickerPrice = self
+            .get_public_json(
+                1,
+                class,
+                &format!("/fapi/v1/ticker/price?symbol={}", symbol),
+            )
+            .await?;
         Ok(ticker.price)
     }
 
@@ -508,10 +540,13 @@ impl BinanceFuturesClient {
         symbol: &str,
         class: RequestClass,
     ) -> Result<Decimal> {
-        self.reserve(1, class)?;
-        let url = format!("{}/fapi/v1/premiumIndex?symbol={}", self.base_url, symbol);
-        let resp = self.send(self.client.get(&url)).await?.error_for_status()?;
-        let mark: BinanceMarkPrice = resp.json().await?;
+        let mark: BinanceMarkPrice = self
+            .get_public_json(
+                1,
+                class,
+                &format!("/fapi/v1/premiumIndex?symbol={}", symbol),
+            )
+            .await?;
         Ok(mark.mark_price)
     }
 
@@ -534,11 +569,8 @@ impl BinanceFuturesClient {
         symbol: &str,
         class: RequestClass,
     ) -> Result<Binance24hrTicker> {
-        self.reserve(1, class)?;
-        let url = format!("{}/fapi/v1/ticker/24hr?symbol={}", self.base_url, symbol);
-        let resp = self.send(self.client.get(&url)).await?.error_for_status()?;
-        let ticker: Binance24hrTicker = resp.json().await?;
-        Ok(ticker)
+        self.get_public_json(1, class, &format!("/fapi/v1/ticker/24hr?symbol={}", symbol))
+            .await
     }
 
     /// Fetch open orders for symbol
@@ -571,18 +603,15 @@ impl BinanceFuturesClient {
 
     /// Fetch an order's final status before treating it as a fill.
     pub async fn get_order(&self, symbol: &str, order_id: i64) -> Result<BinanceOrderResponse> {
-        self.reserve(1, RequestClass::Critical)?;
-        let url = self.signed_url(
+        self.get_signed_json(
+            1,
+            RequestClass::Critical,
             "/fapi/v1/order",
             &format!("symbol={}&orderId={}", symbol, order_id),
-        );
-        let resp = ensure_success(
-            self.send(self.client.get(&url)).await?,
             "Failed to get order",
             true,
         )
-        .await?;
-        Ok(resp.json().await?)
+        .await
     }
 
     /// Resolve a persisted client order ID after a restart.
@@ -1000,31 +1029,30 @@ impl BinanceFuturesClient {
 
     /// Fetch position risk information for symbol
     pub async fn get_position(&self, symbol: &str) -> Result<Option<BinancePositionRisk>> {
-        self.reserve(5, RequestClass::Critical)?;
-        let url = self.signed_url("/fapi/v2/positionRisk", &format!("symbol={}", symbol));
-
-        let resp = ensure_success(
-            self.send(self.client.get(&url)).await?,
-            "Failed to get position risk",
-            false,
-        )
-        .await?;
-
-        let positions: Vec<BinancePositionRisk> = resp.json().await?;
+        let positions: Vec<BinancePositionRisk> = self
+            .get_signed_json(
+                5,
+                RequestClass::Critical,
+                "/fapi/v2/positionRisk",
+                &format!("symbol={}", symbol),
+                "Failed to get position risk",
+                false,
+            )
+            .await?;
         one_way_position(positions, symbol)
     }
 
     /// Fetch position risk for all symbols on the account.
     pub(crate) async fn get_all_positions(&self) -> Result<Vec<BinancePositionRisk>> {
-        self.reserve(5, RequestClass::Normal)?;
-        let url = self.signed_url("/fapi/v2/positionRisk", "");
-        let resp = ensure_success(
-            self.send(self.client.get(&url)).await?,
+        self.get_signed_json(
+            5,
+            RequestClass::Normal,
+            "/fapi/v2/positionRisk",
+            "",
             "Failed to get position risk",
             false,
         )
-        .await?;
-        Ok(resp.json().await?)
+        .await
     }
 
     /// Fetch account balance summary
@@ -1040,18 +1068,15 @@ impl BinanceFuturesClient {
         &self,
         class: RequestClass,
     ) -> Result<BinanceAccountInfoResponse> {
-        self.reserve(5, class)?;
-        let url = self.signed_url("/fapi/v2/account", "");
-
-        let resp = ensure_success(
-            self.send(self.client.get(&url)).await?,
+        self.get_signed_json(
+            5,
+            class,
+            "/fapi/v2/account",
+            "",
             "Failed to get account info",
             false,
         )
-        .await?;
-
-        let acc: BinanceAccountInfoResponse = resp.json().await?;
-        Ok(acc)
+        .await
     }
 }
 

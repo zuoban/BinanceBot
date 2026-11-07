@@ -2434,13 +2434,12 @@ async fn last_buy_and_active_sell_are_both_protected_from_duplicate_placement() 
     );
     assert!(
         !engine
-            .place_grid_order_with_quantity(
+            .place_grid_order(
                 OrderSide::Sell,
                 dec!(118.9),
                 "gb_s_duplicate".into(),
                 1,
                 None,
-                Some(buy.quantity)
             )
             .await
     );

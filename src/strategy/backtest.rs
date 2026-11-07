@@ -768,10 +768,6 @@ pub struct BacktestArgs {
     pub json: bool,
 }
 
-fn scale_of(value: Decimal) -> u32 {
-    value.normalize().scale()
-}
-
 async fn load_rules(args: &BacktestArgs) -> Result<SymbolRules> {
     ensure!(args.maker_fee >= Decimal::ZERO, "--maker-fee 不能为负数");
     let mut rules = match &args.symbol {
@@ -794,13 +790,11 @@ async fn load_rules(args: &BacktestArgs) -> Result<SymbolRules> {
     };
     if let Some(tick) = args.tick_size {
         ensure!(tick > Decimal::ZERO, "--tick-size 必须大于 0");
-        rules.tick_size = tick;
-        rules.price_scale = scale_of(tick);
+        rules.set_tick_size(tick);
     }
     if let Some(step) = args.step_size {
         ensure!(step > Decimal::ZERO, "--step-size 必须大于 0");
-        rules.step_size = step;
-        rules.quantity_scale = scale_of(step);
+        rules.set_step_size(step);
     }
     if let Some(min_qty) = args.min_qty {
         ensure!(min_qty > Decimal::ZERO, "--min-qty 必须大于 0");

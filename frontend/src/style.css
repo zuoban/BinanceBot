@@ -297,7 +297,6 @@ kbd {
 .overview-stat > span { color: var(--text-secondary); font-size: 12px; line-height: 16px; }
 .overview-stat strong { font: 500 26px/32px var(--font-mono); font-variant-numeric: tabular-nums; letter-spacing: -0.02em; overflow-wrap: anywhere; }
 .overview-stat strong small { color: var(--text-muted); font: 400 13px/20px var(--font-sans); letter-spacing: 0; }
-.history-plot-loading { min-height: 180px; display: grid; place-content: center; }
 .overview-trade-breakdown { color: var(--text-muted); font-size: 12px; font-style: normal; line-height: 16px; }
 .overview-pnl-group { display: flex; flex-direction: column; gap: 2px; }
 .overview-pnl-group > span { color: var(--text-muted); font-size: 12px; }
@@ -392,6 +391,7 @@ kbd {
 .history-daily { margin-top: 20px; padding-top: 4px; border-top: 1px solid var(--border-hairline); }
 .history-empty { padding: 28px 0; text-align: center; color: var(--text-muted); font-size: 13px; }
 .history-plot { min-width: 0; }
+.history-plot-loading { min-height: 180px; display: grid; place-content: center; }
 
 /* ---------- Charts ---------- */
 .chart { width: 100%; min-width: 0; }
@@ -648,6 +648,7 @@ kbd {
 .grid-preview { margin-bottom: 20px; padding: 18px 20px; border: 1px solid var(--border-hairline); border-radius: 12px; background: var(--bg-card); }
 .grid-preview-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
 .grid-preview-head h3 { margin: 0; font-size: 15px; font-weight: 600; }
+.grid-preview-meta { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .grid-preview-reference { width: 160px; font-family: var(--font-mono); }
 .grid-preview-empty { margin: 0; }
 .grid-preview-ladder { margin: 0 0 10px; padding: 0; list-style: none; max-height: 320px; max-width: 420px; overflow-y: auto; }
@@ -718,7 +719,6 @@ kbd {
 .skip-link { position: fixed; top: -48px; left: 16px; z-index: 100; padding: 8px 14px; border-radius: 8px; background: var(--accent); color: #fff; font-weight: 600; text-decoration: none; transition: top 150ms var(--ease-out); }
 [data-theme="dark"] .skip-link { color: #0a1220; }
 .skip-link:focus { top: 12px; }
-.grid-preview-meta { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .shortcut-list { display: grid; gap: 8px; margin: 12px 0 0; }
 .shortcut-list > div { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 6px 10px; border-radius: 8px; background: var(--bg-raised); }
 .shortcut-list dt { color: var(--text-secondary); font-size: 13px; }

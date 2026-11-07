@@ -1,10 +1,10 @@
-import { useContext } from 'react';
+import { useContext, useRef } from 'react';
 import { Alert, App, Button, Empty, Space } from 'antd';
 import { CheckCircleFilled, ClockCircleFilled, CloseCircleFilled, ExclamationCircleFilled, InfoCircleFilled, MinusCircleFilled, ReloadOutlined, ThunderboltFilled } from '@ant-design/icons';
 import { Link } from 'react-router-dom';
 import { EditContext } from '../lib/session';
 import type { Mode, Status } from '../lib/types';
-import { modeLabel, number, numeric, statusLabel, trimFractionZeros } from '../lib/format';
+import { compactNumber, modeLabel, number, numeric, statusLabel } from '../lib/format';
 
 export function ErrorNotice({ error, retry }: { error: Error | null; retry?: () => void }) {
   if (!error) return null;
@@ -13,8 +13,8 @@ export function ErrorNotice({ error, retry }: { error: Error | null; retry?: () 
 export type Signal = 'calm' | 'blue' | 'yellow' | 'orange' | 'red';
 const signalIcon: Record<Signal, React.ReactNode> = { calm: <CheckCircleFilled />, blue: <InfoCircleFilled />, yellow: <ExclamationCircleFilled />, orange: <ThunderboltFilled />, red: <CloseCircleFilled /> };
 /** Tiered state chip: colour is never the only channel, every tier carries an icon and words. */
-export function SignalChip({ tier, children, title }: { tier: Signal; children: React.ReactNode; title?: string }) {
-  return <span className={`signal signal-${tier}`} title={title}><span className="signal-icon" aria-hidden="true">{signalIcon[tier]}</span>{children}</span>;
+export function SignalChip({ tier, icon, children, title }: { tier: Signal; icon?: React.ReactNode; children: React.ReactNode; title?: string }) {
+  return <span className={`signal signal-${tier}`} title={title}><span className="signal-icon" aria-hidden="true">{icon ?? signalIcon[tier]}</span>{children}</span>;
 }
 /** A signal chip that filters the list below it; the pressed state is exposed to assistive tech. */
 export function SignalButton({ tier, active, onClick, children }: { tier: Signal; active: boolean; onClick: () => void; children: React.ReactNode }) {
@@ -27,13 +27,13 @@ const statusMeta: Record<Status, { tier: Signal; icon: React.ReactNode }> = {
   STOPPED: { tier: 'blue', icon: <ClockCircleFilled /> },
   ERROR: { tier: 'red', icon: <CloseCircleFilled /> },
 };
-export const StatusTag = ({ status }: { status: Status }) => <span className={`signal signal-${statusMeta[status].tier}`}><span className="signal-icon" aria-hidden="true">{statusMeta[status].icon}</span>{statusLabel[status]}</span>;
+export const StatusTag = ({ status }: { status: Status }) => <SignalChip tier={statusMeta[status].tier} icon={statusMeta[status].icon}>{statusLabel[status]}</SignalChip>;
 export function Pnl({ value, compact = false }: { value: unknown; compact?: boolean }) {
   const n = numeric(value);
   if (compact && n !== null && Math.abs(n) > 0 && Math.abs(n) < 0.01) {
     return <span className={n < 0 ? 'negative numeric' : 'positive numeric'}>{n.toLocaleString('en-US', { maximumSignificantDigits: 3 })}</span>;
   }
-  const text = compact ? trimFractionZeros(number(value)) : number(value);
+  const text = compact ? compactNumber(value) : number(value);
   return <span className={text.startsWith('-') ? 'negative numeric' : text === '--' ? 'numeric' : 'positive numeric'}>{text}</span>;
 }
 export const NoData = () => <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无数据" />;
@@ -58,14 +58,21 @@ export function ConflictReloadButton<T>({ label, activeRef, refetch, onLoaded, o
 }) {
   const { modal } = App.useApp();
   const edit = useContext(EditContext);
+  const running = useRef(false);
   return <Button onClick={async () => {
     const current = activeRef.current;
-    if (!current || !await modal.confirm({ title: `重新加载${label}？`, content: '重新加载会放弃当前未保存的修改，请先记录需要保留的内容。', okText: '重新加载', cancelText: '继续编辑' })) return;
-    if (activeRef.current !== current) return;
-    const result = await refetch();
-    if (activeRef.current !== current || result.error || !result.data || onLoaded(result.data) === false) return;
-    edit.setDirty(false);
-    onReset();
+    if (running.current || !current) return;
+    running.current = true;
+    try {
+      if (!await modal.confirm({ title: `重新加载${label}？`, content: '重新加载会放弃当前未保存的修改，请先记录需要保留的内容。', okText: '重新加载', cancelText: '继续编辑' })) return;
+      if (activeRef.current !== current) return;
+      const result = await refetch();
+      if (activeRef.current !== current || result.error || !result.data || onLoaded(result.data) === false) return;
+      edit.setDirty(false);
+      onReset();
+    } finally {
+      running.current = false;
+    }
   }}>重新加载{label}</Button>;
 }
 export function FormRevertButton({ activeRef, onRevert, onReset }: {
@@ -75,12 +82,19 @@ export function FormRevertButton({ activeRef, onRevert, onReset }: {
 }) {
   const { modal } = App.useApp();
   const edit = useContext(EditContext);
+  const running = useRef(false);
   return <Button onClick={async () => {
     const current = activeRef.current;
-    if (!current || (edit.dirty && !await modal.confirm({ title: '放弃未保存的修改？', okText: '还原', cancelText: '继续编辑' }))) return;
-    if (activeRef.current !== current) return;
-    onRevert();
-    edit.setDirty(false);
-    onReset();
+    if (running.current || !current) return;
+    running.current = true;
+    try {
+      if (edit.dirty && !await modal.confirm({ title: '放弃未保存的修改？', okText: '还原', cancelText: '继续编辑' })) return;
+      if (activeRef.current !== current) return;
+      onRevert();
+      edit.setDirty(false);
+      onReset();
+    } finally {
+      running.current = false;
+    }
   }}>还原</Button>;
 }

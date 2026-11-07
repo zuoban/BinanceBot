@@ -48,13 +48,13 @@ export function OverviewHistory() {
     const byHour = new Map((snapshots ?? []).map(point => [point.hour, point]));
     const pointAt = (hour: number) => {
       const group = byHour.get(hour)?.groups.find(g => accountKey(g) === key);
-      return { hour, equity: numeric(group?.equity), recorded: !!group };
+      return { hour, equity: numeric(group?.equity) };
     };
     const data = Array.from({ length: 24 }, (_, i) => pointAt(lastHour - (23 - i) * 3600));
     const midnight = Math.floor((lastHour + 8 * 3600) / (24 * 3600)) * 24 * 3600 - 8 * 3600;
     const dailyData = Array.from({ length: 7 }, (_, i) => pointAt(midnight - (6 - i) * 24 * 3600));
-    const latestDay = [...dailyData].reverse().find(point => point.recorded);
-    const latest = [...data].reverse().find(point => point.recorded);
+    const latestDay = [...dailyData].reverse().find(point => point.equity !== null);
+    const latest = [...data].reverse().find(point => point.equity !== null);
     const ticks = data.filter(point => point.hour % (4 * 3600) === 0).map(point => point.hour);
     const dailyTicks = dailyData.map(point => point.hour);
     return { data, dailyData, latestDay, latest, ticks, dailyTicks };

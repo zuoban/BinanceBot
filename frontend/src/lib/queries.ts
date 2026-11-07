@@ -23,10 +23,9 @@ type SocketDataByType = { [Message in SocketMessage as Message['type']]: Message
 export function useSocket<T extends keyof SocketDataByType>(path: string | undefined, type: T, onData: (data: SocketDataByType[T]) => void | boolean) {
   const callback = useRef<(data: SocketDataByType[T]) => void | boolean>(onData);
   callback.current = onData;
-  const [lastReceived, setLastReceived] = useState(0);
-  const [connected, setConnected] = useState(false);
+  const [state, setState] = useState({ path, lastReceived: 0, connected: false });
   useEffect(() => {
-    setLastReceived(0); setConnected(false);
+    setState({ path, lastReceived: 0, connected: false });
     if (!path) return;
     let stopped = false, socket: WebSocket | undefined, retry: ReturnType<typeof setTimeout>;
     let attempts = 0;
@@ -40,12 +39,12 @@ export function useSocket<T extends keyof SocketDataByType>(path: string | undef
           const envelope = JSON.parse(event.data) as SocketMessage;
           if (envelope.type !== type) return;
           if (callback.current(envelope.data as SocketDataByType[T]) === false) return;
-          attempts = 0; setConnected(true); setLastReceived(Date.now());
+          attempts = 0; setState({ path, lastReceived: Date.now(), connected: true });
         } catch { /* Ignore malformed frames; HTTP remains the fallback. */ }
       };
       socket.onclose = () => {
         if (stopped) return;
-        setConnected(false);
+        setState(prev => prev.path === path ? { ...prev, connected: false } : prev);
         retry = setTimeout(connect, Math.min(1000 * 2 ** attempts++, 15_000));
       };
       socket.onerror = () => socket?.close();
@@ -53,7 +52,8 @@ export function useSocket<T extends keyof SocketDataByType>(path: string | undef
     connect();
     return () => { stopped = true; clearTimeout(retry); socket?.close(); };
   }, [path, type]);
-  return { lastReceived, connected };
+  const current = state.path === path ? state : { lastReceived: 0, connected: false };
+  return { lastReceived: current.lastReceived, connected: current.connected };
 }
 
 function useSocketFallbackQuery<TData>(key: QueryKey, queryFn: (signal: AbortSignal) => Promise<TData>, socket: { connected: boolean; lastReceived: number }, enabled = true) {
@@ -71,7 +71,7 @@ function useSocketFallbackQuery<TData>(key: QueryKey, queryFn: (signal: AbortSig
       lastFallback.current = now;
       void query.refetch();
     }
-  }, [now, socket.lastReceived, enabled, query]);
+  }, [now, socket.lastReceived, enabled, query.dataUpdatedAt, query.isFetching, query.refetch]);
   return { query, now };
 }
 

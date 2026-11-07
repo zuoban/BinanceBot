@@ -151,6 +151,16 @@ impl SymbolRules {
         })
     }
 
+    pub(crate) fn set_tick_size(&mut self, tick_size: Decimal) {
+        self.tick_size = tick_size;
+        self.price_scale = calculate_scale(tick_size);
+    }
+
+    pub(crate) fn set_step_size(&mut self, step_size: Decimal) {
+        self.step_size = step_size;
+        self.quantity_scale = calculate_scale(step_size);
+    }
+
     /// A fixed lattice must be exactly representable by the exchange price filter.
     pub fn validate_grid_interval(&self, interval: Decimal) -> anyhow::Result<()> {
         anyhow::ensure!(

@@ -78,7 +78,7 @@ export default function Shell() {
       <div className="mobilebar-actions">
         {mode && <ModeTag mode={mode} />}
         <Button type="text" icon={<SearchOutlined />} aria-label="打开命令面板" disabled={saving} onClick={() => { if (!saving) setPalette(true); }} />
-        <Button type="text" icon={<MenuOutlined />} aria-label="打开主导航" onClick={() => setDrawer(true)} />
+        <Button type="text" icon={<MenuOutlined />} aria-label="打开主导航" aria-expanded={drawer} onClick={() => setDrawer(true)} />
       </div>
     </header>
     <Drawer open={drawer} onClose={() => setDrawer(false)} placement="left" size={280} closable={false} className="sidebar-drawer" title={null} styles={{ body: { padding: 0 } }} aria-label="主导航"><SidebarBody idPrefix="drawer" {...sidebarProps} /></Drawer>
@@ -120,7 +120,7 @@ function PaletteHost({ open, setOpen, pairs, stale, authEnabled, saving, onLogou
   useEffect(() => {
     const typing = (target: EventTarget | null) => target instanceof HTMLElement && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName));
     const onKey = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key?.toLowerCase() === 'k') {
+      if ((event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey && event.key?.toLowerCase() === 'k') {
         event.preventDefault();
         if (shortcutState.current.saving) return;
         setOpen(value => value ? false : !document.querySelector('.ant-modal-root, .ant-drawer-open'));

@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import { Alert, Button, Form, Input, Typography } from 'antd';
 import { LockOutlined } from '@ant-design/icons';
 import { useMutation, useQuery } from '@tanstack/react-query';
@@ -10,12 +9,10 @@ import { ThemeSwitch } from '../components/ThemeSwitch';
 
 export default function Login({ onLogin }: { onLogin: () => void }) {
   const status = useQuery({ queryKey: ['auth-status'], queryFn: () => api<AuthStatus>('/api/auth/status'), retry: false });
-  const [error, setError] = useState<Error | null>(null);
   const configured = status.data?.initialized !== false;
   const mutation = useMutation({
     mutationFn: (values: { password: string }) => post<{ token: string }>('/api/auth/login', values),
     onSuccess: data => { tokenStore.set(data.token); onLogin(); },
-    onError: setError,
   });
   if (status.isPending) return <LoadingScreen label="正在连接控制台" />;
   return <main className="login-page">
@@ -36,9 +33,9 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
     <section className="login-form"><div className="login-form-content">
       <Typography.Title level={2}>{configured ? '登录交易控制台' : '无需登录'}</Typography.Title>
       <Typography.Paragraph type="secondary">{configured ? '输入管理员密码，进入策略工作台' : '服务端未设置管理员密码，可直接进入控制台'}</Typography.Paragraph>
-      <ErrorNotice error={status.error} retry={() => void status.refetch()} /><ErrorNotice error={error} />
+      <ErrorNotice error={status.error} retry={() => void status.refetch()} /><ErrorNotice error={mutation.error} />
       {!configured && <><Alert type="info" showIcon title="未启用管理员密码认证，所有能访问该端口的人都可以操作。" /><Button type="primary" size="large" block onClick={onLogin}>进入控制台</Button></>}
-      {configured && <Form layout="vertical" onFinish={values => { setError(null); mutation.mutate(values); }} disabled={mutation.isPending || !status.data}>
+      {configured && <Form layout="vertical" onFinish={values => mutation.mutate(values)} disabled={mutation.isPending || !status.data}>
         <Form.Item name="password" label="管理员密码" rules={[{ required: true, message: '请输入密码' }]}>
           <Input.Password prefix={<LockOutlined />} size="large" autoComplete="current-password" />
         </Form.Item>

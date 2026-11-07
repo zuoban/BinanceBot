@@ -3516,53 +3516,47 @@ impl GridTradingEngine {
             return;
         }
 
-        for &target_price in &desired_buy_prices {
-            // Retain queue priority for active buys still inside the nearest band.
-            let already_exists = has_nearby_grid_order(
-                &active_buy_prices,
-                target_price,
-                grid_interval,
-                rules.tick_size,
-            );
+        for (side, desired_prices, active_prices, grid_level) in [
+            (
+                OrderSide::Buy,
+                &desired_buy_prices,
+                &mut active_buy_prices,
+                -1,
+            ),
+            (
+                OrderSide::Sell,
+                &desired_sell_prices,
+                &mut active_sell_prices,
+                1,
+            ),
+        ] {
+            for &target_price in desired_prices {
+                // Retain queue priority for active orders still inside the nearest band.
+                let already_exists = has_nearby_grid_order(
+                    active_prices,
+                    target_price,
+                    grid_interval,
+                    rules.tick_size,
+                );
+                let on_maker_side = if side == OrderSide::Buy {
+                    target_price < current_price
+                } else {
+                    target_price > current_price
+                };
 
-            if !already_exists && target_price < current_price {
-                let client_id = new_grid_client_order_id(OrderSide::Buy);
-                if self
-                    .place_grid_order(OrderSide::Buy, target_price, client_id, -1, None)
-                    .await
-                {
-                    active_buy_prices.push(target_price);
+                if !already_exists && on_maker_side {
+                    let client_id = new_grid_client_order_id(side);
                     if self
-                        .prune_grid_window(&desired_buy_prices, &desired_sell_prices)
+                        .place_grid_order(side, target_price, client_id, grid_level, None)
                         .await
                     {
-                        return;
-                    }
-                }
-            }
-        }
-
-        // Ordinary sells use the same lattice as buys.
-        for &target_price in &desired_sell_prices {
-            let already_exists = has_nearby_grid_order(
-                &active_sell_prices,
-                target_price,
-                grid_interval,
-                rules.tick_size,
-            );
-
-            if !already_exists && target_price > current_price {
-                let client_id = new_grid_client_order_id(OrderSide::Sell);
-                if self
-                    .place_grid_order(OrderSide::Sell, target_price, client_id, 1, None)
-                    .await
-                {
-                    active_sell_prices.push(target_price);
-                    if self
-                        .prune_grid_window(&desired_buy_prices, &desired_sell_prices)
-                        .await
-                    {
-                        return;
+                        active_prices.push(target_price);
+                        if self
+                            .prune_grid_window(&desired_buy_prices, &desired_sell_prices)
+                            .await
+                        {
+                            return;
+                        }
                     }
                 }
             }
@@ -3688,26 +3682,6 @@ impl GridTradingEngine {
         grid_level: i32,
         paired_client_order_id: Option<String>,
     ) -> bool {
-        self.place_grid_order_with_quantity(
-            side,
-            price,
-            client_order_id,
-            grid_level,
-            paired_client_order_id,
-            None,
-        )
-        .await
-    }
-
-    async fn place_grid_order_with_quantity(
-        &mut self,
-        side: OrderSide,
-        price: Decimal,
-        client_order_id: String,
-        grid_level: i32,
-        paired_client_order_id: Option<String>,
-        order_quantity: Option<Decimal>,
-    ) -> bool {
         if self.state.is_shutting_down() || *self.state.status.read().await != BotStatus::Running {
             return false;
         }
@@ -3729,18 +3703,10 @@ impl GridTradingEngine {
         }
         let rules = self.state.rules.read().await.clone();
         let symbol = config.exchange.symbol.clone();
-        let Some(full_quantity) = order_quantity
-            .or_else(|| rules.calculate_quantity(price, config.grid.order_amount_usdc))
+        let Some(full_quantity) = rules.calculate_quantity(price, config.grid.order_amount_usdc)
         else {
             return false;
         };
-        if full_quantity < rules.min_qty
-            || full_quantity > rules.max_qty
-            || rules.round_quantity(full_quantity) != full_quantity
-            || price * full_quantity < rules.min_notional
-        {
-            return false;
-        }
 
         if !config.exchange.is_paper() && !self.live_reconciliation_ready() {
             warn!("Skipping order: Binance account, position, or open orders are not reconciled recently");
@@ -4461,7 +4427,7 @@ impl GridTradingEngine {
                                 }
                             }
                             let identity_matches = order.symbol == symbol
-                                && matches!(order.side.as_str(), "BUY" | "SELL")
+                                && OrderSide::from_exchange_str(&order.side).is_some()
                                 && retained.matches_exchange_identity(&order);
                             let active_matches = current
                                 .as_ref()

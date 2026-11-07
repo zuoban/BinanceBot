@@ -32,12 +32,13 @@ export default function OverviewPage() {
     if (restoreAddFocus.current && document.activeElement === document.body) addLink.current?.focus();
     restoreAddFocus.current = false;
   }, [hasOverview]);
-  const addPairLink = <Button href="/pairs/new" ref={setAddLink} icon={<PlusOutlined />} onClick={event => {
+  const addPairButton = (props?: { ref?: React.Ref<HTMLAnchorElement>; icon?: React.ReactNode; type?: 'primary' }) => <Button {...props} href="/pairs/new" onClick={event => {
     if (event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) {
       event.preventDefault();
       navigate('/pairs/new');
     }
   }}>新增交易对</Button>;
+  const addPairLink = addPairButton({ ref: setAddLink, icon: <PlusOutlined /> });
   const accounts = useContext(AccountsContext);
   const { modal, message } = App.useApp();
   const controls = useControls();
@@ -252,7 +253,7 @@ export default function OverviewPage() {
           {result && <div className={result.startsWith('未提交') ? 'negative operation-result' : 'muted operation-result'} role="status">{result}</div>}
         </Card></Col>;
       })}
-      {!visible.length && <Col span={24}><Card><Empty description={pairs.length ? '没有符合筛选条件的策略' : '暂无策略数据'}>{pairs.length ? <Button onClick={clearFilters}>清除筛选</Button> : <Link to="/pairs/new"><Button type="primary">新增交易对</Button></Link>}</Empty></Card></Col>}
+      {!visible.length && <Col span={24}><Card><Empty description={pairs.length ? '没有符合筛选条件的策略' : '暂无策略数据'}>{pairs.length ? <Button onClick={clearFilters}>清除筛选</Button> : addPairButton({ type: 'primary' })}</Empty></Card></Col>}
     </Row>
     </section>
     <Card className="overview-trades" title="最近成交" extra={<span className="muted">全部策略当前模式 · 最近 20 条</span>}>

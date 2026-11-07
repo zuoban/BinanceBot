@@ -95,7 +95,7 @@ export default function PairConfig() {
   });
   resetMutation.current = mutation.reset;
   const remove = async () => {
-    if (!pair || removing.current || !page.current) return;
+    if (removing.current || submission.current || !symbol || !pair || !page.current) return;
     const currentPage = page.current;
     removing.current = true;
     edit.setSaving(true);
@@ -118,7 +118,7 @@ export default function PairConfig() {
     if (removed && page.current === currentPage) navigate('/');
   };
   const submit = async (values: FormValues) => {
-    if (submission.current || !page.current) return;
+    if (removing.current || submission.current || !page.current) return;
     const currentPage = page.current;
     const currentSubmission = {};
     submission.current = currentSubmission;

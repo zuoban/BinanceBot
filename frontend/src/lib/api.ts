@@ -29,7 +29,7 @@ export async function authenticatedFetch(path: string, init: ApiRequestInit = {}
   }
   if (response.status === 401 && token && !path.startsWith('/api/auth/login')) {
     // A late response from an old session must not sign out a newer login.
-    if (token && token === tokenStore.get()) {
+    if (token === tokenStore.get()) {
       tokenStore.clear();
       window.dispatchEvent(new Event('auth-expired'));
     }

@@ -7,7 +7,7 @@ export const directionLabel = (direction?: GridConfig['direction'] | string) => 
 export const maxPositionPolicyLabel = (config: { pause_on_max_position?: boolean; cancel_opening_on_max_position?: boolean }) =>
   config.pause_on_max_position ? '暂停策略' : config.cancel_opening_on_max_position ? '仅撤开仓单' : '限制开仓';
 export const quoteAsset = (symbol: string) => ['USDC', 'USDT', 'FDUSD', 'BUSD'].find(a => symbol.endsWith(a)) ?? '';
-export const numeric = (value: unknown): number | null => value === null || value === undefined || value === '' || !Number.isFinite(Number(value)) ? null : Number(value);
+export const numeric = (value: unknown): number | null => typeof value === 'number' ? (Number.isFinite(value) ? value : null) : typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value)) ? Number(value) : null;
 const modeAsset = (mode: Mode, symbol: string) => {
   const asset = quoteAsset(symbol) || symbol;
   return { asset, key: `${mode}:${asset}` };

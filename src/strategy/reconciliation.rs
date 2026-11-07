@@ -327,7 +327,7 @@ impl GridTradingEngine {
                     Utc::now(),
                 );
                 order.order_id = (found.symbol == symbol
-                    && matches!(found.side.as_str(), "BUY" | "SELL")
+                    && OrderSide::from_exchange_str(&found.side).is_some()
                     && orders
                         .iter()
                         .filter(|order| order.client_order_id == found.client_order_id)
@@ -650,7 +650,7 @@ impl GridTradingEngine {
                             })
                             || orders.iter().any(|order| {
                                 order.symbol != symbol
-                                    || !matches!(order.side.as_str(), "BUY" | "SELL")
+                                    || OrderSide::from_exchange_str(&order.side).is_none()
                             })
                             || orders.iter().skip(1).any(|order| {
                                 !order.matches_snapshot(first)
@@ -1069,7 +1069,7 @@ impl GridTradingEngine {
                                 let corrected_to_expected = same_order
                                     && found.client_order_id == expected.client_order_id
                                     && found.symbol == expected.symbol
-                                    && matches!(found.side.as_str(), "BUY" | "SELL")
+                                    && OrderSide::from_exchange_str(&found.side).is_some()
                                     && (expected.purpose == crate::types::OrderPurpose::Unverified
                                         || found.side == expected.side.as_str())
                                     && expected.order_id.is_none_or(|id| id == found.order_id)
@@ -1194,11 +1194,8 @@ impl GridTradingEngine {
                                 return false;
                             }
                             if expected.purpose == crate::types::OrderPurpose::Unverified {
-                                expected.side = if unique.side == "SELL" {
-                                    OrderSide::Sell
-                                } else {
-                                    OrderSide::Buy
-                                };
+                                expected.side = OrderSide::from_exchange_str(&unique.side)
+                                    .unwrap_or(OrderSide::Buy);
                                 expected.price = unique.price;
                                 expected.amount_usdc = expected.price * expected.quantity;
                                 expected.purpose = crate::types::OrderPurpose::Legacy;
@@ -1461,7 +1458,7 @@ impl GridTradingEngine {
                                 continue;
                             }
                             if found.symbol != symbol
-                                || !matches!(found.side.as_str(), "BUY" | "SELL")
+                                || OrderSide::from_exchange_str(&found.side).is_none()
                             {
                                 continue;
                             }
@@ -1525,7 +1522,7 @@ impl GridTradingEngine {
                                 candidates.push(order.clone());
                             }
                             let conflict = found.symbol != symbol
-                                || !matches!(found.side.as_str(), "BUY" | "SELL")
+                                || OrderSide::from_exchange_str(&found.side).is_none()
                                 || candidates
                                     .iter()
                                     .any(|order| !order.matches_exchange_identity(found));
@@ -1662,7 +1659,7 @@ impl GridTradingEngine {
                                     continue;
                                 }
                                 if found.symbol != symbol
-                                    || !matches!(found.side.as_str(), "BUY" | "SELL")
+                                    || OrderSide::from_exchange_str(&found.side).is_none()
                                 {
                                     continue;
                                 }
@@ -1704,7 +1701,8 @@ impl GridTradingEngine {
                     let state = self.state.clone();
                     let active = state.active_orders.read().await;
                     for found in live_ids.values() {
-                        if found.symbol != symbol || !matches!(found.side.as_str(), "BUY" | "SELL")
+                        if found.symbol != symbol
+                            || OrderSide::from_exchange_str(&found.side).is_none()
                         {
                             invalid_live_identity = true;
                             self.track_provisional_observation(found);

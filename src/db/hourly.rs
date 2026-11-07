@@ -30,6 +30,34 @@ impl Rollup {
                 .map_or(timestamp, |latest| latest.max(timestamp)),
         );
     }
+
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, Self)> {
+        let pnl: String = row.get(3)?;
+        let pnl = Decimal::from_str(&pnl).map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(err))
+        })?;
+        Ok((
+            row.get(0)?,
+            Self {
+                buys: row.get(1)?,
+                sells: row.get(2)?,
+                pnl,
+                pending: row.get(4)?,
+                latest: Some(row.get(5)?),
+            },
+        ))
+    }
+
+    fn add_row(&mut self, timestamp: DateTime<Utc>, row: &rusqlite::Row<'_>) -> Result<()> {
+        let verified: bool = row.get(3)?;
+        let pnl = if verified {
+            Decimal::from_str(&row.get::<_, String>(2)?)?
+        } else {
+            Decimal::ZERO
+        };
+        self.add(timestamp, &row.get::<_, String>(1)?, pnl, verified);
+        Ok(())
+    }
 }
 
 pub(super) fn hour(timestamp: DateTime<Utc>) -> i64 {
@@ -75,24 +103,18 @@ pub(super) fn migrate_on(conn: &Connection) -> Result<()> {
     let mut rollups: HashMap<(String, String, i64), Rollup> = HashMap::new();
     {
         let mut statement = conn.prepare(
-            "SELECT trade_id, symbol, mode, timestamp, side, realized_pnl, pnl_verified FROM trades",
+            "SELECT timestamp, side, realized_pnl, pnl_verified, trade_id, symbol, mode FROM trades",
         )?;
         let mut update = conn.prepare("UPDATE trades SET stats_hour = ?1 WHERE trade_id = ?2")?;
         let mut rows = statement.query([])?;
         while let Some(row) = rows.next()? {
-            let timestamp: DateTime<Utc> = row.get(3)?;
-            let verified: bool = row.get(6)?;
-            let pnl = if verified {
-                Decimal::from_str(&row.get::<_, String>(5)?)?
-            } else {
-                Decimal::ZERO
-            };
+            let timestamp: DateTime<Utc> = row.get(0)?;
             let bucket = hour(timestamp);
             rollups
-                .entry((row.get(1)?, row.get(2)?, bucket))
+                .entry((row.get(5)?, row.get(6)?, bucket))
                 .or_default()
-                .add(timestamp, &row.get::<_, String>(4)?, pnl, verified);
-            update.execute(params![bucket, row.get::<_, String>(0)?])?;
+                .add_row(timestamp, row)?;
+            update.execute(params![bucket, row.get::<_, String>(4)?])?;
         }
     }
     for ((symbol, mode, bucket), rollup) in rollups {
@@ -108,34 +130,15 @@ pub(super) fn migrate_on(conn: &Connection) -> Result<()> {
 }
 
 fn load_on(conn: &Connection, symbol: &str, mode: &str, bucket: i64) -> Result<Rollup> {
-    let stored = conn
+    Ok(conn
         .query_row(
-            "SELECT buy_count, sell_count, realized_pnl, pending_pnl_count, latest_timestamp
+            "SELECT hour, buy_count, sell_count, realized_pnl, pending_pnl_count, latest_timestamp
              FROM trade_hourly_rollups WHERE symbol = ?1 AND mode = ?2 AND hour = ?3",
             params![symbol, mode, bucket],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, DateTime<Utc>>(4)?,
-                ))
-            },
+            Rollup::from_row,
         )
-        .optional()?;
-    stored.map_or_else(
-        || Ok(Rollup::default()),
-        |(buys, sells, pnl, pending, latest)| {
-            Ok(Rollup {
-                buys,
-                sells,
-                pnl: Decimal::from_str(&pnl)?,
-                pending,
-                latest: Some(latest),
-            })
-        },
-    )
+        .optional()?
+        .map_or_else(Rollup::default, |(_, rollup)| rollup))
 }
 
 fn save_on(conn: &Connection, symbol: &str, mode: &str, bucket: i64, value: &Rollup) -> Result<()> {
@@ -166,10 +169,7 @@ pub(super) fn insert_on(conn: &Connection, trade: &TradeRecord) -> Result<()> {
     let mut rollup = load_on(conn, &trade.symbol, trade.mode.as_str(), bucket)?;
     rollup.add(
         trade.timestamp,
-        match trade.side {
-            crate::types::OrderSide::Buy => "BUY",
-            crate::types::OrderSide::Sell => "SELL",
-        },
+        trade.side.as_str(),
         trade.realized_pnl,
         trade.pnl_verified,
     );
@@ -221,16 +221,9 @@ pub(super) fn stats_on(
     )?;
     let mut rows = statement.query(params![symbol, mode.as_str(), first_hour, last_hour])?;
     while let Some(row) = rows.next()? {
-        let bucket: i64 = row.get(0)?;
-        let latest: DateTime<Utc> = row.get(5)?;
-        let value = if latest <= now {
-            Rollup {
-                buys: row.get(1)?,
-                sells: row.get(2)?,
-                pnl: Decimal::from_str(&row.get::<_, String>(3)?)?,
-                pending: row.get(4)?,
-                latest: Some(latest),
-            }
+        let (bucket, stored) = Rollup::from_row(row)?;
+        let value = if stored.latest.is_some_and(|latest| latest <= now) {
+            stored
         } else {
             // Only the boundary hour can contain entries after the upper bound.
             // Parse timestamps before comparing so nanoseconds remain exact.
@@ -243,13 +236,7 @@ pub(super) fn stats_on(
             while let Some(entry) = entries.next()? {
                 let timestamp: DateTime<Utc> = entry.get(0)?;
                 if timestamp >= window_start && timestamp <= now {
-                    let verified: bool = entry.get(3)?;
-                    let pnl = if verified {
-                        Decimal::from_str(&entry.get::<_, String>(2)?)?
-                    } else {
-                        Decimal::ZERO
-                    };
-                    value.add(timestamp, &entry.get::<_, String>(1)?, pnl, verified);
+                    value.add_row(timestamp, entry)?;
                 }
             }
             value

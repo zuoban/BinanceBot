@@ -23,6 +23,14 @@ impl OrderSide {
             OrderSide::Sell => "SELL",
         }
     }
+
+    pub fn from_exchange_str(side: &str) -> Option<Self> {
+        match side {
+            "BUY" => Some(Self::Buy),
+            "SELL" => Some(Self::Sell),
+            _ => None,
+        }
+    }
 }
 
 /// Strategy direction in Binance's one-way position mode.
@@ -149,11 +157,7 @@ impl GridOrder {
             client_order_id: found.client_order_id.clone(),
             order_id: Some(found.order_id),
             symbol: found.symbol.clone(),
-            side: if found.side.eq_ignore_ascii_case("BUY") {
-                OrderSide::Buy
-            } else {
-                OrderSide::Sell
-            },
+            side: OrderSide::from_exchange_str(&found.side).unwrap_or(OrderSide::Sell),
             price: found.price,
             quantity,
             amount_usdc: found.price * quantity,
@@ -706,17 +710,13 @@ impl UpdateGlobalConfigPayload {
             config.telegram.bot_token.clear();
             config.telegram.chat_id.clear();
         } else {
-            if let Some(token) = self
-                .telegram_bot_token
-                .filter(|value| !value.trim().is_empty())
-            {
-                config.telegram.bot_token = token.trim().to_string();
-            }
-            if let Some(chat_id) = self
-                .telegram_chat_id
-                .filter(|value| !value.trim().is_empty())
-            {
-                config.telegram.chat_id = chat_id.trim().to_string();
+            for (target, value) in [
+                (&mut config.telegram.bot_token, self.telegram_bot_token),
+                (&mut config.telegram.chat_id, self.telegram_chat_id),
+            ] {
+                if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
+                    *target = value.trim().to_string();
+                }
             }
         }
     }

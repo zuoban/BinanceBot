@@ -2,7 +2,7 @@ use super::AppState;
 use crate::config::AppConfig;
 use crate::db::Database;
 use crate::types::{
-    AccountInfo, BotSnapshot, BotStatus, HourlyTradeStats, OrderSide, OverviewPairView,
+    AccountInfo, BotSnapshot, BotStatus, GridOrder, HourlyTradeStats, OrderSide, OverviewPairView,
     PairSummary, PositionInfo, SummaryPosition, SummaryStats, SummaryTicker, TodayTradeCounts,
     TradeRecord, TradingMode,
 };
@@ -338,6 +338,17 @@ impl AppState {
         ))
     }
 
+    pub(crate) async fn sorted_active_orders(&self) -> Vec<GridOrder> {
+        let mut orders: Vec<GridOrder> =
+            self.active_orders.read().await.values().cloned().collect();
+        orders.sort_by(|a, b| {
+            b.price
+                .cmp(&a.price)
+                .then_with(|| a.client_order_id.cmp(&b.client_order_id))
+        });
+        orders
+    }
+
     pub async fn snapshot(&self) -> BotSnapshot {
         self.snapshot_at(Utc::now()).await
     }
@@ -395,8 +406,7 @@ impl AppState {
             .with_position_and_account(&config, PositionInfo::clone)
             .await;
         let account_cny_rate = self.cny_rates.get(&account.asset).await;
-        let mut active_orders: Vec<_> = self.active_orders.read().await.values().cloned().collect();
-        active_orders.sort_by_key(|order| std::cmp::Reverse(order.price));
+        let active_orders = self.sorted_active_orders().await;
         stats.active_buy_orders = active_orders
             .iter()
             .filter(|order| order.side == OrderSide::Buy)
