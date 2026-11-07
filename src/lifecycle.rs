@@ -125,9 +125,7 @@ async fn begin_stop_engine_inner(
         if recover {
             state.pause_for_shutdown().await?;
         } else {
-            state
-                .pause_trading_with_reason("删除交易对，暂停策略并撤销机器人挂单")
-                .await?;
+            state.pause_trading().await?;
         }
         let (reply, response) = oneshot::channel();
         state

@@ -271,7 +271,7 @@ impl GlobalPositionLimit {
         for state in &states {
             if unsafe_now && (first_trigger || *state.status.read().await == BotStatus::Running) {
                 state.global_cancel_pending.store(true, Ordering::SeqCst);
-                if let Err(error) = Box::pin(state.pause_trading_with_reason(&reason)).await {
+                if let Err(error) = Box::pin(state.pause_trading()).await {
                     state
                         .add_log("ERROR", format!("全局风控暂停状态保存失败: {}", error))
                         .await;
@@ -1263,11 +1263,6 @@ impl AppState {
     }
 
     pub async fn pause_trading(self: &Arc<Self>) -> anyhow::Result<()> {
-        self.pause_trading_with_reason("策略运行异常，已暂停，请查看系统运行日志")
-            .await
-    }
-
-    pub async fn pause_trading_with_reason(self: &Arc<Self>, _reason: &str) -> anyhow::Result<()> {
         let admission = self.safety_pause_admission.lock().await;
         anyhow::ensure!(
             !self.shutdown_guard_cleared.load(Ordering::SeqCst),
@@ -1293,8 +1288,7 @@ impl AppState {
     }
 
     pub async fn resume_trading(self: &Arc<Self>) -> anyhow::Result<()> {
-        self.set_trading_status(BotStatus::Running, Some("手动恢复策略"))
-            .await
+        self.set_trading_status(BotStatus::Running).await
     }
 
     pub(crate) async fn resume_trading_in_mode(
@@ -1411,7 +1405,7 @@ impl AppState {
     }
 
     pub(crate) async fn pause_trading_silently(self: &Arc<Self>) -> anyhow::Result<()> {
-        self.set_trading_status(BotStatus::Paused, None).await
+        self.set_trading_status(BotStatus::Paused).await
     }
 
     pub(crate) async fn resume_trading_silently(
@@ -1427,11 +1421,7 @@ impl AppState {
         .await?
     }
 
-    async fn set_trading_status(
-        self: &Arc<Self>,
-        status: BotStatus,
-        _reason: Option<&str>,
-    ) -> anyhow::Result<()> {
+    async fn set_trading_status(self: &Arc<Self>, status: BotStatus) -> anyhow::Result<()> {
         let state = self.clone();
         tokio::spawn(async move { state.set_trading_status_inner(status, None, None).await })
             .await?
@@ -1507,6 +1497,16 @@ impl AppState {
 
     pub fn pause_epoch(&self) -> u64 {
         self.pause_epoch.load(Ordering::SeqCst)
+    }
+
+    pub(crate) async fn check_global_position_limit(&self) {
+        if let Some(global) = self
+            .global_position_limit
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+        {
+            global.check().await;
+        }
     }
 
     fn queue_global_cancel(self: &Arc<Self>) {
@@ -2800,22 +2800,14 @@ mod tests {
     #[tokio::test]
     async fn strategy_status_changes_do_not_send_notifications() {
         let mut fixture = notification_fixture(true, false).await;
-        fixture
-            .state
-            .pause_trading_with_reason("手动暂停策略")
-            .await
-            .unwrap();
+        fixture.state.pause_trading().await.unwrap();
         assert_eq!(
             fixture.state.db.load_bot_status().unwrap(),
             Some(BotStatus::Paused)
         );
         fixture.state.resume_trading().await.unwrap();
         fixture.state.pause_trading_silently().await.unwrap();
-        fixture
-            .state
-            .pause_trading_with_reason("撤单失败")
-            .await
-            .unwrap();
+        fixture.state.pause_trading().await.unwrap();
         assert_eq!(*fixture.state.status.read().await, BotStatus::Paused);
         no_more_notifications(&mut fixture).await;
         fixture.server.abort();

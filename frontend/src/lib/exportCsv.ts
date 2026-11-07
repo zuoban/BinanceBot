@@ -13,13 +13,17 @@ export function toCsv(header: string[], rows: unknown[][]): string {
   return [header, ...rows].map(row => row.map(csvCell).join(',')).join('\r\n');
 }
 
-/** Download as UTF-8 with a BOM so Excel reads the Chinese headers correctly. */
-export function downloadCsv(filename: string, csv: string) {
-  const url = URL.createObjectURL(new Blob(['\uFEFF', csv], { type: 'text/csv;charset=utf-8' }));
+export function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url; link.download = filename;
   document.body.append(link); link.click(); link.remove();
   setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}
+
+/** Download as UTF-8 with a BOM so Excel reads the Chinese headers correctly. */
+export function downloadCsv(filename: string, csv: string) {
+  downloadBlob(new Blob(['\uFEFF', csv], { type: 'text/csv;charset=utf-8' }), filename);
 }
 
 /** Plain-text copy that also works on non-secure origins, where the async clipboard API is missing. */

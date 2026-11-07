@@ -1532,13 +1532,19 @@ fn mask_api_key_preview(api_key: &str) -> String {
     if k.is_empty() {
         return "未配置".to_string();
     }
-    let char_count = k.chars().count();
-    if char_count > 8 {
-        format!(
-            "{}...{}",
-            k.chars().take(4).collect::<String>(),
-            k.chars().skip(char_count - 4).collect::<String>()
-        )
+    let mut prefix_end = 0;
+    let mut tail = [0usize; 4];
+    let mut count = 0usize;
+    for (idx, _) in k.char_indices() {
+        if count == 4 {
+            prefix_end = idx;
+        }
+        tail[count % 4] = idx;
+        count += 1;
+    }
+    if count > 8 {
+        let suffix_start = tail[count % 4];
+        format!("{}...{}", &k[..prefix_end], &k[suffix_start..])
     } else {
         "****".to_string()
     }
@@ -1627,42 +1633,24 @@ fn apply_config_payload(
     }
     current_config.grid.min_liquidation_distance_pct = payload.min_liquidation_distance_pct;
 
-    if let Some(key) = payload.api_key.filter(|_| !payload.clear_api_credentials) {
-        let key_trimmed = key.trim().to_string();
-        if !key_trimmed.is_empty() {
-            current_config.exchange.api_key = key_trimmed;
+    if !payload.clear_api_credentials {
+        if let Some(key) = non_blank(payload.api_key) {
+            current_config.exchange.api_key = key;
         }
-    }
-
-    if let Some(secret) = payload
-        .api_secret
-        .filter(|_| !payload.clear_api_credentials)
-    {
-        let secret_trimmed = secret.trim().to_string();
-        if !secret_trimmed.is_empty() {
-            current_config.exchange.api_secret = secret_trimmed;
+        if let Some(secret) = non_blank(payload.api_secret) {
+            current_config.exchange.api_secret = secret;
         }
     }
 
     if let Some(enabled) = payload.telegram_enabled {
         current_config.telegram.enabled = enabled;
     }
-    if let Some(token) = payload
-        .telegram_bot_token
-        .filter(|_| !payload.clear_telegram_credentials)
-    {
-        let token = token.trim();
-        if !token.is_empty() {
-            current_config.telegram.bot_token = token.to_string();
+    if !payload.clear_telegram_credentials {
+        if let Some(token) = non_blank(payload.telegram_bot_token) {
+            current_config.telegram.bot_token = token;
         }
-    }
-    if let Some(chat_id) = payload
-        .telegram_chat_id
-        .filter(|_| !payload.clear_telegram_credentials)
-    {
-        let chat_id = chat_id.trim();
-        if !chat_id.is_empty() {
-            current_config.telegram.chat_id = chat_id.to_string();
+        if let Some(chat_id) = non_blank(payload.telegram_chat_id) {
+            current_config.telegram.chat_id = chat_id;
         }
     }
     current_config.validate()?;
@@ -1839,20 +1827,19 @@ async fn post_control_handler(
 }
 
 async fn prepare_control(state: &Arc<AppState>, action: &BotControlAction) -> Result<(), String> {
-    let reason = match action {
-        BotControlAction::Pause => Some("手动暂停策略"),
-        BotControlAction::CancelAll => Some("手动撤销全部策略挂单并暂停策略"),
-        _ => None,
-    };
+    let pause = matches!(
+        action,
+        BotControlAction::Pause | BotControlAction::CancelAll
+    );
     let state = state.clone();
     tokio::spawn(async move {
         let _control = state.socket_control_lock.read().await;
         if state.is_retired() {
             return Err("交易对已移除，无法执行操作".into());
         }
-        if let Some(reason) = reason {
+        if pause {
             state
-                .pause_trading_with_reason(reason)
+                .pause_trading()
                 .await
                 .map_err(|error| format!("暂停交易失败: {}", error))?;
         }

@@ -121,7 +121,7 @@ function GlobalSettings() {
   return <>
     <ErrorNotice error={query.error} retry={() => void query.refetch()} />
     <ErrorNotice error={mutation.error} />
-    {mutation.error?.message.includes('全局设置已被其他请求修改') && <Button onClick={async () => {
+    {((mutation.error as { status?: number } | null)?.status === 409 || mutation.error?.message.includes('全局设置已被其他请求修改')) && <Button onClick={async () => {
       if (!await modal.confirm({ title: '重新加载全局设置？', content: '重新加载会放弃当前未保存的修改，请先记录需要保留的内容。', okText: '重新加载', cancelText: '继续编辑' })) return;
       const result = await query.refetch();
       if (!result.error && result.data) { fill(result.data); edit.setDirty(false); mutation.reset(); }
@@ -136,7 +136,7 @@ function GlobalSettings() {
           <Col xs={24} md={12}><Form.Item name="sync_interval_secs" label="同步间隔（秒）" extra="策略定期同步订单、账户和持仓的间隔。" rules={[{ required: true }]}><InputNumber min={1} precision={0} className="full-width-input" /></Form.Item></Col>
         </Row>
         <div className="settings-card-footer">
-          <ProbeButton label="测试连接" path="/api/global/test-exchange" disabled={!ready || edit.saving}
+          <ProbeButton label="测试连接" path="/api/global/test-exchange" disabled={!ready || edit.saving || Boolean(clearApi)}
             body={() => ({ api_key: form.getFieldValue('api_key'), api_secret: form.getFieldValue('api_secret'), recv_window: form.getFieldValue('recv_window') })} />
           <Form.Item name="clear_api_credentials" valuePropName="checked" className="settings-checkbox-item"><Checkbox>清除已保存的 API Key 和 Secret（清除后所有交易对将以模拟盘运行）</Checkbox></Form.Item>
         </div>
@@ -159,7 +159,7 @@ function GlobalSettings() {
               <Col xs={24} sm={12}><Form.Item name="telegram_chat_id" label="Chat ID" extra="向机器人发送消息后，可通过 Telegram Bot API 的 getUpdates 获取会话 ID。"><Input /></Form.Item></Col>
             </Row>
             <div className="settings-card-footer">
-              <ProbeButton label="发送测试消息" path="/api/global/test-telegram" disabled={!ready || edit.saving}
+              <ProbeButton label="发送测试消息" path="/api/global/test-telegram" disabled={!ready || edit.saving || Boolean(clearTelegram)}
                 body={() => ({ bot_token: form.getFieldValue('telegram_bot_token'), chat_id: form.getFieldValue('telegram_chat_id') })} />
               <Form.Item name="clear_telegram_credentials" valuePropName="checked" className="settings-checkbox-item"><Checkbox>清除 Telegram 凭证（请先关闭通知）</Checkbox></Form.Item>
             </div>
@@ -187,7 +187,7 @@ function ServerSettings() {
     onSettled: () => edit.setSaving(false),
   });
   return <><ErrorNotice error={query.error} retry={() => void query.refetch()} /><ErrorNotice error={mutation.error} />
-    {mutation.error?.message.includes('服务设置已被其他请求修改') && <Button onClick={async () => {
+    {((mutation.error as { status?: number } | null)?.status === 409 || mutation.error?.message.includes('服务设置已被其他请求修改')) && <Button onClick={async () => {
       if (!await modal.confirm({ title: '重新加载服务设置？', content: '重新加载会放弃当前未保存的修改，请先记录需要保留的内容。', okText: '重新加载', cancelText: '继续编辑' })) return;
       const result = await query.refetch();
       if (!result.error && result.data) { baseline.current = result.data; form.setFieldsValue(result.data.saved); edit.setDirty(false); mutation.reset(); }

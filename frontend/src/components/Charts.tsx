@@ -1,7 +1,7 @@
 import { theme } from 'antd';
 import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import type { Snapshot } from '../lib/types';
-import { price, todayCount } from '../lib/format';
+import { numeric, price, todayCount } from '../lib/format';
 import { priceDiffPercent } from '../lib/gridPreview';
 import { useNow } from '../lib/useNow';
 import { NoData } from './Common';
@@ -40,7 +40,7 @@ export function DepthChart({ snapshot }: { snapshot: Snapshot }) {
   if (!orders.length) return <NoData />;
   const mark = Number(snapshot.ticker.mark_price);
   const hasMark = Number.isFinite(mark) && mark > 0;
-  const entries = orders.map(order => ({ kind: 'order' as const, value: Number(order.price), order }));
+  const entries = orders.map(order => ({ kind: 'order' as const, value: numeric(order.price) ?? -Infinity, order }));
   const rows: ({ kind: 'order'; value: number; order: typeof orders[number] } | { kind: 'mark'; value: number })[] = entries;
   if (hasMark) rows.push({ kind: 'mark', value: mark });
   rows.sort((a, b) => b.value - a.value);

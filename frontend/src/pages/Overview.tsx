@@ -5,10 +5,10 @@ import { ArrowDownOutlined, ArrowRightOutlined, ArrowUpOutlined, EyeOutlined, Pl
 import { useOverview } from '../lib/queries';
 import { useUrlParams } from '../lib/urlState';
 import { AccountsContext } from '../lib/session';
-import { ageText, accountGroups, compactNumber as number, compactPrice as price, comparePositionAmount, modeLabel, numeric, positionAmount, positionGroups, quoteAsset, todayCount, todayPnlGroups, todayTradeCounts, trimFractionZeros } from '../lib/format';
+import { ageText, accountGroups, compactNumber as number, compactPrice as price, comparePositionAmount, directionLabel, groupTradePnl, maxPositionPolicyLabel, modeLabel, numeric, positionAmount, positionGroups, quoteAsset, todayCount, todayPnlGroups, todayTradeCounts, trimFractionZeros } from '../lib/format';
 import { ErrorNotice, PageTitle, Pnl, SignalButton, SignalChip, StatusTag } from '../components/Common';
 import { runBatchControls, useControls } from '../components/Controls';
-import type { Pair, Trade } from '../lib/types';
+import type { Pair } from '../lib/types';
 import { OverviewLoading } from '../components/Loading';
 import { OverviewHistory } from '../components/OverviewHistory';
 import { StrategyMenu, StrategyToggle } from '../components/StrategyMenu';
@@ -18,24 +18,6 @@ import { TradesTable } from '../components/DataTables';
 
 import { useNow } from '../lib/useNow';
 const toPair = (e: { snapshot: { symbol: string; status: Pair['status']; grid_config: Pair['grid_config'] }; mode: Pair['mode']; scoped: boolean }): Pair => ({ symbol: e.snapshot.symbol, status: e.snapshot.status, mode: e.mode, grid_config: e.snapshot.grid_config, scoped: e.scoped });
-
-function groupTradePnl(trades: Trade[]) {
-  const groups = new Map<string, { mode: Trade['mode']; asset: string; total: number; available: boolean }>();
-  for (const trade of trades) {
-    const asset = quoteAsset(trade.symbol) || trade.symbol;
-    const key = `${trade.mode}:${asset}`;
-    const group = groups.get(key) ?? { mode: trade.mode, asset, total: 0, available: true };
-    const pnl = numeric(trade.realized_pnl);
-    if (!trade.pnl_verified || pnl === null) group.available = false;
-    else group.total += pnl;
-    groups.set(key, group);
-  }
-  for (const group of groups.values()) {
-    if (Math.abs(group.total) < 1e-12) group.total = 0;
-    else group.total = Number(group.total.toPrecision(12));
-  }
-  return groups;
-}
 export default function OverviewPage() {
   const overview = useOverview();
   const navigate = useNavigate();
@@ -136,7 +118,7 @@ export default function OverviewPage() {
         <div className="overview-stat"><span>运行中</span><strong>{overview.data ? pairs.filter(p => p.status === 'RUNNING').length : '--'}</strong></div>
         <div className="overview-stat"><span>策略总数</span><strong>{overview.data ? pairs.length : '--'}</strong></div>
         <div className="overview-stat"><span>今日成交</span><strong>{overview.data && today ? today.buy + today.sell : '--'}<small> 笔</small></strong><em className="overview-trade-breakdown">买单 {overview.data && today ? today.buy : '--'} 笔 / 卖单 {overview.data && today ? today.sell : '--'} 笔</em></div>
-        <div className="overview-stat overview-pnl" aria-label="今日已实现盈亏">
+        <div className="overview-stat" aria-label="今日已实现盈亏">
           <span>今日已实现盈亏</span>
           {!pnlGroups ? <strong>--</strong> : !pnlGroups.length ? <strong>0</strong> : pnlGroups.map(group => <div className="overview-pnl-group" key={group.key}>
             <strong>{group.total === null ? '--' : <Pnl value={group.total} compact />} <small>{group.asset}</small></strong>
@@ -216,17 +198,17 @@ export default function OverviewPage() {
         const formattedChange = change !== null && Number.isFinite(change) ? number(change, 2) : null;
         const roundedChange = formattedChange === null ? null : Number(formattedChange.replaceAll(',', ''));
         return <Col xs={24} lg={12} xxl={8} key={s.symbol}><Card className={`strategy-card ${s.grid_config.direction === 'SHORT' ? 'strategy-short' : 'strategy-long'}`}>
-          <div className="section-line strategy-card-heading"><div className="strategy-identity"><Link className="pair-name" to={`/pairs/${s.symbol}`}>{s.symbol}</Link><span className="strategy-direction" role="img" aria-label={s.grid_config.direction === 'SHORT' ? '策略方向：做空' : '策略方向：做多'}>{s.grid_config.direction === 'SHORT' ? <><ArrowDownOutlined />做空</> : <><ArrowUpOutlined />做多</>}</span></div><Space className="strategy-card-actions" size={2}><StatusTag status={s.status} /><Popover trigger="click" placement="bottomRight" title={`${s.symbol} 策略配置`} content={
+          <div className="section-line strategy-card-heading"><div className="strategy-identity"><Link className="pair-name" to={`/pairs/${s.symbol}`}>{s.symbol}</Link><span className="strategy-direction" role="img" aria-label={`策略方向：${directionLabel(s.grid_config.direction)}`}>{s.grid_config.direction === 'SHORT' ? <ArrowDownOutlined /> : <ArrowUpOutlined />}{directionLabel(s.grid_config.direction)}</span></div><Space className="strategy-card-actions" size={2}><StatusTag status={s.status} /><Popover trigger="click" placement="bottomRight" title={`${s.symbol} 策略配置`} content={
             <div className="strategy-config-popover">
               <dl>
-                <div><dt>交易方向</dt><dd>{s.grid_config.direction === 'SHORT' ? '做空' : '做多'}</dd></div>
+                <div><dt>交易方向</dt><dd>{directionLabel(s.grid_config.direction)}</dd></div>
                 <div><dt>网格间距</dt><dd>{trimFractionZeros(s.grid_config.grid_interval)} {quote}</dd></div>
                 <div><dt>每格金额</dt><dd>{trimFractionZeros(s.grid_config.order_amount_usdc)} {quote}</dd></div>
                 <div><dt>买单 / 卖单窗口</dt><dd>{s.grid_config.buy_window} / {s.grid_config.sell_window}</dd></div>
                 <div><dt>最低价格</dt><dd>{s.grid_config.min_price == null ? '未设置' : trimFractionZeros(s.grid_config.min_price)}</dd></div>
                 <div><dt>最高价格</dt><dd>{s.grid_config.max_price == null ? '未设置' : trimFractionZeros(s.grid_config.max_price)}</dd></div>
                 <div><dt>最大持仓名义价值</dt><dd>{s.grid_config.max_position_usdc == null ? '未设置' : `${trimFractionZeros(s.grid_config.max_position_usdc)} ${quote}`}</dd></div>
-                <div><dt>持仓上限处理方式</dt><dd>{s.grid_config.pause_on_max_position ? '暂停策略' : s.grid_config.cancel_opening_on_max_position ? '仅撤开仓单' : '限制开仓'}</dd></div>
+                <div><dt>持仓上限处理方式</dt><dd>{maxPositionPolicyLabel(s.grid_config)}</dd></div>
                 <div><dt>仅挂单</dt><dd>{s.grid_config.post_only ? '开启' : '关闭'}</dd></div>
               </dl>
               <Link to={`/pairs/${s.symbol}/config`}>查看完整配置 <ArrowRightOutlined /></Link>
@@ -243,7 +225,7 @@ export default function OverviewPage() {
             <div><span>今日成交</span><strong>{tradeCounts ? tradeCounts.buy + tradeCounts.sell : '--'} <small>笔</small></strong></div>
             <div><span>买单 / 卖单</span><strong>{tradeCounts?.buy ?? '--'} <small>/</small> {tradeCounts?.sell ?? '--'}</strong></div>
           </div>
-          {result && <div className={result.startsWith('失败') ? 'negative operation-result' : 'muted operation-result'} role="status">{result}</div>}
+          {result && <div className={(result.startsWith('未提交') || result.startsWith('失败')) ? 'negative operation-result' : 'muted operation-result'} role="status">{result}</div>}
         </Card></Col>;
       })}
       {!visible.length && <Col span={24}><Card><Empty description={pairs.length ? '没有符合筛选条件的策略' : '暂无策略数据'}>{pairs.length ? <Button onClick={clearFilters}>清除筛选</Button> : <Link to="/pairs/new"><Button type="primary">新增交易对</Button></Link>}</Empty></Card></Col>}
@@ -254,7 +236,7 @@ export default function OverviewPage() {
         <span>当前显示 <strong>{displayedTrades.length}</strong> 笔</span>
         <span>买入 <strong>{buyTrades}</strong> 笔</span>
         <span>卖出 <strong>{sellTrades}</strong> 笔</span>
-        <span className="recent-trades-pnl">合计盈亏 {tradePnlGroups.size === 0 ? <strong>--</strong> : [...tradePnlGroups.entries()].map(([key, group]) => <span key={key}> {modeLabel[group.mode]} <strong>{group.available && Number.isFinite(group.total) ? Math.abs(group.total) > 0 && Math.abs(group.total) < 0.01 ? <span className={group.total < 0 ? 'negative numeric' : 'positive numeric'}>{group.total.toLocaleString('en-US', { maximumSignificantDigits: 3 })}</span> : <Pnl value={group.total} compact /> : '待核实'}</strong> {group.asset}</span>)}</span>
+        <span>合计盈亏 {tradePnlGroups.size === 0 ? <strong>--</strong> : [...tradePnlGroups.entries()].map(([key, group]) => <span key={key}> {modeLabel[group.mode]} <strong>{group.available && Number.isFinite(group.total) ? <Pnl value={group.total} compact /> : '待核实'}</strong> {group.asset}</span>)}</span>
       </div>
       <div id="recent-trades-list"><TradesTable overview trades={displayedTrades} /></div>
       {recentTrades.length > 5 && <div className="overview-trades-toggle"><Button type="text" aria-expanded={tradesExpanded} aria-controls="recent-trades-list" onClick={() => setTradesExpanded(value => !value)}>{tradesExpanded ? '收起' : '展开最近 20 条'}</Button></div>}

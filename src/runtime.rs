@@ -245,9 +245,7 @@ impl RuntimeHandle {
             }
             if !rollback_errors.is_empty() {
                 for state in &states {
-                    let _ = state
-                        .pause_trading_with_reason("全局配置恢复失败，请检查系统运行日志")
-                        .await;
+                    let _ = state.pause_trading().await;
                     let _ = state
                         .action_tx
                         .send(crate::types::BotControlAction::Pause)
@@ -709,9 +707,7 @@ impl TradingRuntime {
             .global_position_limit
             .set(Arc::downgrade(&self.global_position_limit));
         if let Err(error) = strategy.validate() {
-            state
-                .pause_trading_with_reason("启动时发现策略配置无效，请检查系统运行日志")
-                .await?;
+            state.pause_trading().await?;
             state
                 .add_log(
                     "ERROR",
@@ -721,11 +717,7 @@ impl TradingRuntime {
         }
         if self.admin_auth.is_none() && !strategy.exchange.is_paper() {
             if prearmed.is_none() {
-                state
-                    .pause_trading_with_reason(
-                        "未设置管理员密码，实盘策略已暂停；请确认配置后手动恢复或设置 ADMIN_PASSWORD",
-                    )
-                    .await?;
+                state.pause_trading().await?;
             }
             state
                 .add_log(
@@ -790,9 +782,7 @@ impl TradingRuntime {
                 None
             };
             if let Some(Err(error)) = &initialized {
-                let _ = engine_state
-                    .pause_trading_with_reason("策略启动时账户或挂单对账失败，请检查系统运行日志")
-                    .await;
+                let _ = engine_state.pause_trading().await;
                 engine_state
                     .add_log(
                         "ERROR",
@@ -807,13 +797,7 @@ impl TradingRuntime {
                 matches!(initialized, Some(Ok(()))),
                 std::sync::atomic::Ordering::SeqCst,
             );
-            if let Some(global) = engine_state
-                .global_position_limit
-                .get()
-                .and_then(std::sync::Weak::upgrade)
-            {
-                global.check().await;
-            }
+            engine_state.check_global_position_limit().await;
             engine.reconcile_initial_pause().await;
             engine.run().await;
         });
@@ -1194,10 +1178,7 @@ impl TradingRuntime {
                     if let Some(early_stop) = early_stop {
                         let _ = early_stop.await;
                     }
-                    let paused = pair
-                        .state
-                        .pause_trading_with_reason("策略引擎退出，请核实交易所挂单")
-                        .await;
+                    let paused = pair.state.pause_trading().await;
                     paused.and(Err(anyhow::anyhow!("策略引擎已退出，请核实交易所挂单")))
                 } else if let Some(early_stop) = early_stop {
                     match early_stop.await {
@@ -1217,10 +1198,7 @@ impl TradingRuntime {
                         }
                     }
                 } else if pair.engine.is_finished() {
-                    let paused = pair
-                        .state
-                        .pause_trading_with_reason("策略引擎退出，请核实交易所挂单")
-                        .await;
+                    let paused = pair.state.pause_trading().await;
                     paused.and(Err(anyhow::anyhow!("策略引擎已退出，请核实交易所挂单")))
                 } else {
                     stop_engine(&pair.state, &mut pair.engine, limit).await

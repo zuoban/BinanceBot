@@ -52,7 +52,7 @@ export function OverviewHistory() {
   const latest = [...data].reverse().find(point => point.recorded);
   const ticks = data.filter(point => point.hour % (4 * 3600) === 0).map(point => point.hour);
   return <Card className="overview-history" size="small">
-    <div className="history-heading"><div><h2>账户权益趋势</h2></div>{options.length > 0 && !history.isPending && !history.error && <div className="history-metric history-equity" aria-label="最近一次快照"><span>最近账户权益 · {asset}</span><strong>{compactNumber((latest ?? latestDay)?.equity)}</strong></div>}</div>
+    <div className="history-heading"><div><h2>账户权益趋势</h2></div>{options.length > 0 && !history.isPending && !history.error && <div className="history-metric" aria-label="最近一次快照"><span>最近账户权益 · {asset}</span><strong>{compactNumber((latest ?? latestDay)?.equity)}</strong></div>}</div>
     {options.length > 1 && <div className="history-account-row"><Select aria-label="选择趋势账户" value={key} options={options} onChange={next => setSelected({ current, key: next })} /></div>}
     {history.isPending ? <div className="history-empty">正在加载快照…</div> : history.error ? <div className="history-empty" role="alert">快照加载失败，请稍后重试</div> : !options.length ? <div className="history-empty">暂无快照数据，整点后开始记录</div> : <>
       <div className="history-caption"><div className="history-caption-main"><h3>近 24 小时</h3><span>单位 {asset} · 北京时间</span></div><span>最近记录 {latest ? formatDate(latest.hour) : '--'}</span></div>

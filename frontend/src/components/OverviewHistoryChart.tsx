@@ -5,7 +5,7 @@ type HistoryPoint = { hour: number; equity: number | null };
 function HistoryDot({ cx, cy, payload, stroke, index, data, discrete }: { cx?: number; cy?: number; payload?: { hour: number }; stroke?: string; index?: number; data: HistoryPoint[]; discrete: boolean }) {
   if (cx == null || cy == null || !payload || (index != null && data[index]?.equity == null)) return null;
   const isolated = discrete || (index != null && data[index - 1]?.equity == null && data[index + 1]?.equity == null);
-  return <circle cx={cx} cy={cy} r={2} fill={discrete ? 'var(--history-equity)' : stroke} className={payload.hour % (4 * 3600) === 0 || isolated ? 'history-point' : 'history-point history-point-hourly'} />;
+  return <circle cx={cx} cy={cy} r={2} fill={discrete ? 'var(--history-equity)' : stroke} className={payload.hour % (4 * 3600) === 0 || isolated ? undefined : 'history-point-hourly'} />;
 }
 
 export default function OverviewHistoryChart({ data, ticks, asset, formatValue, formatDate, daily = false, discrete = false }: {

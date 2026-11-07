@@ -278,28 +278,11 @@ impl<'a> Sim<'a> {
             return;
         }
         let signed = if side == OrderSide::Buy { qty } else { -qty };
-        let prev_size = self.size;
-        let new_size = prev_size + signed;
-        let same_direction =
-            prev_size.is_zero() || (prev_size > Decimal::ZERO) == (signed > Decimal::ZERO);
-        if same_direction {
-            self.entry = (self.entry * prev_size.abs() + price * qty) / new_size.abs();
-            self.size = new_size;
-        } else {
-            let closing = qty.min(prev_size.abs());
-            let sign = if prev_size > Decimal::ZERO {
-                Decimal::ONE
-            } else {
-                -Decimal::ONE
-            };
-            self.realized += (price - self.entry) * closing * sign;
-            self.size = new_size;
-            if new_size.is_zero() {
-                self.entry = Decimal::ZERO;
-            } else if new_size.is_sign_positive() != prev_size.is_sign_positive() {
-                self.entry = price;
-            }
-        }
+        let (new_size, new_entry, realized_delta) =
+            crate::types::apply_fill_to_position(self.size, self.entry, side, price, qty);
+        self.size = new_size;
+        self.entry = new_entry;
+        self.realized += realized_delta;
         self.cash_flow -= signed * price;
         self.fees += price * qty * self.p.maker_fee_rate;
         self.last_fill = Some(price);

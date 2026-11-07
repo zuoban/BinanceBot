@@ -2456,7 +2456,7 @@ async fn legacy_pair_replenishment_is_retired_even_inside_the_window() {
     let parent = order("s_far", OrderSide::Sell, dec!(119), dec!(1.68));
     let rebuy = new_pair_intent(&parent, OrderSide::Buy, dec!(118.9), dec!(1.68));
     assert!(matches!(
-        engine.pair_submission_decision(&rebuy).await,
+        engine.pair_submission_decision(),
         PairPlacementDecision::Skip(_)
     ));
     assert!(
@@ -2470,9 +2470,8 @@ async fn legacy_pair_replenishment_is_retired_even_inside_the_window() {
             )
             .await
     );
-    let near = new_pair_intent(&parent, OrderSide::Buy, dec!(119.3), dec!(1.67));
     assert!(matches!(
-        engine.pair_submission_decision(&near).await,
+        engine.pair_submission_decision(),
         PairPlacementDecision::Skip(_)
     ));
 }
@@ -2518,10 +2517,8 @@ async fn nearest_buy_window_reuses_canceled_funds_and_still_enforces_position_li
         .all(|o| o.side != OrderSide::Buy));
     engine.last_orders_sync = Some(Instant::now());
     engine.last_account_sync = Some(Instant::now());
-    let parent = order("s_for_rebuy", OrderSide::Sell, dec!(119.4), dec!(2.51));
-    let rebuy = new_pair_intent(&parent, OrderSide::Buy, dec!(119.3), dec!(2.51));
     assert!(matches!(
-        engine.pair_submission_decision(&rebuy).await,
+        engine.pair_submission_decision(),
         PairPlacementDecision::Skip(_)
     ));
 }

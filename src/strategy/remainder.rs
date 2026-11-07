@@ -196,25 +196,11 @@ impl GridTradingEngine {
                 } else {
                     // Query first: a prior cancellation may have succeeded even if
                     // its response was lost or the process exited immediately after it.
-                    let mut found = self
+                    let found = self
                         .client
                         .get_order_by_client_id(&plan.symbol, &source.client_order_id)
                         .await?;
-                    self.confirm_remainder_identity(source, &found, None)
-                        .await?;
-                    if !found.is_terminal() {
-                        self.client
-                            .cancel_order(&plan.symbol, None, Some(&source.client_order_id))
-                            .await?;
-                        found = self
-                            .client
-                            .get_order_by_client_id(&plan.symbol, &source.client_order_id)
-                            .await?;
-                    }
-                    if !found.is_terminal() {
-                        return Err(anyhow!("Source cancellation is not terminal"));
-                    }
-                    self.settle_remainder_order(source.clone(), found, None)
+                    self.cancel_and_settle_remainder_order(source.clone(), found, None)
                         .await?;
                 }
             }
@@ -574,12 +560,8 @@ impl GridTradingEngine {
                     return Err(anyhow!("Could not record remainder fill"));
                 }
             } else {
-                self.delete_managed_order(&order.client_order_id).await?;
-                self.state
-                    .active_orders
-                    .write()
-                    .await
-                    .remove(&order.client_order_id);
+                self.remove_managed_and_active_order(&order.client_order_id)
+                    .await?;
             }
         } else {
             if !self.prepare_partial_adoption(&mut order, &found).await {
@@ -591,42 +573,37 @@ impl GridTradingEngine {
             original.quantity = original.quantity.max(found.orig_qty);
             original.amount_usdc = original.price * original.quantity;
             order.price = found.price;
-            order.quantity = (found.orig_qty - found.executed_qty).max(Decimal::ZERO);
-            order.amount_usdc = order.price * order.quantity;
-            order.status = if found.executed_qty > Decimal::ZERO {
-                OrderStatus::PartiallyFilled
-            } else {
-                OrderStatus::New
-            };
-            if let Err(error) = self.save_managed_order(&order).await {
-                self.state
-                    .active_orders
-                    .write()
-                    .await
-                    .entry(original.client_order_id.clone())
-                    .or_insert(original);
-                self.last_orders_sync = None;
-                self.report_reconciliation_state(true).await;
-                self.pause_trading().await;
-                return Err(error);
-            }
-            self.state
-                .active_orders
-                .write()
+            if !self
+                .adopt_open_exchange_order(&mut order, original, &found)
                 .await
-                .insert(order.client_order_id.clone(), order);
-            if found.executed_qty > Decimal::ZERO {
-                if let Some(global) = self
-                    .state
-                    .global_position_limit
-                    .get()
-                    .and_then(std::sync::Weak::upgrade)
-                {
-                    global.check().await;
-                }
+            {
+                return Err(anyhow!("Could not persist remainder order"));
             }
         }
         Ok(())
+    }
+
+    async fn cancel_and_settle_remainder_order(
+        &mut self,
+        order: GridOrder,
+        mut found: BinanceOrderResponse,
+        mut plan: Option<&mut RemainderPlan>,
+    ) -> Result<()> {
+        self.confirm_remainder_identity(&order, &found, plan.as_deref_mut())
+            .await?;
+        if !found.is_terminal() {
+            self.client
+                .cancel_order(&order.symbol, None, Some(&order.client_order_id))
+                .await?;
+            found = self
+                .client
+                .get_order_by_client_id(&order.symbol, &order.client_order_id)
+                .await?;
+        }
+        if !found.is_terminal() {
+            return Err(anyhow!("Remainder order cancellation is not terminal"));
+        }
+        self.settle_remainder_order(order, found, plan).await
     }
 
     /// Called by cancel-all while trading is paused; resolves a possibly accepted
@@ -636,26 +613,12 @@ impl GridTradingEngine {
             return Ok(());
         };
         if plan.mode != TradingMode::Paper && plan.phase == RemainderPhase::Submitting {
-            if let Some(mut found) = self
+            if let Some(found) = self
                 .client
                 .lookup_order_by_client_id(&plan.symbol, &plan.target.client_order_id)
                 .await?
             {
-                self.confirm_remainder_identity(&plan.target.clone(), &found, Some(&mut plan))
-                    .await?;
-                if !found.is_terminal() {
-                    self.client
-                        .cancel_order(&plan.symbol, None, Some(&plan.target.client_order_id))
-                        .await?;
-                    found = self
-                        .client
-                        .get_order_by_client_id(&plan.symbol, &plan.target.client_order_id)
-                        .await?;
-                }
-                if !found.is_terminal() {
-                    return Err(anyhow!("Remainder target cancellation unresolved"));
-                }
-                self.settle_remainder_order(plan.target.clone(), found, Some(&mut plan))
+                self.cancel_and_settle_remainder_order(plan.target.clone(), found, Some(&mut plan))
                     .await?;
             }
         }

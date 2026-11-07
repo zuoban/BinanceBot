@@ -184,7 +184,7 @@ function PaletteHost({ open, setOpen, pairs, stale, authEnabled, saving, onLogou
 interface SidebarProps { idPrefix: string; pairs: Pair[] | undefined; pending: boolean; symbol: string | undefined; pathname: string; mode: Mode | undefined; authEnabled: boolean; saving: boolean; onNavigate: () => void; onSearch: () => void; onLogout: () => void }
 
 function SidebarBody({ idPrefix, pairs, pending, symbol, pathname, mode, authEnabled, saving, onNavigate, onSearch, onLogout }: SidebarProps) {
-  const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
+  const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/i.test((navigator as Navigator & { userAgentData?: { platform?: string } }).userAgentData?.platform ?? navigator.platform);
   const currentSymbol = symbol ?? routeSymbol(pathname);
   const page = pathname.startsWith('/settings') ? 'settings' : pathname.startsWith('/pairs/') ? 'pair' : 'overview';
   return <div className="sidebar-inner">

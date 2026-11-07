@@ -2,7 +2,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { Alert, Button, Card, Col, Descriptions, Row, Statistic, Tabs } from 'antd';
 import { SettingOutlined } from '@ant-design/icons';
 import { usePairSnapshot, usePairs } from '../lib/queries';
-import { accountGroups, number, numeric, price, quoteAsset, ageText, todayTradeCounts, trimFractionZeros } from '../lib/format';
+import { accountGroups, directionLabel, number, numeric, price, quoteAsset, ageText, todayTradeCounts, trimFractionZeros } from '../lib/format';
 import { ErrorNotice, ModeTag, PageBreadcrumb, PageTitle, Pnl, SignalChip, StatusTag } from '../components/Common';
 import { PairControls, useControls } from '../components/Controls';
 import { DepthChart, HourlyChart } from '../components/Charts';
@@ -30,7 +30,7 @@ export default function PairDetail() {
   const realizedPnl = numeric(s?.stats.total_realized_pnl), commission = numeric(s?.stats.total_commission);
   const netPnl = s?.stats.pending_pnl_trades === 0 && realizedPnl !== null && commission !== null ? realizedPnl - commission : null;
   const currentPair = pair && s ? { ...pair, status: s.status, grid_config: s.grid_config, mode: s.mode } : pair;
-  return <div className="pair-detail">
+  return <div>
     <PageBreadcrumb items={[{ label: '策略总览', to: '/' }, { label: symbol ?? '策略详情' }]} />
     <PageTitle title={symbol ?? '策略详情'} description="行情、网格与成交，随策略实时更新"
       extra={<div className="detail-actions">{currentPair && <PairControls pair={currentPair} stale={query.stale || !!query.error} />}<Button icon={<SettingOutlined />} onClick={() => navigate(`/pairs/${symbol}/config`)}>策略参数</Button></div>} />
@@ -57,7 +57,7 @@ export default function PairDetail() {
           </div><HourlyChart snapshot={s} /></Card></Col>
             <Col xs={24} xl={10}><Card title="实时网格深度" extra={<span className="muted">价格 / {asset} · 数量</span>}><DepthChart snapshot={s} /></Card></Col></Row>
           <Card title="仓位与策略明细" className="detail-card"><Descriptions column={{ xs: 1, sm: 2, lg: 3 }} items={[
-            { key: 'direction', label: '方向', children: s.grid_config.direction === 'SHORT' ? '做空' : '做多' },
+            { key: 'direction', label: '方向', children: directionLabel(s.grid_config.direction) },
             { key: 'entry', label: '持仓均价', children: Number(s.position.size) !== 0 && Number(s.position.entry_price) > 0 ? price(s.position.entry_price) : '--' },
             { key: 'liquidation', label: '预估强平价', children: Number(s.position.liquidation_price) > 0 ? price(s.position.liquidation_price) : '--' },
             { key: 'leverage', label: '杠杆', children: `${s.position.leverage}×` },

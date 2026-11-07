@@ -3,8 +3,8 @@ use crate::config::AppConfig;
 use crate::db::Database;
 use crate::types::{
     AccountInfo, BotSnapshot, BotStatus, HourlyTradeStats, OrderSide, OverviewPairView,
-    PairSummary, SummaryPosition, SummaryStats, SummaryTicker, TodayTradeCounts, TradeRecord,
-    TradingMode,
+    PairSummary, PositionInfo, SummaryPosition, SummaryStats, SummaryTicker, TodayTradeCounts,
+    TradeRecord, TradingMode,
 };
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -163,6 +163,20 @@ impl SnapshotCache {
 }
 
 impl AppState {
+    async fn read_position_and_account(&self, config: &AppConfig) -> (PositionInfo, AccountInfo) {
+        // Valuation updates take position -> account without the commit lock.
+        // Keep both reads together until the shared valuation is published.
+        let position = self.position.read().await;
+        let local_account = self.account.read().await;
+        let account = self.account_view(
+            &config.exchange.symbol,
+            config.exchange.trading_mode(),
+            &position,
+            &local_account,
+        );
+        (position.clone(), account)
+    }
+
     pub(crate) async fn account_snapshot(&self) -> AccountSnapshot {
         // Match the full snapshot's lock order so a scope transition or trade
         // commit cannot expose a partially updated account view.
@@ -177,22 +191,10 @@ impl AppState {
                 mark_update_time: ticker.mark_update_time,
             }
         };
-        let (position, account) = {
-            let position = self.position.read().await;
-            let local_account = self.account.read().await;
-            let account = self.account_view(
-                &config.exchange.symbol,
-                config.exchange.trading_mode(),
-                &position,
-                &local_account,
-            );
-            (
-                AccountPosition {
-                    size: position.size,
-                    unrealized_pnl: position.unrealized_pnl,
-                },
-                account,
-            )
+        let (position, account) = self.read_position_and_account(&config).await;
+        let position = AccountPosition {
+            size: position.size,
+            unrealized_pnl: position.unrealized_pnl,
         };
         let account_cny_rate = self.cny_rates.get(&account.asset).await;
         AccountSnapshot {
@@ -246,20 +248,12 @@ impl AppState {
                 mark_update_time: ticker.mark_update_time,
             }
         };
-        let (position, account) = {
-            let position = self.position.read().await;
-            let local_account = self.account.read().await;
-            let account =
-                self.account_view(&config.exchange.symbol, mode, &position, &local_account);
-            (
-                SummaryPosition {
-                    size: position.size,
-                    entry_price: position.entry_price,
-                    mark_price: position.mark_price,
-                    unrealized_pnl: position.unrealized_pnl,
-                },
-                account,
-            )
+        let (position, account) = self.read_position_and_account(&config).await;
+        let position = SummaryPosition {
+            size: position.size,
+            entry_price: position.entry_price,
+            mark_price: position.mark_price,
+            unrealized_pnl: position.unrealized_pnl,
         };
         let account_cny_rate = self.cny_rates.get(&account.asset).await;
         let orders = self.active_orders.read().await;
@@ -328,17 +322,7 @@ impl AppState {
         let status = *self.status.read().await;
         let ticker = self.ticker.read().await.clone();
         let stats = self.stats.read().await.clone();
-        let (position, account) = {
-            let position = self.position.read().await;
-            let local_account = self.account.read().await;
-            let account = self.account_view(
-                &config.exchange.symbol,
-                config.exchange.trading_mode(),
-                &position,
-                &local_account,
-            );
-            (position.clone(), account)
-        };
+        let (position, account) = self.read_position_and_account(&config).await;
         BotSnapshot {
             status,
             mode: config.exchange.trading_mode(),
@@ -390,19 +374,7 @@ impl AppState {
         let status = *self.status.read().await;
         let ticker = self.ticker.read().await.clone();
         let mut stats = self.stats.read().await.clone();
-        let (position, account) = {
-            // Valuation updates take position -> account without the commit lock.
-            // Keep both reads together until the shared valuation is published.
-            let position = self.position.read().await;
-            let local_account = self.account.read().await;
-            let account = self.account_view(
-                &config.exchange.symbol,
-                config.exchange.trading_mode(),
-                &position,
-                &local_account,
-            );
-            (position.clone(), account)
-        };
+        let (position, account) = self.read_position_and_account(&config).await;
         let account_cny_rate = self.cny_rates.get(&account.asset).await;
         let mut active_orders: Vec<_> = self.active_orders.read().await.values().cloned().collect();
         active_orders.sort_by_key(|order| std::cmp::Reverse(order.price));

@@ -3693,10 +3693,7 @@ async fn concurrent_safety_pause_prevents_shutdown_recovery() {
         state.resume_trading().await.unwrap();
         let shutdown = tokio::spawn(async move { runtime.shutdown(Duration::from_secs(5)).await });
         received_rx.await.unwrap();
-        state
-            .pause_trading_with_reason("模拟并发风控暂停")
-            .await
-            .unwrap();
+        state.pause_trading().await.unwrap();
         release_tx.send(()).unwrap();
         shutdown.await.unwrap().unwrap();
     }

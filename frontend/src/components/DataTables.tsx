@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { App, Button, Segmented, Table, Tag } from 'antd';
 import { CopyOutlined, DownloadOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
-import { number, price, relativeTime, time } from '../lib/format';
+import { beijingDay, number, price, relativeTime, time } from '../lib/format';
 import { priceDiffPercent } from '../lib/gridPreview';
 import { useNow } from '../lib/useNow';
 import type { Log, Order, Trade } from '../lib/types';
@@ -32,7 +32,7 @@ function SideFilterBar({ value, onChange, shown, total, onExport, exportLabel }:
 export function OrdersTable({ orders, mark }: { orders: Order[]; mark?: string }) {
   const [filter, setFilter] = useState<SideFilter>('ALL');
   const rows = useMemo(() => filter === 'ALL' ? orders : orders.filter(order => order.side === filter), [orders, filter]);
-  const exportRows = () => downloadCsv(`orders-${new Date().toISOString().slice(0, 10)}.csv`, toCsv(
+  const exportRows = () => downloadCsv(`orders-${beijingDay()}.csv`, toCsv(
     ['方向', '价格', '数量', '金额', '用途', '状态', '时间（北京）'],
     rows.map(o => [o.side === 'BUY' ? '买入' : '卖出', o.price, o.quantity, o.amount_usdc, purposeLabel[o.purpose] ?? (o.is_take_profit ? '止盈' : '历史订单'), o.status, time(o.created_at)]),
   ));
@@ -62,14 +62,14 @@ export function TradesTable({ trades: allTrades, overview = false }: { trades: T
   const [filter, setFilter] = useState<SideFilter>('ALL');
   const trades = useMemo(() => overview || filter === 'ALL' ? allTrades : allTrades.filter(trade => trade.side === filter), [allTrades, filter, overview]);
   const now = useNow(1000, trades.length > 0);
-  const exportRows = () => downloadCsv(`trades-${new Date().toISOString().slice(0, 10)}.csv`, toCsv(
+  const exportRows = () => downloadCsv(`trades-${beijingDay()}.csv`, toCsv(
     ['时间（北京）', '方向', '成交价格', '数量', '金额', '已实现盈亏', '手续费', '成交方式', '备注'],
     trades.map(t => [time(t.timestamp), t.side === 'BUY' ? '买入' : '卖出', t.price, t.quantity, t.amount_usdc, t.pnl_verified ? t.realized_pnl : '待同步', t.pnl_verified ? t.commission : '待同步', t.pnl_verified ? (t.is_maker ? 'Maker' : 'Taker') : '待同步', t.note]),
   ));
   const columns: ColumnsType<Trade> = [
     ...(overview ? [{ title: '交易对', dataIndex: 'symbol', className: 'trade-symbol', width: 130 }] : []),
     { title: '方向', dataIndex: 'side', render: side, width: 90, fixed: overview ? undefined : 'left' },
-    { title: overview ? '成交时间' : '时间（北京）', dataIndex: 'timestamp', className: overview ? 'trade-time' : undefined, render: overview ? (value: string) => <span title={Number.isFinite(Date.parse(value)) ? `${time(value)}（北京时间）` : undefined}>{relativeTime(value, now)}</span> : time, width: overview ? 90 : 185 },
+    { title: overview ? '成交时间' : '时间（北京）', dataIndex: 'timestamp', render: overview ? (value: string) => <span title={Number.isFinite(Date.parse(value)) ? `${time(value)}（北京时间）` : undefined}>{relativeTime(value, now)}</span> : time, width: overview ? 90 : 185 },
     { title: '成交价格', align: 'right', className: 'table-numeric', dataIndex: 'price', render: (v: string) => overview ? price(v) : <Copyable value={v}>{price(v)}</Copyable> },
     { title: '数量', align: 'right', className: 'table-numeric', dataIndex: 'quantity', render: price },
     { title: '金额', align: 'right', className: 'table-numeric', dataIndex: 'amount_usdc', render: (v: string) => number(v) },
@@ -91,7 +91,7 @@ export function TradesTable({ trades: allTrades, overview = false }: { trades: T
         <div><dt>盈亏</dt><dd>{trade.pnl_verified ? <Pnl value={trade.realized_pnl} /> : <Tag>待同步</Tag>}</dd></div>
       </dl>
     </li>)}</ul> : <div className="trade-list-empty">暂无成交记录</div>}{trades.length > 50 && <p className="muted">仅显示最近 50 条，完整数据请导出 CSV。</p>}</div>}
-    {overview && <div className="overview-trades-mobile">{trades.length ? <ul className="trade-list">{trades.map(trade => <li className="trade-list-item" key={trade.trade_id}>
+    {overview && <div className="overview-trades-mobile">{trades.length ? <ul className="trade-list" aria-label="成交列表">{trades.map(trade => <li className="trade-list-item" key={trade.trade_id}>
       <div className="trade-list-heading"><strong>{trade.symbol}</strong>{side(trade.side)}<span className="trade-list-time" title={Number.isFinite(Date.parse(trade.timestamp)) ? `${time(trade.timestamp)}（北京时间）` : undefined}>{relativeTime(trade.timestamp, now)}</span></div>
       <dl>
         <div><dt>成交均价</dt><dd>{price(trade.price)}</dd></div>
@@ -106,7 +106,7 @@ type LevelFilter = typeof levels[number];
 export function LogsTable({ logs }: { logs: Log[] }) {
   const [level, setLevel] = useState<LevelFilter>('ALL');
   const rows = useMemo(() => level === 'ALL' ? logs : logs.filter(log => log.level === level), [logs, level]);
-  const exportRows = () => downloadCsv(`logs-${new Date().toISOString().slice(0, 10)}.csv`, toCsv(['时间（北京）', '级别', '内容'], rows.map(l => [time(l.timestamp), l.level, l.message])));
+  const exportRows = () => downloadCsv(`logs-${beijingDay()}.csv`, toCsv(['时间（北京）', '级别', '内容'], rows.map(l => [time(l.timestamp), l.level, l.message])));
   return <>
     <div className="table-toolbar">
       <Segmented<LevelFilter> size="small" aria-label="按级别筛选" value={level} onChange={setLevel} options={levels.map(value => ({ value, label: value === 'ALL' ? '全部' : value }))} />

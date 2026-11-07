@@ -2,7 +2,7 @@ import { Alert, Button, Empty, Space } from 'antd';
 import { CheckCircleFilled, ClockCircleFilled, CloseCircleFilled, ExclamationCircleFilled, InfoCircleFilled, MinusCircleFilled, ReloadOutlined, ThunderboltFilled } from '@ant-design/icons';
 import { Link } from 'react-router-dom';
 import type { Mode, Status } from '../lib/types';
-import { modeLabel, number, statusLabel, trimFractionZeros } from '../lib/format';
+import { modeLabel, number, numeric, statusLabel, trimFractionZeros } from '../lib/format';
 
 export function ErrorNotice({ error, retry }: { error: Error | null; retry?: () => void }) {
   if (!error) return null;
@@ -27,6 +27,10 @@ const statusMeta: Record<Status, { tier: Signal; icon: React.ReactNode }> = {
 };
 export const StatusTag = ({ status }: { status: Status }) => <span className={`signal signal-${statusMeta[status].tier}`}><span className="signal-icon" aria-hidden="true">{statusMeta[status].icon}</span>{statusLabel[status]}</span>;
 export function Pnl({ value, compact = false }: { value: unknown; compact?: boolean }) {
+  const n = numeric(value);
+  if (compact && n !== null && Math.abs(n) > 0 && Math.abs(n) < 0.01) {
+    return <span className={n < 0 ? 'negative numeric' : 'positive numeric'}>{n.toLocaleString('en-US', { maximumSignificantDigits: 3 })}</span>;
+  }
   const text = compact ? trimFractionZeros(number(value)) : number(value);
   return <span className={text.startsWith('-') ? 'negative numeric' : text === '--' ? 'numeric' : 'positive numeric'}>{text}</span>;
 }

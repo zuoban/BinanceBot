@@ -33,6 +33,6 @@ export function StrategyMenu({ pair, stale }: { pair: Pair; stale: boolean }) {
       void run(pair, key as Action);
     },
   }}>
-    <Button className="strategy-more" size="small" icon={<MoreOutlined />} aria-label={`${pair.symbol} 更多操作`} />
+    <Button size="small" icon={<MoreOutlined />} aria-label={`${pair.symbol} 更多操作`} />
   </Dropdown>;
 }

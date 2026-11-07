@@ -421,6 +421,14 @@ impl Database {
         self.trade_revisions.lock().unwrap().for_symbol(symbol)
     }
 
+    fn publish_trade_revision(&self, symbol: &str) {
+        #[cfg(test)]
+        self.before_revision_publish();
+        let mut revisions = self.trade_revisions.lock().unwrap();
+        let revision = self.trade_revision.fetch_add(1, Ordering::Release) + 1;
+        revisions.changed(symbol, revision);
+    }
+
     #[cfg(test)]
     pub(crate) fn hourly_stats_query_count(&self) -> u64 {
         self.hourly_stats_queries.load(Ordering::Relaxed)
@@ -430,15 +438,7 @@ impl Database {
     /// Redaction happens only on the copy; never expose a raw live database file.
     pub fn export_analysis_snapshot(&self) -> Result<Vec<u8>> {
         let _export = self.try_analysis_export()?;
-        let mut snapshot = Connection::open_in_memory()?;
-        {
-            let source = self.conn.lock().unwrap();
-            let backup = rusqlite::backup::Backup::new(&source, &mut snapshot)?;
-            anyhow::ensure!(
-                backup.step(-1)? == rusqlite::backup::StepResult::Done,
-                "Database is busy; retry the export"
-            );
-        }
+        let snapshot = self.backup_to_memory()?;
 
         let config_json: Option<String> = snapshot
             .query_row(
@@ -518,7 +518,7 @@ impl Database {
             .map_err(|_| anyhow::anyhow!("Database analysis export is busy; retry the export"))
     }
 
-    fn analysis_snapshot_with_tables(&self, tables: &[&str]) -> Result<Connection> {
+    fn backup_to_memory(&self) -> Result<Connection> {
         let mut snapshot = Connection::open_in_memory()?;
         {
             let source = self.conn.lock().unwrap();
@@ -528,6 +528,11 @@ impl Database {
                 "Database is busy; retry the export"
             );
         }
+        Ok(snapshot)
+    }
+
+    fn analysis_snapshot_with_tables(&self, tables: &[&str]) -> Result<Connection> {
+        let snapshot = self.backup_to_memory()?;
         // Remove triggers and views before clearing unselected tables so their
         // contents cannot affect the export or reveal data through a view.
         let objects = {
@@ -1182,11 +1187,7 @@ impl Database {
                 ledger.record_legacy(&trade.symbol);
             }
             drop(paper_ledger);
-            #[cfg(test)]
-            self.before_revision_publish();
-            let mut revisions = self.trade_revisions.lock().unwrap();
-            let revision = self.trade_revision.fetch_add(1, Ordering::Release) + 1;
-            revisions.changed(&trade.symbol, revision);
+            self.publish_trade_revision(&trade.symbol);
         }
         Ok(inserted)
     }
@@ -1230,11 +1231,7 @@ impl Database {
         let tx = conn.transaction()?;
         let deleted = clear_trades_on(&tx, Some(symbol))?;
         tx.commit()?;
-        #[cfg(test)]
-        self.before_revision_publish();
-        let mut revisions = self.trade_revisions.lock().unwrap();
-        let revision = self.trade_revision.fetch_add(1, Ordering::Release) + 1;
-        revisions.changed(symbol, revision);
+        self.publish_trade_revision(symbol);
         let mut clear_revisions = self.trade_clear_revisions.lock().unwrap();
         let clear_revision = self.trade_clear_revision.fetch_add(1, Ordering::Release) + 1;
         clear_revisions.changed(symbol, clear_revision);
@@ -1318,11 +1315,7 @@ impl Database {
         }
         drop(paper_ledger);
         if inserted {
-            #[cfg(test)]
-            self.before_revision_publish();
-            let mut revisions = self.trade_revisions.lock().unwrap();
-            let revision = self.trade_revision.fetch_add(1, Ordering::Release) + 1;
-            revisions.changed(&trade.symbol, revision);
+            self.publish_trade_revision(&trade.symbol);
         }
         Ok(inserted)
     }
@@ -2064,11 +2057,7 @@ impl Database {
         }
         tx.commit()?;
         if let Some((symbol, _)) = updated_trade {
-            #[cfg(test)]
-            self.before_revision_publish();
-            let mut revisions = self.trade_revisions.lock().unwrap();
-            let revision = self.trade_revision.fetch_add(1, Ordering::Release) + 1;
-            revisions.changed(&symbol, revision);
+            self.publish_trade_revision(&symbol);
             Ok(true)
         } else {
             Ok(false)
@@ -2266,26 +2255,23 @@ impl Database {
     ) -> Result<(Decimal, Decimal, usize)> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT realized_pnl, commission, pnl_verified FROM trades WHERE symbol = ?1 AND mode = ?2;",
+            "SELECT realized_pnl, commission FROM trades WHERE symbol = ?1 AND mode = ?2 AND pnl_verified != 0;",
         )?;
         let rows = stmt.query_map(params![symbol, mode.as_str()], |row| {
-            let verified = row.get::<_, i32>(2)? != 0;
-            if verified {
-                Ok(Some((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
-            } else {
-                Ok(None)
-            }
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
-        let (mut pnl, mut fees, mut pending) = (Decimal::ZERO, Decimal::ZERO, 0);
+        let (mut pnl, mut fees) = (Decimal::ZERO, Decimal::ZERO);
         for row in rows {
-            if let Some((gross, commission)) = row? {
-                pnl += Decimal::from_str(&gross)?;
-                fees += Decimal::from_str(&commission)?;
-            } else {
-                pending += 1;
-            }
+            let (gross, commission) = row?;
+            pnl += Decimal::from_str(&gross)?;
+            fees += Decimal::from_str(&commission)?;
         }
-        Ok((pnl, fees, pending))
+        let pending: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM trades WHERE symbol = ?1 AND mode = ?2 AND pnl_verified = 0;",
+            params![symbol, mode.as_str()],
+            |row| row.get(0),
+        )?;
+        Ok((pnl, fees, pending as usize))
     }
 
     pub fn load_scoped_stats(

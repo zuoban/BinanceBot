@@ -162,6 +162,28 @@ impl GridTradingEngine {
         true
     }
 
+    fn collect_identity_observations(
+        &self,
+        account: [u8; 32],
+        symbol: &str,
+    ) -> Option<Vec<(GridOrder, ObservedOrderIdentity)>> {
+        let mut records = Vec::new();
+        for (key, observations) in &self.order_identity_observations {
+            if key.0 != account {
+                continue;
+            }
+            let expected = self.order_identity_conflicts.get(key)?;
+            if expected.symbol == symbol {
+                records.extend(
+                    observations
+                        .iter()
+                        .map(|observed| (expected.clone(), observed.clone())),
+                );
+            }
+        }
+        Some(records)
+    }
+
     pub(super) async fn persist_identity_observations(
         &mut self,
         account: [u8; 32],
@@ -173,26 +195,10 @@ impl GridTradingEngine {
             self.report_reconciliation_state(true).await;
             return false;
         }
-        let mut records = Vec::new();
-        let mut missing_expected = false;
-        for (key, observations) in &self.order_identity_observations {
-            if key.0 != account {
-                continue;
-            }
-            let Some(expected) = self.order_identity_conflicts.get(key) else {
-                missing_expected = true;
-                break;
-            };
-            if expected.symbol == symbol {
-                for observed in observations {
-                    records.push((expected.clone(), observed.clone()));
-                }
-            }
-        }
-        if missing_expected {
+        let Some(records) = self.collect_identity_observations(account, symbol) else {
             self.report_reconciliation_state(true).await;
             return false;
-        }
+        };
         if records.is_empty() {
             return true;
         }
@@ -252,37 +258,26 @@ impl GridTradingEngine {
             )
             .or_else(|| active.get(&found.client_order_id))
             .cloned()
-            .unwrap_or_else(|| GridOrder {
-                client_order_id: found.client_order_id.clone(),
-                order_id: if found.symbol == symbol
+            .unwrap_or_else(|| {
+                let mut order = GridOrder::from_exchange_response(
+                    found,
+                    found.orig_qty.max(Decimal::ZERO),
+                    OrderPurpose::Unverified,
+                    Utc::now(),
+                );
+                order.order_id = (found.symbol == symbol
                     && matches!(found.side.as_str(), "BUY" | "SELL")
                     && orders
                         .iter()
                         .filter(|order| order.client_order_id == found.client_order_id)
                         .count()
-                        == 1
-                {
-                    Some(found.order_id)
-                } else {
-                    None
-                },
-                symbol: symbol.to_owned(),
-                side: if found.side == "SELL" {
-                    OrderSide::Sell
-                } else {
-                    OrderSide::Buy
-                },
-                price: found.price.max(Decimal::ZERO),
-                quantity: found.orig_qty.max(Decimal::ZERO),
-                amount_usdc: found.price.max(Decimal::ZERO) * found.orig_qty.max(Decimal::ZERO),
-                status: OrderStatus::New,
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-                grid_level: 0,
-                paired_client_order_id: None,
-                is_take_profit: false,
-                purpose: crate::types::OrderPurpose::Unverified,
-                merge_sources: Vec::new(),
+                        == 1)
+                    .then_some(found.order_id);
+                order.symbol = symbol.to_owned();
+                order.price = found.price.max(Decimal::ZERO);
+                order.amount_usdc = order.price * order.quantity;
+                order.status = OrderStatus::New;
+                order
             });
             if let Some(current) = active.get(&found.client_order_id) {
                 if current.symbol == expected.symbol
@@ -326,20 +321,9 @@ impl GridTradingEngine {
             })
             .collect();
         drop(active);
-        let mut identities = Vec::new();
-        for (key, observations) in &self.order_identity_observations {
-            if key.0 == account {
-                if let Some(expected) = self.order_identity_conflicts.get(key) {
-                    if expected.symbol == symbol {
-                        identities.extend(
-                            observations
-                                .iter()
-                                .map(|observed| (expected.clone(), observed.clone())),
-                        );
-                    }
-                }
-            }
-        }
+        let Some(identities) = self.collect_identity_observations(account, symbol) else {
+            return;
+        };
         let batch = format!("snapshot:{}", uuid::Uuid::new_v4());
         if self
             .record_initial_order_response_snapshot(
@@ -894,27 +878,18 @@ impl GridTradingEngine {
                                 .map(|order| order.price)
                                 .max()
                                 .unwrap_or(Decimal::ZERO);
-                            GridOrder {
-                                client_order_id: first.client_order_id.clone(),
-                                order_id: None,
-                                symbol: symbol.clone(),
-                                side: if first.side == "SELL" {
-                                    OrderSide::Sell
-                                } else {
-                                    OrderSide::Buy
-                                },
-                                price,
+                            let mut order = GridOrder::from_exchange_response(
+                                first,
                                 quantity,
-                                amount_usdc: price * quantity,
-                                status: OrderStatus::New,
-                                created_at: Utc::now(),
-                                updated_at: Utc::now(),
-                                grid_level: 0,
-                                paired_client_order_id: None,
-                                is_take_profit: false,
-                                purpose: crate::types::OrderPurpose::Unverified,
-                                merge_sources: Vec::new(),
-                            }
+                                OrderPurpose::Unverified,
+                                Utc::now(),
+                            );
+                            order.order_id = None;
+                            order.symbol = symbol.clone();
+                            order.price = price;
+                            order.amount_usdc = price * quantity;
+                            order.status = OrderStatus::New;
+                            order
                         });
                         if let Some(confirmed) = self
                             .order_identity_conflicts
@@ -945,25 +920,9 @@ impl GridTradingEngine {
                     }
                     drop(active);
                     let snapshot_batch = format!("snapshot:{}", uuid::Uuid::new_v4());
-                    let mut snapshot_identities = Vec::new();
-                    let mut identities_complete = true;
-                    for (key, observations) in &self.order_identity_observations {
-                        if key.0 != account_key {
-                            continue;
-                        }
-                        let Some(expected) = self.order_identity_conflicts.get(key) else {
-                            identities_complete = false;
-                            break;
-                        };
-                        if expected.symbol == symbol {
-                            snapshot_identities.extend(
-                                observations
-                                    .iter()
-                                    .map(|observed| (expected.clone(), observed.clone())),
-                            );
-                        }
-                    }
-                    let saved_snapshots = if identities_complete {
+                    let saved_snapshots = if let Some(snapshot_identities) =
+                        self.collect_identity_observations(account_key, &symbol)
+                    {
                         self.record_initial_order_response_snapshot(
                             account_key,
                             &symbol,
@@ -1692,28 +1651,14 @@ impl GridTradingEngine {
                             {
                                 continue;
                             }
-                            let mut order =
-                                intent.or(remainder).cloned().unwrap_or_else(|| GridOrder {
-                                    client_order_id: found.client_order_id.clone(),
-                                    order_id: Some(found.order_id),
-                                    symbol: found.symbol.clone(),
-                                    side: if found.side == "BUY" {
-                                        OrderSide::Buy
-                                    } else {
-                                        OrderSide::Sell
-                                    },
-                                    price: found.price,
-                                    quantity: found.orig_qty,
-                                    amount_usdc: found.price * found.orig_qty,
-                                    status: OrderStatus::New,
-                                    created_at: Utc::now(),
-                                    updated_at: Utc::now(),
-                                    grid_level: 0,
-                                    paired_client_order_id: None,
-                                    is_take_profit: false,
-                                    purpose: crate::types::OrderPurpose::Legacy,
-                                    merge_sources: Vec::new(),
-                                });
+                            let mut order = intent.or(remainder).cloned().unwrap_or_else(|| {
+                                GridOrder::from_exchange_response(
+                                    found,
+                                    found.orig_qty,
+                                    OrderPurpose::Legacy,
+                                    Utc::now(),
+                                )
+                            });
                             order.order_id = Some(found.order_id);
                             order.quantity = order.quantity.max(found.orig_qty);
                             order.amount_usdc = order.price * order.quantity;
@@ -1805,26 +1750,13 @@ impl GridTradingEngine {
                                 continue;
                             }
                             let metadata = candidates.into_iter().next();
-                            let mut order = metadata.unwrap_or_else(|| GridOrder {
-                                client_order_id: found.client_order_id.clone(),
-                                order_id: Some(found.order_id),
-                                symbol: found.symbol.clone(),
-                                side: if found.side == "BUY" {
-                                    OrderSide::Buy
-                                } else {
-                                    OrderSide::Sell
-                                },
-                                price: found.price,
-                                quantity: found.orig_qty,
-                                amount_usdc: found.price * found.orig_qty,
-                                status: OrderStatus::New,
-                                created_at: Utc::now(),
-                                updated_at: Utc::now(),
-                                grid_level: 0,
-                                paired_client_order_id: None,
-                                is_take_profit: false,
-                                purpose: crate::types::OrderPurpose::Legacy,
-                                merge_sources: Vec::new(),
+                            let mut order = metadata.unwrap_or_else(|| {
+                                GridOrder::from_exchange_response(
+                                    found,
+                                    found.orig_qty,
+                                    OrderPurpose::Legacy,
+                                    Utc::now(),
+                                )
                             });
                             order.order_id = Some(found.order_id);
                             order.quantity = order.quantity.max(found.orig_qty);
@@ -1971,27 +1903,12 @@ impl GridTradingEngine {
                                     active.insert(order.client_order_id.clone(), order);
                                     continue;
                                 }
-                                let order = GridOrder {
-                                    client_order_id: found.client_order_id.clone(),
-                                    order_id: Some(found.order_id),
-                                    symbol: found.symbol.clone(),
-                                    side: if found.side == "BUY" {
-                                        OrderSide::Buy
-                                    } else {
-                                        OrderSide::Sell
-                                    },
-                                    price: found.price,
-                                    quantity: found.orig_qty,
-                                    amount_usdc: found.price * found.orig_qty,
-                                    status: OrderStatus::New,
-                                    created_at: Utc::now(),
-                                    updated_at: Utc::now(),
-                                    grid_level: 0,
-                                    paired_client_order_id: None,
-                                    is_take_profit: false,
-                                    purpose: crate::types::OrderPurpose::Legacy,
-                                    merge_sources: Vec::new(),
-                                };
+                                let order = GridOrder::from_exchange_response(
+                                    found,
+                                    found.orig_qty,
+                                    OrderPurpose::Legacy,
+                                    Utc::now(),
+                                );
                                 self.provisional_order_ids
                                     .insert((account_key, order.client_order_id.clone()));
                                 active.insert(order.client_order_id.clone(), order);
@@ -2166,31 +2083,12 @@ impl GridTradingEngine {
                             };
                             orders_to_persist.push(order.clone());
                         } else {
-                            let order = GridOrder {
-                                client_order_id: client_id.clone(),
-                                order_id: Some(live_order.order_id),
-                                symbol: live_order.symbol.clone(),
-                                side: if live_order.side == "BUY" {
-                                    OrderSide::Buy
-                                } else {
-                                    OrderSide::Sell
-                                },
-                                price: live_order.price,
+                            let order = GridOrder::from_exchange_response(
+                                live_order,
                                 quantity,
-                                amount_usdc: live_order.price * quantity,
-                                status: if live_order.executed_qty > Decimal::ZERO {
-                                    OrderStatus::PartiallyFilled
-                                } else {
-                                    OrderStatus::New
-                                },
-                                created_at: Utc::now(),
-                                updated_at: Utc::now(),
-                                grid_level: 0,
-                                paired_client_order_id: None,
-                                is_take_profit: false,
-                                purpose: crate::types::OrderPurpose::Legacy,
-                                merge_sources: Vec::new(),
-                            };
+                                OrderPurpose::Legacy,
+                                Utc::now(),
+                            );
                             orders_to_persist.push(order.clone());
                             active.insert(client_id.clone(), order);
                         }
@@ -2214,14 +2112,7 @@ impl GridTradingEngine {
                     return false;
                 }
                 if needs_position_refresh {
-                    if let Some(global) = self
-                        .state
-                        .global_position_limit
-                        .get()
-                        .and_then(std::sync::Weak::upgrade)
-                    {
-                        global.check().await;
-                    }
+                    self.state.check_global_position_limit().await;
                 }
                 if self.state.pause_epoch() != pause_epoch {
                     return false;
@@ -2281,8 +2172,9 @@ impl GridTradingEngine {
                             if (Utc::now() - order.created_at).num_seconds()
                                 >= UNKNOWN_SUBMISSION_GRACE_SECS =>
                         {
-                            if let Err(error) =
-                                self.delete_managed_order(&order.client_order_id).await
+                            if let Err(error) = self
+                                .remove_managed_and_active_order(&order.client_order_id)
+                                .await
                             {
                                 error!(
                                     "Could not retire absent order intent {}: {}",
@@ -2290,11 +2182,6 @@ impl GridTradingEngine {
                                 );
                                 persistence_ok = false;
                             } else {
-                                self.state
-                                    .active_orders
-                                    .write()
-                                    .await
-                                    .remove(&order.client_order_id);
                                 self.state.add_log("WARN", format!("Unaccepted order intent {} retired after confirmed absence", order.client_order_id)).await;
                             }
                         }
@@ -2394,18 +2281,15 @@ impl GridTradingEngine {
                             persistence_ok = false;
                         }
                     } else {
-                        if let Err(e) = self.delete_managed_order(&order.client_order_id).await {
+                        if let Err(e) = self
+                            .remove_managed_and_active_order(&order.client_order_id)
+                            .await
+                        {
                             error!(
                                 "Could not delete closed order {}: {}",
                                 order.client_order_id, e
                             );
                             persistence_ok = false;
-                        } else {
-                            self.state
-                                .active_orders
-                                .write()
-                                .await
-                                .remove(&order.client_order_id);
                         }
                         debug!(
                             "Order {} closed without a fill ({})",

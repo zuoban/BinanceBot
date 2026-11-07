@@ -139,6 +139,39 @@ pub struct GridOrder {
 }
 
 impl GridOrder {
+    pub(crate) fn from_exchange_response(
+        found: &crate::exchange::model::BinanceOrderResponse,
+        quantity: Decimal,
+        purpose: OrderPurpose,
+        timestamp: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            client_order_id: found.client_order_id.clone(),
+            order_id: Some(found.order_id),
+            symbol: found.symbol.clone(),
+            side: if found.side.eq_ignore_ascii_case("BUY") {
+                OrderSide::Buy
+            } else {
+                OrderSide::Sell
+            },
+            price: found.price,
+            quantity,
+            amount_usdc: found.price * quantity,
+            status: if found.executed_qty > Decimal::ZERO {
+                OrderStatus::PartiallyFilled
+            } else {
+                OrderStatus::New
+            },
+            created_at: timestamp,
+            updated_at: timestamp,
+            grid_level: 0,
+            paired_client_order_id: None,
+            is_take_profit: false,
+            purpose,
+            merge_sources: Vec::new(),
+        }
+    }
+
     pub(crate) fn apply_terminal_fill(
         &mut self,
         response: &crate::exchange::model::BinanceOrderResponse,
@@ -232,6 +265,45 @@ pub struct PositionInfo {
     pub leverage: u32,
     #[serde(default)]
     pub update_time: Option<DateTime<Utc>>,
+}
+
+pub fn apply_fill_to_position(
+    size: Decimal,
+    entry_price: Decimal,
+    side: OrderSide,
+    price: Decimal,
+    qty: Decimal,
+) -> (Decimal, Decimal, Decimal) {
+    let signed_qty = match side {
+        OrderSide::Buy => qty,
+        OrderSide::Sell => -qty,
+    };
+    let new_size = size + signed_qty;
+    let same_direction = size.is_zero() || size.is_sign_positive() == signed_qty.is_sign_positive();
+    if same_direction {
+        let new_entry = if new_size.is_zero() {
+            Decimal::ZERO
+        } else {
+            ((entry_price * size.abs()) + (price * qty)) / new_size.abs()
+        };
+        (new_size, new_entry, Decimal::ZERO)
+    } else {
+        let closed_qty = qty.min(size.abs());
+        let direction_sign = if size > Decimal::ZERO {
+            Decimal::ONE
+        } else {
+            -Decimal::ONE
+        };
+        let realized = (price - entry_price) * closed_qty * direction_sign;
+        let new_entry = if new_size.is_zero() {
+            Decimal::ZERO
+        } else if new_size.is_sign_positive() != size.is_sign_positive() {
+            price
+        } else {
+            entry_price
+        };
+        (new_size, new_entry, realized)
+    }
 }
 
 pub const PAPER_INITIAL_BALANCE: Decimal = rust_decimal_macros::dec!(10000);

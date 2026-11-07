@@ -24,7 +24,7 @@ function SkeletonCard({ variant = 'metric' }: { variant?: 'metric' | 'strategy' 
 }
 
 export function PageLoading() {
-  return <div className="page-placeholder" role="status" aria-label="正在加载页面">
+  return <div role="status" aria-label="正在加载页面">
     <div className="skeleton-page-heading"><SkeletonLine width="170px" size="large" /><SkeletonLine width="240px" /></div>
     <div className="skeleton-card skeleton-page-panel"><SkeletonLine width="32%" /><SkeletonLine width="55%" size="large" /><SkeletonLine width="42%" /></div>
     <div className="skeleton-grid skeleton-grid-metrics">{[0, 1, 2, 3].map(item => <SkeletonCard key={item} />)}</div>
@@ -32,7 +32,7 @@ export function PageLoading() {
   </div>;
 }
 export function OverviewPageLoading() {
-  return <div className="page-placeholder" role="status" aria-label="正在加载页面">
+  return <div role="status" aria-label="正在加载页面">
     <div className="skeleton-section-heading"><SkeletonLine width="110px" /></div>
     <div className="overview-banner skeleton-overview-banner" aria-hidden="true">
       <div className="overview-stats">
@@ -56,7 +56,7 @@ export function OverviewLoading({ addPairLink }: { addPairLink?: ReactNode }) {
 }
 
 export function DetailPageLoading() {
-  return <div className="pair-detail" role="status" aria-label="正在加载页面">
+  return <div role="status" aria-label="正在加载页面">
     <div className="skeleton-detail-breadcrumb"><SkeletonLine width="160px" size="small" /></div>
     <div className="skeleton-detail-heading"><div className="skeleton-page-heading"><SkeletonLine width="170px" size="large" /><SkeletonLine width="240px" /></div><SkeletonLine width="100px" size="large" /></div>
     <div className="skeleton-card skeleton-detail-status"><SkeletonLine width="200px" /><SkeletonLine width="100px" size="small" /></div>

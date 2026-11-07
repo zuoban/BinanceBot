@@ -1,7 +1,10 @@
-import type { AccountObservation, Mode, Overview, PairSummary, Snapshot, Status } from './types';
+import type { AccountObservation, GridConfig, Mode, Overview, PairSummary, Snapshot, Status, Trade } from './types';
 
 export const modeLabel: Record<Mode, string> = { PAPER: '模拟盘', LIVE: '实盘', UNKNOWN: '未知模式' };
 export const statusLabel: Record<Status, string> = { RUNNING: '运行中', PAUSED: '已暂停', STOPPED: '已停止', ERROR: '异常' };
+export const directionLabel = (direction?: GridConfig['direction'] | string) => direction === 'SHORT' ? '做空' : '做多';
+export const maxPositionPolicyLabel = (config: { pause_on_max_position?: boolean; cancel_opening_on_max_position?: boolean }) =>
+  config.pause_on_max_position ? '暂停策略' : config.cancel_opening_on_max_position ? '仅撤开仓单' : '限制开仓';
 export const quoteAsset = (symbol: string) => ['USDC', 'USDT', 'FDUSD', 'BUSD'].find(a => symbol.endsWith(a)) ?? '';
 export const numeric = (value: unknown): number | null => value === null || value === undefined || value === '' || !Number.isFinite(Number(value)) ? null : Number(value);
 type ValuedPosition = { symbol: string; position: Pick<Snapshot['position'], 'size' | 'mark_price'>; ticker: Pick<Snapshot['ticker'], 'mark_price'> };
@@ -61,7 +64,8 @@ export function ageText(updatedAt: number, now = Date.now()) {
   if (seconds < 2) return '刚刚';
   return relativeTime(new Date(now - seconds * 1000).toISOString(), now);
 }
-const beijingDay = (value: number) => new Date(value + 8 * 3600_000).toISOString().slice(0, 10);
+export const beijingDay = (value = Date.now()) => new Date(value + 8 * 3600_000).toISOString().slice(0, 10);
+const normalizeFloatTotal = (total: number) => Math.abs(total) < 1e-12 ? 0 : Number(total.toPrecision(12));
 export function todayTradeCounts(s: Snapshot | PairSummary, now = Date.now()) {
   if ('today_trade_counts' in s) {
     const counts = s.today_trade_counts;
@@ -82,7 +86,21 @@ export function todayPnlGroups(stats: Overview['today_pnl'], now = Date.now()) {
     else { group.total += pnl; group.pending += row.pending_pnl_count; }
     groups.set(key, group);
   }
-  return [...groups.entries()].map(([key, group]) => ({ ...group, key, total: group.available && !group.pending && Number.isFinite(group.total) ? (Math.abs(group.total) < 1e-12 ? 0 : Number(group.total.toPrecision(12))) : null }));
+  return [...groups.entries()].map(([key, group]) => ({ ...group, key, total: group.available && !group.pending && Number.isFinite(group.total) ? normalizeFloatTotal(group.total) : null }));
+}
+export function groupTradePnl(trades: Trade[]) {
+  const groups = new Map<string, { mode: Trade['mode']; asset: string; total: number; available: boolean }>();
+  for (const trade of trades) {
+    const asset = quoteAsset(trade.symbol) || trade.symbol;
+    const key = `${trade.mode}:${asset}`;
+    const group = groups.get(key) ?? { mode: trade.mode, asset, total: 0, available: true };
+    const pnl = numeric(trade.realized_pnl);
+    if (!trade.pnl_verified || pnl === null) group.available = false;
+    else group.total += pnl;
+    groups.set(key, group);
+  }
+  for (const group of groups.values()) group.total = normalizeFloatTotal(group.total);
+  return groups;
 }
 export function todayCount(s: Snapshot | PairSummary, now = Date.now()) {
   const counts = todayTradeCounts(s, now);
