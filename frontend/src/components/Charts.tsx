@@ -22,13 +22,14 @@ export function HourlyChart({ snapshot }: { snapshot: Snapshot }) {
   const now = useNow();
   if (todayCount(snapshot, now) === null) return <NoData />;
   const data = todayHourlyData(snapshot.hourly_trade_stats!, now);
+  const axisTick = { fontSize: 11, fontFamily: 'ui-monospace, "SF Mono", Menlo, Consolas, monospace', fill: token.colorTextTertiary };
   return <>
     <div className="muted chart-caption">北京时间 · 最近时段在左侧 · 可横向滚动查看</div>
     <div className="hourly-chart-scroll" role="region" tabIndex={0} aria-label="北京时间今日每小时成交笔数，可横向滚动"><div className="chart hourly-chart"><ResponsiveContainer width="100%" height={270}>
       <BarChart data={data} barGap={4} margin={{ top: 16, right: 12, bottom: 4, left: -12 }}>
         <CartesianGrid strokeDasharray="3 5" vertical={false} stroke={token.colorBorderSecondary} />
-        <XAxis dataKey="hour" interval={0} tickLine={false} axisLine={false} tick={{ fontSize: 11, fontFamily: 'ui-monospace, "SF Mono", Menlo, Consolas, monospace', fill: token.colorTextTertiary }} />
-        <YAxis allowDecimals={false} axisLine={false} tickLine={false} tick={{ fontSize: 11, fontFamily: 'ui-monospace, "SF Mono", Menlo, Consolas, monospace', fill: token.colorTextTertiary }} />
+        <XAxis dataKey="hour" interval={0} tickLine={false} axisLine={false} tick={axisTick} />
+        <YAxis allowDecimals={false} axisLine={false} tickLine={false} tick={axisTick} />
         <Legend /><Tooltip cursor={{ fill: token.colorFillSecondary }} contentStyle={{ background: token.colorBgElevated, borderColor: token.colorBorder, borderRadius: 8, color: token.colorText }} labelStyle={{ color: token.colorText }} />
         <Bar dataKey="买入" fill={token.colorSuccess} radius={[3, 3, 0, 0]} /><Bar dataKey="卖出" fill={token.colorError} radius={[3, 3, 0, 0]} />
       </BarChart>

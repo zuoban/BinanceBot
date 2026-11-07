@@ -245,22 +245,6 @@ impl Database {
         }
         conn
     }
-    // These methods already lock the connection directly in production; the test
-    // build routes them through the benchmark collector when enabled.
-    fn lock_reconciliation_connection(
-        &self,
-        operation: &'static str,
-    ) -> std::sync::MutexGuard<'_, Connection> {
-        #[cfg(test)]
-        {
-            self.lock_connection(operation)
-        }
-        #[cfg(not(test))]
-        {
-            let _ = operation;
-            self.conn.lock().unwrap()
-        }
-    }
 
     #[cfg(test)]
     pub(crate) fn enable_benchmark_wait_samples(&self) -> std::sync::Arc<DatabaseWaitSamples> {
@@ -962,6 +946,12 @@ impl Database {
         load_config_on(&self.conn.lock().unwrap())
     }
 
+    pub(crate) async fn load_saved_config(self: &std::sync::Arc<Self>) -> Result<AppConfig> {
+        self.run_blocking(|db| db.load_config())
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("无法读取全局配置"))
+    }
+
     pub fn save_config(&self, config: &AppConfig) -> Result<()> {
         save_config_on(&self.conn.lock().unwrap(), config)
     }
@@ -1367,7 +1357,7 @@ impl Database {
     }
 
     pub fn load_pair_intents(&self, symbol: &str, mode: TradingMode) -> Result<Vec<GridOrder>> {
-        let conn = self.lock_reconciliation_connection("load_pair_intents");
+        let conn = self.lock_connection("load_pair_intents");
         let mut stmt = conn.prepare(
             "SELECT order_json FROM pair_intents WHERE symbol = ?1 AND mode = ?2 ORDER BY created_at;",
         )?;
@@ -1378,7 +1368,7 @@ impl Database {
     }
 
     pub fn delete_pair_intent(&self, parent_client_order_id: &str) -> Result<()> {
-        let conn = self.lock_reconciliation_connection("delete_pair_intent");
+        let conn = self.lock_connection("delete_pair_intent");
         conn.execute(
             "DELETE FROM pair_intents WHERE parent_client_order_id = ?1;",
             params![parent_client_order_id],
@@ -1387,7 +1377,7 @@ impl Database {
     }
 
     pub fn clear_pair_intents(&self, symbol: &str, mode: TradingMode) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_connection("clear_pair_intents");
         conn.execute(
             "DELETE FROM pair_intents WHERE symbol = ?1 AND mode = ?2;",
             params![symbol, mode.as_str()],
@@ -1400,7 +1390,7 @@ impl Database {
             plan.phase,
             crate::types::RemainderPhase::Canceling | crate::types::RemainderPhase::Submitting
         );
-        let conn = self.lock_reconciliation_connection("save_remainder_plan");
+        let conn = self.lock_connection("save_remainder_plan");
         conn.execute(
             "INSERT INTO remainder_plans (target_client_order_id, symbol, mode, active, plan_json, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(target_client_order_id) DO UPDATE SET active = excluded.active, plan_json = excluded.plan_json, updated_at = excluded.updated_at;",
             params![plan.target.client_order_id, plan.symbol, plan.mode.as_str(), active, serde_json::to_string(plan)?, Utc::now().to_rfc3339()],
@@ -1413,7 +1403,7 @@ impl Database {
         symbol: &str,
         mode: TradingMode,
     ) -> Result<Option<RemainderPlan>> {
-        let conn = self.lock_reconciliation_connection("load_remainder_plan");
+        let conn = self.lock_connection("load_remainder_plan");
         let json: Option<String> = conn.query_row(
             "SELECT plan_json FROM remainder_plans WHERE symbol = ?1 AND mode = ?2 AND active = 1;",
             params![symbol, mode.as_str()], |row| row.get(0),
@@ -1424,7 +1414,7 @@ impl Database {
 
     pub fn save_managed_order(&self, order: &GridOrder) -> Result<()> {
         let json = serde_json::to_string(order)?;
-        let conn = self.lock_reconciliation_connection("save_managed_order");
+        let conn = self.lock_connection("save_managed_order");
         conn.execute(
             "INSERT INTO managed_orders (client_order_id, symbol, order_json, updated_at) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(client_order_id) DO UPDATE SET symbol = excluded.symbol, order_json = excluded.order_json, updated_at = excluded.updated_at;",
             params![order.client_order_id, order.symbol, json, Utc::now().to_rfc3339()],
@@ -1433,7 +1423,7 @@ impl Database {
     }
 
     pub fn save_managed_orders(&self, orders: &[GridOrder]) -> Result<()> {
-        let mut conn = self.lock_reconciliation_connection("save_managed_orders");
+        let mut conn = self.lock_connection("save_managed_orders");
         let tx = conn.transaction()?;
         {
             let mut statement = tx.prepare(
@@ -1453,7 +1443,7 @@ impl Database {
     }
 
     pub(crate) fn save_managed_orders_if_absent(&self, orders: &[GridOrder]) -> Result<()> {
-        let mut conn = self.lock_reconciliation_connection("save_managed_orders_if_absent");
+        let mut conn = self.lock_connection("save_managed_orders_if_absent");
         let tx = conn.transaction()?;
         {
             let mut statement = tx.prepare(
@@ -1492,7 +1482,7 @@ impl Database {
     }
 
     pub fn load_managed_orders(&self, symbol: &str) -> Result<Vec<GridOrder>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_connection("load_managed_orders");
         let mut stmt = conn.prepare("SELECT order_json FROM managed_orders WHERE symbol = ?1;")?;
         let json_rows = stmt.query_map(params![symbol], |row| row.get::<_, String>(0))?;
         let mut orders = Vec::new();
@@ -1582,7 +1572,7 @@ impl Database {
             ),
         >,
     ) -> Result<()> {
-        let mut conn = self.lock_reconciliation_connection("save_initial_order_responses");
+        let mut conn = self.lock_connection("save_initial_order_responses");
         let tx = conn.transaction()?;
         Self::save_identity_observation_rows(&tx, account, identities)?;
         let observations: Vec<_> = observations.into_iter().collect();
@@ -1723,7 +1713,7 @@ impl Database {
         symbol: &str,
         client_order_id: &str,
     ) -> Result<Vec<(String, crate::exchange::BinanceOrderResponse)>> {
-        let conn = self.lock_reconciliation_connection("load_initial_order_responses");
+        let conn = self.lock_connection("load_initial_order_responses");
         let mut statement = conn.prepare("SELECT batch_id, response_json FROM initial_order_responses WHERE account_key=?1 AND expected_symbol=?2 AND client_order_id=?3 ORDER BY rowid")?;
         let rows = statement.query_map(params![&account[..], symbol, client_order_id], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -1745,7 +1735,7 @@ impl Database {
         if client_ids.is_empty() {
             return Ok(());
         }
-        let mut conn = self.lock_reconciliation_connection("delete_order_evidence_groups");
+        let mut conn = self.lock_connection("delete_order_evidence_groups");
         let tx = conn.transaction()?;
         {
             let mut initial = tx.prepare("DELETE FROM initial_order_responses WHERE account_key=?1 AND expected_symbol=?2 AND client_order_id=?3")?;
@@ -1767,7 +1757,7 @@ impl Database {
         first: &crate::exchange::BinanceOrderResponse,
         conflicting: &crate::exchange::BinanceOrderResponse,
     ) -> Result<()> {
-        let conn = self.lock_reconciliation_connection("save_terminal_order_disagreement");
+        let conn = self.lock_connection("save_terminal_order_disagreement");
         conn.execute(
             "INSERT INTO terminal_order_disagreements (account_key, expected_symbol, client_order_id, first_json, conflicting_json) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(account_key, expected_symbol, client_order_id, first_json, conflicting_json) DO NOTHING",
             params![&account[..], symbol, client_order_id, serde_json::to_string(first)?, serde_json::to_string(conflicting)?],
@@ -1786,7 +1776,7 @@ impl Database {
             crate::exchange::BinanceOrderResponse,
         )>,
     > {
-        let conn = self.lock_reconciliation_connection("load_terminal_order_disagreements");
+        let conn = self.lock_connection("load_terminal_order_disagreements");
         let mut stmt = conn.prepare("SELECT client_order_id, first_json, conflicting_json FROM terminal_order_disagreements WHERE account_key=?1 AND expected_symbol=?2")?;
         let rows = stmt.query_map(params![&account[..], symbol], |row| {
             Ok((
@@ -1812,7 +1802,7 @@ impl Database {
         account: [u8; 32],
         records: &[(GridOrder, crate::types::ObservedOrderIdentity)],
     ) -> Result<()> {
-        let mut conn = self.lock_reconciliation_connection("save_identity_observations");
+        let mut conn = self.lock_connection("save_identity_observations");
         let tx = conn.transaction()?;
         Self::save_identity_observation_rows(&tx, account, records)?;
         tx.commit()?;
@@ -1860,7 +1850,7 @@ impl Database {
         account: [u8; 32],
         symbol: &str,
     ) -> Result<Vec<(GridOrder, crate::types::ObservedOrderIdentity)>> {
-        let conn = self.lock_reconciliation_connection("load_identity_observations");
+        let conn = self.lock_connection("load_identity_observations");
         let mut stmt = conn.prepare("SELECT expected_json, observed_json FROM order_identity_observations WHERE account_key=?1 AND expected_symbol=?2")?;
         let rows = stmt.query_map(params![&account[..], symbol], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -1877,7 +1867,7 @@ impl Database {
     }
 
     pub fn delete_managed_order(&self, client_order_id: &str) -> Result<()> {
-        let conn = self.lock_reconciliation_connection("delete_managed_order");
+        let conn = self.lock_connection("delete_managed_order");
         conn.execute(
             "DELETE FROM managed_orders WHERE client_order_id = ?1;",
             params![client_order_id],
@@ -1886,7 +1876,7 @@ impl Database {
     }
 
     pub fn clear_managed_orders(&self, symbol: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_connection("clear_managed_orders");
         conn.execute(
             "DELETE FROM managed_orders WHERE symbol = ?1;",
             params![symbol],
@@ -1918,7 +1908,7 @@ impl Database {
         client_order_id: &str,
         mode: TradingMode,
     ) -> Result<Option<(OrderSide, Decimal, Decimal)>> {
-        let conn = self.lock_reconciliation_connection("get_pair_opening");
+        let conn = self.lock_connection("get_pair_opening");
         let value: Option<(String, String, String)> = conn.query_row(
             "SELECT side, price, quantity FROM (
                  SELECT side, price, quantity, 0 AS priority, timestamp FROM trades
@@ -1942,7 +1932,7 @@ impl Database {
     }
 
     pub fn has_recorded_order(&self, client_order_id: &str, mode: TradingMode) -> Result<bool> {
-        let conn = self.lock_reconciliation_connection("has_recorded_order");
+        let conn = self.lock_connection("has_recorded_order");
         Ok(conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM trades WHERE client_order_id = ?1 AND mode = ?2)
                  OR EXISTS(SELECT 1 FROM cleared_trade_ids WHERE client_order_id = ?1 AND mode = ?2);",
@@ -1957,7 +1947,7 @@ impl Database {
         symbol: &str,
         mode: TradingMode,
     ) -> Result<Option<(OrderSide, Decimal)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_connection("last_fill_for");
         let mut stmt = conn.prepare(
             "SELECT side, price FROM (
                  SELECT side, price, timestamp, rowid AS sequence FROM trades WHERE symbol = ?1 AND mode = ?2
@@ -2083,7 +2073,7 @@ impl Database {
     ) -> Result<HourlyTradeStats> {
         #[cfg(test)]
         self.hourly_stats_queries.fetch_add(1, Ordering::Relaxed);
-        let conn = self.lock_reconciliation_connection("get_hourly_trade_stats");
+        let conn = self.lock_connection("get_hourly_trade_stats");
         hourly::stats_on(&conn, symbol, mode, now)
     }
 

@@ -129,6 +129,7 @@ function PaletteHost({ open, setOpen, pairs, stale, authEnabled, saving, onLogou
       }
       if (event.metaKey || event.ctrlKey || event.altKey || typing(event.target) || document.querySelector('.ant-modal-root, .ant-drawer-open')) return;
       if (event.key === '?') { event.preventDefault(); setHelp(true); return; }
+      if (shortcutState.current.saving) return;
       if (event.key === 'g') { lead.current = Date.now(); return; }
       if (lead.current && Date.now() - lead.current < 1200) {
         lead.current = 0;

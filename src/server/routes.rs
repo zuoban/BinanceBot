@@ -48,6 +48,25 @@ struct DatabaseTargetsRequest {
     confirm: bool,
 }
 
+impl DatabaseTargetsRequest {
+    fn selected_targets(&self) -> Option<(bool, bool)> {
+        let mut trades = false;
+        let mut snapshots = false;
+        for target in &self.targets {
+            match target.as_str() {
+                "trade_history" => trades = true,
+                "account_hourly_snapshots" => snapshots = true,
+                _ => return None,
+            }
+        }
+        (trades || snapshots).then_some((trades, snapshots))
+    }
+
+    fn confirmed_targets(&self) -> Option<(bool, bool)> {
+        self.confirm.then(|| self.selected_targets()).flatten()
+    }
+}
+
 #[derive(serde::Serialize)]
 struct DatabaseClearResponse {
     deleted_trades: usize,
@@ -635,32 +654,11 @@ async fn clear_symbol(
     }
 }
 
-fn selected_targets(payload: &DatabaseTargetsRequest) -> Option<(bool, bool)> {
-    if payload.targets.is_empty()
-        || payload
-            .targets
-            .iter()
-            .any(|target| target != "trade_history" && target != "account_hourly_snapshots")
-    {
-        return None;
-    }
-    Some((
-        payload
-            .targets
-            .iter()
-            .any(|target| target == "trade_history"),
-        payload
-            .targets
-            .iter()
-            .any(|target| target == "account_hourly_snapshots"),
-    ))
-}
-
 async fn export_selected_database_handler(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<DatabaseTargetsRequest>,
 ) -> Response {
-    let Some((trades, snapshots)) = selected_targets(&payload) else {
+    let Some((trades, snapshots)) = payload.selected_targets() else {
         return StatusCode::BAD_REQUEST.into_response();
     };
     database_export_response(
@@ -689,26 +687,27 @@ async fn managed_database_clear_handler(
     State(handle): State<RuntimeHandle>,
     payload: Json<DatabaseTargetsRequest>,
 ) -> Response {
+    let Some((trades, snapshots)) = payload.confirmed_targets() else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
     let membership = handle.membership_lock.clone().lock_owned().await;
     let states = handle.states.read().await.clone();
-    database_clear_with_guard(&states, payload.0, Some(membership)).await
+    database_clear_with_guard(&states, trades, snapshots, Some(membership)).await
 }
 
 async fn database_clear(states: &[Arc<AppState>], payload: DatabaseTargetsRequest) -> Response {
-    database_clear_with_guard(states, payload, None).await
+    let Some((trades, snapshots)) = payload.confirmed_targets() else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    database_clear_with_guard(states, trades, snapshots, None).await
 }
 
 async fn database_clear_with_guard(
     states: &[Arc<AppState>],
-    payload: DatabaseTargetsRequest,
+    trades: bool,
+    snapshots: bool,
     guard: Option<tokio::sync::OwnedMutexGuard<()>>,
 ) -> Response {
-    let Some((trades, snapshots)) = selected_targets(&payload) else {
-        return StatusCode::BAD_REQUEST.into_response();
-    };
-    if !payload.confirm {
-        return StatusCode::BAD_REQUEST.into_response();
-    }
     if states.is_empty() {
         return StatusCode::NOT_FOUND.into_response();
     }
@@ -829,11 +828,7 @@ async fn add_pair_handler(
             !payload.has_global_updates(),
             "连接和 Telegram 通知请在全局设置中保存"
         );
-        let saved = handle
-            .db
-            .run_blocking(|db| db.load_config())
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("无法读取全局配置"))?;
+        let saved = handle.db.load_saved_config().await?;
         let mut defaults = AppConfig::default();
         crate::config::GlobalConfig::from_app(&saved).apply_to(&mut defaults);
         let config = apply_config_payload(defaults, payload)?;
@@ -879,16 +874,25 @@ async fn post_managed_config_handler(
     }
 }
 
+async fn map_saved_config<T>(
+    handle: &RuntimeHandle,
+    missing_msg: &'static str,
+    map: impl FnOnce(AppConfig) -> T,
+) -> Json<ApiResponse<T>> {
+    match handle.db.load_saved_config().await {
+        Ok(config) => json_ok(map(config)),
+        Err(_) => json_err(missing_msg),
+    }
+}
+
 async fn get_global_config_handler(
     State(handle): State<RuntimeHandle>,
 ) -> Json<ApiResponse<WebGlobalConfigView>> {
-    match handle.db.run_blocking(|db| db.load_config()).await {
-        Ok(Some(config)) => {
-            let global = crate::config::GlobalConfig::from_app(&config);
-            json_ok(web_global_config_view(&global))
-        }
-        _ => json_err("无法读取全局设置"),
-    }
+    map_saved_config(&handle, "无法读取全局设置", |config| {
+        let global = crate::config::GlobalConfig::from_app(&config);
+        web_global_config_view(&global)
+    })
+    .await
 }
 
 async fn post_global_config_handler(
@@ -1154,14 +1158,15 @@ struct ServerConfigView {
 async fn get_server_config_handler(
     State(handle): State<RuntimeHandle>,
 ) -> Json<ApiResponse<ServerConfigView>> {
-    match handle.db.run_blocking(|db| db.load_config()).await {
-        Ok(Some(config)) => json_ok(ServerConfigView {
+    let active = handle.active_server.clone();
+    map_saved_config(&handle, "无法读取服务设置", |config| {
+        ServerConfigView {
             version: crate::db::config_version(&config.server),
             saved: config.server,
-            active: handle.active_server,
-        }),
-        _ => json_err("无法读取服务设置"),
-    }
+            active,
+        }
+    })
+    .await
 }
 
 #[derive(serde::Deserialize)]

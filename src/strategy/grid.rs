@@ -1001,7 +1001,7 @@ impl GridTradingEngine {
         if *self.state.status.read().await != BotStatus::Running {
             return false;
         }
-        let config = self.state.config.read().await.clone();
+        let config = self.state.config.read().await;
         if !config.grid.pause_on_max_position {
             return false;
         }
@@ -1012,10 +1012,13 @@ impl GridTradingEngine {
         else {
             return false;
         };
-        let position = self.state.position.read().await.clone();
-        let ticker = self.state.ticker.read().await.clone();
+        let position = self.state.position.read().await;
+        let ticker = self.state.ticker.read().await;
         let valuation_price = self.position_valuation_price(&config, &position, &ticker);
         let position_value = position.size.abs() * valuation_price;
+        drop(ticker);
+        drop(position);
+        drop(config);
         if valuation_price <= Decimal::ZERO || position_value < limit {
             return false;
         }
@@ -1040,7 +1043,7 @@ impl GridTradingEngine {
         if cap.is_none() && config.grid.min_liquidation_distance_pct.is_none() {
             return false;
         }
-        let position = self.state.position.read().await.clone();
+        let position = self.state.position.read().await;
         let size = position.size;
         let liquidation_price = position.liquidation_price;
         let liquidation_guard =
@@ -1048,7 +1051,7 @@ impl GridTradingEngine {
         if size.is_zero() || (cap.is_none() && !liquidation_guard) {
             return false;
         }
-        let ticker = self.state.ticker.read().await.clone();
+        let ticker = self.state.ticker.read().await;
         // Market marks follow the existing 15-second market-data freshness limit.
         // Position marks follow the account reconciliation freshness allowance.
         let price = if Self::mark_price_is_fresh(&ticker) {
@@ -1060,6 +1063,8 @@ impl GridTradingEngine {
             // suspended until a fresh mark can establish that protection is safe.
             return true;
         };
+        drop(ticker);
+        drop(position);
         if cap.is_some_and(|limit| size.abs() * price >= limit) {
             return true;
         }
@@ -1143,6 +1148,26 @@ impl GridTradingEngine {
             "切换做多 / 做空方向前，请先平掉当前持仓"
         );
         Ok(())
+    }
+
+    pub(super) async fn load_managed_orders(&self, symbol: &str) -> Result<Vec<GridOrder>> {
+        let symbol = symbol.to_string();
+        self.state
+            .db
+            .run_blocking(move |db| db.load_managed_orders(&symbol))
+            .await
+    }
+
+    pub(super) async fn load_pair_intents(
+        &self,
+        symbol: &str,
+        mode: TradingMode,
+    ) -> Result<Vec<GridOrder>> {
+        let symbol = symbol.to_string();
+        self.state
+            .db
+            .run_blocking(move |db| db.load_pair_intents(&symbol, mode))
+            .await
     }
 
     async fn save_managed_order(&self, order: &GridOrder) -> Result<()> {
@@ -1278,12 +1303,7 @@ impl GridTradingEngine {
         // Restore managed metadata before any exchange request can fail. A
         // subsequent initial pause must reconcile these orders before clearing them.
         if !config.exchange.is_paper() {
-            let restore_symbol = symbol.clone();
-            let restored = self
-                .state
-                .db
-                .run_blocking(move |db| db.load_managed_orders(&restore_symbol))
-                .await?;
+            let restored = self.load_managed_orders(&symbol).await?;
             let mut active = self.state.active_orders.write().await;
             for order in restored
                 .into_iter()
@@ -1385,12 +1405,8 @@ impl GridTradingEngine {
         })
     }
 
-    async fn fetch_symbol_rules(&self, symbol: &str) -> Result<SymbolRules> {
-        Self::fetch_symbol_rules_with_client(&self.client, symbol).await
-    }
-
     async fn load_exchange_rules(&mut self, symbol: &str) -> Result<()> {
-        let rules = self.fetch_symbol_rules(symbol).await?;
+        let rules = Self::fetch_symbol_rules_with_client(&self.client, symbol).await?;
         info!(
             "Loaded Binance exchange rules for {}: tick_size={}, step_size={}, min_notional={}",
             symbol, rules.tick_size, rules.step_size, rules.min_notional
@@ -1742,11 +1758,7 @@ impl GridTradingEngine {
             }
         }
         if !config.exchange.is_paper() {
-            let restored = self
-                .state
-                .db
-                .run_blocking(move |db| db.load_managed_orders(&config.exchange.symbol))
-                .await?;
+            let restored = self.load_managed_orders(&config.exchange.symbol).await?;
             let mut active = self.state.active_orders.write().await;
             for order in restored
                 .into_iter()
@@ -2603,8 +2615,7 @@ impl GridTradingEngine {
             return true;
         }
         let pause_epoch = self.state.pause_epoch();
-        self.account_cache.invalidate(&self.client).await;
-        self.position_cache.invalidate(&self.client).await;
+        self.invalidate_account_and_position_caches().await;
         if self.refresh_position_then_account(false).await
             && self.state.pause_epoch() == pause_epoch
         {
@@ -2679,13 +2690,7 @@ impl GridTradingEngine {
     }
 
     async fn drain_pair_intents(&mut self, symbol: &str, mode: TradingMode) -> bool {
-        let scope = symbol.to_owned();
-        match self
-            .state
-            .db
-            .run_blocking(move |db| db.load_pair_intents(&scope, mode))
-            .await
-        {
+        match self.load_pair_intents(symbol, mode).await {
             Ok(intents) if intents.is_empty() => return true,
             Ok(_) => {}
             Err(error) => {
@@ -2703,13 +2708,7 @@ impl GridTradingEngine {
     }
 
     async fn drain_pair_intents_under_gate(&mut self, symbol: &str, mode: TradingMode) -> bool {
-        let scope = symbol.to_string();
-        let intents = match self
-            .state
-            .db
-            .run_blocking(move |db| db.load_pair_intents(&scope, mode))
-            .await
-        {
+        let intents = match self.load_pair_intents(symbol, mode).await {
             Ok(intents) => intents,
             Err(e) => {
                 error!("Could not load pending pair intents: {}", e);
@@ -2901,13 +2900,7 @@ impl GridTradingEngine {
         if *self.state.status.read().await != BotStatus::Running {
             return true;
         }
-        let scope = symbol.to_string();
-        match self
-            .state
-            .db
-            .run_blocking(move |db| db.load_pair_intents(&scope, mode))
-            .await
-        {
+        match self.load_pair_intents(symbol, mode).await {
             Ok(remaining) => remaining.is_empty(),
             Err(e) => {
                 error!("Could not verify pending pair intents: {}", e);
@@ -3155,10 +3148,8 @@ impl GridTradingEngine {
     async fn on_order_filled(&mut self, order: &mut GridOrder) -> bool {
         if !self.state.config.read().await.exchange.is_paper() {
             order.status = OrderStatus::Filled;
-            self.account_cache.invalidate(&self.client).await;
-            self.position_cache.invalidate(&self.client).await;
+            self.invalidate_account_and_position_caches().await;
             if !self.sync_account_and_position().await {
-                self.last_account_sync = None;
                 let missing = {
                     let mut active = self.state.active_orders.write().await;
                     if active.contains_key(&order.client_order_id) {
@@ -3372,13 +3363,7 @@ impl GridTradingEngine {
     }
 
     async fn has_pending_live_pair_intents(&mut self, symbol: &str) -> bool {
-        let symbol = symbol.to_owned();
-        match self
-            .state
-            .db
-            .run_blocking(move |db| db.load_pair_intents(&symbol, TradingMode::Live))
-            .await
-        {
+        match self.load_pair_intents(symbol, TradingMode::Live).await {
             Ok(intents) => !intents.is_empty(),
             Err(e) => {
                 error!("Could not inspect pending pair intents: {}", e);
@@ -4020,36 +4005,32 @@ impl GridTradingEngine {
                         }
                     }
                     if resp.executed_qty > Decimal::ZERO {
-                        if resp.is_terminal() {
+                        let resolved = if resp.is_terminal() {
                             order.apply_terminal_fill(&resp, exchange_fill_time(&resp));
-                            let recorded = self.on_order_filled(&mut order).await;
-                            if recorded {
-                                if let Some(guard) = &mut fill_guard {
-                                    guard.resolve();
-                                }
+                            self.on_order_filled(&mut order).await
+                        } else {
+                            if !self.prepare_partial_adoption(&mut order, &resp).await {
+                                return false;
                             }
-                            let paused = self.pause_if_position_limit_reached().await;
-                            let protected = self.cancel_suspended_opening_orders(&config).await;
-                            return recorded && !paused && protected;
+                            let original = order.clone();
+                            if !self
+                                .adopt_open_exchange_order(&mut order, original, &resp)
+                                .await
+                            {
+                                return false;
+                            }
+                            true
+                        };
+                        if resolved {
+                            if let Some(guard) = &mut fill_guard {
+                                guard.resolve();
+                            }
                         }
-                        if !self.prepare_partial_adoption(&mut order, &resp).await {
-                            return false;
-                        }
-                        let original = order.clone();
-                        if !self
-                            .adopt_open_exchange_order(&mut order, original, &resp)
-                            .await
-                        {
-                            return false;
-                        }
-                        if let Some(guard) = &mut fill_guard {
-                            guard.resolve();
-                        }
-                        if self.pause_if_position_limit_reached().await {
-                            return false;
-                        }
-                        if !self.cancel_suspended_opening_orders(&config).await {
-                            return false;
+                        let paused = self.pause_if_position_limit_reached().await;
+                        let protected = self.cancel_suspended_opening_orders(&config).await;
+                        let ok = resolved && !paused && protected;
+                        if resp.is_terminal() || !ok {
+                            return ok;
                         }
                     }
                     info!(
@@ -4410,13 +4391,7 @@ impl GridTradingEngine {
         if !paper {
             // Initialization may have failed while loading recovery metadata.
             // Never clear persisted orders without first restoring and reconciling them.
-            let restore_symbol = symbol.clone();
-            let restored = match self
-                .state
-                .db
-                .run_blocking(move |db| db.load_managed_orders(&restore_symbol))
-                .await
-            {
+            let restored = match self.load_managed_orders(&symbol).await {
                 Ok(orders) => orders,
                 Err(e) => {
                     error!("Failed to load managed orders before cancellation: {}", e);

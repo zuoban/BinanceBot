@@ -3,11 +3,11 @@ import { flushSync } from 'react-dom';
 import { UNSAFE_DataRouterContext, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { Alert, App, Button, Card, Col, Form, Input, InputNumber, Row, Select, Space, Switch, type FormInstance } from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { api, ApiError, pairPath, post } from '../lib/api';
+import { api, pairPath, post } from '../lib/api';
 import { usePairs } from '../lib/queries';
 import { AccountsContext, EditContext } from '../lib/session';
 import type { GlobalConfig, GridConfig } from '../lib/types';
-import { ErrorNotice, PageBreadcrumb, PageTitle } from '../components/Common';
+import { ConflictReloadButton, ErrorNotice, FormRevertButton, isConfigConflict, PageBreadcrumb, PageTitle } from '../components/Common';
 import { useDeleteStrategy } from '../components/DeleteStrategy';
 import { GridPreview } from '../components/GridPreview';
 import { defaultGridInterval, isPercentDecimal, isPositiveDecimal, orderAmountError, priceRangeError, tickSizeError } from '../lib/gridPreview';
@@ -172,13 +172,11 @@ export default function PairConfig() {
     <PageTitle title={adding ? '新增交易对' : `${symbol} 策略参数`} description={adding ? '新策略创建后保持暂停，检查参数后手动恢复' : '参数保存后立即生效，请先核对策略设置'} />
     <ErrorNotice error={pairs.error || config.error} retry={() => { if (pairs.error) void pairs.refetch(); if (!adding && pair) void config.refetch(); }} />
     <ErrorNotice error={mutation.error} />
-    {!adding && (mutation.error instanceof ApiError && mutation.error.status === 409 || mutation.error?.message.includes('无法确认配置版本')) && <Button onClick={async () => {
-      const currentPage = page.current;
-      if (!currentPage || !await modal.confirm({ title: '重新加载策略配置？', content: '重新加载会放弃当前未保存的修改，请先记录需要保留的内容。', okText: '重新加载', cancelText: '继续编辑' })) return;
-      if (page.current !== currentPage) return;
-      const result = await config.refetch();
-      if (page.current === currentPage && !result.error && result.data && symbol && result.data.symbol === symbol) { baseline.current = { symbol, config: result.data }; form.setFieldsValue(result.data); edit.setDirty(false); mutation.reset(); }
-    }}>重新加载策略配置</Button>}
+    {!adding && isConfigConflict(mutation.error, '无法确认配置版本') && <ConflictReloadButton label="策略配置" activeRef={page} refetch={config.refetch} onReset={mutation.reset} onLoaded={data => {
+      if (!symbol || data.symbol !== symbol) return false;
+      baseline.current = { symbol, config: data };
+      form.setFieldsValue(data);
+    }} />}
     {pairs.data && !pair && !adding && <Alert type="warning" title="该交易对不存在或已移除" />}
     <Form<FormValues> className="config-form" form={form} layout="vertical" onFinish={values => void submit(values)} onValuesChange={changed => { if ('symbol' in changed) { if (!customInterval.current) form.setFieldValue('grid_interval', defaults.grid_interval); customInterval.current = false; appliedSymbol.current = undefined; } else if ('grid_interval' in changed) customInterval.current = true; if (changed.pause_on_max_position) form.setFieldValue('cancel_opening_on_max_position', false); else if (changed.cancel_opening_on_max_position) form.setFieldValue('pause_on_max_position', false); edit.setDirty(true); }} disabled={formDisabled}>
       <Card title="基本设置">
@@ -221,7 +219,7 @@ export default function PairConfig() {
       <div className={`save-bar${edit.dirty ? ' save-bar-dirty' : ''}`}>
         <SaveBarStatus form={form} adding={adding} dirty={edit.dirty} symbol={symbol} baseline={baseline.current} />
         <Space wrap>
-        <Button onClick={async () => { const currentPage = page.current; if (!currentPage || (edit.dirty && !await modal.confirm({ title: '放弃未保存的修改？', okText: '还原', cancelText: '继续编辑' }))) return; if (page.current !== currentPage) return; if (adding) { customInterval.current = false; appliedSymbol.current = undefined; form.setFieldsValue(defaults); } else if (baseline.current?.symbol === symbol) form.setFieldsValue(baseline.current.config); edit.setDirty(false); mutation.reset(); }}>还原</Button>
+        <FormRevertButton activeRef={page} onReset={mutation.reset} onRevert={() => { if (adding) { customInterval.current = false; appliedSymbol.current = undefined; form.setFieldsValue(defaults); } else if (baseline.current?.symbol === symbol) form.setFieldsValue(baseline.current.config); }} />
         <Button type="primary" htmlType="submit" loading={mutation.isPending}>{adding ? '保存并添加' : '保存并立即生效'}</Button>
       </Space></div>
       {!adding && <Card className="danger-zone" title="删除策略"><p>删除前请暂停策略、等待挂单撤销并平仓；删除不会自动平仓，历史记录会保留。</p><Button danger disabled={edit.saving} loading={deletion.busy} onClick={() => void remove()}>删除策略</Button></Card>}

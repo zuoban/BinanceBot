@@ -189,11 +189,7 @@ impl RuntimeHandle {
         payload: crate::types::UpdateGlobalConfigPayload,
     ) -> anyhow::Result<GlobalConfig> {
         let _membership = self.membership_lock.lock().await;
-        let saved = self
-            .db
-            .run_blocking(|db| db.load_config())
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("无法读取全局配置"))?;
+        let saved = self.db.load_saved_config().await?;
         let mut config = GlobalConfig::from_app(&saved);
         if payload
             .baseline_version
@@ -840,12 +836,7 @@ impl TradingRuntime {
 
     async fn add_pair(&mut self, mut config: AppConfig) -> anyhow::Result<()> {
         let _membership = self.handle.membership_lock.lock().await;
-        let saved = self
-            .handle
-            .db
-            .run_blocking(|db| db.load_config())
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("无法读取全局配置"))?;
+        let saved = self.handle.db.load_saved_config().await?;
         GlobalConfig::from_app(&saved).apply_to(&mut config);
         config.validate()?;
         anyhow::ensure!(

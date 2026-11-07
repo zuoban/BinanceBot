@@ -1,6 +1,6 @@
-use super::cache_entries::{CacheEntries, ENTRY_WAIT, FAILURE_COOLDOWN};
+use super::cache_entries::CacheEntries;
 use super::{BinanceAccountInfoResponse, BinanceFuturesClient};
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use chrono::{DateTime, Utc};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -53,53 +53,30 @@ impl AccountCache {
         client: &BinanceFuturesClient,
         force: bool,
     ) -> Result<AccountSnapshot> {
-        let key = client.account_cache_key();
-        loop {
-            let (epoch, entry) = self.entries.entry(key).await;
-            let mut cached = tokio::time::timeout(ENTRY_WAIT, entry.lock())
-                .await
-                .map_err(|_| anyhow!("shared account request is still in flight"))?;
-            if !self.entries.is_current(key, epoch, &entry).await {
-                continue;
-            }
-            if cached
-                .failed_at
-                .is_some_and(|at| at.elapsed() < FAILURE_COOLDOWN)
-            {
-                return Err(anyhow!("shared account request is cooling down"));
-            }
-            if let Some(snapshot) = cached.snapshot.as_ref().filter(|_| !force) {
-                if snapshot.received_instant.elapsed() < MAX_AGE {
-                    return Ok(snapshot.clone());
-                }
-            }
-            // Do not serve an expired or invalidated snapshot after a failure.
-            cached.snapshot = None;
-            let account = client.get_account().await;
-            if !self.entries.is_current(key, epoch, &entry).await {
-                continue;
-            }
-            let account = match account {
-                Ok(account) => account,
-                Err(error) => {
-                    cached.failed_at = Some(Instant::now());
-                    return Err(error);
-                }
-            };
-            let snapshot = AccountSnapshot {
-                account: Arc::new(account),
-                received_at: Utc::now(),
-                received_instant: Instant::now(),
-            };
-            cached.failed_at = None;
-            cached.snapshot = Some(snapshot.clone());
-            return Ok(snapshot);
-        }
+        let (_, _, snapshot) = self
+            .entries
+            .get_or_fetch(
+                client.account_cache_key(),
+                "account",
+                |snapshot| !force && snapshot.received_instant.elapsed() < MAX_AGE,
+                || async {
+                    let account = client.get_account().await?;
+                    Ok(AccountSnapshot {
+                        account: Arc::new(account),
+                        received_at: Utc::now(),
+                        received_instant: Instant::now(),
+                    })
+                },
+                Clone::clone,
+            )
+            .await?;
+        Ok(snapshot)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::cache_entries::FAILURE_COOLDOWN;
     use super::*;
     use crate::config::AppConfig;
     use axum::{http::StatusCode, routing::get, Json, Router};

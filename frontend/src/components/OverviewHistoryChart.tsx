@@ -3,7 +3,7 @@ import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YA
 type HistoryPoint = { hour: number; equity: number | null };
 const formatHour = (hour: number) => new Date(hour * 1000).toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hour12: false });
 const formatDay = (hour: number) => new Date(hour * 1000).toLocaleDateString('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit' });
-
+const axisTick = { fontSize: 11, fontFamily: 'ui-monospace, "SF Mono", Menlo, Consolas, monospace', fill: 'var(--text-muted)' };
 function HistoryDot({ cx, cy, payload, stroke, index, data, discrete }: { cx?: number; cy?: number; payload?: { hour: number }; stroke?: string; index?: number; data: HistoryPoint[]; discrete: boolean }) {
   if (cx == null || cy == null || !payload || (index != null && data[index]?.equity == null)) return null;
   const isolated = discrete || (index != null && data[index - 1]?.equity == null && data[index + 1]?.equity == null);
@@ -32,8 +32,8 @@ export default function OverviewHistoryChart({ data, ticks, asset, formatValue, 
   return <ResponsiveContainer width="100%" height={200}>
     <LineChart data={data} margin={{ top: 12, right: daily ? 28 : 12, bottom: 0, left: 4 }}>
       <CartesianGrid vertical={false} stroke="var(--border-hairline)" />
-      <XAxis dataKey="hour" ticks={ticks} tickFormatter={daily ? formatDay : formatHour} tickLine={false} axisLine={false} interval={daily ? 'equidistantPreserveEnd' : 'preserveEnd'} minTickGap={daily ? 24 : 12} tick={{ fontSize: 11, fontFamily: 'ui-monospace, "SF Mono", Menlo, Consolas, monospace', fill: 'var(--text-muted)' }} />
-      <YAxis width="auto" domain={['auto', 'auto']} tickFormatter={axisValue} tickLine={false} axisLine={false} tick={{ fontSize: 11, fontFamily: 'ui-monospace, "SF Mono", Menlo, Consolas, monospace', fill: 'var(--text-muted)' }} tickCount={3} />
+      <XAxis dataKey="hour" ticks={ticks} tickFormatter={daily ? formatDay : formatHour} tickLine={false} axisLine={false} interval={daily ? 'equidistantPreserveEnd' : 'preserveEnd'} minTickGap={daily ? 24 : 12} tick={axisTick} />
+      <YAxis width="auto" domain={['auto', 'auto']} tickFormatter={axisValue} tickLine={false} axisLine={false} tick={axisTick} tickCount={3} />
       <Tooltip {...tooltip} />
       <Line name="账户权益" dataKey="equity" stroke={discrete ? 'none' : 'var(--history-equity)'} strokeWidth={2} dot={<HistoryDot data={data} discrete={discrete} />} activeDot={{ r: 4, fill: 'var(--history-equity)' }} connectNulls={false} isAnimationActive={false} />
     </LineChart>

@@ -238,14 +238,7 @@ impl GridTradingEngine {
             plan.phase = RemainderPhase::Complete;
             return self.persist_remainder_plan(plan).await;
         }
-        let symbol = plan.symbol.clone();
-        if !self
-            .state
-            .db
-            .run_blocking(move |db| db.load_pair_intents(&symbol, mode))
-            .await?
-            .is_empty()
-        {
+        if !self.load_pair_intents(&plan.symbol, mode).await?.is_empty() {
             return Ok(()); // Paired exits retain priority and their inventory reservation.
         }
         if !paper

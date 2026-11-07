@@ -87,25 +87,16 @@ export function TradesTable({ trades: allTrades, overview = false }: { trades: T
   ];
   return <div>
     {!overview && <TableFilterBar label="按方向筛选" value={filter} onChange={setFilter} options={sideOptions} shown={trades.length} total={allTrades.length} onExport={exportRows} />}
-    {!overview && <p className="table-scroll-hint">左右滑动查看完整成交信息</p>}
-    {overview && <p className="overview-trades-scroll-hint">左右滑动查看完整成交信息</p>}
+    <p className={overview ? 'overview-trades-scroll-hint' : 'table-scroll-hint'}>左右滑动查看完整成交信息</p>
     <div className={overview ? 'overview-trades-desktop' : 'table-desktop'}><Table<Trade> rowKey="trade_id" columns={columns} dataSource={trades} size="small" scroll={{ x: 1000 }} pagination={overview ? false : { pageSize: 15, showSizeChanger: false, hideOnSinglePage: true }} /></div>
-    {!overview && <div className="table-mobile">{trades.length ? <ul className="trade-list" aria-label="成交列表">{trades.slice(0, 50).map(trade => <li className="trade-list-item" key={trade.trade_id}>
-      <div className="trade-list-heading">{side(trade.side)}<strong><Copyable value={trade.price}>{price(trade.price)}</Copyable></strong><RelativeTime value={trade.timestamp} now={now} className="trade-list-time" /></div>
+    <div className={overview ? 'overview-trades-mobile' : 'table-mobile'}>{trades.length ? <ul className="trade-list" aria-label="成交列表">{(overview ? trades : trades.slice(0, 50)).map(trade => <li className="trade-list-item" key={trade.trade_id}>
+      <div className="trade-list-heading">{overview ? <><strong>{trade.symbol}</strong>{side(trade.side)}</> : <>{side(trade.side)}<strong><Copyable value={trade.price}>{price(trade.price)}</Copyable></strong></>}<RelativeTime value={trade.timestamp} now={now} className="trade-list-time" /></div>
       <dl>
-        <div><dt>数量</dt><dd>{price(trade.quantity)}</dd></div>
+        <div><dt>{overview ? '成交均价' : '数量'}</dt><dd>{price(overview ? trade.price : trade.quantity)}</dd></div>
         <div><dt>金额</dt><dd>{number(trade.amount_usdc)}</dd></div>
         <div><dt>盈亏</dt><dd>{trade.pnl_verified ? <Pnl value={trade.realized_pnl} /> : <Tag>待同步</Tag>}</dd></div>
       </dl>
-    </li>)}</ul> : <div className="trade-list-empty">暂无成交记录</div>}{trades.length > 50 && <p className="muted">仅显示最近 50 条，完整数据请导出 CSV。</p>}</div>}
-    {overview && <div className="overview-trades-mobile">{trades.length ? <ul className="trade-list" aria-label="成交列表">{trades.map(trade => <li className="trade-list-item" key={trade.trade_id}>
-      <div className="trade-list-heading"><strong>{trade.symbol}</strong>{side(trade.side)}<RelativeTime value={trade.timestamp} now={now} className="trade-list-time" /></div>
-      <dl>
-        <div><dt>成交均价</dt><dd>{price(trade.price)}</dd></div>
-        <div><dt>金额</dt><dd>{number(trade.amount_usdc)}</dd></div>
-        <div><dt>盈亏</dt><dd>{trade.pnl_verified ? <Pnl value={trade.realized_pnl} /> : <Tag>待同步</Tag>}</dd></div>
-      </dl>
-    </li>)}</ul> : <div className="trade-list-empty">暂无成交记录</div>}</div>}
+    </li>)}</ul> : <div className="trade-list-empty">暂无成交记录</div>}{!overview && trades.length > 50 && <p className="muted">仅显示最近 50 条，完整数据请导出 CSV。</p>}</div>
   </div>;
 }
 const levels = ['ALL', 'ERROR', 'WARN', 'INFO', 'DEBUG'] as const;

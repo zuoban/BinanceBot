@@ -1,7 +1,7 @@
-use super::cache_entries::{CacheEntries, ENTRY_WAIT, FAILURE_COOLDOWN};
+use super::cache_entries::CacheEntries;
 use super::client::one_way_position_ref;
 use super::{BinanceFuturesClient, BinancePositionRisk};
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use std::time::{Duration, Instant};
 
 const MAX_AGE: Duration = Duration::from_secs(1);
@@ -43,52 +43,28 @@ impl PositionCache {
     ) -> Result<(Option<BinancePositionRisk>, Instant)> {
         let key = client.account_cache_key();
         loop {
-            let (epoch, entry) = self.entries.entry(key).await;
-            let mut cached = tokio::time::timeout(ENTRY_WAIT, entry.lock())
-                .await
-                .map_err(|_| anyhow!("shared position request is still in flight"))?;
-            if !self.entries.is_current(key, epoch, &entry).await {
-                continue;
-            }
-            if cached
-                .failed_at
-                .is_some_and(|at| at.elapsed() < FAILURE_COOLDOWN)
-            {
-                return Err(anyhow!("shared position request is cooling down"));
-            }
-            if cached
-                .snapshot
-                .as_ref()
-                .is_none_or(|snapshot| snapshot.received_instant.elapsed() >= MAX_AGE)
-            {
-                cached.snapshot = None;
-                let positions = client.get_all_positions().await;
-                if !self.entries.is_current(key, epoch, &entry).await {
-                    continue;
-                }
-                let positions = match positions {
-                    Ok(positions) => positions,
-                    Err(error) => {
-                        cached.failed_at = Some(Instant::now());
-                        return Err(error);
-                    }
-                };
-                cached.failed_at = None;
-                cached.snapshot = Some(PositionSnapshot {
-                    positions,
-                    received_instant: Instant::now(),
-                });
-            }
-            let Some(snapshot) = cached.snapshot.as_ref() else {
-                continue;
-            };
-            let position =
-                one_way_position_ref(&snapshot.positions, symbol).map(|position| position.cloned());
-            let received_instant = snapshot.received_instant;
-            drop(cached);
-            if !self.entries.is_current(key, epoch, &entry).await {
-                continue;
-            }
+            let (epoch, entry, (position, received_instant)) = self
+                .entries
+                .get_or_fetch(
+                    key,
+                    "position",
+                    |snapshot| snapshot.received_instant.elapsed() < MAX_AGE,
+                    || async {
+                        let positions = client.get_all_positions().await?;
+                        Ok(PositionSnapshot {
+                            positions,
+                            received_instant: Instant::now(),
+                        })
+                    },
+                    |snapshot| {
+                        (
+                            one_way_position_ref(&snapshot.positions, symbol)
+                                .map(|position| position.cloned()),
+                            snapshot.received_instant,
+                        )
+                    },
+                )
+                .await?;
             let position = position?;
             if position.is_some() {
                 return Ok((position, received_instant));
@@ -107,6 +83,7 @@ impl PositionCache {
 
 #[cfg(test)]
 mod tests {
+    use super::super::cache_entries::FAILURE_COOLDOWN;
     use super::*;
     use crate::config::AppConfig;
     use axum::{extract::Query, http::StatusCode, routing::get, Json, Router};

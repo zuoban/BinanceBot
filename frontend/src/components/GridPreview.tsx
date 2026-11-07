@@ -30,6 +30,10 @@ export function GridPreview<Values>({ form, markPrice, tickSize, stepSize, minQt
   const overLimit = exceeds(worstCase, values?.max_position_usdc);
   const cap = preview && values ? capCoverage(values.max_position_usdc, values.order_amount_usdc, values.grid_interval, reference) : null;
   const thinSpacing = !!preview && !!values && spacingBelowRoundTripFee(values.grid_interval, reference);
+  const renderLevel = (side: 'sell' | 'buy', price: string) => {
+    const s = sizings.get(price), diff = priceDiffPercent(price, reference);
+    return <li key={`${side[0]}${price}`} className={`grid-preview-${side}`}><span>{side === 'sell' ? '卖' : '买'}{s && <small className="grid-preview-qty"> · {s.quantity} ({s.notional} {quote})</small>}</span><span className="grid-preview-price">{diff && <small className="grid-preview-diff">{diff}</small>}<strong>{price}</strong></span></li>;
+  };
   return <section className="grid-preview" aria-label="网格预览">
     <div className="grid-preview-head">
       <h3>网格预览</h3>
@@ -44,9 +48,9 @@ export function GridPreview<Values>({ form, markPrice, tickSize, stepSize, minQt
     {tickError || rangeError ? <p className="grid-preview-warning" role="alert">{tickError ?? rangeError}</p>
       : !preview ? <p className="muted grid-preview-empty">填写网格间距、买卖窗口{hasMark ? '' : '和参考价格'}后显示将挂出的价位。</p> : <>
       <ol className="grid-preview-ladder" aria-label="预计挂单价位，由高到低">
-        {[...preview.sells].reverse().map(price => { const s = sizings.get(price), diff = priceDiffPercent(price, reference); return <li key={`s${price}`} className="grid-preview-sell"><span>卖{s && <small className="grid-preview-qty"> · {s.quantity} ({s.notional} {quote})</small>}</span><span className="grid-preview-price">{diff && <small className="grid-preview-diff">{diff}</small>}<strong>{price}</strong></span></li>; })}
+        {[...preview.sells].reverse().map(price => renderLevel('sell', price))}
         <li className="grid-preview-mark"><span>参考价</span><strong>{reference}</strong></li>
-        {preview.buys.map(price => { const s = sizings.get(price), diff = priceDiffPercent(price, reference); return <li key={`b${price}`} className="grid-preview-buy"><span>买{s && <small className="grid-preview-qty"> · {s.quantity} ({s.notional} {quote})</small>}</span><span className="grid-preview-price">{diff && <small className="grid-preview-diff">{diff}</small>}<strong>{price}</strong></span></li>; })}
+        {preview.buys.map(price => renderLevel('buy', price))}
       </ol>
       <p className="muted">共 {orders} 个挂单。{(preview.buyClipped || preview.sellClipped) && '价格区间限制了部分价位。'}{worstCase && worstCase !== '0' && ` ${openingLabel}全部成交时新增名义价值约 ${worstCase} ${quote}。`}</p>
       {overLimit && <p className="grid-preview-warning" role="alert">{openingLabel}全部成交的名义价值超过最大持仓名义价值 {String(values?.max_position_usdc)} {quote}，达到上限后将{maxPositionPolicyLabel({ pause_on_max_position: Boolean(values?.pause_on_max_position), cancel_opening_on_max_position: Boolean(values?.cancel_opening_on_max_position) })}。</p>}

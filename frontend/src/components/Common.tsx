@@ -1,6 +1,8 @@
-import { Alert, Button, Empty, Space } from 'antd';
+import { useContext } from 'react';
+import { Alert, App, Button, Empty, Space } from 'antd';
 import { CheckCircleFilled, ClockCircleFilled, CloseCircleFilled, ExclamationCircleFilled, InfoCircleFilled, MinusCircleFilled, ReloadOutlined, ThunderboltFilled } from '@ant-design/icons';
 import { Link } from 'react-router-dom';
+import { EditContext } from '../lib/session';
 import type { Mode, Status } from '../lib/types';
 import { modeLabel, number, numeric, statusLabel, trimFractionZeros } from '../lib/format';
 
@@ -43,4 +45,42 @@ export function PageBreadcrumb({ items, disabled = false }: { items: { label: st
 }
 export function PageTitle({ title, description, extra }: { title: string; description?: string; extra?: React.ReactNode }) {
   return <div className="page-heading"><div><h1>{title}</h1>{description && <p>{description}</p>}</div><Space wrap>{extra}</Space></div>;
+}
+export function isConfigConflict(error: Error | null | undefined, messageFragment: string): boolean {
+  return (error as { status?: number } | null | undefined)?.status === 409 || Boolean(error?.message.includes(messageFragment));
+}
+export function ConflictReloadButton<T>({ label, activeRef, refetch, onLoaded, onReset }: {
+  label: string;
+  activeRef: { current: unknown };
+  refetch: () => Promise<{ data?: T; error: unknown }>;
+  onLoaded: (data: NonNullable<T>) => boolean | void;
+  onReset: () => void;
+}) {
+  const { modal } = App.useApp();
+  const edit = useContext(EditContext);
+  return <Button onClick={async () => {
+    const current = activeRef.current;
+    if (!current || !await modal.confirm({ title: `重新加载${label}？`, content: '重新加载会放弃当前未保存的修改，请先记录需要保留的内容。', okText: '重新加载', cancelText: '继续编辑' })) return;
+    if (activeRef.current !== current) return;
+    const result = await refetch();
+    if (activeRef.current !== current || result.error || !result.data || onLoaded(result.data) === false) return;
+    edit.setDirty(false);
+    onReset();
+  }}>重新加载{label}</Button>;
+}
+export function FormRevertButton({ activeRef, onRevert, onReset }: {
+  activeRef: { current: unknown };
+  onRevert: () => void;
+  onReset: () => void;
+}) {
+  const { modal } = App.useApp();
+  const edit = useContext(EditContext);
+  return <Button onClick={async () => {
+    const current = activeRef.current;
+    if (!current || (edit.dirty && !await modal.confirm({ title: '放弃未保存的修改？', okText: '还原', cancelText: '继续编辑' }))) return;
+    if (activeRef.current !== current) return;
+    onRevert();
+    edit.setDirty(false);
+    onReset();
+  }}>还原</Button>;
 }

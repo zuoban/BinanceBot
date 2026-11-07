@@ -2,7 +2,7 @@ import { useContext, useEffect, useRef, useState } from 'react';
 import { App, Button, Card, Checkbox, Space } from 'antd';
 import { useQueryClient } from '@tanstack/react-query';
 import { post } from '../lib/api';
-import { downloadDatabase, refreshClearedQueries, type DatabaseTarget } from '../lib/database';
+import { downloadDatabase, exportSnapshotNotice, exportSnapshotSuccess, refreshClearedQueries, type DatabaseTarget } from '../lib/database';
 import { EditContext } from '../lib/session';
 
 const options: { label: string; value: DatabaseTarget }[] = [
@@ -43,7 +43,7 @@ export function DatabaseSettings() {
       } else {
         setBusy(action); edit.setSaving(true);
         await downloadDatabase('/api/database/export', action === 'selected' ? targets : undefined);
-        message.success(action === 'all' ? '全库脱敏分析快照已导出，不能用于完整恢复' : '所选数据脱敏分析快照已导出，不能用于完整恢复');
+        message.success(exportSnapshotSuccess(action === 'all' ? '全库' : '所选数据'));
       }
     } catch (error) { message.error((error as Error).message); }
     finally { lock.current = false; setBusy(null); edit.setSaving(false); }
@@ -52,7 +52,7 @@ export function DatabaseSettings() {
   return <Card title="数据库操作" className="settings-card">
     <div className="database-intro">
       <p className="muted">选择需要导出或清空的数据类别。成交历史及统计覆盖全部币种和全部模式。</p>
-      <p className="muted">导出的是脱敏分析快照：交易所 API 密钥、Telegram 令牌和聊天 ID 会被清空，登录会话会被移除。快照不能作为完整恢复备份。</p>
+      <p className="muted">{exportSnapshotNotice('')}</p>
     </div>
     <Checkbox.Group className="database-targets" options={options} value={targets} disabled={busy !== null} onChange={values => setTargets(values as DatabaseTarget[])} />
     <div className="settings-card-footer database-actions">

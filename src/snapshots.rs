@@ -194,11 +194,7 @@ pub(crate) async fn current_accounts(
             .filter(|state| !state.is_retired())
             .cloned()
             .collect();
-        let config = handle
-            .db
-            .run_blocking(|db| db.load_config())
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("无法读取全局配置"))?;
+        let config = handle.db.load_saved_config().await?;
         (states, config.strategy_configs()?)
     };
     let mut accounts = BTreeMap::new();

@@ -225,18 +225,9 @@ impl GridTradingEngine {
         orders: &[BinanceOrderResponse],
     ) {
         self.report_reconciliation_state(true).await;
-        let managed_symbol = symbol.to_owned();
-        let managed = self
-            .state
-            .db
-            .run_blocking(move |db| db.load_managed_orders(&managed_symbol))
-            .await
-            .unwrap_or_default();
-        let intent_symbol = symbol.to_owned();
+        let managed = self.load_managed_orders(symbol).await.unwrap_or_default();
         let intents: HashMap<_, _> = self
-            .state
-            .db
-            .run_blocking(move |db| db.load_pair_intents(&intent_symbol, mode))
+            .load_pair_intents(symbol, mode)
             .await
             .unwrap_or_default()
             .into_iter()
@@ -364,13 +355,7 @@ impl GridTradingEngine {
         let config = self.state.config.read().await.clone();
         let symbol = config.exchange.symbol.clone();
         let mode = config.exchange.trading_mode();
-        let intent_symbol = symbol.clone();
-        let pair_intents = match self
-            .state
-            .db
-            .run_blocking(move |db| db.load_pair_intents(&intent_symbol, mode))
-            .await
-        {
+        let pair_intents = match self.load_pair_intents(&symbol, mode).await {
             Ok(intents) => intents
                 .into_iter()
                 .map(|intent| (intent.client_order_id.clone(), intent))
@@ -412,13 +397,7 @@ impl GridTradingEngine {
         let pending_ids = self.provisional_order_ids_for(account_key);
         let mut restored_ids = HashSet::new();
         if !pending_ids.is_empty() {
-            let managed_symbol = symbol.clone();
-            let managed = match self
-                .state
-                .db
-                .run_blocking(move |db| db.load_managed_orders(&managed_symbol))
-                .await
-            {
+            let managed = match self.load_managed_orders(&symbol).await {
                 Ok(orders) => orders,
                 Err(error) => {
                     error!("Could not restore provisional order metadata: {}", error);
@@ -621,12 +600,7 @@ impl GridTradingEngine {
                             .push(found);
                     }
                 }
-                let managed_symbol = symbol.clone();
-                let managed = self
-                    .state
-                    .db
-                    .run_blocking(move |db| db.load_managed_orders(&managed_symbol))
-                    .await;
+                let managed = self.load_managed_orders(&symbol).await;
                 if let Err(error) = &managed {
                     error!("Could not verify snapshot order identities: {}", error);
                 }
@@ -1651,13 +1625,7 @@ impl GridTradingEngine {
                     {
                         return false;
                     }
-                    let managed_symbol = symbol.clone();
-                    let managed = match self
-                        .state
-                        .db
-                        .run_blocking(move |db| db.load_managed_orders(&managed_symbol))
-                        .await
-                    {
+                    let managed = match self.load_managed_orders(&symbol).await {
                         Ok(orders) => orders,
                         Err(error) => {
                             error!(
@@ -1816,13 +1784,7 @@ impl GridTradingEngine {
                 // Every live snapshot is checked against durable identities;
                 // in-memory conflict barriers do not survive a process restart.
                 if !live_ids.is_empty() {
-                    let managed_symbol = symbol.clone();
-                    let managed = match self
-                        .state
-                        .db
-                        .run_blocking(move |db| db.load_managed_orders(&managed_symbol))
-                        .await
-                    {
+                    let managed = match self.load_managed_orders(&symbol).await {
                         Ok(orders) => orders,
                         Err(error) => {
                             error!("Could not verify live order identities: {}", error);
@@ -1990,11 +1952,7 @@ impl GridTradingEngine {
                     })
                 };
                 if needs_position_refresh || inconsistent_fill {
-                    self.account_cache.invalidate(&self.client).await;
-                    self.position_cache.invalidate(&self.client).await;
-                    if inconsistent_fill {
-                        self.last_account_sync = None;
-                    }
+                    self.invalidate_account_and_position_caches().await;
                 }
                 let position_ready = if inconsistent_fill || self.state.pause_epoch() != pause_epoch
                 {
@@ -2221,8 +2179,7 @@ impl GridTradingEngine {
                     // One refresh covers every execution observed before this
                     // point. Keep all reservations and the global submission
                     // barrier until fresh risk inputs and durable commits exist.
-                    self.account_cache.invalidate(&self.client).await;
-                    self.position_cache.invalidate(&self.client).await;
+                    self.invalidate_account_and_position_caches().await;
                     if !self.sync_account_and_position().await {
                         self.last_orders_sync = None;
                         self.report_reconciliation_state(true).await;

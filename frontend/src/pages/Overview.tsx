@@ -5,8 +5,8 @@ import { ArrowDownOutlined, ArrowRightOutlined, ArrowUpOutlined, EyeOutlined, Pl
 import { useOverview } from '../lib/queries';
 import { useUrlParams } from '../lib/urlState';
 import { AccountsContext } from '../lib/session';
-import { ageText, accountGroups, cnyText, compactNumber as number, compactPrice as price, comparePositionAmount, directionLabel, entryPriceText, groupTradePnl, maxPositionPolicyLabel, modeLabel, numeric, positivePrice, positionAmount, positionGroups, quoteAsset, ratioText, todayCount, todayPnlGroups, todayTradeCounts, trimFractionZeros } from '../lib/format';
-import { ErrorNotice, PageTitle, Pnl, SignalButton, SignalChip, StatusTag } from '../components/Common';
+import { ageText, accountGroups, cnyText, compactNumber as number, compactPrice as price, comparePositionAmount, directionLabel, entryPriceText, groupTradePnl, maxPositionPolicyLabel, modeLabel, numeric, positivePrice, positionAmount, positionGroups, quoteAsset, ratioText, todayPnlGroups, todayTradeCounts, trimFractionZeros } from '../lib/format';
+import { ErrorNotice, PageTitle, Pnl, SignalButton, SignalChip, StatusTag, type Signal } from '../components/Common';
 import { runBatchControls, useControls } from '../components/Controls';
 import type { Pair } from '../lib/types';
 import { OverviewLoading } from '../components/Loading';
@@ -67,6 +67,17 @@ export default function OverviewPage() {
   const tradePnlGroups = groupTradePnl(displayedTrades);
   const stale = !!overview.error || now - overview.dataUpdatedAt > 10_000;
   const pairs = entries.map(toPair);
+  let runningCount = 0, pausedCount = 0, stoppedCount = 0, errorCount = 0, liveCount = 0, allPaper = pairs.length > 0;
+  for (const p of pairs) {
+    if (p.status === 'RUNNING') runningCount++;
+    else if (p.status === 'PAUSED') pausedCount++;
+    else if (p.status === 'STOPPED') stoppedCount++;
+    else if (p.status === 'ERROR') errorCount++;
+    if (p.mode === 'LIVE') liveCount++;
+    if (p.mode !== 'PAPER') allPaper = false;
+  }
+  const tradeCountsBySymbol = new Map(entries.map(e => [e.snapshot.symbol, todayTradeCounts(e.snapshot, now)]));
+  const totalToday = (symbol: string) => { const c = tradeCountsBySymbol.get(symbol); return c ? c.buy + c.sell : -1; };
   const batch = async (action: 'pause' | 'resume') => {
     if (batchLock.current) return;
     batchLock.current = true; setBatchBusy(true);
@@ -103,29 +114,31 @@ export default function OverviewPage() {
   };
   const matchesStatus = (e: typeof entries[number]) => statusFilter === 'all' || (statusFilter === 'LIVE' ? e.mode === 'LIVE' : e.snapshot.status === statusFilter);
   const visible = entries.filter(e => e.snapshot.symbol.includes(search.toUpperCase().trim()) && matchesStatus(e))
-    .sort((a, b) => sort === 'position' ? Number(b.snapshot.status === 'RUNNING') - Number(a.snapshot.status === 'RUNNING') || comparePositionAmount(a.snapshot, b.snapshot) : sort === 'today' ? (todayCount(b.snapshot, now) ?? -1) - (todayCount(a.snapshot, now) ?? -1) : sort === 'orders' ? (b.snapshot.stats.active_buy_orders + b.snapshot.stats.active_sell_orders) - (a.snapshot.stats.active_buy_orders + a.snapshot.stats.active_sell_orders) : a.snapshot.symbol.localeCompare(b.snapshot.symbol));
+    .sort((a, b) => sort === 'position' ? Number(b.snapshot.status === 'RUNNING') - Number(a.snapshot.status === 'RUNNING') || comparePositionAmount(a.snapshot, b.snapshot) : sort === 'today' ? totalToday(b.snapshot.symbol) - totalToday(a.snapshot.symbol) : sort === 'orders' ? (b.snapshot.stats.active_buy_orders + b.snapshot.stats.active_sell_orders) - (a.snapshot.stats.active_buy_orders + a.snapshot.stats.active_sell_orders) : a.snapshot.symbol.localeCompare(b.snapshot.symbol));
   const clearFilters = () => updateFilters({ q: '', sort: 'position', status: 'all' });
-  const counts = entries.map(e => todayTradeCounts(e.snapshot, now));
-  const today = counts.every(c => c !== null) ? counts.reduce<{ buy: number; sell: number }>((sum, c) => ({ buy: sum.buy + c!.buy, sell: sum.sell + c!.sell }), { buy: 0, sell: 0 }) : null;
+  const counts = [...tradeCountsBySymbol.values()];
+  const today = counts.every(c => c !== null) ? counts.reduce<{ buy: number; sell: number }>((sum, c) => ({ buy: sum.buy + c.buy, sell: sum.sell + c.sell }), { buy: 0, sell: 0 }) : null;
   const pnlGroups = todayPnlGroups(overview.data?.today_pnl, now);
   const accountList = accountGroups(accounts, now);
   const positionList = positionGroups(entries);
+  const renderStatusButton = (value: string, tier: Signal, label: string, count: number) =>
+    overview.data && count > 0 ? <SignalButton tier={tier} active={statusFilter === value} onClick={() => setStatusFilter(statusFilter === value ? 'all' : value)}>{label} {count}</SignalButton> : null;
   return <>
     <PageTitle title="策略运行概览" description="账户、持仓与全部策略的实时状态" />
     <ErrorNotice error={overview.error} retry={() => void overview.refetch()} />
-    {overview.data && pairs.length > 0 && pairs.every(p => p.mode === 'PAPER') && <PaperGuide firstSymbol={pairs[0].symbol} />}
+    {overview.data && allPaper && <PaperGuide firstSymbol={pairs[0].symbol} />}
     <section className={`overview-banner${stale ? ' is-stale' : ''}`} aria-label="策略运行概览">
       <div className="signal-strip">
         {stale && <SignalChip tier="yellow">数据暂未更新，请检查连接</SignalChip>}
         {stale && overview.dataUpdatedAt > 0 && <span className="muted freshness">上次更新于 {ageText(overview.dataUpdatedAt, now)}</span>}
-        {overview.data && pairs.some(p => p.mode === 'LIVE') && <SignalButton tier="orange" active={statusFilter === 'LIVE'} onClick={() => setStatusFilter(statusFilter === 'LIVE' ? 'all' : 'LIVE')}>实盘策略 {pairs.filter(p => p.mode === 'LIVE').length}</SignalButton>}
-        {overview.data && pairs.some(p => p.status === 'ERROR') && <SignalButton tier="red" active={statusFilter === 'ERROR'} onClick={() => setStatusFilter(statusFilter === 'ERROR' ? 'all' : 'ERROR')}>异常 {pairs.filter(p => p.status === 'ERROR').length}</SignalButton>}
-        {overview.data && pairs.some(p => p.status === 'PAUSED') && <SignalButton tier="blue" active={statusFilter === 'PAUSED'} onClick={() => setStatusFilter(statusFilter === 'PAUSED' ? 'all' : 'PAUSED')}>已暂停 {pairs.filter(p => p.status === 'PAUSED').length}</SignalButton>}
-        {overview.data && !stale && pairs.length > 0 && pairs.every(p => p.status === 'RUNNING') && <SignalChip tier="calm">全部策略运行正常</SignalChip>}
-        {overview.data && pairs.some(p => p.status === 'STOPPED') && <SignalButton tier="blue" active={statusFilter === 'STOPPED'} onClick={() => setStatusFilter(statusFilter === 'STOPPED' ? 'all' : 'STOPPED')}>已停止 {pairs.filter(p => p.status === 'STOPPED').length}</SignalButton>}
+        {renderStatusButton('LIVE', 'orange', '实盘策略', liveCount)}
+        {renderStatusButton('ERROR', 'red', '异常', errorCount)}
+        {renderStatusButton('PAUSED', 'blue', '已暂停', pausedCount)}
+        {overview.data && !stale && pairs.length > 0 && runningCount === pairs.length && <SignalChip tier="calm">全部策略运行正常</SignalChip>}
+        {renderStatusButton('STOPPED', 'blue', '已停止', stoppedCount)}
       </div>
       <div className="overview-stats">
-        <div className="overview-stat"><span>运行中</span><strong>{overview.data ? pairs.filter(p => p.status === 'RUNNING').length : '--'}</strong></div>
+        <div className="overview-stat"><span>运行中</span><strong>{overview.data ? runningCount : '--'}</strong></div>
         <div className="overview-stat"><span>策略总数</span><strong>{overview.data ? pairs.length : '--'}</strong></div>
         <div className="overview-stat"><span>今日成交</span><strong>{overview.data && today ? today.buy + today.sell : '--'}<small> 笔</small></strong><em className="overview-trade-breakdown">买单 {overview.data && today ? today.buy : '--'} 笔 / 卖单 {overview.data && today ? today.sell : '--'} 笔</em></div>
         <div className="overview-stat" aria-label="今日已实现盈亏">
@@ -201,7 +214,7 @@ export default function OverviewPage() {
         const { snapshot: s } = e;
         const pair = toPair(e);
         const quote = quoteAsset(s.symbol), result = controls.results[s.symbol];
-        const tradeCounts = todayTradeCounts(s, now);
+        const tradeCounts = tradeCountsBySymbol.get(s.symbol) ?? null;
         const size = numeric(s.position.size), entry = numeric(s.position.entry_price), mark = numeric(s.ticker.mark_price);
         const validEntry = size !== null && size !== 0 && entry !== null && entry > 0;
         const change = validEntry && mark !== null && mark > 0 ? (mark / entry - 1) * 100 : null;
