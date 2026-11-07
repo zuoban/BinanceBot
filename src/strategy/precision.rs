@@ -68,8 +68,12 @@ impl SymbolRules {
                     tick_size: tick,
                 } => {
                     tick_size = *tick;
-                    min_price = *min_p;
-                    max_price = *max_p;
+                    if *min_p >= Decimal::ZERO {
+                        min_price = *min_p;
+                    }
+                    if *max_p > Decimal::ZERO && *max_p >= min_price {
+                        max_price = *max_p;
+                    }
                 }
                 BinanceFilter::LotSize {
                     min_qty: min_q,
@@ -77,10 +81,16 @@ impl SymbolRules {
                     step_size: step,
                 } => {
                     step_size = *step;
-                    min_qty = *min_q;
-                    max_qty = *max_q;
+                    if *min_q > Decimal::ZERO {
+                        min_qty = *min_q;
+                    }
+                    if *max_q > Decimal::ZERO && *max_q >= min_qty {
+                        max_qty = *max_q;
+                    }
                 }
-                BinanceFilter::MinNotional { notional: Some(n) } => min_notional = *n,
+                BinanceFilter::MinNotional { notional: Some(n) } if *n > Decimal::ZERO => {
+                    min_notional = *n;
+                }
                 _ => {}
             }
         }
@@ -125,6 +135,34 @@ impl SymbolRules {
         interval > Decimal::ZERO && price > Decimal::ZERO && price % interval == Decimal::ZERO
     }
 
+    pub fn is_valid_maker_grid_price(
+        &self,
+        grid: &crate::config::GridConfig,
+        side: OrderSide,
+        price: Decimal,
+        market: Decimal,
+    ) -> bool {
+        if price <= Decimal::ZERO || market <= Decimal::ZERO || grid.grid_interval <= Decimal::ZERO
+        {
+            return false;
+        }
+        let maker_ok = match side {
+            OrderSide::Buy => price < market,
+            OrderSide::Sell => price > market,
+        };
+        let min_price = grid
+            .min_price
+            .unwrap_or(self.min_price)
+            .max(self.min_price)
+            .max(grid.grid_interval);
+        let max_price = grid.max_price.unwrap_or(self.max_price).min(self.max_price);
+        maker_ok
+            && price >= min_price
+            && price <= max_price
+            && self.round_price(price) == price
+            && self.is_grid_price(price, grid.grid_interval)
+    }
+
     /// Zero-anchored levels survive market moves and restarts.
     /// Count eligible levels, skipping reservations without consuming window slots.
     /// At an exact level, neither side places an order at the current market price.
@@ -145,10 +183,27 @@ impl SymbolRules {
             .max(self.min_price)
             .max(interval);
         let max = bounds.1.unwrap_or(self.max_price).min(self.max_price);
-        let below =
-            ((market / interval).ceil() - Decimal::ONE).min((max / interval).floor()) * interval;
-        let above =
-            ((market / interval).floor() + Decimal::ONE).max((min / interval).ceil()) * interval;
+        let (Some(market_steps), Some(min_steps), Some(max_steps)) = (
+            market.checked_div(interval),
+            min.checked_div(interval),
+            max.checked_div(interval),
+        ) else {
+            return (Vec::new(), Vec::new());
+        };
+        let (Some(below), Some(above)) = (
+            market_steps
+                .ceil()
+                .checked_sub(Decimal::ONE)
+                .map(|steps| steps.min(max_steps.floor()))
+                .and_then(|steps| steps.checked_mul(interval)),
+            market_steps
+                .floor()
+                .checked_add(Decimal::ONE)
+                .map(|steps| steps.max(min_steps.ceil()))
+                .and_then(|steps| steps.checked_mul(interval)),
+        ) else {
+            return (Vec::new(), Vec::new());
+        };
         let collect = |side, mut price, count, step| {
             let mut prices = Vec::new();
             while prices.len() < count && price >= min && price <= max {
@@ -190,7 +245,7 @@ impl SymbolRules {
 
     /// Calculate compliant order quantity given target USDC notional amount and price
     pub fn calculate_quantity(&self, price: Decimal, amount_usdc: Decimal) -> Option<Decimal> {
-        if price.is_zero() || amount_usdc.is_zero() {
+        if price <= Decimal::ZERO || amount_usdc <= Decimal::ZERO {
             return None;
         }
         let raw_qty = amount_usdc / price;
@@ -236,12 +291,7 @@ impl SymbolRules {
 }
 
 fn calculate_scale(d: Decimal) -> u32 {
-    let s = d.normalize().to_string();
-    if let Some(pos) = s.find('.') {
-        (s.len() - 1 - pos) as u32
-    } else {
-        0
-    }
+    d.normalize().scale()
 }
 
 #[cfg(test)]
@@ -349,5 +399,50 @@ mod tests {
         rules.tick_size = dec!(0.05);
         assert!(rules.validate_grid_interval(dec!(0.1)).is_ok());
         assert!(rules.validate_grid_interval(dec!(0.12)).is_err());
+    }
+
+    #[test]
+    fn exchange_filters_ignore_invalid_bounds_and_extremes_do_not_overflow() {
+        let info: BinanceExchangeInfo = serde_json::from_value(serde_json::json!({
+            "symbols": [{
+                "symbol": "SOLUSDC", "status": "TRADING", "pricePrecision": 2,
+                "quantityPrecision": 2, "filters": [
+                    {"filterType": "PRICE_FILTER", "minPrice": "-1", "maxPrice": "0", "tickSize": "0.01"},
+                    {"filterType": "LOT_SIZE", "minQty": "0", "maxQty": "0", "stepSize": "0.01"},
+                    {"filterType": "MIN_NOTIONAL", "notional": "0"}
+                ]
+            }]
+        }))
+        .unwrap();
+        let rules = SymbolRules::from_exchange_info(&info, "SOLUSDC").unwrap();
+        assert_eq!(rules.min_price, dec!(0.0001));
+        assert_eq!(rules.max_price, dec!(1000000.0));
+        assert_eq!(rules.min_qty, dec!(0.01));
+        assert_eq!(rules.max_qty, dec!(1000000.0));
+        assert_eq!(rules.min_notional, dec!(5.0));
+        assert_eq!(rules.calculate_quantity(dec!(-100), dec!(100)), None);
+        assert_eq!(rules.calculate_quantity(dec!(100), dec!(-100)), None);
+
+        let tiny = Decimal::new(1, 28);
+        let (buys, sells) =
+            rules.grid_window_prices(dec!(100), tiny, (3, 3), (None, None), |_, _| true);
+        assert!(buys.is_empty() && sells.is_empty());
+
+        let grid = crate::config::GridConfig {
+            grid_interval: dec!(0.1),
+            min_price: Some(dec!(100)),
+            max_price: Some(dec!(120)),
+            ..crate::config::GridConfig::default()
+        };
+        assert!(rules.is_valid_maker_grid_price(&grid, OrderSide::Buy, dec!(110.0), dec!(110.1)));
+        assert!(!rules.is_valid_maker_grid_price(&grid, OrderSide::Buy, dec!(110.1), dec!(110.1)));
+        assert!(rules.is_valid_maker_grid_price(&grid, OrderSide::Sell, dec!(110.2), dec!(110.1)));
+        assert!(!rules.is_valid_maker_grid_price(
+            &grid,
+            OrderSide::Sell,
+            dec!(110.25),
+            dec!(110.1)
+        ));
+        assert!(!rules.is_valid_maker_grid_price(&grid, OrderSide::Buy, dec!(99.9), dec!(110.1)));
     }
 }

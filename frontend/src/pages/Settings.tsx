@@ -8,6 +8,7 @@ import type { GlobalConfig, ServerConfig } from '../lib/types';
 import { ErrorNotice, PageTitle } from '../components/Common';
 import { LoadErrorBoundary } from '../components/LoadErrorBoundary';
 import { useUrlParam } from '../lib/urlState';
+import { isPercentDecimal, isPositiveDecimal, sameDecimal } from '../lib/gridPreview';
 
 const DatabaseSettings = lazy(() => import('../components/DatabaseSettings').then(module => ({ default: module.DatabaseSettings })));
 
@@ -70,17 +71,21 @@ function GlobalSettings() {
     submitting.current = true;
     flushSync(() => edit.setSaving(true));
     const changes: string[] = [];
-    if ((values.global_max_position_notional || null) !== (baseline.current?.global_max_position_notional || null)) {
+    const nextNotional = values.global_max_position_notional || null, baseNotional = baseline.current?.global_max_position_notional || null;
+    if (nextNotional !== baseNotional && !sameDecimal(nextNotional, baseNotional)) {
       changes.push(`全局最大持仓金额：${values.global_max_position_notional || '关闭'}`);
     }
     if (!!values.pause_on_zero_available_margin !== !!baseline.current?.pause_on_zero_available_margin) {
       changes.push(`保证金不足时暂停：${values.pause_on_zero_available_margin ? '开启' : '关闭'}`);
     }
-    if ((values.min_available_margin_pct || null) !== (baseline.current?.min_available_margin_pct || null)) {
+    const nextMarginPct = values.min_available_margin_pct || null, baseMarginPct = baseline.current?.min_available_margin_pct || null;
+    if (nextMarginPct !== baseMarginPct && !sameDecimal(nextMarginPct, baseMarginPct)) {
       changes.push(`可用保证金比例下限：${values.min_available_margin_pct ? `${values.min_available_margin_pct}%` : '关闭'}`);
     }
-    if (!baseline.current?.has_api_key && (values.api_key?.trim() || values.api_secret?.trim())) changes.push('配置 API Key 和 Secret（所有交易对将以实盘运行并保持暂停）');
     if (values.clear_api_credentials) changes.push('清除已保存的 API Key 和 Secret（所有交易对将以模拟盘运行并保持暂停）');
+    else if (values.api_key?.trim() || values.api_secret?.trim()) {
+      changes.push(baseline.current?.has_api_key ? '更新 API Key 或 Secret（所有交易对将以新账户实盘运行并保持暂停）' : '配置 API Key 和 Secret（所有交易对将以实盘运行并保持暂停）');
+    }
     if (values.clear_telegram_credentials) changes.push('清除已保存的 Telegram 凭证');
     try {
       if (changes.length && !await modal.confirm({
@@ -100,6 +105,8 @@ function GlobalSettings() {
       throw error;
     }
   };
+  const clearApi = !!Form.useWatch('clear_api_credentials', form);
+  const clearTelegram = !!Form.useWatch('clear_telegram_credentials', form);
   return <>
     <ErrorNotice error={query.error} retry={() => void query.refetch()} />
     <ErrorNotice error={mutation.error} />
@@ -112,8 +119,8 @@ function GlobalSettings() {
       <Card title="交易所连接" className="settings-card">
         <Alert type="info" showIcon title={`密钥不会回显，留空将保留已有值。${query.data?.has_api_key ? `当前 API Key：${query.data.api_key_preview}` : '尚未配置 API Key。'}运行模式由 API Key 决定：已配置以实盘运行，未配置以模拟盘运行。`} />
         <Row gutter={[20, 16]} className="settings-fields">
-          <Col xs={24} md={12}><Form.Item name="api_key" label="API Key"><Input.Password autoComplete="off" placeholder="留空保留已保存的值" /></Form.Item></Col>
-          <Col xs={24} md={12}><Form.Item name="api_secret" label="API Secret"><Input.Password autoComplete="new-password" placeholder="留空保留已保存的值" /></Form.Item></Col>
+          <Col xs={24} md={12}><Form.Item name="api_key" label="API Key"><Input.Password autoComplete="off" placeholder="留空保留已保存的值" disabled={!ready || edit.saving || clearApi} /></Form.Item></Col>
+          <Col xs={24} md={12}><Form.Item name="api_secret" label="API Secret"><Input.Password autoComplete="new-password" placeholder="留空保留已保存的值" disabled={!ready || edit.saving || clearApi} /></Form.Item></Col>
           <Col xs={24} md={12}><Form.Item name="recv_window" label="请求有效窗口（毫秒）" extra="交易所接受已签名请求的时间窗口。" rules={[{ required: true }]}><InputNumber min={1} precision={0} className="full-width-input" /></Form.Item></Col>
           <Col xs={24} md={12}><Form.Item name="sync_interval_secs" label="同步间隔（秒）" extra="策略定期同步订单、账户和持仓的间隔。" rules={[{ required: true }]}><InputNumber min={1} precision={0} className="full-width-input" /></Form.Item></Col>
         </Row>
@@ -127,9 +134,9 @@ function GlobalSettings() {
         <Col xs={24} xl={12} className="settings-grid-col">
           <Card title="全局风控" className="settings-card settings-card-fill">
             <Row gutter={[20, 16]}>
-              <Col span={24}><Form.Item name="global_max_position_notional" label="全局最大持仓金额" extra="留空表示关闭；所有已配置策略的持仓绝对金额直接相加（包括不同模式和计价资产，不进行汇率换算），达到后暂停所有策略。" rules={[{ validator: (_, value: string | null | undefined) => !value || (/^\d+(\.\d+)?$/.test(value) && /[1-9]/.test(value)) ? Promise.resolve() : Promise.reject(new Error('请输入大于 0 的金额')) }]}><InputNumber stringMode min="0" className="full-width-input" /></Form.Item></Col>
+              <Col span={24}><Form.Item name="global_max_position_notional" label="全局最大持仓金额" extra="留空表示关闭；所有已配置策略的持仓绝对金额直接相加（包括不同模式和计价资产，不进行汇率换算），达到后暂停所有策略。" rules={[{ validator: (_, value: string | null | undefined) => !value || isPositiveDecimal(value) ? Promise.resolve() : Promise.reject(new Error('请输入大于 0 的金额')) }]}><InputNumber stringMode min="0" className="full-width-input" /></Form.Item></Col>
               <Col span={24}><Form.Item name="pause_on_zero_available_margin" label="可用保证金不足时暂停" valuePropName="checked" extra="开启后，任意已配置策略的可用保证金小于或等于零时，暂停所有策略、撤销机器人挂单并保留持仓。"><Switch checkedChildren="开启" unCheckedChildren="关闭" /></Form.Item></Col>
-              <Col span={24}><Form.Item name="min_available_margin_pct" label="可用保证金比例下限（%）" extra="留空表示关闭。任意已配置策略的可用保证金占保证金余额的比例小于或等于该值时，暂停所有策略、撤销机器人挂单并保留持仓，处理方式与“可用保证金不足时暂停”相同。" rules={[{ validator: (_, value: string | null | undefined) => !value || (Number(value) > 0 && Number(value) < 100) ? Promise.resolve() : Promise.reject(new Error('请输入大于 0 且小于 100 的百分比')) }]}><InputNumber stringMode min="0" max="100" className="full-width-input" /></Form.Item></Col>
+              <Col span={24}><Form.Item name="min_available_margin_pct" label="可用保证金比例下限（%）" extra="留空表示关闭。任意已配置策略的可用保证金占保证金余额的比例小于或等于该值时，暂停所有策略、撤销机器人挂单并保留持仓，处理方式与“可用保证金不足时暂停”相同。" rules={[{ validator: (_, value: string | null | undefined) => !value || isPercentDecimal(value) ? Promise.resolve() : Promise.reject(new Error('请输入大于 0 且小于 100 的百分比')) }]}><InputNumber stringMode min="0" max="100" className="full-width-input" /></Form.Item></Col>
             </Row>
           </Card>
         </Col>
@@ -137,7 +144,7 @@ function GlobalSettings() {
           <Card title="Telegram 通知" className="settings-card settings-card-fill">
             <Row gutter={[16, 16]}>
               <Col span={24}><Form.Item name="telegram_enabled" label="通知开关" valuePropName="checked"><Switch checkedChildren="开启" unCheckedChildren="关闭" /></Form.Item></Col>
-              <Col xs={24} sm={12}><Form.Item name="telegram_bot_token" label="Bot Token" extra={query.data?.has_telegram_bot_token ? '已保存 Token，留空保持不变。' : '尚未配置 Token。'}><Input.Password autoComplete="new-password" /></Form.Item></Col>
+              <Col xs={24} sm={12}><Form.Item name="telegram_bot_token" label="Bot Token" extra={query.data?.has_telegram_bot_token ? '已保存 Token，留空保持不变。' : '尚未配置 Token。'}><Input.Password autoComplete="new-password" disabled={!ready || edit.saving || clearTelegram} /></Form.Item></Col>
               <Col xs={24} sm={12}><Form.Item name="telegram_chat_id" label="Chat ID" extra="向机器人发送消息后，可通过 Telegram Bot API 的 getUpdates 获取会话 ID。"><Input /></Form.Item></Col>
             </Row>
             <div className="settings-card-footer">

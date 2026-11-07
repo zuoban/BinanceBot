@@ -39,15 +39,16 @@ fn parse_market_update(
         .and_then(Value::as_str)
         .map(str::to_owned);
     if stream.is_some() {
-        payload = payload.get("data")?.clone();
+        payload = payload.get_mut("data").map(Value::take)?;
     }
     let event_type = payload.get("e")?.as_str()?;
     let (event_time, info, last_time) = match event_type {
         "24hrTicker" => {
-            if stream
-                .as_deref()
-                .is_some_and(|s| s != format!("{}@ticker", symbol.to_lowercase()))
-            {
+            if stream.as_deref().is_some_and(|stream| {
+                !stream
+                    .strip_suffix("@ticker")
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case(symbol))
+            }) {
                 return None;
             }
             let msg: BinanceWs24hrTicker = serde_json::from_value(payload).ok()?;
@@ -79,10 +80,11 @@ fn parse_market_update(
             )
         }
         "markPriceUpdate" => {
-            if stream
-                .as_deref()
-                .is_some_and(|s| s != format!("{}@markPrice@1s", symbol.to_lowercase()))
-            {
+            if stream.as_deref().is_some_and(|stream| {
+                !stream
+                    .strip_suffix("@markPrice@1s")
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case(symbol))
+            }) {
                 return None;
             }
             let msg: BinanceWsMarkPrice = serde_json::from_value(payload).ok()?;

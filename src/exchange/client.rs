@@ -184,6 +184,9 @@ pub struct BinanceFuturesClient {
     api_secret: String,
     client: Client,
     recv_window: u64,
+    account_cache_key: [u8; 32],
+    account_identity_key: [u8; 32],
+    rate_account_key: [u8; 32],
     time_offset_ms: AtomicI64,
     limiter: Arc<RateLimiter>,
     fill_progress: std::sync::Mutex<std::collections::HashMap<(String, i64), FillCacheEntry>>,
@@ -222,8 +225,14 @@ impl BinanceFuturesClient {
     }
 
     pub(crate) fn new_with_limiter(config: &ExchangeConfig, limiter: Arc<RateLimiter>) -> Self {
-        let base_url = "https://fapi.binance.com".to_string();
+        Self::new_with_base_url_and_limiter(config, "https://fapi.binance.com".to_string(), limiter)
+    }
 
+    fn new_with_base_url_and_limiter(
+        config: &ExchangeConfig,
+        base_url: String,
+        limiter: Arc<RateLimiter>,
+    ) -> Self {
         let mut headers = HeaderMap::new();
         if !config.api_key.is_empty() {
             if let Ok(mut val) = HeaderValue::from_str(&config.api_key) {
@@ -238,12 +247,24 @@ impl BinanceFuturesClient {
             .build()
             .expect("Failed to build HTTP client");
 
+        let account_cache_key = Self::compute_account_cache_key(
+            &base_url,
+            &config.api_key,
+            &config.api_secret,
+            config.recv_window,
+        );
+        let account_identity_key = Self::identity_key(&base_url, &config.api_key);
+        let rate_account_key = Sha256::digest(config.api_key.as_bytes()).into();
+
         Self {
             base_url,
             _api_key: config.api_key.clone(),
             api_secret: config.api_secret.clone(),
             client,
             recv_window: config.recv_window,
+            account_cache_key,
+            account_identity_key,
+            rate_account_key,
             time_offset_ms: AtomicI64::new(0),
             limiter,
             fill_progress: std::sync::Mutex::new(Default::default()),
@@ -254,9 +275,11 @@ impl BinanceFuturesClient {
     }
     /// Rebuild credentials while keeping the configured endpoint and rate limiter.
     pub(crate) fn reconfig(&self, config: &ExchangeConfig) -> Self {
-        let mut client = Self::new_with_limiter(config, Arc::clone(&self.limiter));
-        client.base_url.clone_from(&self.base_url);
-        client
+        Self::new_with_base_url_and_limiter(
+            config,
+            self.base_url.clone(),
+            Arc::clone(&self.limiter),
+        )
     }
 
     #[cfg(test)]
@@ -270,9 +293,7 @@ impl BinanceFuturesClient {
         base_url: String,
         limiter: Arc<RateLimiter>,
     ) -> Self {
-        let mut client = Self::new_with_limiter(config, limiter);
-        client.base_url = base_url;
-        client
+        Self::new_with_base_url_and_limiter(config, base_url, limiter)
     }
 
     /// Synchronize local timestamp with Binance Futures server time
@@ -303,12 +324,21 @@ impl BinanceFuturesClient {
     }
 
     pub(crate) fn account_cache_key(&self) -> [u8; 32] {
+        self.account_cache_key
+    }
+
+    fn compute_account_cache_key(
+        base_url: &str,
+        api_key: &str,
+        api_secret: &str,
+        recv_window: u64,
+    ) -> [u8; 32] {
         let mut hash = Sha256::new();
         for value in [
-            self.base_url.as_bytes(),
-            self._api_key.as_bytes(),
-            self.api_secret.as_bytes(),
-            &self.recv_window.to_be_bytes(),
+            base_url.as_bytes(),
+            api_key.as_bytes(),
+            api_secret.as_bytes(),
+            &recv_window.to_be_bytes(),
         ] {
             hash.update((value.len() as u64).to_be_bytes());
             hash.update(value);
@@ -319,7 +349,7 @@ impl BinanceFuturesClient {
     // Recovery records belong to the exchange account, independent of request
     // timing settings or changes to the API secret for the same API key.
     pub(crate) fn account_identity_key(&self) -> [u8; 32] {
-        Self::identity_key(&self.base_url, &self._api_key)
+        self.account_identity_key
     }
 
     pub(crate) fn configured_account_identity(config: &ExchangeConfig) -> [u8; 32] {
@@ -336,7 +366,7 @@ impl BinanceFuturesClient {
     }
 
     fn rate_account_key(&self) -> [u8; 32] {
-        Sha256::digest(self._api_key.as_bytes()).into()
+        self.rate_account_key
     }
 
     #[cfg(test)]

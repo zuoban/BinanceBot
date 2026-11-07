@@ -148,7 +148,8 @@ impl TradeNotificationContext {
             30
         };
         let fresh = flat_paper || (age >= Duration::zero() && age < Duration::seconds(max_age));
-        let matching_asset = account.asset == quote_asset(&trade.symbol);
+        let matching_asset =
+            crate::types::quote_asset(&trade.symbol).is_some_and(|asset| account.asset == asset);
         let account_equity = (fresh && matching_asset).then_some(account.margin_balance);
         let wallet_balance = ((trade.mode == TradingMode::Paper || fresh) && matching_asset)
             .then_some(account.total_wallet_balance);
@@ -210,19 +211,12 @@ impl TradeNotificationContext {
     }
 }
 
-fn quote_asset(symbol: &str) -> &'static str {
-    ["USDC", "USDT", "FDUSD", "BUSD"]
-        .into_iter()
-        .find(|asset| symbol.ends_with(asset))
-        .unwrap_or("计价资产")
-}
-
 pub fn format_trade_message(trade: &TradeRecord, context: &TradeNotificationContext) -> String {
     let icon = match trade.side {
         OrderSide::Buy => "🟢",
         OrderSide::Sell => "🔴",
     };
-    let quote = quote_asset(&trade.symbol);
+    let quote = crate::types::quote_asset(&trade.symbol).unwrap_or("计价资产");
     let average_price = trade.price.normalize();
     let count = |value: Option<u64>| value.map_or_else(|| "--".to_string(), |n| n.to_string());
     let money = |value: Option<Decimal>| {
@@ -595,6 +589,21 @@ mod tests {
             assert!(message.contains("账户权益：-- USDC｜</b>--"));
             assert!(message.ends_with("可用余额：-- USDC｜--"));
         }
+        let mut unknown_symbol = trade.clone();
+        unknown_symbol.symbol = "BTCETH".into();
+        let fallback_account = AccountInfo {
+            asset: "计价资产".into(),
+            ..account(trade.timestamp)
+        };
+        let context = TradeNotificationContext::for_trade(
+            &unknown_symbol,
+            None,
+            &fallback_account,
+            None,
+            trade.timestamp,
+        );
+        assert_eq!(context.available_balance, None);
+        assert!(format_trade_message(&unknown_symbol, &context).contains("计价资产"));
     }
 
     #[test]

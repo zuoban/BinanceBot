@@ -26,7 +26,10 @@ const statusMeta: Record<Status, { tier: Signal; icon: React.ReactNode }> = {
   ERROR: { tier: 'red', icon: <CloseCircleFilled /> },
 };
 export const StatusTag = ({ status }: { status: Status }) => <span className={`signal signal-${statusMeta[status].tier}`}><span className="signal-icon" aria-hidden="true">{statusMeta[status].icon}</span>{statusLabel[status]}</span>;
-export const Pnl = ({ value, compact = false }: { value: unknown; compact?: boolean }) => <span className={Number(value) < 0 ? 'negative numeric' : 'positive numeric'}>{compact ? trimFractionZeros(number(value)) : number(value)}</span>;
+export function Pnl({ value, compact = false }: { value: unknown; compact?: boolean }) {
+  const text = compact ? trimFractionZeros(number(value)) : number(value);
+  return <span className={text.startsWith('-') ? 'negative numeric' : text === '--' ? 'numeric' : 'positive numeric'}>{text}</span>;
+}
 export const NoData = () => <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无数据" />;
 export function PageBreadcrumb({ items, disabled = false }: { items: { label: string; to?: string }[]; disabled?: boolean }) {
   return <nav className="page-breadcrumb" aria-label="面包屑"><ol>{items.map((item, index) => {

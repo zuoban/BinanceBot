@@ -1,5 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { api } from '../lib/api';
+import { downloadDatabase } from '../lib/database';
 
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
@@ -51,4 +52,16 @@ it('preserves caller cancellation without treating it as a connection failure', 
   caller.abort(reason);
   await result;
   expect(timeout.signal.aborted).toBe(false);
+});
+
+it('uses the 120s timeout for database exports instead of the default 15s timeout', async () => {
+  const timeout = new AbortController();
+  const timeoutFactory = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(timeout.signal);
+  vi.stubGlobal('fetch', pendingFetch());
+  const request = downloadDatabase('/api/database/export');
+  const result = expect(request).rejects.toMatchObject({ status: 0 });
+  expect(timeoutFactory).toHaveBeenCalledOnce();
+  expect(timeoutFactory).toHaveBeenCalledWith(120_000);
+  timeout.abort(new DOMException('Timed out', 'TimeoutError'));
+  await result;
 });

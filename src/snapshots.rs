@@ -249,7 +249,7 @@ pub(crate) async fn collect_hourly(
         updates.push(update);
     }
     let observations = futures_util::future::join_all(states.iter().map(|state| async {
-        let snapshot = state.snapshot().await;
+        let snapshot = state.snapshot_for_hourly().await;
         let config = state.config.read().await;
         let identity = (snapshot.mode == TradingMode::Live).then(|| {
             crate::exchange::client::BinanceFuturesClient::configured_account_identity(

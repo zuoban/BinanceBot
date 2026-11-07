@@ -976,7 +976,7 @@ async fn get_global_config_handler(
             let global = crate::config::GlobalConfig::from_app(&config);
             Json(ApiResponse {
                 success: true,
-                data: Some(web_global_config_view(&config, &global)),
+                data: Some(web_global_config_view(&global)),
                 message: None,
             })
         }
@@ -1012,9 +1012,7 @@ async fn post_global_config_handler(
     }
     match handle.update_global_config(payload).await {
         Ok(global) => {
-            let mut config = AppConfig::default();
-            global.apply_to(&mut config);
-            let view = web_global_config_view(&config, &global);
+            let view = web_global_config_view(&global);
             Json(ApiResponse {
                 success: true,
                 data: Some(view),
@@ -1029,24 +1027,20 @@ async fn post_global_config_handler(
     }
 }
 
-fn web_global_config_view(
-    config: &AppConfig,
-    global: &crate::config::GlobalConfig,
-) -> WebGlobalConfigView {
-    let view = web_config_view(config);
+fn web_global_config_view(global: &crate::config::GlobalConfig) -> WebGlobalConfigView {
     WebGlobalConfigView {
         version: crate::db::config_version(global),
         global_max_position_notional: global.global_max_position_notional,
         pause_on_zero_available_margin: global.pause_on_zero_available_margin,
         min_available_margin_pct: global.min_available_margin_pct,
-        recv_window: view.recv_window,
-        sync_interval_secs: view.sync_interval_secs,
-        has_api_key: view.has_api_key,
-        has_api_secret: view.has_api_secret,
-        api_key_preview: view.api_key_preview,
-        telegram_enabled: view.telegram_enabled,
-        has_telegram_bot_token: view.has_telegram_bot_token,
-        telegram_chat_id: view.telegram_chat_id,
+        recv_window: global.recv_window,
+        sync_interval_secs: global.sync_interval_secs,
+        has_api_key: !global.api_key.trim().is_empty(),
+        has_api_secret: !global.api_secret.trim().is_empty(),
+        api_key_preview: mask_api_key_preview(&global.api_key),
+        telegram_enabled: global.telegram.enabled,
+        has_telegram_bot_token: !global.telegram.bot_token.trim().is_empty(),
+        telegram_chat_id: global.telegram.chat_id.clone(),
     }
 }
 
@@ -1583,7 +1577,12 @@ async fn get_status_handler(
 async fn get_orders_handler(
     State(state): State<Arc<AppState>>,
 ) -> Json<ApiResponse<Vec<GridOrder>>> {
-    let orders: Vec<GridOrder> = state.active_orders.read().await.values().cloned().collect();
+    let mut orders: Vec<GridOrder> = state.active_orders.read().await.values().cloned().collect();
+    orders.sort_by(|a, b| {
+        b.price
+            .cmp(&a.price)
+            .then_with(|| a.client_order_id.cmp(&b.client_order_id))
+    });
     Json(ApiResponse {
         success: true,
         data: Some(orders),
@@ -1598,15 +1597,25 @@ async fn get_trades_handler(
     let symbol = config.exchange.symbol.clone();
     let mode = config.exchange.trading_mode();
     drop(config);
+    let query_symbol = symbol.clone();
     let trades = match state
         .db
-        .run_blocking(move |db| db.get_recent_trades_for(&symbol, mode, 100))
+        .run_blocking(move |db| db.get_recent_trades_for(&query_symbol, mode, 100))
         .await
     {
         Ok(t) => t,
         Err(e) => {
             error!("Failed to fetch trades from SQLite: {}", e);
-            state.recent_trades.read().await.iter().cloned().collect()
+            state
+                .recent_trades
+                .read()
+                .await
+                .iter()
+                .filter(|t| t.symbol == symbol && t.mode == mode)
+                .rev()
+                .take(100)
+                .cloned()
+                .collect()
         }
     };
     Json(ApiResponse {
@@ -1766,30 +1775,27 @@ fn pair_config_version(config: &AppConfig, instance: u128) -> String {
     ))
 }
 
+fn mask_api_key_preview(api_key: &str) -> String {
+    let k = api_key.trim();
+    if k.is_empty() {
+        return "未配置".to_string();
+    }
+    let char_count = k.chars().count();
+    if char_count > 8 {
+        format!(
+            "{}...{}",
+            k.chars().take(4).collect::<String>(),
+            k.chars().skip(char_count - 4).collect::<String>()
+        )
+    } else {
+        "****".to_string()
+    }
+}
+
 fn web_config_view(config: &AppConfig) -> WebConfigView {
     let has_key = !config.exchange.api_key.trim().is_empty();
     let has_secret = !config.exchange.api_secret.trim().is_empty();
-
-    let key_preview = if has_key {
-        let k = &config.exchange.api_key;
-        if k.len() > 8 {
-            format!(
-                "{}...{}",
-                k.chars().take(4).collect::<String>(),
-                k.chars()
-                    .rev()
-                    .take(4)
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev()
-                    .collect::<String>()
-            )
-        } else {
-            "****".to_string()
-        }
-    } else {
-        "未配置".to_string()
-    };
+    let key_preview = mask_api_key_preview(&config.exchange.api_key);
 
     let view = WebConfigView {
         config_version: String::new(),
@@ -1905,7 +1911,9 @@ fn apply_config_payload(
         .filter(|_| !payload.clear_telegram_credentials)
     {
         let chat_id = chat_id.trim();
-        current_config.telegram.chat_id = chat_id.to_string();
+        if !chat_id.is_empty() {
+            current_config.telegram.chat_id = chat_id.to_string();
+        }
     }
     current_config.validate()?;
     Ok(current_config)
@@ -4012,5 +4020,64 @@ mod tests {
         assert!(!request.is_finished());
         drop(action_rx);
         assert!(!request.await.unwrap().0.success);
+    }
+
+    #[test]
+    fn mask_api_key_preview_counts_characters_instead_of_utf8_bytes() {
+        assert_eq!(mask_api_key_preview(""), "未配置");
+        assert_eq!(mask_api_key_preview("   "), "未配置");
+        assert_eq!(mask_api_key_preview("abcd1234"), "****");
+        // 4 CJK characters = 12 UTF-8 bytes (> 8 bytes, <= 8 chars): must stay masked.
+        assert_eq!(mask_api_key_preview("密钥测试"), "****");
+        assert_eq!(mask_api_key_preview("一二三四五六七八"), "****");
+        assert_eq!(
+            mask_api_key_preview("一二三四五六七八九"),
+            "一二三四...六七八九"
+        );
+        assert_eq!(mask_api_key_preview("abcdefghijkl"), "abcd...ijkl");
+    }
+
+    #[tokio::test]
+    async fn get_orders_handler_returns_orders_sorted_by_price_desc() {
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let (action_tx, _action_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::new(AppConfig::default(), db, action_tx);
+        {
+            let mut orders = state.active_orders.write().await;
+            for (id, price) in [
+                ("b", rust_decimal_macros::dec!(100)),
+                ("a", rust_decimal_macros::dec!(200)),
+                ("c", rust_decimal_macros::dec!(100)),
+            ] {
+                orders.insert(
+                    id.into(),
+                    crate::types::GridOrder {
+                        client_order_id: id.into(),
+                        order_id: None,
+                        symbol: "SOLUSDC".into(),
+                        side: crate::types::OrderSide::Buy,
+                        price,
+                        quantity: rust_decimal_macros::dec!(1),
+                        amount_usdc: price,
+                        status: crate::types::OrderStatus::New,
+                        created_at: chrono::Utc::now(),
+                        updated_at: chrono::Utc::now(),
+                        grid_level: 0,
+                        paired_client_order_id: None,
+                        is_take_profit: false,
+                        purpose: crate::types::OrderPurpose::Grid,
+                        merge_sources: Vec::new(),
+                    },
+                );
+            }
+        }
+        let response = get_orders_handler(State(state)).await.0;
+        let ids: Vec<_> = response
+            .data
+            .unwrap()
+            .into_iter()
+            .map(|o| o.client_order_id)
+            .collect();
+        assert_eq!(ids, vec!["a", "b", "c"]);
     }
 }

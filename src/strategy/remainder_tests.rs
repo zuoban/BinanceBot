@@ -326,7 +326,7 @@ async fn exchange_server(fake: Exchange) -> (String, tokio::task::JoinHandle<()>
     let app = Router::new()
         .route("/fapi/v1/openOrders", get(|State(fake): State<Exchange>| async move {
             if consume(&fake.hide_open) { return Json(Vec::<BinanceOrderResponse>::new()) }
-            Json(fake.orders.lock().unwrap().values().filter(|o| !terminal(&o.status)).cloned().collect::<Vec<_>>())
+            Json(fake.orders.lock().unwrap().values().filter(|o| !o.is_terminal()).cloned().collect::<Vec<_>>())
         }))
         .route("/fapi/v1/order", get(|State(fake): State<Exchange>, Query(query): Query<HashMap<String,String>>| async move {
             if consume(&fake.fail_lookup) { return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"code": -1000, "msg": "uncertain"}))) }
@@ -621,7 +621,7 @@ async fn unresolved_lookup_blocks_all_new_window_orders_and_pause_cancels_target
         .lock()
         .unwrap()
         .values()
-        .all(|o| terminal(&o.status)));
+        .all(|o| o.is_terminal()));
     assert!(engine.state.active_orders.read().await.is_empty());
     server.abort();
 }

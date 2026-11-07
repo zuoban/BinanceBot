@@ -2,7 +2,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { Alert, Button, Card, Col, Descriptions, Row, Statistic, Tabs } from 'antd';
 import { SettingOutlined } from '@ant-design/icons';
 import { usePairSnapshot, usePairs } from '../lib/queries';
-import { accountGroups, modeOf, number, numeric, price, quoteAsset, ageText, todayTradeCounts } from '../lib/format';
+import { accountGroups, number, numeric, price, quoteAsset, ageText, todayTradeCounts } from '../lib/format';
 import { ErrorNotice, ModeTag, PageBreadcrumb, PageTitle, Pnl, SignalChip, StatusTag } from '../components/Common';
 import { PairControls, useControls } from '../components/Controls';
 import { DepthChart, HourlyChart } from '../components/Charts';
@@ -23,13 +23,13 @@ export default function PairDetail() {
   const now = useNow();
   const [tab, setTab] = useUrlParam<string>('tab', 'monitor', ['monitor', 'orders', 'trades', 'logs']);
   const s = query.data, asset = quoteAsset(symbol ?? '');
-  const account = s && pair ? accountGroups([{ snapshot: s, mode: s.mode, scoped: pair.scoped, account_observation_stale: query.stale }])[0] : undefined;
-  const today = s ? todayTradeCounts(s) : null;
+  const account = s && pair ? accountGroups([{ snapshot: s, mode: s.mode, scoped: pair.scoped, account_observation_stale: query.stale }], now)[0] : undefined;
+  const today = s ? todayTradeCounts(s, now) : null;
   useDocumentTitle(`${s && Number(s.ticker.mark_price) > 0 ? price(s.ticker.mark_price) : '--'} | ${today?.buy ?? '--'}B | ${today?.sell ?? '--'}S`);
   const todayPnl = today && s?.hourly_trade_stats && s.hourly_trade_stats.pending_pnl_count === 0 ? s.hourly_trade_stats.realized_pnl : null;
   const realizedPnl = numeric(s?.stats.total_realized_pnl), commission = numeric(s?.stats.total_commission);
   const netPnl = s?.stats.pending_pnl_trades === 0 && realizedPnl !== null && commission !== null ? realizedPnl - commission : null;
-  const currentPair = pair && s ? { ...pair, status: s.status, grid_config: s.grid_config, mode: modeOf(s) } : pair;
+  const currentPair = pair && s ? { ...pair, status: s.status, grid_config: s.grid_config, mode: s.mode } : pair;
   return <div className="pair-detail">
     <PageBreadcrumb items={[{ label: '策略总览', to: '/' }, { label: symbol ?? '策略详情' }]} />
     <PageTitle title={symbol ?? '策略详情'} description="行情、网格与成交，随策略实时更新"
@@ -45,7 +45,7 @@ export default function PairDetail() {
         <Col xs={24} sm={12} xl={6}><Card><Statistic title={`标记价格 / ${asset}`} value={Number(s.ticker.mark_price) > 0 ? price(s.ticker.mark_price) : '--'} /><div className="muted">最新成交 {price(s.ticker.last_price)}</div></Card></Col>
         <Col xs={24} sm={12} xl={6}><Card><Statistic title={`已实现盈亏 / ${asset}`} value={s.stats.total_realized_pnl} formatter={() => <Pnl value={s.stats.total_realized_pnl} />} /><div className="muted">扣费后 {number(netPnl)}</div></Card></Col>
         <Col xs={24} sm={12} xl={6}><Card><Statistic title={`持仓未实现 / ${asset}`} value={s.position.unrealized_pnl} formatter={() => <Pnl value={s.position.unrealized_pnl} />} /><div className="muted">持仓数量 {price(s.position.size)}</div></Card></Col>
-        <Col xs={24} sm={12} xl={6}><Card><Statistic title={`账户权益 / ${account?.asset || asset}`} value={account?.equity ?? '--'} precision={2} /><div className="muted">≈ ¥{number(account?.cny)} · 可用 {number(account?.available)}</div></Card></Col>
+        <Col xs={24} sm={12} xl={6}><Card><Statistic title={`账户权益 / ${account?.asset || asset}`} value={account?.equity ?? '--'} precision={2} /><div className="muted">{account?.cny != null ? `≈ ¥${number(account.cny)}` : '人民币估值待更新'} · 可用 {number(account?.available)}</div></Card></Col>
       </Row>
       <Tabs className="detail-tabs" activeKey={tab} onChange={setTab} items={[
         { key: 'monitor', label: '实时监控', children: <>
@@ -58,7 +58,7 @@ export default function PairDetail() {
             <Col xs={24} xl={10}><Card title="实时网格深度" extra={<span className="muted">价格 / {asset} · 数量</span>}><DepthChart snapshot={s} /></Card></Col></Row>
           <Card title="仓位与策略明细" className="detail-card"><Descriptions column={{ xs: 1, sm: 2, lg: 3 }} items={[
             { key: 'direction', label: '方向', children: s.grid_config.direction === 'SHORT' ? '做空' : '做多' },
-            { key: 'entry', label: '持仓均价', children: price(s.position.entry_price) },
+            { key: 'entry', label: '持仓均价', children: Number(s.position.size) !== 0 && Number(s.position.entry_price) > 0 ? price(s.position.entry_price) : '--' },
             { key: 'liquidation', label: '预估强平价', children: Number(s.position.liquidation_price) > 0 ? price(s.position.liquidation_price) : '--' },
             { key: 'leverage', label: '杠杆', children: `${s.position.leverage}×` },
             { key: 'interval', label: '网格间距', children: s.grid_config.grid_interval },

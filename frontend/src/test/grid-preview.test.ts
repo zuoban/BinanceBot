@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { defaultGridInterval, exceeds, exposure, gridPreview, orderAmountError, orderSizing, priceDiffPercent, priceRangeError, capCoverage, spacingBelowRoundTripFee, spacingPercent, sumDecimals, tickSizeError } from '../lib/gridPreview';
+import { defaultGridInterval, exceeds, exposure, gridPreview, isPercentDecimal, isPositiveDecimal, orderAmountError, orderSizing, priceDiffPercent, priceRangeError, capCoverage, sameDecimal, spacingBelowRoundTripFee, spacingPercent, sumDecimals, tickSizeError } from '../lib/gridPreview';
 
 const base = { interval: '0.5', buyWindow: 3, sellWindow: 3 };
 
@@ -113,4 +113,15 @@ it('measures how far price must move one way to fill the position cap', () => {
   expect(capCoverage('100', '200', '50', '75000')).toBeNull();
   expect(capCoverage(null, '200', '50', '75000')).toBeNull();
   expect(capCoverage('1600', '0', '50', '75000')).toBeNull();
+});
+
+it('validates positive, percentage, and equal plain decimals without float rounding', () => {
+  expect(isPositiveDecimal('0.00000001')).toBe(true);
+  expect(isPositiveDecimal('0')).toBe(false);
+  expect(isPositiveDecimal('1e-5')).toBe(false);
+  expect(isPercentDecimal('99.9999999999999999')).toBe(true);
+  expect(isPercentDecimal('100')).toBe(false);
+  expect(isPercentDecimal('0')).toBe(false);
+  expect(sameDecimal('100.50', '100.5')).toBe(true);
+  expect(sameDecimal('100.0000000000000001', '100')).toBe(false);
 });

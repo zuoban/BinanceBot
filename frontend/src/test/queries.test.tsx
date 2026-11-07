@@ -115,7 +115,10 @@ it('ignores late frames after switching pairs and retains the new pair snapshot'
   const old = FakeSocket.instances[0];
   rerender({ selected: pair('BTCUSDC') });
   await waitFor(() => expect(result.current.data?.symbol).toBe('BTCUSDC'));
+  act(() => { FakeSocket.instances.at(-1)!.sendSnapshot('SOLUSDC', '999'); });
+  expect(result.current.live).toBe(false);
   act(() => { old.sendSnapshot('SOLUSDC', '999'); FakeSocket.instances.at(-1)!.sendSnapshot('BTCUSDC', '123'); });
+  expect(result.current.live).toBe(true);
   expect(result.current.data?.symbol).toBe('BTCUSDC');
   expect(result.current.data?.ticker.last_price).toBe('123');
   client.clear();

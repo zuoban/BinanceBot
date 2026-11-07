@@ -97,12 +97,23 @@ pub enum OrderStatus {
     Expired,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ObservedOrderIdentity {
     pub client_order_id: String,
     pub symbol: String,
     pub side: String,
     pub order_id: i64,
+}
+
+impl ObservedOrderIdentity {
+    pub(crate) fn from_response(resp: &crate::exchange::model::BinanceOrderResponse) -> Self {
+        Self {
+            client_order_id: resp.client_order_id.clone(),
+            symbol: resp.symbol.clone(),
+            side: resp.side.clone(),
+            order_id: resp.order_id,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -162,6 +173,15 @@ pub struct RemainderPlan {
     pub phase: RemainderPhase,
 }
 
+impl RemainderPlan {
+    pub fn find_order(&self, client_order_id: &str) -> Option<&GridOrder> {
+        self.sources
+            .iter()
+            .chain(std::iter::once(&self.target))
+            .find(|order| order.client_order_id == client_order_id)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradeRecord {
     pub trade_id: String,
@@ -195,12 +215,13 @@ pub struct PositionInfo {
     pub update_time: Option<DateTime<Utc>>,
 }
 
-pub fn quote_asset(symbol: &str) -> Option<&str> {
+pub const PAPER_INITIAL_BALANCE: Decimal = rust_decimal_macros::dec!(10000);
+
+pub fn quote_asset(symbol: &str) -> Option<&'static str> {
     ["FDUSD", "USDC", "USDT", "BUSD"]
         .into_iter()
         .find(|asset| symbol.ends_with(asset))
 }
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountInfo {
     pub asset: String,
@@ -209,6 +230,19 @@ pub struct AccountInfo {
     pub margin_balance: Decimal,
     pub unrealized_profit: Decimal,
     pub update_time: DateTime<Utc>,
+}
+
+impl AccountInfo {
+    pub fn initial_paper(symbol: &str, update_time: Option<DateTime<Utc>>) -> Self {
+        Self {
+            asset: quote_asset(symbol).unwrap_or(symbol).to_string(),
+            total_wallet_balance: PAPER_INITIAL_BALANCE,
+            available_balance: PAPER_INITIAL_BALANCE,
+            margin_balance: PAPER_INITIAL_BALANCE,
+            unrealized_profit: Decimal::ZERO,
+            update_time: update_time.unwrap_or_else(Utc::now),
+        }
+    }
 }
 
 impl Default for AccountInfo {
@@ -544,7 +578,10 @@ impl UpdateGlobalConfigPayload {
             {
                 config.telegram.bot_token = token.trim().to_string();
             }
-            if let Some(chat_id) = self.telegram_chat_id {
+            if let Some(chat_id) = self
+                .telegram_chat_id
+                .filter(|value| !value.trim().is_empty())
+            {
                 config.telegram.chat_id = chat_id.trim().to_string();
             }
         }
@@ -702,5 +739,31 @@ mod tests {
         ticker.update_time = now;
         ticker.last_price = Decimal::ZERO;
         assert!(!ticker.prices_are_fresh(now));
+    }
+
+    #[test]
+    fn global_config_payload_preserves_existing_chat_id_when_blank() {
+        let mut global =
+            crate::config::GlobalConfig::from_app(&crate::config::AppConfig::default());
+        global.telegram.chat_id = "123456".into();
+        UpdateGlobalConfigPayload {
+            telegram_chat_id: Some("   ".into()),
+            ..Default::default()
+        }
+        .apply_to(&mut global);
+        assert_eq!(global.telegram.chat_id, "123456");
+
+        UpdateGlobalConfigPayload {
+            clear_telegram_credentials: true,
+            ..Default::default()
+        }
+        .apply_to(&mut global);
+        assert!(global.telegram.chat_id.is_empty());
+    }
+
+    #[test]
+    fn initial_paper_account_falls_back_to_symbol_when_quote_suffix_is_unknown() {
+        assert_eq!(AccountInfo::initial_paper("SOLUSDC", None).asset, "USDC");
+        assert_eq!(AccountInfo::initial_paper("BTCETH", None).asset, "BTCETH");
     }
 }

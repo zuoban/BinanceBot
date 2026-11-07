@@ -1,12 +1,10 @@
 use super::Database;
-use crate::types::{AccountInfo, PositionInfo};
+use crate::types::{AccountInfo, PositionInfo, PAPER_INITIAL_BALANCE};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use rust_decimal::Decimal;
 use std::collections::{BTreeMap, HashMap, HashSet};
-
-const INITIAL_BALANCE: Decimal = rust_decimal_macros::dec!(10000);
 
 struct Contribution {
     asset: String,
@@ -43,7 +41,7 @@ impl Contribution {
         } else {
             position.entry_price
         };
-        self.wallet_delta = account.total_wallet_balance - INITIAL_BALANCE;
+        self.wallet_delta = account.total_wallet_balance - PAPER_INITIAL_BALANCE;
         self.unrealized_pnl = position.unrealized_pnl;
         self.position_margin =
             position.size.abs() * valuation_price / Decimal::from(position.leverage.max(1));
@@ -64,7 +62,7 @@ impl Contribution {
         // A snapshot captured before a newer transaction cannot roll its wallet
         // or holdings back after that transaction has published its contribution.
         (!self.committed
-            || (self.wallet_delta == account.total_wallet_balance - INITIAL_BALANCE
+            || (self.wallet_delta == account.total_wallet_balance - PAPER_INITIAL_BALANCE
                 && self.size == position.size
                 && self.entry_price == position.entry_price))
             && account.update_time >= self.update_time
@@ -108,7 +106,7 @@ impl AssetLedger {
     }
 
     fn account(&self, asset: &str) -> AccountInfo {
-        let total_wallet_balance = INITIAL_BALANCE + self.wallet_delta;
+        let total_wallet_balance = PAPER_INITIAL_BALANCE + self.wallet_delta;
         let margin_balance = total_wallet_balance + self.unrealized_pnl;
         AccountInfo {
             asset: asset.to_owned(),

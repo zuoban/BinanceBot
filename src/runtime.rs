@@ -1002,17 +1002,8 @@ impl TradingRuntime {
                 match position {
                     Ok(Some(position)) => {
                         let has_position = !position.position_amt.is_zero();
-                        {
-                            let mut current = state.position.write().await;
-                            current.symbol = position.symbol;
-                            current.size = position.position_amt;
-                            current.entry_price = position.entry_price;
-                            current.mark_price = position.mark_price;
-                            current.unrealized_pnl = position.un_realized_profit;
-                            current.liquidation_price = position.liquidation_price;
-                            current.leverage = position.leverage.parse().unwrap_or(20);
-                            current.update_time = Some(chrono::Utc::now());
-                        }
+                        *state.position.write().await =
+                            position.into_position_info(Some(chrono::Utc::now()));
                         if has_position {
                             self.global_position_limit.check().await;
                             Err(anyhow::anyhow!("仍有持仓，请先平仓再移除交易对"))

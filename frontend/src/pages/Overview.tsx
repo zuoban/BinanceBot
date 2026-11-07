@@ -1,4 +1,4 @@
-import { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useContext, useLayoutEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { App, Button, Card, Col, Dropdown, Empty, Input, Popover, Row, Select, Space, Statistic } from 'antd';
 import { ArrowDownOutlined, ArrowRightOutlined, ArrowUpOutlined, EyeOutlined, PlusOutlined, SearchOutlined, ThunderboltOutlined } from '@ant-design/icons';
@@ -16,8 +16,10 @@ import { BatchResultDrawer, type BatchReport } from '../components/BatchResultDr
 import { PaperGuide } from '../components/PaperGuide';
 import { TradesTable } from '../components/DataTables';
 
+import { useNow } from '../lib/useNow';
 const number = (value: unknown, digits?: number) => trimFractionZeros(fixedNumber(value, digits));
 const price = (value: unknown) => trimFractionZeros(fixedPrice(value));
+const toPair = (e: { snapshot: { symbol: string; status: Pair['status']; grid_config: Pair['grid_config'] }; mode: Pair['mode']; scoped: boolean }): Pair => ({ symbol: e.snapshot.symbol, status: e.snapshot.status, mode: e.mode, grid_config: e.snapshot.grid_config, scoped: e.scoped });
 
 function groupTradePnl(trades: Trade[]) {
   const groups = new Map<string, { mode: Trade['mode']; asset: string; total: number; available: boolean }>();
@@ -30,9 +32,12 @@ function groupTradePnl(trades: Trade[]) {
     else group.total += pnl;
     groups.set(key, group);
   }
+  for (const group of groups.values()) {
+    if (Math.abs(group.total) < 1e-12) group.total = 0;
+    else group.total = Number(group.total.toPrecision(12));
+  }
   return groups;
 }
-
 export default function OverviewPage() {
   const overview = useOverview();
   const navigate = useNavigate();
@@ -67,8 +72,7 @@ export default function OverviewPage() {
   const [batchBusy, setBatchBusy] = useState(false);
   const [report, setReport] = useState<BatchReport | null>(null);
   const [tradesExpanded, setTradesExpanded] = useState(false);
-  const [now, setNow] = useState(Date.now());
-  useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(timer); }, []);
+  const now = useNow();
   const batchLock = useRef(false);
   const entries = overview.data?.pairs ?? [];
   const recentTrades = overview.data?.recent_trades ?? [];
@@ -77,7 +81,7 @@ export default function OverviewPage() {
   const sellTrades = displayedTrades.filter(trade => trade.side === 'SELL').length;
   const tradePnlGroups = groupTradePnl(displayedTrades);
   const stale = !!overview.error || now - overview.dataUpdatedAt > 10_000;
-  const pairs = entries.map(e => ({ symbol: e.snapshot.symbol, status: e.snapshot.status, mode: e.mode, grid_config: e.snapshot.grid_config, scoped: e.scoped } satisfies Pair));
+  const pairs = entries.map(toPair);
   const batch = async (action: 'pause' | 'resume') => {
     if (batchLock.current) return;
     batchLock.current = true; setBatchBusy(true);
@@ -86,7 +90,7 @@ export default function OverviewPage() {
       if (action === 'resume') {
         const refreshed = await overview.refetch();
         if (refreshed.error || !refreshed.data) throw refreshed.error ?? new Error('无法刷新策略列表');
-        targets = refreshed.data.pairs.filter(e => e.snapshot.status !== 'RUNNING').map(e => ({ symbol: e.snapshot.symbol, status: e.snapshot.status, mode: e.mode, grid_config: e.snapshot.grid_config, scoped: e.scoped } satisfies Pair));
+        targets = refreshed.data.pairs.filter(e => e.snapshot.status !== 'RUNNING').map(toPair);
         if (!targets.length) { message.info('当前没有可恢复的策略'); return; }
       }
       const accepted = await modal.confirm({
@@ -99,7 +103,7 @@ export default function OverviewPage() {
       if (action === 'pause') {
         const refreshed = await overview.refetch();
         if (refreshed.error || !refreshed.data) throw refreshed.error ?? new Error('无法刷新策略列表');
-        selected = refreshed.data.pairs.map(e => ({ symbol: e.snapshot.symbol, status: e.snapshot.status, mode: e.mode, grid_config: e.snapshot.grid_config, scoped: e.scoped } satisfies Pair));
+        selected = refreshed.data.pairs.map(toPair);
         if (!selected.length) { message.info('当前没有可暂停的策略'); return; }
       }
       const outcomes = await runBatchControls(selected, action, controls.run);
@@ -111,11 +115,11 @@ export default function OverviewPage() {
   };
   const matchesStatus = (e: typeof entries[number]) => statusFilter === 'all' || (statusFilter === 'LIVE' ? e.mode === 'LIVE' : e.snapshot.status === statusFilter);
   const visible = entries.filter(e => e.snapshot.symbol.includes(search.toUpperCase().trim()) && matchesStatus(e))
-    .sort((a, b) => sort === 'position' ? Number(b.snapshot.status === 'RUNNING') - Number(a.snapshot.status === 'RUNNING') || comparePositionAmount(a.snapshot, b.snapshot) : sort === 'today' ? (todayCount(b.snapshot) ?? -1) - (todayCount(a.snapshot) ?? -1) : sort === 'orders' ? (b.snapshot.stats.active_buy_orders + b.snapshot.stats.active_sell_orders) - (a.snapshot.stats.active_buy_orders + a.snapshot.stats.active_sell_orders) : a.snapshot.symbol.localeCompare(b.snapshot.symbol));
+    .sort((a, b) => sort === 'position' ? Number(b.snapshot.status === 'RUNNING') - Number(a.snapshot.status === 'RUNNING') || comparePositionAmount(a.snapshot, b.snapshot) : sort === 'today' ? (todayCount(b.snapshot, now) ?? -1) - (todayCount(a.snapshot, now) ?? -1) : sort === 'orders' ? (b.snapshot.stats.active_buy_orders + b.snapshot.stats.active_sell_orders) - (a.snapshot.stats.active_buy_orders + a.snapshot.stats.active_sell_orders) : a.snapshot.symbol.localeCompare(b.snapshot.symbol));
   const clearFilters = () => updateFilters({ q: '', sort: 'position', status: 'all' });
-  const counts = entries.map(e => todayTradeCounts(e.snapshot));
+  const counts = entries.map(e => todayTradeCounts(e.snapshot, now));
   const today = counts.every(c => c !== null) ? counts.reduce<{ buy: number; sell: number }>((sum, c) => ({ buy: sum.buy + c!.buy, sell: sum.sell + c!.sell }), { buy: 0, sell: 0 }) : null;
-  const pnlGroups = todayPnlGroups(overview.data?.today_pnl);
+  const pnlGroups = todayPnlGroups(overview.data?.today_pnl, now);
   return <>
     <PageTitle title="策略运行概览" description="账户、持仓与全部策略的实时状态" />
     <ErrorNotice error={overview.error} retry={() => void overview.refetch()} />
@@ -148,7 +152,7 @@ export default function OverviewPage() {
     <section className="overview-finance-group" aria-labelledby="accounts-heading">
     <div className="section-heading"><h2 id="accounts-heading">账户概览</h2></div>
     <Row gutter={[16, 16]}>
-      {accountGroups(accounts).map(group => <Col xs={24} xl={12} key={group.key}><Card className="account-card finance-card" size="small">
+      {accountGroups(accounts, now).map(group => <Col xs={24} xl={12} key={group.key}><Card className="account-card finance-card" size="small">
         <div className="section-line finance-card-heading"><span>保证金余额</span></div>
         <div className="finance-card-primary"><Statistic value={group.equity ?? '--'} formatter={() => number(group.equity)} suffix={group.asset} />
           <span className="finance-card-note muted">{group.cny !== null ? `≈ ¥${number(group.cny)}` : '人民币估值待更新'}</span></div>
@@ -203,10 +207,11 @@ export default function OverviewPage() {
       {(search || sort !== 'position' || statusFilter !== 'all') && <Button type="text" onClick={clearFilters}>清除筛选</Button>}
     </div>
     <Row gutter={[20, 20]}>
-      {visible.map(({ snapshot: s, mode: m, scoped }) => {
-        const pair: Pair = { symbol: s.symbol, status: s.status, mode: m, grid_config: s.grid_config, scoped };
+      {visible.map(e => {
+        const { snapshot: s } = e;
+        const pair = toPair(e);
         const quote = quoteAsset(s.symbol), result = controls.results[s.symbol];
-        const tradeCounts = todayTradeCounts(s);
+        const tradeCounts = todayTradeCounts(s, now);
         const size = numeric(s.position.size), entry = numeric(s.position.entry_price), mark = numeric(s.ticker.mark_price);
         const validEntry = size !== null && size !== 0 && entry !== null && entry > 0;
         const change = validEntry && mark !== null && mark > 0 ? (mark / entry - 1) * 100 : null;
@@ -257,7 +262,17 @@ export default function OverviewPage() {
       {recentTrades.length > 5 && <div className="overview-trades-toggle"><Button type="text" aria-expanded={tradesExpanded} aria-controls="recent-trades-list" onClick={() => setTradesExpanded(value => !value)}>{tradesExpanded ? '收起' : '展开最近 20 条'}</Button></div>}
     </Card>
     <OverviewHistory />
-    <BatchResultDrawer report={report} onClose={() => setReport(null)} onRetry={(pair, action) => void controls.run(pair, action)} />
+    <BatchResultDrawer report={report} busy={controls.busy} onClose={() => setReport(null)} onRetry={(pair, action) => void (async () => {
+      const result = await controls.run(pair, action);
+      if (!result) return;
+      setReport(current => {
+        if (!current) return null;
+        const outcomes = result === 'confirmed'
+          ? current.outcomes.filter(item => item.pair.symbol !== pair.symbol)
+          : current.outcomes.map(item => item.pair.symbol === pair.symbol ? { ...item, result } : item);
+        return outcomes.length ? { ...current, outcomes } : null;
+      });
+    })()} />
     </>}
   </>;
 }

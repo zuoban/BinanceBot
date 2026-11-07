@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useQuery, useQueryClient, type QueryKey, type UseQueryResult } from '@tanstack/react-query';
 import { api, pairPath, socketUrl, tokenStore } from './api';
 import type { AccountFrame, AccountObservation, OverviewHistoryData, Overview, Pair, Snapshot, SocketMessage } from './types';
-
+import { useNow } from './useNow';
 const SOCKET_LIVE_MS = 5000;
 const HTTP_FALLBACK_MS = 3000;
 const SNAPSHOT_STALE_MS = 10_000;
@@ -55,38 +55,41 @@ export function useSocket<T extends keyof SocketDataByType>(path: string | undef
   return { lastReceived, connected };
 }
 
+function useSocketFallbackQuery<TData>(key: QueryKey, queryFn: (signal: AbortSignal) => Promise<TData>, socket: { connected: boolean; lastReceived: number }, enabled = true) {
+  const lastFallback = useRef(0);
+  const query: UseQueryResult<TData, Error> = useQuery({
+    queryKey: key,
+    queryFn: ({ signal }) => queryFn(signal),
+    enabled,
+    refetchInterval: () => socket.connected && Date.now() - socket.lastReceived < SOCKET_LIVE_MS ? false : HTTP_FALLBACK_MS,
+  });
+  const now = useNow(1000, enabled);
+  // The clock also restarts polling when an open socket silently stops sending.
+  useEffect(() => {
+    if (enabled && now - socket.lastReceived >= SOCKET_LIVE_MS && now - query.dataUpdatedAt >= HTTP_FALLBACK_MS && now - lastFallback.current >= HTTP_FALLBACK_MS && !query.isFetching) {
+      lastFallback.current = now;
+      void query.refetch();
+    }
+  }, [now, socket.lastReceived, enabled, query]);
+  return { query, now };
+}
+
 export function usePairSnapshot(pair: Pair | undefined) {
   const client = useQueryClient();
-  const lastFallback = useRef(0);
   const key = ['snapshot', pair?.symbol, pair?.scoped];
   const acceptSnapshot = (data: Snapshot) => {
-    if (data.symbol !== pair?.symbol) return;
+    if (data.symbol !== pair?.symbol) return false;
     // Cancel a pre-frame HTTP read before publishing the newer socket observation.
     void client.cancelQueries({ queryKey: key });
     client.setQueryData(key, data);
   };
   const socket = useSocket(pair && pairPath(pair, 'ws'), 'snapshot', acceptSnapshot);
-  const query = useQuery({
-    queryKey: key,
-    queryFn: ({ signal }) => api<Snapshot>(pairPath(pair!, 'status'), { signal }),
-    enabled: !!pair,
-    refetchInterval: () => socket.connected && Date.now() - socket.lastReceived < SOCKET_LIVE_MS ? false : HTTP_FALLBACK_MS,
-  });
-  const [now, setNow] = useState(Date.now());
-  useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(timer); }, []);
-  // The clock also restarts polling when an open socket silently stops sending.
-  useEffect(() => {
-    if (pair && now - socket.lastReceived >= SOCKET_LIVE_MS && now - query.dataUpdatedAt >= HTTP_FALLBACK_MS && now - lastFallback.current >= HTTP_FALLBACK_MS && !query.isFetching) {
-      lastFallback.current = now;
-      void query.refetch();
-    }
-  }, [now, socket.lastReceived, pair, query]);
+  const { query, now } = useSocketFallbackQuery(key, signal => api<Snapshot>(pairPath(pair!, 'status'), { signal }), socket, !!pair);
   return { ...query, live: socket.connected && now - socket.lastReceived < SOCKET_LIVE_MS, stale: now - query.dataUpdatedAt > SNAPSHOT_STALE_MS };
 }
 
 export function useLiveAccounts() {
   const client = useQueryClient();
-  const lastFallback = useRef(0);
   const key = ['accounts'];
   const stream = useSocket('/api/accounts/ws', 'accounts', data => {
     const current = client.getQueryData<AccountFrame>(key);
@@ -94,24 +97,12 @@ export function useLiveAccounts() {
     void client.cancelQueries({ queryKey: key });
     client.setQueryData(key, data);
   });
-  const query = useQuery({
-    queryKey: key,
-    queryFn: async ({ signal }) => {
-      const data = await api<AccountFrame>('/api/accounts', { signal });
-      const current = client.getQueryData<AccountFrame>(key);
-      return current && Date.parse(data.generated_at) < Date.parse(current.generated_at) ? current : data;
-    },
-    refetchInterval: () => stream.connected && Date.now() - stream.lastReceived < SOCKET_LIVE_MS ? false : HTTP_FALLBACK_MS,
-  });
-  const [now, setNow] = useState(Date.now());
-  useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(timer); }, []);
-  useEffect(() => {
-    if (now - stream.lastReceived >= SOCKET_LIVE_MS && now - query.dataUpdatedAt >= HTTP_FALLBACK_MS && now - lastFallback.current >= HTTP_FALLBACK_MS && !query.isFetching) {
-      lastFallback.current = now;
-      void query.refetch();
-    }
-  }, [now, stream.lastReceived, query]);
+  const { query, now } = useSocketFallbackQuery(key, async signal => {
+    const data = await api<AccountFrame>('/api/accounts', { signal });
+    const current = client.getQueryData<AccountFrame>(key);
+    return current && Date.parse(data.generated_at) < Date.parse(current.generated_at) ? current : data;
+  }, stream);
   const stale = now - query.dataUpdatedAt > SNAPSHOT_STALE_MS || now - Date.parse(query.data?.generated_at ?? '') > SNAPSHOT_STALE_MS;
-  const accounts: AccountObservation[] = (query.data?.pairs ?? []).map(entry => ({ ...entry, account_observation_stale: stale }));
+  const accounts = useMemo<AccountObservation[]>(() => (query.data?.pairs ?? []).map(entry => ({ ...entry, account_observation_stale: stale })), [query.data?.pairs, stale]);
   return { accounts, stale, error: query.error };
 }

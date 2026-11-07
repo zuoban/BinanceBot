@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { App, Button, Segmented, Table, Tag } from 'antd';
 import { CopyOutlined, DownloadOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import { number, price, relativeTime, time } from '../lib/format';
+import { priceDiffPercent } from '../lib/gridPreview';
+import { useNow } from '../lib/useNow';
 import type { Log, Order, Trade } from '../lib/types';
 import { Pnl } from './Common';
 import { copyText, downloadCsv, toCsv } from '../lib/exportCsv';
@@ -37,7 +39,7 @@ export function OrdersTable({ orders, mark }: { orders: Order[]; mark?: string }
   const columns: ColumnsType<Order> = [
     { title: '方向', dataIndex: 'side', render: side, width: 90, fixed: 'left' },
     { title: '价格', align: 'right', className: 'table-numeric', dataIndex: 'price', render: (v: string) => <Copyable value={v}>{price(v)}</Copyable>, sorter: (a, b) => Number(a.price) - Number(b.price) },
-    { title: '距标记价格', align: 'right', className: 'table-numeric', render: (_, o) => Number(mark) > 0 ? `${number((Number(o.price) / Number(mark) - 1) * 100)}%` : '--' },
+    { title: '距标记价格', align: 'right', className: 'table-numeric', render: (_, o) => priceDiffPercent(o.price, mark) ?? '--' },
     { title: '数量', align: 'right', className: 'table-numeric', dataIndex: 'quantity', render: price },
     { title: '金额', align: 'right', className: 'table-numeric', dataIndex: 'amount_usdc', render: (v: string) => number(v) },
     { title: '用途', render: (_, o) => purposeLabel[o.purpose] ?? (o.is_take_profit ? '止盈' : '历史订单') },
@@ -52,24 +54,18 @@ export function OrdersTable({ orders, mark }: { orders: Order[]; mark?: string }
       <dl>
         <div><dt>数量</dt><dd>{price(o.quantity)}</dd></div>
         <div><dt>金额</dt><dd>{number(o.amount_usdc)}</dd></div>
-        <div><dt>距标记价</dt><dd>{Number(mark) > 0 ? `${number((Number(o.price) / Number(mark) - 1) * 100)}%` : '--'}</dd></div>
+        <div><dt>距标记价</dt><dd>{priceDiffPercent(o.price, mark) ?? '--'}</dd></div>
       </dl>
     </li>)}</ul> : <div className="trade-list-empty">暂无挂单</div>}</div></>;
 }
 export function TradesTable({ trades: allTrades, overview = false }: { trades: Trade[]; overview?: boolean }) {
-  const [now, setNow] = useState(Date.now);
   const [filter, setFilter] = useState<SideFilter>('ALL');
   const trades = useMemo(() => overview || filter === 'ALL' ? allTrades : allTrades.filter(trade => trade.side === filter), [allTrades, filter, overview]);
+  const now = useNow(1000, trades.length > 0);
   const exportRows = () => downloadCsv(`trades-${new Date().toISOString().slice(0, 10)}.csv`, toCsv(
     ['时间（北京）', '方向', '成交价格', '数量', '金额', '已实现盈亏', '手续费', '成交方式', '备注'],
     trades.map(t => [time(t.timestamp), t.side === 'BUY' ? '买入' : '卖出', t.price, t.quantity, t.amount_usdc, t.pnl_verified ? t.realized_pnl : '待同步', t.pnl_verified ? t.commission : '待同步', t.pnl_verified ? (t.is_maker ? 'Maker' : 'Taker') : '待同步', t.note]),
   ));
-  useEffect(() => {
-    if (!trades.length) return;
-    setNow(Date.now());
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, [trades.length]);
   const columns: ColumnsType<Trade> = [
     ...(overview ? [{ title: '交易对', dataIndex: 'symbol', className: 'trade-symbol', width: 130 }] : []),
     { title: '方向', dataIndex: 'side', render: side, width: 90, fixed: overview ? undefined : 'left' },

@@ -87,15 +87,7 @@ impl GridTradingEngine {
         });
         let Some(price) = price else { return Ok(()) };
         let market = self.state.ticker.read().await.last_price;
-        if market <= Decimal::ZERO
-            || (closing_side == OrderSide::Sell && price <= market)
-            || (closing_side == OrderSide::Buy && price >= market)
-            || price < rules.min_price
-            || price > rules.max_price
-            || config.grid.max_price.is_some_and(|max| price > max)
-            || config.grid.min_price.is_some_and(|min| price < min)
-            || rules.round_price(price) != price
-        {
+        if !rules.is_valid_maker_grid_price(&config.grid, closing_side, price, market) {
             return Ok(());
         }
         let Some(full_quantity) = rules.calculate_quantity(price, config.grid.order_amount_usdc)
@@ -210,7 +202,7 @@ impl GridTradingEngine {
                         .await?;
                     self.confirm_remainder_identity(source, &found, None)
                         .await?;
-                    if !terminal(&found.status) {
+                    if !found.is_terminal() {
                         self.client
                             .cancel_order(&plan.symbol, None, Some(&source.client_order_id))
                             .await?;
@@ -219,7 +211,7 @@ impl GridTradingEngine {
                             .get_order_by_client_id(&plan.symbol, &source.client_order_id)
                             .await?;
                     }
-                    if !terminal(&found.status) {
+                    if !found.is_terminal() {
                         return Err(anyhow!("Source cancellation is not terminal"));
                     }
                     self.settle_remainder_order(source.clone(), found, None)
@@ -302,14 +294,7 @@ impl GridTradingEngine {
         };
         if plan.target.side != closing_side
             || !window.contains(&price)
-            || !rules.is_grid_price(price, config.grid.grid_interval)
-            || (closing_side == OrderSide::Sell && price <= market)
-            || (closing_side == OrderSide::Buy && price >= market)
-            || rules.round_price(price) != price
-            || price < rules.min_price
-            || price > rules.max_price
-            || config.grid.max_price.is_some_and(|max| price > max)
-            || config.grid.min_price.is_some_and(|min| price < min)
+            || !rules.is_valid_maker_grid_price(&config.grid, plan.target.side, price, market)
         {
             // Sources are terminal and the target lookup above confirmed that
             // no order was accepted. Keeping this plan active would freeze both
@@ -594,7 +579,7 @@ impl GridTradingEngine {
             }
             return Err(anyhow!("Remainder fill quantity remains unresolved"));
         }
-        if terminal(&found.status) {
+        if found.is_terminal() {
             if found.executed_qty > Decimal::ZERO {
                 order.updated_at = exchange_fill_time(&found);
                 order.quantity = found.executed_qty;
@@ -676,7 +661,7 @@ impl GridTradingEngine {
             {
                 self.confirm_remainder_identity(&plan.target.clone(), &found, Some(&mut plan))
                     .await?;
-                if !terminal(&found.status) {
+                if !found.is_terminal() {
                     self.client
                         .cancel_order(&plan.symbol, None, Some(&plan.target.client_order_id))
                         .await?;
@@ -685,7 +670,7 @@ impl GridTradingEngine {
                         .get_order_by_client_id(&plan.symbol, &plan.target.client_order_id)
                         .await?;
                 }
-                if !terminal(&found.status) {
+                if !found.is_terminal() {
                     return Err(anyhow!("Remainder target cancellation unresolved"));
                 }
                 self.settle_remainder_order(plan.target.clone(), found, Some(&mut plan))
@@ -695,13 +680,6 @@ impl GridTradingEngine {
         plan.phase = RemainderPhase::Abandoned;
         self.persist_remainder_plan(&plan).await
     }
-}
-
-fn terminal(status: &str) -> bool {
-    matches!(
-        status,
-        "FILLED" | "CANCELED" | "EXPIRED" | "EXPIRED_IN_MATCH" | "REJECTED"
-    )
 }
 
 #[cfg(test)]

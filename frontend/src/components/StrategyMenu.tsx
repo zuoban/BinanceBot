@@ -4,7 +4,6 @@ import { useNavigate } from 'react-router-dom';
 import type { Action, Pair } from '../lib/types';
 import { pendingLabel, useControls } from './Controls';
 
-/** The most frequent action stays one click away; destructive ones live in the menu or the config page. */
 export function StrategyToggle({ pair, stale }: { pair: Pair; stale: boolean }) {
   const { busy, pending, run } = useControls();
   const running = pair.status === 'RUNNING';
@@ -16,7 +15,6 @@ export function StrategyToggle({ pair, stale }: { pair: Pair; stale: boolean }) 
       onClick={() => void run(pair, running ? 'pause' : 'resume')}>{active ? pendingLabel[active] : label}</Button>
   </Tooltip>;
 }
-
 export function StrategyMenu({ pair, stale }: { pair: Pair; stale: boolean }) {
   const navigate = useNavigate();
   const { busy, run } = useControls();

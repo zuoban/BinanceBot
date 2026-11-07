@@ -3,6 +3,7 @@ import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAx
 import type { Snapshot } from '../lib/types';
 import { price, todayCount } from '../lib/format';
 import { priceDiffPercent } from '../lib/gridPreview';
+import { useNow } from '../lib/useNow';
 import { NoData } from './Common';
 
 export function todayHourlyData(stats: NonNullable<Snapshot['hourly_trade_stats']>, now = Date.now()) {
@@ -18,8 +19,9 @@ export function todayHourlyData(stats: NonNullable<Snapshot['hourly_trade_stats'
 
 export function HourlyChart({ snapshot }: { snapshot: Snapshot }) {
   const { token } = theme.useToken();
-  if (todayCount(snapshot) === null) return <NoData />;
-  const data = todayHourlyData(snapshot.hourly_trade_stats!);
+  const now = useNow();
+  if (todayCount(snapshot, now) === null) return <NoData />;
+  const data = todayHourlyData(snapshot.hourly_trade_stats!, now);
   return <>
     <div className="muted chart-caption">北京时间 · 最近时段在左侧 · 可横向滚动查看</div>
     <div className="hourly-chart-scroll" role="region" tabIndex={0} aria-label="北京时间今日每小时成交笔数，可横向滚动"><div className="chart hourly-chart"><ResponsiveContainer width="100%" height={270}>

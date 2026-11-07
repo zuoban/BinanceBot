@@ -30,7 +30,6 @@ function Root() {
   const [loggedIn, setLoggedIn] = useState(!!tokenStore.get());
   const authStatus = useQuery({ queryKey: ['auth-status'], queryFn: () => api<AuthStatus>('/api/auth/status'), retry: false });
   const authEnabled = authStatus.data?.initialized !== false;
-  const status = useQuery({ queryKey: ['verify-session', loggedIn], queryFn: () => api<AuthStatus>('/api/auth/status'), enabled: loggedIn && authEnabled, retry: false });
   const logout = useCallback(async (revoked = false) => {
     const token = tokenStore.get();
     if (!revoked && token) await post('/api/auth/logout', {});
@@ -42,14 +41,12 @@ function Root() {
     window.addEventListener('auth-expired', expire);
     return () => window.removeEventListener('auth-expired', expire);
   }, []);
-  useEffect(() => { if (status.data && !status.data.authenticated) { tokenStore.clear(); client.clear(); setLoggedIn(false); } }, [status.data]);
+  useEffect(() => { if (loggedIn && authEnabled && authStatus.data && !authStatus.data.authenticated) { tokenStore.clear(); client.clear(); setLoggedIn(false); } }, [loggedIn, authEnabled, authStatus.data]);
   const session = { logout, authEnabled };
-  if (authStatus.isPending) return <LoadingScreen label="正在连接控制台" />;
+  if (authStatus.isPending) return <LoadingScreen label={loggedIn ? '正在验证会话' : '正在连接控制台'} />;
   if (authStatus.error) return <div className="loading-screen"><div>无法连接后端服务：{authStatus.error.message}<br /><button onClick={() => void authStatus.refetch()}>重试</button></div></div>;
   if (!authEnabled) return <SessionContext.Provider value={session}><RouterProvider router={router} /></SessionContext.Provider>;
-  if (loggedIn && status.isPending) return <LoadingScreen label="正在验证会话" />;
-  if (loggedIn && status.error) return <div className="loading-screen"><div>无法连接后端服务：{status.error.message}<br /><button onClick={() => void status.refetch()}>重试</button></div></div>;
-  return <SessionContext.Provider value={session}>{loggedIn && status.data?.authenticated ? <RouterProvider router={router} /> : <Login onLogin={() => { client.clear(); setLoggedIn(true); }} />}</SessionContext.Provider>;
+  return <SessionContext.Provider value={session}>{loggedIn && authStatus.data?.authenticated ? <RouterProvider router={router} /> : <Login onLogin={() => { client.clear(); setLoggedIn(true); }} />}</SessionContext.Provider>;
 }
 
 ReactDOM.createRoot(document.getElementById('root')!).render(

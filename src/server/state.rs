@@ -165,19 +165,21 @@ impl GlobalPositionLimit {
             if let Some(ref committed) = committed {
                 committed.apply_to(&mut config);
             }
+            let max_age = config
+                .exchange
+                .sync_interval_secs
+                .saturating_mul(3)
+                .max(30)
+                .min(i64::MAX as u64) as i64;
+            let now = Utc::now();
+            let fresh = |time| {
+                let age = now.signed_duration_since(time);
+                age >= chrono::Duration::zero() && age <= chrono::Duration::seconds(max_age)
+            };
             if margin_guard {
                 let account = state.current_account().await;
-                let max_age = config
-                    .exchange
-                    .sync_interval_secs
-                    .saturating_mul(3)
-                    .max(30)
-                    .min(i64::MAX as u64) as i64;
-                let age = Utc::now().signed_duration_since(account.update_time);
                 if account.asset.is_empty()
-                    || (!config.exchange.is_paper()
-                        && (age < chrono::Duration::zero()
-                            || age > chrono::Duration::seconds(max_age)))
+                    || (!config.exchange.is_paper() && !fresh(account.update_time))
                 {
                     member_incomplete = true;
                 } else if account.available_balance <= Decimal::ZERO
@@ -196,32 +198,10 @@ impl GlobalPositionLimit {
                 continue;
             }
             let position = state.position.read().await.clone();
-            if !config.exchange.is_paper() {
-                let max_age = config
-                    .exchange
-                    .sync_interval_secs
-                    .saturating_mul(3)
-                    .max(30)
-                    .min(i64::MAX as u64) as i64;
-                let fresh = position.update_time.is_some_and(|time| {
-                    let age = Utc::now().signed_duration_since(time);
-                    age >= chrono::Duration::zero() && age <= chrono::Duration::seconds(max_age)
-                });
-                if !fresh {
-                    member_incomplete = true;
-                }
+            if !config.exchange.is_paper() && !position.update_time.is_some_and(fresh) {
+                member_incomplete = true;
             }
             let ticker = state.ticker.read().await.clone();
-            let max_age = config
-                .exchange
-                .sync_interval_secs
-                .saturating_mul(3)
-                .max(30)
-                .min(i64::MAX as u64) as i64;
-            let fresh = |time| {
-                let age = Utc::now().signed_duration_since(time);
-                age >= chrono::Duration::zero() && age <= chrono::Duration::seconds(max_age)
-            };
             let price = if ticker.mark_price > Decimal::ZERO && fresh(ticker.mark_update_time) {
                 ticker.mark_price
             } else if position.mark_price > Decimal::ZERO && position.update_time.is_some_and(fresh)
@@ -553,14 +533,7 @@ impl AppState {
         };
 
         let initial_account = if config.exchange.is_paper() {
-            AccountInfo {
-                asset: quote_asset(&symbol).unwrap_or(&symbol).to_string(),
-                total_wallet_balance: rust_decimal_macros::dec!(10000.0),
-                available_balance: rust_decimal_macros::dec!(10000.0),
-                margin_balance: rust_decimal_macros::dec!(10000.0),
-                unrealized_profit: Decimal::ZERO,
-                update_time: Utc::now(),
-            }
+            AccountInfo::initial_paper(&symbol, Some(Utc::now()))
         } else {
             AccountInfo::default()
         };

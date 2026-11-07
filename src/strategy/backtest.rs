@@ -278,23 +278,26 @@ impl<'a> Sim<'a> {
             return;
         }
         let signed = if side == OrderSide::Buy { qty } else { -qty };
+        let prev_size = self.size;
+        let new_size = prev_size + signed;
         let same_direction =
-            self.size.is_zero() || (self.size > Decimal::ZERO) == (signed > Decimal::ZERO);
+            prev_size.is_zero() || (prev_size > Decimal::ZERO) == (signed > Decimal::ZERO);
         if same_direction {
-            let new_size = self.size + signed;
-            self.entry = (self.entry * self.size.abs() + price * qty) / new_size.abs();
+            self.entry = (self.entry * prev_size.abs() + price * qty) / new_size.abs();
             self.size = new_size;
         } else {
-            let closing = qty.min(self.size.abs());
-            let sign = if self.size > Decimal::ZERO {
+            let closing = qty.min(prev_size.abs());
+            let sign = if prev_size > Decimal::ZERO {
                 Decimal::ONE
             } else {
                 -Decimal::ONE
             };
             self.realized += (price - self.entry) * closing * sign;
-            self.size += signed;
-            if self.size.is_zero() {
+            self.size = new_size;
+            if new_size.is_zero() {
                 self.entry = Decimal::ZERO;
+            } else if new_size.is_sign_positive() != prev_size.is_sign_positive() {
+                self.entry = price;
             }
         }
         self.cash_flow -= signed * price;
@@ -529,6 +532,9 @@ pub fn run(params: &BacktestParams, candles: &[Candle]) -> Result<BacktestReport
     let grid = &params.grid;
     ensure!(!candles.is_empty(), "没有可回放的行情数据");
     grid.validate()?;
+    if params.maker_fee_rate < Decimal::ZERO {
+        bail!("maker_fee_rate 不能为负数");
+    }
     ensure!(params.capital > Decimal::ZERO, "参考资金必须大于 0");
     ensure!(
         params
@@ -784,6 +790,7 @@ fn scale_of(value: Decimal) -> u32 {
 }
 
 async fn load_rules(args: &BacktestArgs) -> Result<SymbolRules> {
+    ensure!(args.maker_fee >= Decimal::ZERO, "--maker-fee 不能为负数");
     let mut rules = match &args.symbol {
         Some(symbol) => {
             let client = BinanceFuturesClient::new(&AppConfig::default().exchange);
@@ -813,9 +820,11 @@ async fn load_rules(args: &BacktestArgs) -> Result<SymbolRules> {
         rules.quantity_scale = scale_of(step);
     }
     if let Some(min_qty) = args.min_qty {
+        ensure!(min_qty > Decimal::ZERO, "--min-qty 必须大于 0");
         rules.min_qty = min_qty;
     }
     if let Some(min_notional) = args.min_notional {
+        ensure!(min_notional > Decimal::ZERO, "--min-notional 必须大于 0");
         rules.min_notional = min_notional;
     }
     Ok(rules)
@@ -1214,9 +1223,7 @@ mod tests {
         assert_eq!(with_fees.net_total, dec!(-0.99));
 
         p.maker_fee_rate = dec!(-0.0002);
-        let with_rebate = run(&p, &candles).unwrap();
-        assert!(with_rebate.fees < Decimal::ZERO);
-        assert!(with_rebate.net_total > report.net_total);
+        assert!(run(&p, &candles).is_err());
     }
 
     #[test]
@@ -1500,7 +1507,72 @@ mod tests {
         assert!(run(&params(|_| {}), &[]).is_err());
         assert!(run(&params(|g| g.grid_interval = dec!(0.005)), &good).is_err());
         assert!(run(&params(|g| g.pause_on_max_position = true), &good).is_err());
+        let mut negative_fee = params(|_| {});
+        negative_fee.maker_fee_rate = dec!(-0.0001);
+        assert!(run(&negative_fee, &good).is_err());
         let backwards = vec![Candle::tick(2, dec!(100)), Candle::tick(1, dec!(100))];
         assert!(run(&params(|_| {}), &backwards).is_err());
+
+        // When a fill in the opposite direction crosses zero, entry resets to fill price.
+        let p = params(|g| g.direction = GridDirection::Short);
+        let mut sim = Sim::new(&p, dec!(100), 0);
+        sim.size = dec!(1);
+        sim.entry = dec!(95);
+        sim.orders.push(BtOrder {
+            side: OrderSide::Sell,
+            price: dec!(105),
+            qty: dec!(2),
+            remainder: false,
+        });
+        sim.fill_at(OrderSide::Sell, dec!(105));
+        assert_eq!(sim.size, dec!(-1));
+        assert_eq!(sim.entry, dec!(105));
+    }
+
+    #[tokio::test]
+    async fn cli_rules_reject_invalid_fee_and_filter_overrides() {
+        let base = BacktestArgs {
+            symbol: None,
+            csv: None,
+            interval: "1m".into(),
+            days: 7,
+            direction: DirectionArg::Long,
+            grid_interval: vec![dec!(1)],
+            amount: vec![dec!(100)],
+            buy_window: vec![3],
+            sell_window: vec![3],
+            min_price: None,
+            max_price: None,
+            max_position: None,
+            pause_on_max_position: false,
+            cancel_opening_on_max_position: false,
+            maker_fee: dec!(0.0002),
+            funding_rate: Decimal::ZERO,
+            capital: dec!(1000),
+            tick_size: None,
+            step_size: None,
+            min_qty: None,
+            min_notional: None,
+            exit_floor: None,
+            json: false,
+        };
+        assert!(load_rules(&BacktestArgs {
+            maker_fee: dec!(-0.0001),
+            ..base.clone()
+        })
+        .await
+        .is_err());
+        assert!(load_rules(&BacktestArgs {
+            min_qty: Some(Decimal::ZERO),
+            ..base.clone()
+        })
+        .await
+        .is_err());
+        assert!(load_rules(&BacktestArgs {
+            min_notional: Some(Decimal::ZERO),
+            ..base
+        })
+        .await
+        .is_err());
     }
 }

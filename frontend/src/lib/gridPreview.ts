@@ -65,6 +65,26 @@ export function exceeds(value: string | null, limit: unknown): boolean {
   return rescale(a, scale) > rescale(b, scale);
 }
 
+/** True when `value` is a positive plain decimal (`> 0`). */
+export function isPositiveDecimal(value: unknown): boolean {
+  const parsed = parse(value);
+  return !!parsed && parsed.n > 0n;
+}
+
+/** True when `value` is a plain decimal strictly between `0` and `100`. */
+export function isPercentDecimal(value: unknown): boolean {
+  const parsed = parse(value);
+  return !!parsed && parsed.n > 0n && parsed.n < 100n * 10n ** BigInt(parsed.s);
+}
+
+/** Exact numeric equality for plain decimals; returns false when either side is not a plain decimal. */
+export function sameDecimal(a: unknown, b: unknown): boolean {
+  const left = parse(a), right = parse(b);
+  if (!left || !right) return false;
+  const scale = Math.max(left.s, right.s);
+  return rescale(left, scale) === rescale(right, scale);
+}
+
 /** Mirrors `GridConfig::validate` for the price range: both bounds positive, minimum below maximum. */
 export function priceRangeError(field: 'min' | 'max', min: unknown, max: unknown): string | null {
   const own = parse(field === 'min' ? min : max);

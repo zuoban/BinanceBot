@@ -11,7 +11,7 @@ export async function refreshClearedQueries(client: QueryClient, keys: QueryKey[
 export async function downloadDatabase(path: string, targets?: DatabaseTarget[]) {
   const response = await authenticatedFetch(path, {
     ...(targets ? { method: 'POST', body: JSON.stringify({ targets }) } : {}),
-    signal: AbortSignal.timeout(120_000),
+    timeoutMs: 120_000,
   });
   if (!response.ok) {
     const result = await response.json().catch(() => null) as { message?: string } | null;

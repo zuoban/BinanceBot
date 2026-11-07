@@ -1201,27 +1201,7 @@ impl Database {
         let mut conn = self.lock_connection("clear_selected_database");
         let tx = conn.transaction()?;
         let deleted_trades = if trades {
-            tx.execute_batch(
-                "INSERT INTO execution_frontiers (symbol, mode, side, price, timestamp)
-                 SELECT symbol, mode, side, price, timestamp FROM (
-                     SELECT symbol, mode, side, price, timestamp,
-                            ROW_NUMBER() OVER (
-                                PARTITION BY symbol, mode ORDER BY timestamp DESC, rowid DESC
-                            ) AS rank
-                     FROM trades
-                 ) WHERE rank = 1
-                 ON CONFLICT(symbol, mode) DO UPDATE SET
-                     side = excluded.side, price = excluded.price, timestamp = excluded.timestamp
-                 WHERE excluded.timestamp >= execution_frontiers.timestamp;
-                 INSERT OR IGNORE INTO cleared_trade_ids (trade_id, client_order_id, mode)
-                     SELECT trade_id, client_order_id, mode FROM trades;",
-            )?;
-            preserve_pair_openings_on(&tx, None)?;
-            let deleted = tx.execute("DELETE FROM trades", [])?;
-            tx.execute_batch(
-                "DELETE FROM trade_hourly_rollups; DELETE FROM scoped_grid_stats; DELETE FROM grid_stats;",
-            )?;
-            deleted
+            clear_trades_on(&tx, None)?
         } else {
             0
         };
@@ -1248,35 +1228,7 @@ impl Database {
     pub fn clear_trade_history_for_symbol(&self, symbol: &str) -> Result<usize> {
         let mut conn = self.lock_connection("clear_trade_history_for_symbol");
         let tx = conn.transaction()?;
-        tx.execute(
-            "INSERT INTO execution_frontiers (symbol, mode, side, price, timestamp)
-             SELECT symbol, mode, side, price, timestamp FROM (
-                 SELECT symbol, mode, side, price, timestamp,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY symbol, mode ORDER BY timestamp DESC, rowid DESC
-                        ) AS rank
-                 FROM trades WHERE symbol = ?1
-             ) WHERE rank = 1
-             ON CONFLICT(symbol, mode) DO UPDATE SET
-                 side = excluded.side, price = excluded.price, timestamp = excluded.timestamp
-             WHERE excluded.timestamp >= execution_frontiers.timestamp",
-            params![symbol],
-        )?;
-        tx.execute(
-            "INSERT OR IGNORE INTO cleared_trade_ids (trade_id, client_order_id, mode)
-             SELECT trade_id, client_order_id, mode FROM trades WHERE symbol = ?1",
-            params![symbol],
-        )?;
-        preserve_pair_openings_on(&tx, Some(symbol))?;
-        let deleted = tx.execute("DELETE FROM trades WHERE symbol = ?1", params![symbol])?;
-        tx.execute(
-            "DELETE FROM trade_hourly_rollups WHERE symbol = ?1",
-            params![symbol],
-        )?;
-        tx.execute(
-            "DELETE FROM scoped_grid_stats WHERE symbol = ?1",
-            params![symbol],
-        )?;
+        let deleted = clear_trades_on(&tx, Some(symbol))?;
         tx.commit()?;
         #[cfg(test)]
         self.before_revision_publish();
@@ -1421,17 +1373,7 @@ impl Database {
             symbol: symbol.to_string(),
             ..PositionInfo::default()
         };
-        let balance = rust_decimal_macros::dec!(10000);
-        let account = AccountInfo {
-            asset: crate::types::quote_asset(symbol)
-                .unwrap_or(symbol)
-                .to_string(),
-            total_wallet_balance: balance,
-            available_balance: balance,
-            margin_balance: balance,
-            unrealized_profit: Decimal::ZERO,
-            update_time: Utc::now(),
-        };
+        let account = AccountInfo::initial_paper(symbol, Some(Utc::now()));
         tx.execute(
             "INSERT INTO paper_accounts (symbol, position_json, account_json) VALUES (?1, ?2, ?3)",
             params![
@@ -2188,7 +2130,7 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT symbol, mode, timestamp, realized_pnl, pnl_verified FROM trades
-             WHERE timestamp >= ?1 AND timestamp < ?2 ORDER BY mode, symbol",
+             WHERE timestamp >= ?1 AND timestamp < ?2",
         )?;
         let rows = stmt.query_map(
             params![
@@ -2205,20 +2147,26 @@ impl Database {
                 ))
             },
         )?;
-        let mut groups = std::collections::BTreeMap::new();
+        let mut groups: std::collections::BTreeMap<(String, String), crate::types::TodayPnlGroup> =
+            std::collections::BTreeMap::new();
         for row in rows {
             let (symbol, mode, timestamp, pnl, verified) = row?;
             if timestamp < window_start || timestamp > now {
                 continue;
             }
-            let group = groups
-                .entry((mode.clone(), symbol.clone()))
-                .or_insert_with(|| crate::types::TodayPnlGroup {
+            let key = (mode, symbol);
+            let group = if let Some(group) = groups.get_mut(&key) {
+                group
+            } else {
+                let mode = TradingMode::from_db(&key.0);
+                let symbol = key.1.clone();
+                groups.entry(key).or_insert(crate::types::TodayPnlGroup {
                     symbol,
-                    mode: TradingMode::from_db(&mode),
+                    mode,
                     realized_pnl: Decimal::ZERO,
                     pending_pnl_count: 0,
-                });
+                })
+            };
             if verified {
                 group.realized_pnl += Decimal::from_str(&pnl)?;
             } else {
@@ -2358,6 +2306,7 @@ impl Database {
         .transpose()
     }
 
+    /// Legacy un-scoped grid stats accessor retained for backward-compatibility tests.
     pub fn load_stats(&self) -> Result<Option<(usize, usize, Decimal, Decimal)>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
@@ -2382,6 +2331,7 @@ impl Database {
         }
     }
 
+    /// Legacy un-scoped grid stats writer retained for backward-compatibility tests.
     pub fn save_stats(&self, stats: &GridStats) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         save_stats_on(&conn, stats)
@@ -2725,6 +2675,45 @@ fn save_bot_status_on(conn: &Connection, status: BotStatus) -> Result<()> {
         params![name, Utc::now().to_rfc3339()],
     )?;
     Ok(())
+}
+
+fn clear_trades_on(tx: &Connection, symbol: Option<&str>) -> Result<usize> {
+    tx.execute(
+        "INSERT INTO execution_frontiers (symbol, mode, side, price, timestamp)
+         SELECT symbol, mode, side, price, timestamp FROM (
+             SELECT symbol, mode, side, price, timestamp,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY symbol, mode ORDER BY timestamp DESC, rowid DESC
+                    ) AS rank
+             FROM trades WHERE (?1 IS NULL OR symbol = ?1)
+         ) WHERE rank = 1
+         ON CONFLICT(symbol, mode) DO UPDATE SET
+             side = excluded.side, price = excluded.price, timestamp = excluded.timestamp
+         WHERE excluded.timestamp >= execution_frontiers.timestamp",
+        params![symbol],
+    )?;
+    tx.execute(
+        "INSERT OR IGNORE INTO cleared_trade_ids (trade_id, client_order_id, mode)
+         SELECT trade_id, client_order_id, mode FROM trades WHERE (?1 IS NULL OR symbol = ?1)",
+        params![symbol],
+    )?;
+    preserve_pair_openings_on(tx, symbol)?;
+    let deleted = tx.execute(
+        "DELETE FROM trades WHERE (?1 IS NULL OR symbol = ?1)",
+        params![symbol],
+    )?;
+    tx.execute(
+        "DELETE FROM trade_hourly_rollups WHERE (?1 IS NULL OR symbol = ?1)",
+        params![symbol],
+    )?;
+    tx.execute(
+        "DELETE FROM scoped_grid_stats WHERE (?1 IS NULL OR symbol = ?1)",
+        params![symbol],
+    )?;
+    if symbol.is_none() {
+        tx.execute("DELETE FROM grid_stats", [])?;
+    }
+    Ok(deleted)
 }
 
 fn preserve_pair_openings_on(conn: &Connection, symbol: Option<&str>) -> Result<()> {

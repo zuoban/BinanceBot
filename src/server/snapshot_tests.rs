@@ -509,14 +509,18 @@ async fn snapshot_push_continues_while_the_trading_engine_waits_for_rest() {
         .unwrap();
     let mut updates = state.ws_broadcast_tx.subscribe();
     let snapshots = tokio::spawn(state.clone().run_snapshot_broadcast());
-    let first = tokio::time::timeout(Duration::from_secs(2), updates.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&first).unwrap()["type"],
-        "snapshot"
-    );
+    let first = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let frame: serde_json::Value =
+                serde_json::from_str(&updates.recv().await.unwrap()).unwrap();
+            if frame["type"] == "snapshot" {
+                break frame;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(first["data"]["status"], "PAUSED");
     state.ticker.write().await.last_price = dec!(123);
     let second = tokio::time::timeout(Duration::from_secs(2), async {
         loop {

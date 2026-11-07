@@ -321,6 +321,41 @@ impl AppState {
         self.snapshot_at(Utc::now()).await
     }
 
+    pub(crate) async fn snapshot_for_hourly(&self) -> BotSnapshot {
+        let _scope = self.snapshot_scope_lock.read().await;
+        let _commit = self.trade_commit_lock.lock().await;
+        let config = self.config.read().await;
+        let status = *self.status.read().await;
+        let ticker = self.ticker.read().await.clone();
+        let stats = self.stats.read().await.clone();
+        let (position, account) = {
+            let position = self.position.read().await;
+            let local_account = self.account.read().await;
+            let account = self.account_view(
+                &config.exchange.symbol,
+                config.exchange.trading_mode(),
+                &position,
+                &local_account,
+            );
+            (position.clone(), account)
+        };
+        BotSnapshot {
+            status,
+            mode: config.exchange.trading_mode(),
+            symbol: config.exchange.symbol.clone(),
+            ticker,
+            stats,
+            position,
+            account,
+            account_cny_rate: None,
+            grid_config: config.summary(),
+            active_orders: Vec::new(),
+            recent_trades: Vec::new(),
+            hourly_trade_stats: None,
+            recent_logs: Vec::new(),
+        }
+    }
+
     async fn snapshot_at(&self, now: DateTime<Utc>) -> BotSnapshot {
         // A trade commit, cleanup, or scope transition during a database read
         // must not combine old chart rows with the new in-memory state.

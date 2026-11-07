@@ -1,5 +1,5 @@
 import type { GridConfig } from './types';
-
+import { sameDecimal } from './gridPreview';
 type Editable = Omit<GridConfig, 'post_only'>;
 export interface FieldChange { key: keyof Editable; label: string; before: string; after: string; risky: boolean }
 
@@ -20,7 +20,7 @@ const fields: { key: keyof Editable; label: string; risky: boolean; show: (confi
 const blank = (value: unknown) => value === null || value === undefined || value === '';
 const same = (a: unknown, b: unknown) => {
   if (blank(a) || blank(b)) return blank(a) && blank(b);
-  if (typeof a === 'string' && typeof b === 'string' && a.trim() !== '' && b.trim() !== '' && !Number.isNaN(Number(a)) && !Number.isNaN(Number(b))) return Number(a) === Number(b);
+  if (sameDecimal(a, b)) return true;
   return a === b;
 };
 

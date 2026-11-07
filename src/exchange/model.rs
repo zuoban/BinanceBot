@@ -95,6 +95,43 @@ pub struct BinanceOrderResponse {
     pub update_time: Option<i64>,
 }
 
+impl BinanceOrderResponse {
+    pub fn is_terminal_status(status: &str) -> bool {
+        matches!(
+            status,
+            "FILLED" | "CANCELED" | "EXPIRED" | "EXPIRED_IN_MATCH" | "REJECTED"
+        )
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        Self::is_terminal_status(&self.status)
+    }
+
+    pub fn is_unfilled_terminal_status(status: &str) -> bool {
+        matches!(
+            status,
+            "CANCELED" | "EXPIRED" | "EXPIRED_IN_MATCH" | "REJECTED"
+        )
+    }
+
+    pub fn is_unfilled_terminal(&self) -> bool {
+        Self::is_unfilled_terminal_status(&self.status)
+    }
+
+    pub fn is_known_status(status: &str) -> bool {
+        matches!(
+            status,
+            "NEW"
+                | "PARTIALLY_FILLED"
+                | "FILLED"
+                | "CANCELED"
+                | "EXPIRED"
+                | "EXPIRED_IN_MATCH"
+                | "REJECTED"
+        )
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct BinanceUserTrade {
     #[serde(rename = "realizedPnl")]
@@ -161,6 +198,24 @@ pub struct BinancePositionRisk {
     pub leverage: String,
 }
 
+impl BinancePositionRisk {
+    pub fn into_position_info(
+        self,
+        update_time: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> crate::types::PositionInfo {
+        crate::types::PositionInfo {
+            symbol: self.symbol,
+            size: self.position_amt,
+            entry_price: self.entry_price,
+            mark_price: self.mark_price,
+            unrealized_pnl: self.un_realized_profit,
+            liquidation_price: self.liquidation_price,
+            leverage: self.leverage.parse().unwrap_or(20),
+            update_time,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct BinanceAccountAsset {
     pub asset: String,
@@ -196,12 +251,6 @@ impl BinanceAccountInfoResponse {
             .filter(|asset| symbol.ends_with(&asset.asset))
             .max_by_key(|asset| asset.asset.len())
     }
-}
-
-#[derive(Debug, Deserialize)]
-pub struct BinanceListenKeyResponse {
-    #[serde(rename = "listenKey")]
-    pub listen_key: String,
 }
 
 /// WebSocket 24hr Mini-Ticker payload
@@ -278,5 +327,37 @@ mod tests {
         assert_eq!(asset.asset, "USDC");
         assert_eq!(asset.margin_balance, dec!(9852.87142345));
         assert_eq!(asset.available_balance, dec!(6358.01937745));
+    }
+
+    #[test]
+    fn order_status_and_position_risk_helpers_classify_responses() {
+        assert!(super::BinanceOrderResponse::is_terminal_status("FILLED"));
+        assert!(!super::BinanceOrderResponse::is_unfilled_terminal_status(
+            "FILLED"
+        ));
+        assert!(super::BinanceOrderResponse::is_unfilled_terminal_status(
+            "CANCELED"
+        ));
+        assert!(super::BinanceOrderResponse::is_known_status(
+            "PARTIALLY_FILLED"
+        ));
+        assert!(!super::BinanceOrderResponse::is_known_status(
+            "PENDING_CANCEL"
+        ));
+
+        let risk = super::BinancePositionRisk {
+            symbol: "SOLUSDC".into(),
+            position_side: None,
+            position_amt: dec!(3.5),
+            entry_price: dec!(120),
+            mark_price: dec!(125),
+            un_realized_profit: dec!(17.5),
+            liquidation_price: dec!(80),
+            leverage: "15".into(),
+        };
+        let pos = risk.into_position_info(None);
+        assert_eq!(pos.symbol, "SOLUSDC");
+        assert_eq!(pos.size, dec!(3.5));
+        assert_eq!(pos.leverage, 15);
     }
 }

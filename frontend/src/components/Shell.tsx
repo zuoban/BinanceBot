@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, Outlet, useBlocker, useLocation, useNavigate } from 'react-router-dom';
 import { App, Button, Drawer, Modal } from 'antd';
 import { AppstoreOutlined, ArrowDownOutlined, ArrowUpOutlined, BulbOutlined, EditOutlined, LineChartOutlined, LogoutOutlined, MenuOutlined, PauseOutlined, PlayCircleOutlined, PlusOutlined, QuestionCircleOutlined, ReloadOutlined, SearchOutlined, SettingOutlined, StopOutlined } from '@ant-design/icons';
@@ -18,15 +18,15 @@ export default function Shell() {
   const pairs = usePairs();
   const liveAccounts = useLiveAccounts();
   const accounts = liveAccounts.accounts;
-  const accountPairs = new Map(accounts.map(entry => [entry.snapshot.symbol, entry]));
-  const currentPairs = pairs.data?.map(pair => {
+  const accountPairs = useMemo(() => new Map(accounts.map(entry => [entry.snapshot.symbol, entry])), [accounts]);
+  const currentPairs = useMemo(() => pairs.data?.map(pair => {
     const observation = accountPairs.get(pair.symbol);
     return observation?.mode === pair.mode && !observation.account_observation_stale ? { ...pair, status: observation.snapshot.status } : pair;
-  });
-  const pairModeChanged = pairs.data?.some(pair => {
+  }), [pairs.data, accountPairs]);
+  const pairModeChanged = useMemo(() => pairs.data?.some(pair => {
     const observation = accountPairs.get(pair.symbol);
     return observation && observation.mode !== pair.mode;
-  });
+  }), [pairs.data, accountPairs]);
   const [dirty, setDirty] = useState(false), [saving, setSaving] = useState(false);
   const { modal, message } = App.useApp();
   const { logout, authEnabled } = useSession();
@@ -66,7 +66,7 @@ export default function Shell() {
   const mode = pairs.data?.[0]?.mode;
   const page = location.pathname.startsWith('/settings') ? 'settings' : location.pathname.startsWith('/pairs/') ? 'pair' : 'overview';
   const sidebarProps = { pairs: currentPairs, pending: pairs.isPending, symbol, pathname: location.pathname, mode, authEnabled, saving, onNavigate: () => setDrawer(false), onSearch: () => { setDrawer(false); setPalette(true); }, onLogout: () => void logOut() };
-  return <EditContext.Provider value={context}><AccountsContext.Provider value={accounts}><ControlProvider><div className="app-layout">
+  return <EditContext.Provider value={context}><AccountsContext.Provider value={accounts}><ControlProvider pairs={currentPairs}><div className="app-layout">
     <a className="skip-link" href="#main">跳到主内容</a>
     <aside className="sidebar"><SidebarBody idPrefix="rail" {...sidebarProps} /></aside>
     <header className="mobilebar">
@@ -110,30 +110,33 @@ function PaletteHost({ open, setOpen, pairs, stale, authEnabled, saving, onLogou
   }, []);
   const symbols = useMemo(() => pairs?.map(pair => pair.symbol) ?? [], [pairs]);
   const current = pathname.match(/^\/pairs\/([^/]+)/)?.[1];
+  const lead = useRef(0);
+  const shortcutState = useRef({ symbols, current, pathname });
+  shortcutState.current = { symbols, current, pathname };
   useEffect(() => {
     const typing = (target: EventTarget | null) => target instanceof HTMLElement && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName));
-    let lead = 0;
     const onKey = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key?.toLowerCase() === 'k') { event.preventDefault(); setOpen(value => !value); return; }
       if (event.metaKey || event.ctrlKey || event.altKey || typing(event.target) || document.querySelector('.ant-modal-root, .ant-drawer-open')) return;
       if (event.key === '?') { event.preventDefault(); setHelp(true); return; }
-      if (event.key === 'g') { lead = Date.now(); return; }
-      if (lead && Date.now() - lead < 1200) {
-        lead = 0;
+      if (event.key === 'g') { lead.current = Date.now(); return; }
+      if (lead.current && Date.now() - lead.current < 1200) {
+        lead.current = 0;
         if (event.key === 'o') { navigate('/'); return; }
         if (event.key === 's') { navigate('/settings'); return; }
         if (event.key === 'n') { navigate('/pairs/new'); return; }
       }
-      if ((event.key === '[' || event.key === ']') && symbols.length > 1 && current) {
-        const index = symbols.indexOf(current);
+      const { symbols: currentSymbols, current: activeSymbol, pathname: currentPathname } = shortcutState.current;
+      if ((event.key === '[' || event.key === ']') && currentSymbols.length > 1 && activeSymbol) {
+        const index = currentSymbols.indexOf(activeSymbol);
         if (index < 0) return;
-        const next = symbols[(index + (event.key === ']' ? 1 : -1) + symbols.length) % symbols.length];
-        navigate(`/pairs/${next}${pathname.endsWith('/config') ? '/config' : ''}`);
+        const next = currentSymbols[(index + (event.key === ']' ? 1 : -1) + currentSymbols.length) % currentSymbols.length];
+        navigate(`/pairs/${next}${currentPathname.endsWith('/config') ? '/config' : ''}`);
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [navigate, setOpen, symbols, current, pathname]);
+  }, [navigate, setOpen]);
   const commands = useMemo<Command[]>(() => {
     const all: Command[] = [
       { key: 'go-overview', group: '页面', label: '策略总览', hint: 'g o', keywords: 'overview home 总览 首页', icon: <AppstoreOutlined />, run: () => navigate('/') },
