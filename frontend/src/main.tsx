@@ -3,7 +3,7 @@ import ReactDOM from 'react-dom/client';
 import { App as AntApp } from 'antd';
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
 import { createBrowserRouter, RouterProvider } from 'react-router-dom';
-import { api, post, tokenStore } from './lib/api';
+import { api, ApiError, post, tokenStore } from './lib/api';
 import type { AuthStatus } from './lib/types';
 import { SessionContext } from './lib/session';
 import Login from './pages/Login';
@@ -32,7 +32,10 @@ function Root() {
   const authEnabled = authStatus.data?.initialized !== false;
   const logout = useCallback(async (revoked = false) => {
     const token = tokenStore.get();
-    if (!revoked && token) await post('/api/auth/logout', {});
+    if (!revoked && token) {
+      try { await post('/api/auth/logout', {}); }
+      catch (error) { if (!(error instanceof ApiError && error.status === 401)) throw error; }
+    }
     if (tokenStore.get() !== token) return;
     tokenStore.clear(); client.clear(); setLoggedIn(false);
   }, []);
@@ -44,7 +47,7 @@ function Root() {
   useEffect(() => { if (loggedIn && authEnabled && authStatus.data && !authStatus.data.authenticated) { tokenStore.clear(); client.clear(); setLoggedIn(false); } }, [loggedIn, authEnabled, authStatus.data]);
   const session = { logout, authEnabled };
   if (authStatus.isPending) return <LoadingScreen label={loggedIn ? '正在验证会话' : '正在连接控制台'} />;
-  if (authStatus.error) return <div className="loading-screen"><div>无法连接后端服务：{authStatus.error.message}<br /><button onClick={() => void authStatus.refetch()}>重试</button></div></div>;
+  if (authStatus.error) return <div className="loading-screen"><div>无法连接后端服务：{authStatus.error.message}<br /><button type="button" onClick={() => void authStatus.refetch()}>重试</button></div></div>;
   if (!authEnabled) return <SessionContext.Provider value={session}><RouterProvider router={router} /></SessionContext.Provider>;
   return <SessionContext.Provider value={session}>{loggedIn && authStatus.data?.authenticated ? <RouterProvider router={router} /> : <Login onLogin={() => { client.clear(); setLoggedIn(true); }} />}</SessionContext.Provider>;
 }

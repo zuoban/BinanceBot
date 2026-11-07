@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useCallback, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 
 interface ParamSpec { fallback: string; allowed?: readonly string[] }
@@ -9,6 +9,8 @@ interface ParamSpec { fallback: string; allowed?: readonly string[] }
  */
 export function useUrlParams<S extends Record<string, ParamSpec>>(spec: S): [{ [K in keyof S]: string }, (patch: Partial<{ [K in keyof S]: string }>) => void] {
   const [params, setParams] = useSearchParams();
+  const specRef = useRef(spec);
+  specRef.current = spec;
   const values = Object.fromEntries(Object.entries(spec).map(([key, { fallback, allowed }]) => {
     const raw = params.get(key);
     return [key, raw !== null && (!allowed || allowed.includes(raw)) ? raw : fallback];
@@ -16,13 +18,12 @@ export function useUrlParams<S extends Record<string, ParamSpec>>(spec: S): [{ [
   const update = useCallback((patch: Partial<{ [K in keyof S]: string }>) => {
     setParams(current => {
       const next = new URLSearchParams(current);
-      for (const [key, value] of Object.entries(patch) as [string, string][]) {
-        if (value === spec[key].fallback || value === '') next.delete(key); else next.set(key, value);
+      for (const [key, value] of Object.entries(patch) as [string, string | undefined][]) {
+        if (value === undefined || !(key in specRef.current)) continue;
+        if (value === specRef.current[key].fallback || value === '') next.delete(key); else next.set(key, value);
       }
       return next;
     }, { replace: true });
-    // `spec` is a stable literal per call site.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [setParams]);
   return [values, update];
 }

@@ -2138,19 +2138,24 @@ impl Database {
                 (now + ChronoDuration::days(1)).date_naive().to_string()
             ],
             |row| {
+                let verified = row.get::<_, bool>(4)?;
+                let pnl = if verified {
+                    Some(row.get::<_, String>(3)?)
+                } else {
+                    None
+                };
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, DateTime<Utc>>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, bool>(4)?,
+                    pnl,
                 ))
             },
         )?;
         let mut groups: std::collections::BTreeMap<(String, String), crate::types::TodayPnlGroup> =
             std::collections::BTreeMap::new();
         for row in rows {
-            let (symbol, mode, timestamp, pnl, verified) = row?;
+            let (symbol, mode, timestamp, pnl) = row?;
             if timestamp < window_start || timestamp > now {
                 continue;
             }
@@ -2167,7 +2172,7 @@ impl Database {
                     pending_pnl_count: 0,
                 })
             };
-            if verified {
+            if let Some(pnl) = pnl {
                 group.realized_pnl += Decimal::from_str(&pnl)?;
             } else {
                 group.pending_pnl_count += 1;
@@ -2210,6 +2215,7 @@ impl Database {
         value
     }
 
+    #[cfg(test)]
     pub fn get_unverified_trades(
         &self,
         symbol: &str,
@@ -2263,16 +2269,16 @@ impl Database {
             "SELECT realized_pnl, commission, pnl_verified FROM trades WHERE symbol = ?1 AND mode = ?2;",
         )?;
         let rows = stmt.query_map(params![symbol, mode.as_str()], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i32>(2)?,
-            ))
+            let verified = row.get::<_, i32>(2)? != 0;
+            if verified {
+                Ok(Some((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            } else {
+                Ok(None)
+            }
         })?;
         let (mut pnl, mut fees, mut pending) = (Decimal::ZERO, Decimal::ZERO, 0);
         for row in rows {
-            let (gross, commission, verified) = row?;
-            if verified != 0 {
+            if let Some((gross, commission)) = row? {
                 pnl += Decimal::from_str(&gross)?;
                 fees += Decimal::from_str(&commission)?;
             } else {

@@ -22,9 +22,10 @@ export function HistoryActions({ symbol }: { symbol: string }) {
   };
   const clear = async () => {
     if (lock.current) return;
-    lock.current = true; setBusy('clear');
+    lock.current = true;
     try {
       if (!await modal.confirm({ title: `清理 ${symbol} 的成交历史？`, content: `将删除 ${symbol} 全部模式的历史成交并重置相关统计。持仓和挂单保留。此操作无法撤销，建议先导出。`, okText: '清理当前币种历史', okButtonProps: { danger: true }, cancelText: '取消' })) return;
+      setBusy('clear');
       const result = await post<{ deleted_trades: number }>(`${path}/trades/clear`, { confirm: true });
       await refreshClearedQueries(client, [['snapshot'], ['overview']]);
       message.success(`已清理 ${symbol} 的 ${result.deleted_trades} 笔历史成交`);

@@ -90,13 +90,9 @@ async fn main() -> anyhow::Result<()> {
             confirm == "INITIALIZE-EMPTY-PAPER-ACCOUNT",
             "Confirmation must be exactly INITIALIZE-EMPTY-PAPER-ACCOUNT"
         );
-        anyhow::ensure!(
-            (3..=32).contains(&symbol.len())
-                && symbol
-                    .bytes()
-                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()),
-            "Trading pair must contain 3–32 uppercase ASCII letters or digits"
-        );
+        binance_grid_bot::config::validate_symbol(&symbol).map_err(|_| {
+            anyhow::anyhow!("Trading pair must contain 3–32 uppercase ASCII letters or digits")
+        })?;
         #[cfg(not(unix))]
         anyhow::bail!("Offline paper migration requires Unix process locking");
         #[cfg(unix)]

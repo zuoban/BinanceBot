@@ -12,10 +12,10 @@ function SkeletonLine({ width, size }: { width: string; size?: 'large' | 'small'
   return <div className={`skeleton-line${size ? ` skeleton-line-${size}` : ''}`} style={{ width }} />;
 }
 
-function SkeletonCard({ variant = 'metric' }: { variant?: 'metric' | 'strategy' | 'chart' }) {
+function SkeletonCard({ variant = 'metric' }: { variant?: 'metric' | 'strategy' }) {
   return <div className={`skeleton-card skeleton-card-${variant}`}>
     <div className="skeleton-card-heading"><SkeletonLine width="36%" size="small" /><SkeletonLine width="18%" size="small" /></div>
-    <SkeletonLine width={variant === 'chart' ? '28%' : '48%'} size="large" />
+    <SkeletonLine width="48%" size="large" />
     {variant === 'metric' ? <SkeletonLine width="62%" size="small" /> :
       <div className={`skeleton-card-content skeleton-card-content-${variant}`}>
         {[0, 1, 2, 3].map(item => <div key={item}><SkeletonLine width="65%" size="small" /><SkeletonLine width="85%" /></div>)}

@@ -180,7 +180,6 @@ impl Drop for FillCacheCleanup<'_> {
 
 pub struct BinanceFuturesClient {
     base_url: String,
-    pub _api_key: String,
     api_secret: String,
     client: Client,
     recv_window: u64,
@@ -258,7 +257,6 @@ impl BinanceFuturesClient {
 
         Self {
             base_url,
-            _api_key: config.api_key.clone(),
             api_secret: config.api_secret.clone(),
             client,
             recv_window: config.recv_window,

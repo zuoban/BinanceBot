@@ -2,7 +2,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { Alert, Button, Card, Col, Descriptions, Row, Statistic, Tabs } from 'antd';
 import { SettingOutlined } from '@ant-design/icons';
 import { usePairSnapshot, usePairs } from '../lib/queries';
-import { accountGroups, number, numeric, price, quoteAsset, ageText, todayTradeCounts } from '../lib/format';
+import { accountGroups, number, numeric, price, quoteAsset, ageText, todayTradeCounts, trimFractionZeros } from '../lib/format';
 import { ErrorNotice, ModeTag, PageBreadcrumb, PageTitle, Pnl, SignalChip, StatusTag } from '../components/Common';
 import { PairControls, useControls } from '../components/Controls';
 import { DepthChart, HourlyChart } from '../components/Charts';
@@ -45,7 +45,7 @@ export default function PairDetail() {
         <Col xs={24} sm={12} xl={6}><Card><Statistic title={`标记价格 / ${asset}`} value={Number(s.ticker.mark_price) > 0 ? price(s.ticker.mark_price) : '--'} /><div className="muted">最新成交 {price(s.ticker.last_price)}</div></Card></Col>
         <Col xs={24} sm={12} xl={6}><Card><Statistic title={`已实现盈亏 / ${asset}`} value={s.stats.total_realized_pnl} formatter={() => <Pnl value={s.stats.total_realized_pnl} />} /><div className="muted">扣费后 {number(netPnl)}</div></Card></Col>
         <Col xs={24} sm={12} xl={6}><Card><Statistic title={`持仓未实现 / ${asset}`} value={s.position.unrealized_pnl} formatter={() => <Pnl value={s.position.unrealized_pnl} />} /><div className="muted">持仓数量 {price(s.position.size)}</div></Card></Col>
-        <Col xs={24} sm={12} xl={6}><Card><Statistic title={`账户权益 / ${account?.asset || asset}`} value={account?.equity ?? '--'} precision={2} /><div className="muted">{account?.cny != null ? `≈ ¥${number(account.cny)}` : '人民币估值待更新'} · 可用 {number(account?.available)}</div></Card></Col>
+        <Col xs={24} sm={12} xl={6}><Card><Statistic title={`账户权益 / ${account?.asset || asset}`} value={account?.equity ?? '--'} formatter={() => number(account?.equity)} /><div className="muted">{account?.cny != null ? `≈ ¥${number(account.cny)}` : '人民币估值待更新'} · 可用 {number(account?.available)}</div></Card></Col>
       </Row>
       <Tabs className="detail-tabs" activeKey={tab} onChange={setTab} items={[
         { key: 'monitor', label: '实时监控', children: <>
@@ -61,8 +61,8 @@ export default function PairDetail() {
             { key: 'entry', label: '持仓均价', children: Number(s.position.size) !== 0 && Number(s.position.entry_price) > 0 ? price(s.position.entry_price) : '--' },
             { key: 'liquidation', label: '预估强平价', children: Number(s.position.liquidation_price) > 0 ? price(s.position.liquidation_price) : '--' },
             { key: 'leverage', label: '杠杆', children: `${s.position.leverage}×` },
-            { key: 'interval', label: '网格间距', children: s.grid_config.grid_interval },
-            { key: 'amount', label: '每格金额', children: `${s.grid_config.order_amount_usdc} ${asset}` },
+            { key: 'interval', label: '网格间距', children: `${trimFractionZeros(s.grid_config.grid_interval)} ${asset}` },
+            { key: 'amount', label: '每格金额', children: `${trimFractionZeros(s.grid_config.order_amount_usdc)} ${asset}` },
             { key: 'commission', label: '累计手续费', children: number(s.stats.total_commission, 4) },
             { key: 'cycles', label: '历史配对循环', children: s.stats.completed_cycles },
             { key: 'trades', label: '累计成交', children: s.stats.total_trades },

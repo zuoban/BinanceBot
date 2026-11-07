@@ -5,7 +5,7 @@ import { ArrowDownOutlined, ArrowRightOutlined, ArrowUpOutlined, EyeOutlined, Pl
 import { useOverview } from '../lib/queries';
 import { useUrlParams } from '../lib/urlState';
 import { AccountsContext } from '../lib/session';
-import { ageText, accountGroups, comparePositionAmount, modeLabel, numeric, number as fixedNumber, positionAmount, positionGroups, price as fixedPrice, quoteAsset, todayCount, todayPnlGroups, todayTradeCounts, trimFractionZeros } from '../lib/format';
+import { ageText, accountGroups, compactNumber as number, compactPrice as price, comparePositionAmount, modeLabel, numeric, positionAmount, positionGroups, quoteAsset, todayCount, todayPnlGroups, todayTradeCounts, trimFractionZeros } from '../lib/format';
 import { ErrorNotice, PageTitle, Pnl, SignalButton, SignalChip, StatusTag } from '../components/Common';
 import { runBatchControls, useControls } from '../components/Controls';
 import type { Pair, Trade } from '../lib/types';
@@ -17,8 +17,6 @@ import { PaperGuide } from '../components/PaperGuide';
 import { TradesTable } from '../components/DataTables';
 
 import { useNow } from '../lib/useNow';
-const number = (value: unknown, digits?: number) => trimFractionZeros(fixedNumber(value, digits));
-const price = (value: unknown) => trimFractionZeros(fixedPrice(value));
 const toPair = (e: { snapshot: { symbol: string; status: Pair['status']; grid_config: Pair['grid_config'] }; mode: Pair['mode']; scoped: boolean }): Pair => ({ symbol: e.snapshot.symbol, status: e.snapshot.status, mode: e.mode, grid_config: e.snapshot.grid_config, scoped: e.scoped });
 
 function groupTradePnl(trades: Trade[]) {

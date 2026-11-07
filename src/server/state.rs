@@ -326,6 +326,21 @@ impl GlobalPositionLimit {
         let _guard = self.lock.lock().await;
         self.check_locked().await
     }
+
+    fn blocks_submission(&self) -> bool {
+        self.enabled.load(Ordering::SeqCst)
+            && (self.blocked.load(Ordering::SeqCst)
+                || self.pending_fill_reconciliations.load(Ordering::SeqCst) != 0
+                || self.fill_failure_generation.load(Ordering::SeqCst)
+                    != self.fill_recovered_generation.load(Ordering::SeqCst)
+                || !self.membership_ready.load(Ordering::SeqCst))
+    }
+
+    fn is_blocked_or_unready(&self) -> bool {
+        self.blocked.load(Ordering::SeqCst)
+            || (self.enabled.load(Ordering::SeqCst)
+                && !self.membership_ready.load(Ordering::SeqCst))
+    }
 }
 
 const RECENT_TRADE_LIMIT: usize = 200;
@@ -1161,7 +1176,12 @@ impl AppState {
         let mut timer = tokio::time::interval(Duration::from_secs(10));
         loop {
             timer.tick().await;
-            let asset = self.account.read().await.asset.clone();
+            let mut asset = self.account.read().await.asset.clone();
+            if asset.is_empty() {
+                asset = crate::types::quote_asset(&self.config.read().await.exchange.symbol)
+                    .unwrap_or_default()
+                    .to_string();
+            }
             if let Err(err) = self.cny_rates.refresh_if_due(&asset).await {
                 warn!("Could not refresh {}/CNY exchange rate: {}", asset, err);
             }
@@ -1315,11 +1335,9 @@ impl AppState {
         self.pause_epoch.fetch_add(1, Ordering::SeqCst);
         let mut eligibility = self.status_update_lock.lock().await;
         if *self.status.read().await == BotStatus::Running {
-            let blocked = global.as_ref().is_some_and(|coordinator| {
-                coordinator.blocked.load(Ordering::SeqCst)
-                    || (coordinator.enabled.load(Ordering::SeqCst)
-                        && !coordinator.membership_ready.load(Ordering::SeqCst))
-            });
+            let blocked = global
+                .as_ref()
+                .is_some_and(|coordinator| coordinator.is_blocked_or_unready());
             *eligibility = if self.global_position_initialized.load(Ordering::SeqCst)
                 && self.global_position_ready.load(Ordering::SeqCst)
                 && self.safety_pauses_pending.load(Ordering::SeqCst) == 0
@@ -1358,11 +1376,9 @@ impl AppState {
         };
         let _admission = self.safety_pause_admission.lock().await;
         let mut eligibility = self.status_update_lock.lock().await;
-        let blocked = global.as_ref().is_some_and(|coordinator| {
-            coordinator.blocked.load(Ordering::SeqCst)
-                || (coordinator.enabled.load(Ordering::SeqCst)
-                    && !coordinator.membership_ready.load(Ordering::SeqCst))
-        });
+        let blocked = global
+            .as_ref()
+            .is_some_and(|coordinator| coordinator.is_blocked_or_unready());
         // A pending pause must finish durably before a clean restart can be allowed.
         anyhow::ensure!(
             self.safety_pauses_pending.load(Ordering::SeqCst) == 0,
@@ -1552,14 +1568,9 @@ impl AppState {
         };
         if self.is_shutting_down()
             || self.global_cancel_pending.load(Ordering::SeqCst)
-            || global.as_ref().is_some_and(|global| {
-                global.enabled.load(Ordering::SeqCst)
-                    && (global.blocked.load(Ordering::SeqCst)
-                        || global.pending_fill_reconciliations.load(Ordering::SeqCst) != 0
-                        || global.fill_failure_generation.load(Ordering::SeqCst)
-                            != global.fill_recovered_generation.load(Ordering::SeqCst)
-                        || !global.membership_ready.load(Ordering::SeqCst))
-            })
+            || global
+                .as_ref()
+                .is_some_and(|global| global.blocks_submission())
         {
             return None;
         }
@@ -1581,14 +1592,7 @@ impl AppState {
             .global_position_limit
             .get()
             .and_then(std::sync::Weak::upgrade)
-            .is_some_and(|global| {
-                global.enabled.load(Ordering::SeqCst)
-                    && (global.blocked.load(Ordering::SeqCst)
-                        || global.pending_fill_reconciliations.load(Ordering::SeqCst) != 0
-                        || global.fill_failure_generation.load(Ordering::SeqCst)
-                            != global.fill_recovered_generation.load(Ordering::SeqCst)
-                        || !global.membership_ready.load(Ordering::SeqCst))
-            })
+            .is_some_and(|global| global.blocks_submission())
         {
             return None;
         }

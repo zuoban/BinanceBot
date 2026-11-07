@@ -292,17 +292,6 @@ fn escape_html(value: &str) -> String {
         .replace('>', "&gt;")
 }
 
-pub async fn send_trade_notification(
-    client: &Client,
-    config: &TelegramConfig,
-    trade: &TradeRecord,
-    context: &TradeNotificationContext,
-) -> Result<()> {
-    TelegramNotifier::new(client.clone())
-        .send_trade_notification(config, trade, context)
-        .await
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

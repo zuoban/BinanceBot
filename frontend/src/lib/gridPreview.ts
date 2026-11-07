@@ -26,6 +26,7 @@ export function gridPreview(input: GridPreviewInput): GridPreview | null {
   const buyWindow = Number(input.buyWindow), sellWindow = Number(input.sellWindow);
   if (!reference || !interval || reference.n === 0n || interval.n === 0n) return null;
   if (![buyWindow, sellWindow].every(count => Number.isInteger(count) && count >= 1 && count <= 50)) return null;
+  if (priceRangeError('min', input.min, input.max) || priceRangeError('max', input.min, input.max)) return null;
   const min = parse(input.min), max = parse(input.max);
   const scale = Math.max(reference.s, interval.s, min?.s ?? 0, max?.s ?? 0);
   const mark = rescale(reference, scale), step = rescale(interval, scale);

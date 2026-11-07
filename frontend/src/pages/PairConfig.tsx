@@ -47,6 +47,7 @@ export default function PairConfig() {
   const baseline = useRef<{ symbol: string; config: GridConfig & { config_version: string } } | null>(null);
   const customInterval = useRef(false);
   const appliedSymbol = useRef<string | undefined>(undefined);
+  const resetMutation = useRef(() => {});
   const global = useQuery({ queryKey: ['global-config'], queryFn: ({ signal }) => api<GlobalConfig>('/api/global/config', { signal }), refetchOnWindowFocus: false });
   // Unknown state (for example a failed global-config request) is confirmed as live.
   const live = global.data ? global.data.has_api_key && global.data.has_api_secret : pair ? pair.mode === 'LIVE' : true;
@@ -57,11 +58,12 @@ export default function PairConfig() {
     baseline.current = null;
     customInterval.current = false;
     appliedSymbol.current = undefined;
+    resetMutation.current();
     form.resetFields();
     if (adding) form.setFieldsValue(defaults);
   }, [symbol, adding, form]);
   useEffect(() => {
-    if (config.data && !ready && !adding && symbol) { baseline.current = { symbol, config: config.data }; form.setFieldsValue(config.data); setReady(true); }
+    if (config.data && config.data.symbol === symbol && !ready && !adding && symbol) { baseline.current = { symbol, config: config.data }; form.setFieldsValue(config.data); setReady(true); }
   }, [config.data, ready, adding, form, symbol]);
   useEffect(() => () => { edit.setDirty(false); edit.setSaving(false); }, [edit.setDirty, edit.setSaving]);
   const mutation = useMutation({
@@ -80,6 +82,7 @@ export default function PairConfig() {
       if (!adding && typeof data !== 'string') form.setFieldsValue(data);
       message.success(adding ? '交易对已添加，策略保持暂停，请检查配置后手动恢复' : '策略配置已保存并生效');
       const targetSymbol = adding ? (typeof data === 'string' ? data : values.symbol.trim().toUpperCase()) : symbol;
+      void client.invalidateQueries({ queryKey: ['snapshot', targetSymbol] });
       navigate(`/pairs/${targetSymbol}`, { replace: true });
       void client.invalidateQueries({ queryKey: ['pairs'] });
       void client.invalidateQueries({ queryKey: ['overview'] });
@@ -89,6 +92,7 @@ export default function PairConfig() {
     onError: error => message.error(error.message),
     onSettled: () => edit.setSaving(false),
   });
+  resetMutation.current = mutation.reset;
   const remove = async () => {
     if (!pair || removing.current) return;
     removing.current = true;
@@ -113,6 +117,7 @@ export default function PairConfig() {
     submission.current = currentSubmission;
     try {
       const latest = await global.refetch();
+      if (page.current !== currentPage || submission.current !== currentSubmission) return;
       const currentLive = latest.data ? latest.data.has_api_key && latest.data.has_api_secret : pair ? pair.mode === 'LIVE' : true;
       const changes = adding || !baseline.current ? null : diffGridConfig(baseline.current.config, values);
       if (currentLive && !await modal.confirm({

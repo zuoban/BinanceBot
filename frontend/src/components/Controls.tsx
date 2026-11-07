@@ -100,9 +100,11 @@ export function ControlProvider({ pairs, children }: { pairs?: Pair[]; children:
     } finally {
       locked.current.delete(pair.symbol); setBusy(new Set(locked.current));
       setPending(p => { const { [pair.symbol]: _done, ...rest } = p; return rest; });
-      void client.invalidateQueries({ queryKey: ['pairs'] });
-      void client.invalidateQueries({ queryKey: ['overview'] });
-      void client.invalidateQueries({ queryKey: ['snapshot', pair.symbol] });
+      if (submitted) {
+        void client.invalidateQueries({ queryKey: ['pairs'] });
+        void client.invalidateQueries({ queryKey: ['overview'] });
+        void client.invalidateQueries({ queryKey: ['snapshot', pair.symbol] });
+      }
     }
   };
   return <Context.Provider value={{ busy, pending, results, clearResult, run }}>{children}</Context.Provider>;

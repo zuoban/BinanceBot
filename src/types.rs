@@ -138,6 +138,25 @@ pub struct GridOrder {
     pub merge_sources: Vec<OrderSource>,
 }
 
+impl GridOrder {
+    pub(crate) fn apply_terminal_fill(
+        &mut self,
+        response: &crate::exchange::model::BinanceOrderResponse,
+        updated_at: DateTime<Utc>,
+    ) {
+        self.updated_at = updated_at;
+        self.quantity = response.executed_qty;
+        if let Some(price) = response
+            .avg_price
+            .filter(|p| *p > Decimal::ZERO)
+            .or_else(|| (response.price > Decimal::ZERO).then_some(response.price))
+        {
+            self.price = price;
+        }
+        self.amount_usdc = self.price * self.quantity;
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum OrderPurpose {
@@ -713,6 +732,39 @@ pub struct AuthTokenResponse {
     pub token: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiResponse<T> {
+    pub success: bool,
+    pub data: Option<T>,
+    pub message: Option<String>,
+}
+
+impl<T> ApiResponse<T> {
+    pub fn ok(data: T) -> Self {
+        Self {
+            success: true,
+            data: Some(data),
+            message: None,
+        }
+    }
+
+    pub fn ok_with_message(data: T, message: impl Into<String>) -> Self {
+        Self {
+            success: true,
+            data: Some(data),
+            message: Some(message.into()),
+        }
+    }
+
+    pub fn err(message: impl Into<String>) -> Self {
+        Self {
+            success: false,
+            data: None,
+            message: Some(message.into()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -765,5 +817,62 @@ mod tests {
     fn initial_paper_account_falls_back_to_symbol_when_quote_suffix_is_unknown() {
         assert_eq!(AccountInfo::initial_paper("SOLUSDC", None).asset, "USDC");
         assert_eq!(AccountInfo::initial_paper("BTCETH", None).asset, "BTCETH");
+    }
+
+    #[test]
+    fn terminal_fill_prefers_positive_avg_price_falls_back_to_response_price_and_updates_notional()
+    {
+        let created_at = Utc::now() - chrono::Duration::seconds(10);
+        let updated_at = Utc::now();
+        let base_order = GridOrder {
+            client_order_id: "gb_fill_1".into(),
+            order_id: Some(42),
+            symbol: "SOLUSDC".into(),
+            side: OrderSide::Buy,
+            price: dec!(100),
+            quantity: dec!(2),
+            amount_usdc: dec!(200),
+            status: OrderStatus::New,
+            created_at,
+            updated_at: created_at,
+            grid_level: 1000,
+            paired_client_order_id: None,
+            is_take_profit: false,
+            purpose: OrderPurpose::Grid,
+            merge_sources: Vec::new(),
+        };
+        let mut response = crate::exchange::model::BinanceOrderResponse {
+            order_id: 42,
+            client_order_id: "gb_fill_1".into(),
+            symbol: "SOLUSDC".into(),
+            status: "FILLED".into(),
+            price: dec!(101),
+            avg_price: Some(dec!(99.5)),
+            orig_qty: dec!(2),
+            executed_qty: dec!(1.5),
+            side: "BUY".into(),
+            order_type: "LIMIT".into(),
+            time_in_force: "GTX".into(),
+            update_time: None,
+        };
+
+        let mut order = base_order.clone();
+        order.apply_terminal_fill(&response, updated_at);
+        assert_eq!(order.updated_at, updated_at);
+        assert_eq!(order.quantity, dec!(1.5));
+        assert_eq!(order.price, dec!(99.5));
+        assert_eq!(order.amount_usdc, dec!(149.25));
+
+        response.avg_price = Some(Decimal::ZERO);
+        let mut fallback_order = base_order.clone();
+        fallback_order.apply_terminal_fill(&response, updated_at);
+        assert_eq!(fallback_order.price, dec!(101));
+        assert_eq!(fallback_order.amount_usdc, dec!(151.5));
+
+        response.price = Decimal::ZERO;
+        let mut keep_order = base_order;
+        keep_order.apply_terminal_fill(&response, updated_at);
+        assert_eq!(keep_order.price, dec!(100));
+        assert_eq!(keep_order.amount_usdc, dec!(150));
     }
 }

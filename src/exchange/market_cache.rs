@@ -1,3 +1,4 @@
+use super::cache_entries::{ENTRY_WAIT, FAILURE_COOLDOWN};
 use super::BinanceFuturesClient;
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
@@ -10,8 +11,6 @@ use tokio::sync::Mutex;
 const DEMAND_WINDOW: Duration = Duration::from_secs(10);
 const BULK_THRESHOLD: usize = 10;
 const SNAPSHOT_MAX_AGE: Duration = Duration::from_secs(3);
-const FAILURE_COOLDOWN: Duration = Duration::from_secs(2);
-const ENTRY_WAIT: Duration = Duration::from_millis(100);
 
 #[derive(Default)]
 struct MarketEntry {
@@ -39,10 +38,12 @@ impl MarketCache {
     ) -> Result<(Decimal, DateTime<Utc>)> {
         let entry = {
             let mut entries = self.entries.lock().await;
-            entries
-                .entry(client.market_cache_key().to_owned())
-                .or_default()
-                .clone()
+            let key = client.market_cache_key();
+            if let Some(entry) = entries.get(key) {
+                entry.clone()
+            } else {
+                entries.entry(key.to_owned()).or_default().clone()
+            }
         };
         // A slow shared HTTP request must not stall every engine's reconciliation.
         let mut entry = tokio::time::timeout(ENTRY_WAIT, entry.lock())

@@ -45,6 +45,8 @@ export function number(value: unknown, digits = 2) {
 }
 export const price = (value: unknown) => number(value, Math.min(10, Math.max(4, 2 - Math.floor(Math.log10(Math.abs(Number(value)) || 1)))));
 export const trimFractionZeros = (value: string) => value.replace(/(\.\d*?[1-9])0+$|\.0+$/, '$1');
+export const compactNumber = (value: unknown, digits = 2) => trimFractionZeros(number(value, digits));
+export const compactPrice = (value: unknown) => trimFractionZeros(price(value));
 export const time = (value: string) => new Date(value).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
 export function relativeTime(value: string, now = Date.now()) {
   const timestamp = Date.parse(value);
@@ -80,7 +82,7 @@ export function todayPnlGroups(stats: Overview['today_pnl'], now = Date.now()) {
     else { group.total += pnl; group.pending += row.pending_pnl_count; }
     groups.set(key, group);
   }
-  return [...groups.entries()].map(([key, group]) => ({ ...group, key, total: group.available && !group.pending && Number.isFinite(group.total) ? group.total : null }));
+  return [...groups.entries()].map(([key, group]) => ({ ...group, key, total: group.available && !group.pending && Number.isFinite(group.total) ? (Math.abs(group.total) < 1e-12 ? 0 : Number(group.total.toPrecision(12))) : null }));
 }
 export function todayCount(s: Snapshot | PairSummary, now = Date.now()) {
   const counts = todayTradeCounts(s, now);

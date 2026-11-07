@@ -8,7 +8,7 @@ import { NoData } from './Common';
 
 export function todayHourlyData(stats: NonNullable<Snapshot['hourly_trade_stats']>, now = Date.now()) {
   const start = Date.parse(stats.window_start);
-  const currentHour = Math.floor((now - start) / 3600_000);
+  const currentHour = Math.min(23, Math.max(0, Math.floor((now - start) / 3600_000)));
   const buckets = new Map(stats.buckets.map(bucket => [Date.parse(bucket.hour_start), bucket]));
   return Array.from({ length: 24 }, (_, index) => {
     const hour = (currentHour - index + 24) % 24;

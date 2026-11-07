@@ -4,7 +4,7 @@ use crate::exchange::market_cache::MarketCache;
 use crate::exchange::position_cache::PositionCache;
 use crate::exchange::{BinanceOrderResponse, BinanceUserTrade};
 use crate::server::state::AppState;
-use crate::strategy::precision::SymbolRules;
+use crate::strategy::precision::{SymbolRules, SymbolRulesError};
 use crate::types::*;
 use anyhow::{anyhow, Result};
 use chrono::Utc;
@@ -1302,18 +1302,12 @@ impl GridTradingEngine {
         symbol: &str,
     ) -> Result<SymbolRules> {
         let info = client.get_exchange_info(Some(symbol)).await?;
-        let symbol_info = info
-            .symbols
-            .iter()
-            .find(|item| item.symbol.eq_ignore_ascii_case(symbol))
-            .ok_or_else(|| anyhow!("Missing Binance exchange rules for {}", symbol))?;
-        anyhow::ensure!(
-            symbol_info.status == "TRADING",
-            "Symbol {} is not trading",
-            symbol
-        );
-        SymbolRules::from_exchange_info(&info, symbol)
-            .ok_or_else(|| anyhow!("Missing Binance exchange rules for {}", symbol))
+        SymbolRules::from_trading_exchange_info(&info, symbol).map_err(|error| match error {
+            SymbolRulesError::NotFound | SymbolRulesError::MissingFilters => {
+                anyhow!("Missing Binance exchange rules for {}", symbol)
+            }
+            SymbolRulesError::NotTrading => anyhow!("Symbol {} is not trading", symbol),
+        })
     }
 
     async fn fetch_symbol_rules(&self, symbol: &str) -> Result<SymbolRules> {
@@ -2709,9 +2703,7 @@ impl GridTradingEngine {
                 original.quantity = original.quantity.max(found.orig_qty);
                 original.amount_usdc = original.price * original.quantity;
                 if unresolved_filled_quantity(&found) {
-                    self.account_cache.invalidate(&self.client).await;
-                    self.position_cache.invalidate(&self.client).await;
-                    self.last_account_sync = None;
+                    self.invalidate_account_and_position_caches().await;
                     self.state
                         .active_orders
                         .write()
@@ -2729,13 +2721,7 @@ impl GridTradingEngine {
                 }
                 if found.is_terminal() {
                     if found.executed_qty > Decimal::ZERO {
-                        intent.updated_at = exchange_fill_time(&found);
-                        intent.quantity = found.executed_qty;
-                        if let Some(price) = found.avg_price.filter(|price| *price > Decimal::ZERO)
-                        {
-                            intent.price = price;
-                        }
-                        intent.amount_usdc = intent.price * intent.quantity;
+                        intent.apply_terminal_fill(&found, exchange_fill_time(&found));
                         if !self.on_order_filled(&mut intent).await {
                             return false;
                         }
@@ -3091,6 +3077,18 @@ impl GridTradingEngine {
                 None
             }
         }
+    }
+
+    pub(super) async fn invalidate_account_and_position_caches(&mut self) {
+        self.account_cache.invalidate(&self.client).await;
+        self.position_cache.invalidate(&self.client).await;
+        self.last_account_sync = None;
+    }
+
+    pub(super) async fn block_reconciliation_and_invalidate_caches(&mut self) {
+        self.last_orders_sync = None;
+        self.report_reconciliation_state(true).await;
+        self.invalidate_account_and_position_caches().await;
     }
 
     async fn sync_account_and_position_inner(&mut self, shared_position: bool) -> bool {
@@ -3901,7 +3899,7 @@ impl GridTradingEngine {
                 return false;
             }
             // Paper Trading simulation
-            order.order_id = Some(rand::random::<i64>().abs());
+            order.order_id = Some(rand::random::<i64>().saturating_abs());
             active_orders.insert(client_order_id.clone(), order);
             debug!(
                 "[PAPER] Placed {} Maker order: price={}, qty={}, id={}",
@@ -3969,11 +3967,7 @@ impl GridTradingEngine {
             match result {
                 Ok(resp) => {
                     if unresolved_filled_quantity(&resp) {
-                        self.last_orders_sync = None;
-                        self.report_reconciliation_state(true).await;
-                        self.account_cache.invalidate(&self.client).await;
-                        self.position_cache.invalidate(&self.client).await;
-                        self.last_account_sync = None;
+                        self.block_reconciliation_and_invalidate_caches().await;
                     }
                     order.order_id = Some(resp.order_id);
                     order.symbol = resp.symbol.clone();
@@ -3998,9 +3992,7 @@ impl GridTradingEngine {
                         .insert(resp.client_order_id.clone(), order.clone());
                     if !persisted {
                         if resp.executed_qty > Decimal::ZERO {
-                            self.account_cache.invalidate(&self.client).await;
-                            self.position_cache.invalidate(&self.client).await;
-                            self.last_account_sync = None;
+                            self.invalidate_account_and_position_caches().await;
                         }
                         return false;
                     }
@@ -4032,14 +4024,7 @@ impl GridTradingEngine {
                     }
                     if resp.executed_qty > Decimal::ZERO {
                         if resp.is_terminal() {
-                            order.updated_at = exchange_fill_time(&resp);
-                            order.quantity = resp.executed_qty;
-                            if let Some(price) =
-                                resp.avg_price.filter(|price| *price > Decimal::ZERO)
-                            {
-                                order.price = price;
-                            }
-                            order.amount_usdc = order.price * order.quantity;
+                            order.apply_terminal_fill(&resp, exchange_fill_time(&resp));
                             let recorded = self.on_order_filled(&mut order).await;
                             if recorded {
                                 if let Some(guard) = &mut fill_guard {
@@ -4136,9 +4121,7 @@ impl GridTradingEngine {
                                     || unresolved_filled_quantity(&found)
                                 {
                                     self.report_reconciliation_state(true).await;
-                                    self.account_cache.invalidate(&self.client).await;
-                                    self.position_cache.invalidate(&self.client).await;
-                                    self.last_account_sync = None;
+                                    self.invalidate_account_and_position_caches().await;
                                 }
                                 order.order_id = Some(found.order_id);
                                 order.status = if found.executed_qty > Decimal::ZERO {
@@ -4225,11 +4208,7 @@ impl GridTradingEngine {
             }
             match exchange_order {
                 Ok(exchange_order) if unresolved_filled_quantity(&exchange_order) => {
-                    self.account_cache.invalidate(&self.client).await;
-                    self.position_cache.invalidate(&self.client).await;
-                    self.last_account_sync = None;
-                    self.last_orders_sync = None;
-                    self.report_reconciliation_state(true).await;
+                    self.block_reconciliation_and_invalidate_caches().await;
                     return false;
                 }
                 Ok(exchange_order) if !exchange_order.is_terminal() => {
@@ -4239,14 +4218,8 @@ impl GridTradingEngine {
                 }
                 Ok(exchange_order) if exchange_order.executed_qty > Decimal::ZERO => {
                     let mut filled = order.clone();
-                    filled.updated_at = exchange_fill_time(&exchange_order);
-                    filled.quantity = exchange_order.executed_qty;
-                    if let Some(price) = exchange_order
-                        .avg_price
-                        .filter(|price| *price > Decimal::ZERO)
-                    {
-                        filled.price = price;
-                    }
+                    filled
+                        .apply_terminal_fill(&exchange_order, exchange_fill_time(&exchange_order));
                     return self.on_order_filled(&mut filled).await;
                 }
                 Ok(_) => {}
@@ -4536,11 +4509,7 @@ impl GridTradingEngine {
                 {
                     let confirmation = self.client.get_order(&symbol, order.order_id).await;
                     if confirmation.as_ref().is_ok_and(unresolved_filled_quantity) {
-                        self.last_orders_sync = None;
-                        self.report_reconciliation_state(true).await;
-                        self.account_cache.invalidate(&self.client).await;
-                        self.position_cache.invalidate(&self.client).await;
-                        self.last_account_sync = None;
+                        self.block_reconciliation_and_invalidate_caches().await;
                         // A managed exchange order can be absent from local
                         // metadata. Keep it recoverable before the list changes.
                         let source = managed_sources

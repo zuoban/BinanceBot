@@ -485,7 +485,7 @@ pub(crate) fn validate_min_available_margin_pct(pct: Option<Decimal>) -> anyhow:
     Ok(())
 }
 
-fn validate_symbol(symbol: &str) -> anyhow::Result<()> {
+pub fn validate_symbol(symbol: &str) -> anyhow::Result<()> {
     anyhow::ensure!(
         (3..=32).contains(&symbol.len())
             && symbol

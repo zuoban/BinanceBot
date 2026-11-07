@@ -59,10 +59,21 @@ function GlobalSettings() {
       telegram_enabled: !!v.telegram_enabled, clear_api_credentials: !!v.clear_api_credentials, clear_telegram_credentials: !!v.clear_telegram_credentials,
     }),
     onMutate: () => edit.setSaving(true),
-    onSuccess: data => { client.setQueryData(['global-config'], data); fill(data); edit.setDirty(false); message.success('全局设置已保存，所有交易对立即生效'); },
+    onSuccess: (data, values) => {
+      client.setQueryData(['global-config'], data);
+      fill(data);
+      edit.setDirty(false);
+      message.success('全局设置已保存，所有交易对立即生效');
+      if (values.api_key?.trim() || values.api_secret?.trim() || values.clear_api_credentials) {
+        void client.resetQueries({ queryKey: ['overview-history'] });
+      }
+      void client.invalidateQueries({ queryKey: ['pairs'] });
+      void client.invalidateQueries({ queryKey: ['overview'] });
+      void client.invalidateQueries({ queryKey: ['accounts'] });
+      void client.invalidateQueries({ queryKey: ['snapshot'] });
+    },
     onError: error => message.error(error.message),
-    onSettled: (_data, _error, values) => {
-      if (values.api_key?.trim() || values.clear_api_credentials) void client.resetQueries({ queryKey: ['overview-history'] });
+    onSettled: () => {
       submitting.current = false; edit.setSaving(false);
     },
   });

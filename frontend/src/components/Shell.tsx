@@ -4,7 +4,7 @@ import { App, Button, Drawer, Modal } from 'antd';
 import { AppstoreOutlined, ArrowDownOutlined, ArrowUpOutlined, BulbOutlined, EditOutlined, LineChartOutlined, LogoutOutlined, MenuOutlined, PauseOutlined, PlayCircleOutlined, PlusOutlined, QuestionCircleOutlined, ReloadOutlined, SearchOutlined, SettingOutlined, StopOutlined } from '@ant-design/icons';
 import { useLiveAccounts, usePairs } from '../lib/queries';
 import { AccountsContext, EditContext, useSession } from '../lib/session';
-import { accountGroups, number, statusLabel, trimFractionZeros } from '../lib/format';
+import { accountGroups, compactNumber, statusLabel } from '../lib/format';
 import type { Mode, Pair } from '../lib/types';
 import { ControlProvider, useControls } from './Controls';
 import { CommandPalette, type Command } from './CommandPalette';
@@ -13,6 +13,11 @@ import { useTheme, type ThemePreference } from '../lib/theme';
 import { defaultTitle, useDocumentTitle } from '../lib/documentTitle';
 import { ModeTag } from './Common';
 
+
+function routeSymbol(pathname: string) {
+  const symbol = pathname.match(/^\/pairs\/([^/]+)/)?.[1];
+  return symbol && symbol !== 'new' ? symbol : undefined;
+}
 export default function Shell() {
   const location = useLocation();
   const pairs = usePairs();
@@ -34,7 +39,7 @@ export default function Shell() {
   const alert = !!liveAccounts.error || liveAccounts.stale || accounts.some(entry => entry.account_observation_stale || entry.snapshot.status === 'ERROR');
   const withAlert = (title: string) => alert ? `⚠ ${title}` : title;
   useDocumentTitle(location.pathname.match(/^\/pairs\/(?!new\/?$)[^/]+\/?$/) ? null : withAlert(groups.length ? groups.map(group => {
-    return `${trimFractionZeros(number(group.equity))} | ${group.ratio === null ? '--' : `${trimFractionZeros(number(group.ratio))}%`}`;
+    return `${compactNumber(group.equity)} | ${group.ratio === null ? '--' : `${compactNumber(group.ratio)}%`}`;
   }).join(' / ') : defaultTitle));
   const blocker = useBlocker(({ currentLocation, nextLocation }) => (dirty || saving) && currentLocation.pathname !== nextLocation.pathname);
   useEffect(() => {
@@ -54,7 +59,7 @@ export default function Shell() {
     window.addEventListener('beforeunload', beforeUnload);
     return () => window.removeEventListener('beforeunload', beforeUnload);
   }, [dirty, saving]);
-  const symbol = location.pathname.match(/^\/pairs\/([^/]+)/)?.[1];
+  const symbol = routeSymbol(location.pathname);
   const context = useMemo(() => ({ dirty, setDirty, saving, setSaving }), [dirty, saving]);
   const logOut = useCallback(async () => {
     if (saving) return;
@@ -84,14 +89,14 @@ export default function Shell() {
       <button type="button" className={`bottombar-item${page === 'pair' ? ' bottombar-item-active' : ''}`} aria-label="切换或查看交易对" aria-expanded={drawer} onClick={() => setDrawer(open => !open)}><LineChartOutlined aria-hidden="true" /><span>交易对</span></button>
       <Link to="/settings" className={`bottombar-item${page === 'settings' ? ' bottombar-item-active' : ''}`} aria-current={page === 'settings' ? 'page' : undefined}><SettingOutlined aria-hidden="true" /><span>设置</span></Link>
     </nav>
-    <PaletteHost open={palette} setOpen={setPalette} pairs={currentPairs} stale={!!pairs.error || !!liveAccounts.error || liveAccounts.stale || !!pairModeChanged || Date.now() - pairs.dataUpdatedAt > 10_000} authEnabled={authEnabled} saving={saving} onLogout={() => void logOut()} />
+    <PaletteHost open={palette} setOpen={setPalette} pairs={currentPairs} stale={!!pairs.error || !!liveAccounts.error || liveAccounts.stale || !!pairModeChanged || Date.now() - pairs.dataUpdatedAt > 10_000} authEnabled={authEnabled} saving={saving} onLogout={logOut} />
   </div></ControlProvider></AccountsContext.Provider></EditContext.Provider>;
 }
 
 const recentKey = 'binance_bot_recent_commands';
 const readRecent = (): string[] => { try { const value = JSON.parse(localStorage.getItem(recentKey) ?? '[]'); return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string').slice(0, 5) : []; } catch { return []; } };
 
-interface HostProps { open: boolean; setOpen: (open: boolean | ((value: boolean) => boolean)) => void; pairs: Pair[] | undefined; stale: boolean; authEnabled: boolean; saving: boolean; onLogout: () => void }
+interface HostProps { open: boolean; setOpen: (open: boolean | ((value: boolean) => boolean)) => void; pairs: Pair[] | undefined; stale: boolean; authEnabled: boolean; saving: boolean; onLogout: () => void | Promise<void> }
 
 /** Owns the command list, the global shortcuts and the recently-used order. Lives inside ControlProvider to reuse its guarded actions. */
 function PaletteHost({ open, setOpen, pairs, stale, authEnabled, saving, onLogout }: HostProps) {
@@ -109,7 +114,7 @@ function PaletteHost({ open, setOpen, pairs, stale, authEnabled, saving, onLogou
     });
   }, []);
   const symbols = useMemo(() => pairs?.map(pair => pair.symbol) ?? [], [pairs]);
-  const current = pathname.match(/^\/pairs\/([^/]+)/)?.[1];
+  const current = routeSymbol(pathname);
   const lead = useRef(0);
   const shortcutState = useRef({ symbols, current, pathname });
   shortcutState.current = { symbols, current, pathname };
@@ -153,7 +158,7 @@ function PaletteHost({ open, setOpen, pairs, stale, authEnabled, saving, onLogou
         ];
       }),
       ...(Object.entries(themeLabels) as [ThemePreference, string][]).map(([key, label]) => ({ key: `theme-${key}`, group: '外观', label: `主题：${label}`, hint: preference === key ? '当前' : undefined, keywords: 'theme dark light 主题 深色 浅色', icon: <BulbOutlined />, run: () => setPreference(key) })),
-      ...(authEnabled ? [{ key: 'logout', group: '账户', label: '退出登录', keywords: 'logout 退出', icon: <LogoutOutlined />, disabled: saving, run: onLogout }] : []),
+      ...(authEnabled ? [{ key: 'logout', group: '账户', label: '退出登录', keywords: 'logout 退出', icon: <LogoutOutlined />, disabled: saving, run: () => void onLogout() }] : []),
       { key: 'shortcuts', group: '帮助', label: '键盘快捷键', hint: '?', keywords: 'help shortcuts 快捷键 帮助', icon: <QuestionCircleOutlined />, run: () => setHelp(true) },
     ];
     const wrapped = all.map(command => ({ ...command, run: () => { remember(command.key); command.run(); } }));
@@ -180,6 +185,7 @@ interface SidebarProps { idPrefix: string; pairs: Pair[] | undefined; pending: b
 
 function SidebarBody({ idPrefix, pairs, pending, symbol, pathname, mode, authEnabled, saving, onNavigate, onSearch, onLogout }: SidebarProps) {
   const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
+  const currentSymbol = symbol ?? routeSymbol(pathname);
   const page = pathname.startsWith('/settings') ? 'settings' : pathname.startsWith('/pairs/') ? 'pair' : 'overview';
   return <div className="sidebar-inner">
     <Link className="sidebar-brand" to="/" aria-label="Grid Console 首页" onClick={onNavigate}><img className="sidebar-logo" src="/logo.svg" alt="" /><span className="sidebar-brand-name"><strong>Grid Console</strong><small>Binance Futures</small></span></Link>
@@ -193,7 +199,7 @@ function SidebarBody({ idPrefix, pairs, pending, symbol, pathname, mode, authEna
       {pending && !pairs && [0, 1, 2].map(item => <div className="sidebar-pair-skeleton" key={item} aria-hidden="true" />)}
       {pairs?.map(pair => {
         const short = pair.grid_config.direction === 'SHORT';
-        const active = pair.symbol === symbol;
+        const active = pair.symbol === currentSymbol;
         return <Link key={pair.symbol} to={`/pairs/${pair.symbol}${pathname.endsWith('/config') ? '/config' : ''}`} onClick={onNavigate} className={`sidebar-pair${active ? ' sidebar-pair-active' : ''}`} aria-current={active ? 'page' : undefined}>
           <span className={`status-dot status-dot-${pair.status.toLowerCase()}`} aria-hidden="true" />
           <span className="sidebar-pair-symbol">{pair.symbol}</span>

@@ -1642,9 +1642,7 @@ impl GridTradingEngine {
                     // A prior correction cannot prove that the exchange order
                     // has not changed since. Block before each verification.
                     self.set_global_reconciliation_ready(false).await;
-                    self.account_cache.invalidate(&self.client).await;
-                    self.position_cache.invalidate(&self.client).await;
-                    self.last_account_sync = None;
+                    self.invalidate_account_and_position_caches().await;
                     let account_key = self.client.account_identity_key();
                     for found in &uncertain {
                         self.track_provisional_observation(found);
@@ -1893,9 +1891,7 @@ impl GridTradingEngine {
                                 live_ids.insert(corrected.client_order_id.clone(), corrected);
                             }
                             _ => {
-                                self.account_cache.invalidate(&self.client).await;
-                                self.position_cache.invalidate(&self.client).await;
-                                self.last_account_sync = None;
+                                self.invalidate_account_and_position_caches().await;
                                 self.set_global_reconciliation_ready(false).await;
                             }
                         }
@@ -2275,9 +2271,7 @@ impl GridTradingEngine {
                         .is_ok_and(|found| found.as_ref().is_some_and(unresolved_filled_quantity));
                     if inconsistent {
                         self.report_reconciliation_state(true).await;
-                        self.account_cache.invalidate(&self.client).await;
-                        self.position_cache.invalidate(&self.client).await;
-                        self.last_account_sync = None;
+                        self.invalidate_account_and_position_caches().await;
                     }
                     if self.state.pause_epoch() != pause_epoch {
                         return false;
@@ -2392,17 +2386,10 @@ impl GridTradingEngine {
                 }
                 for (mut order, exchange_order) in terminal_orders {
                     if exchange_order.executed_qty > Decimal::ZERO {
-                        order.updated_at = exchange_fill_time(&exchange_order);
-                        order.quantity = exchange_order.executed_qty;
-                        if let Some(avg_price) = exchange_order
-                            .avg_price
-                            .filter(|price| *price > Decimal::ZERO)
-                        {
-                            order.price = avg_price;
-                        } else {
-                            order.price = exchange_order.price;
-                        }
-                        order.amount_usdc = order.price * order.quantity;
+                        order.apply_terminal_fill(
+                            &exchange_order,
+                            exchange_fill_time(&exchange_order),
+                        );
                         if !self.commit_order_fill(&mut order).await {
                             persistence_ok = false;
                         }

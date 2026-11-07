@@ -529,8 +529,6 @@ kbd {
 .skeleton-card > .skeleton-line-large { margin-bottom: 16px; }
 .skeleton-card-content { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 24px; margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--border-hairline); }
 .skeleton-card-content > div { display: grid; gap: 8px; }
-.skeleton-card-chart { min-height: 260px; }
-.skeleton-card-content-chart { margin-top: 36px; }
 .skeleton-page-panel { display: grid; gap: 16px; min-height: 160px; margin-bottom: 20px; align-content: center; }
 .skeleton-page-panel > .skeleton-line-large { margin: 0; }
 .skeleton-grid { display: grid; gap: 16px; }

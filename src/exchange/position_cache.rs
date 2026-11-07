@@ -27,16 +27,13 @@ impl PositionCache {
         symbol: &str,
     ) -> Result<(Option<BinancePositionRisk>, Instant)> {
         let key = client.account_cache_key();
-        loop {
-            let epoch = self.entries.detach(key).await;
-            let position = client.get_position(symbol).await;
-            let received_at = Instant::now();
-            let current = self.entries.detach_if_current(key, epoch).await;
-            let position = position?;
-            if current {
-                return Ok((position, received_at));
-            }
-        }
+        self.entries
+            .refresh_critical(key, || async {
+                let position = client.get_position(symbol).await;
+                let received_at = Instant::now();
+                Ok((position?, received_at))
+            })
+            .await
     }
 
     pub async fn get(

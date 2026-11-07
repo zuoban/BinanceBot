@@ -116,6 +116,16 @@ pub(crate) struct RateLimiter {
 }
 
 impl RateLimiter {
+    fn endpoint_mut<'a>(
+        endpoints: &'a mut HashMap<String, EndpointLimits>,
+        endpoint: &str,
+    ) -> &'a mut EndpointLimits {
+        if !endpoints.contains_key(endpoint) {
+            endpoints.insert(endpoint.to_owned(), EndpointLimits::default());
+        }
+        endpoints.get_mut(endpoint).expect("inserted above")
+    }
+
     pub fn reserve(
         &self,
         endpoint: &str,
@@ -125,7 +135,7 @@ impl RateLimiter {
     ) -> Result<(), String> {
         let mut endpoints = self.endpoints.lock().unwrap();
         let now = Instant::now();
-        let endpoint = endpoints.entry(endpoint.to_owned()).or_default();
+        let endpoint = Self::endpoint_mut(&mut endpoints, endpoint);
         if endpoint.blocked_until.is_some_and(|until| now < until) {
             return Err("Binance rate-limit cooldown is active".into());
         }
@@ -200,7 +210,7 @@ impl RateLimiter {
 
     pub fn update_exchange_limits(&self, endpoint: &str, limits: &[BinanceRateLimit]) {
         let mut endpoints = self.endpoints.lock().unwrap();
-        let endpoint = endpoints.entry(endpoint.to_owned()).or_default();
+        let endpoint = Self::endpoint_mut(&mut endpoints, endpoint);
         for limit in limits.iter().filter(|limit| limit.limit > 0) {
             let slot = match (
                 limit.rate_limit_type.as_str(),
@@ -225,7 +235,7 @@ impl RateLimiter {
     ) {
         let mut endpoints = self.endpoints.lock().unwrap();
         let now = Instant::now();
-        let endpoint = endpoints.entry(endpoint.to_owned()).or_default();
+        let endpoint = Self::endpoint_mut(&mut endpoints, endpoint);
         let value = |name| {
             headers
                 .get(name)

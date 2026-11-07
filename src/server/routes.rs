@@ -54,11 +54,25 @@ struct DatabaseClearResponse {
     deleted_account_hourly_snapshots: usize,
 }
 
-#[derive(Debug, serde::Serialize)]
-pub struct ApiResponse<T> {
-    pub success: bool,
-    pub data: Option<T>,
-    pub message: Option<String>,
+pub use crate::types::ApiResponse;
+
+fn json_ok<T>(data: T) -> Json<ApiResponse<T>> {
+    Json(ApiResponse::ok(data))
+}
+
+fn json_ok_msg<T>(data: T, message: impl Into<String>) -> Json<ApiResponse<T>> {
+    Json(ApiResponse::ok_with_message(data, message))
+}
+
+fn json_err<T>(message: impl Into<String>) -> Json<ApiResponse<T>> {
+    Json(ApiResponse::err(message))
+}
+
+fn status_err<T>(
+    status: StatusCode,
+    message: impl Into<String>,
+) -> (StatusCode, Json<ApiResponse<T>>) {
+    (status, json_err(message))
 }
 
 #[derive(Deserialize)]
@@ -89,24 +103,10 @@ async fn exchange_symbols_handler(
 ) -> (StatusCode, Json<ApiResponse<Vec<String>>>) {
     match query {
         Ok(Query(SymbolsQuery { environment })) if environment == "mainnet" => {}
-        _ => return symbols_error(StatusCode::BAD_REQUEST, "无效的交易所环境，请使用 mainnet"),
+        _ => return status_err(StatusCode::BAD_REQUEST, "无效的交易所环境，请使用 mainnet"),
     };
     let config = AppConfig::default().exchange;
     fetch_exchange_symbols(&BinanceFuturesClient::new_with_limiter(&config, limiter)).await
-}
-
-fn symbols_error(
-    status: StatusCode,
-    message: &str,
-) -> (StatusCode, Json<ApiResponse<Vec<String>>>) {
-    (
-        status,
-        Json(ApiResponse {
-            success: false,
-            data: None,
-            message: Some(message.to_string()),
-        }),
-    )
 }
 
 async fn fetch_exchange_symbols(
@@ -121,18 +121,11 @@ async fn fetch_exchange_symbols(
                 .map(|symbol| symbol.symbol)
                 .collect();
             symbols.sort_unstable();
-            (
-                StatusCode::OK,
-                Json(ApiResponse {
-                    success: true,
-                    data: Some(symbols),
-                    message: None,
-                }),
-            )
+            (StatusCode::OK, json_ok(symbols))
         }
         Err(error) => {
             warn!(%error, "获取交易所交易对失败");
-            symbols_error(StatusCode::BAD_GATEWAY, "获取交易所交易对失败，请稍后重试")
+            status_err(StatusCode::BAD_GATEWAY, "获取交易所交易对失败，请稍后重试")
         }
     }
 }
@@ -146,30 +139,15 @@ async fn exchange_symbol_preview_handler(
         symbol,
     } = match query {
         Ok(Query(q)) if q.environment == "mainnet" => q,
-        _ => return symbol_preview_error(StatusCode::BAD_REQUEST, "无效的交易所环境或交易对参数"),
+        _ => return status_err(StatusCode::BAD_REQUEST, "无效的交易所环境或交易对参数"),
     };
     let symbol = symbol.trim().to_ascii_uppercase();
-    if symbol.is_empty() || symbol.len() > 20 || !symbol.chars().all(|c| c.is_ascii_alphanumeric())
-    {
-        return symbol_preview_error(StatusCode::BAD_REQUEST, "无效的交易对代码");
+    if crate::config::validate_symbol(&symbol).is_err() {
+        return status_err(StatusCode::BAD_REQUEST, "无效的交易对代码");
     }
     let config = AppConfig::default().exchange;
     let client = BinanceFuturesClient::new_with_limiter(&config, limiter);
     fetch_exchange_symbol_preview(&client, &symbol).await
-}
-
-fn symbol_preview_error(
-    status: StatusCode,
-    message: &str,
-) -> (StatusCode, Json<ApiResponse<ExchangeSymbolPreview>>) {
-    (
-        status,
-        Json(ApiResponse {
-            success: false,
-            data: None,
-            message: Some(message.to_string()),
-        }),
-    )
 }
 
 async fn fetch_exchange_symbol_preview(
@@ -185,23 +163,22 @@ async fn fetch_exchange_symbol_preview(
         Ok(info) => info,
         Err(error) => {
             warn!(%error, symbol, "获取交易对规则失败");
-            return symbol_preview_error(StatusCode::BAD_GATEWAY, "获取交易对规则失败，请稍后重试");
+            return status_err(StatusCode::BAD_GATEWAY, "获取交易对规则失败，请稍后重试");
         }
     };
-    let Some(item) = info
-        .symbols
-        .iter()
-        .find(|item| item.symbol.eq_ignore_ascii_case(symbol))
-    else {
-        return symbol_preview_error(StatusCode::NOT_FOUND, "交易对不存在");
-    };
-    if item.status != "TRADING" {
-        return symbol_preview_error(StatusCode::BAD_REQUEST, "该交易对当前未处于交易状态");
-    }
-    let Some(rules) = crate::strategy::precision::SymbolRules::from_exchange_info(&info, symbol)
-    else {
-        return symbol_preview_error(StatusCode::BAD_GATEWAY, "交易对精度规则缺失");
-    };
+    let rules =
+        match crate::strategy::precision::SymbolRules::from_trading_exchange_info(&info, symbol) {
+            Ok(rules) => rules,
+            Err(crate::strategy::precision::SymbolRulesError::NotFound) => {
+                return status_err(StatusCode::NOT_FOUND, "交易对不存在");
+            }
+            Err(crate::strategy::precision::SymbolRulesError::NotTrading) => {
+                return status_err(StatusCode::BAD_REQUEST, "该交易对当前未处于交易状态");
+            }
+            Err(crate::strategy::precision::SymbolRulesError::MissingFilters) => {
+                return status_err(StatusCode::BAD_GATEWAY, "交易对精度规则缺失");
+            }
+        };
     let last_price = last_res
         .ok()
         .filter(|price| *price > rust_decimal::Decimal::ZERO);
@@ -210,18 +187,14 @@ async fn fetch_exchange_symbol_preview(
         .filter(|price| *price > rust_decimal::Decimal::ZERO);
     (
         StatusCode::OK,
-        Json(ApiResponse {
-            success: true,
-            data: Some(ExchangeSymbolPreview {
-                symbol: rules.symbol,
-                last_price,
-                mark_price,
-                tick_size: rules.tick_size,
-                step_size: rules.step_size,
-                min_qty: rules.min_qty,
-                min_notional: rules.min_notional,
-            }),
-            message: None,
+        json_ok(ExchangeSymbolPreview {
+            symbol: rules.symbol,
+            last_price,
+            mark_price,
+            tick_size: rules.tick_size,
+            step_size: rules.step_size,
+            min_qty: rules.min_qty,
+            min_notional: rules.min_notional,
         }),
     )
 }
@@ -254,13 +227,9 @@ fn extract_token(headers: &HeaderMap) -> Option<String> {
 }
 
 fn auth_service_error<T>() -> (StatusCode, Json<ApiResponse<T>>) {
-    (
+    status_err(
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ApiResponse {
-            success: false,
-            data: None,
-            message: Some("认证服务异常，请稍后重试".into()),
-        }),
+        "认证服务异常，请稍后重试",
     )
 }
 
@@ -284,13 +253,9 @@ async fn require_auth_middleware(
     };
 
     if !is_valid {
-        return Err((
+        return Err(status_err(
             StatusCode::UNAUTHORIZED,
-            Json(ApiResponse {
-                success: false,
-                data: None,
-                message: Some("未授权访问：请先输入管理员密码进行身份认证".to_string()),
-            }),
+            "未授权访问：请先输入管理员密码进行身份认证",
         ));
     }
 
@@ -449,11 +414,7 @@ async fn collect_pairs(states: &[Arc<AppState>]) -> Json<ApiResponse<Vec<Trading
             grid_config: config.summary(),
         });
     }
-    Json(ApiResponse {
-        success: true,
-        data: Some(pairs),
-        message: None,
-    })
+    json_ok(pairs)
 }
 
 async fn get_overview_handler(
@@ -486,15 +447,11 @@ async fn collect_overview(states: &[Arc<AppState>]) -> Json<ApiResponse<Overview
             .then_with(|| b.trade_id.cmp(&a.trade_id))
     });
     recent_trades.truncate(20);
-    Json(ApiResponse {
-        success: true,
-        data: Some(OverviewSnapshot {
-            generated_at,
-            pairs,
-            today_pnl,
-            recent_trades,
-        }),
-        message: None,
+    json_ok(OverviewSnapshot {
+        generated_at,
+        pairs,
+        today_pnl,
+        recent_trades,
     })
 }
 
@@ -658,37 +615,22 @@ async fn clear_symbol(
     payload: ClearTradeHistoryRequest,
 ) -> (StatusCode, Json<ApiResponse<ClearTradeHistoryResponse>>) {
     if !payload.confirm {
-        return (
+        return status_err(
             StatusCode::BAD_REQUEST,
-            Json(ApiResponse {
-                success: false,
-                data: None,
-                message: Some("请确认清理当前币种所有模式的成交历史".into()),
-            }),
+            "请确认清理当前币种所有模式的成交历史",
         );
     }
     match state.clear_symbol_trade_history(symbol).await {
         Ok((deleted_trades, snapshot)) => (
             StatusCode::OK,
-            Json(ApiResponse {
-                success: true,
-                data: Some(ClearTradeHistoryResponse {
-                    deleted_trades,
-                    snapshot,
-                }),
-                message: None,
+            json_ok(ClearTradeHistoryResponse {
+                deleted_trades,
+                snapshot,
             }),
         ),
         Err(error) => {
             error!("Scoped trade cleanup failed: {}", error);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse {
-                    success: false,
-                    data: None,
-                    message: Some("历史记录清理失败".into()),
-                }),
-            )
+            status_err(StatusCode::INTERNAL_SERVER_ERROR, "历史记录清理失败")
         }
     }
 }
@@ -778,13 +720,9 @@ async fn database_clear_with_guard(
                 return StatusCode::INTERNAL_SERVER_ERROR.into_response();
             }
         };
-    Json(ApiResponse {
-        success: true,
-        data: Some(DatabaseClearResponse {
-            deleted_trades,
-            deleted_account_hourly_snapshots,
-        }),
-        message: None,
+    json_ok(DatabaseClearResponse {
+        deleted_trades,
+        deleted_account_hourly_snapshots,
     })
     .into_response()
 }
@@ -846,15 +784,11 @@ async fn get_managed_overview_handler(
     let states = handle.states.read().await.clone();
     if states.is_empty() {
         let generated_at = chrono::Utc::now();
-        return Json(ApiResponse {
-            success: true,
-            data: Some(OverviewSnapshot {
-                generated_at,
-                pairs: Vec::new(),
-                today_pnl: handle.db.cached_today_pnl(generated_at).await,
-                recent_trades: Vec::new(),
-            }),
-            message: None,
+        return json_ok(OverviewSnapshot {
+            generated_at,
+            pairs: Vec::new(),
+            today_pnl: handle.db.cached_today_pnl(generated_at).await,
+            recent_trades: Vec::new(),
         });
     }
     collect_overview(&states).await
@@ -877,18 +811,10 @@ async fn get_overview_history_handler(
     }
     .await;
     match result {
-        Ok(data) => Json(ApiResponse {
-            success: true,
-            data: Some(data),
-            message: None,
-        }),
+        Ok(data) => json_ok(data),
         Err(error) => {
             tracing::warn!(%error, "Could not read account snapshots");
-            Json(ApiResponse {
-                success: false,
-                data: None,
-                message: Some("无法读取历史快照".into()),
-            })
+            json_err("无法读取历史快照")
         }
     }
 }
@@ -916,16 +842,11 @@ async fn add_pair_handler(
     }
     .await;
     match result {
-        Ok(symbol) => Json(ApiResponse {
-            success: true,
-            data: Some(symbol),
-            message: Some("交易对已添加并保存，策略保持暂停；检查配置后手动恢复".into()),
-        }),
-        Err(error) => Json(ApiResponse {
-            success: false,
-            data: None,
-            message: Some(error.to_string()),
-        }),
+        Ok(symbol) => json_ok_msg(
+            symbol,
+            "交易对已添加并保存，策略保持暂停；检查配置后手动恢复",
+        ),
+        Err(error) => json_err(error.to_string()),
     }
 }
 
@@ -943,27 +864,16 @@ async fn post_managed_config_handler(
             .iter()
             .any(|current| Arc::ptr_eq(current, &state))
         {
-            return (
-                StatusCode::CONFLICT,
-                Json(ApiResponse {
-                    success: false,
-                    data: None,
-                    message: Some("交易对已被删除或替换，请刷新后重试".into()),
-                }),
-            );
+            return status_err(StatusCode::CONFLICT, "交易对已被删除或替换，请刷新后重试");
         }
         apply_pair_config(state, payload).await
     })
     .await
     {
         Ok(result) => result,
-        Err(error) => (
+        Err(error) => status_err(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiResponse {
-                success: false,
-                data: None,
-                message: Some(format!("配置更新任务异常退出: {}", error)),
-            }),
+            format!("配置更新任务异常退出: {}", error),
         ),
     }
 }
@@ -974,17 +884,9 @@ async fn get_global_config_handler(
     match handle.db.run_blocking(|db| db.load_config()).await {
         Ok(Some(config)) => {
             let global = crate::config::GlobalConfig::from_app(&config);
-            Json(ApiResponse {
-                success: true,
-                data: Some(web_global_config_view(&global)),
-                message: None,
-            })
+            json_ok(web_global_config_view(&global))
         }
-        _ => Json(ApiResponse {
-            success: false,
-            data: None,
-            message: Some("无法读取全局设置".into()),
-        }),
+        _ => json_err("无法读取全局设置"),
     }
 }
 
@@ -995,35 +897,19 @@ async fn post_global_config_handler(
     if let Err(error) = crate::config::validate_global_position_limit(
         payload.global_max_position_notional.flatten(),
     ) {
-        return Json(ApiResponse {
-            success: false,
-            data: None,
-            message: Some(error.to_string()),
-        });
+        return json_err(error.to_string());
     }
     if let Err(error) =
         crate::config::validate_min_available_margin_pct(payload.min_available_margin_pct.flatten())
     {
-        return Json(ApiResponse {
-            success: false,
-            data: None,
-            message: Some(error.to_string()),
-        });
+        return json_err(error.to_string());
     }
     match handle.update_global_config(payload).await {
         Ok(global) => {
             let view = web_global_config_view(&global);
-            Json(ApiResponse {
-                success: true,
-                data: Some(view),
-                message: Some("全局设置已保存，所有交易对立即生效".into()),
-            })
+            json_ok_msg(view, "全局设置已保存，所有交易对立即生效")
         }
-        Err(error) => Json(ApiResponse {
-            success: false,
-            data: None,
-            message: Some(error.to_string()),
-        }),
+        Err(error) => json_err(error.to_string()),
     }
 }
 
@@ -1055,14 +941,6 @@ struct TestExchangePayload {
 struct TestTelegramPayload {
     bot_token: Option<String>,
     chat_id: Option<String>,
-}
-
-fn probe_failure(message: impl Into<String>) -> Json<ApiResponse<String>> {
-    Json(ApiResponse {
-        success: false,
-        data: None,
-        message: Some(message.into()),
-    })
 }
 
 fn non_blank(value: Option<String>) -> Option<String> {
@@ -1149,7 +1027,7 @@ pub(crate) struct ProbeGates {
 fn probe_throttled(gate: &ProbeGate) -> Option<Json<ApiResponse<String>>> {
     gate.enter(std::time::Instant::now())
         .err()
-        .map(|wait| probe_failure(format!("测试过于频繁，请 {wait} 秒后再试")))
+        .map(|wait| json_err(format!("测试过于频繁，请 {wait} 秒后再试")))
 }
 
 /// Verify that the (possibly unsaved) API credentials can read the futures account.
@@ -1163,23 +1041,19 @@ async fn test_exchange_handler(
     }
     let saved = match handle.db.run_blocking(|db| db.load_config()).await {
         Ok(Some(config)) => config.exchange,
-        _ => return probe_failure("无法读取全局设置"),
+        _ => return json_err("无法读取全局设置"),
     };
     let config = match resolve_exchange_probe(&saved, payload) {
         Ok(config) => config,
-        Err(message) => return probe_failure(message),
+        Err(message) => return json_err(message),
     };
     let client = BinanceFuturesClient::new_with_limiter(&config, Arc::new(RateLimiter::default()));
     if let Err(error) = client.sync_server_time().await {
-        return probe_failure(sanitized_probe_error("无法连接币安", &error));
+        return json_err(sanitized_probe_error("无法连接币安", &error));
     }
     match client.get_account().await {
-        Ok(_) => Json(ApiResponse {
-            success: true,
-            data: Some("连接成功：API Key 有效，可读取合约账户".into()),
-            message: None,
-        }),
-        Err(error) => probe_failure(sanitized_probe_error("账户验证失败", &error)),
+        Ok(_) => json_ok("连接成功：API Key 有效，可读取合约账户".into()),
+        Err(error) => json_err(sanitized_probe_error("账户验证失败", &error)),
     }
 }
 
@@ -1200,29 +1074,25 @@ async fn test_telegram_handler(
     }
     let saved = match handle.db.run_blocking(|db| db.load_config()).await {
         Ok(Some(config)) => config.telegram,
-        _ => return probe_failure("无法读取全局设置"),
+        _ => return json_err("无法读取全局设置"),
     };
     let config = match resolve_telegram_probe(&saved, payload) {
         Ok(config) => config,
-        Err(message) => return probe_failure(message),
+        Err(message) => return json_err(message),
     };
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
     {
         Ok(client) => client,
-        Err(_) => return probe_failure("无法创建网络客户端"),
+        Err(_) => return json_err("无法创建网络客户端"),
     };
     match crate::telegram::TelegramNotifier::new(client)
         .send_test_message(&config)
         .await
     {
-        Ok(()) => Json(ApiResponse {
-            success: true,
-            data: Some("测试消息已发送，请在 Telegram 中查看".into()),
-            message: None,
-        }),
-        Err(error) => probe_failure(format!("测试消息发送失败：{error}")),
+        Ok(()) => json_ok("测试消息已发送，请在 Telegram 中查看".into()),
+        Err(error) => json_err(format!("测试消息发送失败：{error}")),
     }
 }
 
@@ -1232,23 +1102,11 @@ async fn remove_pair_handler(
     Json(payload): Json<ClearTradeHistoryRequest>,
 ) -> Json<ApiResponse<String>> {
     if !payload.confirm {
-        return Json(ApiResponse {
-            success: false,
-            data: None,
-            message: Some("请确认移除交易对；移除前须平仓，历史记录会保留".into()),
-        });
+        return json_err("请确认移除交易对；移除前须平仓，历史记录会保留");
     }
     match handle.remove_pair(symbol.clone()).await {
-        Ok(()) => Json(ApiResponse {
-            success: true,
-            data: Some(symbol),
-            message: Some("交易对已移除，历史记录保留".into()),
-        }),
-        Err(error) => Json(ApiResponse {
-            success: false,
-            data: None,
-            message: Some(error.to_string()),
-        }),
+        Ok(()) => json_ok_msg(symbol, "交易对已移除，历史记录保留"),
+        Err(error) => json_err(error.to_string()),
     }
 }
 
@@ -1276,20 +1134,12 @@ async fn get_server_config_handler(
     State(handle): State<RuntimeHandle>,
 ) -> Json<ApiResponse<ServerConfigView>> {
     match handle.db.run_blocking(|db| db.load_config()).await {
-        Ok(Some(config)) => Json(ApiResponse {
-            success: true,
-            data: Some(ServerConfigView {
-                version: crate::db::config_version(&config.server),
-                saved: config.server,
-                active: handle.active_server,
-            }),
-            message: None,
+        Ok(Some(config)) => json_ok(ServerConfigView {
+            version: crate::db::config_version(&config.server),
+            saved: config.server,
+            active: handle.active_server,
         }),
-        _ => Json(ApiResponse {
-            success: false,
-            data: None,
-            message: Some("无法读取服务设置".into()),
-        }),
+        _ => json_err("无法读取服务设置"),
     }
 }
 
@@ -1313,20 +1163,15 @@ async fn post_server_config_handler(
         })
         .await;
     match result {
-        Ok(()) => Json(ApiResponse {
-            success: true,
-            data: Some(ServerConfigView {
+        Ok(()) => json_ok_msg(
+            ServerConfigView {
                 version: crate::db::config_version(&submitted),
                 saved: submitted,
                 active: handle.active_server,
-            }),
-            message: Some("服务设置已保存，重启程序后生效".into()),
-        }),
-        Err(error) => Json(ApiResponse {
-            success: false,
-            data: None,
-            message: Some(error.to_string()),
-        }),
+            },
+            "服务设置已保存，重启程序后生效",
+        ),
+        Err(error) => json_err(error.to_string()),
     }
 }
 
@@ -1335,13 +1180,9 @@ async fn clear_multi_trade_history_handler(
     Json(payload): Json<ClearTradeHistoryRequest>,
 ) -> (StatusCode, Json<ApiResponse<ClearTradeHistoryResponse>>) {
     if !payload.confirm {
-        return (
+        return status_err(
             StatusCode::BAD_REQUEST,
-            Json(ApiResponse {
-                success: false,
-                data: None,
-                message: Some("请先确认清理全部交易对和运行模式的历史成交及累计统计".into()),
-            }),
+            "请先确认清理全部交易对和运行模式的历史成交及累计统计",
         );
     }
     match AppState::clear_trade_history_for(&states).await {
@@ -1361,39 +1202,27 @@ async fn clear_multi_trade_history_handler(
                 }
             }
             let Some(snapshot) = primary_snapshot else {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ApiResponse {
-                        success: false,
-                        data: None,
-                        message: Some("没有可用的交易对状态".into()),
-                    }),
-                );
+                return status_err(StatusCode::INTERNAL_SERVER_ERROR, "没有可用的交易对状态");
             };
             (
                 StatusCode::OK,
-                Json(ApiResponse {
-                    success: true,
-                    data: Some(ClearTradeHistoryResponse {
+                json_ok_msg(
+                    ClearTradeHistoryResponse {
                         deleted_trades,
                         snapshot,
-                    }),
-                    message: Some(format!(
+                    },
+                    format!(
                         "已清理 {} 笔历史成交记录，全部交易对累计统计已重置",
                         deleted_trades
-                    )),
-                }),
+                    ),
+                ),
             )
         }
         Err(error) => {
             error!("Trade history cleanup failed: {}", error);
-            (
+            status_err(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse {
-                    success: false,
-                    data: None,
-                    message: Some("历史记录清理失败，请稍后重试或查看服务器日志".into()),
-                }),
+                "历史记录清理失败，请稍后重试或查看服务器日志",
             )
         }
     }
@@ -1421,14 +1250,7 @@ async fn get_auth_status_handler(
         .await;
 
     match result {
-        Ok(status) => (
-            StatusCode::OK,
-            Json(ApiResponse {
-                success: true,
-                data: Some(status),
-                message: None,
-            }),
-        ),
+        Ok(status) => (StatusCode::OK, json_ok(status)),
         Err(error) => {
             error!("Failed to check authentication status: {}", error);
             auth_service_error()
@@ -1445,14 +1267,7 @@ fn peer_ip(address: SocketAddr) -> IpAddr {
     }
 }
 fn auth_busy<T>() -> (StatusCode, Json<ApiResponse<T>>) {
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(ApiResponse {
-            success: false,
-            data: None,
-            message: Some("认证服务繁忙，请稍后重试".to_string()),
-        }),
-    )
+    status_err(StatusCode::SERVICE_UNAVAILABLE, "认证服务繁忙，请稍后重试")
 }
 
 async fn post_auth_login_handler(
@@ -1464,25 +1279,14 @@ async fn post_auth_login_handler(
         return auth_busy();
     };
     if !state.begin_login_attempt(peer_ip(address)).await {
-        return (
+        return status_err(
             StatusCode::TOO_MANY_REQUESTS,
-            Json(ApiResponse {
-                success: false,
-                data: None,
-                message: Some("登录尝试过于频繁，请一分钟后重试".to_string()),
-            }),
+            "登录尝试过于频繁，请一分钟后重试",
         );
     }
     let Some(admin_auth) = state.admin_auth() else {
         warn!("Admin login rejected: no password configured for this process");
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse {
-                success: false,
-                data: None,
-                message: Some("未启用管理员密码认证，无需登录".to_string()),
-            }),
-        );
+        return status_err(StatusCode::BAD_REQUEST, "未启用管理员密码认证，无需登录");
     };
 
     let password = payload.password;
@@ -1500,14 +1304,7 @@ async fn post_auth_login_handler(
     };
     if !verified {
         warn!("Failed admin authentication attempt: incorrect password");
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(ApiResponse {
-                success: false,
-                data: None,
-                message: Some("管理员密码错误，请重新输入".to_string()),
-            }),
-        );
+        return status_err(StatusCode::UNAUTHORIZED, "管理员密码错误，请重新输入");
     }
 
     let token = crate::auth::generate_session_token();
@@ -1522,11 +1319,7 @@ async fn post_auth_login_handler(
             info!("Admin authentication successful");
             (
                 StatusCode::OK,
-                Json(ApiResponse {
-                    success: true,
-                    data: Some(AuthTokenResponse { token }),
-                    message: Some("管理员身份认证成功！".to_string()),
-                }),
+                json_ok_msg(AuthTokenResponse { token }, "管理员身份认证成功！"),
             )
         }
         Err(error) => {
@@ -1543,13 +1336,9 @@ async fn post_auth_logout_handler(
     if let Some(token) = extract_token(&headers) {
         if let Err(error) = state.delete_session(&token).await {
             error!("Failed to delete session during logout: {}", error);
-            return (
+            return status_err(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse {
-                    success: false,
-                    data: None,
-                    message: Some("退出登录失败，请重试或查看服务器日志".to_string()),
-                }),
+                "退出登录失败，请重试或查看服务器日志",
             );
         }
     }
@@ -1566,12 +1355,7 @@ async fn post_auth_logout_handler(
 async fn get_status_handler(
     State(state): State<Arc<AppState>>,
 ) -> Json<ApiResponse<crate::types::BotSnapshot>> {
-    let snapshot = state.snapshot().await;
-    Json(ApiResponse {
-        success: true,
-        data: Some(snapshot),
-        message: None,
-    })
+    json_ok(state.snapshot().await)
 }
 
 async fn get_orders_handler(
@@ -1583,11 +1367,7 @@ async fn get_orders_handler(
             .cmp(&a.price)
             .then_with(|| a.client_order_id.cmp(&b.client_order_id))
     });
-    Json(ApiResponse {
-        success: true,
-        data: Some(orders),
-        message: None,
-    })
+    json_ok(orders)
 }
 
 async fn get_trades_handler(
@@ -1618,20 +1398,12 @@ async fn get_trades_handler(
                 .collect()
         }
     };
-    Json(ApiResponse {
-        success: true,
-        data: Some(trades),
-        message: None,
-    })
+    json_ok(trades)
 }
 
 async fn get_logs_handler(State(state): State<Arc<AppState>>) -> Json<ApiResponse<Vec<LogEntry>>> {
     let logs: Vec<LogEntry> = state.recent_logs.read().await.iter().cloned().collect();
-    Json(ApiResponse {
-        success: true,
-        data: Some(logs),
-        message: None,
-    })
+    json_ok(logs)
 }
 
 async fn clear_trade_history_handler(
@@ -1639,13 +1411,9 @@ async fn clear_trade_history_handler(
     Json(payload): Json<ClearTradeHistoryRequest>,
 ) -> (StatusCode, Json<ApiResponse<ClearTradeHistoryResponse>>) {
     if !payload.confirm {
-        return (
+        return status_err(
             StatusCode::BAD_REQUEST,
-            Json(ApiResponse {
-                success: false,
-                data: None,
-                message: Some("请先确认清理全部交易对和运行模式的历史成交及累计统计".into()),
-            }),
+            "请先确认清理全部交易对和运行模式的历史成交及累计统计",
         );
     }
     match state.clear_trade_history().await {
@@ -1662,28 +1430,20 @@ async fn clear_trade_history_handler(
             let snapshot = state.broadcast_snapshot().await;
             (
                 StatusCode::OK,
-                Json(ApiResponse {
-                    success: true,
-                    data: Some(ClearTradeHistoryResponse {
+                json_ok_msg(
+                    ClearTradeHistoryResponse {
                         deleted_trades,
                         snapshot,
-                    }),
-                    message: Some(format!(
-                        "已清理 {} 笔历史成交记录，累计统计已重置",
-                        deleted_trades
-                    )),
-                }),
+                    },
+                    format!("已清理 {} 笔历史成交记录，累计统计已重置", deleted_trades),
+                ),
             )
         }
         Err(error) => {
             error!("Trade history cleanup failed: {}", error);
-            (
+            status_err(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse {
-                    success: false,
-                    data: None,
-                    message: Some("历史记录清理失败，请稍后重试或查看服务器日志".into()),
-                }),
+                "历史记录清理失败，请稍后重试或查看服务器日志",
             )
         }
     }
@@ -1729,15 +1489,11 @@ fn database_export_response(result: anyhow::Result<Vec<u8>>) -> Response {
         }
         Err(error) => {
             error!("Database analysis export failed: {}", error);
-            (
+            status_err::<()>(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse::<()> {
-                    success: false,
-                    data: None,
-                    message: Some("数据库导出失败，请稍后重试或查看服务器日志".into()),
-                }),
+                "数据库导出失败，请稍后重试或查看服务器日志",
             )
-                .into_response()
+            .into_response()
         }
     }
 }
@@ -1756,11 +1512,7 @@ async fn get_config_handler(
         view.min_notional =
             (rules.min_notional > rust_decimal::Decimal::ZERO).then_some(rules.min_notional);
     }
-    Json(ApiResponse {
-        success: true,
-        data: Some(view),
-        message: None,
-    })
+    json_ok(view)
 }
 
 fn pair_config_version(config: &AppConfig, instance: u128) -> String {
@@ -1797,7 +1549,7 @@ fn web_config_view(config: &AppConfig) -> WebConfigView {
     let has_secret = !config.exchange.api_secret.trim().is_empty();
     let key_preview = mask_api_key_preview(&config.exchange.api_key);
 
-    let view = WebConfigView {
+    WebConfigView {
         config_version: String::new(),
         symbol: config.exchange.symbol.clone(),
         direction: config.grid.direction,
@@ -1824,9 +1576,7 @@ fn web_config_view(config: &AppConfig) -> WebConfigView {
         step_size: None,
         min_qty: None,
         min_notional: None,
-    };
-
-    view
+    }
 }
 
 fn apply_config_payload(
@@ -1925,13 +1675,9 @@ async fn post_config_handler(
 ) -> (StatusCode, Json<ApiResponse<WebConfigView>>) {
     match tokio::spawn(async move { apply_pair_config(state, payload).await }).await {
         Ok(result) => result,
-        Err(error) => (
+        Err(error) => status_err(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiResponse {
-                success: false,
-                data: None,
-                message: Some(format!("配置更新任务异常退出: {}", error)),
-            }),
+            format!("配置更新任务异常退出: {}", error),
         ),
     }
 }
@@ -1947,23 +1693,15 @@ async fn apply_pair_config(
         .as_deref()
         .filter(|version| !version.trim().is_empty())
     else {
-        return (
+        return status_err(
             StatusCode::BAD_REQUEST,
-            Json(ApiResponse {
-                success: false,
-                data: None,
-                message: Some("更新交易对设置时必须提供 baseline_version".into()),
-            }),
+            "更新交易对设置时必须提供 baseline_version",
         );
     };
     if version != pair_config_version(&current, state.config_instance) {
-        return (
+        return status_err(
             StatusCode::CONFLICT,
-            Json(ApiResponse {
-                success: false,
-                data: None,
-                message: Some("交易对设置已被其他请求修改，请刷新后重试".into()),
-            }),
+            "交易对设置已被其他请求修改，请刷新后重试",
         );
     }
     (
@@ -1978,29 +1716,15 @@ async fn apply_pair_config_inner(
     payload: UpdateConfigPayload,
 ) -> Json<ApiResponse<WebConfigView>> {
     if state.pair_scope().is_some() && payload.has_global_updates() {
-        return Json(ApiResponse {
-            success: false,
-            data: None,
-            message: Some("连接和 Telegram 通知请在全局设置中保存".into()),
-        });
+        return json_err("连接和 Telegram 通知请在全局设置中保存");
     }
     let current_config = match apply_config_payload(current, payload) {
         Ok(config) => config,
-        Err(error) => {
-            return Json(ApiResponse {
-                success: false,
-                data: None,
-                message: Some(error.to_string()),
-            })
-        }
+        Err(error) => return json_err(error.to_string()),
     };
     if let Some(symbol) = state.pair_scope() {
         if symbol != current_config.exchange.symbol {
-            return Json(ApiResponse {
-                success: false,
-                data: None,
-                message: Some("交易对不能直接重命名，请在页面中添加新交易对".into()),
-            });
+            return json_err("交易对不能直接重命名，请在页面中添加新交易对");
         }
     }
 
@@ -2016,28 +1740,12 @@ async fn apply_pair_config_inner(
         .await
     {
         error!("Failed to notify strategy engine of config update: {}", e);
-        return Json(ApiResponse {
-            success: false,
-            data: None,
-            message: Some(format!("策略更新通知失败: {}", e)),
-        });
+        return json_err(format!("策略更新通知失败: {}", e));
     }
     match reply_rx.await {
         Ok(Ok(())) => info!("Configuration applied and saved to {}", state.db.path()),
-        Ok(Err(error)) => {
-            return Json(ApiResponse {
-                success: false,
-                data: None,
-                message: Some(error),
-            })
-        }
-        Err(error) => {
-            return Json(ApiResponse {
-                success: false,
-                data: None,
-                message: Some(format!("策略未确认配置变更: {}", error)),
-            })
-        }
+        Ok(Err(error)) => return json_err(error),
+        Err(error) => return json_err(format!("策略未确认配置变更: {}", error)),
     }
 
     let mut response = get_config_handler(State(state)).await;
@@ -2121,22 +1829,12 @@ async fn post_control_handler(
 ) -> Json<ApiResponse<String>> {
     let action = match control_action(payload, state.pause_epoch()) {
         Ok(action) => action,
-        Err(message) => {
-            return Json(ApiResponse {
-                success: false,
-                data: None,
-                message: Some(message),
-            })
-        }
+        Err(message) => return json_err(message),
     };
     let result = tokio::spawn(dispatch_control(state, action)).await;
     match result {
         Ok(response) => response,
-        Err(error) => Json(ApiResponse {
-            success: false,
-            data: None,
-            message: Some(format!("控制任务失败: {}", error)),
-        }),
+        Err(error) => json_err(format!("控制任务失败: {}", error)),
     }
 }
 
@@ -2170,11 +1868,7 @@ async fn dispatch_control(
 ) -> Json<ApiResponse<String>> {
     let pending_pause = PendingControlPause::new(&state, &action.0);
     if let Err(message) = prepare_control(&state, &action.0).await {
-        return Json(ApiResponse {
-            success: false,
-            data: None,
-            message: Some(message),
-        });
+        return json_err(message);
     }
     dispatch_prepared_control(state, action, pending_pause, None, None, None).await
 }
@@ -2195,35 +1889,23 @@ async fn dispatch_prepared_control(
     };
     let mut retired = state.subscribe_retirement();
     if *retired.borrow() {
-        return Json(ApiResponse {
-            success: false,
-            data: None,
-            message: Some("交易对已移除，无法执行操作".into()),
-        });
+        return json_err("交易对已移除，无法执行操作");
     }
     let reservation = tokio::select! {
         biased;
-        _ = retired.changed() => return Json(ApiResponse { success: false, data: None, message: Some("交易对已移除，无法执行操作".into()) }),
+        _ = retired.changed() => return json_err("交易对已移除，无法执行操作"),
         result = state.action_tx.reserve() => result,
     };
     let permit = match reservation {
         Ok(permit) => permit,
         Err(e) => {
             error!("Failed to dispatch action: {}", e);
-            return Json(ApiResponse {
-                success: false,
-                data: None,
-                message: Some(format!("Failed to send action: {}", e)),
-            });
+            return json_err(format!("Failed to send action: {}", e));
         }
     };
     let control = state.socket_control_lock.read().await;
     if state.is_retired() {
-        return Json(ApiResponse {
-            success: false,
-            data: None,
-            message: Some("交易对已移除，无法执行操作".into()),
-        });
+        return json_err("交易对已移除，无法执行操作");
     }
     // Checking immediately before submission closes the channel-wait window.
     // Revocation can still race with this check after it completes; actions
@@ -2231,19 +1913,11 @@ async fn dispatch_prepared_control(
     if pending_pause.is_none() {
         if let Some(token) = &socket_token {
             if !state.is_token_valid(token).await {
-                return Json(ApiResponse {
-                    success: false,
-                    data: None,
-                    message: Some("会话已失效".into()),
-                });
+                return json_err("会话已失效");
             }
         }
         if *state.pending_control_pauses.borrow() != 0 {
-            return Json(ApiResponse {
-                success: false,
-                data: None,
-                message: Some("暂停或撤单正在提交，请稍后重试".into()),
-            });
+            return json_err("暂停或撤单正在提交，请稍后重试");
         }
     }
     permit.send(action);
@@ -2255,37 +1929,21 @@ async fn dispatch_prepared_control(
     if let Some(reply) = reply {
         let response = tokio::select! {
             biased;
-            _ = retired.changed() => return Json(ApiResponse { success: false, data: None, message: Some("交易对已移除，无法执行操作".into()) }),
+            _ = retired.changed() => return json_err("交易对已移除，无法执行操作"),
             _ = async {
                 if let Some(results) = &socket_results { results.closed().await; }
                 else { std::future::pending::<()>().await; }
-            } => return Json(ApiResponse { success: false, data: None, message: Some("控制连接已关闭".into()) }),
+            } => return json_err("控制连接已关闭"),
             response = reply => response,
         };
         match response {
             Ok(Ok(())) => {}
-            Ok(Err(message)) => {
-                return Json(ApiResponse {
-                    success: false,
-                    data: None,
-                    message: Some(message),
-                })
-            }
-            Err(error) => {
-                return Json(ApiResponse {
-                    success: false,
-                    data: None,
-                    message: Some(format!("策略未确认控制操作: {}", error)),
-                })
-            }
+            Ok(Err(message)) => return json_err(message),
+            Err(error) => return json_err(format!("策略未确认控制操作: {}", error)),
         }
     }
 
-    Json(ApiResponse {
-        success: true,
-        data: Some(format!("Action {} triggered successfully", action_name)),
-        message: None,
-    })
+    json_ok(format!("Action {} triggered successfully", action_name))
 }
 
 fn websocket_token(headers: &HeaderMap) -> &str {
@@ -2397,11 +2055,7 @@ impl AccountHub {
 async fn get_accounts_handler(
     Extension(hub): Extension<Arc<AccountHub>>,
 ) -> Json<ApiResponse<AccountFrame>> {
-    Json(ApiResponse {
-        success: true,
-        data: Some(hub.source.frame().await),
-        message: None,
-    })
+    json_ok(hub.source.frame().await)
 }
 
 async fn accounts_ws_handler(
@@ -2883,6 +2537,8 @@ mod tests {
             "/api/exchange/symbol-preview?environment=testnet&symbol=SOLUSDC",
             "/api/exchange/symbol-preview?environment=mainnet&symbol=",
             "/api/exchange/symbol-preview?environment=mainnet&symbol=SOL-USDC",
+            "/api/exchange/symbol-preview?environment=mainnet&symbol=AB",
+            "/api/exchange/symbol-preview?environment=mainnet&symbol=ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567",
         ] {
             let bad = router
                 .clone()

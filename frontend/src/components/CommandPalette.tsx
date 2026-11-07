@@ -23,9 +23,10 @@ export function CommandPalette({ open, onClose, commands }: { open: boolean; onC
     const needle = query.trim().toLowerCase();
     return commands.filter(command => !command.disabled && (!needle || `${command.label} ${command.keywords ?? ''} ${command.group}`.toLowerCase().includes(needle)));
   }, [commands, query]);
+  const currentActive = Math.min(active, Math.max(0, results.length - 1));
   useEffect(() => { if (open) { setQuery(''); setActive(0); } }, [open]);
   useEffect(() => { setActive(0); }, [query]);
-  useEffect(() => { list.current?.querySelector('[aria-selected="true"]')?.scrollIntoView?.({ block: 'nearest' }); }, [active]);
+  useEffect(() => { list.current?.querySelector('[aria-selected="true"]')?.scrollIntoView?.({ block: 'nearest' }); }, [currentActive]);
   const choose = (command: Command | undefined) => {
     if (!command) return;
     onClose();
@@ -34,15 +35,15 @@ export function CommandPalette({ open, onClose, commands }: { open: boolean; onC
   const onKeyDown = (event: React.KeyboardEvent) => {
     // Enter that commits an IME candidate must not run a command.
     if (event.nativeEvent.isComposing || event.keyCode === 229) return;
-    if (event.key === 'ArrowDown') { event.preventDefault(); setActive(index => results.length ? (index + 1) % results.length : 0); }
-    else if (event.key === 'ArrowUp') { event.preventDefault(); setActive(index => results.length ? (index - 1 + results.length) % results.length : 0); }
-    else if (event.key === 'Enter') { event.preventDefault(); choose(results[active]); }
+    if (event.key === 'ArrowDown') { event.preventDefault(); setActive(results.length ? (currentActive + 1) % results.length : 0); }
+    else if (event.key === 'ArrowUp') { event.preventDefault(); setActive(results.length ? (currentActive - 1 + results.length) % results.length : 0); }
+    else if (event.key === 'Enter') { event.preventDefault(); choose(results[currentActive]); }
   };
   let lastGroup = '';
   return <Modal open={open} aria-label="命令面板" onCancel={onClose} footer={null} closable={false} destroyOnHidden width={560} className="palette" afterOpenChange={visible => { if (visible) input.current?.focus(); }}>
     <div className="palette-search">
       <SearchOutlined aria-hidden="true" />
-      <Input ref={input} variant="borderless" aria-label="搜索命令" placeholder="搜索交易对、页面或操作" value={query} onChange={event => setQuery(event.target.value)} onKeyDown={onKeyDown} role="combobox" aria-expanded={results.length > 0} aria-controls="palette-list" aria-activedescendant={results[active] ? `palette-${results[active].key}` : undefined} autoComplete="off" />
+      <Input ref={input} variant="borderless" aria-label="搜索命令" placeholder="搜索交易对、页面或操作" value={query} onChange={event => setQuery(event.target.value)} onKeyDown={onKeyDown} role="combobox" aria-expanded={results.length > 0} aria-controls="palette-list" aria-activedescendant={results[currentActive] ? `palette-${results[currentActive].key}` : undefined} autoComplete="off" />
       <kbd>Esc</kbd>
     </div>
     <ul className="palette-list" id="palette-list" role="listbox" aria-label="命令列表" ref={list}>
@@ -51,7 +52,7 @@ export function CommandPalette({ open, onClose, commands }: { open: boolean; onC
         lastGroup = command.group;
         return <li key={command.key} role="presentation">
           {heading && <div className="palette-group">{heading}</div>}
-          <div id={`palette-${command.key}`} role="option" aria-selected={index === active} className={`palette-item${index === active ? ' palette-item-active' : ''}`} onMouseMove={() => setActive(index)} onClick={() => choose(command)}>
+          <div id={`palette-${command.key}`} role="option" aria-selected={index === currentActive} className={`palette-item${index === currentActive ? ' palette-item-active' : ''}`} onMouseMove={() => setActive(index)} onClick={() => choose(command)}>
             <span className="palette-icon" aria-hidden="true">{command.icon}</span>
             <span className="palette-label">{command.label}</span>
             {command.hint && <span className="palette-hint">{command.hint}</span>}

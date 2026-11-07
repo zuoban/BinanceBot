@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
@@ -54,6 +55,26 @@ impl<T> CacheEntries<T> {
         }
         *entry = Default::default();
         true
+    }
+
+    pub(super) async fn refresh_critical<R, F, Fut>(
+        &self,
+        key: [u8; 32],
+        mut fetch: F,
+    ) -> anyhow::Result<R>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = anyhow::Result<R>>,
+    {
+        loop {
+            let epoch = self.detach(key).await;
+            let result = fetch().await;
+            let current = self.detach_if_current(key, epoch).await;
+            let value = result?;
+            if current {
+                return Ok(value);
+            }
+        }
     }
 
     pub(super) async fn entry(&self, key: [u8; 32]) -> (u64, Entry<T>) {

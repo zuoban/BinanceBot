@@ -1,4 +1,4 @@
-use crate::exchange::model::{BinanceExchangeInfo, BinanceFilter};
+use crate::exchange::model::{BinanceExchangeInfo, BinanceFilter, BinanceSymbolInfo};
 use crate::types::OrderSide;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -37,19 +37,43 @@ impl Default for SymbolRules {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SymbolRulesError {
+    NotFound,
+    NotTrading,
+    MissingFilters,
+}
+
 impl SymbolRules {
     pub fn from_exchange_info(info: &BinanceExchangeInfo, symbol_name: &str) -> Option<Self> {
         let sym = info
             .symbols
             .iter()
             .find(|s| s.symbol.eq_ignore_ascii_case(symbol_name))?;
+        Self::from_symbol_info(sym)
+    }
 
+    pub fn from_trading_exchange_info(
+        info: &BinanceExchangeInfo,
+        symbol_name: &str,
+    ) -> std::result::Result<Self, SymbolRulesError> {
+        let sym = info
+            .symbols
+            .iter()
+            .find(|s| s.symbol.eq_ignore_ascii_case(symbol_name))
+            .ok_or(SymbolRulesError::NotFound)?;
+        if sym.status != "TRADING" {
+            return Err(SymbolRulesError::NotTrading);
+        }
+        Self::from_symbol_info(sym).ok_or(SymbolRulesError::MissingFilters)
+    }
+
+    fn from_symbol_info(sym: &BinanceSymbolInfo) -> Option<Self> {
         if !sym.filters.iter().any(|filter| matches!(filter, BinanceFilter::PriceFilter { tick_size, .. } if *tick_size > Decimal::ZERO))
             || !sym.filters.iter().any(|filter| matches!(filter, BinanceFilter::LotSize { step_size, .. } if *step_size > Decimal::ZERO))
         {
             return None;
         }
-
         let mut tick_size = dec!(0.01);
         let mut min_price = dec!(0.0001);
         let mut max_price = dec!(1000000.0);
@@ -321,6 +345,40 @@ mod tests {
                 .tick_size,
             dec!(0.00001)
         );
+    }
+
+    #[test]
+    fn trading_exchange_rules_distinguish_not_found_not_trading_and_missing_filters() {
+        let mut info: BinanceExchangeInfo = serde_json::from_value(serde_json::json!({
+            "symbols": [{
+                "symbol": "SOLUSDC", "status": "BREAK", "pricePrecision": 2,
+                "quantityPrecision": 2, "filters": [
+                    {"filterType": "LOT_SIZE", "minQty": "0.01", "maxQty": "1000", "stepSize": "0.01"}
+                ]
+            }]
+        }))
+        .unwrap();
+        assert_eq!(
+            SymbolRules::from_trading_exchange_info(&info, "BTCUSDC").unwrap_err(),
+            SymbolRulesError::NotFound
+        );
+        assert_eq!(
+            SymbolRules::from_trading_exchange_info(&info, "SOLUSDC").unwrap_err(),
+            SymbolRulesError::NotTrading
+        );
+        info.symbols[0].status = "TRADING".into();
+        assert_eq!(
+            SymbolRules::from_trading_exchange_info(&info, "SOLUSDC").unwrap_err(),
+            SymbolRulesError::MissingFilters
+        );
+        info.symbols[0].filters.push(BinanceFilter::PriceFilter {
+            min_price: dec!(0.01),
+            max_price: dec!(1000),
+            tick_size: dec!(0.01),
+        });
+        let rules = SymbolRules::from_trading_exchange_info(&info, "solusdc").unwrap();
+        assert_eq!(rules.symbol, "SOLUSDC");
+        assert_eq!(rules.tick_size, dec!(0.01));
     }
 
     #[test]

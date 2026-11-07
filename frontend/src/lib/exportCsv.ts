@@ -19,7 +19,7 @@ export function downloadCsv(filename: string, csv: string) {
   const link = document.createElement('a');
   link.href = url; link.download = filename;
   document.body.append(link); link.click(); link.remove();
-  URL.revokeObjectURL(url);
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
 }
 
 /** Plain-text copy that also works on non-secure origins, where the async clipboard API is missing. */

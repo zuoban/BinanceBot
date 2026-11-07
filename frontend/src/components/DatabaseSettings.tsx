@@ -23,11 +23,12 @@ export function DatabaseSettings() {
 
   const run = async (action: 'selected' | 'all' | 'clear') => {
     if (lock.current || (action !== 'all' && targets.length === 0)) return;
-    lock.current = true; setBusy(action); edit.setSaving(true);
+    lock.current = true;
     try {
       if (action === 'clear') {
         const names = options.filter(option => targets.includes(option.value)).map(option => option.label).join('、');
         if (!await modal.confirm({ title: '清空所选数据库数据？', content: `将永久清空：${names}。此操作无法撤销，建议先导出所选数据。持仓和挂单保留。`, okText: '确认清空', okButtonProps: { danger: true }, cancelText: '取消' })) return;
+        setBusy('clear'); edit.setSaving(true);
         const result = await post<ClearResult>('/api/database/clear', { targets, confirm: true });
         const keys = [
           ...(targets.includes('trade_history') ? [['snapshot'], ['overview']] : []),
@@ -40,6 +41,7 @@ export function DatabaseSettings() {
         ];
         message.success(`已清空 ${counts.join('、')}`);
       } else {
+        setBusy(action); edit.setSaving(true);
         await downloadDatabase('/api/database/export', action === 'selected' ? targets : undefined);
         message.success(action === 'all' ? '全库脱敏分析快照已导出，不能用于完整恢复' : '所选数据脱敏分析快照已导出，不能用于完整恢复');
       }

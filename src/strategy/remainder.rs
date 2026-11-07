@@ -492,11 +492,7 @@ impl GridTradingEngine {
             .unwrap_or_else(|| order.clone());
         let id_conflict = trusted.order_id.is_some_and(|id| id != found.order_id);
         if id_conflict {
-            self.last_orders_sync = None;
-            self.report_reconciliation_state(true).await;
-            self.account_cache.invalidate(&self.client).await;
-            self.position_cache.invalidate(&self.client).await;
-            self.last_account_sync = None;
+            self.block_reconciliation_and_invalidate_caches().await;
             self.track_identity_conflict(&trusted, found);
             self.state
                 .active_orders
@@ -533,11 +529,7 @@ impl GridTradingEngine {
                     .write()
                     .await
                     .insert(confirmed.client_order_id.clone(), confirmed);
-                self.last_orders_sync = None;
-                self.report_reconciliation_state(true).await;
-                self.account_cache.invalidate(&self.client).await;
-                self.position_cache.invalidate(&self.client).await;
-                self.last_account_sync = None;
+                self.block_reconciliation_and_invalidate_caches().await;
                 self.persist_identity_observations(key.0, &order.symbol)
                     .await;
                 return Err(error);
@@ -554,11 +546,7 @@ impl GridTradingEngine {
     ) -> Result<()> {
         let inconsistent_fill = unresolved_filled_quantity(&found);
         if inconsistent_fill {
-            self.last_orders_sync = None;
-            self.report_reconciliation_state(true).await;
-            self.account_cache.invalidate(&self.client).await;
-            self.position_cache.invalidate(&self.client).await;
-            self.last_account_sync = None;
+            self.block_reconciliation_and_invalidate_caches().await;
         }
         self.confirm_remainder_identity(&order, &found, plan)
             .await?;
@@ -581,13 +569,7 @@ impl GridTradingEngine {
         }
         if found.is_terminal() {
             if found.executed_qty > Decimal::ZERO {
-                order.updated_at = exchange_fill_time(&found);
-                order.quantity = found.executed_qty;
-                order.price = found
-                    .avg_price
-                    .filter(|p| *p > Decimal::ZERO)
-                    .unwrap_or(found.price);
-                order.amount_usdc = order.price * order.quantity;
+                order.apply_terminal_fill(&found, exchange_fill_time(&found));
                 if !self.on_order_filled(&mut order).await {
                     return Err(anyhow!("Could not record remainder fill"));
                 }

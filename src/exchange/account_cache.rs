@@ -32,19 +32,16 @@ impl AccountCache {
 
     pub async fn refresh_critical(&self, client: &BinanceFuturesClient) -> Result<AccountSnapshot> {
         let key = client.account_cache_key();
-        loop {
-            let epoch = self.entries.detach(key).await;
-            let account = client.get_account_critical().await;
-            let current = self.entries.detach_if_current(key, epoch).await;
-            let account = account?;
-            if current {
-                return Ok(AccountSnapshot {
+        self.entries
+            .refresh_critical(key, || async {
+                let account = client.get_account_critical().await?;
+                Ok(AccountSnapshot {
                     account: Arc::new(account),
                     received_at: Utc::now(),
                     received_instant: Instant::now(),
-                });
-            }
-        }
+                })
+            })
+            .await
     }
 
     pub async fn invalidate(&self, client: &BinanceFuturesClient) {
