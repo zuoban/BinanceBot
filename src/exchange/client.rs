@@ -239,10 +239,10 @@ impl BinanceFuturesClient {
     }
 
     pub(crate) fn new_with_limiter(config: &ExchangeConfig, limiter: Arc<RateLimiter>) -> Self {
-        Self::new_with_base_url_and_limiter(config, "https://fapi.binance.com".to_string(), limiter)
+        Self::with_base_url_and_limiter(config, "https://fapi.binance.com".to_string(), limiter)
     }
 
-    fn new_with_base_url_and_limiter(
+    pub(crate) fn with_base_url_and_limiter(
         config: &ExchangeConfig,
         base_url: String,
         limiter: Arc<RateLimiter>,
@@ -288,25 +288,12 @@ impl BinanceFuturesClient {
     }
     /// Rebuild credentials while keeping the configured endpoint and rate limiter.
     pub(crate) fn reconfig(&self, config: &ExchangeConfig) -> Self {
-        Self::new_with_base_url_and_limiter(
-            config,
-            self.base_url.clone(),
-            Arc::clone(&self.limiter),
-        )
+        Self::with_base_url_and_limiter(config, self.base_url.clone(), Arc::clone(&self.limiter))
     }
 
     #[cfg(test)]
     pub(crate) fn with_base_url(config: &ExchangeConfig, base_url: String) -> Self {
         Self::with_base_url_and_limiter(config, base_url, Arc::new(RateLimiter::default()))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_base_url_and_limiter(
-        config: &ExchangeConfig,
-        base_url: String,
-        limiter: Arc<RateLimiter>,
-    ) -> Self {
-        Self::new_with_base_url_and_limiter(config, base_url, limiter)
     }
 
     /// Synchronize local timestamp with Binance Futures server time

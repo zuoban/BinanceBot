@@ -87,8 +87,7 @@ fn aggregate(
                                 s.account.update_time,
                                 now,
                                 snapshot_max_age_secs(*interval),
-                            ) && s.ticker.mark_price > Decimal::ZERO
-                                && is_timestamp_fresh(s.ticker.mark_update_time, now, 15)))
+                            ) && s.ticker.mark_price_is_fresh(now)))
                 }) {
                     latest.map(|(s, _)| s.account.margin_balance)
                 } else {
@@ -113,14 +112,11 @@ fn aggregate(
                 if size.is_zero() {
                     continue;
                 }
-                let mark = snapshot.ticker.mark_price;
-                if mark <= Decimal::ZERO
-                    || !is_timestamp_fresh(snapshot.ticker.mark_update_time, now, 15)
-                {
+                if !snapshot.ticker.mark_price_is_fresh(now) {
                     valid = false;
                     continue;
                 }
-                let amount = size.abs() * mark;
+                let amount = size.abs() * snapshot.ticker.mark_price;
                 if size > Decimal::ZERO {
                     long += amount;
                 } else {
@@ -185,14 +181,7 @@ pub(crate) async fn current_accounts(
     // Global changes hold this lock until persistence or rollback is complete.
     let (states, committed) = {
         let _membership = handle.membership_lock.lock().await;
-        let states: Vec<_> = handle
-            .states
-            .read()
-            .await
-            .iter()
-            .filter(|state| !state.is_retired())
-            .cloned()
-            .collect();
+        let states = handle.active_states().await;
         let config = handle.db.load_saved_config().await?;
         (states, config.strategy_configs()?)
     };
@@ -237,14 +226,7 @@ pub(crate) async fn collect_hourly(
     let Ok(_membership) = handle.membership_lock.try_lock() else {
         return Ok(None);
     };
-    let states: Vec<_> = handle
-        .states
-        .read()
-        .await
-        .iter()
-        .filter(|state| !state.is_retired())
-        .cloned()
-        .collect();
+    let states = handle.active_states().await;
     let mut updates = Vec::with_capacity(states.len());
     for state in &states {
         let Ok(update) = state.config_update_lock.try_lock() else {

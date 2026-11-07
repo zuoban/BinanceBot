@@ -17,8 +17,6 @@ beforeEach(() => {
   overview.dataUpdatedAt = Date.now();
   overview.refetch.mockReset();
   vi.mocked(runBatchControls).mockReset().mockResolvedValue([]);
-  vi.stubGlobal('matchMedia', vi.fn().mockImplementation(query => ({ matches: false, media: query, addListener: vi.fn(), removeListener: vi.fn(), addEventListener: vi.fn(), removeEventListener: vi.fn() })));
-  vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
 });
 vi.mock('../lib/queries', () => ({ useOverview: () => overview, useOverviewHistory: () => ({ data: { snapshots: [], current_accounts: [] }, isPending: false, error: null }) }));
 const actions = vi.hoisted(() => ({ run: vi.fn(), remove: vi.fn(), busy: new Set<string>(), pending: {} as Record<string, string>, deleting: false }));
@@ -47,6 +45,7 @@ it('orders running strategies first, then by absolute position amount, and updat
   const symbols = () => [...screen.getByRole('region', { name: '交易策略' }).querySelectorAll('.pair-name')].map(link => link.textContent);
   expect(symbols()).toEqual(['ZECUSDC', 'ADAUSDC', 'SOLUSDC', 'ETHUSDC', 'XRPUSDC', 'BTCUSDC', 'BNBUSDC']);
   pairs[0].snapshot.status = 'RUNNING';
+  overview.data = { ...overview.data, pairs: [...pairs] };
   rerender(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
   expect(symbols()).toEqual(['BTCUSDC', 'ZECUSDC', 'ADAUSDC', 'SOLUSDC', 'ETHUSDC', 'XRPUSDC', 'BNBUSDC']);
 });
@@ -497,6 +496,7 @@ it.each(['PAPER', 'LIVE'] as const)('shows shared %s asset balances once when a 
   s.position.size = '3';
   second.position.size = '-1';
   entries.push({ snapshot: second, mode, scoped: true });
+  overview.data = { ...overview.data, pairs: [...entries] };
   rerender(page());
   expect(screen.getAllByText('保证金余额')).toHaveLength(1);
   const shared = screen.getByText('保证金余额').closest('.account-card') as HTMLElement;

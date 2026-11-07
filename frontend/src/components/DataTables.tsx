@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { createContext, useContext, useMemo, useState } from 'react';
 import { App, Button, Segmented, Table, Tag } from 'antd';
 import { CopyOutlined, DownloadOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
@@ -14,9 +14,11 @@ const purposeLabel: Record<string, string> = { GRID: '网格', TAKE_PROFIT: '止
 function orderPurpose(o: Order) {
   return purposeLabel[o.purpose] ?? (o.is_take_profit ? '止盈' : '历史订单');
 }
-function RelativeTime({ value, now, className }: { value: string; now: number; className?: string }) {
+const NowContext = createContext(0);
+function RelativeTime({ value, className }: { value: string; className?: string }) {
+  const now = useContext(NowContext);
   const timestamp = Date.parse(value);
-  return <span className={className} title={Number.isFinite(timestamp) ? `${time(value)}（北京时间）` : undefined}>{relativeTime(value, now)}</span>;
+  return <span className={className} title={Number.isFinite(timestamp) ? `${time(timestamp)}（北京时间）` : undefined}>{relativeTime(timestamp, now)}</span>;
 }
 /** Click-to-copy for a price or quantity. The visible text stays the formatted value; the raw value is what gets copied. */
 function Copyable({ value, children }: { value: string; children: React.ReactNode }) {
@@ -77,7 +79,7 @@ export function TradesTable({ trades: allTrades, overview = false, now: currentN
   const columns = useMemo<ColumnsType<Trade>>(() => [
     ...(overview ? [{ title: '交易对', dataIndex: 'symbol', className: 'trade-symbol', width: 130 }] : []),
     { title: '方向', dataIndex: 'side', render: side, width: 90, fixed: overview ? undefined : 'left' },
-    { title: overview ? '成交时间' : '时间（北京）', dataIndex: 'timestamp', render: overview ? (value: string) => <RelativeTime value={value} now={now} /> : time, width: overview ? 90 : 185 },
+    { title: overview ? '成交时间' : '时间（北京）', dataIndex: 'timestamp', render: overview ? (value: string) => <RelativeTime value={value} /> : time, width: overview ? 90 : 185 },
     { title: '成交价格', align: 'right', className: 'table-numeric', dataIndex: 'price', render: (v: string) => overview ? price(v) : <Copyable value={v}>{price(v)}</Copyable> },
     { title: '数量', align: 'right', className: 'table-numeric', dataIndex: 'quantity', render: price },
     { title: '金额', align: 'right', className: 'table-numeric', dataIndex: 'amount_usdc', render: (v: string) => number(v) },
@@ -85,20 +87,19 @@ export function TradesTable({ trades: allTrades, overview = false, now: currentN
     { title: '手续费', align: 'right', className: 'table-numeric', render: (_, t) => t.pnl_verified ? number(t.commission, 4) : <Tag>待同步</Tag> },
     { title: '成交方式', render: (_, t) => t.pnl_verified ? (t.is_maker ? 'Maker' : 'Taker') : <Tag>待同步</Tag> },
     { title: '备注', dataIndex: 'note', ellipsis: true },
-  ], [overview, overview ? now : 0]);
-  return <div>
+  ], [overview]);
+  return <NowContext.Provider value={now}><div>
     {!overview && <TableFilterBar label="按方向筛选" value={filter} onChange={setFilter} options={sideOptions} shown={trades.length} total={allTrades.length} onExport={exportRows} />}
-    {overview && <p className="overview-trades-scroll-hint">左右滑动查看完整成交信息</p>}
-    <div className={overview ? 'overview-trades-desktop' : 'table-desktop'}>{!overview && <p className="table-scroll-hint">左右滑动查看完整成交信息</p>}<Table<Trade> rowKey="trade_id" columns={columns} dataSource={trades} size="small" scroll={{ x: 1000 }} pagination={overview ? false : { pageSize: 15, showSizeChanger: false, hideOnSinglePage: true }} /></div>
+    <div className="table-desktop"><p className="table-scroll-hint">左右滑动查看完整成交信息</p><Table<Trade> rowKey="trade_id" columns={columns} dataSource={trades} size="small" scroll={{ x: 1000 }} pagination={overview ? false : { pageSize: 15, showSizeChanger: false, hideOnSinglePage: true }} /></div>
     <div className={overview ? 'overview-trades-mobile' : 'table-mobile'}>{trades.length ? <ul className="trade-list" aria-label="成交列表">{(overview ? trades : trades.slice(0, 50)).map(trade => <li className="trade-list-item" key={trade.trade_id}>
-      <div className="trade-list-heading">{overview ? <><strong>{trade.symbol}</strong>{side(trade.side)}</> : <>{side(trade.side)}<strong><Copyable value={trade.price}>{price(trade.price)}</Copyable></strong></>}<RelativeTime value={trade.timestamp} now={now} className="trade-list-time" /></div>
+      <div className="trade-list-heading">{overview ? <><strong>{trade.symbol}</strong>{side(trade.side)}</> : <>{side(trade.side)}<strong><Copyable value={trade.price}>{price(trade.price)}</Copyable></strong></>}<RelativeTime value={trade.timestamp} className="trade-list-time" /></div>
       <dl>
         <div><dt>{overview ? '成交均价' : '数量'}</dt><dd>{price(overview ? trade.price : trade.quantity)}</dd></div>
         <div><dt>金额</dt><dd>{number(trade.amount_usdc)}</dd></div>
         <div><dt>盈亏</dt><dd>{trade.pnl_verified ? <Pnl value={trade.realized_pnl} /> : <Tag>待同步</Tag>}</dd></div>
       </dl>
     </li>)}</ul> : <div className="trade-list-empty">暂无成交记录</div>}{!overview && trades.length > 50 && <p className="muted">仅显示最近 50 条，完整数据请导出 CSV。</p>}</div>
-  </div>;
+  </div></NowContext.Provider>;
 }
 const levels = ['ALL', 'ERROR', 'WARN', 'INFO', 'DEBUG'] as const;
 type LevelFilter = typeof levels[number];

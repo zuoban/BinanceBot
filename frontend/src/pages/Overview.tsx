@@ -1,14 +1,14 @@
-import { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { App, Button, Card, Col, Dropdown, Empty, Input, Popover, Row, Select, Space, Statistic } from 'antd';
 import { ArrowDownOutlined, ArrowRightOutlined, ArrowUpOutlined, EyeOutlined, PlusOutlined, SearchOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { useOverview } from '../lib/queries';
 import { useUrlParams } from '../lib/urlState';
 import { AccountsContext } from '../lib/session';
-import { ageText, accountGroups, cnyText, compactNumber as number, compactPrice as price, comparePositionAmount, directionLabel, entryChange, entryPriceText, groupTradePnl, maxPositionPolicyLabel, modeLabel, positivePrice, positionAmount, positionGroups, quoteAsset, ratioText, SNAPSHOT_STALE_MS, todayPnlGroups, todayTradeCounts, trimFractionZeros } from '../lib/format';
+import { ageText, accountGroups, beijingDay, cnyText, compactNumber as number, compactPrice as price, comparePositionAmount, directionLabel, entryChange, entryPriceText, groupTradePnl, maxPositionPolicyLabel, modeLabel, positivePrice, positionAmount, positionGroups, quoteAsset, ratioText, SNAPSHOT_STALE_MS, todayPnlGroups, todayTradeCounts, trimFractionZeros } from '../lib/format';
 import { ErrorNotice, PageTitle, Pnl, SignalButton, SignalChip, StatusTag, type Signal } from '../components/Common';
 import { runBatchControls, useControls } from '../components/Controls';
-import type { Pair } from '../lib/types';
+import type { Overview, Pair, Trade } from '../lib/types';
 import { OverviewLoading } from '../components/Loading';
 import { OverviewHistory } from '../components/OverviewHistory';
 import { StrategyMenu, StrategyToggle } from '../components/StrategyMenu';
@@ -17,6 +17,8 @@ import { PaperGuide } from '../components/PaperGuide';
 import { TradesTable } from '../components/DataTables';
 
 import { useNow } from '../lib/useNow';
+const emptyPairs: Overview['pairs'] = [];
+const emptyTrades: Trade[] = [];
 const toPair = (e: { snapshot: { symbol: string; status: Pair['status']; grid_config: Pair['grid_config'] }; mode: Pair['mode']; scoped: boolean }): Pair => ({ symbol: e.snapshot.symbol, status: e.snapshot.status, mode: e.mode, grid_config: e.snapshot.grid_config, scoped: e.scoped });
 export default function OverviewPage() {
   const overview = useOverview();
@@ -60,12 +62,12 @@ export default function OverviewPage() {
     mounted.current = true;
     return () => { mounted.current = false; };
   }, []);
-  const entries = overview.data?.pairs ?? [];
-  const recentTrades = overview.data?.recent_trades ?? [];
-  const displayedTrades = recentTrades.slice(0, tradesExpanded ? 20 : 5);
+  const entries = overview.data?.pairs ?? emptyPairs;
+  const recentTrades = overview.data?.recent_trades ?? emptyTrades;
+  const displayedTrades = useMemo(() => recentTrades.slice(0, tradesExpanded ? 20 : 5), [recentTrades, tradesExpanded]);
   const buyTrades = displayedTrades.filter(trade => trade.side === 'BUY').length;
   const sellTrades = displayedTrades.filter(trade => trade.side === 'SELL').length;
-  const tradePnlGroups = groupTradePnl(displayedTrades);
+  const tradePnlGroups = useMemo(() => groupTradePnl(displayedTrades), [displayedTrades]);
   const stale = !!overview.error || now - overview.dataUpdatedAt > SNAPSHOT_STALE_MS;
   const pairs = entries.map(toPair);
   let runningCount = 0, pausedCount = 0, stoppedCount = 0, errorCount = 0, liveCount = 0, allPaper = pairs.length > 0;
@@ -77,8 +79,8 @@ export default function OverviewPage() {
     if (p.mode === 'LIVE') liveCount++;
     if (p.mode !== 'PAPER') allPaper = false;
   }
-  const tradeCountsBySymbol = new Map(entries.map(e => [e.snapshot.symbol, todayTradeCounts(e.snapshot, now)]));
-  const totalToday = (symbol: string) => { const c = tradeCountsBySymbol.get(symbol); return c ? c.buy + c.sell : -1; };
+  const currentDay = beijingDay(now);
+  const tradeCountsBySymbol = useMemo(() => new Map(entries.map(e => [e.snapshot.symbol, todayTradeCounts(e.snapshot, now)])), [entries, currentDay]);
   const batch = async (action: 'pause' | 'resume') => {
     if (batchLock.current) return;
     batchLock.current = true; setBatchBusy(true);
@@ -117,15 +119,19 @@ export default function OverviewPage() {
       if (mounted.current) message.error(`批量操作失败：${error instanceof Error ? error.message : String(error)}`);
     } finally { batchLock.current = false; if (mounted.current) setBatchBusy(false); }
   };
-  const matchesStatus = (e: typeof entries[number]) => statusFilter === 'all' || (statusFilter === 'LIVE' ? e.mode === 'LIVE' : e.snapshot.status === statusFilter);
-  const visible = entries.filter(e => e.snapshot.symbol.includes(search.toUpperCase().trim()) && matchesStatus(e))
-    .sort((a, b) => sort === 'position' ? Number(b.snapshot.status === 'RUNNING') - Number(a.snapshot.status === 'RUNNING') || comparePositionAmount(a.snapshot, b.snapshot) : sort === 'today' ? totalToday(b.snapshot.symbol) - totalToday(a.snapshot.symbol) || a.snapshot.symbol.localeCompare(b.snapshot.symbol) : sort === 'orders' ? (b.snapshot.stats.active_buy_orders + b.snapshot.stats.active_sell_orders) - (a.snapshot.stats.active_buy_orders + a.snapshot.stats.active_sell_orders) || a.snapshot.symbol.localeCompare(b.snapshot.symbol) : a.snapshot.symbol.localeCompare(b.snapshot.symbol));
+  const visible = useMemo(() => {
+    const query = search.toUpperCase().trim();
+    const totalToday = (symbol: string) => { const c = tradeCountsBySymbol.get(symbol); return c ? c.buy + c.sell : -1; };
+    const matchesStatus = (e: typeof entries[number]) => statusFilter === 'all' || (statusFilter === 'LIVE' ? e.mode === 'LIVE' : e.snapshot.status === statusFilter);
+    return entries.filter(e => e.snapshot.symbol.includes(query) && matchesStatus(e))
+      .sort((a, b) => sort === 'position' ? Number(b.snapshot.status === 'RUNNING') - Number(a.snapshot.status === 'RUNNING') || comparePositionAmount(a.snapshot, b.snapshot) : sort === 'today' ? totalToday(b.snapshot.symbol) - totalToday(a.snapshot.symbol) || a.snapshot.symbol.localeCompare(b.snapshot.symbol) : sort === 'orders' ? (b.snapshot.stats.active_buy_orders + b.snapshot.stats.active_sell_orders) - (a.snapshot.stats.active_buy_orders + a.snapshot.stats.active_sell_orders) || a.snapshot.symbol.localeCompare(b.snapshot.symbol) : a.snapshot.symbol.localeCompare(b.snapshot.symbol));
+  }, [entries, search, statusFilter, sort, tradeCountsBySymbol]);
   const clearFilters = () => updateFilters({ q: '', sort: 'position', status: 'all' });
   const counts = [...tradeCountsBySymbol.values()];
   const today = counts.every(c => c !== null) ? counts.reduce<{ buy: number; sell: number }>((sum, c) => ({ buy: sum.buy + c.buy, sell: sum.sell + c.sell }), { buy: 0, sell: 0 }) : null;
   const pnlGroups = todayPnlGroups(overview.data?.today_pnl, now);
   const accountList = accountGroups(accounts, now);
-  const positionList = positionGroups(entries);
+  const positionList = useMemo(() => positionGroups(entries), [entries]);
   const renderStatusButton = (value: string, tier: Signal, label: string, count: number) =>
     overview.data && count > 0 ? <SignalButton tier={tier} active={statusFilter === value} onClick={() => setStatusFilter(statusFilter === value ? 'all' : value)}>{label} {count}</SignalButton> : null;
   return <>

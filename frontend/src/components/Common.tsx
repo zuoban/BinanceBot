@@ -56,18 +56,20 @@ export function ConflictReloadButton<T>({ label, activeRef, refetch, onLoaded, o
   onLoaded: (data: NonNullable<T>) => boolean | void;
   onReset: () => void;
 }) {
-  const { modal } = App.useApp();
+  const { modal, message } = App.useApp();
   const edit = useContext(EditContext);
   const running = useRef(false);
-  return <Button onClick={async () => {
+  return <Button disabled={edit.saving} onClick={async () => {
     const current = activeRef.current;
-    if (running.current || !current) return;
+    if (running.current || edit.saving || !current) return;
     running.current = true;
     try {
       if (!await modal.confirm({ title: `重新加载${label}？`, content: '重新加载会放弃当前未保存的修改，请先记录需要保留的内容。', okText: '重新加载', cancelText: '继续编辑' })) return;
       if (activeRef.current !== current) return;
       const result = await refetch();
-      if (activeRef.current !== current || result.error || !result.data || onLoaded(result.data) === false) return;
+      if (activeRef.current !== current) return;
+      if (result.error) { message.error((result.error as Error).message); return; }
+      if (!result.data || onLoaded(result.data) === false) return;
       edit.setDirty(false);
       onReset();
     } finally {

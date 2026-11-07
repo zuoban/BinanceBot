@@ -132,12 +132,17 @@ impl TradeNotificationContext {
         cny_rate: Option<&CnyRate>,
         now: DateTime<Utc>,
     ) -> Self {
-        let side_count = |bucket: &crate::types::HourlyTradeCount| match trade.side {
-            OrderSide::Buy => bucket.buy_count,
-            OrderSide::Sell => bucket.sell_count,
+        let select_side = |(buy, sell): (u64, u64)| match trade.side {
+            OrderSide::Buy => buy,
+            OrderSide::Sell => sell,
         };
-        let today_count = hourly_stats.map(|stats| stats.buckets.iter().map(side_count).sum());
-        let hour_count = hourly_stats.and_then(|stats| stats.buckets.last().map(side_count));
+        let today_count = hourly_stats.map(|stats| select_side(stats.total_counts()));
+        let hour_count = hourly_stats.and_then(|stats| {
+            stats
+                .buckets
+                .last()
+                .map(|bucket| select_side((bucket.buy_count, bucket.sell_count)))
+        });
         let age = now - account.update_time;
         let flat_paper = trade.mode == TradingMode::Paper
             && account.margin_balance == account.available_balance
@@ -269,7 +274,7 @@ pub fn format_trade_message(trade: &TradeRecord, context: &TradeNotificationCont
 }
 
 fn format_beijing_time(now: DateTime<Utc>) -> String {
-    now.with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap())
+    now.with_timezone(&crate::types::beijing_offset())
         .format("%Y-%m-%d %H:%M:%S")
         .to_string()
 }

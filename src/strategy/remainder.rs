@@ -3,11 +3,16 @@ use super::*;
 
 impl GridTradingEngine {
     pub(super) async fn load_remainder_plan(&self) -> Result<Option<RemainderPlan>> {
-        let config = self.state.config.read().await.clone();
-        let mode = config.exchange.trading_mode();
+        let (symbol, mode) = {
+            let config = self.state.config.read().await;
+            (
+                config.exchange.symbol.clone(),
+                config.exchange.trading_mode(),
+            )
+        };
         self.state
             .db
-            .run_blocking(move |db| db.load_remainder_plan(&config.exchange.symbol, mode))
+            .run_blocking(move |db| db.load_remainder_plan(&symbol, mode))
             .await
     }
 

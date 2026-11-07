@@ -109,6 +109,16 @@ impl RuntimeHandle {
         self.stop.send_replace(true);
     }
 
+    pub(crate) async fn active_states(&self) -> Vec<Arc<AppState>> {
+        self.states
+            .read()
+            .await
+            .iter()
+            .filter(|state| !state.is_retired())
+            .cloned()
+            .collect()
+    }
+
     fn register_engine(&self, pair: &PairTask) {
         let mut engines = self.engine_aborts.lock().unwrap();
         engines.retain(|(state, _)| {
@@ -208,14 +218,7 @@ impl RuntimeHandle {
         payload.apply_to(&mut config);
         // Retired members remain published for risk accounting, but their engines
         // are no longer available to validate or apply configuration changes.
-        let states: Vec<_> = self
-            .states
-            .read()
-            .await
-            .iter()
-            .filter(|state| !state.is_retired())
-            .cloned()
-            .collect();
+        let states = self.active_states().await;
         // Validate every active mode before changing any engine (including credential clearing).
         for state in &states {
             let mut strategy = state.config.read().await.clone();
@@ -617,6 +620,17 @@ impl TradingRuntime {
         std::future::pending::<()>().await;
     }
 
+    async fn wait_for_any_shutdown(
+        first: &mut Option<watch::Receiver<bool>>,
+        second: &mut Option<watch::Receiver<bool>>,
+    ) {
+        tokio::select! {
+            biased;
+            _ = Self::wait_for_startup_shutdown(first) => {}
+            _ = Self::wait_for_startup_shutdown(second) => {}
+        }
+    }
+
     pub fn handle(&self) -> RuntimeHandle {
         self.handle.clone()
     }
@@ -770,8 +784,7 @@ impl TradingRuntime {
             let permitted = if let Some(start) = start {
                 tokio::select! {
                     biased;
-                    _ = Self::wait_for_startup_shutdown(&mut startup_shutdown) => false,
-                    _ = Self::wait_for_startup_shutdown(&mut runtime_shutdown) => false,
+                    _ = Self::wait_for_any_shutdown(&mut startup_shutdown, &mut runtime_shutdown) => false,
                     result = start => result.is_ok(),
                 }
             } else {
@@ -780,11 +793,7 @@ impl TradingRuntime {
             let initialized = if permitted {
                 tokio::select! {
                     biased;
-                    _ = Self::wait_for_startup_shutdown(&mut startup_shutdown) => {
-                        engine_state.request_shutdown();
-                        None
-                    }
-                    _ = Self::wait_for_startup_shutdown(&mut runtime_shutdown) => {
+                    _ = Self::wait_for_any_shutdown(&mut startup_shutdown, &mut runtime_shutdown) => {
                         engine_state.request_shutdown();
                         None
                     }

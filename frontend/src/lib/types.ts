@@ -76,7 +76,7 @@ export interface Overview { generated_at: string; pairs: { scoped: boolean; mode
 export interface HistoryAccount { mode: Mode; asset: string; account_id: string | null }
 export interface HourlySnapshot {
   hour: number;
-  groups: (HistoryAccount & { equity: Decimal | null; long: Decimal | null; short: Decimal | null })[];
+  groups: (HistoryAccount & { equity: Decimal | null })[];
 }
 export interface OverviewHistoryData { snapshots: HourlySnapshot[]; current_accounts: HistoryAccount[] }
 export interface GlobalConfig {

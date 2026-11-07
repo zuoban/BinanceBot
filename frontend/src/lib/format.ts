@@ -81,16 +81,26 @@ export function cnyText(value: number | null | undefined, compact = false) {
 export function ratioText(value: number | null | undefined, compact = false) {
   return value != null && Number.isFinite(value) ? `${compact ? compactNumber(value) : number(value)}%` : '--';
 }
-export const time = (value: string) => {
-  const ts = Date.parse(value);
-  return Number.isFinite(ts) ? new Date(ts).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) : '--';
+const beijingTimeFormat = new Intl.DateTimeFormat('zh-CN', {
+  timeZone: 'Asia/Shanghai',
+  year: 'numeric',
+  month: 'numeric',
+  day: 'numeric',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  hour12: false,
+});
+export const time = (value: string | number) => {
+  const ts = typeof value === 'number' ? value : Date.parse(value);
+  return Number.isFinite(ts) ? beijingTimeFormat.format(ts) : '--';
 };
 function formatSeconds(seconds: number) {
   const [amount, unit] = seconds < 60 ? [seconds, '秒'] : seconds < 3600 ? [Math.floor(seconds / 60), '分钟'] : seconds < 86400 ? [Math.floor(seconds / 3600), '小时'] : [Math.floor(seconds / 86400), '天'];
   return `${amount}${unit}`;
 }
-export function relativeTime(value: string, now = Date.now()) {
-  const timestamp = Date.parse(value);
+export function relativeTime(value: string | number, now = Date.now()) {
+  const timestamp = typeof value === 'number' ? value : Date.parse(value);
   if (!Number.isFinite(timestamp)) return '--';
   const seconds = Math.floor(Math.abs(now - timestamp) / 1000);
   return `${formatSeconds(seconds)}${timestamp > now ? '后' : '前'}`;

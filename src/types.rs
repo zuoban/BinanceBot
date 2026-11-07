@@ -122,6 +122,29 @@ impl ObservedOrderIdentity {
             order_id: resp.order_id,
         }
     }
+
+    pub(crate) fn from_order(order: &GridOrder) -> Option<Self> {
+        Some(Self {
+            client_order_id: order.client_order_id.clone(),
+            symbol: order.symbol.clone(),
+            side: order.side.as_str().to_owned(),
+            order_id: order.order_id?,
+        })
+    }
+
+    pub(crate) fn matches_order(&self, expected: &GridOrder) -> bool {
+        self.client_order_id == expected.client_order_id
+            && self.symbol == expected.symbol
+            && self.side == expected.side.as_str()
+            && expected.order_id.is_none_or(|id| self.order_id == id)
+    }
+
+    pub(crate) fn matches_confirmed_order(&self, expected: &GridOrder) -> bool {
+        self.client_order_id == expected.client_order_id
+            && self.symbol == expected.symbol
+            && self.side == expected.side.as_str()
+            && expected.order_id == Some(self.order_id)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -161,11 +184,7 @@ impl GridOrder {
             price: found.price,
             quantity,
             amount_usdc: found.price * quantity,
-            status: if found.executed_qty > Decimal::ZERO {
-                OrderStatus::PartiallyFilled
-            } else {
-                OrderStatus::New
-            },
+            status: found.open_order_status(),
             created_at: timestamp,
             updated_at: timestamp,
             grid_level: 0,
@@ -445,6 +464,18 @@ impl Default for GridStats {
     }
 }
 
+pub const MARKET_PRICE_MAX_AGE_SECS: i64 = 15;
+
+pub(crate) fn beijing_offset() -> chrono::FixedOffset {
+    chrono::FixedOffset::east_opt(8 * 3600).expect("UTC+8 is a valid fixed offset")
+}
+
+pub(crate) fn non_blank(value: Option<String>) -> Option<String> {
+    value
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
 pub(crate) fn is_timestamp_fresh(
     updated_at: DateTime<Utc>,
     now: DateTime<Utc>,
@@ -476,13 +507,17 @@ pub struct TickerInfo {
 }
 
 impl TickerInfo {
+    pub fn mark_price_is_fresh(&self, now: DateTime<Utc>) -> bool {
+        self.mark_price > Decimal::ZERO
+            && is_timestamp_fresh(self.mark_update_time, now, MARKET_PRICE_MAX_AGE_SECS)
+    }
+
     /// A positive cached mark must be fresh too; do not silently change the
     /// strategy reference to the last price when a previously available mark expires.
     pub fn prices_are_fresh(&self, now: DateTime<Utc>) -> bool {
         self.last_price > Decimal::ZERO
-            && is_timestamp_fresh(self.update_time, now, 15)
-            && (self.mark_price <= Decimal::ZERO
-                || is_timestamp_fresh(self.mark_update_time, now, 15))
+            && is_timestamp_fresh(self.update_time, now, MARKET_PRICE_MAX_AGE_SECS)
+            && (self.mark_price <= Decimal::ZERO || self.mark_price_is_fresh(now))
     }
 
     /// Center the grid on the mark price; use the last price until a mark is available.
@@ -516,6 +551,14 @@ pub struct HourlyTradeStats {
     pub buckets: Vec<HourlyTradeCount>,
     pub realized_pnl: Decimal,
     pub pending_pnl_count: u64,
+}
+
+impl HourlyTradeStats {
+    pub fn total_counts(&self) -> (u64, u64) {
+        self.buckets.iter().fold((0, 0), |(buy, sell), bucket| {
+            (buy + bucket.buy_count, sell + bucket.sell_count)
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -715,8 +758,8 @@ impl UpdateGlobalConfigPayload {
                 (&mut config.api_key, self.api_key),
                 (&mut config.api_secret, self.api_secret),
             ] {
-                if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
-                    *target = value.trim().to_string();
+                if let Some(value) = non_blank(value) {
+                    *target = value;
                 }
             }
         }
@@ -731,8 +774,8 @@ impl UpdateGlobalConfigPayload {
                 (&mut config.telegram.bot_token, self.telegram_bot_token),
                 (&mut config.telegram.chat_id, self.telegram_chat_id),
             ] {
-                if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
-                    *target = value.trim().to_string();
+                if let Some(value) = non_blank(value) {
+                    *target = value;
                 }
             }
         }

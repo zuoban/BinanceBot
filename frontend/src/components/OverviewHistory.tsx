@@ -2,16 +2,19 @@ import { Suspense, lazy, useMemo, useState } from 'react';
 import { Card, Select } from 'antd';
 import { useOverviewHistory } from '../lib/queries';
 import { compactNumber, modeLabel, numeric } from '../lib/format';
+import { useNow } from '../lib/useNow';
 import type { HistoryAccount } from '../lib/types';
 import { LoadErrorBoundary } from './LoadErrorBoundary';
 
 const OverviewHistoryChart = lazy(() => import('./OverviewHistoryChart'));
-const formatDate = (hour: number) => new Date(hour * 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
+const historyDateFormat = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
+const formatDate = (hour: number) => historyDateFormat.format(hour * 1000);
 const accountKey = (account: HistoryAccount) => JSON.stringify([account.mode, account.asset, account.account_id]);
 const isUnidentified = (account: HistoryAccount) => account.mode !== 'PAPER' && account.account_id === null;
 
 export function OverviewHistory() {
   const history = useOverviewHistory();
+  const now = useNow(60_000);
   const [selected, setSelected] = useState<{ current: string; key: string }>();
   const snapshots = history.data?.snapshots;
   const currentAccounts = history.data?.current_accounts;
@@ -43,7 +46,7 @@ export function OverviewHistory() {
   const account = key ? groups.get(key) : undefined;
   const asset = account?.asset;
   const discrete = account ? isUnidentified(account) : false;
-  const lastHour = Math.floor(Date.now() / 3600_000) * 3600;
+  const lastHour = Math.floor(now / 3600_000) * 3600;
   const { data, dailyData, latestDay, latest, ticks, dailyTicks } = useMemo(() => {
     const byHour = new Map((snapshots ?? []).map(point => [point.hour, point]));
     const pointAt = (hour: number) => {

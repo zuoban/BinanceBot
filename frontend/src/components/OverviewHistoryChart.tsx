@@ -2,8 +2,10 @@ import { memo } from 'react';
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 
 type HistoryPoint = { hour: number; equity: number | null };
-const formatHour = (hour: number) => new Date(hour * 1000).toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hour12: false });
-const formatDay = (hour: number) => new Date(hour * 1000).toLocaleDateString('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit' });
+const hourFormat = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hour12: false });
+const dayFormat = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit' });
+const formatHour = (hour: number) => hourFormat.format(hour * 1000);
+const formatDay = (hour: number) => dayFormat.format(hour * 1000);
 const axisTick = { fontSize: 11, fontFamily: 'var(--font-mono)', fill: 'var(--text-muted)' };
 function HistoryDot({ cx, cy, payload, stroke, index, data, discrete }: { cx?: number; cy?: number; payload?: { hour: number }; stroke?: string; index?: number; data: HistoryPoint[]; discrete: boolean }) {
   if (cx == null || cy == null || !payload || (index != null && data[index]?.equity == null)) return null;

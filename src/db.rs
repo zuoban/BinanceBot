@@ -4,7 +4,7 @@ use crate::types::{
     RemainderPlan, TradeRecord, TradingMode,
 };
 use anyhow::{Context, Result};
-use chrono::{DateTime, Duration as ChronoDuration, FixedOffset, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use rust_decimal::Decimal;
 use std::collections::HashMap;
@@ -28,7 +28,7 @@ macro_rules! select_trades_sql {
 }
 
 pub(crate) fn beijing_midnight(now: DateTime<Utc>) -> DateTime<Utc> {
-    let beijing = FixedOffset::east_opt(8 * 3600).unwrap();
+    let beijing = crate::types::beijing_offset();
     now.with_timezone(&beijing)
         .date_naive()
         .and_hms_opt(0, 0, 0)
@@ -67,6 +67,34 @@ impl TradeRevisions {
     }
 }
 
+#[derive(Default)]
+struct RevisionTracker {
+    revision: AtomicU64,
+    by_symbol: Mutex<TradeRevisions>,
+}
+
+impl RevisionTracker {
+    fn current(&self) -> u64 {
+        self.revision.load(Ordering::Acquire)
+    }
+
+    fn for_symbol(&self, symbol: &str) -> u64 {
+        self.by_symbol.lock().unwrap().for_symbol(symbol)
+    }
+
+    fn publish(&self, symbol: &str) {
+        let mut revisions = self.by_symbol.lock().unwrap();
+        let revision = self.revision.fetch_add(1, Ordering::Release) + 1;
+        revisions.changed(symbol, revision);
+    }
+
+    fn clear_all(&self) {
+        let mut revisions = self.by_symbol.lock().unwrap();
+        let revision = self.revision.fetch_add(1, Ordering::Release) + 1;
+        revisions.clear_all(revision);
+    }
+}
+
 // Enabled only by the local benchmark; no global collector or production overhead.
 #[cfg(test)]
 #[derive(Default)]
@@ -85,10 +113,8 @@ type MembershipHook = (
 pub struct Database {
     conn: Mutex<Connection>,
     path: String,
-    trade_revision: AtomicU64,
-    trade_revisions: Mutex<TradeRevisions>,
-    trade_clear_revision: AtomicU64,
-    trade_clear_revisions: Mutex<TradeRevisions>,
+    trade_revisions: RevisionTracker,
+    trade_clear_revisions: RevisionTracker,
     #[cfg(test)]
     revision_publish_hook:
         Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
@@ -304,10 +330,8 @@ impl Database {
         let db = Self {
             conn: Mutex::new(conn),
             path: path_str,
-            trade_revision: AtomicU64::new(0),
-            trade_revisions: Mutex::new(TradeRevisions::default()),
-            trade_clear_revision: AtomicU64::new(0),
-            trade_clear_revisions: Mutex::new(TradeRevisions::default()),
+            trade_revisions: RevisionTracker::default(),
+            trade_clear_revisions: RevisionTracker::default(),
             #[cfg(test)]
             revision_publish_hook: Mutex::new(None),
             #[cfg(test)]
@@ -403,7 +427,7 @@ impl Database {
     }
 
     pub(crate) fn trade_data_revision(&self) -> u64 {
-        self.trade_revision.load(Ordering::Acquire)
+        self.trade_revisions.current()
     }
 
     #[cfg(test)]
@@ -415,15 +439,13 @@ impl Database {
     }
 
     pub(crate) fn symbol_trade_revision(&self, symbol: &str) -> u64 {
-        self.trade_revisions.lock().unwrap().for_symbol(symbol)
+        self.trade_revisions.for_symbol(symbol)
     }
 
     fn publish_trade_revision(&self, symbol: &str) {
         #[cfg(test)]
         self.before_revision_publish();
-        let mut revisions = self.trade_revisions.lock().unwrap();
-        let revision = self.trade_revision.fetch_add(1, Ordering::Release) + 1;
-        revisions.changed(symbol, revision);
+        self.trade_revisions.publish(symbol);
     }
 
     #[cfg(test)]
@@ -1204,12 +1226,8 @@ impl Database {
         if trades {
             #[cfg(test)]
             self.before_revision_publish();
-            let mut revisions = self.trade_revisions.lock().unwrap();
-            let revision = self.trade_revision.fetch_add(1, Ordering::Release) + 1;
-            revisions.clear_all(revision);
-            let mut clear_revisions = self.trade_clear_revisions.lock().unwrap();
-            let clear_revision = self.trade_clear_revision.fetch_add(1, Ordering::Release) + 1;
-            clear_revisions.clear_all(clear_revision);
+            self.trade_revisions.clear_all();
+            self.trade_clear_revisions.clear_all();
         }
         Ok((deleted_trades, deleted_snapshots))
     }
@@ -1221,9 +1239,7 @@ impl Database {
         let deleted = clear_trades_on(&tx, Some(symbol))?;
         tx.commit()?;
         self.publish_trade_revision(symbol);
-        let mut clear_revisions = self.trade_clear_revisions.lock().unwrap();
-        let clear_revision = self.trade_clear_revision.fetch_add(1, Ordering::Release) + 1;
-        clear_revisions.changed(symbol, clear_revision);
+        self.trade_clear_revisions.publish(symbol);
         Ok(deleted)
     }
 
@@ -2003,13 +2019,7 @@ impl Database {
         let Some(saved_symbol) = saved_symbol else {
             return Ok(false);
         };
-        if self
-            .trade_clear_revisions
-            .lock()
-            .unwrap()
-            .for_symbol(&saved_symbol)
-            != expected_clear_revision
-        {
+        if self.trade_clear_revisions.for_symbol(&saved_symbol) != expected_clear_revision {
             return Ok(false);
         }
         let tx = conn.transaction()?;
@@ -2197,20 +2207,13 @@ impl Database {
             trade_from_row,
         )?;
         let trades = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-        let revision = self
-            .trade_clear_revisions
-            .lock()
-            .unwrap()
-            .for_symbol(symbol);
+        let revision = self.trade_clear_revisions.for_symbol(symbol);
         Ok((trades, revision))
     }
 
     pub fn symbol_trade_clear_revision(&self, symbol: &str) -> u64 {
         let _conn = self.lock_connection("symbol_trade_clear_revision");
-        self.trade_clear_revisions
-            .lock()
-            .unwrap()
-            .for_symbol(symbol)
+        self.trade_clear_revisions.for_symbol(symbol)
     }
 
     pub fn get_pnl_totals(
@@ -3377,9 +3380,9 @@ mod tests {
                  BEGIN SELECT RAISE(ABORT, 'snapshot cleanup test failure'); END;"
         ).unwrap();
 
-        let revision = db.trade_revision.load(Ordering::Acquire);
+        let revision = db.trade_data_revision();
         assert!(db.clear_selected_database(true, true).is_err());
-        assert_eq!(db.trade_revision.load(Ordering::Acquire), revision);
+        assert_eq!(db.trade_data_revision(), revision);
         assert_eq!(db.get_recent_trades(10).unwrap().len(), 1);
         assert_eq!(
             db.load_scoped_stats("SOLUSDC", TradingMode::Live)
@@ -4217,10 +4220,8 @@ mod tests {
         let db = Database {
             conn: Mutex::new(conn),
             path: ":memory:".into(),
-            trade_revision: AtomicU64::new(0),
-            trade_revisions: Mutex::new(TradeRevisions::default()),
-            trade_clear_revision: AtomicU64::new(0),
-            trade_clear_revisions: Mutex::new(TradeRevisions::default()),
+            trade_revisions: RevisionTracker::default(),
+            trade_clear_revisions: RevisionTracker::default(),
             revision_publish_hook: Mutex::new(None),
             membership_commit_hook: Mutex::new(None),
             today_pnl_cache: tokio::sync::Mutex::new(None),

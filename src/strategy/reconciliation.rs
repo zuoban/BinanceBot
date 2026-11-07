@@ -465,13 +465,10 @@ impl GridTradingEngine {
                                 authoritative.reserve_max(observed.price, observed.quantity);
                             }
                         }
-                        if let Some(observed) = active.get(id).and_then(known_order_identity) {
-                            if authoritative.symbol != observed.symbol
-                                || authoritative.side.as_str() != observed.side
-                                || authoritative
-                                    .order_id
-                                    .is_none_or(|order_id| order_id != observed.order_id)
-                            {
+                        if let Some(observed) =
+                            active.get(id).and_then(ObservedOrderIdentity::from_order)
+                        {
+                            if !observed.matches_confirmed_order(&authoritative) {
                                 self.insert_identity_observation(
                                     (account_key, id.clone()),
                                     observed,
@@ -658,14 +655,9 @@ impl GridTradingEngine {
                         remainder_plan.as_ref(),
                     );
                     if let (Some(expected), Some(observed)) =
-                        (durable, known_order_identity(current))
+                        (durable, ObservedOrderIdentity::from_order(current))
                     {
-                        if expected.symbol != current.symbol
-                            || expected.side != current.side
-                            || expected
-                                .order_id
-                                .is_none_or(|id| Some(id) != current.order_id)
-                        {
+                        if !observed.matches_confirmed_order(expected) {
                             if expected.order_id.is_none()
                                 && expected.symbol == current.symbol
                                 && expected.side == current.side
@@ -1810,11 +1802,7 @@ impl GridTradingEngine {
                                 };
                             order.quantity = quantity;
                             order.amount_usdc = order.price * order.quantity;
-                            order.status = if live_order.executed_qty > Decimal::ZERO {
-                                OrderStatus::PartiallyFilled
-                            } else {
-                                OrderStatus::New
-                            };
+                            order.status = live_order.open_order_status();
                             orders_to_persist.push(order.clone());
                         } else {
                             let order = GridOrder::from_exchange_response(

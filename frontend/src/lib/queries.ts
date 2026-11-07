@@ -6,7 +6,6 @@ import type { AccountFrame, AccountObservation, OverviewHistoryData, Overview, P
 import { useNow } from './useNow';
 const SOCKET_LIVE_MS = 5000;
 const HTTP_FALLBACK_MS = 3000;
-export { SNAPSHOT_STALE_MS };
 
 export function usePairs() {
   return useQuery({ queryKey: ['pairs'], queryFn: ({ signal }) => api<Pair[]>('/api/pairs', { signal }), refetchInterval: 10_000 });

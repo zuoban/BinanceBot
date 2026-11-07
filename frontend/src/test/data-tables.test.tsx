@@ -11,8 +11,6 @@ vi.mock('../lib/exportCsv', async importOriginal => ({ ...await importOriginal<t
 beforeEach(() => {
   vi.clearAllMocks();
   exported.copy.mockResolvedValue(true);
-  vi.stubGlobal('matchMedia', vi.fn().mockImplementation(query => ({ matches: false, media: query, addListener: vi.fn(), removeListener: vi.fn(), addEventListener: vi.fn(), removeEventListener: vi.fn() })));
-  vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
 });
 
 const trade = (id: string, side: 'BUY' | 'SELL', pnl: string): Trade => ({ trade_id: id, symbol: 'BTCUSDC', mode: 'PAPER', side, price: '67420.5', quantity: '0.002', amount_usdc: '134.84', realized_pnl: pnl, commission: '0.02', pnl_verified: true, is_maker: true, timestamp: '2026-11-05T01:00:00Z', note: '=cmd' });

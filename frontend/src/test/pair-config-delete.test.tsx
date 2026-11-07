@@ -29,9 +29,6 @@ vi.mock('../components/ThemeSwitch', () => ({ ThemeSwitch: () => null, ThemeSegm
 
 beforeEach(() => {
   vi.clearAllMocks();
-  localStorage.clear();
-  vi.stubGlobal('matchMedia', vi.fn().mockImplementation(query => ({ matches: false, media: query, addListener: vi.fn(), removeListener: vi.fn(), addEventListener: vi.fn(), removeEventListener: vi.fn() })));
-  vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
 });
 function setup(request: Promise<unknown>, initialPath = '/pairs/BTCUSDC/config', configError?: Error, symbols = (_path: string): Promise<string[]> => Promise.resolve(['BTCUSDC', 'SOLUSDC']), postOnly = true) {
   mocks.api.mockImplementation((path: string, init?: RequestInit) => path.startsWith('/api/exchange/symbols?') ? symbols(path) : init?.method === 'DELETE' ? request : configError ? Promise.reject(configError) : Promise.resolve({ ...pair('BTCUSDC').grid_config, post_only: postOnly, config_version: 'version-1' }));
@@ -161,7 +158,9 @@ it('requires a position limit when pause is enabled and allows clearing it when 
   await user.click(screen.getByRole('button', { name: '保存并添加' }));
   expect(await screen.findByText('暂停策略需要大于 0 的持仓上限')).toBeInTheDocument();
   expect(mocks.post).not.toHaveBeenCalled();
-  await user.click(screen.getByRole('switch', { name: '持仓上限处理方式' }));
+  await user.click(screen.getByRole('switch', { name: '达到上限时仅撤开仓单' }));
+  expect(await screen.findByText('撤销开仓单需要大于 0 的持仓上限')).toBeInTheDocument();
+  await user.click(screen.getByRole('switch', { name: '达到上限时仅撤开仓单' }));
   await user.click(screen.getByRole('button', { name: '保存并添加' }));
   await waitFor(() => expect(mocks.post).toHaveBeenCalledWith('/api/pairs', expect.objectContaining({
     max_position_usdc: null, pause_on_max_position: false,
@@ -383,8 +382,12 @@ it('保留冲突时的输入，并在确认后重新加载版本', async () => {
   const reload = await screen.findByRole('button', { name: '重新加载策略配置' });
   expect(input).toHaveValue('0.2');
   expect(mocks.post).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ baseline_version: 'version-1' }));
-  mocks.confirm.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+  mocks.confirm.mockResolvedValueOnce(false).mockResolvedValueOnce(true).mockResolvedValueOnce(true);
   await user.click(reload);
+  expect(input).toHaveValue('0.2');
+  mocks.api.mockRejectedValueOnce(new Error('重新加载失败'));
+  await user.click(reload);
+  await waitFor(() => expect(mocks.error).toHaveBeenCalledWith('重新加载失败'));
   expect(input).toHaveValue('0.2');
   mocks.api.mockResolvedValue({ ...pair('BTCUSDC').grid_config, grid_interval: '0.3', config_version: 'version-2' });
   await user.click(reload);

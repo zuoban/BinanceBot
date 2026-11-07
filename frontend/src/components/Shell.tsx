@@ -37,7 +37,8 @@ export default function Shell() {
   const groups = accountGroups(accounts, liveAccounts.now);
   const alert = !!liveAccounts.error || liveAccounts.stale || accounts.some(entry => entry.account_observation_stale || entry.snapshot.status === 'ERROR');
   const withAlert = (title: string) => alert ? `⚠ ${title}` : title;
-  useDocumentTitle(location.pathname.match(/^\/pairs\/(?!new\/?$)[^/]+\/?$/) ? null : withAlert(groups.length ? groups.map(group => {
+  const symbol = routeSymbol(location.pathname);
+  useDocumentTitle(Boolean(symbol && !location.pathname.endsWith('/config')) ? null : withAlert(groups.length ? groups.map(group => {
     return `${compactNumber(group.equity)} | ${ratioText(group.ratio, true)}`;
   }).join(' / ') : defaultTitle));
   const blocker = useBlocker(({ currentLocation, nextLocation }) => (dirty || saving) && currentLocation.pathname !== nextLocation.pathname);
@@ -58,7 +59,6 @@ export default function Shell() {
     window.addEventListener('beforeunload', beforeUnload);
     return () => window.removeEventListener('beforeunload', beforeUnload);
   }, [dirty, saving]);
-  const symbol = routeSymbol(location.pathname);
   const context = useMemo(() => ({ dirty, setDirty, saving, setSaving }), [dirty, saving]);
   const logOut = useCallback(async () => {
     if (saving) return;

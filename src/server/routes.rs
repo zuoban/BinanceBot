@@ -5,10 +5,12 @@ use crate::exchange::BinanceFuturesClient;
 use crate::runtime::RuntimeHandle;
 use crate::server::state::snapshot::{AccountFrame, AccountMessage};
 use crate::server::state::AppState;
+use crate::strategy::SymbolRules;
 use crate::types::{
-    AuthLoginPayload, AuthStatusResponse, AuthTokenResponse, BotControlAction, BotSnapshot,
-    GridOrder, LogEntry, OverviewSnapshot, TradeRecord, TradingMode, TradingPairView,
-    UpdateConfigPayload, UpdateGlobalConfigPayload, WebConfigView, WebGlobalConfigView,
+    beijing_offset, non_blank, AuthLoginPayload, AuthStatusResponse, AuthTokenResponse,
+    BotControlAction, BotSnapshot, GridOrder, LogEntry, OverviewSnapshot, TradeRecord, TradingMode,
+    TradingPairView, UpdateConfigPayload, UpdateGlobalConfigPayload, WebConfigView,
+    WebGlobalConfigView,
 };
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, Path, Query, State};
@@ -817,7 +819,7 @@ async fn post_managed_config_handler(
     Extension(handle): Extension<RuntimeHandle>,
     Json(payload): Json<UpdateConfigPayload>,
 ) -> (StatusCode, Json<ApiResponse<WebConfigView>>) {
-    match tokio::spawn(async move {
+    spawn_config_update(async move {
         let _membership = handle.membership_lock.lock().await;
         if !handle
             .states
@@ -831,13 +833,6 @@ async fn post_managed_config_handler(
         apply_pair_config(state, payload).await
     })
     .await
-    {
-        Ok(result) => result,
-        Err(error) => status_err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("配置更新任务异常退出: {}", error),
-        ),
-    }
 }
 
 async fn map_saved_config<T>(
@@ -912,12 +907,6 @@ struct TestExchangePayload {
 struct TestTelegramPayload {
     bot_token: Option<String>,
     chat_id: Option<String>,
-}
-
-fn non_blank(value: Option<String>) -> Option<String> {
-    value
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
 }
 
 /// Resolve probe credentials: a non-blank override wins, otherwise the saved value is used.
@@ -1423,7 +1412,7 @@ fn database_export_response(result: anyhow::Result<Vec<u8>>) -> Response {
             let filename = format!(
                 "binancebot-analysis-{}.db",
                 chrono::Utc::now()
-                    .with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap())
+                    .with_timezone(&beijing_offset())
                     .format("%Y%m%d-%H%M%S")
             );
             (
@@ -1461,17 +1450,8 @@ async fn get_config_handler(
     State(state): State<Arc<AppState>>,
 ) -> Json<ApiResponse<WebConfigView>> {
     let config = state.config.read().await;
-    let mut view = web_config_view(&config);
-    view.config_version = pair_config_version(&config, state.config_instance);
     let rules = state.rules.read().await;
-    if rules.symbol.eq_ignore_ascii_case(&config.exchange.symbol) {
-        view.tick_size = (rules.tick_size > rust_decimal::Decimal::ZERO).then_some(rules.tick_size);
-        view.step_size = (rules.step_size > rust_decimal::Decimal::ZERO).then_some(rules.step_size);
-        view.min_qty = (rules.min_qty > rust_decimal::Decimal::ZERO).then_some(rules.min_qty);
-        view.min_notional =
-            (rules.min_notional > rust_decimal::Decimal::ZERO).then_some(rules.min_notional);
-    }
-    json_ok(view)
+    json_ok(web_config_view(&config, state.config_instance, &rules))
 }
 
 fn pair_config_version(config: &AppConfig, instance: u128) -> String {
@@ -1509,11 +1489,15 @@ fn mask_api_key_preview(api_key: &str) -> String {
     }
 }
 
-fn web_config_view(config: &AppConfig) -> WebConfigView {
+fn web_config_view(config: &AppConfig, instance: u128, rules: &SymbolRules) -> WebConfigView {
     let global = web_global_config_view(&crate::config::GlobalConfig::from_app(config));
+    let matching_rules = rules.symbol.eq_ignore_ascii_case(&config.exchange.symbol);
+    let positive_rule = |value: rust_decimal::Decimal| {
+        (matching_rules && value > rust_decimal::Decimal::ZERO).then_some(value)
+    };
 
     WebConfigView {
-        config_version: String::new(),
+        config_version: pair_config_version(config, instance),
         symbol: config.exchange.symbol.clone(),
         direction: config.grid.direction,
         grid_interval: config.grid.grid_interval,
@@ -1535,10 +1519,10 @@ fn web_config_view(config: &AppConfig) -> WebConfigView {
         pause_on_max_position: config.grid.pause_on_max_position,
         cancel_opening_on_max_position: config.grid.cancel_opening_on_max_position,
         min_liquidation_distance_pct: config.grid.min_liquidation_distance_pct,
-        tick_size: None,
-        step_size: None,
-        min_qty: None,
-        min_notional: None,
+        tick_size: positive_rule(rules.tick_size),
+        step_size: positive_rule(rules.step_size),
+        min_qty: positive_rule(rules.min_qty),
+        min_notional: positive_rule(rules.min_notional),
     }
 }
 
@@ -1595,17 +1579,24 @@ fn apply_config_payload(
     Ok(current_config)
 }
 
-async fn post_config_handler(
-    State(state): State<Arc<AppState>>,
-    Json(payload): Json<UpdateConfigPayload>,
-) -> (StatusCode, Json<ApiResponse<WebConfigView>>) {
-    match tokio::spawn(async move { apply_pair_config(state, payload).await }).await {
+async fn spawn_config_update<F>(fut: F) -> (StatusCode, Json<ApiResponse<WebConfigView>>)
+where
+    F: Future<Output = (StatusCode, Json<ApiResponse<WebConfigView>>)> + Send + 'static,
+{
+    match tokio::spawn(fut).await {
         Ok(result) => result,
         Err(error) => status_err(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("配置更新任务异常退出: {}", error),
         ),
     }
+}
+
+async fn post_config_handler(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<UpdateConfigPayload>,
+) -> (StatusCode, Json<ApiResponse<WebConfigView>>) {
+    spawn_config_update(apply_pair_config(state, payload)).await
 }
 
 async fn apply_pair_config(

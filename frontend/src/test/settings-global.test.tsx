@@ -21,8 +21,6 @@ const config = {
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.confirm.mockResolvedValue(true);
-  vi.stubGlobal('matchMedia', vi.fn().mockImplementation(query => ({ matches: false, media: query, addListener: vi.fn(), removeListener: vi.fn(), addEventListener: vi.fn(), removeEventListener: vi.fn() })));
-  vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
   mocks.api.mockResolvedValue(config);
   mocks.post.mockImplementation(async (_url, values) => ({ ...config, ...values }));
 });

@@ -296,9 +296,7 @@ impl AppState {
             active_sell_orders,
         };
         let today_trade_counts = charts.and_then(|charts| charts.trades).map(|stats| {
-            let (buy, sell) = stats.buckets.iter().fold((0, 0), |(buy, sell), bucket| {
-                (buy + bucket.buy_count, sell + bucket.sell_count)
-            });
+            let (buy, sell) = stats.total_counts();
             TodayTradeCounts {
                 window_start: stats.window_start,
                 window_end: stats.window_end,

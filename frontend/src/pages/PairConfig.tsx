@@ -184,7 +184,7 @@ export default function PairConfig() {
       form.setFieldsValue(data);
     }} />}
     {pairs.data && !pair && !adding && <Alert type="warning" title="该交易对不存在或已移除" />}
-    <Form<FormValues> className="config-form" form={form} layout="vertical" onFinish={values => void submit(values)} onValuesChange={changed => { if ('symbol' in changed) { form.setFieldValue('grid_interval', defaults.grid_interval); customInterval.current = false; appliedSymbol.current = undefined; } else if ('grid_interval' in changed) customInterval.current = true; if (changed.pause_on_max_position) form.setFieldValue('cancel_opening_on_max_position', false); else if (changed.cancel_opening_on_max_position) form.setFieldValue('pause_on_max_position', false); edit.setDirty(true); }} disabled={formDisabled}>
+    <Form<FormValues> className="config-form" form={form} layout="vertical" onFinish={values => void submit(values)} onValuesChange={changed => { if ('symbol' in changed) { form.setFieldValue('grid_interval', defaults.grid_interval); customInterval.current = false; appliedSymbol.current = undefined; } else if ('grid_interval' in changed) customInterval.current = true; if (changed.pause_on_max_position) { form.setFieldValue('cancel_opening_on_max_position', false); void form.validateFields(['max_position_usdc']).catch(() => {}); } else if (changed.cancel_opening_on_max_position) { form.setFieldValue('pause_on_max_position', false); void form.validateFields(['max_position_usdc']).catch(() => {}); } edit.setDirty(true); }} disabled={formDisabled}>
       <Card title="基本设置">
         {live && <Alert type="warning" showIcon className="config-live-alert" title="实盘使用真实资金，请核对交易方向和风险限制。" />}
         <Row gutter={[20, 16]}>

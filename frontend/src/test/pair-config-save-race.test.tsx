@@ -28,8 +28,6 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.confirm.mockReset();
   mocks.post.mockReset();
-  vi.stubGlobal('matchMedia', vi.fn().mockImplementation(query => ({ matches: false, media: query, addListener: vi.fn(), removeListener: vi.fn(), addEventListener: vi.fn(), removeEventListener: vi.fn() })));
-  vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
   mocks.api.mockImplementation((path: string) => path === '/api/global/config'
     ? Promise.resolve({ version: 'global-version', has_api_key: true, has_api_secret: true })
     : Promise.resolve({ ...pair(path.includes('ETHUSDC') ? 'ETHUSDC' : 'BTCUSDC').grid_config, config_version: 'version-1' }));

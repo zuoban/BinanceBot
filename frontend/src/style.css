@@ -158,7 +158,7 @@ kbd {
   background: var(--rail-bg); color: var(--rail-text);
   border-right: 1px solid var(--rail-line);
 }
-.sidebar-inner { display: flex; flex-direction: column; height: 100%; padding: 16px 12px 12px; gap: 4px; background: var(--rail-bg); color: var(--rail-text); }
+.sidebar-inner { display: flex; flex-direction: column; height: 100%; padding: 16px 12px 12px; gap: 4px; }
 
 .sidebar-brand { display: inline-flex; align-items: center; gap: 10px; padding: 4px 8px 12px; color: var(--rail-text); text-decoration: none; }
 .sidebar-logo { width: 32px; height: 32px; border-radius: 8px; flex: none; }
@@ -220,7 +220,7 @@ kbd {
 .sidebar-inner .theme-segmented .ant-segmented-item-selected { background: var(--rail-active); color: #fff; }
 .sidebar-inner .theme-segmented .ant-segmented-thumb { background: var(--rail-active); }
 
-.sidebar-drawer .ant-drawer-body { background: var(--rail-bg); }
+.sidebar-drawer .ant-drawer-body { background: var(--rail-bg); color: var(--rail-text); }
 .sidebar-drawer .sidebar-inner { padding-top: 20px; }
 
 .mobilebar, .bottombar { display: none; }
@@ -358,7 +358,7 @@ kbd {
 .recent-trades-summary { display: flex; flex-wrap: wrap; gap: 6px 24px; padding: 14px 0; color: var(--text-secondary); font-size: 13px; }
 .recent-trades-summary strong { color: var(--text-primary); font-family: var(--font-mono); font-weight: 500; }
 .overview-trades-toggle { display: flex; justify-content: center; padding-top: 8px; }
-.overview-trades-scroll-hint, .table-scroll-hint { display: none; }
+.table-scroll-hint { display: none; }
 .overview-trades-mobile { display: none; }
 .log-message { white-space: pre-wrap; word-break: break-word; font-family: var(--font-mono); font-size: 12px; }
 .trade-symbol { font-family: var(--font-mono); font-weight: 500; }
@@ -557,7 +557,7 @@ kbd {
   .skeleton-grid-charts { grid-template-columns: 1fr; }
 }
 @media (min-width: 601px) and (max-width: 1311px) {
-  .overview-trades-scroll-hint, .table-scroll-hint { display: block; margin: 0 0 8px; color: var(--text-secondary); font-size: 12px; }
+  .table-scroll-hint { display: block; margin: 0 0 8px; color: var(--text-secondary); font-size: 12px; }
 }
 @media (max-width: 991px) {
   .skeleton-grid-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -611,7 +611,7 @@ kbd {
   .today-trade-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .overview-trades .ant-card-body { padding: 0 16px 8px; }
   .overview-trades .ant-card-extra { font-size: 12px; line-height: 1.45; }
-  .overview-trades-desktop, .table-desktop { display: none; }
+  .table-desktop { display: none; }
   .overview-trades-mobile, .table-mobile { display: block; }
   .table-toolbar .ant-btn { min-height: 36px; }
   .ant-card-head-title { white-space: normal; }

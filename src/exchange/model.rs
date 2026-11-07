@@ -131,6 +131,14 @@ impl BinanceOrderResponse {
         )
     }
 
+    pub fn open_order_status(&self) -> crate::types::OrderStatus {
+        if self.executed_qty > Decimal::ZERO {
+            crate::types::OrderStatus::PartiallyFilled
+        } else {
+            crate::types::OrderStatus::New
+        }
+    }
+
     pub fn matches_identity(&self, other: &Self) -> bool {
         self.client_order_id == other.client_order_id
             && self.symbol == other.symbol

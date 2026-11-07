@@ -178,7 +178,7 @@ export function orderAmountError(amount: unknown, referencePrice?: unknown, rule
 }
 
 /** Informational capacity threshold; it does not predict profitability or the next cap event. */
-export const CAP_DROP_WARN_PERCENT = 3;
+const CAP_DROP_WARN_PERCENT = 3;
 
 /**
  * Flat-position capacity estimate from target notionals:

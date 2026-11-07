@@ -94,22 +94,6 @@ fn unresolved_filled_quantity(order: &BinanceOrderResponse) -> bool {
     order.status == "FILLED" && order.executed_qty <= Decimal::ZERO
 }
 
-fn known_order_identity(order: &GridOrder) -> Option<ObservedOrderIdentity> {
-    Some(ObservedOrderIdentity {
-        client_order_id: order.client_order_id.clone(),
-        symbol: order.symbol.clone(),
-        side: order.side.as_str().to_owned(),
-        order_id: order.order_id?,
-    })
-}
-
-fn identity_differs_from_order(observed: &ObservedOrderIdentity, expected: &GridOrder) -> bool {
-    observed.client_order_id != expected.client_order_id
-        || observed.symbol != expected.symbol
-        || observed.side != expected.side.as_str()
-        || expected.order_id.is_some_and(|id| observed.order_id != id)
-}
-
 /// All idle orders follow the window. Partial executions finish on their existing order.
 fn is_window_order(order: &GridOrder) -> bool {
     is_grid_order(&order.client_order_id) && order.status == OrderStatus::New
@@ -663,43 +647,15 @@ impl GridTradingEngine {
         let key = (account, symbol.to_owned(), expected_client_id.to_owned());
         let evidence = (first.clone(), conflicting.clone());
         self.terminal_order_disagreements
-            .entry(key.clone())
+            .entry(key)
             .or_default()
-            .push(evidence.clone());
+            .push(evidence);
         self.last_orders_sync = None;
         self.report_reconciliation_state(true).await;
-        let save_key = key.clone();
-        match self
-            .state
-            .db
-            .run_blocking(move |db| {
-                db.save_terminal_order_disagreement(
-                    save_key.0,
-                    &save_key.1,
-                    &save_key.2,
-                    &evidence.0,
-                    &evidence.1,
-                )
-            })
-            .await
-        {
-            Ok(()) => {
-                if let Some(pending) = self.terminal_order_disagreements.get_mut(&key) {
-                    pending.pop();
-                    if pending.is_empty() {
-                        self.terminal_order_disagreements.remove(&key);
-                    }
-                }
-                true
-            }
-            Err(error) => {
-                error!("Could not persist terminal order disagreement: {}", error);
-                false
-            }
-        }
+        self.flush_terminal_disagreements(account, symbol).await
     }
 
-    async fn terminal_disagreement_blocked(&mut self, account: [u8; 32], symbol: &str) -> bool {
+    async fn flush_terminal_disagreements(&mut self, account: [u8; 32], symbol: &str) -> bool {
         while let Some((key, evidence)) = self
             .terminal_order_disagreements
             .iter()
@@ -728,7 +684,7 @@ impl GridTradingEngine {
                 error!("Could not persist terminal order disagreement: {}", error);
                 self.last_orders_sync = None;
                 self.report_reconciliation_state(true).await;
-                return true;
+                return false;
             }
             if let Some(observations) = self.terminal_order_disagreements.get_mut(&key) {
                 if !observations.is_empty() {
@@ -738,6 +694,13 @@ impl GridTradingEngine {
                     self.terminal_order_disagreements.remove(&key);
                 }
             }
+        }
+        true
+    }
+
+    async fn terminal_disagreement_blocked(&mut self, account: [u8; 32], symbol: &str) -> bool {
+        if !self.flush_terminal_disagreements(account, symbol).await {
+            return true;
         }
         let scope_symbol = symbol.to_owned();
         let result = self
@@ -800,8 +763,8 @@ impl GridTradingEngine {
         candidate: &GridOrder,
         expected: &GridOrder,
     ) {
-        if let Some(observed) = known_order_identity(candidate) {
-            if identity_differs_from_order(&observed, expected) {
+        if let Some(observed) = ObservedOrderIdentity::from_order(candidate) {
+            if !observed.matches_order(expected) {
                 self.insert_identity_observation(key.clone(), observed);
             }
         }
@@ -810,7 +773,7 @@ impl GridTradingEngine {
     fn promote_provisional_observations(&mut self, key: &([u8; 32], String), expected: &GridOrder) {
         if let Some(observed) = self.provisional_order_observations.remove(key) {
             for item in observed {
-                if identity_differs_from_order(&item, expected) {
+                if !item.matches_order(expected) {
                     self.insert_identity_observation(key.clone(), item);
                 }
             }
@@ -913,8 +876,7 @@ impl GridTradingEngine {
     }
 
     fn mark_price_is_fresh(ticker: &TickerInfo) -> bool {
-        ticker.mark_price > Decimal::ZERO
-            && is_timestamp_fresh(ticker.mark_update_time, Utc::now(), 15)
+        ticker.mark_price_is_fresh(Utc::now())
     }
 
     fn position_mark_is_fresh(
@@ -2070,7 +2032,7 @@ impl GridTradingEngine {
         let (last_updated, mark_updated) = {
             let mut ticker = self.state.ticker.write().await;
             let now = Utc::now();
-            let fresh = |time| is_timestamp_fresh(time, now, 15);
+            let fresh = |time| is_timestamp_fresh(time, now, MARKET_PRICE_MAX_AGE_SECS);
             let last_updated = ticker_update.last_price > Decimal::ZERO
                 && fresh(ticker_update.update_time)
                 && ticker_update.update_time >= ticker.update_time;
@@ -2090,7 +2052,9 @@ impl GridTradingEngine {
                 ticker.mark_price = ticker_update.mark_price;
                 ticker.mark_update_time = ticker_update.mark_update_time;
             }
-            ticker.symbol = ticker_update.symbol.clone();
+            if ticker.symbol != ticker_update.symbol {
+                ticker.symbol = ticker_update.symbol.clone();
+            }
             (last_updated, mark_updated)
         };
         // Rejected market events cannot change risk inputs or trigger paper fills.
@@ -2117,8 +2081,11 @@ impl GridTradingEngine {
         let is_running = *self.state.status.read().await == BotStatus::Running;
 
         // In paper mode, match simulated orders against live market price
-        let prices_fresh = self.state.ticker.read().await.prices_are_fresh(Utc::now());
-        if is_running && paper && prices_fresh && last_updated {
+        if is_running
+            && paper
+            && last_updated
+            && self.state.ticker.read().await.prices_are_fresh(Utc::now())
+        {
             self.pending_paper_ticker = None;
             self.simulate_order_fills(ticker_update.last_price).await;
         }
@@ -2416,7 +2383,7 @@ impl GridTradingEngine {
                 let previous = completion.previous;
                 let now = Utc::now();
                 let mut ticker = self.state.ticker.write().await;
-                if !is_timestamp_fresh(requested_at, now, 15)
+                if !is_timestamp_fresh(requested_at, now, MARKET_PRICE_MAX_AGE_SECS)
                     || ticker.symbol != previous.symbol
                     || ticker.mark_update_time != previous.mark_update_time
                     || ticker.mark_price != previous.mark_price
@@ -2679,11 +2646,7 @@ impl GridTradingEngine {
     ) -> bool {
         order.quantity = (found.orig_qty - found.executed_qty).max(Decimal::ZERO);
         order.amount_usdc = order.price * order.quantity;
-        order.status = if found.executed_qty > Decimal::ZERO {
-            OrderStatus::PartiallyFilled
-        } else {
-            OrderStatus::New
-        };
+        order.status = found.open_order_status();
         if let Err(error) = self.save_managed_order(order).await {
             error!(
                 "Could not persist adopted order {}: {}",
@@ -4060,11 +4023,7 @@ impl GridTradingEngine {
                                     self.invalidate_account_and_position_caches().await;
                                 }
                                 order.order_id = Some(found.order_id);
-                                order.status = if found.executed_qty > Decimal::ZERO {
-                                    OrderStatus::PartiallyFilled
-                                } else {
-                                    OrderStatus::New
-                                };
+                                order.status = found.open_order_status();
                                 if let Err(error) = self.save_managed_order(&order).await {
                                     error!(
                                         "Could not persist accepted order {}: {}",
@@ -4468,9 +4427,11 @@ impl GridTradingEngine {
                             if !retained.matches_exchange_identity(&order) {
                                 self.track_identity_conflict(&retained, &order);
                             }
-                            if let Some(observed) = previous.as_ref().and_then(known_order_identity)
+                            if let Some(observed) = previous
+                                .as_ref()
+                                .and_then(ObservedOrderIdentity::from_order)
                             {
-                                if identity_differs_from_order(&observed, &retained) {
+                                if !observed.matches_order(&retained) {
                                     self.record_identity_conflict_observation(
                                         account, &retained, observed,
                                     );

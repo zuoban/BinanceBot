@@ -1032,14 +1032,7 @@ impl AppState {
     }
 
     pub async fn clear_trade_history(self: &Arc<Self>) -> anyhow::Result<usize> {
-        let state = Arc::clone(self);
-        tokio::spawn(async move {
-            let _commit = state.trade_commit_lock.lock().await;
-            let deleted = state.db.run_blocking(Database::clear_trade_history).await?;
-            state.reset_trade_history_cache().await;
-            Ok(deleted)
-        })
-        .await?
+        Self::clear_trade_history_for(std::slice::from_ref(self)).await
     }
 
     pub async fn clear_symbol_trade_history(
@@ -1068,9 +1061,11 @@ impl AppState {
     }
 
     pub async fn clear_trade_history_for(states: &[Arc<Self>]) -> anyhow::Result<usize> {
-        Ok(Self::clear_selected_database_for(states, true, false, None)
-            .await?
-            .0)
+        Ok(
+            Self::clear_selected_database_inner(states, true, false, None, false)
+                .await?
+                .0,
+        )
     }
 
     pub async fn clear_selected_database_for(
@@ -1078,6 +1073,16 @@ impl AppState {
         trades: bool,
         snapshots: bool,
         membership_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+    ) -> anyhow::Result<(usize, usize)> {
+        Self::clear_selected_database_inner(states, trades, snapshots, membership_guard, true).await
+    }
+
+    async fn clear_selected_database_inner(
+        states: &[Arc<Self>],
+        trades: bool,
+        snapshots: bool,
+        membership_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+        broadcast: bool,
     ) -> anyhow::Result<(usize, usize)> {
         let states = states.to_vec();
         anyhow::ensure!(!states.is_empty(), "没有运行中的交易对");
@@ -1097,7 +1102,7 @@ impl AppState {
                 }
                 deleted
             };
-            if trades {
+            if trades && broadcast {
                 for state in &states {
                     state.broadcast_snapshot().await;
                 }
