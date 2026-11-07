@@ -1,4 +1,5 @@
 use crate::config::{AppConfig, ServerConfig};
+use crate::db::Database;
 use crate::exchange::rate_limit::RateLimiter;
 use crate::exchange::BinanceFuturesClient;
 use crate::runtime::RuntimeHandle;
@@ -316,7 +317,7 @@ async fn get_single_pair_handler(
 async fn get_single_overview_handler(
     State(state): State<Arc<AppState>>,
 ) -> Json<ApiResponse<OverviewSnapshot>> {
-    collect_overview(std::slice::from_ref(&state)).await
+    collect_overview(std::slice::from_ref(&state), None).await
 }
 
 fn pair_routes() -> Router<Arc<AppState>> {
@@ -443,13 +444,16 @@ async fn collect_pairs(states: &[Arc<AppState>]) -> Json<ApiResponse<Vec<Trading
 async fn get_overview_handler(
     State(states): State<Arc<Vec<Arc<AppState>>>>,
 ) -> Json<ApiResponse<OverviewSnapshot>> {
-    collect_overview(&states).await
+    collect_overview(&states, None).await
 }
 
-async fn collect_overview(states: &[Arc<AppState>]) -> Json<ApiResponse<OverviewSnapshot>> {
+async fn collect_overview(
+    states: &[Arc<AppState>],
+    db: Option<&Arc<Database>>,
+) -> Json<ApiResponse<OverviewSnapshot>> {
     let generated_at = chrono::Utc::now();
-    let today_pnl = match states.first() {
-        Some(state) => state.db.cached_today_pnl(generated_at).await,
+    let today_pnl = match db.or_else(|| states.first().map(|s| &s.db)) {
+        Some(db) => db.cached_today_pnl(generated_at).await,
         None => None,
     };
     let summaries = futures_util::future::join_all(
@@ -571,35 +575,10 @@ async fn single_pair_clear_handler(
 
 async fn dispatch_managed_database_pair(
     State(handle): State<RuntimeHandle>,
-    Path(symbol): Path<String>,
     req: axum::extract::Request,
 ) -> Response {
     let _membership = handle.membership_lock.lock().await;
-    let state = handle
-        .states
-        .read()
-        .await
-        .iter()
-        .find(|state| state.pair_scope() == Some(symbol.as_str()))
-        .cloned();
-    let Some(state) = state else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    let resource = if req.uri().path().ends_with("/database/export") {
-        "/database/export"
-    } else {
-        "/trades/clear"
-    };
-    let Ok(uri) = resource.parse() else {
-        return StatusCode::BAD_REQUEST.into_response();
-    };
-    let mut req = req;
-    *req.uri_mut() = uri;
-    pair_resource_routes()
-        .with_state(state)
-        .oneshot(req)
-        .await
-        .unwrap()
+    dispatch_pair(State(handle.clone()), req).await
 }
 
 async fn scoped_export_handler(State(state): State<Arc<AppState>>) -> Response {
@@ -669,7 +648,7 @@ async fn single_database_clear_handler(
     State(state): State<Arc<AppState>>,
     payload: Json<DatabaseTargetsRequest>,
 ) -> Response {
-    database_clear(&[state], payload.0).await
+    database_clear(std::slice::from_ref(&state), payload.0).await
 }
 
 async fn multi_database_clear_handler(
@@ -778,16 +757,7 @@ async fn get_managed_overview_handler(
     // Release the registry lock before collecting snapshots so dashboard reads
     // do not hold up pair additions or removals during database work.
     let states = handle.states.read().await.clone();
-    if states.is_empty() {
-        let generated_at = chrono::Utc::now();
-        return json_ok(OverviewSnapshot {
-            generated_at,
-            pairs: Vec::new(),
-            today_pnl: handle.db.cached_today_pnl(generated_at).await,
-            recent_trades: Vec::new(),
-        });
-    }
-    collect_overview(&states).await
+    collect_overview(&states, Some(&handle.db)).await
 }
 
 async fn get_overview_history_handler(
@@ -1263,25 +1233,25 @@ async fn get_auth_status_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> (StatusCode, Json<ApiResponse<AuthStatusResponse>>) {
-    let token = extract_token(&headers);
     let initialized = state.is_auth_configured();
-    let result = state
-        .db
-        .run_blocking(move |db| {
-            let authenticated = !initialized
-                || match token {
-                    Some(token) => db.is_session_valid(&token)?,
-                    None => false,
-                };
-            Ok(AuthStatusResponse {
+    let result = if !initialized {
+        Ok(true)
+    } else if let Some(token) = extract_token(&headers) {
+        state
+            .db
+            .run_blocking(move |db| db.is_session_valid(&token))
+            .await
+    } else {
+        Ok(false)
+    };
+    match result {
+        Ok(authenticated) => (
+            StatusCode::OK,
+            json_ok(AuthStatusResponse {
                 initialized,
                 authenticated,
-            })
-        })
-        .await;
-
-    match result {
-        Ok(status) => (StatusCode::OK, json_ok(status)),
+            }),
+        ),
         Err(error) => {
             error!("Failed to check authentication status: {}", error);
             auth_service_error()
@@ -2139,10 +2109,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, token: String) {
     if !state.is_token_valid(&token).await {
         return;
     }
-    if let Ok(json) = serde_json::to_string(&serde_json::json!({
-        "type": "snapshot",
-        "data": initial_snapshot
-    })) {
+    if let Some(json) = crate::types::ws_frame_json("snapshot", &initial_snapshot) {
         if !matches!(
             send_until_retired(&mut sender, Message::Text(json), &mut retired).await,
             Some(Ok(()))

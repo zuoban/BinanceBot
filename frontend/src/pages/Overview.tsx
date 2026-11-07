@@ -149,7 +149,7 @@ export default function OverviewPage() {
         <div className="overview-stat" aria-label="今日已实现盈亏">
           <span>今日已实现盈亏</span>
           {!pnlGroups ? <strong>--</strong> : !pnlGroups.length ? <strong>0</strong> : pnlGroups.map(group => <div className="overview-pnl-group" key={group.key}>
-            <strong>{group.total === null ? '--' : <Pnl value={group.total} compact />} <small>{group.asset}</small></strong>
+            <strong><Pnl value={group.total} compact /> <small>{group.asset}</small></strong>
             {group.pending > 0 && <span>盈亏待同步</span>}
           </div>)}
         </div>
@@ -170,7 +170,7 @@ export default function OverviewPage() {
         </div>
         <div className="finance-metrics" aria-label={`${group.asset}账户资产`}>
           <div><span>钱包余额</span><strong>{number(group.wallet)}</strong></div>
-          <div><span>未实现盈亏</span><strong>{group.unrealized === null ? '--' : <Pnl value={group.unrealized} />}</strong></div>
+          <div><span>未实现盈亏</span><strong><Pnl value={group.unrealized} /></strong></div>
         </div>
         <div className="muted">{group.count} 个策略共用账户 · 去重展示</div>
       </Card></Col>)}
@@ -269,7 +269,7 @@ export default function OverviewPage() {
     <OverviewHistory />
     <BatchResultDrawer report={report} busy={controls.busy} onClose={() => setReport(null)} onRetry={(pair, action) => void (async () => {
       const result = await controls.run(pair, action);
-      if (!mounted.current || !result || (result === 'not_submitted' && !controls.busy.has(pair.symbol))) return;
+      if (!mounted.current || !result || result === 'not_submitted') return;
       setReport(current => {
         if (!current) return null;
         const outcomes = result === 'confirmed'

@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { ConfigProvider, theme as antdTheme } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 
@@ -23,10 +23,11 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const [preference, setPreferenceState] = useState<ThemePreference>(readPreference);
   const [darkSystem, setDarkSystem] = useState(systemDark);
   const dark = preference === 'dark' || (preference === 'system' && darkSystem);
-  const setPreference = (value: ThemePreference) => {
+  const setPreference = useCallback((value: ThemePreference) => {
     setPreferenceState(value);
     try { localStorage.setItem(storageKey, value); } catch { /* Keep the choice for this session. */ }
-  };
+  }, []);
+  const value = useMemo(() => ({ preference, setPreference }), [preference, setPreference]);
 
   useEffect(() => {
     if (typeof window.matchMedia !== 'function') return;
@@ -48,7 +49,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
   }, [dark]);
 
-  return <ThemeContext.Provider value={{ preference, setPreference }}>
+  return <ThemeContext.Provider value={value}>
     <ConfigProvider locale={zhCN} theme={{
       algorithm: dark ? antdTheme.darkAlgorithm : antdTheme.defaultAlgorithm,
       token: {

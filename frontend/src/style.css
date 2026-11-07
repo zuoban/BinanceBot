@@ -173,7 +173,8 @@ kbd {
   transition: background-color 150ms var(--ease-out), border-color 150ms var(--ease-out);
 }
 .sidebar-search > span:not(.anticon) { flex: 1; }
-.sidebar-search:hover { background: var(--rail-hover); border-color: #2b3d5c; color: var(--rail-text); }
+.sidebar-search:not(:disabled):hover { background: var(--rail-hover); border-color: #2b3d5c; color: var(--rail-text); }
+.sidebar-search:disabled { opacity: 0.5; cursor: not-allowed; }
 .sidebar kbd, .sidebar-drawer kbd { background: transparent; border-color: var(--rail-line); color: var(--rail-muted); }
 
 .sidebar-nav { display: flex; flex-direction: column; gap: 2px; }

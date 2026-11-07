@@ -131,11 +131,15 @@ impl BinanceOrderResponse {
         )
     }
 
-    pub fn matches_snapshot(&self, other: &Self) -> bool {
+    pub fn matches_identity(&self, other: &Self) -> bool {
         self.client_order_id == other.client_order_id
             && self.symbol == other.symbol
             && self.side == other.side
             && self.order_id == other.order_id
+    }
+
+    pub fn matches_snapshot(&self, other: &Self) -> bool {
+        self.matches_identity(other)
             && self.status == other.status
             && self.executed_qty == other.executed_qty
             && self.orig_qty == other.orig_qty

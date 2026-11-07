@@ -4,7 +4,7 @@ import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YA
 type HistoryPoint = { hour: number; equity: number | null };
 const formatHour = (hour: number) => new Date(hour * 1000).toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hour12: false });
 const formatDay = (hour: number) => new Date(hour * 1000).toLocaleDateString('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit' });
-const axisTick = { fontSize: 11, fontFamily: 'ui-monospace, "SF Mono", Menlo, Consolas, monospace', fill: 'var(--text-muted)' };
+const axisTick = { fontSize: 11, fontFamily: 'var(--font-mono)', fill: 'var(--text-muted)' };
 function HistoryDot({ cx, cy, payload, stroke, index, data, discrete }: { cx?: number; cy?: number; payload?: { hour: number }; stroke?: string; index?: number; data: HistoryPoint[]; discrete: boolean }) {
   if (cx == null || cy == null || !payload || (index != null && data[index]?.equity == null)) return null;
   const isolated = discrete || (index != null && data[index - 1]?.equity == null && data[index + 1]?.equity == null);
@@ -28,7 +28,7 @@ export default memo(function OverviewHistoryChart({ data, ticks, asset, formatVa
     cursor: { stroke: 'var(--border-strong)', strokeDasharray: '3 4' },
     contentStyle: { background: 'var(--bg-raised)', borderColor: 'var(--border-strong)', borderRadius: 8, color: 'var(--text-primary)', fontSize: 12 },
     labelStyle: { color: 'var(--text-primary)', marginBottom: 4 },
-    itemStyle: { color: 'var(--text-primary)', fontFamily: 'ui-monospace, "SF Mono", Menlo, Consolas, monospace' },
+    itemStyle: { color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' },
   };
   return <ResponsiveContainer width="100%" height={200}>
     <LineChart data={data} margin={{ top: 12, right: daily ? 28 : 12, bottom: 0, left: 4 }}>

@@ -24,11 +24,7 @@ pub(super) fn terminal_responses_disagree(
     a: &BinanceOrderResponse,
     b: &BinanceOrderResponse,
 ) -> bool {
-    if a.client_order_id != b.client_order_id
-        || a.symbol != b.symbol
-        || a.side != b.side
-        || a.order_id != b.order_id
-    {
+    if !a.matches_identity(b) {
         return false;
     }
     // An impossible zero-fill FILLED response is itself unresolved, but it
@@ -146,12 +142,7 @@ impl GridTradingEngine {
                 self.record_identity_conflict_observation(account, &expected, observed);
                 active
                     .entry(expected.client_order_id.clone())
-                    .and_modify(|current| {
-                        if current.has_compatible_identity(&expected) && current.order_id.is_none()
-                        {
-                            current.order_id = expected.order_id;
-                        }
-                    })
+                    .and_modify(|current| current.adopt_compatible_order_id(&expected))
                     .or_insert(expected);
             }
         }
@@ -468,11 +459,7 @@ impl GridTradingEngine {
                         )
                         .cloned()
                         .unwrap_or_else(|| expected.clone());
-                        if authoritative.order_id.is_none()
-                            && authoritative.has_compatible_identity(&expected)
-                        {
-                            authoritative.order_id = expected.order_id;
-                        }
+                        authoritative.adopt_compatible_order_id(&expected);
                         for observed in std::iter::once(&expected).chain(active.get(id)) {
                             if authoritative.has_compatible_identity(observed) {
                                 authoritative.reserve_max(observed.price, observed.quantity);
@@ -802,12 +789,7 @@ impl GridTradingEngine {
                     for (mut expected, observed) in active_identity_observations {
                         let key = (account_key, expected.client_order_id.clone());
                         if let Some(confirmed) = self.order_identity_conflicts.get(&key) {
-                            if expected.order_id.is_none()
-                                && confirmed.order_id.is_some()
-                                && expected.has_compatible_identity(confirmed)
-                            {
-                                expected.order_id = confirmed.order_id;
-                            }
+                            expected.adopt_compatible_order_id(confirmed);
                         }
                         self.record_identity_conflict_observation(account_key, &expected, observed);
                     }
@@ -853,12 +835,7 @@ impl GridTradingEngine {
                             .order_identity_conflicts
                             .get(&(account_key, expected.client_order_id.clone()))
                         {
-                            if expected.order_id.is_none()
-                                && confirmed.order_id.is_some()
-                                && expected.has_compatible_identity(confirmed)
-                            {
-                                expected.order_id = confirmed.order_id;
-                            }
+                            expected.adopt_compatible_order_id(confirmed);
                         }
                         if expected.purpose == crate::types::OrderPurpose::Unverified {
                             for found in &observations {
@@ -1602,10 +1579,7 @@ impl GridTradingEngine {
                             .await
                         {
                             Ok(corrected)
-                                if corrected.client_order_id == original.client_order_id
-                                    && corrected.symbol == original.symbol
-                                    && corrected.side == original.side
-                                    && corrected.order_id == original.order_id
+                                if corrected.matches_identity(&original)
                                     && !unresolved_filled_quantity(&corrected)
                                     && BinanceOrderResponse::is_known_status(&corrected.status) =>
                             {

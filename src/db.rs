@@ -18,6 +18,15 @@ mod authentication;
 mod hourly;
 mod paper;
 
+macro_rules! select_trades_sql {
+    ($suffix:literal) => {
+        concat!(
+            "SELECT trade_id, client_order_id, symbol, side, price, quantity, amount_usdc, realized_pnl, commission, pnl_verified, is_maker, timestamp, note, mode FROM trades ",
+            $suffix
+        )
+    };
+}
+
 pub(crate) fn beijing_midnight(now: DateTime<Utc>) -> DateTime<Utc> {
     let beijing = FixedOffset::east_opt(8 * 3600).unwrap();
     now.with_timezone(&beijing)
@@ -1898,9 +1907,9 @@ impl Database {
         mode: TradingMode,
     ) -> Result<Option<TradeRecord>> {
         let conn = self.lock_connection("get_trade_by_client_id");
-        let mut stmt = conn.prepare(
-            "SELECT trade_id, client_order_id, symbol, side, price, quantity, amount_usdc, realized_pnl, commission, pnl_verified, is_maker, timestamp, note, mode FROM trades WHERE client_order_id = ?1 AND mode = ?2 ORDER BY timestamp DESC LIMIT 1;",
-        )?;
+        let mut stmt = conn.prepare(select_trades_sql!(
+            "WHERE client_order_id = ?1 AND mode = ?2 ORDER BY timestamp DESC LIMIT 1;"
+        ))?;
         let mut rows = stmt.query(params![client_order_id, mode.as_str()])?;
         rows.next()?
             .map(trade_from_row)
@@ -2037,15 +2046,9 @@ impl Database {
 
     pub fn get_recent_trades(&self, limit: usize) -> Result<Vec<TradeRecord>> {
         let conn = self.lock_connection("get_recent_trades");
-        let mut stmt = conn.prepare(
-            r#"
-            SELECT trade_id, client_order_id, symbol, side, price, quantity,
-                   amount_usdc, realized_pnl, commission, pnl_verified, is_maker, timestamp, note, mode
-            FROM trades
-            ORDER BY timestamp DESC, rowid DESC
-            LIMIT ?1;
-            "#,
-        )?;
+        let mut stmt = conn.prepare(select_trades_sql!(
+            "ORDER BY timestamp DESC, rowid DESC LIMIT ?1;"
+        ))?;
 
         let rows = stmt.query_map(params![limit as i64], trade_from_row)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -2059,9 +2062,9 @@ impl Database {
         limit: usize,
     ) -> Result<Vec<TradeRecord>> {
         let conn = self.lock_connection("get_recent_trades_for");
-        let mut stmt = conn.prepare(
-            "SELECT trade_id, client_order_id, symbol, side, price, quantity, amount_usdc, realized_pnl, commission, pnl_verified, is_maker, timestamp, note, mode FROM trades WHERE symbol = ?1 AND mode = ?2 ORDER BY timestamp DESC, rowid DESC LIMIT ?3;",
-        )?;
+        let mut stmt = conn.prepare(select_trades_sql!(
+            "WHERE symbol = ?1 AND mode = ?2 ORDER BY timestamp DESC, rowid DESC LIMIT ?3;"
+        ))?;
         let rows = stmt.query_map(params![symbol, mode.as_str(), limit as i64], trade_from_row)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
@@ -2115,19 +2118,14 @@ impl Database {
             if timestamp < window_start || timestamp > now {
                 continue;
             }
-            let key = (mode, symbol);
-            let group = if let Some(group) = groups.get_mut(&key) {
-                group
-            } else {
-                let mode = TradingMode::from_db(&key.0);
-                let symbol = key.1.clone();
-                groups.entry(key).or_insert(crate::types::TodayPnlGroup {
-                    symbol,
-                    mode,
+            let group = groups
+                .entry((mode, symbol))
+                .or_insert_with_key(|(mode, symbol)| crate::types::TodayPnlGroup {
+                    symbol: symbol.clone(),
+                    mode: TradingMode::from_db(mode),
                     realized_pnl: Decimal::ZERO,
                     pending_pnl_count: 0,
-                })
-            };
+                });
             if let Some(pnl) = pnl {
                 group.realized_pnl += Decimal::from_str(&pnl)?;
             } else {
@@ -2191,9 +2189,9 @@ impl Database {
         offset: usize,
     ) -> Result<(Vec<TradeRecord>, u64)> {
         let conn = self.lock_connection("get_unverified_trades_with_clear_revision");
-        let mut stmt = conn.prepare(
-            "SELECT trade_id, client_order_id, symbol, side, price, quantity, amount_usdc, realized_pnl, commission, pnl_verified, is_maker, timestamp, note, mode FROM trades WHERE symbol = ?1 AND mode = ?2 AND pnl_verified = 0 ORDER BY timestamp DESC LIMIT ?3 OFFSET ?4;",
-        )?;
+        let mut stmt = conn.prepare(select_trades_sql!(
+            "WHERE symbol = ?1 AND mode = ?2 AND pnl_verified = 0 ORDER BY timestamp DESC LIMIT ?3 OFFSET ?4;"
+        ))?;
         let rows = stmt.query_map(
             params![symbol, mode.as_str(), limit as i64, offset as i64],
             trade_from_row,

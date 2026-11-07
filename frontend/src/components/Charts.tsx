@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import { theme } from 'antd';
 import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import type { Snapshot } from '../lib/types';
@@ -21,9 +22,10 @@ export function HourlyChart({ snapshot, now: currentNow }: { snapshot: Snapshot;
   const { token } = theme.useToken();
   const fallbackNow = useNow(1000, currentNow === undefined);
   const now = currentNow ?? fallbackNow;
+  const hourBucket = Math.floor(now / 3600_000);
+  const data = useMemo(() => snapshot.hourly_trade_stats ? todayHourlyData(snapshot.hourly_trade_stats, now) : [], [snapshot.hourly_trade_stats, hourBucket]);
   if (todayCount(snapshot, now) === null) return <NoData />;
-  const data = todayHourlyData(snapshot.hourly_trade_stats!, now);
-  const axisTick = { fontSize: 11, fontFamily: 'ui-monospace, "SF Mono", Menlo, Consolas, monospace', fill: token.colorTextTertiary };
+  const axisTick = { fontSize: 11, fontFamily: 'var(--font-mono)', fill: token.colorTextTertiary };
   return <>
     <div className="muted chart-caption">北京时间 · 最近时段在左侧 · 可横向滚动查看</div>
     <div className="hourly-chart-scroll" role="region" tabIndex={0} aria-label="北京时间今日每小时成交笔数，可横向滚动"><div className="chart hourly-chart"><ResponsiveContainer width="100%" height={270}>

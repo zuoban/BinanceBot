@@ -41,6 +41,13 @@ impl PairTask {
         self.state.request_shutdown();
         let _ = self.shutdown_tx.send(true);
     }
+
+    async fn stop_background(&mut self) {
+        for task in self.background.drain(..) {
+            task.abort();
+            let _ = task.await;
+        }
+    }
 }
 
 impl RuntimeCommand {
@@ -809,21 +816,18 @@ impl TradingRuntime {
             engine.run().await;
         });
         #[cfg(test)]
-        let background = if self.test_exchange_url.is_some() {
-            Vec::new()
-        } else {
+        let spawn_background = self.test_exchange_url.is_none();
+        #[cfg(not(test))]
+        let spawn_background = true;
+        let background = if spawn_background {
             vec![
                 tokio::spawn(stream.run()),
                 tokio::spawn(state.clone().run_cny_rate_refresh()),
                 tokio::spawn(state.clone().run_snapshot_broadcast()),
             ]
+        } else {
+            Vec::new()
         };
-        #[cfg(not(test))]
-        let background = vec![
-            tokio::spawn(stream.run()),
-            tokio::spawn(state.clone().run_cny_rate_refresh()),
-            tokio::spawn(state.clone().run_snapshot_broadcast()),
-        ];
         Ok(PairTask {
             state,
             engine: engine_task,
@@ -945,10 +949,7 @@ impl TradingRuntime {
         let mut result =
             remove_engine(&pair.state, &mut pair.engine, Duration::from_secs(30)).await;
         let state = pair.state.clone();
-        for task in pair.background.drain(..) {
-            task.abort();
-            let _ = task.await;
-        }
+        pair.stop_background().await;
         // Retired states reject new verification admission. Finish old commits
         // before either removing the member or restoring a replacement.
         // Use the old state's lock, and release it before replacement startup.
@@ -1183,10 +1184,7 @@ impl TradingRuntime {
                     } else {
                         stop_engine(&pair.state, &mut pair.engine, limit).await
                     };
-                for task in pair.background.drain(..) {
-                    task.abort();
-                    let _ = task.await;
-                }
+                pair.stop_background().await;
                 result.map_err(|error| format!("{}: {}", symbol, error))
             },
         ))

@@ -454,9 +454,7 @@ impl AppState {
         // from being published after the cleanup response's fresh snapshot.
         let _publish = self.snapshot_publish_lock.lock().await;
         let snapshot = self.snapshot().await;
-        if let Ok(json) =
-            serde_json::to_string(&serde_json::json!({"type": "snapshot", "data": snapshot}))
-        {
+        if let Some(json) = crate::types::ws_frame_json("snapshot", &snapshot) {
             let _ = self.ws_broadcast_tx.send(json);
         }
         snapshot

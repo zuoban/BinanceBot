@@ -93,8 +93,10 @@ export function useLiveAccounts() {
   const client = useQueryClient();
   const key = ['accounts'];
   const stream = useSocket('/api/accounts/ws', 'accounts', data => {
+    const generatedAt = Date.parse(data.generated_at);
+    if (!Number.isFinite(generatedAt)) return false;
     const current = client.getQueryData<AccountFrame>(key);
-    if (current && Date.parse(data.generated_at) < Date.parse(current.generated_at)) return false;
+    if (current && generatedAt < Date.parse(current.generated_at)) return false;
     void client.cancelQueries({ queryKey: key });
     client.setQueryData(key, data);
   });
@@ -103,7 +105,8 @@ export function useLiveAccounts() {
     const current = client.getQueryData<AccountFrame>(key);
     return current && Date.parse(data.generated_at) < Date.parse(current.generated_at) ? current : data;
   }, stream);
-  const stale = now - query.dataUpdatedAt > SNAPSHOT_STALE_MS || now - Date.parse(query.data?.generated_at ?? '') > SNAPSHOT_STALE_MS;
+  const generatedAt = Date.parse(query.data?.generated_at ?? '');
+  const stale = now - query.dataUpdatedAt > SNAPSHOT_STALE_MS || !Number.isFinite(generatedAt) || now - generatedAt > SNAPSHOT_STALE_MS;
   const accounts = useMemo<AccountObservation[]>(() => (query.data?.pairs ?? []).map(entry => ({ ...entry, account_observation_stale: stale })), [query.data?.pairs, stale]);
   return { accounts, stale, error: query.error, now };
 }

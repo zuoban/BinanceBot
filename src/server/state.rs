@@ -906,10 +906,7 @@ impl AppState {
         }
 
         // Broadcast trade update event to WebSocket clients
-        if let Ok(json) = serde_json::to_string(&serde_json::json!({
-            "type": "trade",
-            "data": trade
-        })) {
+        if let Some(json) = crate::types::ws_frame_json("trade", &trade) {
             let _ = self.ws_broadcast_tx.send(json);
         }
 
@@ -1192,10 +1189,7 @@ impl AppState {
         logs.push_back(entry.clone());
 
         // Also broadcast log event to WebSocket clients
-        if let Ok(json) = serde_json::to_string(&serde_json::json!({
-            "type": "log",
-            "data": entry
-        })) {
+        if let Some(json) = crate::types::ws_frame_json("log", &entry) {
             let _ = self.ws_broadcast_tx.send(json);
         }
     }

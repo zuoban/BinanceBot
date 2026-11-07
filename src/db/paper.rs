@@ -36,15 +36,9 @@ impl Contribution {
     }
 
     fn refresh(&mut self, position: &PositionInfo, account: &AccountInfo, committed: bool) {
-        let valuation_price = if position.mark_price > Decimal::ZERO {
-            position.mark_price
-        } else {
-            position.entry_price
-        };
         self.wallet_delta = account.total_wallet_balance - PAPER_INITIAL_BALANCE;
         self.unrealized_pnl = position.unrealized_pnl;
-        self.position_margin =
-            position.size.abs() * valuation_price / Decimal::from(position.leverage.max(1));
+        self.position_margin = position.position_margin();
         self.size = position.size;
         self.entry_price = position.entry_price;
         // Paper valuation timestamps live on the local account in older states.

@@ -4,7 +4,7 @@ import { App, Button, Drawer, Modal } from 'antd';
 import { AppstoreOutlined, ArrowDownOutlined, ArrowUpOutlined, BulbOutlined, EditOutlined, LineChartOutlined, LogoutOutlined, MenuOutlined, PauseOutlined, PlayCircleOutlined, PlusOutlined, QuestionCircleOutlined, ReloadOutlined, SearchOutlined, SettingOutlined, StopOutlined } from '@ant-design/icons';
 import { useLiveAccounts, usePairs } from '../lib/queries';
 import { AccountsContext, EditContext, useSession } from '../lib/session';
-import { accountGroups, compactNumber, ratioText, SNAPSHOT_STALE_MS, statusLabel } from '../lib/format';
+import { accountGroups, compactNumber, directionLabel, ratioText, SNAPSHOT_STALE_MS, statusLabel } from '../lib/format';
 import type { Mode, Pair } from '../lib/types';
 import { ControlProvider, useControls } from './Controls';
 import { CommandPalette, type Command } from './CommandPalette';
@@ -101,7 +101,7 @@ interface HostProps { open: boolean; setOpen: (open: boolean | ((value: boolean)
 function PaletteHost({ open, setOpen, pairs, stale, authEnabled, saving, onLogout }: HostProps) {
   const navigate = useNavigate();
   const { pathname } = useLocation();
-  const { run } = useControls();
+  const { busy, run } = useControls();
   const { preference, setPreference } = useTheme();
   const [recent, setRecent] = useState<string[]>(readRecent);
   const [help, setHelp] = useState(false);
@@ -127,7 +127,7 @@ function PaletteHost({ open, setOpen, pairs, stale, authEnabled, saving, onLogou
         return;
       }
       if (event.metaKey || event.ctrlKey || event.altKey || typing(event.target) || document.querySelector('.ant-modal-root, .ant-drawer-open')) return;
-      if (event.key === '?') { event.preventDefault(); setHelp(true); return; }
+      if (event.key === '?') { lead.current = 0; event.preventDefault(); setHelp(true); return; }
       if (shortcutState.current.saving) return;
       if (event.key === 'g') { lead.current = Date.now(); return; }
       if (lead.current && Date.now() - lead.current < 1200) {
@@ -154,12 +154,13 @@ function PaletteHost({ open, setOpen, pairs, stale, authEnabled, saving, onLogou
       { key: 'go-new', group: '页面', label: '新增交易对', hint: 'g n', keywords: 'new add 新增 添加', icon: <PlusOutlined />, run: () => navigate('/pairs/new') },
       ...(pairs ?? []).flatMap(pair => {
         const running = pair.status === 'RUNNING';
+        const pairBusy = Boolean(busy?.has(pair.symbol));
         return [
-          { key: `pair-${pair.symbol}`, group: '交易对', label: pair.symbol, hint: `${statusLabel[pair.status]} · ${pair.grid_config.direction === 'SHORT' ? '做空' : '做多'}`, keywords: '策略 查看', icon: <LineChartOutlined />, run: () => navigate(`/pairs/${pair.symbol}`) },
+          { key: `pair-${pair.symbol}`, group: '交易对', label: pair.symbol, hint: `${statusLabel[pair.status]} · ${directionLabel(pair.grid_config.direction)}`, keywords: '策略 查看', icon: <LineChartOutlined />, run: () => navigate(`/pairs/${pair.symbol}`) },
           { key: `config-${pair.symbol}`, group: '交易对', label: `${pair.symbol} 策略参数`, hint: '编辑', keywords: 'config 配置 参数', icon: <EditOutlined />, run: () => navigate(`/pairs/${pair.symbol}/config`) },
-          { key: `toggle-${pair.symbol}`, group: '操作', label: `${running ? '暂停' : '恢复'} ${pair.symbol}`, hint: pair.mode === 'LIVE' && !running ? '实盘 · 需确认' : undefined, keywords: running ? 'pause 暂停 停止' : 'resume 恢复 启动', icon: running ? <PauseOutlined /> : <PlayCircleOutlined />, disabled: stale && !running, run: () => void run(pair, running ? 'pause' : 'resume') },
-          { key: `rebalance-${pair.symbol}`, group: '操作', label: `重建 ${pair.symbol} 网格`, hint: '需确认', keywords: 'rebalance 重建 网格', icon: <ReloadOutlined />, disabled: stale || !running, run: () => void run(pair, 'rebalance') },
-          { key: `cancel-${pair.symbol}`, group: '操作', label: `撤单并暂停 ${pair.symbol}`, hint: '需确认', keywords: 'cancel 撤单', icon: <StopOutlined />, run: () => void run(pair, 'cancel_all') },
+          { key: `toggle-${pair.symbol}`, group: '操作', label: `${running ? '暂停' : '恢复'} ${pair.symbol}`, hint: pair.mode === 'LIVE' && !running ? '实盘 · 需确认' : undefined, keywords: running ? 'pause 暂停 停止' : 'resume 恢复 启动', icon: running ? <PauseOutlined /> : <PlayCircleOutlined />, disabled: pairBusy || (stale && !running), run: () => void run(pair, running ? 'pause' : 'resume') },
+          { key: `rebalance-${pair.symbol}`, group: '操作', label: `重建 ${pair.symbol} 网格`, hint: '需确认', keywords: 'rebalance 重建 网格', icon: <ReloadOutlined />, disabled: pairBusy || stale || !running, run: () => void run(pair, 'rebalance') },
+          { key: `cancel-${pair.symbol}`, group: '操作', label: `撤单并暂停 ${pair.symbol}`, hint: '需确认', keywords: 'cancel 撤单', icon: <StopOutlined />, disabled: pairBusy, run: () => void run(pair, 'cancel_all') },
         ];
       }),
       ...(Object.entries(themeLabels) as [ThemePreference, string][]).map(([key, label]) => ({ key: `theme-${key}`, group: '外观', label: `主题：${label}`, hint: preference === key ? '当前' : undefined, keywords: 'theme dark light 主题 深色 浅色', icon: <BulbOutlined />, run: () => setPreference(key) })),
@@ -170,7 +171,7 @@ function PaletteHost({ open, setOpen, pairs, stale, authEnabled, saving, onLogou
     const byKey = new Map(wrapped.map(command => [command.key, command]));
     const recents = recent.flatMap(key => { const command = byKey.get(key); return command && !command.disabled ? [{ ...command, group: '最近使用', key: `recent-${command.key}` }] : []; });
     return [...recents, ...wrapped];
-  }, [pairs, navigate, run, preference, setPreference, authEnabled, saving, onLogout, stale, recent, remember]);
+  }, [pairs, navigate, busy, run, preference, setPreference, authEnabled, saving, onLogout, stale, recent, remember]);
   return <>
     <CommandPalette open={open} onClose={() => setOpen(false)} commands={commands} />
     <Modal open={help} onCancel={() => setHelp(false)} footer={null} title="键盘快捷键" width={440} destroyOnHidden>
@@ -207,7 +208,7 @@ function SidebarBody({ idPrefix, pairs, pending, symbol, page, pathname, mode, a
           <span className={`status-dot status-dot-${pair.status.toLowerCase()}`} aria-hidden="true" />
           <span className="sidebar-pair-symbol">{pair.symbol}</span>
           <span className={`sidebar-pair-side ${short ? 'short' : 'long'}`} aria-hidden="true">{short ? <ArrowDownOutlined /> : <ArrowUpOutlined />}</span>
-          <span className="sr-only">{statusLabel[pair.status]}，{short ? '做空' : '做多'}</span>
+          <span className="sr-only">{statusLabel[pair.status]}，{directionLabel(pair.grid_config.direction)}</span>
         </Link>;
       })}
       {pairs && !pairs.length && <p className="sidebar-empty">暂无交易对</p>}

@@ -81,7 +81,10 @@ export function cnyText(value: number | null | undefined, compact = false) {
 export function ratioText(value: number | null | undefined, compact = false) {
   return value != null && Number.isFinite(value) ? `${compact ? compactNumber(value) : number(value)}%` : '--';
 }
-export const time = (value: string) => new Date(value).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
+export const time = (value: string) => {
+  const ts = Date.parse(value);
+  return Number.isFinite(ts) ? new Date(ts).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) : '--';
+};
 function formatSeconds(seconds: number) {
   const [amount, unit] = seconds < 60 ? [seconds, '秒'] : seconds < 3600 ? [Math.floor(seconds / 60), '分钟'] : seconds < 86400 ? [Math.floor(seconds / 3600), '小时'] : [Math.floor(seconds / 86400), '天'];
   return `${amount}${unit}`;

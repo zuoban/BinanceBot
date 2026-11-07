@@ -213,6 +213,12 @@ impl GridOrder {
                 .is_none_or(|(a, b)| a == b)
     }
 
+    pub(crate) fn adopt_compatible_order_id(&mut self, other: &GridOrder) {
+        if self.order_id.is_none() && self.has_compatible_identity(other) {
+            self.order_id = other.order_id;
+        }
+    }
+
     pub(crate) fn reserve_quantity(&mut self, min_quantity: Decimal) {
         self.quantity = self.quantity.max(min_quantity);
         self.amount_usdc = self.price * self.quantity;
@@ -299,6 +305,17 @@ pub struct PositionInfo {
     pub leverage: u32,
     #[serde(default)]
     pub update_time: Option<DateTime<Utc>>,
+}
+
+impl PositionInfo {
+    pub fn position_margin(&self) -> Decimal {
+        let valuation_price = if self.mark_price > Decimal::ZERO {
+            self.mark_price
+        } else {
+            self.entry_price
+        };
+        self.size.abs() * valuation_price / Decimal::from(self.leverage.max(1))
+    }
 }
 
 pub fn apply_fill_to_position(
@@ -878,6 +895,16 @@ impl<T> ApiResponse<T> {
             message: Some(message.into()),
         }
     }
+}
+
+pub(crate) fn ws_frame_json<T: Serialize + ?Sized>(kind: &'static str, data: &T) -> Option<String> {
+    #[derive(Serialize)]
+    struct WsFrame<'a, T: ?Sized> {
+        #[serde(rename = "type")]
+        kind: &'static str,
+        data: &'a T,
+    }
+    serde_json::to_string(&WsFrame { kind, data }).ok()
 }
 
 #[cfg(test)]

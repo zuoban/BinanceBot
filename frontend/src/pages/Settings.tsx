@@ -87,7 +87,7 @@ function GlobalSettings() {
   const mutation = useMutation({
     mutationFn: (v: GlobalForm) => post<GlobalConfig>('/api/global/config', {
       baseline_version: baseline.current?.version, recv_window: v.recv_window, sync_interval_secs: v.sync_interval_secs,
-      global_max_position_notional: v.global_max_position_notional ?? null,
+      global_max_position_notional: v.global_max_position_notional || null,
       pause_on_zero_available_margin: v.pause_on_zero_available_margin ?? false,
       min_available_margin_pct: v.min_available_margin_pct || null,
       api_key: v.clear_api_credentials ? '' : v.api_key?.trim() || null, api_secret: v.clear_api_credentials ? '' : v.api_secret?.trim() || null,

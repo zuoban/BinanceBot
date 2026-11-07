@@ -155,7 +155,7 @@ export default function PairConfig() {
   const previewLast = positiveDecimalText(symbolPreview.data?.last_price);
   const previewMark = positiveDecimalText(symbolPreview.data?.mark_price);
   const latestPrice = adding ? (previewLast ?? previewMark) : null;
-  const effectiveMark = adding ? (previewMark ?? previewLast ?? undefined) : markPrice;
+  const effectiveMark = (adding ? (previewMark ?? previewLast) : positiveDecimalText(markPrice)) ?? undefined;
   const tickSize = adding ? symbolPreview.data?.tick_size : config.data?.tick_size;
   const stepSize = adding ? symbolPreview.data?.step_size : config.data?.step_size;
   const minQty = adding ? symbolPreview.data?.min_qty : config.data?.min_qty;
@@ -170,7 +170,7 @@ export default function PairConfig() {
       void form.validateFields(['grid_interval', 'order_amount_usdc']).catch(() => {});
     }
   }, [adding, ready, edit.saving, selectedSymbol, effectiveMark, tickSize, form]);
-  useEffect(() => { if ((tickSize || stepSize || minNotional) && ready) void form.validateFields(['grid_interval', 'order_amount_usdc']).catch(() => {}); }, [tickSize, stepSize, minNotional, effectiveMark, ready, form]);
+  useEffect(() => { if ((tickSize || stepSize || minQty || minNotional) && ready) void form.validateFields(['grid_interval', 'order_amount_usdc']).catch(() => {}); }, [tickSize, stepSize, minQty, minNotional, effectiveMark, ready, form]);
   return <div className="config-page">
     <PageBreadcrumb disabled={edit.saving} items={adding
       ? [{ label: '策略总览', to: '/' }, { label: '新增交易对' }]
@@ -184,7 +184,7 @@ export default function PairConfig() {
       form.setFieldsValue(data);
     }} />}
     {pairs.data && !pair && !adding && <Alert type="warning" title="该交易对不存在或已移除" />}
-    <Form<FormValues> className="config-form" form={form} layout="vertical" onFinish={values => void submit(values)} onValuesChange={changed => { if ('symbol' in changed) { if (!customInterval.current) form.setFieldValue('grid_interval', defaults.grid_interval); customInterval.current = false; appliedSymbol.current = undefined; } else if ('grid_interval' in changed) customInterval.current = true; if (changed.pause_on_max_position) form.setFieldValue('cancel_opening_on_max_position', false); else if (changed.cancel_opening_on_max_position) form.setFieldValue('pause_on_max_position', false); edit.setDirty(true); }} disabled={formDisabled}>
+    <Form<FormValues> className="config-form" form={form} layout="vertical" onFinish={values => void submit(values)} onValuesChange={changed => { if ('symbol' in changed) { form.setFieldValue('grid_interval', defaults.grid_interval); customInterval.current = false; appliedSymbol.current = undefined; } else if ('grid_interval' in changed) customInterval.current = true; if (changed.pause_on_max_position) form.setFieldValue('cancel_opening_on_max_position', false); else if (changed.cancel_opening_on_max_position) form.setFieldValue('pause_on_max_position', false); edit.setDirty(true); }} disabled={formDisabled}>
       <Card title="基本设置">
         {live && <Alert type="warning" showIcon className="config-live-alert" title="实盘使用真实资金，请核对交易方向和风险限制。" />}
         <Row gutter={[20, 16]}>

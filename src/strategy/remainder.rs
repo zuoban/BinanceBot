@@ -47,34 +47,24 @@ impl GridTradingEngine {
             return Ok(());
         }
         let rules = self.state.rules.read().await.clone();
-        let orders: Vec<_> = self
+        let (mut sources, other_orders): (Vec<_>, Vec<_>) = self
             .state
             .active_orders
             .read()
             .await
             .values()
             .cloned()
-            .collect();
-        let mut sources: Vec<_> = orders
-            .iter()
-            .filter(|o| {
+            .partition(|o| {
                 o.symbol == config.exchange.symbol
                     && o.side == closing_side
                     && o.purpose == OrderPurpose::Remainder
                     && o.paired_client_order_id.is_none()
                     && is_grid_order(&o.client_order_id)
-            })
-            .cloned()
-            .collect();
+            });
         sources.sort_by(|a, b| a.client_order_id.cmp(&b.client_order_id));
-        let occupied: Vec<_> = orders
+        let occupied: Vec<_> = other_orders
             .iter()
-            .filter(|o| {
-                o.side == closing_side
-                    && !sources
-                        .iter()
-                        .any(|s| s.client_order_id == o.client_order_id)
-            })
+            .filter(|o| o.side == closing_side)
             .map(|o| o.price)
             .collect();
         let price = desired_prices.iter().copied().find(|price| {
@@ -95,15 +85,6 @@ impl GridTradingEngine {
             return Ok(());
         };
         let position = self.state.position.read().await.size;
-        let other_orders: Vec<_> = orders
-            .iter()
-            .filter(|o| {
-                !sources
-                    .iter()
-                    .any(|s| s.client_order_id == o.client_order_id)
-            })
-            .cloned()
-            .collect();
         let quantity = rules
             .round_quantity(closing_quantity_available(
                 direction,
@@ -320,12 +301,9 @@ impl GridTradingEngine {
             return Ok(());
         }
         if paper {
-            let mut active_orders = self.state.active_orders.write().await;
-            if self.state.is_shutting_down() {
+            if !self.insert_paper_order(&mut plan.target).await {
                 return Ok(());
             }
-            plan.target.order_id = Some(rand::random::<i64>().saturating_abs());
-            active_orders.insert(plan.target.client_order_id.clone(), plan.target.clone());
         } else {
             let price = rules.format_price(price);
             let quantity = rules.format_quantity(quantity);

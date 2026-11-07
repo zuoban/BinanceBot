@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { App, Button, Dropdown, Space, Tooltip } from 'antd';
 import { MoreOutlined, PauseOutlined, PlayCircleOutlined, ReloadOutlined, StopOutlined } from '@ant-design/icons';
 import { useQueryClient } from '@tanstack/react-query';
@@ -59,7 +59,7 @@ export function ControlProvider({ pairs, children }: { pairs?: Pair[]; children:
       return Object.fromEntries(Object.entries(current).filter(([key]) => active.has(key)));
     });
   }, [pairs]);
-  const run = async (pair: Pair, action: Action, confirmed = false): Promise<ControlResult> => {
+  const run = useCallback(async (pair: Pair, action: Action, confirmed = false): Promise<ControlResult> => {
     if (locked.current.has(pair.symbol)) return 'not_submitted';
     locked.current.add(pair.symbol); setBusy(new Set(locked.current));
     let submitted = false;
@@ -106,8 +106,9 @@ export function ControlProvider({ pairs, children }: { pairs?: Pair[]; children:
         void client.invalidateQueries({ queryKey: ['snapshot', pair.symbol] });
       }
     }
-  };
-  return <Context.Provider value={{ busy, pending, results, clearResult, run }}>{children}</Context.Provider>;
+  }, [client, message, modal]);
+  const value = useMemo(() => ({ busy, pending, results, clearResult, run }), [busy, pending, results, clearResult, run]);
+  return <Context.Provider value={value}>{children}</Context.Provider>;
 }
 export function PairControls({ pair, stale = false }: { pair: Pair; stale?: boolean }) {
   const { busy, pending, run } = useControls();

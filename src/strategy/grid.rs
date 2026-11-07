@@ -150,16 +150,9 @@ fn update_paper_account(
     } else {
         (position.mark_price - position.entry_price) * position.size
     };
-    let margin_price = if position.mark_price > Decimal::ZERO {
-        position.mark_price
-    } else {
-        position.entry_price
-    };
-    let position_margin =
-        position.size.abs() * margin_price / Decimal::from(position.leverage.max(1));
     account.unrealized_profit = position.unrealized_pnl;
     account.margin_balance = account.total_wallet_balance + position.unrealized_pnl;
-    account.available_balance = account.margin_balance - position_margin;
+    account.available_balance = account.margin_balance - position.position_margin();
     account.update_time = if ticker.mark_price > Decimal::ZERO {
         ticker.mark_update_time
     } else {
@@ -872,6 +865,16 @@ impl GridTradingEngine {
         }
     }
 
+    pub(super) async fn insert_paper_order(&self, order: &mut GridOrder) -> bool {
+        let mut active_orders = self.state.active_orders.write().await;
+        if self.state.is_shutting_down() {
+            return false;
+        }
+        order.order_id = Some(rand::random::<i64>().saturating_abs());
+        active_orders.insert(order.client_order_id.clone(), order.clone());
+        true
+    }
+
     pub(super) async fn refresh_position_then_account(&mut self, shared: bool) -> bool {
         let position = self.sync_position(shared).await;
         let account = if position.is_some() {
@@ -1095,6 +1098,15 @@ impl GridTradingEngine {
             canceled &= self.cancel_single_order(&order).await;
         }
         canceled
+    }
+
+    async fn protect_openings_and_check_limits(
+        &mut self,
+        config: &crate::config::AppConfig,
+    ) -> bool {
+        let protected = self.cancel_suspended_opening_orders(config).await;
+        let paused = self.pause_if_position_limit_reached().await;
+        protected && !paused
     }
 
     async fn pause_for_position_limit(&mut self, reason: String) {
@@ -1521,25 +1533,11 @@ impl GridTradingEngine {
                 }
 
                 completion = market_completion(&mut self.mark_price_task) => {
-                    self.mark_price_task = None;
-                    match completion {
-                        Ok(completion) => self.apply_mark_price_completion(completion).await,
-                        Err(error) => {
-                            self.mark_retry.failed();
-                            warn!(%error, "Mark-price fallback task failed");
-                        }
-                    }
+                    self.finish_mark_price_task(completion).await;
                 }
 
                 completion = market_completion(&mut self.ticker_task) => {
-                    self.ticker_task = None;
-                    match completion {
-                        Ok(completion) => self.apply_ticker_completion(completion).await,
-                        Err(error) => {
-                            self.ticker_retry.failed();
-                            warn!(%error, "Ticker fallback task failed");
-                        }
-                    }
+                    self.finish_ticker_task(completion).await;
                 }
             }
         }
@@ -2107,17 +2105,13 @@ impl GridTradingEngine {
         }
 
         // Update unrealized PnL for current position
-        let paper = self.state.config.read().await.exchange.is_paper();
+        let config = self.state.config.read().await.clone();
+        let paper = config.exchange.is_paper();
         if paper {
             self.update_paper_valuation().await;
         }
 
-        let config = self.state.config.read().await.clone();
-        if !self.cancel_suspended_opening_orders(&config).await {
-            return;
-        }
-
-        if self.pause_if_position_limit_reached().await {
+        if !self.protect_openings_and_check_limits(&config).await {
             return;
         }
         let is_running = *self.state.status.read().await == BotStatus::Running;
@@ -2393,9 +2387,20 @@ impl GridTradingEngine {
     async fn refresh_mark_price(&mut self, symbol: &str) {
         self.start_mark_price_request(symbol).await;
         if let Some(task) = self.mark_price_task.take() {
-            match task.await {
-                Ok(completion) => self.apply_mark_price_completion(completion).await,
-                Err(_) => self.mark_retry.failed(),
+            self.finish_mark_price_task(task.await).await;
+        }
+    }
+
+    async fn finish_mark_price_task(
+        &mut self,
+        completion: std::result::Result<MarkPriceCompletion, tokio::task::JoinError>,
+    ) {
+        self.mark_price_task = None;
+        match completion {
+            Ok(completion) => self.apply_mark_price_completion(completion).await,
+            Err(error) => {
+                self.mark_retry.failed();
+                warn!(%error, "Mark-price fallback task failed");
             }
         }
     }
@@ -2428,11 +2433,9 @@ impl GridTradingEngine {
                     self.update_paper_valuation().await;
                 }
                 let config = self.state.config.read().await.clone();
-                let protected = self.cancel_suspended_opening_orders(&config).await;
-                if self.pause_if_position_limit_reached().await {
-                    return;
-                }
-                if protected && self.state.pause_epoch() == pause_epoch {
+                if self.protect_openings_and_check_limits(&config).await
+                    && self.state.pause_epoch() == pause_epoch
+                {
                     self.match_pending_paper_ticker().await;
                     if self.state.pause_epoch() == pause_epoch {
                         self.maintain_grid_window().await;
@@ -2502,9 +2505,20 @@ impl GridTradingEngine {
     async fn refresh_stale_ticker(&mut self, symbol: &str) {
         self.start_ticker_request(symbol).await;
         if let Some(task) = self.ticker_task.take() {
-            match task.await {
-                Ok(completion) => self.apply_ticker_completion(completion).await,
-                Err(_) => self.ticker_retry.failed(),
+            self.finish_ticker_task(task.await).await;
+        }
+    }
+
+    async fn finish_ticker_task(
+        &mut self,
+        completion: std::result::Result<TickerCompletion, tokio::task::JoinError>,
+    ) {
+        self.ticker_task = None;
+        match completion {
+            Ok(completion) => self.apply_ticker_completion(completion).await,
+            Err(error) => {
+                self.ticker_retry.failed();
+                warn!(%error, "Ticker fallback task failed");
             }
         }
     }
@@ -2572,8 +2586,7 @@ impl GridTradingEngine {
         let config = self.state.config.read().await.clone();
         if config.exchange.is_paper()
             && *self.state.status.read().await == BotStatus::Running
-            && self.cancel_suspended_opening_orders(&config).await
-            && !self.pause_if_position_limit_reached().await
+            && self.protect_openings_and_check_limits(&config).await
         {
             self.simulate_order_fills(price).await;
         }
@@ -3852,13 +3865,10 @@ impl GridTradingEngine {
         };
 
         if config.exchange.is_paper() {
-            let mut active_orders = self.state.active_orders.write().await;
-            if self.state.is_shutting_down() {
+            // Paper Trading simulation
+            if !self.insert_paper_order(&mut order).await {
                 return false;
             }
-            // Paper Trading simulation
-            order.order_id = Some(rand::random::<i64>().saturating_abs());
-            active_orders.insert(client_order_id.clone(), order);
             debug!(
                 "[PAPER] Placed {} Maker order: price={}, qty={}, id={}",
                 side.as_str(),
@@ -3986,9 +3996,8 @@ impl GridTradingEngine {
                                 guard.resolve();
                             }
                         }
-                        let paused = self.pause_if_position_limit_reached().await;
-                        let protected = self.cancel_suspended_opening_orders(&config).await;
-                        let ok = resolved && !paused && protected;
+                        let protected = self.protect_openings_and_check_limits(&config).await;
+                        let ok = resolved && protected;
                         if resp.is_terminal() || !ok {
                             return ok;
                         }
@@ -4102,15 +4111,8 @@ impl GridTradingEngine {
                 // A lost response or a fill preceding cancellation can still
                 // leave a terminal order. Confirm it through the query below.
             }
-            let exchange_order = match order.order_id {
-                Some(id) => self.client.get_order(&order.symbol, id).await,
-                None => {
-                    self.client
-                        .get_order_by_client_id(&order.symbol, &order.client_order_id)
-                        .await
-                }
-            };
-            if let Ok(exchange_order) = &exchange_order {
+            let exchange_order = self.lookup_order(order).await;
+            if let Ok(Some(exchange_order)) = &exchange_order {
                 if !order.matches_exchange_identity(exchange_order) {
                     self.track_identity_conflict(order, exchange_order);
                     self.last_orders_sync = None;
@@ -4128,22 +4130,29 @@ impl GridTradingEngine {
                 }
             }
             match exchange_order {
-                Ok(exchange_order) if unresolved_filled_quantity(&exchange_order) => {
+                Ok(Some(exchange_order)) if unresolved_filled_quantity(&exchange_order) => {
                     self.block_reconciliation_and_invalidate_caches().await;
                     return false;
                 }
-                Ok(exchange_order) if !exchange_order.is_terminal() => {
+                Ok(Some(exchange_order)) if !exchange_order.is_terminal() => {
                     self.last_orders_sync = None;
                     warn!("Cancellation is not terminal for {}", order.client_order_id);
                     return false;
                 }
-                Ok(exchange_order) if exchange_order.executed_qty > Decimal::ZERO => {
+                Ok(Some(exchange_order)) if exchange_order.executed_qty > Decimal::ZERO => {
                     let mut filled = order.clone();
                     filled
                         .apply_terminal_fill(&exchange_order, exchange_fill_time(&exchange_order));
                     return self.on_order_filled(&mut filled).await;
                 }
-                Ok(_) => {}
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    warn!(
+                        "Canceled order {} but could not confirm fill status: order not found",
+                        order.client_order_id
+                    );
+                    return false;
+                }
                 Err(e) => {
                     warn!(
                         "Canceled order {} but could not confirm fill status: {}",
@@ -4401,12 +4410,9 @@ impl GridTradingEngine {
                                 })
                             })
                             .cloned();
-                        let confirmation_conflict = confirmation.as_ref().is_ok_and(|found| {
-                            found.client_order_id != order.client_order_id
-                                || found.symbol != order.symbol
-                                || found.side != order.side
-                                || found.order_id != order.order_id
-                        });
+                        let confirmation_conflict = confirmation
+                            .as_ref()
+                            .is_ok_and(|found| !found.matches_identity(&order));
                         let (retained, identity_conflict, previous) = {
                             let mut active = self.state.active_orders.write().await;
                             let current = active.get(&order.client_order_id).cloned();
@@ -4420,11 +4426,7 @@ impl GridTradingEngine {
                                     )
                                 });
                             if let Some(current) = &current {
-                                if retained.order_id.is_none()
-                                    && retained.has_compatible_identity(current)
-                                {
-                                    retained.order_id = current.order_id;
-                                }
+                                retained.adopt_compatible_order_id(current);
                             }
                             let identity_matches = order.symbol == symbol
                                 && OrderSide::from_exchange_str(&order.side).is_some()
