@@ -409,12 +409,7 @@ impl GridTradingEngine {
             self.report_reconciliation_state(true).await;
             return false;
         }
-        let pending_ids: HashSet<_> = self
-            .provisional_order_ids
-            .iter()
-            .filter(|(account, _)| *account == account_key)
-            .map(|(_, id)| id.clone())
-            .collect();
+        let pending_ids = self.provisional_order_ids_for(account_key);
         let mut restored_ids = HashSet::new();
         if !pending_ids.is_empty() {
             let managed_symbol = symbol.clone();
@@ -499,10 +494,7 @@ impl GridTradingEngine {
                         continue;
                     }
                     let Some(current) = active.get(id).cloned() else {
-                        self.provisional_order_ids
-                            .remove(&(account_key, id.clone()));
-                        self.provisional_order_observations
-                            .remove(&(account_key, id.clone()));
+                        self.clear_provisional_order(&(account_key, id.clone()));
                         continue;
                     };
                     let Some(durable) =
@@ -540,14 +532,9 @@ impl GridTradingEngine {
                         active.insert(id.clone(), restored);
                     }
                     restored_ids.insert(id.clone());
-                    if !self
-                        .order_identity_conflicts
-                        .contains_key(&(account_key, id.clone()))
-                    {
-                        self.provisional_order_ids
-                            .remove(&(account_key, id.clone()));
-                        self.provisional_order_observations
-                            .remove(&(account_key, id.clone()));
+                    let key = (account_key, id.clone());
+                    if !self.order_identity_conflicts.contains_key(&key) {
+                        self.clear_provisional_order(&key);
                     }
                 }
             }
@@ -1354,17 +1341,7 @@ impl GridTradingEngine {
                         return false;
                     }
                     if !seen && !corrected_terminal.contains_key(&expected.client_order_id) {
-                        let result = match expected.order_id {
-                            Some(id) => self.client.get_order(&expected.symbol, id).await.map(Some),
-                            None => {
-                                self.client
-                                    .lookup_order_by_client_id(
-                                        &expected.symbol,
-                                        &expected.client_order_id,
-                                    )
-                                    .await
-                            }
-                        };
+                        let result = self.lookup_order(&expected).await;
                         match result {
                             Ok(Some(found)) => {
                                 let unknown_id = expected.order_id.is_none();
@@ -1791,8 +1768,7 @@ impl GridTradingEngine {
                     }
                     for id in persisted_ids {
                         let key = (account_key, id);
-                        self.provisional_order_ids.remove(&key);
-                        self.provisional_order_observations.remove(&key);
+                        self.clear_provisional_order(&key);
                     }
                     if identity_conflict {
                         self.report_reconciliation_state(true).await;
@@ -2024,15 +2000,11 @@ impl GridTradingEngine {
                 {
                     false
                 } else if needs_position_refresh {
-                    let shared = matches!(priority, ReconciliationPriority::Periodic);
-                    let position = self.sync_position(shared).await;
-                    let account = if position.is_some() {
-                        self.sync_account(shared, !shared).await
-                    } else {
-                        None
-                    };
-                    self.last_account_sync = position.zip(account).map(|(p, a)| p.min(a));
-                    self.last_account_sync.is_some()
+                    self.refresh_position_then_account(matches!(
+                        priority,
+                        ReconciliationPriority::Periodic
+                    ))
+                    .await
                 } else {
                     true
                 };
@@ -2141,21 +2113,7 @@ impl GridTradingEngine {
                     {
                         Ok(Some(corrected))
                     } else {
-                        match order.order_id {
-                            Some(order_id) => self
-                                .client
-                                .get_order(&order.symbol, order_id)
-                                .await
-                                .map(Some),
-                            None => {
-                                self.client
-                                    .lookup_order_by_client_id(
-                                        &order.symbol,
-                                        &order.client_order_id,
-                                    )
-                                    .await
-                            }
-                        }
+                        self.lookup_order(&order).await
                     };
                     let inconsistent = exchange_result
                         .as_ref()

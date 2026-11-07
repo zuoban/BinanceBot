@@ -21,7 +21,7 @@ export function CommandPalette({ open, onClose, commands }: { open: boolean; onC
   const list = useRef<HTMLUListElement>(null);
   const results = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    return commands.filter(command => !command.disabled && (!needle || `${command.label} ${command.keywords ?? ''} ${command.group}`.toLowerCase().includes(needle)));
+    return commands.filter(command => !command.disabled && (!needle || (command.group !== '最近使用' && `${command.label} ${command.keywords ?? ''} ${command.group}`.toLowerCase().includes(needle))));
   }, [commands, query]);
   const currentActive = Math.min(active, Math.max(0, results.length - 1));
   useEffect(() => { if (open) { setQuery(''); setActive(0); } }, [open]);

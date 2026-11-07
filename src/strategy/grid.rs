@@ -324,6 +324,15 @@ async fn market_completion<T>(
     }
 }
 
+fn build_sync_timer(sync_secs: u64) -> tokio::time::Interval {
+    let period = Duration::from_secs(sync_secs);
+    let offset =
+        Duration::from_millis(rand::random::<u64>() % sync_secs.saturating_mul(1000).max(1));
+    let mut timer = interval_at(tokio::time::Instant::now() + offset, period);
+    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    timer
+}
+
 #[derive(Clone)]
 struct InitialOrderResponseBatch {
     batch_id: String,
@@ -644,7 +653,7 @@ impl GridTradingEngine {
             {
                 self.order_identity_observations.remove(&key);
                 self.order_identity_conflicts.remove(&key);
-                self.provisional_order_ids.remove(&key);
+                self.clear_provisional_order(&key);
             }
         }
         true
@@ -838,6 +847,70 @@ impl GridTradingEngine {
         }
     }
 
+    pub(super) fn clear_provisional_order(&mut self, key: &([u8; 32], String)) {
+        self.provisional_order_ids.remove(key);
+        self.provisional_order_observations.remove(key);
+    }
+
+    pub(super) fn provisional_order_ids_for(&self, account: [u8; 32]) -> Vec<String> {
+        self.provisional_order_ids
+            .iter()
+            .filter(|(key, _)| *key == account)
+            .map(|(_, id)| id.clone())
+            .collect()
+    }
+
+    pub(super) async fn lookup_order(
+        &self,
+        order: &GridOrder,
+    ) -> Result<Option<BinanceOrderResponse>> {
+        match order.order_id {
+            Some(id) => self.client.get_order(&order.symbol, id).await.map(Some),
+            None => {
+                self.client
+                    .lookup_order_by_client_id(&order.symbol, &order.client_order_id)
+                    .await
+            }
+        }
+    }
+
+    pub(super) async fn refresh_position_then_account(&mut self, shared: bool) -> bool {
+        let position = self.sync_position(shared).await;
+        let account = if position.is_some() {
+            self.sync_account(shared, !shared).await
+        } else {
+            None
+        };
+        self.last_account_sync = position.zip(account).map(|(p, a)| p.min(a));
+        self.last_account_sync.is_some()
+    }
+
+    pub(super) async fn submit_exchange_order(
+        &self,
+        exchange_guard: crate::server::state::ExchangeSubmissionGuard,
+        request: NewOrderRequest<'_>,
+    ) -> (
+        std::result::Result<BinanceOrderResponse, ExchangeError>,
+        Option<crate::server::state::PendingFillReconciliation>,
+    ) {
+        let result = self.client.place_order(request).await;
+        let mut fill_guard = if result.as_ref().is_ok_and(|response| {
+            response.executed_qty > Decimal::ZERO || unresolved_filled_quantity(response)
+        }) || result
+            .as_ref()
+            .is_err_and(|error| error.execution_status_unknown())
+        {
+            Some(self.state.publish_fill_reconciliation())
+        } else {
+            None
+        };
+        exchange_guard.complete();
+        if let Some(guard) = &mut fill_guard {
+            guard.acquire().await;
+        }
+        (result, fill_guard)
+    }
+
     fn mark_price_is_fresh(ticker: &TickerInfo) -> bool {
         let age = Utc::now().signed_duration_since(ticker.mark_update_time);
         ticker.mark_price > Decimal::ZERO
@@ -907,12 +980,7 @@ impl GridTradingEngine {
 
     /// Check filled position value independently of opening-order reservations.
     async fn pause_if_position_limit_reached(&mut self) -> bool {
-        let global = self
-            .state
-            .global_position_limit
-            .get()
-            .and_then(std::sync::Weak::upgrade);
-        if let Some(global) = global {
+        if let Some(global) = self.state.global_limit() {
             if self
                 .state
                 .config
@@ -1365,11 +1433,7 @@ impl GridTradingEngine {
             .exchange
             .sync_interval_secs
             .max(1);
-        let period = Duration::from_secs(sync_secs);
-        let offset =
-            Duration::from_millis(rand::random::<u64>() % sync_secs.saturating_mul(1000).max(1));
-        let mut sync_timer = interval_at(tokio::time::Instant::now() + offset, period);
-        sync_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut sync_timer = build_sync_timer(sync_secs);
         let mut pnl_timer = interval(Duration::from_secs(1));
         pnl_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -1395,10 +1459,7 @@ impl GridTradingEngine {
                                 let updated_secs = self.state.config.read().await.exchange.sync_interval_secs.max(1);
                                 if updated_secs != sync_secs {
                                     sync_secs = updated_secs;
-                                    let period = Duration::from_secs(sync_secs);
-                                    let offset = Duration::from_millis(rand::random::<u64>() % sync_secs.saturating_mul(1000).max(1));
-                                    sync_timer = interval_at(tokio::time::Instant::now() + offset, period);
-                                    sync_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                                    sync_timer = build_sync_timer(sync_secs);
                                 }
                             }
                         },
@@ -2545,14 +2606,9 @@ impl GridTradingEngine {
         let pause_epoch = self.state.pause_epoch();
         self.account_cache.invalidate(&self.client).await;
         self.position_cache.invalidate(&self.client).await;
-        let position = self.sync_position(false).await;
-        let account = if position.is_some() {
-            self.sync_account(false, true).await
-        } else {
-            None
-        };
-        self.last_account_sync = position.zip(account).map(|(p, a)| p.min(a));
-        if self.last_account_sync.is_some() && self.state.pause_epoch() == pause_epoch {
+        if self.refresh_position_then_account(false).await
+            && self.state.pause_epoch() == pause_epoch
+        {
             return true;
         }
 
@@ -3316,6 +3372,23 @@ impl GridTradingEngine {
                 .is_some_and(|at| at.elapsed() < Duration::from_secs(10))
     }
 
+    async fn has_pending_live_pair_intents(&mut self, symbol: &str) -> bool {
+        let symbol = symbol.to_owned();
+        match self
+            .state
+            .db
+            .run_blocking(move |db| db.load_pair_intents(&symbol, TradingMode::Live))
+            .await
+        {
+            Ok(intents) => !intents.is_empty(),
+            Err(e) => {
+                error!("Could not inspect pending pair intents: {}", e);
+                self.pause_trading().await;
+                true
+            }
+        }
+    }
+
     /// Ensure the active pre-placed order window matches buy_window and sell_window
     async fn maintain_grid_window(&mut self) {
         let config = self.state.config.read().await.clone();
@@ -3353,42 +3426,21 @@ impl GridTradingEngine {
                 return;
             }
         }
-        if !config.exchange.is_paper() {
-            let symbol = config.exchange.symbol.clone();
-            let mode = TradingMode::Live;
-            match self
-                .state
-                .db
-                .run_blocking(move |db| db.load_pair_intents(&symbol, mode))
+        if !config.exchange.is_paper()
+            && self
+                .has_pending_live_pair_intents(&config.exchange.symbol)
                 .await
-            {
-                Ok(intents) if !intents.is_empty() => return,
-                Ok(_) => {}
-                Err(e) => {
-                    error!("Could not inspect pending pair intents: {}", e);
-                    self.pause_trading().await;
-                    return;
-                }
-            }
+        {
+            return;
         }
         let trimmed = self.trim_closing_orders_to_position().await;
-        if trimmed && !config.exchange.is_paper() {
-            let symbol = config.exchange.symbol.clone();
-            let mode = TradingMode::Live;
-            match self
-                .state
-                .db
-                .run_blocking(move |db| db.load_pair_intents(&symbol, mode))
+        if trimmed
+            && !config.exchange.is_paper()
+            && self
+                .has_pending_live_pair_intents(&config.exchange.symbol)
                 .await
-            {
-                Ok(intents) if !intents.is_empty() => return,
-                Ok(_) => {}
-                Err(e) => {
-                    error!("Could not inspect pending pair intents: {}", e);
-                    self.pause_trading().await;
-                    return;
-                }
-            }
+        {
+            return;
         }
         let current_price = self.state.ticker.read().await.grid_reference_price();
         if current_price.is_zero() {
@@ -3900,32 +3952,20 @@ impl GridTradingEngine {
                 }
                 return false;
             };
-            let result = self
-                .client
-                .place_order(NewOrderRequest {
-                    symbol: &symbol,
-                    side: side.as_str(),
-                    price: &formatted_price,
-                    quantity: &formatted_qty,
-                    client_order_id: &client_order_id,
-                    post_only: true,
-                    reduce_only: side == config.grid.direction.closing_side(),
-                })
+            let (result, mut fill_guard) = self
+                .submit_exchange_order(
+                    exchange_guard,
+                    NewOrderRequest {
+                        symbol: &symbol,
+                        side: side.as_str(),
+                        price: &formatted_price,
+                        quantity: &formatted_qty,
+                        client_order_id: &client_order_id,
+                        post_only: true,
+                        reduce_only: side == config.grid.direction.closing_side(),
+                    },
+                )
                 .await;
-            let mut fill_guard = if result.as_ref().is_ok_and(|response| {
-                response.executed_qty > Decimal::ZERO || unresolved_filled_quantity(response)
-            }) || result
-                .as_ref()
-                .is_err_and(|error| error.execution_status_unknown())
-            {
-                Some(self.state.publish_fill_reconciliation())
-            } else {
-                None
-            };
-            exchange_guard.complete();
-            if let Some(guard) = &mut fill_guard {
-                guard.acquire().await;
-            }
             match result {
                 Ok(resp) => {
                     if unresolved_filled_quantity(&resp) {
@@ -4197,12 +4237,7 @@ impl GridTradingEngine {
 
     async fn restore_provisional_before_cancel(&mut self, symbol: &str, mode: TradingMode) -> bool {
         let account = self.client.account_identity_key();
-        let ids: Vec<_> = self
-            .provisional_order_ids
-            .iter()
-            .filter(|(key, _)| *key == account)
-            .map(|(_, id)| id.clone())
-            .collect();
+        let ids = self.provisional_order_ids_for(account);
         if ids.is_empty() {
             return true;
         }
@@ -4294,10 +4329,8 @@ impl GridTradingEngine {
                 let mut restored = durable.clone();
                 restored.quantity = durable.quantity.max(current.quantity);
                 restored.amount_usdc = restored.price * restored.quantity;
-                active.insert(id.clone(), restored);
-                self.provisional_order_observations
-                    .remove(&(account, id.clone()));
-                self.provisional_order_ids.remove(&(account, id));
+                active.insert(id, restored);
+                self.clear_provisional_order(&key);
             }
         }
         if conflict {
@@ -4534,10 +4567,7 @@ impl GridTradingEngine {
                                 current,
                             )
                         };
-                        let key = (
-                            self.client.account_identity_key(),
-                            retained.client_order_id.clone(),
-                        );
+                        let account = self.client.account_identity_key();
                         if identity_conflict {
                             if confirmation_conflict {
                                 if let Ok(found) = &confirmation {
@@ -4554,17 +4584,15 @@ impl GridTradingEngine {
                             {
                                 if identity_differs_from_order(&observed, &retained) {
                                     self.record_identity_conflict_observation(
-                                        key.0, &retained, observed,
+                                        account, &retained, observed,
                                     );
                                 }
                             }
                         }
                         if managed_read_failed || !metadata_ready {
                             self.track_provisional_observation(&order);
-                            self.provisional_order_ids.insert(key);
                         } else if let Err(error) = self.save_managed_order(&retained).await {
                             self.track_provisional_observation(&order);
-                            self.provisional_order_ids.insert(key);
                             error!(
                                 "Could not persist uncertain canceled order {}: {}",
                                 retained.client_order_id, error
@@ -4572,11 +4600,7 @@ impl GridTradingEngine {
                             self.pause_trading().await;
                         }
                         if identity_conflict {
-                            self.persist_identity_observations(
-                                self.client.account_identity_key(),
-                                &symbol,
-                            )
-                            .await;
+                            self.persist_identity_observations(account, &symbol).await;
                         }
                         cancellation_failed = true;
                         continue;

@@ -36,6 +36,20 @@ enum RuntimeCommand {
     },
 }
 
+impl PairTask {
+    fn signal_shutdown(&self) {
+        self.state.request_shutdown();
+        let _ = self.shutdown_tx.send(true);
+    }
+}
+
+impl RuntimeCommand {
+    fn reject_on_shutdown(self) {
+        let (Self::Add { reply, .. } | Self::Remove { reply, .. }) = self;
+        let _ = reply.send(Err("程序正在退出，无法修改交易对列表".into()));
+    }
+}
+
 struct ActiveRemoval(Arc<std::sync::Mutex<Option<String>>>);
 
 impl Drop for ActiveRemoval {
@@ -502,8 +516,7 @@ impl TradingRuntime {
                     biased;
                     _ = Self::wait_for_startup_shutdown(&mut shutdown) => {
                         for pair in &runtime.pairs {
-                            pair.state.request_shutdown();
-                            let _ = pair.shutdown_tx.send(true);
+                            pair.signal_shutdown();
                         }
                         preparing.await
                     }
@@ -516,8 +529,7 @@ impl TradingRuntime {
                     let symbol = pair.state.config.read().await.exchange.symbol.clone();
                     let stopped = shutdown.as_ref().is_some_and(|rx| *rx.borrow());
                     if stopped {
-                        pair.state.request_shutdown();
-                        let _ = pair.shutdown_tx.send(true);
+                        pair.signal_shutdown();
                     }
                     runtime.handle.register_engine(&pair);
                     runtime.pairs.push(pair);
@@ -559,8 +571,7 @@ impl TradingRuntime {
                 biased;
                 _ = Self::wait_for_startup_shutdown(&mut shutdown) => {
                     for pair in &runtime.pairs {
-                        pair.state.request_shutdown();
-                        let _ = pair.shutdown_tx.send(true);
+                        pair.signal_shutdown();
                     }
                     check.await;
                 }
@@ -951,8 +962,7 @@ impl TradingRuntime {
         };
         pair.state.retire();
         drop(control);
-        pair.state.request_shutdown();
-        let _ = pair.shutdown_tx.send(true);
+        pair.signal_shutdown();
         let mut result =
             remove_engine(&pair.state, &mut pair.engine, Duration::from_secs(30)).await;
         let state = pair.state.clone();
@@ -1097,10 +1107,7 @@ impl TradingRuntime {
                     {
                         let _admission = self.handle.active_removal.lock().unwrap();
                         if *self.handle.stop.borrow() {
-                            let reply = match command {
-                                RuntimeCommand::Add { reply, .. } | RuntimeCommand::Remove { reply, .. } => reply,
-                            };
-                            let _ = reply.send(Err("程序正在退出，无法修改交易对列表".into()));
+                            command.reject_on_shutdown();
                             return "Runtime shutdown requested".into();
                         }
                     }
@@ -1152,15 +1159,11 @@ impl TradingRuntime {
         self.handle.request_shutdown();
         self.command_rx.close();
         while let Ok(command) = self.command_rx.try_recv() {
-            let reply = match command {
-                RuntimeCommand::Add { reply, .. } | RuntimeCommand::Remove { reply, .. } => reply,
-            };
-            let _ = reply.send(Err("程序正在退出，无法修改交易对列表".into()));
+            command.reject_on_shutdown();
         }
         // Stop submissions for ALL pairs before awaiting any cancellation.
         for pair in &self.pairs {
-            pair.state.request_shutdown();
-            let _ = pair.shutdown_tx.send(true);
+            pair.signal_shutdown();
         }
         let mut early_stops = std::mem::take(&mut *self.handle.early_stops.lock().await);
         let mut pair_stops = Vec::with_capacity(self.pairs.len());

@@ -121,9 +121,9 @@ impl RateLimiter {
         endpoint: &str,
     ) -> &'a mut EndpointLimits {
         if !endpoints.contains_key(endpoint) {
-            endpoints.insert(endpoint.to_owned(), EndpointLimits::default());
+            return endpoints.entry(endpoint.to_owned()).or_default();
         }
-        endpoints.get_mut(endpoint).expect("inserted above")
+        endpoints.get_mut(endpoint).expect("checked above")
     }
 
     pub fn reserve(

@@ -349,32 +349,20 @@ impl GridTradingEngine {
             let Some(exchange_guard) = self.state.try_exchange_submission() else {
                 return Ok(());
             };
-            let found = self
-                .client
-                .place_order(NewOrderRequest {
-                    symbol: &plan.symbol,
-                    side: closing_side.as_str(),
-                    price: &price,
-                    quantity: &quantity,
-                    client_order_id: &plan.target.client_order_id,
-                    post_only: true,
-                    reduce_only: true,
-                })
+            let (found, mut fill_guard) = self
+                .submit_exchange_order(
+                    exchange_guard,
+                    NewOrderRequest {
+                        symbol: &plan.symbol,
+                        side: closing_side.as_str(),
+                        price: &price,
+                        quantity: &quantity,
+                        client_order_id: &plan.target.client_order_id,
+                        post_only: true,
+                        reduce_only: true,
+                    },
+                )
                 .await;
-            let mut fill_guard = if found.as_ref().is_ok_and(|response| {
-                response.executed_qty > Decimal::ZERO || unresolved_filled_quantity(response)
-            }) || found
-                .as_ref()
-                .is_err_and(|error| error.execution_status_unknown())
-            {
-                Some(self.state.publish_fill_reconciliation())
-            } else {
-                None
-            };
-            exchange_guard.complete();
-            if let Some(guard) = &mut fill_guard {
-                guard.acquire().await;
-            }
             let found = found?;
             self.settle_remainder_order(plan.target.clone(), found, Some(&mut *plan))
                 .await?;

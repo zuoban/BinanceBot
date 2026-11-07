@@ -39,11 +39,10 @@ impl MarketCache {
         let entry = {
             let mut entries = self.entries.lock().await;
             let key = client.market_cache_key();
-            if let Some(entry) = entries.get(key) {
-                entry.clone()
-            } else {
-                entries.entry(key.to_owned()).or_default().clone()
-            }
+            entries
+                .get(key)
+                .cloned()
+                .unwrap_or_else(|| entries.entry(key.to_owned()).or_default().clone())
         };
         // A slow shared HTTP request must not stall every engine's reconciliation.
         let mut entry = tokio::time::timeout(ENTRY_WAIT, entry.lock())

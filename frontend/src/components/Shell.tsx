@@ -69,8 +69,8 @@ export default function Shell() {
   const [drawer, setDrawer] = useState(false), [palette, setPalette] = useState(false);
   useEffect(() => { setDrawer(false); }, [location.pathname]);
   const mode = pairs.data?.[0]?.mode;
-  const page = location.pathname.startsWith('/settings') ? 'settings' : location.pathname.startsWith('/pairs/') ? 'pair' : 'overview';
-  const sidebarProps = { pairs: currentPairs, pending: pairs.isPending, symbol, pathname: location.pathname, mode, authEnabled, saving, onNavigate: () => setDrawer(false), onSearch: () => { setDrawer(false); setPalette(true); }, onLogout: () => void logOut() };
+  const page: SidebarProps['page'] = location.pathname.startsWith('/settings') ? 'settings' : location.pathname.startsWith('/pairs/') ? 'pair' : 'overview';
+  const sidebarProps = { pairs: currentPairs, pending: pairs.isPending, symbol, page, pathname: location.pathname, mode, authEnabled, saving, onNavigate: () => setDrawer(false), onSearch: () => { setDrawer(false); setPalette(true); }, onLogout: () => void logOut() };
   return <EditContext.Provider value={context}><AccountsContext.Provider value={accounts}><ControlProvider pairs={currentPairs}><div className="app-layout">
     <a className="skip-link" href="#main">跳到主内容</a>
     <aside className="sidebar"><SidebarBody idPrefix="rail" {...sidebarProps} /></aside>
@@ -116,12 +116,17 @@ function PaletteHost({ open, setOpen, pairs, stale, authEnabled, saving, onLogou
   const symbols = useMemo(() => pairs?.map(pair => pair.symbol) ?? [], [pairs]);
   const current = routeSymbol(pathname);
   const lead = useRef(0);
-  const shortcutState = useRef({ symbols, current, pathname });
-  shortcutState.current = { symbols, current, pathname };
+  const shortcutState = useRef({ symbols, current, pathname, saving });
+  shortcutState.current = { symbols, current, pathname, saving };
   useEffect(() => {
     const typing = (target: EventTarget | null) => target instanceof HTMLElement && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName));
     const onKey = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key?.toLowerCase() === 'k') { event.preventDefault(); setOpen(value => !value); return; }
+      if ((event.metaKey || event.ctrlKey) && event.key?.toLowerCase() === 'k') {
+        event.preventDefault();
+        if (shortcutState.current.saving) return;
+        setOpen(value => value ? false : !document.querySelector('.ant-modal-root, .ant-drawer-open'));
+        return;
+      }
       if (event.metaKey || event.ctrlKey || event.altKey || typing(event.target) || document.querySelector('.ant-modal-root, .ant-drawer-open')) return;
       if (event.key === '?') { event.preventDefault(); setHelp(true); return; }
       if (event.key === 'g') { lead.current = Date.now(); return; }
@@ -181,12 +186,10 @@ function PaletteHost({ open, setOpen, pairs, stale, authEnabled, saving, onLogou
   </>;
 }
 
-interface SidebarProps { idPrefix: string; pairs: Pair[] | undefined; pending: boolean; symbol: string | undefined; pathname: string; mode: Mode | undefined; authEnabled: boolean; saving: boolean; onNavigate: () => void; onSearch: () => void; onLogout: () => void }
+interface SidebarProps { idPrefix: string; pairs: Pair[] | undefined; pending: boolean; symbol: string | undefined; page: 'overview' | 'pair' | 'settings'; pathname: string; mode: Mode | undefined; authEnabled: boolean; saving: boolean; onNavigate: () => void; onSearch: () => void; onLogout: () => void }
 
-function SidebarBody({ idPrefix, pairs, pending, symbol, pathname, mode, authEnabled, saving, onNavigate, onSearch, onLogout }: SidebarProps) {
+function SidebarBody({ idPrefix, pairs, pending, symbol, page, pathname, mode, authEnabled, saving, onNavigate, onSearch, onLogout }: SidebarProps) {
   const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/i.test((navigator as Navigator & { userAgentData?: { platform?: string } }).userAgentData?.platform ?? navigator.platform);
-  const currentSymbol = symbol ?? routeSymbol(pathname);
-  const page = pathname.startsWith('/settings') ? 'settings' : pathname.startsWith('/pairs/') ? 'pair' : 'overview';
   return <div className="sidebar-inner">
     <Link className="sidebar-brand" to="/" aria-label="Grid Console 首页" onClick={onNavigate}><img className="sidebar-logo" src="/logo.svg" alt="" /><span className="sidebar-brand-name"><strong>Grid Console</strong><small>Binance Futures</small></span></Link>
     <button type="button" className="sidebar-search" onClick={onSearch} aria-label="打开命令面板"><SearchOutlined aria-hidden="true" /><span>搜索与跳转</span><kbd aria-hidden="true">{isMac ? '⌘K' : 'Ctrl K'}</kbd></button>
@@ -199,7 +202,7 @@ function SidebarBody({ idPrefix, pairs, pending, symbol, pathname, mode, authEna
       {pending && !pairs && [0, 1, 2].map(item => <div className="sidebar-pair-skeleton" key={item} aria-hidden="true" />)}
       {pairs?.map(pair => {
         const short = pair.grid_config.direction === 'SHORT';
-        const active = pair.symbol === currentSymbol;
+        const active = pair.symbol === symbol;
         return <Link key={pair.symbol} to={`/pairs/${pair.symbol}${pathname.endsWith('/config') ? '/config' : ''}`} onClick={onNavigate} className={`sidebar-pair${active ? ' sidebar-pair-active' : ''}`} aria-current={active ? 'page' : undefined}>
           <span className={`status-dot status-dot-${pair.status.toLowerCase()}`} aria-hidden="true" />
           <span className="sidebar-pair-symbol">{pair.symbol}</span>

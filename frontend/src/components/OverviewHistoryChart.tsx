@@ -1,6 +1,8 @@
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 
 type HistoryPoint = { hour: number; equity: number | null };
+const formatHour = (hour: number) => new Date(hour * 1000).toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hour12: false });
+const formatDay = (hour: number) => new Date(hour * 1000).toLocaleDateString('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit' });
 
 function HistoryDot({ cx, cy, payload, stroke, index, data, discrete }: { cx?: number; cy?: number; payload?: { hour: number }; stroke?: string; index?: number; data: HistoryPoint[]; discrete: boolean }) {
   if (cx == null || cy == null || !payload || (index != null && data[index]?.equity == null)) return null;
@@ -17,8 +19,6 @@ export default function OverviewHistoryChart({ data, ticks, asset, formatValue, 
   daily?: boolean;
   discrete?: boolean;
 }) {
-  const formatHour = (hour: number) => new Date(hour * 1000).toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hour12: false });
-  const formatDay = (hour: number) => new Date(hour * 1000).toLocaleDateString('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit' });
   const useWan = data.some(point => point.equity !== null && Math.abs(point.equity) >= 100_000);
   const axisValue = (value: number) => useWan ? `${(value / 10000).toLocaleString('en-US', { maximumFractionDigits: 6 })}万` : formatValue(value);
   const tooltip = {

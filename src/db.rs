@@ -1239,9 +1239,10 @@ impl Database {
     }
 
     pub fn insert_trade_with_stats(&self, trade: &TradeRecord, stats: &GridStats) -> Result<bool> {
-        self.insert_trade_with_recovery(trade, stats, None, None)
+        self.insert_trade_with_paper_recovery(trade, stats, None, None, None)
     }
 
+    #[cfg(test)]
     pub fn insert_trade_with_recovery(
         &self,
         trade: &TradeRecord,
@@ -1912,6 +1913,7 @@ impl Database {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn get_trade_by_client_id(
         &self,
         client_order_id: &str,
@@ -2301,32 +2303,48 @@ impl Database {
     /// Legacy un-scoped grid stats accessor retained for backward-compatibility tests.
     pub fn load_stats(&self) -> Result<Option<(usize, usize, Decimal, Decimal)>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT total_trades, completed_cycles, total_realized_profit, total_volume_usdc FROM grid_stats WHERE id = 1;",
-        )?;
-        let mut rows = stmt.query([])?;
-
-        if let Some(row) = rows.next()? {
-            let total_trades: i64 = row.get(0)?;
-            let completed_cycles: i64 = row.get(1)?;
-            let profit_str: String = row.get(2)?;
-            let volume_str: String = row.get(3)?;
-
-            Ok(Some((
-                total_trades as usize,
-                completed_cycles as usize,
-                Decimal::from_str(&profit_str).unwrap_or(Decimal::ZERO),
-                Decimal::from_str(&volume_str).unwrap_or(Decimal::ZERO),
-            )))
-        } else {
-            Ok(None)
-        }
+        let row: Option<(i64, i64, String, String)> = conn
+            .query_row(
+                "SELECT total_trades, completed_cycles, total_realized_profit, total_volume_usdc FROM grid_stats WHERE id = 1;",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        row.map(|(trades, cycles, profit, volume)| {
+            Ok((
+                trades as usize,
+                cycles as usize,
+                Decimal::from_str(&profit).unwrap_or(Decimal::ZERO),
+                Decimal::from_str(&volume).unwrap_or(Decimal::ZERO),
+            ))
+        })
+        .transpose()
     }
 
     /// Legacy un-scoped grid stats writer retained for backward-compatibility tests.
     pub fn save_stats(&self, stats: &GridStats) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        save_stats_on(&conn, stats)
+        conn.execute(
+            r#"
+            INSERT INTO grid_stats (id, total_trades, completed_cycles, total_realized_profit, total_volume_usdc, updated_at)
+            VALUES (1, ?1, ?2, ?3, ?4, ?5)
+            ON CONFLICT(id) DO UPDATE SET
+                total_trades = excluded.total_trades,
+                completed_cycles = excluded.completed_cycles,
+                total_realized_profit = excluded.total_realized_profit,
+                total_volume_usdc = excluded.total_volume_usdc,
+                updated_at = excluded.updated_at;
+            "#,
+            params![
+                stats.total_trades as i64,
+                stats.completed_cycles as i64,
+                stats.total_realized_profit.to_string(),
+                stats.total_volume_usdc.to_string(),
+                Utc::now().to_rfc3339(),
+            ],
+        )
+        .context("Failed to save stats to SQLite database")?;
+        Ok(())
     }
 }
 
@@ -2780,30 +2798,6 @@ fn save_scoped_stats_on(
         "INSERT INTO scoped_grid_stats (symbol, mode, total_trades, completed_cycles, total_realized_profit, total_volume_usdc, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT(symbol, mode) DO UPDATE SET total_trades = excluded.total_trades, completed_cycles = excluded.completed_cycles, total_realized_profit = excluded.total_realized_profit, total_volume_usdc = excluded.total_volume_usdc, updated_at = excluded.updated_at;",
         params![symbol, mode.as_str(), stats.total_trades as i64, stats.completed_cycles as i64, stats.total_realized_profit.to_string(), stats.total_volume_usdc.to_string(), Utc::now().to_rfc3339()],
     )?;
-    Ok(())
-}
-
-fn save_stats_on(conn: &Connection, stats: &GridStats) -> Result<()> {
-    conn.execute(
-        r#"
-        INSERT INTO grid_stats (id, total_trades, completed_cycles, total_realized_profit, total_volume_usdc, updated_at)
-        VALUES (1, ?1, ?2, ?3, ?4, ?5)
-        ON CONFLICT(id) DO UPDATE SET
-            total_trades = excluded.total_trades,
-            completed_cycles = excluded.completed_cycles,
-            total_realized_profit = excluded.total_realized_profit,
-            total_volume_usdc = excluded.total_volume_usdc,
-            updated_at = excluded.updated_at;
-        "#,
-        params![
-            stats.total_trades as i64,
-            stats.completed_cycles as i64,
-            stats.total_realized_profit.to_string(),
-            stats.total_volume_usdc.to_string(),
-            Utc::now().to_rfc3339(),
-        ],
-    )
-    .context("Failed to save stats to SQLite database")?;
     Ok(())
 }
 

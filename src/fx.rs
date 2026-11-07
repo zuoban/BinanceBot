@@ -76,18 +76,22 @@ impl CnyRateCache {
 
         {
             let mut entries = self.entries.lock().await;
-            let entry = entries.entry(asset.to_string()).or_default();
-            if entry
-                .fetched_at
-                .is_some_and(|time| time.elapsed() < CACHE_TTL)
-                || entry
-                    .attempted_at
-                    .is_some_and(|time| time.elapsed() < RETRY_DELAY)
-            {
+            if entries.get(asset).is_some_and(|entry| {
+                entry
+                    .fetched_at
+                    .is_some_and(|time| time.elapsed() < CACHE_TTL)
+                    || entry
+                        .attempted_at
+                        .is_some_and(|time| time.elapsed() < RETRY_DELAY)
+            }) {
                 return Ok(());
             }
             // Set this before the request so concurrent refreshes share one attempt.
-            entry.attempted_at = Some(Instant::now());
+            if let Some(entry) = entries.get_mut(asset) {
+                entry.attempted_at = Some(Instant::now());
+            } else {
+                entries.entry(asset.to_string()).or_default().attempted_at = Some(Instant::now());
+            }
         }
 
         let response = self
@@ -113,9 +117,13 @@ impl CnyRateCache {
         }
 
         let mut entries = self.entries.lock().await;
-        let entry = entries.entry(asset.to_string()).or_default();
+        let entry = if let Some(entry) = entries.get_mut(asset) {
+            entry
+        } else {
+            entries.entry(asset.to_string()).or_default()
+        };
         entry.rate = Some(CnyRate {
-            asset: asset.to_string(),
+            asset: response.data.currency,
             cny_per_unit: rate,
             updated_at: Utc::now(),
         });

@@ -50,19 +50,31 @@ export const price = (value: unknown) => number(value, Math.min(10, Math.max(4, 
 export const trimFractionZeros = (value: string) => value.replace(/(\.\d*?[1-9])0+$|\.0+$/, '$1');
 export const compactNumber = (value: unknown, digits = 2) => trimFractionZeros(number(value, digits));
 export const compactPrice = (value: unknown) => trimFractionZeros(price(value));
+export function positivePrice(value: unknown, compact = false) {
+  const n = numeric(value);
+  return n !== null && n > 0 ? (compact ? compactPrice(n) : price(n)) : '--';
+}
+export function entryPriceText(position: { size: string; entry_price: string }, compact = false) {
+  const size = numeric(position.size), entry = numeric(position.entry_price);
+  return size !== null && size !== 0 && entry !== null && entry > 0 ? (compact ? compactPrice(entry) : price(entry)) : '--';
+}
 export const time = (value: string) => new Date(value).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
+function formatSeconds(seconds: number) {
+  const [amount, unit] = seconds < 60 ? [seconds, '秒'] : seconds < 3600 ? [Math.floor(seconds / 60), '分钟'] : seconds < 86400 ? [Math.floor(seconds / 3600), '小时'] : [Math.floor(seconds / 86400), '天'];
+  return `${amount}${unit}`;
+}
 export function relativeTime(value: string, now = Date.now()) {
   const timestamp = Date.parse(value);
   if (!Number.isFinite(timestamp)) return '--';
   const seconds = Math.floor(Math.abs(now - timestamp) / 1000);
-  const [amount, unit] = seconds < 60 ? [seconds, '秒'] : seconds < 3600 ? [Math.floor(seconds / 60), '分钟'] : seconds < 86400 ? [Math.floor(seconds / 3600), '小时'] : [Math.floor(seconds / 86400), '天'];
-  return `${amount}${unit}${timestamp > now ? '后' : '前'}`;
+  return `${formatSeconds(seconds)}${timestamp > now ? '后' : '前'}`;
 }
 /** How long ago a past moment was; a clock a hair ahead of `now` still reads as just now. */
 export function ageText(updatedAt: number, now = Date.now()) {
   const seconds = Math.max(0, Math.floor((now - updatedAt) / 1000));
+  if (!Number.isFinite(seconds)) return '--';
   if (seconds < 2) return '刚刚';
-  return relativeTime(new Date(now - seconds * 1000).toISOString(), now);
+  return `${formatSeconds(seconds)}前`;
 }
 export const beijingDay = (value = Date.now()) => new Date(value + 8 * 3600_000).toISOString().slice(0, 10);
 const normalizeFloatTotal = (total: number) => Math.abs(total) < 1e-12 ? 0 : Number(total.toPrecision(12));
@@ -146,6 +158,6 @@ export function accountGroups<T extends AccountObservation>(entries: T[], now = 
     const wallet = unavailable ? null : numeric(account.account.total_wallet_balance);
     const unrealized = valued ? numeric(account.account.unrealized_profit) : null;
     const rate = account.account_cny_rate?.asset === asset ? numeric(account.account_cny_rate.cny_per_unit) : null;
-    return { key: `${mode}:${asset}`, mode, asset, count: snapshots.length, equity: unavailable ? null : equity, available: unavailable ? null : available, wallet: unavailable ? null : wallet, unrealized: unavailable ? null : unrealized, ratio: unavailable ? null : availableRatio(available, wallet), cny: !unavailable && equity !== null && rate !== null ? equity * rate : null };
+    return { key: `${mode}:${asset}`, mode, asset, count: snapshots.length, equity, available, wallet, unrealized, ratio: availableRatio(available, wallet), cny: equity !== null && rate !== null ? equity * rate : null };
   });
 }

@@ -54,13 +54,7 @@ fn aggregate(
     let mut groups: BTreeMap<SnapshotBucketKey, Vec<(&BotSnapshot, u64)>> = BTreeMap::new();
     for (snapshot, sync_interval, account_id) in snapshots {
         let mode = snapshot.mode;
-        let asset = quote_asset(&snapshot.symbol).unwrap_or_else(|| {
-            if snapshot.account.asset.is_empty() {
-                &snapshot.symbol
-            } else {
-                &snapshot.account.asset
-            }
-        });
+        let asset = resolve_snapshot_asset(&snapshot.symbol, &snapshot.account.asset);
         groups
             .entry((
                 mode.as_str().to_owned(),
@@ -146,20 +140,44 @@ fn aggregate(
         .collect()
 }
 
+fn resolve_snapshot_asset<'a>(symbol: &'a str, account_asset: &'a str) -> &'a str {
+    quote_asset(symbol).unwrap_or(if account_asset.is_empty() {
+        symbol
+    } else {
+        account_asset
+    })
+}
+
+fn live_account_identity(
+    mode: TradingMode,
+    exchange: &crate::config::ExchangeConfig,
+) -> Option<[u8; 32]> {
+    (mode == TradingMode::Live).then(|| {
+        crate::exchange::client::BinanceFuturesClient::configured_account_identity(exchange)
+    })
+}
+
 async fn resolve_account_id(
     handle: &RuntimeHandle,
     cache: &mut HashMap<[u8; 32], String>,
-    identity: [u8; 32],
-) -> anyhow::Result<String> {
-    if let Some(id) = cache.get(&identity) {
-        return Ok(id.clone());
+    mode: TradingMode,
+    identity: Option<[u8; 32]>,
+) -> anyhow::Result<Option<String>> {
+    match identity {
+        Some(identity) => {
+            if let Some(id) = cache.get(&identity) {
+                return Ok(Some(id.clone()));
+            }
+            let id = handle
+                .db
+                .run_blocking(move |db| db.history_account_id(identity))
+                .await?;
+            cache.insert(identity, id.clone());
+            Ok(Some(id))
+        }
+        None if mode == TradingMode::Paper => Ok(Some(PAPER_SHARED_ACCOUNT_ID.to_owned())),
+        None => Ok(None),
     }
-    let id = handle
-        .db
-        .run_blocking(move |db| db.history_account_id(identity))
-        .await?;
-    cache.insert(identity, id.clone());
-    Ok(id)
 }
 
 pub(crate) async fn current_accounts(
@@ -195,25 +213,16 @@ pub(crate) async fn current_accounts(
         let Some(config) = config else { continue };
         let symbol = config.exchange.symbol.as_str();
         let mode = config.exchange.trading_mode();
-        let account_id = if mode == TradingMode::Live {
-            let key = crate::exchange::client::BinanceFuturesClient::configured_account_identity(
-                &config.exchange,
-            );
-            Some(resolve_account_id(handle, &mut identities, key).await?)
-        } else if mode == TradingMode::Paper {
-            Some(PAPER_SHARED_ACCOUNT_ID.to_owned())
-        } else {
-            None
-        };
-        let asset = if let Some(asset) = quote_asset(symbol) {
-            asset.to_owned()
-        } else {
-            let account = state.account.read().await;
-            if account.asset.is_empty() {
-                symbol.to_owned()
-            } else {
-                account.asset.clone()
-            }
+        let account_id = resolve_account_id(
+            handle,
+            &mut identities,
+            mode,
+            live_account_identity(mode, &config.exchange),
+        )
+        .await?;
+        let asset = match quote_asset(symbol) {
+            Some(asset) => asset.to_owned(),
+            None => resolve_snapshot_asset(symbol, &state.account.read().await.asset).to_owned(),
         };
         accounts
             .entry((mode.as_str().to_owned(), asset.clone(), account_id.clone()))
@@ -251,22 +260,15 @@ pub(crate) async fn collect_hourly(
     let observations = futures_util::future::join_all(states.iter().map(|state| async {
         let snapshot = state.snapshot_for_hourly().await;
         let config = state.config.read().await;
-        let identity = (snapshot.mode == TradingMode::Live).then(|| {
-            crate::exchange::client::BinanceFuturesClient::configured_account_identity(
-                &config.exchange,
-            )
-        });
+        let identity = live_account_identity(snapshot.mode, &config.exchange);
         (snapshot, config.exchange.sync_interval_secs, identity)
     }))
     .await;
     let mut identities = HashMap::new();
     let mut snapshots = Vec::with_capacity(observations.len());
     for (snapshot, interval, identity) in observations {
-        let account_id = match identity {
-            Some(identity) => Some(resolve_account_id(handle, &mut identities, identity).await?),
-            None if snapshot.mode == TradingMode::Paper => Some(PAPER_SHARED_ACCOUNT_ID.to_owned()),
-            None => None,
-        };
+        let account_id =
+            resolve_account_id(handle, &mut identities, snapshot.mode, identity).await?;
         snapshots.push((snapshot, interval, account_id));
     }
     Ok(Some(snapshots))

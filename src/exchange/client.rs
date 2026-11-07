@@ -321,6 +321,28 @@ impl BinanceFuturesClient {
         format!("{}&signature={}", params, signature)
     }
 
+    fn signed_url(&self, path: &str, params: &str) -> String {
+        let ts = self.current_timestamp();
+        let query = if params.is_empty() {
+            format!("recvWindow={}&timestamp={}", self.recv_window, ts)
+        } else {
+            format!(
+                "{}&recvWindow={}&timestamp={}",
+                params, self.recv_window, ts
+            )
+        };
+        format!("{}{}?{}", self.base_url, path, self.sign_params(&query))
+    }
+
+    fn hash_length_prefixed(parts: &[&[u8]]) -> [u8; 32] {
+        let mut hash = Sha256::new();
+        for value in parts {
+            hash.update((value.len() as u64).to_be_bytes());
+            hash.update(value);
+        }
+        hash.finalize().into()
+    }
+
     pub(crate) fn account_cache_key(&self) -> [u8; 32] {
         self.account_cache_key
     }
@@ -331,17 +353,12 @@ impl BinanceFuturesClient {
         api_secret: &str,
         recv_window: u64,
     ) -> [u8; 32] {
-        let mut hash = Sha256::new();
-        for value in [
+        Self::hash_length_prefixed(&[
             base_url.as_bytes(),
             api_key.as_bytes(),
             api_secret.as_bytes(),
             &recv_window.to_be_bytes(),
-        ] {
-            hash.update((value.len() as u64).to_be_bytes());
-            hash.update(value);
-        }
-        hash.finalize().into()
+        ])
     }
 
     // Recovery records belong to the exchange account, independent of request
@@ -355,12 +372,7 @@ impl BinanceFuturesClient {
     }
 
     fn identity_key(base_url: &str, api_key: &str) -> [u8; 32] {
-        let mut hash = Sha256::new();
-        for value in [base_url.as_bytes(), api_key.as_bytes()] {
-            hash.update((value.len() as u64).to_be_bytes());
-            hash.update(value);
-        }
-        hash.finalize().into()
+        Self::hash_length_prefixed(&[base_url.as_bytes(), api_key.as_bytes()])
     }
 
     fn rate_account_key(&self) -> [u8; 32] {
@@ -532,13 +544,7 @@ impl BinanceFuturesClient {
         class: RequestClass,
     ) -> Result<Vec<BinanceOrderResponse>> {
         self.reserve(1, class)?;
-        let ts = self.current_timestamp();
-        let query = format!(
-            "symbol={}&recvWindow={}&timestamp={}",
-            symbol, self.recv_window, ts
-        );
-        let signed_query = self.sign_params(&query);
-        let url = format!("{}/fapi/v1/openOrders?{}", self.base_url, signed_query);
+        let url = self.signed_url("/fapi/v1/openOrders", &format!("symbol={}", symbol));
 
         let resp = checked_response(self.send(self.client.get(&url)).await?).await?;
 
@@ -549,13 +555,10 @@ impl BinanceFuturesClient {
     /// Fetch an order's final status before treating it as a fill.
     pub async fn get_order(&self, symbol: &str, order_id: i64) -> Result<BinanceOrderResponse> {
         self.reserve(1, RequestClass::Critical)?;
-        let ts = self.current_timestamp();
-        let query = format!(
-            "symbol={}&orderId={}&recvWindow={}&timestamp={}",
-            symbol, order_id, self.recv_window, ts
+        let url = self.signed_url(
+            "/fapi/v1/order",
+            &format!("symbol={}&orderId={}", symbol, order_id),
         );
-        let signed_query = self.sign_params(&query);
-        let url = format!("{}/fapi/v1/order?{}", self.base_url, signed_query);
         let resp = self.send(self.client.get(&url)).await?;
         if !resp.status().is_success() {
             let status = resp.status();
@@ -608,15 +611,9 @@ impl BinanceFuturesClient {
         class: RequestClass,
     ) -> Result<Option<BinanceOrderResponse>> {
         self.reserve(1, class)?;
-        let ts = self.current_timestamp();
-        let query = format!(
-            "symbol={}&origClientOrderId={}&recvWindow={}&timestamp={}",
-            symbol, client_order_id, self.recv_window, ts
-        );
-        let url = format!(
-            "{}/fapi/v1/order?{}",
-            self.base_url,
-            self.sign_params(&query)
+        let url = self.signed_url(
+            "/fapi/v1/order",
+            &format!("symbol={}&origClientOrderId={}", symbol, client_order_id),
         );
         let resp = self.send(self.client.get(&url)).await?;
         if !resp.status().is_success() {
@@ -767,18 +764,12 @@ impl BinanceFuturesClient {
                 .from_id
                 .map(|id| format!("&fromId={}", id))
                 .unwrap_or_default();
-            let query = format!(
-                "symbol={}&orderId={}&limit=1000{}&recvWindow={}&timestamp={}",
-                symbol,
-                order_id,
-                cursor,
-                self.recv_window,
-                self.current_timestamp()
-            );
-            let url = format!(
-                "{}/fapi/v1/userTrades?{}",
-                self.base_url,
-                self.sign_params(&query)
+            let url = self.signed_url(
+                "/fapi/v1/userTrades",
+                &format!(
+                    "symbol={}&orderId={}&limit=1000{}",
+                    symbol, order_id, cursor
+                ),
             );
             let resp = match self.send(self.client.get(&url)).await {
                 Ok(resp) => resp,
@@ -924,7 +915,6 @@ impl BinanceFuturesClient {
             },
         )
         .map_err(|error| ExchangeError::RequestRejected(error.to_string()))?;
-        let ts = self.current_timestamp();
         let tif = if order.post_only { "GTX" } else { "GTC" };
 
         let reduce_only_param = if order.reduce_only {
@@ -932,12 +922,19 @@ impl BinanceFuturesClient {
         } else {
             ""
         };
-        let query = format!(
-            "symbol={}&side={}&type=LIMIT&timeInForce={}&price={}&quantity={}&newClientOrderId={}{}&recvWindow={}&timestamp={}",
-            order.symbol, order.side, tif, order.price, order.quantity, order.client_order_id, reduce_only_param, self.recv_window, ts
+        let url = self.signed_url(
+            "/fapi/v1/order",
+            &format!(
+                "symbol={}&side={}&type=LIMIT&timeInForce={}&price={}&quantity={}&newClientOrderId={}{}",
+                order.symbol,
+                order.side,
+                tif,
+                order.price,
+                order.quantity,
+                order.client_order_id,
+                reduce_only_param
+            ),
         );
-        let signed_query = self.sign_params(&query);
-        let url = format!("{}/fapi/v1/order?{}", self.base_url, signed_query);
 
         debug!(
             "Sending Binance order request: side={}, price={}, qty={}, tif={}",
@@ -966,19 +963,14 @@ impl BinanceFuturesClient {
         client_order_id: Option<&str>,
     ) -> Result<()> {
         self.reserve(1, RequestClass::Critical)?;
-        let ts = self.current_timestamp();
-        let mut query = format!(
-            "symbol={}&recvWindow={}&timestamp={}",
-            symbol, self.recv_window, ts
-        );
+        let mut params = format!("symbol={}", symbol);
         if let Some(id) = order_id {
-            query.push_str(&format!("&orderId={}", id));
+            params.push_str(&format!("&orderId={}", id));
         } else if let Some(cid) = client_order_id {
-            query.push_str(&format!("&origClientOrderId={}", cid));
+            params.push_str(&format!("&origClientOrderId={}", cid));
         }
 
-        let signed_query = self.sign_params(&query);
-        let url = format!("{}/fapi/v1/order?{}", self.base_url, signed_query);
+        let url = self.signed_url("/fapi/v1/order", &params);
 
         let resp = self.send(self.client.delete(&url)).await?;
         if !resp.status().is_success() {
@@ -991,13 +983,7 @@ impl BinanceFuturesClient {
     /// Fetch position risk information for symbol
     pub async fn get_position(&self, symbol: &str) -> Result<Option<BinancePositionRisk>> {
         self.reserve(5, RequestClass::Critical)?;
-        let ts = self.current_timestamp();
-        let query = format!(
-            "symbol={}&recvWindow={}&timestamp={}",
-            symbol, self.recv_window, ts
-        );
-        let signed_query = self.sign_params(&query);
-        let url = format!("{}/fapi/v2/positionRisk?{}", self.base_url, signed_query);
+        let url = self.signed_url("/fapi/v2/positionRisk", &format!("symbol={}", symbol));
 
         let resp = self.send(self.client.get(&url)).await?;
         if !resp.status().is_success() {
@@ -1012,10 +998,7 @@ impl BinanceFuturesClient {
     /// Fetch position risk for all symbols on the account.
     pub(crate) async fn get_all_positions(&self) -> Result<Vec<BinancePositionRisk>> {
         self.reserve(5, RequestClass::Normal)?;
-        let ts = self.current_timestamp();
-        let query = format!("recvWindow={}&timestamp={}", self.recv_window, ts);
-        let signed_query = self.sign_params(&query);
-        let url = format!("{}/fapi/v2/positionRisk?{}", self.base_url, signed_query);
+        let url = self.signed_url("/fapi/v2/positionRisk", "");
         let resp = self.send(self.client.get(&url)).await?;
         if !resp.status().is_success() {
             let body = resp.text().await.unwrap_or_default();
@@ -1038,10 +1021,7 @@ impl BinanceFuturesClient {
         class: RequestClass,
     ) -> Result<BinanceAccountInfoResponse> {
         self.reserve(5, class)?;
-        let ts = self.current_timestamp();
-        let query = format!("recvWindow={}&timestamp={}", self.recv_window, ts);
-        let signed_query = self.sign_params(&query);
-        let url = format!("{}/fapi/v2/account?{}", self.base_url, signed_query);
+        let url = self.signed_url("/fapi/v2/account", "");
 
         let resp = self.send(self.client.get(&url)).await?;
         if !resp.status().is_success() {

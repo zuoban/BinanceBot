@@ -131,17 +131,29 @@ impl GlobalPositionLimit {
                 && !self.membership_ready.load(Ordering::SeqCst);
         };
         let committed = self.committed_config.read().unwrap().clone();
-        let mut config = first.config.read().await.clone();
-        if let Some(ref committed) = committed {
-            committed.apply_to(&mut config);
-        }
-        let limit = config
-            .global_max_position_notional
-            .filter(|v| *v > Decimal::ZERO);
-        let margin_pct = config
-            .min_available_margin_pct
-            .filter(|pct| *pct > Decimal::ZERO);
-        let margin_guard = config.pause_on_zero_available_margin || margin_pct.is_some();
+        let committed_ref = committed.as_ref();
+        let (
+            global_max_position_notional,
+            min_available_margin_pct,
+            pause_on_zero_available_margin,
+        ) = {
+            let config = first.config.read().await;
+            match committed_ref {
+                Some(committed) => (
+                    committed.global_max_position_notional,
+                    committed.min_available_margin_pct,
+                    committed.pause_on_zero_available_margin,
+                ),
+                None => (
+                    config.global_max_position_notional,
+                    config.min_available_margin_pct,
+                    config.pause_on_zero_available_margin,
+                ),
+            }
+        };
+        let limit = global_max_position_notional.filter(|v| *v > Decimal::ZERO);
+        let margin_pct = min_available_margin_pct.filter(|pct| *pct > Decimal::ZERO);
+        let margin_guard = pause_on_zero_available_margin || margin_pct.is_some();
         if limit.is_none() && !margin_guard {
             self.enabled.store(false, Ordering::SeqCst);
             self.blocked.store(false, Ordering::SeqCst);
@@ -161,13 +173,21 @@ impl GlobalPositionLimit {
             let mut member_incomplete = !initialized
                 || !state.global_position_ready.load(Ordering::SeqCst)
                 || state.paper_restore_failed.load(Ordering::SeqCst);
-            let mut config = state.config.read().await.clone();
-            if let Some(ref committed) = committed {
-                committed.apply_to(&mut config);
-            }
-            let max_age = config
-                .exchange
-                .sync_interval_secs
+            let (sync_interval_secs, is_paper) = {
+                let config = state.config.read().await;
+                match committed_ref {
+                    Some(committed) => (
+                        committed.sync_interval_secs,
+                        committed.api_key.trim().is_empty()
+                            && committed.api_secret.trim().is_empty(),
+                    ),
+                    None => (
+                        config.exchange.sync_interval_secs,
+                        config.exchange.is_paper(),
+                    ),
+                }
+            };
+            let max_age = sync_interval_secs
                 .saturating_mul(3)
                 .max(30)
                 .min(i64::MAX as u64) as i64;
@@ -178,9 +198,7 @@ impl GlobalPositionLimit {
             };
             if margin_guard {
                 let account = state.current_account().await;
-                if account.asset.is_empty()
-                    || (!config.exchange.is_paper() && !fresh(account.update_time))
-                {
+                if account.asset.is_empty() || (!is_paper && !fresh(account.update_time)) {
                     member_incomplete = true;
                 } else if account.available_balance <= Decimal::ZERO
                     || margin_pct.is_some_and(|pct| {
@@ -197,27 +215,37 @@ impl GlobalPositionLimit {
                 initialized_incomplete |= initialized && member_incomplete;
                 continue;
             }
-            let position = state.position.read().await.clone();
-            if !config.exchange.is_paper() && !position.update_time.is_some_and(fresh) {
+            let (position_size, position_mark_price, position_update_time) = {
+                let position = state.position.read().await;
+                (position.size, position.mark_price, position.update_time)
+            };
+            if !is_paper && !position_update_time.is_some_and(fresh) {
                 member_incomplete = true;
             }
-            let ticker = state.ticker.read().await.clone();
-            let price = if ticker.mark_price > Decimal::ZERO && fresh(ticker.mark_update_time) {
-                ticker.mark_price
-            } else if position.mark_price > Decimal::ZERO && position.update_time.is_some_and(fresh)
+            let (ticker_mark_price, ticker_mark_update_time, ticker_last_price, ticker_update_time) = {
+                let ticker = state.ticker.read().await;
+                (
+                    ticker.mark_price,
+                    ticker.mark_update_time,
+                    ticker.last_price,
+                    ticker.update_time,
+                )
+            };
+            let price = if ticker_mark_price > Decimal::ZERO && fresh(ticker_mark_update_time) {
+                ticker_mark_price
+            } else if position_mark_price > Decimal::ZERO && position_update_time.is_some_and(fresh)
             {
-                position.mark_price
-            } else if ticker.last_price > Decimal::ZERO && fresh(ticker.update_time) {
-                ticker.last_price
+                position_mark_price
+            } else if ticker_last_price > Decimal::ZERO && fresh(ticker_update_time) {
+                ticker_last_price
             } else {
                 Decimal::ZERO
             };
-            if !position.size.is_zero() && price <= Decimal::ZERO {
+            if !position_size.is_zero() && price <= Decimal::ZERO {
                 member_incomplete = true;
             }
             if price > Decimal::ZERO {
-                match position
-                    .size
+                match position_size
                     .abs()
                     .checked_mul(price)
                     .and_then(|v| total.checked_add(v))
@@ -280,24 +308,29 @@ impl GlobalPositionLimit {
             }
             state.queue_global_cancel();
         }
-        if first_trigger && config.telegram.enabled {
-            let telegram = config.telegram.clone();
-            let notifier = first.telegram_notifier.clone();
-            let state = Arc::clone(first);
-            tokio::spawn(async move {
-                if let Err(error) = notifier
-                    .send_global_risk_notification(&telegram, &reason)
-                    .await
-                {
-                    warn!(
-                        "Failed to send Telegram global risk notification: {}",
-                        error
-                    );
-                    state
-                        .add_log("WARN", format!("Telegram 全局风控通知发送失败: {}", error))
-                        .await;
-                }
-            });
+        if first_trigger {
+            let telegram = match committed_ref {
+                Some(committed) => committed.telegram.clone(),
+                None => first.config.read().await.telegram.clone(),
+            };
+            if telegram.enabled {
+                let notifier = first.telegram_notifier.clone();
+                let state = Arc::clone(first);
+                tokio::spawn(async move {
+                    if let Err(error) = notifier
+                        .send_global_risk_notification(&telegram, &reason)
+                        .await
+                    {
+                        warn!(
+                            "Failed to send Telegram global risk notification: {}",
+                            error
+                        );
+                        state
+                            .add_log("WARN", format!("Telegram 全局风控通知发送失败: {}", error))
+                            .await;
+                    }
+                });
+            }
         }
         incomplete || position_limit_reached || zero_margin
     }
@@ -361,6 +394,25 @@ fn recent_trade_cache(trades: Vec<TradeRecord>) -> VecDeque<TradeRecord> {
         cache_recent_trade(&mut cache, trade);
     }
     cache
+}
+
+fn build_grid_stats(
+    scoped: Option<(usize, usize, Decimal, Decimal)>,
+    pnl: Option<(Decimal, Decimal, usize)>,
+) -> GridStats {
+    let mut stats = GridStats::default();
+    if let Some((total_trades, cycles, profit, volume)) = scoped {
+        stats.total_trades = total_trades;
+        stats.completed_cycles = cycles;
+        stats.total_realized_profit = profit;
+        stats.total_volume_usdc = volume;
+    }
+    if let Some((realized_pnl, commission, pending)) = pnl {
+        stats.total_realized_pnl = realized_pnl;
+        stats.total_commission = commission;
+        stats.pending_pnl_trades = pending;
+    }
+    stats
 }
 
 struct PendingSafetyPause<'a>(&'a AtomicU64);
@@ -587,23 +639,15 @@ impl AppState {
         let recent_trades = recent_trade_cache(saved_trades);
 
         // Restore cumulative grid stats from SQLite database if available
-        let mut initial_stats = GridStats::default();
-        if let Ok(Some((total_trades, cycles, profit, volume))) =
-            db.load_scoped_stats(&symbol, mode)
-        {
-            initial_stats.total_trades = total_trades;
-            initial_stats.completed_cycles = cycles;
-            initial_stats.total_realized_profit = profit;
-            initial_stats.total_volume_usdc = volume;
-        }
-        match db.get_pnl_totals(&symbol, mode) {
-            Ok((pnl, commission, pending)) => {
-                initial_stats.total_realized_pnl = pnl;
-                initial_stats.total_commission = commission;
-                initial_stats.pending_pnl_trades = pending;
+        let scoped_stats = db.load_scoped_stats(&symbol, mode).ok().flatten();
+        let pnl_totals = match db.get_pnl_totals(&symbol, mode) {
+            Ok(totals) => Some(totals),
+            Err(e) => {
+                warn!("Failed to load realized PnL totals: {}", e);
+                None
             }
-            Err(e) => warn!("Failed to load realized PnL totals: {}", e),
-        }
+        };
+        let initial_stats = build_grid_stats(scoped_stats, pnl_totals);
 
         Arc::new(Self {
             db,
@@ -985,24 +1029,14 @@ impl AppState {
                 ))
             })
             .await;
-        let (saved_stats, (pnl, commission, pending), trades) = match result {
+        let (saved_stats, pnl_totals, trades) = match result {
             Ok(result) => result,
             Err(e) => {
                 error!("Failed to load scoped statistics: {}", e);
                 return;
             }
         };
-        let mut updated = GridStats::default();
-        if let Some((trades, cycles, profit, volume)) = saved_stats {
-            updated.total_trades = trades;
-            updated.completed_cycles = cycles;
-            updated.total_realized_profit = profit;
-            updated.total_volume_usdc = volume;
-        }
-        updated.total_realized_pnl = pnl;
-        updated.total_commission = commission;
-        updated.pending_pnl_trades = pending;
-        *self.stats.write().await = updated;
+        *self.stats.write().await = build_grid_stats(saved_stats, Some(pnl_totals));
         *self.recent_trades.write().await = recent_trade_cache(trades);
     }
 
@@ -1315,10 +1349,7 @@ impl AppState {
     }
 
     async fn pause_for_shutdown_inner(self: &Arc<Self>) -> anyhow::Result<()> {
-        let global = self
-            .global_position_limit
-            .get()
-            .and_then(std::sync::Weak::upgrade);
+        let global = self.global_limit();
         let _global_guard = if let Some(coordinator) = &global {
             let guard = coordinator.lock.lock().await;
             coordinator.check_locked().await;
@@ -1357,10 +1388,7 @@ impl AppState {
     }
 
     async fn commit_shutdown_recovery_inner(self: &Arc<Self>) -> anyhow::Result<()> {
-        let global = self
-            .global_position_limit
-            .get()
-            .and_then(std::sync::Weak::upgrade);
+        let global = self.global_limit();
         let _global_guard = if let Some(coordinator) = &global {
             let guard = coordinator.lock.lock().await;
             coordinator.check_locked().await;
@@ -1434,9 +1462,7 @@ impl AppState {
         expected_mode: Option<TradingMode>,
     ) -> anyhow::Result<()> {
         let global = if status == BotStatus::Running {
-            self.global_position_limit
-                .get()
-                .and_then(std::sync::Weak::upgrade)
+            self.global_limit()
         } else {
             None
         };
@@ -1499,12 +1525,14 @@ impl AppState {
         self.pause_epoch.load(Ordering::SeqCst)
     }
 
-    pub(crate) async fn check_global_position_limit(&self) {
-        if let Some(global) = self
-            .global_position_limit
+    pub(crate) fn global_limit(&self) -> Option<Arc<GlobalPositionLimit>> {
+        self.global_position_limit
             .get()
             .and_then(std::sync::Weak::upgrade)
-        {
+    }
+
+    pub(crate) async fn check_global_position_limit(&self) {
+        if let Some(global) = self.global_limit() {
             global.check().await;
         }
     }
@@ -1529,10 +1557,7 @@ impl AppState {
     }
 
     pub(crate) fn publish_fill_reconciliation(self: &Arc<Self>) -> PendingFillReconciliation {
-        let global = self
-            .global_position_limit
-            .get()
-            .and_then(std::sync::Weak::upgrade);
+        let global = self.global_limit();
         if let Some(global) = &global {
             global
                 .pending_fill_reconciliations
@@ -1553,10 +1578,7 @@ impl AppState {
     }
 
     pub(crate) fn try_exchange_submission(self: &Arc<Self>) -> Option<ExchangeSubmissionGuard> {
-        let global = self
-            .global_position_limit
-            .get()
-            .and_then(std::sync::Weak::upgrade);
+        let global = self.global_limit();
         let barrier = if let Some(global) = &global {
             if global.enabled.load(Ordering::SeqCst) {
                 Some(global.submission_barrier.clone().try_read_owned().ok()?)
@@ -1589,9 +1611,7 @@ impl AppState {
             return None;
         }
         if self
-            .global_position_limit
-            .get()
-            .and_then(std::sync::Weak::upgrade)
+            .global_limit()
             .is_some_and(|global| global.blocks_submission())
         {
             return None;
@@ -1619,9 +1639,7 @@ impl AppState {
     pub fn is_shutting_down(&self) -> bool {
         self.shutdown_requested.load(Ordering::SeqCst)
             || self
-                .global_position_limit
-                .get()
-                .and_then(std::sync::Weak::upgrade)
+                .global_limit()
                 .is_some_and(|global| global.shutdown_requested.load(Ordering::SeqCst))
     }
 

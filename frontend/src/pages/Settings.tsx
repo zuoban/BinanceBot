@@ -14,15 +14,37 @@ const DatabaseSettings = lazy(() => import('../components/DatabaseSettings').the
 
 type GlobalForm = GlobalConfig & { api_key?: string; api_secret?: string; telegram_bot_token?: string; clear_api_credentials: boolean; clear_telegram_credentials: boolean };
 /** Verify unsaved credentials against the exchange or Telegram; nothing is persisted by the probe. */
-function ProbeButton({ label, path, body, disabled }: { label: string; path: string; body: () => Record<string, unknown>; disabled?: boolean }) {
+function ProbeButton({ label, path, body, disabled, resetKey }: { label: string; path: string; body: () => Record<string, unknown>; disabled?: boolean; resetKey?: string }) {
   const { message } = App.useApp();
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
+  const running = useRef(false);
+  const mounted = useRef(true);
+  const activeKey = useRef(resetKey);
+  activeKey.current = resetKey;
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+  useEffect(() => { setResult(null); }, [resetKey, disabled]);
   const run = async () => {
+    if (running.current || disabled) return;
+    running.current = true;
+    const key = activeKey.current;
     setBusy(true); setResult(null);
-    try { setResult({ ok: true, text: await post<string>(path, body()) }); }
-    catch (error) { const text = (error as Error).message; setResult({ ok: false, text }); message.error(text); }
-    finally { setBusy(false); }
+    try {
+      const text = await post<string>(path, body());
+      if (mounted.current && activeKey.current === key) setResult({ ok: true, text });
+    } catch (error) {
+      if (mounted.current && activeKey.current === key) {
+        const text = (error as Error).message;
+        setResult({ ok: false, text });
+        message.error(text);
+      }
+    } finally {
+      running.current = false;
+      if (mounted.current) setBusy(false);
+    }
   };
   return <div className="probe">
     <Button onClick={() => void run()} loading={busy} disabled={disabled}>{label}</Button>
@@ -116,8 +138,14 @@ function GlobalSettings() {
       throw error;
     }
   };
+  const apiKey = Form.useWatch('api_key', form);
+  const apiSecret = Form.useWatch('api_secret', form);
+  const recvWindow = Form.useWatch('recv_window', form);
+  const botToken = Form.useWatch('telegram_bot_token', form);
+  const chatId = Form.useWatch('telegram_chat_id', form);
   const clearApi = !!Form.useWatch('clear_api_credentials', form);
   const clearTelegram = !!Form.useWatch('clear_telegram_credentials', form);
+  const version = baseline.current?.version ?? query.data?.version ?? '';
   return <>
     <ErrorNotice error={query.error} retry={() => void query.refetch()} />
     <ErrorNotice error={mutation.error} />
@@ -137,6 +165,7 @@ function GlobalSettings() {
         </Row>
         <div className="settings-card-footer">
           <ProbeButton label="测试连接" path="/api/global/test-exchange" disabled={!ready || edit.saving || Boolean(clearApi)}
+            resetKey={JSON.stringify([version, apiKey ?? '', apiSecret ?? '', recvWindow ?? '', clearApi])}
             body={() => ({ api_key: form.getFieldValue('api_key'), api_secret: form.getFieldValue('api_secret'), recv_window: form.getFieldValue('recv_window') })} />
           <Form.Item name="clear_api_credentials" valuePropName="checked" className="settings-checkbox-item"><Checkbox>清除已保存的 API Key 和 Secret（清除后所有交易对将以模拟盘运行）</Checkbox></Form.Item>
         </div>
@@ -156,17 +185,18 @@ function GlobalSettings() {
             <Row gutter={[16, 16]}>
               <Col span={24}><Form.Item name="telegram_enabled" label="通知开关" valuePropName="checked"><Switch checkedChildren="开启" unCheckedChildren="关闭" /></Form.Item></Col>
               <Col xs={24} sm={12}><Form.Item name="telegram_bot_token" label="Bot Token" extra={query.data?.has_telegram_bot_token ? '已保存 Token，留空保持不变。' : '尚未配置 Token。'}><Input.Password autoComplete="new-password" disabled={!ready || edit.saving || clearTelegram} /></Form.Item></Col>
-              <Col xs={24} sm={12}><Form.Item name="telegram_chat_id" label="Chat ID" extra="向机器人发送消息后，可通过 Telegram Bot API 的 getUpdates 获取会话 ID。"><Input /></Form.Item></Col>
+              <Col xs={24} sm={12}><Form.Item name="telegram_chat_id" label="Chat ID" extra="向机器人发送消息后，可通过 Telegram Bot API 的 getUpdates 获取会话 ID。"><Input disabled={!ready || edit.saving || clearTelegram} /></Form.Item></Col>
             </Row>
             <div className="settings-card-footer">
               <ProbeButton label="发送测试消息" path="/api/global/test-telegram" disabled={!ready || edit.saving || Boolean(clearTelegram)}
+                resetKey={JSON.stringify([version, botToken ?? '', chatId ?? '', clearTelegram])}
                 body={() => ({ bot_token: form.getFieldValue('telegram_bot_token'), chat_id: form.getFieldValue('telegram_chat_id') })} />
               <Form.Item name="clear_telegram_credentials" valuePropName="checked" className="settings-checkbox-item"><Checkbox>清除 Telegram 凭证（请先关闭通知）</Checkbox></Form.Item>
             </div>
           </Card>
         </Col>
       </Row>
-      <div className={`save-bar${edit.dirty ? ' save-bar-dirty' : ''}`}><span className="muted" role="status">{edit.dirty ? '有未保存的修改' : '所有修改已保存'}</span><Space wrap><Button onClick={async () => { if (edit.dirty && !await modal.confirm({ title: '放弃未保存的修改？', okText: '还原', cancelText: '继续编辑' })) return; if (query.data) fill(query.data); edit.setDirty(false); }}>还原</Button><Button type="primary" htmlType="submit" loading={mutation.isPending}>保存全局设置</Button></Space></div>
+      <div className={`save-bar${edit.dirty ? ' save-bar-dirty' : ''}`}><span className="muted" role="status">{edit.dirty ? '有未保存的修改' : '所有修改已保存'}</span><Space wrap><Button onClick={async () => { if (edit.dirty && !await modal.confirm({ title: '放弃未保存的修改？', okText: '还原', cancelText: '继续编辑' })) return; if (baseline.current) fill(baseline.current); else if (query.data) fill(query.data); edit.setDirty(false); mutation.reset(); }}>还原</Button><Button type="primary" htmlType="submit" loading={mutation.isPending}>保存全局设置</Button></Space></div>
     </Form>
   </>;
 }
@@ -177,6 +207,7 @@ function ServerSettings() {
   const { message, modal } = App.useApp();
   const query = useQuery({ queryKey: ['server-config'], queryFn: ({ signal }) => api<ServerConfig>('/api/server/config', { signal }) });
   const baseline = useRef<ServerConfig | null>(null);
+  const submitting = useRef(false);
   useEffect(() => { if (query.data && !ready) { baseline.current = query.data; form.setFieldsValue(query.data.saved); setReady(true); } }, [query.data, ready, form]);
   useEffect(() => () => { edit.setDirty(false); edit.setSaving(false); }, [edit.setDirty, edit.setSaving]);
   const mutation = useMutation({
@@ -184,7 +215,7 @@ function ServerSettings() {
     onMutate: () => edit.setSaving(true),
     onSuccess: data => { baseline.current = data; form.setFieldsValue(data.saved); edit.setDirty(false); message.success('服务设置已保存，重启后生效'); void query.refetch(); },
     onError: error => message.error(error.message),
-    onSettled: () => edit.setSaving(false),
+    onSettled: () => { submitting.current = false; edit.setSaving(false); },
   });
   return <><ErrorNotice error={query.error} retry={() => void query.refetch()} /><ErrorNotice error={mutation.error} />
     {((mutation.error as { status?: number } | null)?.status === 409 || mutation.error?.message.includes('服务设置已被其他请求修改')) && <Button onClick={async () => {
@@ -193,13 +224,13 @@ function ServerSettings() {
       if (!result.error && result.data) { baseline.current = result.data; form.setFieldsValue(result.data.saved); edit.setDirty(false); mutation.reset(); }
     }}>重新加载服务设置</Button>}
     <Card title="监听设置" className="settings-card"><Alert type="info" showIcon title={`当前监听：${query.data?.active.host ?? '--'}:${query.data?.active.port ?? '--'}。修改后重启生效；使用 Docker 时请同时调整代理配置。`} />
-      <Form form={form} layout="vertical" className="settings-fields" disabled={!ready || edit.saving} onValuesChange={() => edit.setDirty(true)} onFinish={v => mutation.mutate(v)}>
+      <Form form={form} layout="vertical" className="settings-fields" disabled={!ready || edit.saving} onValuesChange={() => edit.setDirty(true)} onFinish={v => { if (submitting.current) return; submitting.current = true; mutation.mutate(v); }}>
         <Row gutter={[20, 16]}><Col xs={24} md={12}><Form.Item name="host" label="监听地址" rules={[{ required: true }]}><Input /></Form.Item></Col>
           <Col xs={24} md={12}><Form.Item name="port" label="端口" rules={[{ required: true }]}><InputNumber min={1} max={65535} precision={0} className="full-width-input" /></Form.Item></Col></Row>
         <div className="settings-card-footer settings-card-actions">
           <span className="muted" role="status">{edit.dirty ? '有未保存的修改' : '修改后需重启后端生效'}</span>
           <Space wrap>
-            <Button onClick={async () => { if (edit.dirty && !await modal.confirm({ title: '放弃未保存的修改？', okText: '还原', cancelText: '继续编辑' })) return; if (baseline.current) form.setFieldsValue(baseline.current.saved); edit.setDirty(false); }}>还原</Button>
+            <Button onClick={async () => { if (edit.dirty && !await modal.confirm({ title: '放弃未保存的修改？', okText: '还原', cancelText: '继续编辑' })) return; if (baseline.current) form.setFieldsValue(baseline.current.saved); edit.setDirty(false); mutation.reset(); }}>还原</Button>
             <Button type="primary" htmlType="submit" loading={mutation.isPending}>保存监听设置</Button>
           </Space>
         </div>

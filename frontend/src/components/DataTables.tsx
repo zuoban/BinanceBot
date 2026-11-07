@@ -11,6 +11,13 @@ import { copyText, downloadCsv, toCsv } from '../lib/exportCsv';
 
 const side = (value: string) => <span className={`side-tag side-${value === 'BUY' ? 'buy' : 'sell'}`}><span aria-hidden="true">{value === 'BUY' ? '↑' : '↓'}</span>{value === 'BUY' ? '买入' : '卖出'}</span>;
 const purposeLabel: Record<string, string> = { GRID: '网格', TAKE_PROFIT: '止盈', REMAINDER: '余量合并', LEGACY: '历史订单' };
+function orderPurpose(o: Order) {
+  return purposeLabel[o.purpose] ?? (o.is_take_profit ? '止盈' : '历史订单');
+}
+function RelativeTime({ value, now, className }: { value: string; now: number; className?: string }) {
+  const timestamp = Date.parse(value);
+  return <span className={className} title={Number.isFinite(timestamp) ? `${time(value)}（北京时间）` : undefined}>{relativeTime(value, now)}</span>;
+}
 /** Click-to-copy for a price or quantity. The visible text stays the formatted value; the raw value is what gets copied. */
 function Copyable({ value, children }: { value: string; children: React.ReactNode }) {
   const { message } = App.useApp();
@@ -20,12 +27,12 @@ function Copyable({ value, children }: { value: string; children: React.ReactNod
 }
 
 type SideFilter = 'ALL' | 'BUY' | 'SELL';
-const sideOptions = [{ value: 'ALL', label: '全部' }, { value: 'BUY', label: '买入' }, { value: 'SELL', label: '卖出' }];
-function SideFilterBar({ value, onChange, shown, total, onExport, exportLabel }: { value: SideFilter; onChange: (value: SideFilter) => void; shown: number; total: number; onExport: () => void; exportLabel: string }) {
+const sideOptions: { value: SideFilter; label: string }[] = [{ value: 'ALL', label: '全部' }, { value: 'BUY', label: '买入' }, { value: 'SELL', label: '卖出' }];
+function TableFilterBar<T extends string>({ label, value, onChange, options, shown, total, onExport }: { label: string; value: T; onChange: (value: T) => void; options: { value: T; label: string }[]; shown: number; total: number; onExport: () => void }) {
   return <div className="table-toolbar">
-    <Segmented<SideFilter> size="small" aria-label="按方向筛选" value={value} onChange={onChange} options={sideOptions as { value: SideFilter; label: string }[]} />
+    <Segmented<T> size="small" aria-label={label} value={value} onChange={onChange} options={options} />
     <span className="muted" role="status">显示 {shown} / {total} 条</span>
-    <Button size="small" icon={<DownloadOutlined />} disabled={!shown} onClick={onExport}>{exportLabel}</Button>
+    <Button size="small" icon={<DownloadOutlined />} disabled={!shown} onClick={onExport}>导出 CSV</Button>
   </div>;
 }
 
@@ -34,7 +41,7 @@ export function OrdersTable({ orders, mark }: { orders: Order[]; mark?: string }
   const rows = useMemo(() => filter === 'ALL' ? orders : orders.filter(order => order.side === filter), [orders, filter]);
   const exportRows = () => downloadCsv(`orders-${beijingDay()}.csv`, toCsv(
     ['方向', '价格', '数量', '金额', '用途', '状态', '时间（北京）'],
-    rows.map(o => [o.side === 'BUY' ? '买入' : '卖出', o.price, o.quantity, o.amount_usdc, purposeLabel[o.purpose] ?? (o.is_take_profit ? '止盈' : '历史订单'), o.status, time(o.created_at)]),
+    rows.map(o => [o.side === 'BUY' ? '买入' : '卖出', o.price, o.quantity, o.amount_usdc, orderPurpose(o), o.status, time(o.created_at)]),
   ));
   const columns: ColumnsType<Order> = [
     { title: '方向', dataIndex: 'side', render: side, width: 90, fixed: 'left' },
@@ -42,15 +49,15 @@ export function OrdersTable({ orders, mark }: { orders: Order[]; mark?: string }
     { title: '距标记价格', align: 'right', className: 'table-numeric', render: (_, o) => priceDiffPercent(o.price, mark) ?? '--' },
     { title: '数量', align: 'right', className: 'table-numeric', dataIndex: 'quantity', render: price },
     { title: '金额', align: 'right', className: 'table-numeric', dataIndex: 'amount_usdc', render: (v: string) => number(v) },
-    { title: '用途', render: (_, o) => purposeLabel[o.purpose] ?? (o.is_take_profit ? '止盈' : '历史订单') },
+    { title: '用途', render: (_, o) => orderPurpose(o) },
     { title: '状态', dataIndex: 'status' },
     { title: '时间（北京）', dataIndex: 'created_at', render: time, width: 185 },
   ];
-  return <><SideFilterBar value={filter} onChange={setFilter} shown={rows.length} total={orders.length} onExport={exportRows} exportLabel="导出 CSV" /><div className="table-desktop"><p className="table-scroll-hint">左右滑动查看完整挂单信息</p><Table<Order> rowKey="client_order_id" columns={columns} dataSource={rows} size="small" scroll={{ x: 900 }}
+  return <><TableFilterBar label="按方向筛选" value={filter} onChange={setFilter} options={sideOptions} shown={rows.length} total={orders.length} onExport={exportRows} /><div className="table-desktop"><p className="table-scroll-hint">左右滑动查看完整挂单信息</p><Table<Order> rowKey="client_order_id" columns={columns} dataSource={rows} size="small" scroll={{ x: 900 }}
     pagination={{ pageSize: 15, showSizeChanger: false, hideOnSinglePage: true }}
     expandable={{ rowExpandable: o => !!o.merge_sources?.length, expandedRowRender: o => <ul>{o.merge_sources.map(source => <li key={source.client_order_id}>{source.client_order_id} · {price(source.price)} × {price(source.quantity)}</li>)}</ul> }} /></div>
     <div className="table-mobile">{rows.length ? <ul className="trade-list" aria-label="挂单列表">{rows.map(o => <li className="trade-list-item" key={o.client_order_id}>
-      <div className="trade-list-heading">{side(o.side)}<strong><Copyable value={o.price}>{price(o.price)}</Copyable></strong><span className="trade-list-time">{purposeLabel[o.purpose] ?? (o.is_take_profit ? '止盈' : '历史订单')}</span></div>
+      <div className="trade-list-heading">{side(o.side)}<strong><Copyable value={o.price}>{price(o.price)}</Copyable></strong><span className="trade-list-time">{orderPurpose(o)}</span></div>
       <dl>
         <div><dt>数量</dt><dd>{price(o.quantity)}</dd></div>
         <div><dt>金额</dt><dd>{number(o.amount_usdc)}</dd></div>
@@ -69,7 +76,7 @@ export function TradesTable({ trades: allTrades, overview = false }: { trades: T
   const columns: ColumnsType<Trade> = [
     ...(overview ? [{ title: '交易对', dataIndex: 'symbol', className: 'trade-symbol', width: 130 }] : []),
     { title: '方向', dataIndex: 'side', render: side, width: 90, fixed: overview ? undefined : 'left' },
-    { title: overview ? '成交时间' : '时间（北京）', dataIndex: 'timestamp', render: overview ? (value: string) => <span title={Number.isFinite(Date.parse(value)) ? `${time(value)}（北京时间）` : undefined}>{relativeTime(value, now)}</span> : time, width: overview ? 90 : 185 },
+    { title: overview ? '成交时间' : '时间（北京）', dataIndex: 'timestamp', render: overview ? (value: string) => <RelativeTime value={value} now={now} /> : time, width: overview ? 90 : 185 },
     { title: '成交价格', align: 'right', className: 'table-numeric', dataIndex: 'price', render: (v: string) => overview ? price(v) : <Copyable value={v}>{price(v)}</Copyable> },
     { title: '数量', align: 'right', className: 'table-numeric', dataIndex: 'quantity', render: price },
     { title: '金额', align: 'right', className: 'table-numeric', dataIndex: 'amount_usdc', render: (v: string) => number(v) },
@@ -79,12 +86,12 @@ export function TradesTable({ trades: allTrades, overview = false }: { trades: T
     { title: '备注', dataIndex: 'note', ellipsis: true },
   ];
   return <div>
-    {!overview && <SideFilterBar value={filter} onChange={setFilter} shown={trades.length} total={allTrades.length} onExport={exportRows} exportLabel="导出 CSV" />}
+    {!overview && <TableFilterBar label="按方向筛选" value={filter} onChange={setFilter} options={sideOptions} shown={trades.length} total={allTrades.length} onExport={exportRows} />}
     {!overview && <p className="table-scroll-hint">左右滑动查看完整成交信息</p>}
     {overview && <p className="overview-trades-scroll-hint">左右滑动查看完整成交信息</p>}
     <div className={overview ? 'overview-trades-desktop' : 'table-desktop'}><Table<Trade> rowKey="trade_id" columns={columns} dataSource={trades} size="small" scroll={{ x: 1000 }} pagination={overview ? false : { pageSize: 15, showSizeChanger: false, hideOnSinglePage: true }} /></div>
     {!overview && <div className="table-mobile">{trades.length ? <ul className="trade-list" aria-label="成交列表">{trades.slice(0, 50).map(trade => <li className="trade-list-item" key={trade.trade_id}>
-      <div className="trade-list-heading">{side(trade.side)}<strong><Copyable value={trade.price}>{price(trade.price)}</Copyable></strong><span className="trade-list-time" title={Number.isFinite(Date.parse(trade.timestamp)) ? `${time(trade.timestamp)}（北京时间）` : undefined}>{relativeTime(trade.timestamp, now)}</span></div>
+      <div className="trade-list-heading">{side(trade.side)}<strong><Copyable value={trade.price}>{price(trade.price)}</Copyable></strong><RelativeTime value={trade.timestamp} now={now} className="trade-list-time" /></div>
       <dl>
         <div><dt>数量</dt><dd>{price(trade.quantity)}</dd></div>
         <div><dt>金额</dt><dd>{number(trade.amount_usdc)}</dd></div>
@@ -92,7 +99,7 @@ export function TradesTable({ trades: allTrades, overview = false }: { trades: T
       </dl>
     </li>)}</ul> : <div className="trade-list-empty">暂无成交记录</div>}{trades.length > 50 && <p className="muted">仅显示最近 50 条，完整数据请导出 CSV。</p>}</div>}
     {overview && <div className="overview-trades-mobile">{trades.length ? <ul className="trade-list" aria-label="成交列表">{trades.map(trade => <li className="trade-list-item" key={trade.trade_id}>
-      <div className="trade-list-heading"><strong>{trade.symbol}</strong>{side(trade.side)}<span className="trade-list-time" title={Number.isFinite(Date.parse(trade.timestamp)) ? `${time(trade.timestamp)}（北京时间）` : undefined}>{relativeTime(trade.timestamp, now)}</span></div>
+      <div className="trade-list-heading"><strong>{trade.symbol}</strong>{side(trade.side)}<RelativeTime value={trade.timestamp} now={now} className="trade-list-time" /></div>
       <dl>
         <div><dt>成交均价</dt><dd>{price(trade.price)}</dd></div>
         <div><dt>金额</dt><dd>{number(trade.amount_usdc)}</dd></div>
@@ -103,23 +110,20 @@ export function TradesTable({ trades: allTrades, overview = false }: { trades: T
 }
 const levels = ['ALL', 'ERROR', 'WARN', 'INFO', 'DEBUG'] as const;
 type LevelFilter = typeof levels[number];
+const levelOptions: { value: LevelFilter; label: string }[] = levels.map(value => ({ value, label: value === 'ALL' ? '全部' : value }));
 export function LogsTable({ logs }: { logs: Log[] }) {
   const [level, setLevel] = useState<LevelFilter>('ALL');
   const rows = useMemo(() => level === 'ALL' ? logs : logs.filter(log => log.level === level), [logs, level]);
   const exportRows = () => downloadCsv(`logs-${beijingDay()}.csv`, toCsv(['时间（北京）', '级别', '内容'], rows.map(l => [time(l.timestamp), l.level, l.message])));
   return <>
-    <div className="table-toolbar">
-      <Segmented<LevelFilter> size="small" aria-label="按级别筛选" value={level} onChange={setLevel} options={levels.map(value => ({ value, label: value === 'ALL' ? '全部' : value }))} />
-      <span className="muted" role="status">显示 {rows.length} / {logs.length} 条</span>
-      <Button size="small" icon={<DownloadOutlined />} disabled={!rows.length} onClick={exportRows}>导出 CSV</Button>
-    </div>
+    <TableFilterBar label="按级别筛选" value={level} onChange={setLevel} options={levelOptions} shown={rows.length} total={logs.length} onExport={exportRows} />
     <div className="table-desktop"><p className="table-scroll-hint">左右滑动查看完整日志</p>
     <Table<Log> rowKey={l => `${l.timestamp}-${l.level}-${l.message}`} dataSource={rows} size="small" scroll={{ x: 600 }} pagination={{ pageSize: 30, showSizeChanger: false }} columns={[
       { title: '时间（北京）', dataIndex: 'timestamp', render: time, width: 185 },
       { title: '级别', dataIndex: 'level', width: 90, render: v => <span className={`log-level log-level-${String(v).toLowerCase()}`}>{v}</span> },
       { title: '内容', dataIndex: 'message', className: 'log-message' },
     ]} /></div>
-    <div className="table-mobile">{rows.length ? <ul className="trade-list" aria-label="日志列表">{rows.slice(0, 100).map(l => <li className="trade-list-item" key={`${l.timestamp}-${l.level}-${l.message}`}>
+    <div className="table-mobile">{rows.length ? <ul className="trade-list" aria-label="日志列表">{rows.slice(0, 100).map((l, i) => <li className="trade-list-item" key={`${l.timestamp}-${l.level}-${i}-${l.message}`}>
       <div className="trade-list-heading"><span className={`log-level log-level-${l.level.toLowerCase()}`}>{l.level}</span><span className="trade-list-time">{time(l.timestamp)}</span></div>
       <p className="log-message">{l.message}</p>
     </li>)}</ul> : <div className="trade-list-empty">暂无日志</div>}{rows.length > 100 && <p className="muted">仅显示最近 100 条，完整数据请导出 CSV。</p>}</div>
