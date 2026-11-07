@@ -4,7 +4,7 @@ import { App, Button, Drawer, Modal } from 'antd';
 import { AppstoreOutlined, ArrowDownOutlined, ArrowUpOutlined, BulbOutlined, EditOutlined, LineChartOutlined, LogoutOutlined, MenuOutlined, PauseOutlined, PlayCircleOutlined, PlusOutlined, QuestionCircleOutlined, ReloadOutlined, SearchOutlined, SettingOutlined, StopOutlined } from '@ant-design/icons';
 import { useLiveAccounts, usePairs } from '../lib/queries';
 import { AccountsContext, EditContext, useSession } from '../lib/session';
-import { accountGroups, compactNumber, statusLabel } from '../lib/format';
+import { accountGroups, compactNumber, ratioText, statusLabel } from '../lib/format';
 import type { Mode, Pair } from '../lib/types';
 import { ControlProvider, useControls } from './Controls';
 import { CommandPalette, type Command } from './CommandPalette';
@@ -35,11 +35,11 @@ export default function Shell() {
   const [dirty, setDirty] = useState(false), [saving, setSaving] = useState(false);
   const { modal, message } = App.useApp();
   const { logout, authEnabled } = useSession();
-  const groups = accountGroups(accounts);
+  const groups = accountGroups(accounts, liveAccounts.now);
   const alert = !!liveAccounts.error || liveAccounts.stale || accounts.some(entry => entry.account_observation_stale || entry.snapshot.status === 'ERROR');
   const withAlert = (title: string) => alert ? `⚠ ${title}` : title;
   useDocumentTitle(location.pathname.match(/^\/pairs\/(?!new\/?$)[^/]+\/?$/) ? null : withAlert(groups.length ? groups.map(group => {
-    return `${compactNumber(group.equity)} | ${group.ratio === null ? '--' : `${compactNumber(group.ratio)}%`}`;
+    return `${compactNumber(group.equity)} | ${ratioText(group.ratio, true)}`;
   }).join(' / ') : defaultTitle));
   const blocker = useBlocker(({ currentLocation, nextLocation }) => (dirty || saving) && currentLocation.pathname !== nextLocation.pathname);
   useEffect(() => {
@@ -89,7 +89,7 @@ export default function Shell() {
       <button type="button" className={`bottombar-item${page === 'pair' ? ' bottombar-item-active' : ''}`} aria-label="切换或查看交易对" aria-expanded={drawer} onClick={() => setDrawer(open => !open)}><LineChartOutlined aria-hidden="true" /><span>交易对</span></button>
       <Link to="/settings" className={`bottombar-item${page === 'settings' ? ' bottombar-item-active' : ''}`} aria-current={page === 'settings' ? 'page' : undefined}><SettingOutlined aria-hidden="true" /><span>设置</span></Link>
     </nav>
-    <PaletteHost open={palette} setOpen={setPalette} pairs={currentPairs} stale={!!pairs.error || !!liveAccounts.error || liveAccounts.stale || !!pairModeChanged || Date.now() - pairs.dataUpdatedAt > 10_000} authEnabled={authEnabled} saving={saving} onLogout={logOut} />
+    <PaletteHost open={palette} setOpen={setPalette} pairs={currentPairs} stale={!!pairs.error || !!liveAccounts.error || liveAccounts.stale || !!pairModeChanged || liveAccounts.now - pairs.dataUpdatedAt > 10_000} authEnabled={authEnabled} saving={saving} onLogout={logOut} />
   </div></ControlProvider></AccountsContext.Provider></EditContext.Provider>;
 }
 

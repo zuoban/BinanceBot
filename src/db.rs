@@ -440,16 +440,8 @@ impl Database {
         let _export = self.try_analysis_export()?;
         let snapshot = self.backup_to_memory()?;
 
-        let config_json: Option<String> = snapshot
-            .query_row(
-                "SELECT config_json FROM app_config WHERE id = 1",
-                [],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if let Some(json) = config_json {
+        if let Some(mut config) = load_config_on(&snapshot)? {
             // Typed serialization also drops unrecognized config fields.
-            let mut config: AppConfig = serde_json::from_str(&json)?;
             config.exchange.api_key.clear();
             config.exchange.api_secret.clear();
             config.telegram.bot_token.clear();
@@ -967,18 +959,7 @@ impl Database {
     }
 
     pub fn load_config(&self) -> Result<Option<AppConfig>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT config_json FROM app_config WHERE id = 1;")?;
-        let mut rows = stmt.query([])?;
-
-        if let Some(row) = rows.next()? {
-            let json_str: String = row.get(0)?;
-            let config: AppConfig = serde_json::from_str(&json_str)
-                .context("Failed to deserialize AppConfig from SQLite database")?;
-            Ok(Some(config))
-        } else {
-            Ok(None)
-        }
+        load_config_on(&self.conn.lock().unwrap())
     }
 
     pub fn save_config(&self, config: &AppConfig) -> Result<()> {
@@ -1951,13 +1932,8 @@ impl Database {
         ).optional()?;
         value
             .map(|(side, price, quantity)| {
-                let side = match side.as_str() {
-                    "BUY" => OrderSide::Buy,
-                    "SELL" => OrderSide::Sell,
-                    _ => anyhow::bail!("Invalid paired opening side: {}", side),
-                };
                 Ok((
-                    side,
+                    parse_order_side(&side)?,
                     Decimal::from_str(&price)?,
                     Decimal::from_str(&quantity)?,
                 ))
@@ -1996,11 +1972,7 @@ impl Database {
             .optional()?;
         value
             .map(|(side, price)| {
-                let side = match side.as_str() {
-                    "BUY" => OrderSide::Buy,
-                    "SELL" => OrderSide::Sell,
-                    _ => anyhow::bail!("invalid saved fill side: {}", side),
-                };
+                let side = parse_order_side(&side)?;
                 let price = Decimal::from_str(&price)?;
                 anyhow::ensure!(price > Decimal::ZERO, "invalid saved fill price: {}", price);
                 Ok((side, price))
@@ -2282,42 +2254,26 @@ impl Database {
         mode: TradingMode,
     ) -> Result<Option<(usize, usize, Decimal, Decimal)>> {
         let conn = self.conn.lock().unwrap();
-        let row: Option<(i64, i64, String, String)> = conn
-            .query_row(
-                "SELECT total_trades, completed_cycles, total_realized_profit, total_volume_usdc FROM scoped_grid_stats WHERE symbol = ?1 AND mode = ?2;",
-                params![symbol, mode.as_str()],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .optional()?;
-        row.map(|(trades, cycles, profit, volume)| {
-            Ok((
-                trades as usize,
-                cycles as usize,
-                Decimal::from_str(&profit)?,
-                Decimal::from_str(&volume)?,
-            ))
-        })
+        conn.query_row(
+            "SELECT total_trades, completed_cycles, total_realized_profit, total_volume_usdc FROM scoped_grid_stats WHERE symbol = ?1 AND mode = ?2;",
+            params![symbol, mode.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?
+        .map(parse_stats_row)
         .transpose()
     }
 
     /// Legacy un-scoped grid stats accessor retained for backward-compatibility tests.
     pub fn load_stats(&self) -> Result<Option<(usize, usize, Decimal, Decimal)>> {
         let conn = self.conn.lock().unwrap();
-        let row: Option<(i64, i64, String, String)> = conn
-            .query_row(
-                "SELECT total_trades, completed_cycles, total_realized_profit, total_volume_usdc FROM grid_stats WHERE id = 1;",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .optional()?;
-        row.map(|(trades, cycles, profit, volume)| {
-            Ok((
-                trades as usize,
-                cycles as usize,
-                Decimal::from_str(&profit).unwrap_or(Decimal::ZERO),
-                Decimal::from_str(&volume).unwrap_or(Decimal::ZERO),
-            ))
-        })
+        conn.query_row(
+            "SELECT total_trades, completed_cycles, total_realized_profit, total_volume_usdc FROM grid_stats WHERE id = 1;",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?
+        .map(parse_stats_row)
         .transpose()
     }
 
@@ -2348,13 +2304,62 @@ impl Database {
     }
 }
 
-fn load_required_config_on(conn: &Connection) -> Result<AppConfig> {
-    let json: String = conn.query_row(
+fn load_config_on(conn: &Connection) -> Result<Option<AppConfig>> {
+    conn.query_row(
         "SELECT config_json FROM app_config WHERE id = 1",
         [],
-        |row| row.get(0),
+        |row| row.get::<_, String>(0),
+    )
+    .optional()?
+    .map(|json| {
+        serde_json::from_str(&json).context("Failed to deserialize AppConfig from SQLite database")
+    })
+    .transpose()
+}
+
+fn load_required_config_on(conn: &Connection) -> Result<AppConfig> {
+    load_config_on(conn)?.context("Missing AppConfig in SQLite database")
+}
+
+fn load_raw_config_value_on(conn: &Connection) -> Result<Option<serde_json::Value>> {
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT config_json FROM app_config WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(stored.and_then(|json| serde_json::from_str(&json).ok()))
+}
+
+fn save_raw_config_value_on(conn: &Connection, config: &serde_json::Value) -> Result<()> {
+    conn.execute(
+        "UPDATE app_config SET config_json = ?1, updated_at = ?2 WHERE id = 1",
+        params![
+            serde_json::to_string_pretty(config)?,
+            Utc::now().to_rfc3339()
+        ],
     )?;
-    Ok(serde_json::from_str(&json)?)
+    Ok(())
+}
+
+fn parse_order_side(side: &str) -> Result<OrderSide> {
+    match side {
+        "BUY" => Ok(OrderSide::Buy),
+        "SELL" => Ok(OrderSide::Sell),
+        _ => anyhow::bail!("Invalid order side: {}", side),
+    }
+}
+
+fn parse_stats_row(
+    (trades, cycles, profit, volume): (i64, i64, String, String),
+) -> Result<(usize, usize, Decimal, Decimal)> {
+    Ok((
+        trades as usize,
+        cycles as usize,
+        Decimal::from_str(&profit)?,
+        Decimal::from_str(&volume)?,
+    ))
 }
 
 fn save_config_on(conn: &Connection, config: &AppConfig) -> Result<()> {
@@ -2406,17 +2411,7 @@ fn save_pair_config_on(conn: &Connection, symbol: &str, config: &AppConfig) -> R
 /// saved testnet strategy moves all configured strategies to paused paper mode.
 /// Keep non-testnet recovery state intact for an operator to review.
 fn retire_legacy_testnet_config(conn: &Connection) -> Result<()> {
-    let stored: Option<String> = conn
-        .query_row(
-            "SELECT config_json FROM app_config WHERE id = 1",
-            [],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let Some(stored) = stored else {
-        return Ok(());
-    };
-    let Ok(mut config) = serde_json::from_str::<serde_json::Value>(&stored) else {
+    let Some(mut config) = load_raw_config_value_on(conn)? else {
         return Ok(());
     };
     let Some(root) = config.as_object_mut() else {
@@ -2494,13 +2489,7 @@ fn retire_legacy_testnet_config(conn: &Connection) -> Result<()> {
             }
         }
     }
-    conn.execute(
-        "UPDATE app_config SET config_json = ?1, updated_at = ?2 WHERE id = 1",
-        params![
-            serde_json::to_string_pretty(&config)?,
-            Utc::now().to_rfc3339()
-        ],
-    )?;
+    save_raw_config_value_on(conn, &config)?;
     symbols.sort();
     symbols.dedup();
     if symbols.is_empty() {
@@ -2521,17 +2510,7 @@ fn retire_legacy_testnet_config(conn: &Connection) -> Result<()> {
 /// live scope to start paused and drop the retired flag so an operator's later
 /// resume is not undone on the next restart.
 fn retire_legacy_dry_run_intent(conn: &Connection) -> Result<()> {
-    let stored: Option<String> = conn
-        .query_row(
-            "SELECT config_json FROM app_config WHERE id = 1",
-            [],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let Some(stored) = stored else {
-        return Ok(());
-    };
-    let Ok(mut config) = serde_json::from_str::<serde_json::Value>(&stored) else {
+    let Some(mut config) = load_raw_config_value_on(conn)? else {
         return Ok(());
     };
     let Some(root) = config.as_object_mut() else {
@@ -2596,13 +2575,7 @@ fn retire_legacy_dry_run_intent(conn: &Connection) -> Result<()> {
     for symbol in &live_symbols {
         save_pair_status_on(conn, symbol, TradingMode::Live, BotStatus::Paused)?;
     }
-    conn.execute(
-        "UPDATE app_config SET config_json = ?1, updated_at = ?2 WHERE id = 1",
-        params![
-            serde_json::to_string_pretty(&config)?,
-            Utc::now().to_rfc3339()
-        ],
-    )?;
+    save_raw_config_value_on(conn, &config)?;
     if !live_symbols.is_empty() {
         warn!(
             "Legacy paper configuration had API credentials; now live and paused until resumed: {}",
@@ -2778,7 +2751,7 @@ fn insert_trade_on(conn: &Connection, trade: &TradeRecord) -> Result<bool> {
                 if trade.is_maker { 1 } else { 0 },
                 trade.timestamp,
                 trade.note,
-                trade.timestamp.timestamp().div_euclid(3600) * 3600,
+                hourly::hour(trade.timestamp),
             ],
         )
         .context("Failed to insert trade into SQLite database")?;

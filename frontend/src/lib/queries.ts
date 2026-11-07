@@ -85,7 +85,7 @@ export function usePairSnapshot(pair: Pair | undefined) {
   };
   const socket = useSocket(pair && pairPath(pair, 'ws'), 'snapshot', acceptSnapshot);
   const { query, now } = useSocketFallbackQuery(key, signal => api<Snapshot>(pairPath(pair!, 'status'), { signal }), socket, !!pair);
-  return { ...query, live: socket.connected && now - socket.lastReceived < SOCKET_LIVE_MS, stale: now - query.dataUpdatedAt > SNAPSHOT_STALE_MS };
+  return { ...query, now, live: socket.connected && now - socket.lastReceived < SOCKET_LIVE_MS, stale: now - query.dataUpdatedAt > SNAPSHOT_STALE_MS };
 }
 
 export function useLiveAccounts() {
@@ -104,5 +104,5 @@ export function useLiveAccounts() {
   }, stream);
   const stale = now - query.dataUpdatedAt > SNAPSHOT_STALE_MS || now - Date.parse(query.data?.generated_at ?? '') > SNAPSHOT_STALE_MS;
   const accounts = useMemo<AccountObservation[]>(() => (query.data?.pairs ?? []).map(entry => ({ ...entry, account_observation_stale: stale })), [query.data?.pairs, stale]);
-  return { accounts, stale, error: query.error };
+  return { accounts, stale, error: query.error, now };
 }

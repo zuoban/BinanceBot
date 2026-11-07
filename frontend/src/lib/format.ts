@@ -58,6 +58,12 @@ export function entryPriceText(position: { size: string; entry_price: string }, 
   const size = numeric(position.size), entry = numeric(position.entry_price);
   return size !== null && size !== 0 && entry !== null && entry > 0 ? (compact ? compactPrice(entry) : price(entry)) : '--';
 }
+export function cnyText(value: number | null | undefined, compact = false) {
+  return value != null && Number.isFinite(value) ? `≈ ¥${compact ? compactNumber(value) : number(value)}` : '人民币估值待更新';
+}
+export function ratioText(value: number | null | undefined, compact = false) {
+  return value != null && Number.isFinite(value) ? `${compact ? compactNumber(value) : number(value)}%` : '--';
+}
 export const time = (value: string) => new Date(value).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
 function formatSeconds(seconds: number) {
   const [amount, unit] = seconds < 60 ? [seconds, '秒'] : seconds < 3600 ? [Math.floor(seconds / 60), '分钟'] : seconds < 86400 ? [Math.floor(seconds / 3600), '小时'] : [Math.floor(seconds / 86400), '天'];
@@ -158,6 +164,6 @@ export function accountGroups<T extends AccountObservation>(entries: T[], now = 
     const wallet = unavailable ? null : numeric(account.account.total_wallet_balance);
     const unrealized = valued ? numeric(account.account.unrealized_profit) : null;
     const rate = account.account_cny_rate?.asset === asset ? numeric(account.account_cny_rate.cny_per_unit) : null;
-    return { key: `${mode}:${asset}`, mode, asset, count: snapshots.length, equity, available, wallet, unrealized, ratio: availableRatio(available, wallet), cny: equity !== null && rate !== null ? equity * rate : null };
+    return { key: `${mode}:${asset}`, mode, asset, count: snapshots.length, equity, available, wallet, unrealized, ratio: availableRatio(available, wallet), cny: equity !== null && rate !== null && rate > 0 && Number.isFinite(equity * rate) ? equity * rate : null };
   });
 }

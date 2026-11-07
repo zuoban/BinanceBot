@@ -70,12 +70,11 @@ export default function PairConfig() {
   useEffect(() => () => { edit.setDirty(false); edit.setSaving(false); }, [edit.setDirty, edit.setSaving]);
   const mutation = useMutation({
     mutationFn: (values: FormValues) => {
-      const fields = values;
       if (!adding && (typeof baseline.current?.config.config_version !== 'string' || !baseline.current.config.config_version || baseline.current.symbol !== symbol)) throw new Error('无法确认配置版本，请重新加载策略配置');
       return post<GridConfig | string>(adding ? '/api/pairs' : pairPath(pair!, 'config'), {
-        ...fields, ...(!adding && { baseline_version: baseline.current?.config.config_version }), symbol: fields.symbol.trim().toUpperCase(),
+        ...values, ...(!adding && { baseline_version: baseline.current?.config.config_version }), symbol: values.symbol.trim().toUpperCase(),
         post_only: true,
-        min_price: fields.min_price || null, max_price: fields.max_price || null, max_position_usdc: fields.max_position_usdc || null, min_liquidation_distance_pct: fields.min_liquidation_distance_pct || null,
+        min_price: values.min_price || null, max_price: values.max_price || null, max_position_usdc: values.max_position_usdc || null, min_liquidation_distance_pct: values.min_liquidation_distance_pct || null,
       });
     },
     onMutate: () => edit.setSaving(true),
@@ -174,9 +173,11 @@ export default function PairConfig() {
     <ErrorNotice error={pairs.error || config.error} retry={() => { if (pairs.error) void pairs.refetch(); if (!adding && pair) void config.refetch(); }} />
     <ErrorNotice error={mutation.error} />
     {!adding && (mutation.error instanceof ApiError && mutation.error.status === 409 || mutation.error?.message.includes('无法确认配置版本')) && <Button onClick={async () => {
-      if (!await modal.confirm({ title: '重新加载策略配置？', content: '重新加载会放弃当前未保存的修改，请先记录需要保留的内容。', okText: '重新加载', cancelText: '继续编辑' })) return;
+      const currentPage = page.current;
+      if (!currentPage || !await modal.confirm({ title: '重新加载策略配置？', content: '重新加载会放弃当前未保存的修改，请先记录需要保留的内容。', okText: '重新加载', cancelText: '继续编辑' })) return;
+      if (page.current !== currentPage) return;
       const result = await config.refetch();
-      if (!result.error && result.data && symbol) { baseline.current = { symbol, config: result.data }; form.setFieldsValue(result.data); edit.setDirty(false); mutation.reset(); }
+      if (page.current === currentPage && !result.error && result.data && symbol && result.data.symbol === symbol) { baseline.current = { symbol, config: result.data }; form.setFieldsValue(result.data); edit.setDirty(false); mutation.reset(); }
     }}>重新加载策略配置</Button>}
     {pairs.data && !pair && !adding && <Alert type="warning" title="该交易对不存在或已移除" />}
     <Form<FormValues> className="config-form" form={form} layout="vertical" onFinish={values => void submit(values)} onValuesChange={changed => { if ('symbol' in changed) { if (!customInterval.current) form.setFieldValue('grid_interval', defaults.grid_interval); customInterval.current = false; appliedSymbol.current = undefined; } else if ('grid_interval' in changed) customInterval.current = true; if (changed.pause_on_max_position) form.setFieldValue('cancel_opening_on_max_position', false); else if (changed.cancel_opening_on_max_position) form.setFieldValue('pause_on_max_position', false); edit.setDirty(true); }} disabled={formDisabled}>
@@ -220,7 +221,7 @@ export default function PairConfig() {
       <div className={`save-bar${edit.dirty ? ' save-bar-dirty' : ''}`}>
         <SaveBarStatus form={form} adding={adding} dirty={edit.dirty} symbol={symbol} baseline={baseline.current} />
         <Space wrap>
-        <Button onClick={async () => { if (edit.dirty && !await modal.confirm({ title: '放弃未保存的修改？', okText: '还原', cancelText: '继续编辑' })) return; if (adding) { customInterval.current = false; appliedSymbol.current = undefined; form.setFieldsValue(defaults); } else if (baseline.current?.symbol === symbol) form.setFieldsValue(baseline.current.config); edit.setDirty(false); mutation.reset(); }}>还原</Button>
+        <Button onClick={async () => { const currentPage = page.current; if (!currentPage || (edit.dirty && !await modal.confirm({ title: '放弃未保存的修改？', okText: '还原', cancelText: '继续编辑' }))) return; if (page.current !== currentPage) return; if (adding) { customInterval.current = false; appliedSymbol.current = undefined; form.setFieldsValue(defaults); } else if (baseline.current?.symbol === symbol) form.setFieldsValue(baseline.current.config); edit.setDirty(false); mutation.reset(); }}>还原</Button>
         <Button type="primary" htmlType="submit" loading={mutation.isPending}>{adding ? '保存并添加' : '保存并立即生效'}</Button>
       </Space></div>
       {!adding && <Card className="danger-zone" title="删除策略"><p>删除前请暂停策略、等待挂单撤销并平仓；删除不会自动平仓，历史记录会保留。</p><Button danger disabled={edit.saving} loading={deletion.busy} onClick={() => void remove()}>删除策略</Button></Card>}

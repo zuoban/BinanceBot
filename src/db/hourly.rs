@@ -32,7 +32,7 @@ impl Rollup {
     }
 }
 
-fn hour(timestamp: DateTime<Utc>) -> i64 {
+pub(super) fn hour(timestamp: DateTime<Utc>) -> i64 {
     timestamp.timestamp().div_euclid(3600) * 3600
 }
 

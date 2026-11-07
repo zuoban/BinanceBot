@@ -773,7 +773,8 @@ async fn dispatch_pair(
 async fn get_managed_pairs_handler(
     State(handle): State<RuntimeHandle>,
 ) -> Json<ApiResponse<Vec<TradingPairView>>> {
-    get_pairs_handler(State(Arc::new(handle.states.read().await.clone()))).await
+    let states = handle.states.read().await.clone();
+    collect_pairs(&states).await
 }
 
 async fn get_managed_overview_handler(
@@ -1030,22 +1031,43 @@ fn probe_throttled(gate: &ProbeGate) -> Option<Json<ApiResponse<String>>> {
         .map(|wait| json_err(format!("测试过于频繁，请 {wait} 秒后再试")))
 }
 
+async fn load_probe_config<T, P>(
+    handle: &RuntimeHandle,
+    gate: &ProbeGate,
+    payload: P,
+    resolve: impl FnOnce(&AppConfig, P) -> Result<T, String>,
+) -> Result<T, Json<ApiResponse<String>>> {
+    if let Some(throttled) = probe_throttled(gate) {
+        return Err(throttled);
+    }
+    let Some(saved) = handle
+        .db
+        .run_blocking(|db| db.load_config())
+        .await
+        .ok()
+        .flatten()
+    else {
+        return Err(json_err("无法读取全局设置"));
+    };
+    resolve(&saved, payload).map_err(json_err)
+}
+
 /// Verify that the (possibly unsaved) API credentials can read the futures account.
 /// Nothing is persisted, and failures never echo signed URLs or credentials.
 async fn test_exchange_handler(
     State(handle): State<RuntimeHandle>,
     Json(payload): Json<TestExchangePayload>,
 ) -> Json<ApiResponse<String>> {
-    if let Some(throttled) = probe_throttled(&handle.probes.exchange) {
-        return throttled;
-    }
-    let saved = match handle.db.run_blocking(|db| db.load_config()).await {
-        Ok(Some(config)) => config.exchange,
-        _ => return json_err("无法读取全局设置"),
-    };
-    let config = match resolve_exchange_probe(&saved, payload) {
+    let config = match load_probe_config(
+        &handle,
+        &handle.probes.exchange,
+        payload,
+        |saved, payload| resolve_exchange_probe(&saved.exchange, payload),
+    )
+    .await
+    {
         Ok(config) => config,
-        Err(message) => return json_err(message),
+        Err(response) => return response,
     };
     let client = BinanceFuturesClient::new_with_limiter(&config, Arc::new(RateLimiter::default()));
     if let Err(error) = client.sync_server_time().await {
@@ -1069,28 +1091,27 @@ async fn test_telegram_handler(
     State(handle): State<RuntimeHandle>,
     Json(payload): Json<TestTelegramPayload>,
 ) -> Json<ApiResponse<String>> {
-    if let Some(throttled) = probe_throttled(&handle.probes.telegram) {
-        return throttled;
-    }
-    let saved = match handle.db.run_blocking(|db| db.load_config()).await {
-        Ok(Some(config)) => config.telegram,
-        _ => return json_err("无法读取全局设置"),
-    };
-    let config = match resolve_telegram_probe(&saved, payload) {
+    let config = match load_probe_config(
+        &handle,
+        &handle.probes.telegram,
+        payload,
+        |saved, payload| resolve_telegram_probe(&saved.telegram, payload),
+    )
+    .await
+    {
         Ok(config) => config,
-        Err(message) => return json_err(message),
+        Err(response) => return response,
     };
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-    {
-        Ok(client) => client,
-        Err(_) => return json_err("无法创建网络客户端"),
-    };
-    match crate::telegram::TelegramNotifier::new(client)
-        .send_test_message(&config)
+    let Some(notifier) = handle
+        .states
+        .read()
         .await
-    {
+        .first()
+        .map(|state| state.telegram_notifier().clone())
+    else {
+        return json_err("没有活跃的交易对实例");
+    };
+    match notifier.send_test_message(&config).await {
         Ok(()) => json_ok("测试消息已发送，请在 Telegram 中查看".into()),
         Err(error) => json_err(format!("测试消息发送失败：{error}")),
     }
@@ -1342,14 +1363,7 @@ async fn post_auth_logout_handler(
             );
         }
     }
-    (
-        StatusCode::OK,
-        Json(ApiResponse {
-            success: true,
-            data: None,
-            message: Some("已安全退出登录".to_string()),
-        }),
-    )
+    (StatusCode::OK, json_ok_msg((), "已安全退出登录"))
 }
 
 async fn get_status_handler(

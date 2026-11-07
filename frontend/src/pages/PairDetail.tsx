@@ -2,7 +2,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { Alert, Button, Card, Col, Descriptions, Row, Statistic, Tabs } from 'antd';
 import { SettingOutlined } from '@ant-design/icons';
 import { usePairSnapshot, usePairs } from '../lib/queries';
-import { accountGroups, directionLabel, entryPriceText, number, numeric, positivePrice, price, quoteAsset, ageText, todayTradeCounts, trimFractionZeros } from '../lib/format';
+import { accountGroups, cnyText, directionLabel, entryPriceText, number, numeric, positivePrice, price, quoteAsset, ageText, ratioText, todayTradeCounts, trimFractionZeros } from '../lib/format';
 import { ErrorNotice, ModeTag, PageBreadcrumb, PageTitle, Pnl, SignalChip, StatusTag } from '../components/Common';
 import { PairControls, useControls } from '../components/Controls';
 import { DepthChart, HourlyChart } from '../components/Charts';
@@ -11,7 +11,6 @@ import { HistoryActions } from '../components/HistoryActions';
 import { DetailLoading } from '../components/Loading';
 import { useDocumentTitle } from '../lib/documentTitle';
 import { useUrlParam } from '../lib/urlState';
-import { useNow } from '../lib/useNow';
 
 export default function PairDetail() {
   const { symbol } = useParams();
@@ -20,7 +19,7 @@ export default function PairDetail() {
   const pair = pairs.data?.find(p => p.symbol === symbol);
   const query = usePairSnapshot(pair);
   const controls = useControls();
-  const now = useNow();
+  const now = query.now;
   const [tab, setTab] = useUrlParam<string>('tab', 'monitor', ['monitor', 'orders', 'trades', 'logs']);
   const s = query.data, asset = quoteAsset(symbol ?? '');
   const account = s && pair ? accountGroups([{ snapshot: s, mode: s.mode, account_observation_stale: query.stale }], now)[0] : undefined;
@@ -45,7 +44,7 @@ export default function PairDetail() {
         <Col xs={24} sm={12} xl={6}><Card><Statistic title={`标记价格 / ${asset}`} value={positivePrice(s.ticker.mark_price)} /><div className="muted">最新成交 {price(s.ticker.last_price)}</div></Card></Col>
         <Col xs={24} sm={12} xl={6}><Card><Statistic title={`已实现盈亏 / ${asset}`} value={s.stats.total_realized_pnl} formatter={() => <Pnl value={s.stats.total_realized_pnl} />} /><div className="muted">扣费后 {number(netPnl)}</div></Card></Col>
         <Col xs={24} sm={12} xl={6}><Card><Statistic title={`持仓未实现 / ${asset}`} value={s.position.unrealized_pnl} formatter={() => <Pnl value={s.position.unrealized_pnl} />} /><div className="muted">持仓数量 {price(s.position.size)}</div></Card></Col>
-        <Col xs={24} sm={12} xl={6}><Card><Statistic title={`账户权益 / ${account?.asset || asset}`} value={account?.equity ?? '--'} formatter={() => number(account?.equity)} /><div className="muted">{account?.cny != null ? `≈ ¥${number(account.cny)}` : '人民币估值待更新'} · 可用 {number(account?.available)}</div></Card></Col>
+        <Col xs={24} sm={12} xl={6}><Card><Statistic title={`账户权益 / ${account?.asset || asset}`} value={account?.equity ?? '--'} formatter={() => number(account?.equity)} /><div className="muted">{cnyText(account?.cny)} · 可用 {number(account?.available)}</div></Card></Col>
       </Row>
       <Tabs className="detail-tabs" activeKey={tab} onChange={setTab} items={[
         { key: 'monitor', label: '实时监控', children: <>
@@ -68,12 +67,12 @@ export default function PairDetail() {
             { key: 'trades', label: '累计成交', children: s.stats.total_trades },
             { key: 'pending', label: '待核实盈亏', children: `${s.stats.pending_pnl_trades} 笔` },
             { key: 'volume', label: '累计成交额', children: `${number(s.stats.total_volume_usdc)} ${asset}` },
-            { key: 'available', label: '可用比例（按钱包余额）', children: account?.ratio != null ? `${number(account.ratio)}%` : '--' },
+            { key: 'available', label: '可用比例（按钱包余额）', children: ratioText(account?.ratio) },
           ]} /></Card>
         </> },
-        { key: 'orders', label: `挂单 (${s.active_orders.length})`, children: <Card><OrdersTable orders={s.active_orders} mark={s.ticker.mark_price} /></Card> },
-        { key: 'trades', label: '成交历史', children: <Card title="最近成交" extra={pair ? <HistoryActions key={pair.symbol} symbol={pair.symbol} /> : null}><Alert type="info" title={`此处展示当前模式的最近成交；导出和清理作用于 ${symbol ?? ''} 的全部模式。`} /><TradesTable trades={s.recent_trades} /></Card> },
-        { key: 'logs', label: '运行日志', children: <Card><LogsTable logs={s.recent_logs} /></Card> },
+        { key: 'orders', label: `挂单 (${s.active_orders.length})`, children: <Card><OrdersTable key={symbol} orders={s.active_orders} mark={s.ticker.mark_price} /></Card> },
+        { key: 'trades', label: '成交历史', children: <Card title="最近成交" extra={pair ? <HistoryActions key={pair.symbol} symbol={pair.symbol} /> : null}><Alert type="info" title={`此处展示当前模式的最近成交；导出和清理作用于 ${symbol ?? ''} 的全部模式。`} /><TradesTable key={symbol} trades={s.recent_trades} /></Card> },
+        { key: 'logs', label: '运行日志', children: <Card><LogsTable key={symbol} logs={s.recent_logs} /></Card> },
       ]} />
     </>}
   </div>;

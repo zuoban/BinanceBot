@@ -1348,6 +1348,15 @@ impl AppState {
         tokio::spawn(async move { state.pause_for_shutdown_inner().await }).await?
     }
 
+    fn shutdown_recovery_eligible(&self, global: Option<&GlobalPositionLimit>) -> bool {
+        let blocked = global.is_some_and(GlobalPositionLimit::is_blocked_or_unready);
+        self.global_position_initialized.load(Ordering::SeqCst)
+            && self.global_position_ready.load(Ordering::SeqCst)
+            && self.safety_pauses_pending.load(Ordering::SeqCst) == 0
+            && !blocked
+            && !self.global_cancel_pending.load(Ordering::SeqCst)
+    }
+
     async fn pause_for_shutdown_inner(self: &Arc<Self>) -> anyhow::Result<()> {
         let global = self.global_limit();
         let _global_guard = if let Some(coordinator) = &global {
@@ -1360,19 +1369,9 @@ impl AppState {
         self.pause_epoch.fetch_add(1, Ordering::SeqCst);
         let mut eligibility = self.status_update_lock.lock().await;
         if *self.status.read().await == BotStatus::Running {
-            let blocked = global
-                .as_ref()
-                .is_some_and(|coordinator| coordinator.is_blocked_or_unready());
-            *eligibility = if self.global_position_initialized.load(Ordering::SeqCst)
-                && self.global_position_ready.load(Ordering::SeqCst)
-                && self.safety_pauses_pending.load(Ordering::SeqCst) == 0
-                && !blocked
-                && !self.global_cancel_pending.load(Ordering::SeqCst)
-            {
-                Some(self.safety_pause_epoch.load(Ordering::SeqCst))
-            } else {
-                None
-            };
+            *eligibility = self
+                .shutdown_recovery_eligible(global.as_deref())
+                .then(|| self.safety_pause_epoch.load(Ordering::SeqCst));
         }
         *self.status.write().await = BotStatus::Paused;
         if let Err(error) = self.persist_status(BotStatus::Paused).await {
@@ -1398,9 +1397,6 @@ impl AppState {
         };
         let _admission = self.safety_pause_admission.lock().await;
         let mut eligibility = self.status_update_lock.lock().await;
-        let blocked = global
-            .as_ref()
-            .is_some_and(|coordinator| coordinator.is_blocked_or_unready());
         // A pending pause must finish durably before a clean restart can be allowed.
         anyhow::ensure!(
             self.safety_pauses_pending.load(Ordering::SeqCst) == 0,
@@ -1408,11 +1404,7 @@ impl AppState {
         );
         if let Some(epoch) = eligibility.take().filter(|epoch| {
             *epoch == self.safety_pause_epoch.load(Ordering::SeqCst)
-                && self.safety_pauses_pending.load(Ordering::SeqCst) == 0
-                && !blocked
-                && !self.global_cancel_pending.load(Ordering::SeqCst)
-                && self.global_position_initialized.load(Ordering::SeqCst)
-                && self.global_position_ready.load(Ordering::SeqCst)
+                && self.shutdown_recovery_eligible(global.as_deref())
         }) {
             self.persist_status(BotStatus::Running).await?;
             // A pause may have started and been cancelled while the database
@@ -1649,6 +1641,10 @@ impl AppState {
 
     pub fn is_auth_configured(&self) -> bool {
         self.admin_auth.is_some()
+    }
+
+    pub(crate) fn telegram_notifier(&self) -> &TelegramNotifier {
+        &self.telegram_notifier
     }
 }
 

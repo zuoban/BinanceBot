@@ -5,7 +5,7 @@ import { ArrowDownOutlined, ArrowRightOutlined, ArrowUpOutlined, EyeOutlined, Pl
 import { useOverview } from '../lib/queries';
 import { useUrlParams } from '../lib/urlState';
 import { AccountsContext } from '../lib/session';
-import { ageText, accountGroups, compactNumber as number, compactPrice as price, comparePositionAmount, directionLabel, entryPriceText, groupTradePnl, maxPositionPolicyLabel, modeLabel, numeric, positivePrice, positionAmount, positionGroups, quoteAsset, todayCount, todayPnlGroups, todayTradeCounts, trimFractionZeros } from '../lib/format';
+import { ageText, accountGroups, cnyText, compactNumber as number, compactPrice as price, comparePositionAmount, directionLabel, entryPriceText, groupTradePnl, maxPositionPolicyLabel, modeLabel, numeric, positivePrice, positionAmount, positionGroups, quoteAsset, ratioText, todayCount, todayPnlGroups, todayTradeCounts, trimFractionZeros } from '../lib/format';
 import { ErrorNotice, PageTitle, Pnl, SignalButton, SignalChip, StatusTag } from '../components/Common';
 import { runBatchControls, useControls } from '../components/Controls';
 import type { Pair } from '../lib/types';
@@ -145,10 +145,10 @@ export default function OverviewPage() {
       {accountList.map(group => <Col xs={24} xl={12} key={group.key}><Card className="account-card finance-card" size="small">
         <div className="section-line finance-card-heading"><span>保证金余额</span></div>
         <div className="finance-card-primary"><Statistic value={group.equity ?? '--'} formatter={() => number(group.equity)} suffix={group.asset} />
-          <span className="finance-card-note muted">{group.cny !== null ? `≈ ¥${number(group.cny)}` : '人民币估值待更新'}</span></div>
+          <span className="finance-card-note muted">{cnyText(group.cny, true)}</span></div>
         <div className="finance-metrics">
           <div><span>可用余额</span><strong>{number(group.available)} <small>{group.asset}</small></strong></div>
-          <div><span>可用比例（按钱包余额）</span><strong>{group.ratio !== null ? `${number(group.ratio)}%` : '--'}</strong></div>
+          <div><span>可用比例（按钱包余额）</span><strong>{ratioText(group.ratio, true)}</strong></div>
         </div>
         <div className="finance-metrics" aria-label={`${group.asset}账户资产`}>
           <div><span>钱包余额</span><strong>{number(group.wallet)}</strong></div>
@@ -219,6 +219,7 @@ export default function OverviewPage() {
                 <div><dt>最高价格</dt><dd>{s.grid_config.max_price == null ? '未设置' : trimFractionZeros(s.grid_config.max_price)}</dd></div>
                 <div><dt>最大持仓名义价值</dt><dd>{s.grid_config.max_position_usdc == null ? '未设置' : `${trimFractionZeros(s.grid_config.max_position_usdc)} ${quote}`}</dd></div>
                 <div><dt>持仓上限处理方式</dt><dd>{maxPositionPolicyLabel(s.grid_config)}</dd></div>
+                <div><dt>强平距离阈值</dt><dd>{s.grid_config.min_liquidation_distance_pct == null ? '未设置' : `${trimFractionZeros(s.grid_config.min_liquidation_distance_pct)}%`}</dd></div>
                 <div><dt>仅挂单</dt><dd>{s.grid_config.post_only ? '开启' : '关闭'}</dd></div>
               </dl>
               <Link to={`/pairs/${s.symbol}/config`}>查看完整配置 <ArrowRightOutlined /></Link>

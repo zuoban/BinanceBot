@@ -1,6 +1,5 @@
 /* ---------- Tokens ---------- */
 :root {
-  --bg-deep: #e9eef5;
   --bg-page: #f2f5f9;
   --bg-card: #ffffff;
   --bg-raised: #f6f8fb;
@@ -13,7 +12,6 @@
   --accent-soft: rgba(29, 78, 216, 0.08);
   --positive: #0f7a52;
   --negative: #b4382c;
-  --warning: #a35a07;
   --danger-border: #f0c4bd;
   --history-equity: #1d4ed8;
 
@@ -46,7 +44,6 @@
 }
 
 [data-theme="dark"] {
-  --bg-deep: #070d18;
   --bg-page: #0a1220;
   --bg-card: #101a2b;
   --bg-raised: #16223a;
@@ -59,7 +56,6 @@
   --accent-soft: rgba(110, 160, 255, 0.14);
   --positive: #3fcf96;
   --negative: #ff7a66;
-  --warning: #f0b94d;
   --danger-border: #5a2a24;
   --history-equity: #6ea0ff;
 
@@ -221,14 +217,10 @@ kbd {
 .sidebar .signal-blue, .sidebar-drawer .signal-blue, .mobilebar .signal-blue { --sig-fg: #8fb3ff; --sig-line: #1e3a6e; }
 .sidebar .signal-orange, .sidebar-drawer .signal-orange, .mobilebar .signal-orange { --sig-fg: #ff9f57; --sig-line: #5e3a1a; }
 .sidebar .signal-yellow, .sidebar-drawer .signal-yellow, .mobilebar .signal-yellow { --sig-fg: #f0cf63; --sig-line: #55481c; }
-.sidebar .theme-segmented { background: var(--rail-hover); }
-.sidebar-drawer .theme-segmented { background: var(--rail-hover); }
-.sidebar .theme-segmented .ant-segmented-item { color: var(--rail-muted); }
-.sidebar-drawer .theme-segmented .ant-segmented-item { color: var(--rail-muted); }
-.sidebar .theme-segmented .ant-segmented-item-selected { background: var(--rail-active); color: #fff; }
-.sidebar-drawer .theme-segmented .ant-segmented-item-selected { background: var(--rail-active); color: #fff; }
-.sidebar .theme-segmented .ant-segmented-thumb { background: var(--rail-active); }
-.sidebar-drawer .theme-segmented .ant-segmented-thumb { background: var(--rail-active); }
+.sidebar-inner .theme-segmented { background: var(--rail-hover); }
+.sidebar-inner .theme-segmented .ant-segmented-item { color: var(--rail-muted); }
+.sidebar-inner .theme-segmented .ant-segmented-item-selected { background: var(--rail-active); color: #fff; }
+.sidebar-inner .theme-segmented .ant-segmented-thumb { background: var(--rail-active); }
 
 .sidebar-drawer .ant-drawer-body { background: var(--rail-bg); }
 .sidebar-drawer .sidebar-inner { padding-top: 20px; }
@@ -729,6 +721,7 @@ kbd {
 
 /* ---------- Skip link, shortcut modal & mobile bottom tab bar ---------- */
 .skip-link { position: fixed; top: -48px; left: 16px; z-index: 100; padding: 8px 14px; border-radius: 8px; background: var(--accent); color: #fff; font-weight: 600; text-decoration: none; transition: top 150ms var(--ease-out); }
+[data-theme="dark"] .skip-link { color: #0a1220; }
 .skip-link:focus { top: 12px; }
 .grid-preview-meta { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .shortcut-list { display: grid; gap: 8px; margin: 12px 0 0; }

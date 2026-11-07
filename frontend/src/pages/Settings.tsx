@@ -151,8 +151,9 @@ function GlobalSettings() {
     <ErrorNotice error={mutation.error} />
     {((mutation.error as { status?: number } | null)?.status === 409 || mutation.error?.message.includes('全局设置已被其他请求修改')) && <Button onClick={async () => {
       if (!await modal.confirm({ title: '重新加载全局设置？', content: '重新加载会放弃当前未保存的修改，请先记录需要保留的内容。', okText: '重新加载', cancelText: '继续编辑' })) return;
+      if (!mounted.current) return;
       const result = await query.refetch();
-      if (!result.error && result.data) { fill(result.data); edit.setDirty(false); mutation.reset(); }
+      if (mounted.current && !result.error && result.data) { fill(result.data); edit.setDirty(false); mutation.reset(); }
     }}>重新加载全局设置</Button>}
     <Form form={form} layout="vertical" disabled={!ready || edit.saving} onValuesChange={() => edit.setDirty(true)} onFinish={v => void submit(v)}>
       <Card title="交易所连接" className="settings-card">
@@ -196,7 +197,7 @@ function GlobalSettings() {
           </Card>
         </Col>
       </Row>
-      <div className={`save-bar${edit.dirty ? ' save-bar-dirty' : ''}`}><span className="muted" role="status">{edit.dirty ? '有未保存的修改' : '所有修改已保存'}</span><Space wrap><Button onClick={async () => { if (edit.dirty && !await modal.confirm({ title: '放弃未保存的修改？', okText: '还原', cancelText: '继续编辑' })) return; if (baseline.current) fill(baseline.current); else if (query.data) fill(query.data); edit.setDirty(false); mutation.reset(); }}>还原</Button><Button type="primary" htmlType="submit" loading={mutation.isPending}>保存全局设置</Button></Space></div>
+      <div className={`save-bar${edit.dirty ? ' save-bar-dirty' : ''}`}><span className="muted" role="status">{edit.dirty ? '有未保存的修改' : '所有修改已保存'}</span><Space wrap><Button onClick={async () => { if (edit.dirty && !await modal.confirm({ title: '放弃未保存的修改？', okText: '还原', cancelText: '继续编辑' })) return; if (!mounted.current) return; if (baseline.current) fill(baseline.current); else if (query.data) fill(query.data); edit.setDirty(false); mutation.reset(); }}>还原</Button><Button type="primary" htmlType="submit" loading={mutation.isPending}>保存全局设置</Button></Space></div>
     </Form>
   </>;
 }
@@ -205,23 +206,29 @@ function ServerSettings() {
   const [ready, setReady] = useState(false);
   const edit = useContext(EditContext);
   const { message, modal } = App.useApp();
+  const client = useQueryClient();
   const query = useQuery({ queryKey: ['server-config'], queryFn: ({ signal }) => api<ServerConfig>('/api/server/config', { signal }) });
   const baseline = useRef<ServerConfig | null>(null);
+  const mounted = useRef(false);
   const submitting = useRef(false);
   useEffect(() => { if (query.data && !ready) { baseline.current = query.data; form.setFieldsValue(query.data.saved); setReady(true); } }, [query.data, ready, form]);
-  useEffect(() => () => { edit.setDirty(false); edit.setSaving(false); }, [edit.setDirty, edit.setSaving]);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; edit.setDirty(false); edit.setSaving(false); };
+  }, [edit.setDirty, edit.setSaving]);
   const mutation = useMutation({
     mutationFn: (values: ServerConfig['saved']) => post<ServerConfig>('/api/server/config', { ...values, baseline_version: baseline.current?.version ?? null }),
     onMutate: () => edit.setSaving(true),
-    onSuccess: data => { baseline.current = data; form.setFieldsValue(data.saved); edit.setDirty(false); message.success('服务设置已保存，重启后生效'); void query.refetch(); },
+    onSuccess: data => { client.setQueryData(['server-config'], data); baseline.current = data; form.setFieldsValue(data.saved); edit.setDirty(false); message.success('服务设置已保存，重启后生效'); void query.refetch(); },
     onError: error => message.error(error.message),
     onSettled: () => { submitting.current = false; edit.setSaving(false); },
   });
   return <><ErrorNotice error={query.error} retry={() => void query.refetch()} /><ErrorNotice error={mutation.error} />
     {((mutation.error as { status?: number } | null)?.status === 409 || mutation.error?.message.includes('服务设置已被其他请求修改')) && <Button onClick={async () => {
       if (!await modal.confirm({ title: '重新加载服务设置？', content: '重新加载会放弃当前未保存的修改，请先记录需要保留的内容。', okText: '重新加载', cancelText: '继续编辑' })) return;
+      if (!mounted.current) return;
       const result = await query.refetch();
-      if (!result.error && result.data) { baseline.current = result.data; form.setFieldsValue(result.data.saved); edit.setDirty(false); mutation.reset(); }
+      if (mounted.current && !result.error && result.data) { baseline.current = result.data; form.setFieldsValue(result.data.saved); edit.setDirty(false); mutation.reset(); }
     }}>重新加载服务设置</Button>}
     <Card title="监听设置" className="settings-card"><Alert type="info" showIcon title={`当前监听：${query.data?.active.host ?? '--'}:${query.data?.active.port ?? '--'}。修改后重启生效；使用 Docker 时请同时调整代理配置。`} />
       <Form form={form} layout="vertical" className="settings-fields" disabled={!ready || edit.saving} onValuesChange={() => edit.setDirty(true)} onFinish={v => { if (submitting.current) return; submitting.current = true; mutation.mutate(v); }}>
@@ -230,7 +237,7 @@ function ServerSettings() {
         <div className="settings-card-footer settings-card-actions">
           <span className="muted" role="status">{edit.dirty ? '有未保存的修改' : '修改后需重启后端生效'}</span>
           <Space wrap>
-            <Button onClick={async () => { if (edit.dirty && !await modal.confirm({ title: '放弃未保存的修改？', okText: '还原', cancelText: '继续编辑' })) return; if (baseline.current) form.setFieldsValue(baseline.current.saved); edit.setDirty(false); mutation.reset(); }}>还原</Button>
+            <Button onClick={async () => { if (edit.dirty && !await modal.confirm({ title: '放弃未保存的修改？', okText: '还原', cancelText: '继续编辑' })) return; if (!mounted.current) return; if (baseline.current) form.setFieldsValue(baseline.current.saved); edit.setDirty(false); mutation.reset(); }}>还原</Button>
             <Button type="primary" htmlType="submit" loading={mutation.isPending}>保存监听设置</Button>
           </Space>
         </div>

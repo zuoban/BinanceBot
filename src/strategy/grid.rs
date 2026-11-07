@@ -1773,6 +1773,27 @@ impl GridTradingEngine {
         Ok(())
     }
 
+    async fn load_target_paper_state(
+        &self,
+        new_config: &crate::config::AppConfig,
+        direction_changed: bool,
+    ) -> Result<Option<(PositionInfo, AccountInfo)>> {
+        let symbol = new_config.exchange.symbol.clone();
+        let state = self
+            .state
+            .db
+            .run_blocking(move |db| db.load_paper_state(&symbol))
+            .await?;
+        anyhow::ensure!(
+            !direction_changed
+                || state.as_ref().is_none_or(|(position, _)| {
+                    position.size * new_config.grid.direction.sign() >= Decimal::ZERO
+                }),
+            "切换做多 / 做空方向前，请先平掉目标账户的持仓"
+        );
+        Ok(state)
+    }
+
     async fn apply_config(&mut self, new_config: crate::config::AppConfig) -> Result<()> {
         new_config.validate()?;
         self.retire_market_requests();
@@ -1811,20 +1832,8 @@ impl GridTradingEngine {
         }
         let mut paper_state = if new_config.exchange.is_paper() && (market_changed || mode_changed)
         {
-            let symbol = new_config.exchange.symbol.clone();
-            let state = self
-                .state
-                .db
-                .run_blocking(move |db| db.load_paper_state(&symbol))
-                .await?;
-            anyhow::ensure!(
-                !direction_changed
-                    || state.as_ref().is_none_or(|(position, _)| {
-                        position.size * new_config.grid.direction.sign() >= Decimal::ZERO
-                    }),
-                "切换做多 / 做空方向前，请先平掉目标账户的持仓"
-            );
-            state
+            self.load_target_paper_state(&new_config, direction_changed)
+                .await?
         } else {
             None
         };
@@ -1898,19 +1907,9 @@ impl GridTradingEngine {
             }
         }
         if new_config.exchange.is_paper() && (market_changed || mode_changed) {
-            let symbol = new_config.exchange.symbol.clone();
             paper_state = self
-                .state
-                .db
-                .run_blocking(move |db| db.load_paper_state(&symbol))
+                .load_target_paper_state(&new_config, direction_changed)
                 .await?;
-            anyhow::ensure!(
-                !direction_changed
-                    || paper_state.as_ref().is_none_or(|(position, _)| {
-                        position.size * new_config.grid.direction.sign() >= Decimal::ZERO
-                    }),
-                "切换做多 / 做空方向前，请先平掉目标账户的持仓"
-            );
         }
         // Snapshot readers must see the new config together with its matching runtime data.
         let transition_state = Arc::clone(&self.state);

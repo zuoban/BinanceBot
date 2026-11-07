@@ -98,6 +98,23 @@ async fn checked_response(response: reqwest::Response) -> Result<reqwest::Respon
     }
 }
 
+async fn ensure_success(
+    resp: reqwest::Response,
+    context: &str,
+    include_status: bool,
+) -> Result<reqwest::Response> {
+    if resp.status().is_success() {
+        return Ok(resp);
+    }
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    if include_status {
+        Err(anyhow!("{}: {} - {}", context, status, body))
+    } else {
+        Err(anyhow!("{}: {}", context, body))
+    }
+}
+
 pub struct NewOrderRequest<'a> {
     pub symbol: &'a str,
     pub side: &'a str,
@@ -559,12 +576,12 @@ impl BinanceFuturesClient {
             "/fapi/v1/order",
             &format!("symbol={}&orderId={}", symbol, order_id),
         );
-        let resp = self.send(self.client.get(&url)).await?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("Failed to get order: {} - {}", status, body));
-        }
+        let resp = ensure_success(
+            self.send(self.client.get(&url)).await?,
+            "Failed to get order",
+            true,
+        )
+        .await?;
         Ok(resp.json().await?)
     }
 
@@ -972,11 +989,12 @@ impl BinanceFuturesClient {
 
         let url = self.signed_url("/fapi/v1/order", &params);
 
-        let resp = self.send(self.client.delete(&url)).await?;
-        if !resp.status().is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("Failed to cancel order: {}", body));
-        }
+        ensure_success(
+            self.send(self.client.delete(&url)).await?,
+            "Failed to cancel order",
+            false,
+        )
+        .await?;
         Ok(())
     }
 
@@ -985,11 +1003,12 @@ impl BinanceFuturesClient {
         self.reserve(5, RequestClass::Critical)?;
         let url = self.signed_url("/fapi/v2/positionRisk", &format!("symbol={}", symbol));
 
-        let resp = self.send(self.client.get(&url)).await?;
-        if !resp.status().is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("Failed to get position risk: {}", body));
-        }
+        let resp = ensure_success(
+            self.send(self.client.get(&url)).await?,
+            "Failed to get position risk",
+            false,
+        )
+        .await?;
 
         let positions: Vec<BinancePositionRisk> = resp.json().await?;
         one_way_position(positions, symbol)
@@ -999,11 +1018,12 @@ impl BinanceFuturesClient {
     pub(crate) async fn get_all_positions(&self) -> Result<Vec<BinancePositionRisk>> {
         self.reserve(5, RequestClass::Normal)?;
         let url = self.signed_url("/fapi/v2/positionRisk", "");
-        let resp = self.send(self.client.get(&url)).await?;
-        if !resp.status().is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("Failed to get position risk: {}", body));
-        }
+        let resp = ensure_success(
+            self.send(self.client.get(&url)).await?,
+            "Failed to get position risk",
+            false,
+        )
+        .await?;
         Ok(resp.json().await?)
     }
 
@@ -1023,11 +1043,12 @@ impl BinanceFuturesClient {
         self.reserve(5, class)?;
         let url = self.signed_url("/fapi/v2/account", "");
 
-        let resp = self.send(self.client.get(&url)).await?;
-        if !resp.status().is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("Failed to get account info: {}", body));
-        }
+        let resp = ensure_success(
+            self.send(self.client.get(&url)).await?,
+            "Failed to get account info",
+            false,
+        )
+        .await?;
 
         let acc: BinanceAccountInfoResponse = resp.json().await?;
         Ok(acc)
