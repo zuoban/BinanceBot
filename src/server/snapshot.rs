@@ -1,7 +1,11 @@
 use super::AppState;
 use crate::config::AppConfig;
 use crate::db::Database;
-use crate::types::{AccountInfo, BotSnapshot, HourlyTradeStats, OrderSide, TradingMode};
+use crate::types::{
+    AccountInfo, BotSnapshot, BotStatus, HourlyTradeStats, OrderSide, OverviewPairView,
+    PairSummary, SummaryPosition, SummaryStats, SummaryTicker, TodayTradeCounts, TradeRecord,
+    TradingMode,
+};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::Serialize;
@@ -23,9 +27,11 @@ pub(crate) struct AccountSnapshot {
 #[derive(Serialize)]
 struct AccountSnapshotData {
     symbol: String,
+    status: BotStatus,
     ticker: AccountTicker,
     position: AccountPosition,
     account: AccountInfo,
+    account_cny_rate: Option<crate::fx::CnyRate>,
 }
 
 #[derive(Serialize)]
@@ -41,9 +47,15 @@ struct AccountPosition {
 }
 
 #[derive(Serialize)]
+pub(crate) struct AccountFrame {
+    pub generated_at: DateTime<Utc>,
+    pub pairs: Vec<AccountSnapshot>,
+}
+
+#[derive(Serialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub(crate) enum AccountMessage {
-    Accounts { pairs: Vec<AccountSnapshot> },
+    Accounts(AccountFrame),
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -157,6 +169,7 @@ impl AppState {
         let _scope = self.snapshot_scope_lock.read().await;
         let _commit = self.trade_commit_lock.lock().await;
         let config = self.config.read().await;
+        let status = *self.status.read().await;
         let ticker = {
             let ticker = self.ticker.read().await;
             AccountTicker {
@@ -164,28 +177,144 @@ impl AppState {
                 mark_update_time: ticker.mark_update_time,
             }
         };
-        let position = self.position.read().await;
-        let local_account = self.account.read().await;
-        let account = self.account_view(
-            &config.exchange.symbol,
-            config.exchange.trading_mode(),
-            &position,
-            &local_account,
-        );
-        drop(local_account);
-        let position = AccountPosition {
-            size: position.size,
-            unrealized_pnl: position.unrealized_pnl,
+        let (position, account) = {
+            let position = self.position.read().await;
+            let local_account = self.account.read().await;
+            let account = self.account_view(
+                &config.exchange.symbol,
+                config.exchange.trading_mode(),
+                &position,
+                &local_account,
+            );
+            (
+                AccountPosition {
+                    size: position.size,
+                    unrealized_pnl: position.unrealized_pnl,
+                },
+                account,
+            )
         };
+        let account_cny_rate = self.cny_rates.get(&account.asset).await;
         AccountSnapshot {
             mode: config.exchange.trading_mode(),
             snapshot: AccountSnapshotData {
                 symbol: config.exchange.symbol.clone(),
+                status,
                 ticker,
                 position,
                 account,
+                account_cny_rate,
             },
         }
+    }
+
+    pub(crate) async fn overview_snapshot(
+        &self,
+        now: DateTime<Utc>,
+    ) -> (OverviewPairView, Vec<TradeRecord>) {
+        for _ in 0..3 {
+            let scope = SnapshotScope::from_config(&*self.config.read().await);
+            let charts = self.snapshot_cache.get(&self.db, scope, now).await;
+            if let Some(summary) = self.collect_overview(Some(charts)).await {
+                return summary;
+            }
+        }
+        self.collect_overview(None)
+            .await
+            .expect("An uncached summary has no scope or revision to invalidate")
+    }
+
+    async fn collect_overview(
+        &self,
+        charts: Option<SnapshotCharts>,
+    ) -> Option<(OverviewPairView, Vec<TradeRecord>)> {
+        let _scope = self.snapshot_scope_lock.read().await;
+        let _commit = self.trade_commit_lock.lock().await;
+        let config = self.config.read().await;
+        let mode = config.exchange.trading_mode();
+        if charts.as_ref().is_some_and(|charts| {
+            charts.scope != SnapshotScope::from_config(&config)
+                || charts.revision != self.db.symbol_trade_revision(&charts.scope.symbol)
+        }) {
+            return None;
+        }
+        let status = *self.status.read().await;
+        let ticker = {
+            let ticker = self.ticker.read().await;
+            SummaryTicker {
+                mark_price: ticker.mark_price,
+                mark_update_time: ticker.mark_update_time,
+            }
+        };
+        let (position, account) = {
+            let position = self.position.read().await;
+            let local_account = self.account.read().await;
+            let account =
+                self.account_view(&config.exchange.symbol, mode, &position, &local_account);
+            (
+                SummaryPosition {
+                    size: position.size,
+                    entry_price: position.entry_price,
+                    mark_price: position.mark_price,
+                    unrealized_pnl: position.unrealized_pnl,
+                },
+                account,
+            )
+        };
+        let account_cny_rate = self.cny_rates.get(&account.asset).await;
+        let orders = self.active_orders.read().await;
+        let active_buy_orders = orders
+            .values()
+            .filter(|order| order.side == OrderSide::Buy)
+            .count();
+        let active_sell_orders = orders.len() - active_buy_orders;
+        drop(orders);
+        let stats = SummaryStats {
+            total_realized_pnl: self.stats.read().await.total_realized_pnl,
+            active_buy_orders,
+            active_sell_orders,
+        };
+        let today_trade_counts = charts.and_then(|charts| charts.trades).map(|stats| {
+            let (buy, sell) = stats.buckets.iter().fold((0, 0), |(buy, sell), bucket| {
+                (buy + bucket.buy_count, sell + bucket.sell_count)
+            });
+            TodayTradeCounts {
+                window_start: stats.window_start,
+                window_end: stats.window_end,
+                buy,
+                sell,
+            }
+        });
+        let trades = self.recent_trades.read().await;
+        let mut recent: Vec<_> = trades
+            .iter()
+            .filter(|trade| trade.mode == mode && trade.symbol == config.exchange.symbol)
+            .collect();
+        recent.sort_unstable_by(|a, b| {
+            b.timestamp
+                .cmp(&a.timestamp)
+                .then_with(|| b.trade_id.cmp(&a.trade_id))
+        });
+        let recent = recent.into_iter().take(20).cloned().collect();
+        Some((
+            OverviewPairView {
+                scoped: self.pair_scope().is_some(),
+                mode,
+                snapshot: PairSummary {
+                    symbol: config.exchange.symbol.clone(),
+                    status,
+                    mode,
+                    grid_config: config.summary(),
+                    ticker,
+                    position,
+                    stats,
+                    today_trade_counts,
+                    account,
+                    account_cny_rate,
+                },
+            },
+            recent,
+        ))
     }
 
     pub async fn snapshot(&self) -> BotSnapshot {

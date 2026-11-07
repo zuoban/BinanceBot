@@ -199,6 +199,7 @@ async fn cleanup_requires_auth_and_confirmation_then_clears_every_scope() {
         assert_eq!(state.stats.read().await.total_trades, 65);
     }
 
+    let verification_clear_revision = db.symbol_trade_clear_revision("SOLUSDC");
     let mut events = state.ws_broadcast_tx.subscribe();
     let response = app
         .clone()
@@ -251,7 +252,10 @@ async fn cleanup_requires_auth_and_confirmation_then_clears_every_scope() {
     }
     let mut delayed_verification = trade(0, "SOLUSDC", TradingMode::Paper);
     delayed_verification.pnl_verified = true;
-    state.verify_trade_pnl(delayed_verification).await.unwrap();
+    state
+        .verify_trade_pnl(delayed_verification, verification_clear_revision)
+        .await
+        .unwrap();
     assert_eq!(state.stats.read().await.total_realized_pnl, Decimal::ZERO);
     assert_eq!(state.stats.read().await.pending_pnl_trades, 0);
     let event: Value = serde_json::from_str(&events.try_recv().unwrap()).unwrap();

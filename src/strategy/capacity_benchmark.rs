@@ -469,7 +469,7 @@ async fn simulated_live_reconciliation() {
                 engine.last_orders_sync = None;
                 engine.last_account_sync = None;
                 let cycle_start = Instant::now();
-                engine.sync_cycle().await;
+                engine.sync_cycle(true).await;
                 samples.push(cycle_start.elapsed().as_secs_f64() * 1000.0);
                 orders_ok += usize::from(engine.last_orders_sync.is_some());
                 account_ok += usize::from(engine.last_account_sync.is_some());

@@ -23,7 +23,7 @@ export default function PairDetail() {
   const now = useNow();
   const [tab, setTab] = useUrlParam<string>('tab', 'monitor', ['monitor', 'orders', 'trades', 'logs']);
   const s = query.data, asset = quoteAsset(symbol ?? '');
-  const account = s && pair ? accountGroups([{ snapshot: s, mode: pair.mode, scoped: pair.scoped, account_observation_stale: query.stale }])[0] : undefined;
+  const account = s && pair ? accountGroups([{ snapshot: s, mode: s.mode, scoped: pair.scoped, account_observation_stale: query.stale }])[0] : undefined;
   const today = s ? todayTradeCounts(s) : null;
   useDocumentTitle(`${s && Number(s.ticker.mark_price) > 0 ? price(s.ticker.mark_price) : '--'} | ${today?.buy ?? '--'}B | ${today?.sell ?? '--'}S`);
   const todayPnl = today && s?.hourly_trade_stats && s.hourly_trade_stats.pending_pnl_count === 0 ? s.hourly_trade_stats.realized_pnl : null;

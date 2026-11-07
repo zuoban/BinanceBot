@@ -1,6 +1,6 @@
-use super::cache_entries::CacheEntries;
+use super::cache_entries::{CacheEntries, ENTRY_WAIT, FAILURE_COOLDOWN};
 use super::{BinanceAccountInfoResponse, BinanceFuturesClient};
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -59,27 +59,43 @@ impl AccountCache {
         let key = client.account_cache_key();
         loop {
             let (epoch, entry) = self.entries.entry(key).await;
-            let mut cached = entry.lock().await;
+            let mut cached = tokio::time::timeout(ENTRY_WAIT, entry.lock())
+                .await
+                .map_err(|_| anyhow!("shared account request is still in flight"))?;
             if !self.entries.is_current(key, epoch, &entry).await {
                 continue;
             }
-            if let Some(snapshot) = cached.as_ref().filter(|_| !force) {
+            if cached
+                .failed_at
+                .is_some_and(|at| at.elapsed() < FAILURE_COOLDOWN)
+            {
+                return Err(anyhow!("shared account request is cooling down"));
+            }
+            if let Some(snapshot) = cached.snapshot.as_ref().filter(|_| !force) {
                 if snapshot.received_instant.elapsed() < MAX_AGE {
                     return Ok(snapshot.clone());
                 }
             }
             // Do not serve an expired or invalidated snapshot after a failure.
-            *cached = None;
+            cached.snapshot = None;
             let account = client.get_account().await;
             if !self.entries.is_current(key, epoch, &entry).await {
                 continue;
             }
+            let account = match account {
+                Ok(account) => account,
+                Err(error) => {
+                    cached.failed_at = Some(Instant::now());
+                    return Err(error);
+                }
+            };
             let snapshot = AccountSnapshot {
-                account: Arc::new(account?),
+                account: Arc::new(account),
                 received_at: Utc::now(),
                 received_instant: Instant::now(),
             };
-            *cached = Some(snapshot.clone());
+            cached.failed_at = None;
+            cached.snapshot = Some(snapshot.clone());
             return Ok(snapshot);
         }
     }
@@ -251,18 +267,57 @@ mod tests {
         let cache = AccountCache::default();
         cache.get(&client).await.unwrap();
         let (_epoch, entry) = cache.entries.entry(client.account_cache_key()).await;
-        entry.lock().await.as_mut().unwrap().received_instant = Instant::now() - MAX_AGE;
+        entry
+            .lock()
+            .await
+            .snapshot
+            .as_mut()
+            .unwrap()
+            .received_instant = Instant::now() - MAX_AGE;
         fail.store(true, Ordering::SeqCst);
-        assert!(cache.get(&client).await.is_err());
-        assert!(entry.lock().await.is_none());
+        let failed = futures_util::future::join_all((0..20).map(|_| cache.get(&client))).await;
+        assert!(failed.iter().all(Result::is_err));
+        assert!(entry.lock().await.snapshot.is_none());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
         fail.store(false, Ordering::SeqCst);
+        assert!(cache.get(&client).await.is_err());
+        assert!(cache.refresh(&client).await.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        tokio::time::sleep(FAILURE_COOLDOWN).await;
         cache.get(&client).await.unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 3);
         server.abort();
     }
 
     #[tokio::test]
-    async fn invalidation_does_not_wait_for_inflight_account_request() {
+    async fn critical_refresh_bypasses_failure_cooldown_and_locked_entry() {
+        let (url, calls, fail, server) = server().await;
+        let client = BinanceFuturesClient::with_base_url(&AppConfig::default().exchange, url);
+        let cache = AccountCache::default();
+        fail.store(true, Ordering::SeqCst);
+        assert!(cache.get(&client).await.is_err());
+        fail.store(false, Ordering::SeqCst);
+        assert!(cache.refresh(&client).await.is_err());
+        let (_, entry) = cache.entries.entry(client.account_cache_key()).await;
+        let held = entry.lock().await;
+        let critical =
+            tokio::time::timeout(Duration::from_secs(1), cache.refresh_critical(&client))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            critical.account.available_balance,
+            rust_decimal::Decimal::from(8)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        drop(held);
+        cache.get(&client).await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn ordinary_wait_is_bounded_and_retired_failure_cannot_poison_new_generation() {
         let calls = Arc::new(AtomicUsize::new(0));
         let started = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
@@ -279,12 +334,13 @@ mod tests {
                     if old {
                         started.notify_one();
                         release.notified().await;
+                        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({})));
                     }
-                    let balance = if old { "1" } else { "2" };
-                    Json(json!({"totalWalletBalance": balance, "totalMarginBalance": balance,
+                    let balance = "2";
+                    (StatusCode::OK, Json(json!({"totalWalletBalance": balance, "totalMarginBalance": balance,
                         "totalUnrealizedProfit": "0", "availableBalance": balance,
                         "assets": [{"asset": "USDC", "walletBalance": balance,
-                            "unrealizedProfit": "0", "marginBalance": balance, "availableBalance": balance}]}))
+                            "unrealizedProfit": "0", "marginBalance": balance, "availableBalance": balance}]})))
                 }
             }
         }));
@@ -302,6 +358,12 @@ mod tests {
             async move { cache.get(&client).await.unwrap() }
         });
         started.notified().await;
+        let waiting = futures_util::future::join_all((0..20).map(|_| cache.get(&client)));
+        let waiting = tokio::time::timeout(Duration::from_secs(1), waiting)
+            .await
+            .unwrap();
+        assert!(waiting.iter().all(Result::is_err));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
         tokio::time::timeout(Duration::from_secs(1), cache.invalidate(&client))
             .await
             .unwrap();

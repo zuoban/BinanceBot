@@ -360,7 +360,50 @@ pub struct TradingPairView {
 pub struct OverviewPairView {
     pub scoped: bool,
     pub mode: TradingMode,
-    pub snapshot: BotSnapshot,
+    pub snapshot: PairSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairSummary {
+    pub symbol: String,
+    pub status: BotStatus,
+    pub mode: TradingMode,
+    pub grid_config: crate::config::GridConfigSummary,
+    pub ticker: SummaryTicker,
+    pub position: SummaryPosition,
+    pub stats: SummaryStats,
+    pub today_trade_counts: Option<TodayTradeCounts>,
+    pub account: AccountInfo,
+    pub account_cny_rate: Option<crate::fx::CnyRate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SummaryTicker {
+    pub mark_price: Decimal,
+    pub mark_update_time: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SummaryPosition {
+    pub size: Decimal,
+    pub entry_price: Decimal,
+    pub mark_price: Decimal,
+    pub unrealized_pnl: Decimal,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SummaryStats {
+    pub total_realized_pnl: Decimal,
+    pub active_buy_orders: usize,
+    pub active_sell_orders: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TodayTradeCounts {
+    pub window_start: DateTime<Utc>,
+    pub window_end: DateTime<Utc>,
+    pub buy: u64,
+    pub sell: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -370,6 +413,7 @@ pub struct OverviewSnapshot {
     /// Consumers must not sum account balances across pairs.
     pub pairs: Vec<OverviewPairView>,
     pub today_pnl: Option<TodayPnl>,
+    pub recent_trades: Vec<TradeRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -675,7 +675,7 @@ async fn live_opposite_position_cancels_opening_orders_even_with_stale_prices() 
         }
         // This exchange still serves account/order requests, but price endpoints
         // are unavailable, so the sync cannot refresh the expired market data.
-        engine.sync_cycle().await;
+        engine.sync_cycle(true).await;
 
         assert!(!engine
             .state

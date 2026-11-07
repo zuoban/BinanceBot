@@ -57,6 +57,147 @@ async fn orders(engine: &GridTradingEngine) -> Vec<GridOrder> {
 }
 
 #[tokio::test]
+async fn empty_paper_grid_recovers_from_either_market_completion_order_without_pushes() {
+    for mark_first in [false, true] {
+        for blocked in [
+            "ready",
+            "gate",
+            "paused",
+            "shutdown",
+            "live_account",
+            "live_orders",
+            "unreconciled",
+        ] {
+            let mut engine = paper_engine().await;
+            let state = engine.state.clone();
+            state.config.write().await.exchange.sync_interval_secs = 20;
+            *state.position.write().await = PositionInfo::default();
+            let now = Utc::now();
+            *state.ticker.write().await = TickerInfo {
+                symbol: "SOLUSDC".into(),
+                last_price: dec!(100),
+                mark_price: dec!(100),
+                update_time: now - chrono::Duration::seconds(20),
+                mark_update_time: now - chrono::Duration::seconds(20),
+                ..Default::default()
+            };
+            if blocked.starts_with("live_") || blocked == "unreconciled" {
+                let mut config = state.config.write().await;
+                config.exchange.api_key = "live-key".into();
+                config.exchange.api_secret = "live-secret".into();
+                engine.last_account_sync = Some(Instant::now());
+                engine.last_orders_sync = Some(Instant::now());
+                if blocked == "live_account" {
+                    engine.last_account_sync = None;
+                }
+                if blocked == "live_orders" {
+                    engine.last_orders_sync = None;
+                }
+                engine.reconciliation_blocked = blocked == "unreconciled";
+            }
+            let gate = if blocked == "gate" {
+                Some(state.order_submission_lock.clone().write_owned().await)
+            } else {
+                None
+            };
+            if blocked == "paused" {
+                state.pause_trading().await.unwrap();
+            }
+            let scope = engine.market_request_scope("SOLUSDC").await;
+            let mark = MarkPriceCompletion {
+                scope: scope.clone(),
+                previous: state.ticker.read().await.clone(),
+                result: Ok((dec!(100), now)),
+            };
+            let ticker = TickerCompletion {
+                scope,
+                result: Ok(TickerInfo {
+                    symbol: "SOLUSDC".into(),
+                    last_price: dec!(100),
+                    update_time: now,
+                    ..Default::default()
+                }),
+            };
+            if blocked == "shutdown" {
+                state.request_shutdown();
+            }
+            if mark_first {
+                engine.apply_mark_price_completion(mark).await;
+                assert!(orders(&engine).await.is_empty());
+                engine.apply_ticker_completion(ticker).await;
+            } else {
+                engine.apply_ticker_completion(ticker).await;
+                assert!(orders(&engine).await.is_empty());
+                engine.apply_mark_price_completion(mark).await;
+            }
+            let recovered = orders(&engine).await;
+            if blocked == "ready" {
+                assert!(
+                    recovered.iter().any(|order| order.side == OrderSide::Buy),
+                    "mark_first={mark_first}"
+                );
+            } else {
+                assert!(recovered.is_empty(), "{blocked}, mark_first={mark_first}");
+            }
+            assert!(state.db.get_recent_trades(10).unwrap().is_empty());
+            drop(gate);
+        }
+    }
+}
+
+#[tokio::test]
+async fn mark_only_completion_runs_paper_position_cap_and_opening_protection() {
+    for pause in [false, true] {
+        let mut engine = paper_engine().await;
+        let state = engine.state.clone();
+        {
+            let mut config = state.config.write().await;
+            config.grid.max_position_usdc = Some(dec!(1000));
+            config.grid.pause_on_max_position = pause;
+            config.grid.cancel_opening_on_max_position = !pause;
+        }
+        state.position.write().await.size = dec!(10);
+        let now = Utc::now();
+        *state.ticker.write().await = TickerInfo {
+            symbol: "SOLUSDC".into(),
+            last_price: dec!(99),
+            mark_price: dec!(99),
+            update_time: now - chrono::Duration::seconds(20),
+            mark_update_time: now - chrono::Duration::seconds(20),
+            ..Default::default()
+        };
+        for pending in [
+            order("mark_cap_buy", OrderSide::Buy, dec!(98), dec!(1)),
+            order("mark_cap_sell", OrderSide::Sell, dec!(102), dec!(1)),
+        ] {
+            state
+                .active_orders
+                .write()
+                .await
+                .insert(pending.client_order_id.clone(), pending);
+        }
+        assert!(engine.pending_paper_ticker.is_none());
+        let completion = MarkPriceCompletion {
+            scope: engine.market_request_scope("SOLUSDC").await,
+            previous: state.ticker.read().await.clone(),
+            result: Ok((dec!(101), now)),
+        };
+        engine.apply_mark_price_completion(completion).await;
+        let remaining = orders(&engine).await;
+        if pause {
+            assert_eq!(*state.status.read().await, BotStatus::Paused);
+            assert!(remaining.is_empty());
+        } else {
+            assert_eq!(*state.status.read().await, BotStatus::Running);
+            assert_eq!(remaining.len(), 1);
+            assert_eq!(remaining[0].client_order_id, "gb_mark_cap_sell");
+            assert_eq!(remaining[0].price, dec!(102));
+        }
+        assert!(state.db.get_recent_trades(10).unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
 async fn remainder_submission_waits_for_the_global_configuration_gate() {
     let mut engine = paper_engine().await;
     let state = engine.state.clone();
@@ -876,7 +1017,7 @@ async fn max_position_pause_on_live_sync_stays_paused_when_cancellation_fails() 
         engine.client = Arc::new(BinanceFuturesClient::with_base_url(&config.exchange, url));
     }
     engine.state.position.write().await.size = dec!(9);
-    engine.sync_cycle().await;
+    engine.sync_cycle(true).await;
     assert_eq!(*engine.state.status.read().await, BotStatus::Paused);
     assert_eq!(engine.state.position.read().await.size, dec!(10));
     assert_eq!(

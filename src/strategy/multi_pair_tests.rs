@@ -121,7 +121,7 @@ async fn periodic_reconciliation_preserves_critical_budget_for_cancellation() {
         limiter,
     ));
     engine.last_orders_sync = Some(Instant::now());
-    engine.sync_cycle().await;
+    engine.sync_cycle(true).await;
     assert_eq!(listings.load(Ordering::SeqCst), 0);
     assert!(engine.last_orders_sync.is_none());
     assert!(engine.reconciliation_blocked);

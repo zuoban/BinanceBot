@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, pairPath, socketUrl, tokenStore } from './api';
-import type { AccountFrame, OverviewHistoryData, Overview, Pair, Snapshot, SocketMessage } from './types';
+import type { AccountFrame, AccountObservation, OverviewHistoryData, Overview, Pair, Snapshot, SocketMessage } from './types';
 
 const SOCKET_LIVE_MS = 5000;
 const HTTP_FALLBACK_MS = 3000;
@@ -19,8 +19,8 @@ export function useOverviewHistory() {
 
 type SocketDataByType = { [Message in SocketMessage as Message['type']]: Message['data'] };
 
-export function useSocket<T extends keyof SocketDataByType>(path: string | undefined, type: T, onData: (data: SocketDataByType[T]) => void) {
-  const callback = useRef<(data: SocketDataByType[T]) => void>(onData);
+export function useSocket<T extends keyof SocketDataByType>(path: string | undefined, type: T, onData: (data: SocketDataByType[T]) => void | boolean) {
+  const callback = useRef<(data: SocketDataByType[T]) => void | boolean>(onData);
   callback.current = onData;
   const [lastReceived, setLastReceived] = useState(0);
   const [connected, setConnected] = useState(false);
@@ -38,7 +38,7 @@ export function useSocket<T extends keyof SocketDataByType>(path: string | undef
         try {
           const envelope = JSON.parse(event.data) as SocketMessage;
           if (envelope.type !== type) return;
-          callback.current(envelope.data as SocketDataByType[T]);
+          if (callback.current(envelope.data as SocketDataByType[T]) === false) return;
           attempts = 0; setConnected(true); setLastReceived(Date.now());
         } catch { /* Ignore malformed frames; HTTP remains the fallback. */ }
       };
@@ -84,26 +84,34 @@ export function usePairSnapshot(pair: Pair | undefined) {
   return { ...query, live: socket.connected && now - socket.lastReceived < SOCKET_LIVE_MS, stale: now - query.dataUpdatedAt > SNAPSHOT_STALE_MS };
 }
 
-export function useLiveAccounts(overview: Overview | undefined, overviewUpdatedAt: number) {
-  const [frame, setFrame] = useState<AccountFrame>();
+export function useLiveAccounts() {
+  const client = useQueryClient();
+  const lastFallback = useRef(0);
+  const key = ['accounts'];
+  const stream = useSocket('/api/accounts/ws', 'accounts', data => {
+    const current = client.getQueryData<AccountFrame>(key);
+    if (current && Date.parse(data.generated_at) < Date.parse(current.generated_at)) return false;
+    void client.cancelQueries({ queryKey: key });
+    client.setQueryData(key, data);
+  });
+  const query = useQuery({
+    queryKey: key,
+    queryFn: async ({ signal }) => {
+      const data = await api<AccountFrame>('/api/accounts', { signal });
+      const current = client.getQueryData<AccountFrame>(key);
+      return current && Date.parse(data.generated_at) < Date.parse(current.generated_at) ? current : data;
+    },
+    refetchInterval: () => stream.connected && Date.now() - stream.lastReceived < SOCKET_LIVE_MS ? false : HTTP_FALLBACK_MS,
+  });
   const [now, setNow] = useState(Date.now());
   useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(timer); }, []);
-  const stream = useSocket('/api/accounts/ws', 'accounts', setFrame);
-  const httpStale = now - overviewUpdatedAt > SNAPSHOT_STALE_MS;
-  const fallback = (overview?.pairs ?? []).map(entry => ({ ...entry, account_observation_stale: httpStale }));
-  if (now - stream.lastReceived >= SOCKET_LIVE_MS) return fallback;
-  const accounts = new Map<AccountFrame['pairs'][number]['mode'], Map<string, AccountFrame['pairs'][number]>>();
-  for (const account of frame?.pairs ?? []) {
-    let symbols = accounts.get(account.mode);
-    if (!symbols) {
-      symbols = new Map();
-      accounts.set(account.mode, symbols);
+  useEffect(() => {
+    if (now - stream.lastReceived >= SOCKET_LIVE_MS && now - query.dataUpdatedAt >= HTTP_FALLBACK_MS && now - lastFallback.current >= HTTP_FALLBACK_MS && !query.isFetching) {
+      lastFallback.current = now;
+      void query.refetch();
     }
-    if (!symbols.has(account.snapshot.symbol)) symbols.set(account.snapshot.symbol, account);
-  }
-  return fallback.map(entry => {
-    const account = accounts.get(entry.mode)?.get(entry.snapshot.symbol);
-    if (!account) return entry;
-    return { ...entry, account_observation_stale: false, snapshot: { ...entry.snapshot, account: account.snapshot.account, position: { ...entry.snapshot.position, ...account.snapshot.position }, ticker: { ...entry.snapshot.ticker, ...account.snapshot.ticker } } };
-  });
+  }, [now, stream.lastReceived, query]);
+  const stale = now - query.dataUpdatedAt > SNAPSHOT_STALE_MS || now - Date.parse(query.data?.generated_at ?? '') > SNAPSHOT_STALE_MS;
+  const accounts: AccountObservation[] = (query.data?.pairs ?? []).map(entry => ({ ...entry, account_observation_stale: stale }));
+  return { accounts, stale, error: query.error };
 }

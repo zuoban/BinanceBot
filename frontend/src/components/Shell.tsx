@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, Outlet, useBlocker, useLocation, useNavigate } from 'react-router-dom';
 import { App, Button, Drawer, Modal } from 'antd';
 import { AppstoreOutlined, ArrowDownOutlined, ArrowUpOutlined, BulbOutlined, EditOutlined, LineChartOutlined, LogoutOutlined, MenuOutlined, PauseOutlined, PlayCircleOutlined, PlusOutlined, QuestionCircleOutlined, ReloadOutlined, SearchOutlined, SettingOutlined, StopOutlined } from '@ant-design/icons';
-import { useLiveAccounts, useOverview, usePairs } from '../lib/queries';
+import { useLiveAccounts, usePairs } from '../lib/queries';
 import { AccountsContext, EditContext, useSession } from '../lib/session';
 import { accountGroups, number, statusLabel, trimFractionZeros } from '../lib/format';
 import type { Mode, Pair } from '../lib/types';
@@ -16,13 +16,22 @@ import { ModeTag } from './Common';
 export default function Shell() {
   const location = useLocation();
   const pairs = usePairs();
-  const overview = useOverview();
-  const accounts = useLiveAccounts(overview.data, overview.dataUpdatedAt);
+  const liveAccounts = useLiveAccounts();
+  const accounts = liveAccounts.accounts;
+  const accountPairs = new Map(accounts.map(entry => [entry.snapshot.symbol, entry]));
+  const currentPairs = pairs.data?.map(pair => {
+    const observation = accountPairs.get(pair.symbol);
+    return observation?.mode === pair.mode && !observation.account_observation_stale ? { ...pair, status: observation.snapshot.status } : pair;
+  });
+  const pairModeChanged = pairs.data?.some(pair => {
+    const observation = accountPairs.get(pair.symbol);
+    return observation && observation.mode !== pair.mode;
+  });
   const [dirty, setDirty] = useState(false), [saving, setSaving] = useState(false);
   const { modal, message } = App.useApp();
   const { logout, authEnabled } = useSession();
   const groups = accountGroups(accounts);
-  const alert = !!overview.error || accounts.some(entry => entry.account_observation_stale || entry.snapshot.status === 'ERROR');
+  const alert = !!liveAccounts.error || liveAccounts.stale || accounts.some(entry => entry.account_observation_stale || entry.snapshot.status === 'ERROR');
   const withAlert = (title: string) => alert ? `⚠ ${title}` : title;
   useDocumentTitle(location.pathname.match(/^\/pairs\/(?!new\/?$)[^/]+\/?$/) ? null : withAlert(groups.length ? groups.map(group => {
     return `${trimFractionZeros(number(group.equity))} | ${group.ratio === null ? '--' : `${trimFractionZeros(number(group.ratio))}%`}`;
@@ -56,7 +65,7 @@ export default function Shell() {
   useEffect(() => { setDrawer(false); }, [location.pathname]);
   const mode = pairs.data?.[0]?.mode;
   const page = location.pathname.startsWith('/settings') ? 'settings' : location.pathname.startsWith('/pairs/') ? 'pair' : 'overview';
-  const sidebarProps = { pairs: pairs.data, pending: pairs.isPending, symbol, pathname: location.pathname, mode, authEnabled, saving, onNavigate: () => setDrawer(false), onSearch: () => { setDrawer(false); setPalette(true); }, onLogout: () => void logOut() };
+  const sidebarProps = { pairs: currentPairs, pending: pairs.isPending, symbol, pathname: location.pathname, mode, authEnabled, saving, onNavigate: () => setDrawer(false), onSearch: () => { setDrawer(false); setPalette(true); }, onLogout: () => void logOut() };
   return <EditContext.Provider value={context}><AccountsContext.Provider value={accounts}><ControlProvider><div className="app-layout">
     <a className="skip-link" href="#main">跳到主内容</a>
     <aside className="sidebar"><SidebarBody idPrefix="rail" {...sidebarProps} /></aside>
@@ -75,7 +84,7 @@ export default function Shell() {
       <button type="button" className={`bottombar-item${page === 'pair' ? ' bottombar-item-active' : ''}`} aria-label="切换或查看交易对" aria-expanded={drawer} onClick={() => setDrawer(open => !open)}><LineChartOutlined aria-hidden="true" /><span>交易对</span></button>
       <Link to="/settings" className={`bottombar-item${page === 'settings' ? ' bottombar-item-active' : ''}`} aria-current={page === 'settings' ? 'page' : undefined}><SettingOutlined aria-hidden="true" /><span>设置</span></Link>
     </nav>
-    <PaletteHost open={palette} setOpen={setPalette} pairs={pairs.data} stale={!!overview.error || Date.now() - overview.dataUpdatedAt > 10_000} authEnabled={authEnabled} saving={saving} onLogout={() => void logOut()} />
+    <PaletteHost open={palette} setOpen={setPalette} pairs={currentPairs} stale={!!pairs.error || !!liveAccounts.error || liveAccounts.stale || !!pairModeChanged || Date.now() - pairs.dataUpdatedAt > 10_000} authEnabled={authEnabled} saving={saving} onLogout={() => void logOut()} />
   </div></ControlProvider></AccountsContext.Provider></EditContext.Provider>;
 }
 

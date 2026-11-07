@@ -918,12 +918,36 @@ impl AppState {
         true
     }
 
-    pub async fn verify_trade_pnl(&self, trade: TradeRecord) -> anyhow::Result<()> {
-        let _commit = self.trade_commit_lock.lock().await;
+    pub async fn verify_trade_pnl(
+        self: &Arc<Self>,
+        trade: TradeRecord,
+        expected_clear_revision: u64,
+    ) -> anyhow::Result<()> {
+        let commit = self.trade_commit_lock.clone().lock_owned().await;
+        // Retirement closes admission even if an aborted worker is still polling.
+        if self.is_retired() {
+            return Ok(());
+        }
+        let state = self.clone();
+        // Once admitted, finish publishing even if the requester stops.
+        tokio::spawn(async move {
+            let _commit = commit;
+            state
+                .verify_trade_pnl_inner(trade, expected_clear_revision)
+                .await
+        })
+        .await?
+    }
+
+    async fn verify_trade_pnl_inner(
+        &self,
+        trade: TradeRecord,
+        expected_clear_revision: u64,
+    ) -> anyhow::Result<()> {
         let stored_trade = trade.clone();
         if !self
             .db
-            .run_blocking(move |db| db.verify_trade_pnl(&stored_trade))
+            .run_blocking(move |db| db.verify_trade_pnl(&stored_trade, expected_clear_revision))
             .await?
         {
             return Ok(());
@@ -950,6 +974,10 @@ impl AppState {
             existing.pnl_verified = true;
         }
         Ok(())
+    }
+
+    pub(crate) async fn drain_trade_commits(&self) {
+        let _commit = self.trade_commit_lock.lock().await;
     }
 
     pub async fn refresh_current_scope(&self) {
@@ -3084,6 +3112,118 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn canceled_verification_request_still_publishes_its_committed_result() {
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        db.save_config(&AppConfig::default()).unwrap();
+        let (tx, _) = mpsc::channel(1);
+        let state = AppState::new(AppConfig::default(), db.clone(), tx);
+        let mut trade = cache_test_trade("cancel-verification", 1, TradingMode::Paper);
+        trade.pnl_verified = false;
+        trade.realized_pnl = Decimal::ZERO;
+        trade.commission = Decimal::ZERO;
+        assert!(state.record_trade(trade.clone(), None, None, None).await);
+        let clear_revision = db.symbol_trade_clear_revision(&trade.symbol);
+        let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        db.set_membership_commit_hook("add", reached_tx, resume_rx);
+        let writer = tokio::task::spawn_blocking({
+            let db = db.clone();
+            move || {
+                let mut config = AppConfig::default();
+                config.exchange.symbol = "ETHUSDT".into();
+                db.add_pair_config(&config)
+            }
+        });
+        reached_rx.await.unwrap();
+        trade.realized_pnl = dec!(3.25);
+        trade.commission = dec!(0.02);
+        trade.pnl_verified = true;
+        let request = tokio::spawn({
+            let state = state.clone();
+            async move { state.verify_trade_pnl(trade, clear_revision).await }
+        });
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while state.trade_commit_lock.try_lock().is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        resume_tx.send(()).unwrap();
+        writer.await.unwrap().unwrap();
+        let _commit = tokio::time::timeout(Duration::from_secs(3), state.trade_commit_lock.lock())
+            .await
+            .unwrap();
+        let stats = state.stats.read().await;
+        assert_eq!(stats.total_realized_pnl, dec!(3.25));
+        assert_eq!(stats.total_commission, dec!(0.02));
+        assert_eq!(stats.pending_pnl_trades, 0);
+        let recent = state.recent_trades.read().await;
+        assert!(recent[0].pnl_verified);
+        assert_eq!(recent[0].realized_pnl, dec!(3.25));
+        assert_eq!(
+            db.get_pnl_totals("SOLUSDC", TradingMode::Paper).unwrap(),
+            (dec!(3.25), dec!(0.02), 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn canceled_verification_waiter_never_commits_after_the_lock_is_released() {
+        use std::future::Future;
+        use std::task::Poll;
+
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let (tx, _) = mpsc::channel(1);
+        let state = AppState::new(AppConfig::default(), db.clone(), tx);
+        let mut trade = cache_test_trade("cancel-waiting-verification", 1, TradingMode::Paper);
+        assert!(state.record_trade(trade.clone(), None, None, None).await);
+        let clear_revision = db.symbol_trade_clear_revision(&trade.symbol);
+        trade.realized_pnl = dec!(3.25);
+        trade.commission = dec!(0.02);
+        trade.pnl_verified = true;
+
+        let commit = state.trade_commit_lock.lock().await;
+        let (waiting_tx, waiting_rx) = tokio::sync::oneshot::channel();
+        let request = tokio::spawn({
+            let state = state.clone();
+            async move {
+                let verification = state.verify_trade_pnl(trade, clear_revision);
+                tokio::pin!(verification);
+                std::future::poll_fn(|cx| {
+                    assert!(verification.as_mut().poll(cx).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+                waiting_tx.send(()).unwrap();
+                verification.await
+            }
+        });
+        waiting_rx.await.unwrap();
+        tokio::task::yield_now().await;
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        drop(commit);
+
+        let _commit = tokio::time::timeout(Duration::from_secs(3), state.trade_commit_lock.lock())
+            .await
+            .unwrap();
+        let stats = state.stats.read().await;
+        assert_eq!(stats.total_realized_pnl, Decimal::ZERO);
+        assert_eq!(stats.total_commission, Decimal::ZERO);
+        assert_eq!(stats.pending_pnl_trades, 1);
+        let recent = state.recent_trades.read().await;
+        assert!(!recent[0].pnl_verified);
+        assert_eq!(recent[0].realized_pnl, Decimal::ZERO);
+        assert_eq!(recent[0].commission, Decimal::ZERO);
+        assert_eq!(
+            db.get_pnl_totals("SOLUSDC", TradingMode::Paper).unwrap(),
+            (Decimal::ZERO, Decimal::ZERO, 1)
+        );
+    }
+
+    #[tokio::test]
     async fn recent_trade_verification_preserves_cached_timestamp() {
         let db = Arc::new(Database::open(":memory:").unwrap());
         let (tx, _) = mpsc::channel(1);
@@ -3093,7 +3233,11 @@ mod tests {
         let mut verified = original.clone();
         verified.timestamp += chrono::Duration::seconds(100);
         verified.realized_pnl = dec!(3);
-        state.verify_trade_pnl(verified).await.unwrap();
+        let clear_revision = state.db.symbol_trade_clear_revision(&verified.symbol);
+        state
+            .verify_trade_pnl(verified, clear_revision)
+            .await
+            .unwrap();
         let cached = state.recent_trades.read().await;
         assert_eq!(cached[0].timestamp, original.timestamp);
         assert_eq!(cached[0].realized_pnl, dec!(3));
@@ -3144,5 +3288,49 @@ mod tests {
         let snapshot = state.snapshot().await;
         let hourly = snapshot.hourly_trade_stats.unwrap();
         assert_eq!(hourly.buckets.iter().map(|b| b.buy_count).sum::<u64>(), 1);
+    }
+
+    #[tokio::test]
+    async fn retired_verification_is_left_for_the_replacement_state() {
+        let config = AppConfig::default();
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        db.save_config(&config).unwrap();
+        let commit = Arc::new(Mutex::new(()));
+        let (tx, _) = mpsc::channel(1);
+        let retired = AppState::new_for_pair(config.clone(), db.clone(), tx, commit.clone());
+        let mut trade = cache_test_trade("retired-verification", 1, TradingMode::Paper);
+        trade.pnl_verified = false;
+        trade.realized_pnl = Decimal::ZERO;
+        trade.commission = Decimal::ZERO;
+        assert!(retired.record_trade(trade.clone(), None, None, None).await);
+        let revision = db.symbol_trade_clear_revision(&trade.symbol);
+        trade.realized_pnl = dec!(3.25);
+        trade.commission = dec!(0.02);
+        trade.pnl_verified = true;
+
+        retired.retire();
+        retired.drain_trade_commits().await;
+        retired
+            .verify_trade_pnl(trade.clone(), revision)
+            .await
+            .unwrap();
+        assert_eq!(
+            db.get_pnl_totals("SOLUSDC", TradingMode::Paper).unwrap(),
+            (Decimal::ZERO, Decimal::ZERO, 1)
+        );
+        assert!(!retired.recent_trades.read().await[0].pnl_verified);
+
+        let (tx, _) = mpsc::channel(1);
+        let replacement = AppState::new_for_pair(config, db.clone(), tx, commit);
+        replacement.verify_trade_pnl(trade, revision).await.unwrap();
+        let stats = replacement.stats.read().await;
+        assert_eq!(stats.total_realized_pnl, dec!(3.25));
+        assert_eq!(stats.total_commission, dec!(0.02));
+        assert_eq!(stats.pending_pnl_trades, 0);
+        assert!(replacement.recent_trades.read().await[0].pnl_verified);
+        assert_eq!(
+            db.get_pnl_totals("SOLUSDC", TradingMode::Paper).unwrap(),
+            (dec!(3.25), dec!(0.02), 0)
+        );
     }
 }

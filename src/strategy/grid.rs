@@ -309,6 +309,34 @@ impl MarketRetry {
 }
 
 #[derive(Clone)]
+struct MarketRequestScope {
+    generation: u64,
+    account: [u8; 32],
+    symbol: String,
+    mode: TradingMode,
+}
+
+struct MarkPriceCompletion {
+    scope: MarketRequestScope,
+    previous: TickerInfo,
+    result: Result<(Decimal, chrono::DateTime<Utc>)>,
+}
+
+struct TickerCompletion {
+    scope: MarketRequestScope,
+    result: Result<TickerInfo>,
+}
+
+async fn market_completion<T>(
+    task: &mut Option<JoinHandle<T>>,
+) -> std::result::Result<T, tokio::task::JoinError> {
+    match task {
+        Some(task) => task.await,
+        None => std::future::pending().await,
+    }
+}
+
+#[derive(Clone)]
 struct InitialOrderResponseBatch {
     batch_id: String,
     responses: Vec<(String, String, String, BinanceOrderResponse)>,
@@ -327,11 +355,17 @@ pub struct GridTradingEngine {
     action_rx: mpsc::Receiver<BotControlAction>,
     ticker_rx: broadcast::Receiver<TickerInfo>,
     pnl_reconcile_offset: usize,
-    pnl_reconcile_task: Option<JoinHandle<()>>,
+    pnl_reconcile_task: Option<JoinHandle<Option<Instant>>>,
+    pnl_retry_at: Option<Instant>,
+    pnl_order_ids: HashMap<String, i64>,
     last_account_sync: Option<Instant>,
     last_orders_sync: Option<Instant>,
     mark_retry: MarketRetry,
     ticker_retry: MarketRetry,
+    market_request_generation: u64,
+    mark_price_task: Option<JoinHandle<MarkPriceCompletion>>,
+    ticker_task: Option<JoinHandle<TickerCompletion>>,
+    pending_paper_ticker: Option<(Decimal, chrono::DateTime<Utc>, u64)>,
     reconciliation_blocked: bool,
     provisional_order_ids: HashSet<([u8; 32], String)>,
     order_identity_conflicts: HashMap<([u8; 32], String), GridOrder>,
@@ -348,6 +382,7 @@ pub struct GridTradingEngine {
 
 impl Drop for GridTradingEngine {
     fn drop(&mut self) {
+        self.retire_market_requests();
         if let Some(task) = &self.pnl_reconcile_task {
             task.abort();
         }
@@ -391,10 +426,16 @@ impl GridTradingEngine {
             ticker_rx,
             pnl_reconcile_offset: 0,
             pnl_reconcile_task: None,
+            pnl_retry_at: None,
+            pnl_order_ids: HashMap::new(),
             last_account_sync: None,
             last_orders_sync: None,
             mark_retry: MarketRetry::default(),
             ticker_retry: MarketRetry::default(),
+            market_request_generation: 0,
+            mark_price_task: None,
+            ticker_task: None,
+            pending_paper_ticker: None,
             reconciliation_blocked: false,
             provisional_order_ids: HashSet::new(),
             order_identity_conflicts: HashMap::new(),
@@ -1270,7 +1311,8 @@ impl GridTradingEngine {
             Duration::from_millis(rand::random::<u64>() % sync_secs.saturating_mul(1000).max(1));
         let mut sync_timer = interval_at(tokio::time::Instant::now() + offset, period);
         sync_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut pnl_timer = interval(Duration::from_secs(60));
+        let mut pnl_timer = interval(Duration::from_secs(1));
+        pnl_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         // Preserve recovered orders. Reconciliation and the regular window
         // maintenance will add only the missing levels.
@@ -1312,14 +1354,38 @@ impl GridTradingEngine {
 
                 // Regular synchronization timer
                 _ = sync_timer.tick() => {
-                    self.sync_cycle().await;
+                    self.sync_cycle(false).await;
+                    self.reconcile_unverified_trades().await;
                 }
 
                 _ = pnl_timer.tick() => {
                     self.reconcile_unverified_trades().await;
                 }
+
+                completion = market_completion(&mut self.mark_price_task) => {
+                    self.mark_price_task = None;
+                    match completion {
+                        Ok(completion) => self.apply_mark_price_completion(completion).await,
+                        Err(error) => {
+                            self.mark_retry.failed();
+                            warn!(%error, "Mark-price fallback task failed");
+                        }
+                    }
+                }
+
+                completion = market_completion(&mut self.ticker_task) => {
+                    self.ticker_task = None;
+                    match completion {
+                        Ok(completion) => self.apply_ticker_completion(completion).await,
+                        Err(error) => {
+                            self.ticker_retry.failed();
+                            warn!(%error, "Ticker fallback task failed");
+                        }
+                    }
+                }
             }
         }
+        self.retire_market_requests();
     }
 
     async fn handle_control_action(&mut self, action: BotControlAction) {
@@ -1432,7 +1498,7 @@ impl GridTradingEngine {
                     .add_log("INFO", "Trading bot resumed by user")
                     .await;
                 let _ = reply.send(Ok(()));
-                self.sync_cycle().await;
+                self.sync_cycle(false).await;
             }
             BotControlAction::CancelAll | BotControlAction::CancelAllAlreadyPersisted => {
                 info!("Cancel all orders requested");
@@ -1508,6 +1574,7 @@ impl GridTradingEngine {
     }
 
     async fn shutdown_inner(&mut self, removing: bool) -> Result<()> {
+        self.retire_market_requests();
         self.state.request_shutdown();
         let paused = self.state.pause_for_shutdown().await;
         // Shutdown can interrupt initialization before durable orders have been
@@ -1589,6 +1656,7 @@ impl GridTradingEngine {
 
     async fn apply_config(&mut self, new_config: crate::config::AppConfig) -> Result<()> {
         new_config.validate()?;
+        self.retire_market_requests();
         if let Some(symbol) = self.state.pair_scope() {
             anyhow::ensure!(
                 symbol == new_config.exchange.symbol,
@@ -1749,6 +1817,14 @@ impl GridTradingEngine {
         }
 
         self.client = new_client;
+        if market_changed || mode_changed || client_changed {
+            if let Some(task) = self.pnl_reconcile_task.take() {
+                task.abort();
+            }
+            self.pnl_order_ids.clear();
+            self.pnl_reconcile_offset = 0;
+            self.pnl_retry_at = None;
+        }
         if client_changed {
             self.state.position.write().await.update_time = None;
             self.state.account.write().await.update_time = chrono::DateTime::<Utc>::default();
@@ -1933,7 +2009,11 @@ impl GridTradingEngine {
         // In paper mode, match simulated orders against live market price
         let prices_fresh = self.state.ticker.read().await.prices_are_fresh(Utc::now());
         if is_running && paper && prices_fresh && last_updated {
+            self.pending_paper_ticker = None;
             self.simulate_order_fills(ticker_update.last_price).await;
+        }
+        if mark_updated {
+            self.match_pending_paper_ticker().await;
         }
     }
 
@@ -2008,7 +2088,7 @@ impl GridTradingEngine {
     }
 
     /// Periodic sync cycle
-    async fn sync_cycle(&mut self) {
+    async fn sync_cycle(&mut self, wait_for_market: bool) {
         let started = tracing::enabled!(tracing::Level::DEBUG).then(Instant::now);
         macro_rules! finish_sync {
             ($result:expr) => {
@@ -2025,8 +2105,11 @@ impl GridTradingEngine {
         let config = self.state.config.read().await.clone();
         let paper = config.exchange.is_paper();
 
-        self.refresh_mark_price(&config.exchange.symbol, paper)
-            .await;
+        if wait_for_market {
+            self.refresh_mark_price(&config.exchange.symbol).await;
+        } else {
+            self.start_mark_price_request(&config.exchange.symbol).await;
+        }
         if let Some(started) = started {
             debug!(
                 stage = "mark_price",
@@ -2038,7 +2121,11 @@ impl GridTradingEngine {
             finish_sync!("paused_after_mark_price");
             return;
         }
-        self.refresh_stale_ticker(&config.exchange.symbol).await;
+        if wait_for_market {
+            self.refresh_stale_ticker(&config.exchange.symbol).await;
+        } else {
+            self.start_ticker_request(&config.exchange.symbol).await;
+        }
         if let Some(started) = started {
             debug!(
                 stage = "ticker",
@@ -2126,7 +2213,39 @@ impl GridTradingEngine {
         }
     }
 
-    async fn refresh_mark_price(&mut self, symbol: &str, paper: bool) {
+    fn retire_market_requests(&mut self) {
+        self.market_request_generation = self.market_request_generation.wrapping_add(1);
+        self.pending_paper_ticker = None;
+        if let Some(task) = self.mark_price_task.take() {
+            task.abort();
+        }
+        if let Some(task) = self.ticker_task.take() {
+            task.abort();
+        }
+    }
+
+    async fn market_request_scope(&self, symbol: &str) -> MarketRequestScope {
+        MarketRequestScope {
+            generation: self.market_request_generation,
+            account: self.client.account_identity_key(),
+            symbol: symbol.to_owned(),
+            mode: self.state.config.read().await.exchange.trading_mode(),
+        }
+    }
+
+    async fn market_scope_is_current(&self, scope: &MarketRequestScope) -> bool {
+        let config = self.state.config.read().await;
+        !self.state.is_shutting_down()
+            && scope.generation == self.market_request_generation
+            && scope.account == self.client.account_identity_key()
+            && scope.symbol == config.exchange.symbol
+            && scope.mode == config.exchange.trading_mode()
+    }
+
+    async fn start_mark_price_request(&mut self, symbol: &str) {
+        if self.mark_price_task.is_some() || self.state.is_shutting_down() {
+            return;
+        }
         let previous = self.state.ticker.read().await.clone();
         let age = Utc::now().signed_duration_since(previous.mark_update_time);
         if previous.symbol == symbol
@@ -2140,23 +2259,67 @@ impl GridTradingEngine {
         if !self.mark_retry.ready() {
             return;
         }
-        match self.market_cache.mark_price(&self.client, symbol).await {
+        let scope = self.market_request_scope(symbol).await;
+        let client = Arc::clone(&self.client);
+        let cache = Arc::clone(&self.market_cache);
+        self.mark_price_task = Some(tokio::spawn(async move {
+            let result = cache.mark_price(&client, &scope.symbol).await;
+            MarkPriceCompletion {
+                scope,
+                previous,
+                result,
+            }
+        }));
+    }
+
+    async fn refresh_mark_price(&mut self, symbol: &str) {
+        self.start_mark_price_request(symbol).await;
+        if let Some(task) = self.mark_price_task.take() {
+            match task.await {
+                Ok(completion) => self.apply_mark_price_completion(completion).await,
+                Err(_) => self.mark_retry.failed(),
+            }
+        }
+    }
+
+    async fn apply_mark_price_completion(&mut self, completion: MarkPriceCompletion) {
+        if !self.market_scope_is_current(&completion.scope).await {
+            return;
+        }
+        let symbol = &completion.scope.symbol;
+        match completion.result {
             Ok((price, requested_at)) if price > Decimal::ZERO => {
                 self.mark_retry.reset();
+                let previous = completion.previous;
+                let age = Utc::now().signed_duration_since(requested_at);
                 let mut ticker = self.state.ticker.write().await;
-                if ticker.symbol != previous.symbol
+                if age < chrono::Duration::zero()
+                    || age >= chrono::Duration::seconds(15)
+                    || ticker.symbol != previous.symbol
                     || ticker.mark_update_time != previous.mark_update_time
                     || ticker.mark_price != previous.mark_price
                     || (ticker.mark_price > Decimal::ZERO && requested_at < ticker.mark_update_time)
                 {
                     return;
                 }
+                ticker.symbol = symbol.clone();
                 ticker.mark_price = price;
                 ticker.mark_update_time = requested_at;
                 drop(ticker);
-
-                if paper {
+                let pause_epoch = self.state.pause_epoch();
+                if completion.scope.mode == TradingMode::Paper {
                     self.update_paper_valuation().await;
+                }
+                let config = self.state.config.read().await.clone();
+                let protected = self.cancel_suspended_opening_orders(&config).await;
+                if self.pause_if_position_limit_reached().await {
+                    return;
+                }
+                if protected && self.state.pause_epoch() == pause_epoch {
+                    self.match_pending_paper_ticker().await;
+                    if self.state.pause_epoch() == pause_epoch {
+                        self.maintain_grid_window().await;
+                    }
                 }
             }
             Ok(_) => {
@@ -2170,7 +2333,10 @@ impl GridTradingEngine {
         }
     }
 
-    async fn refresh_stale_ticker(&mut self, symbol: &str) {
+    async fn start_ticker_request(&mut self, symbol: &str) {
+        if self.ticker_task.is_some() || self.state.is_shutting_down() {
+            return;
+        }
         let ticker = self.state.ticker.read().await.clone();
         let age = Utc::now() - ticker.update_time;
         if ticker.symbol == symbol
@@ -2183,40 +2349,119 @@ impl GridTradingEngine {
         if !self.ticker_retry.ready() {
             return;
         }
-
-        let mut update = ticker;
-        let mut requested_at = Utc::now();
-        update.symbol = symbol.to_string();
-        match self.client.get_24hr_ticker_for_fallback(symbol).await {
-            Ok(stats) => {
-                update.last_price = stats.last_price;
-                update.high_24h = stats.high_price;
-                update.low_24h = stats.low_price;
-                update.change_24h = stats.price_change;
-                update.change_percent_24h = stats.price_change_percent;
-                update.volume_24h = stats.volume;
-            }
-            Err(e) => {
-                debug!("Could not refresh 24h ticker for {}: {}", symbol, e);
-                requested_at = Utc::now();
-                match self.client.get_ticker_price_for_fallback(symbol).await {
-                    Ok(price) => update.last_price = price,
+        let scope = self.market_request_scope(symbol).await;
+        let client = Arc::clone(&self.client);
+        self.ticker_task = Some(tokio::spawn(async move {
+            let mut update = ticker;
+            update.symbol = scope.symbol.clone();
+            update.mark_price = Decimal::ZERO;
+            update.update_time = Utc::now();
+            let result = async {
+                match client.get_24hr_ticker_for_fallback(&scope.symbol).await {
+                    Ok(stats) => {
+                        update.last_price = stats.last_price;
+                        update.high_24h = stats.high_price;
+                        update.low_24h = stats.low_price;
+                        update.change_24h = stats.price_change;
+                        update.change_percent_24h = stats.price_change_percent;
+                        update.volume_24h = stats.volume;
+                    }
                     Err(e) => {
-                        self.ticker_retry.failed();
-                        warn!("Could not refresh stale market price for {}: {}", symbol, e);
-                        return;
+                        debug!("Could not refresh 24h ticker for {}: {}", scope.symbol, e);
+                        update.update_time = Utc::now();
+                        update.last_price =
+                            client.get_ticker_price_for_fallback(&scope.symbol).await?;
+                    }
+                }
+                anyhow::ensure!(
+                    update.last_price > Decimal::ZERO,
+                    "Zero fallback ticker price"
+                );
+                Ok(update)
+            }
+            .await;
+            TickerCompletion { scope, result }
+        }));
+    }
+
+    async fn refresh_stale_ticker(&mut self, symbol: &str) {
+        self.start_ticker_request(symbol).await;
+        if let Some(task) = self.ticker_task.take() {
+            match task.await {
+                Ok(completion) => self.apply_ticker_completion(completion).await,
+                Err(_) => self.ticker_retry.failed(),
+            }
+        }
+    }
+
+    async fn apply_ticker_completion(&mut self, completion: TickerCompletion) {
+        if !self.market_scope_is_current(&completion.scope).await {
+            return;
+        }
+        match completion.result {
+            Ok(update) => {
+                let price = update.last_price;
+                let timestamp = update.update_time;
+                let pause_epoch = self.state.pause_epoch();
+                self.handle_ticker_update(update).await;
+                let running = *self.state.status.read().await == BotStatus::Running;
+                let ticker = self.state.ticker.read().await;
+                if completion.scope.mode == TradingMode::Paper
+                    && running
+                    && self.state.pause_epoch() == pause_epoch
+                    && ticker.last_price == price
+                    && ticker.update_time == timestamp
+                    && !ticker.prices_are_fresh(Utc::now())
+                {
+                    // A ticker arriving before its mark must still be matched
+                    // once valuation is fresh, using this exact price event.
+                    self.pending_paper_ticker = Some((price, timestamp, pause_epoch));
+                }
+                drop(ticker);
+                if self.state.pause_epoch() == pause_epoch {
+                    let ticker = self.state.ticker.read().await;
+                    let accepted = ticker.last_price == price && ticker.update_time == timestamp;
+                    drop(ticker);
+                    if accepted {
+                        self.maintain_grid_window().await;
                     }
                 }
             }
+            Err(e) => {
+                self.ticker_retry.failed();
+                warn!(
+                    "Could not refresh stale market price for {}: {}",
+                    completion.scope.symbol, e
+                );
+            }
         }
-        if update.last_price <= Decimal::ZERO {
-            self.ticker_retry.failed();
+    }
+
+    async fn match_pending_paper_ticker(&mut self) {
+        let Some((price, timestamp, pause_epoch)) = self.pending_paper_ticker else {
+            return;
+        };
+        let ticker = self.state.ticker.read().await;
+        if self.state.pause_epoch() != pause_epoch
+            || ticker.last_price != price
+            || ticker.update_time != timestamp
+        {
+            self.pending_paper_ticker = None;
             return;
         }
-        self.ticker_retry.reset();
-        update.mark_price = Decimal::ZERO;
-        update.update_time = requested_at;
-        self.handle_ticker_update(update).await;
+        if !ticker.prices_are_fresh(Utc::now()) {
+            return;
+        }
+        drop(ticker);
+        self.pending_paper_ticker = None;
+        let config = self.state.config.read().await.clone();
+        if config.exchange.is_paper()
+            && *self.state.status.read().await == BotStatus::Running
+            && self.cancel_suspended_opening_orders(&config).await
+            && !self.pause_if_position_limit_reached().await
+        {
+            self.simulate_order_fills(price).await;
+        }
     }
 
     // Compatibility recovery only: adopted exchange orders are reconciled, but
@@ -2612,26 +2857,7 @@ impl GridTradingEngine {
         }
     }
 
-    async fn fetch_execution_pnl(
-        &self,
-        symbol: &str,
-        order_id: i64,
-        expected_qty: Decimal,
-    ) -> Result<(Decimal, Decimal, bool)> {
-        let scope = symbol.to_owned();
-        let clear_revision = self
-            .state
-            .db
-            .run_blocking(move |db| Ok(db.symbol_trade_clear_revision(&scope)))
-            .await?;
-        let fills = self
-            .client
-            .get_user_trades(symbol, order_id, expected_qty, clear_revision)
-            .await?;
-        aggregate_execution_pnl(symbol, &fills)
-    }
-
-    /// Fill the exchange PnL and fees for rows saved before this version or during API outages.
+    /// Bounded compensation runs independently of order admission and risk refreshes.
     async fn reconcile_unverified_trades(&mut self) {
         if self
             .pnl_reconcile_task
@@ -2640,6 +2866,18 @@ impl GridTradingEngine {
         {
             return;
         }
+        if let Some(task) = self.pnl_reconcile_task.take() {
+            if let Ok(Some(retry_at)) = task.await {
+                self.pnl_retry_at = Some(retry_at);
+            }
+        }
+        if self
+            .pnl_retry_at
+            .is_some_and(|retry_at| Instant::now() < retry_at)
+        {
+            return;
+        }
+        self.pnl_retry_at = None;
         let config = self.state.config.read().await.clone();
         if config.exchange.is_paper() {
             return;
@@ -2649,6 +2887,7 @@ impl GridTradingEngine {
         self.client.note_pnl_reconcile_backlog(pending_count);
         if pending_count == 0 {
             self.pnl_reconcile_offset = 0;
+            self.pnl_order_ids.clear();
             return;
         }
         let offset = self.pnl_reconcile_offset % pending_count;
@@ -2657,7 +2896,7 @@ impl GridTradingEngine {
             .state
             .db
             .run_blocking(move |db| {
-                db.get_unverified_trades_with_clear_revision(&pending_symbol, mode, 3, offset)
+                db.get_unverified_trades_with_clear_revision(&pending_symbol, mode, 32, offset)
             })
             .await
         {
@@ -2668,41 +2907,87 @@ impl GridTradingEngine {
             }
         };
         self.pnl_reconcile_offset = (offset + pending.len()) % pending_count;
+        let pending: Vec<_> = pending
+            .into_iter()
+            .map(|trade| {
+                let order_id = self.pnl_order_ids.remove(&trade.client_order_id);
+                (trade, order_id)
+            })
+            .collect();
         let client = Arc::clone(&self.client);
         let state = Arc::clone(&self.state);
         self.pnl_reconcile_task = Some(tokio::spawn(async move {
-            for mut trade in pending {
-                let result = async {
-                    let order = client
-                        .get_order_by_client_id(&trade.symbol, &trade.client_order_id)
-                        .await?;
-                    let fills = client
-                        .get_user_trades(
-                            &trade.symbol,
-                            order.order_id,
-                            order.executed_qty,
-                            clear_revision,
-                        )
-                        .await?;
-                    aggregate_execution_pnl(&trade.symbol, &fills)
-                }
-                .await;
-                match result {
-                    Ok((pnl, commission, maker)) => {
-                        trade.realized_pnl = pnl;
-                        trade.commission = commission;
-                        trade.is_maker = maker;
-                        trade.pnl_verified = true;
-                        if let Err(e) = state.verify_trade_pnl(trade).await {
-                            warn!("Could not save verified trade PnL: {}", e);
+            use futures_util::{stream, StreamExt};
+            use std::sync::atomic::{AtomicBool, Ordering};
+            let quota_blocked = AtomicBool::new(false);
+            let retry_needed = AtomicBool::new(false);
+            stream::iter(pending)
+                .for_each_concurrent(4, |(mut trade, order_id)| {
+                    let client = Arc::clone(&client);
+                    let state = Arc::clone(&state);
+                    let quota_blocked = &quota_blocked;
+                    let retry_needed = &retry_needed;
+                    async move {
+                        if quota_blocked.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        let result = async {
+                            let order_id = match order_id {
+                                Some(order_id) => order_id,
+                                None => {
+                                    client
+                                        .get_order_by_client_id_for_pnl(
+                                            &trade.symbol,
+                                            &trade.client_order_id,
+                                        )
+                                        .await?
+                                        .order_id
+                                }
+                            };
+                            let fills = client
+                                .get_user_trades(
+                                    &trade.symbol,
+                                    order_id,
+                                    trade.quantity,
+                                    clear_revision,
+                                )
+                                .await?;
+                            aggregate_execution_pnl(&trade.symbol, &fills)
+                        }
+                        .await;
+                        match result {
+                            Ok((pnl, commission, maker)) => {
+                                trade.realized_pnl = pnl;
+                                trade.commission = commission;
+                                trade.is_maker = maker;
+                                trade.pnl_verified = true;
+                                if let Err(e) = state.verify_trade_pnl(trade, clear_revision).await
+                                {
+                                    warn!("Could not save verified trade PnL: {}", e);
+                                    retry_needed.store(true, Ordering::Relaxed);
+                                }
+                            }
+                            Err(e) => {
+                                retry_needed.store(true, Ordering::Relaxed);
+                                if e.downcast_ref::<crate::exchange::client::LocalRateLimitError>()
+                                    .is_some()
+                                {
+                                    // Stop this batch at the first local rejection;
+                                    // only the other already-active requests may finish.
+                                    quota_blocked.store(true, Ordering::Relaxed);
+                                }
+                                debug!(
+                                    "PnL verification deferred for {}: {}",
+                                    trade.client_order_id, e
+                                );
+                            }
                         }
                     }
-                    Err(e) => debug!(
-                        "PnL verification deferred for {}: {}",
-                        trade.client_order_id, e
-                    ),
-                }
-            }
+                })
+                .await;
+            retry_needed.load(Ordering::Relaxed).then(|| {
+                Instant::now() + Duration::from_millis(60_000 + rand::random::<u64>() % 1001)
+            })
         }));
     }
 
@@ -2809,15 +3094,41 @@ impl GridTradingEngine {
         }
     }
 
-    /// Executed when an order is confirmed filled
+    /// Executed when an order is confirmed filled outside a batched observation.
     async fn on_order_filled(&mut self, order: &mut GridOrder) -> bool {
+        if !self.state.config.read().await.exchange.is_paper() {
+            order.status = OrderStatus::Filled;
+            self.account_cache.invalidate(&self.client).await;
+            self.position_cache.invalidate(&self.client).await;
+            if !self.sync_account_and_position().await {
+                self.last_account_sync = None;
+                let missing = {
+                    let mut active = self.state.active_orders.write().await;
+                    if active.contains_key(&order.client_order_id) {
+                        false
+                    } else {
+                        active.insert(order.client_order_id.clone(), order.clone());
+                        true
+                    }
+                };
+                if missing {
+                    if let Err(error) = self.save_managed_order(order).await {
+                        error!(%error, "Could not persist unverified terminal order");
+                        self.pause_trading().await;
+                    }
+                }
+                return false;
+            }
+        }
+        self.commit_order_fill(order).await
+    }
+
+    /// Risk refresh and its global check must precede this durable commit.
+    async fn commit_order_fill(&mut self, order: &mut GridOrder) -> bool {
         order.status = OrderStatus::Filled;
         let config = self.state.config.read().await.clone();
         if config.exchange.is_paper() {
             order.updated_at = Utc::now();
-        } else {
-            self.account_cache.invalidate(&self.client).await;
-            self.position_cache.invalidate(&self.client).await;
         }
         let mode = config.exchange.trading_mode();
         let recorded_id = order.client_order_id.clone();
@@ -2831,23 +3142,18 @@ impl GridTradingEngine {
         };
         match recorded {
             Ok(true) => {
-                // Refresh position and account and publish the global risk check
-                // before removing the reservation for an already-recorded fill.
-                if !config.exchange.is_paper() && !self.sync_account_and_position().await {
-                    self.last_account_sync = None;
-                    return false;
-                }
-                self.state
-                    .active_orders
-                    .write()
-                    .await
-                    .remove(&order.client_order_id);
+                // Retire durable recovery metadata before releasing its reservation.
                 if !config.exchange.is_paper() {
                     if let Err(e) = self.delete_managed_order(&order.client_order_id).await {
                         error!("Could not clear already-recorded order: {}", e);
                         return false;
                     }
                 }
+                self.state
+                    .active_orders
+                    .write()
+                    .await
+                    .remove(&order.client_order_id);
                 return true;
             }
             Ok(false) => {}
@@ -2859,40 +3165,6 @@ impl GridTradingEngine {
                 self.pause_trading().await;
                 return false;
             }
-        }
-
-        // Retain the managed order until both position and account are known.
-        // A failed refresh must not remove the only reservation or record a fill
-        // that a later reconciliation can no longer find.
-        if !config.exchange.is_paper() && !self.sync_account_and_position().await {
-            let missing = {
-                let mut active = self.state.active_orders.write().await;
-                if active.contains_key(&order.client_order_id) {
-                    false
-                } else {
-                    active.insert(order.client_order_id.clone(), order.clone());
-                    true
-                }
-            };
-            if missing {
-                if let Err(error) = self.save_managed_order(order).await {
-                    error!(
-                        "Could not persist unverified terminal order {}: {}",
-                        order.client_order_id, error
-                    );
-                    self.pause_trading().await;
-                }
-            }
-            return false;
-        }
-
-        // Keep paper orders retryable until the detached commit has finished.
-        if !config.exchange.is_paper() {
-            self.state
-                .active_orders
-                .write()
-                .await
-                .remove(&order.client_order_id);
         }
 
         let mut cycle_profit = Decimal::ZERO;
@@ -2923,7 +3195,8 @@ impl GridTradingEngine {
                             .active_orders
                             .write()
                             .await
-                            .insert(order.client_order_id.clone(), order.clone());
+                            .entry(order.client_order_id.clone())
+                            .or_insert_with(|| order.clone());
                         self.pause_trading().await;
                         return false;
                     }
@@ -2977,21 +3250,9 @@ impl GridTradingEngine {
 
         let (realized_pnl, commission, is_maker, pnl_verified) = if config.exchange.is_paper() {
             (simulated_pnl, Decimal::ZERO, true, true)
-        } else if let Some(order_id) = order.order_id {
-            match self
-                .fetch_execution_pnl(&order.symbol, order_id, order.quantity)
-                .await
-            {
-                Ok((pnl, fee, maker)) => (pnl, fee, maker, true),
-                Err(e) => {
-                    warn!(
-                        "Exchange PnL unavailable for {}: {}",
-                        order.client_order_id, e
-                    );
-                    (Decimal::ZERO, Decimal::ZERO, true, false)
-                }
-            }
         } else {
+            // Unknown PnL stays explicitly pending until complete exchange fills
+            // are verified. Pagination must never hold the global risk barrier.
             (Decimal::ZERO, Decimal::ZERO, true, false)
         };
 
@@ -3030,8 +3291,20 @@ impl GridTradingEngine {
                 .active_orders
                 .write()
                 .await
-                .insert(order.client_order_id.clone(), order.clone());
+                .entry(order.client_order_id.clone())
+                .or_insert_with(|| order.clone());
             return false;
+        }
+        if !config.exchange.is_paper() {
+            self.state
+                .active_orders
+                .write()
+                .await
+                .remove(&order.client_order_id);
+            if let Some(order_id) = order.order_id {
+                self.pnl_order_ids
+                    .insert(order.client_order_id.clone(), order_id);
+            }
         }
         self.state
             .add_log(
@@ -3044,6 +3317,16 @@ impl GridTradingEngine {
             )
             .await;
         true
+    }
+
+    fn live_reconciliation_ready(&self) -> bool {
+        !self.reconciliation_blocked
+            && self
+                .last_account_sync
+                .is_some_and(|at| at.elapsed() < Duration::from_secs(10))
+            && self
+                .last_orders_sync
+                .is_some_and(|at| at.elapsed() < Duration::from_secs(10))
     }
 
     /// Ensure the active pre-placed order window matches buy_window and sell_window
@@ -3065,6 +3348,9 @@ impl GridTradingEngine {
             return;
         }
         if self.pause_if_position_limit_reached().await {
+            return;
+        }
+        if !config.exchange.is_paper() && !self.live_reconciliation_ready() {
             return;
         }
         if !self.market_data_ready().await {
@@ -3444,20 +3730,8 @@ impl GridTradingEngine {
             return false;
         }
 
-        if !config.exchange.is_paper()
-            && self
-                .last_account_sync
-                .is_none_or(|at| at.elapsed() >= Duration::from_secs(10))
-        {
-            warn!("Skipping order: Binance account or position has not been synchronized recently");
-            return false;
-        }
-        if !config.exchange.is_paper()
-            && self
-                .last_orders_sync
-                .is_none_or(|at| at.elapsed() >= Duration::from_secs(10))
-        {
-            warn!("Skipping order: Binance open orders have not been synchronized recently");
+        if !config.exchange.is_paper() && !self.live_reconciliation_ready() {
+            warn!("Skipping order: Binance account, position, or open orders are not reconciled recently");
             return false;
         }
 
@@ -7439,32 +7713,32 @@ mod tests {
             ticker.last_price = dec!(100);
             ticker.update_time = Utc::now();
         }
-        engine.refresh_mark_price(symbol, true).await;
+        engine.refresh_mark_price(symbol).await;
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(state.ticker.read().await.mark_price, dec!(105));
-        engine.refresh_mark_price(symbol, true).await;
+        engine.refresh_mark_price(symbol).await;
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         let stale = Utc::now() - chrono::Duration::seconds(16);
         state.ticker.write().await.mark_update_time = stale;
         fail.store(true, Ordering::SeqCst);
-        engine.refresh_mark_price(symbol, true).await;
+        engine.refresh_mark_price(symbol).await;
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         let ticker = state.ticker.read().await;
         assert_eq!(ticker.mark_update_time, stale);
         assert!(!ticker.prices_are_fresh(Utc::now()));
         drop(ticker);
         fail.store(false, Ordering::SeqCst);
-        engine.refresh_mark_price(symbol, true).await;
+        engine.refresh_mark_price(symbol).await;
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert!(!state.ticker.read().await.prices_are_fresh(Utc::now()));
         engine.mark_retry.retry_at = Some(Instant::now() - std::time::Duration::from_secs(1));
-        engine.refresh_mark_price(symbol, true).await;
+        engine.refresh_mark_price(symbol).await;
         assert_eq!(calls.load(Ordering::SeqCst), 3);
         assert!(state.ticker.read().await.prices_are_fresh(Utc::now()));
 
         state.ticker.write().await.mark_update_time = stale;
         fail.store(true, Ordering::SeqCst);
-        engine.refresh_mark_price(symbol, true).await;
+        engine.refresh_mark_price(symbol).await;
         assert!(!engine.mark_retry.ready());
         engine
             .handle_ticker_update(TickerInfo {
@@ -7479,7 +7753,7 @@ mod tests {
         let future = Utc::now() + chrono::Duration::seconds(30);
         state.ticker.write().await.mark_update_time = future;
         fail.store(false, Ordering::SeqCst);
-        engine.refresh_mark_price(symbol, true).await;
+        engine.refresh_mark_price(symbol).await;
         let ticker = state.ticker.read().await;
         assert_eq!(ticker.mark_price, dec!(106));
         assert_eq!(ticker.mark_update_time, future);
@@ -7598,17 +7872,14 @@ mod tests {
         let state = AppState::new(config.clone(), db, action_tx);
         let client = Arc::new(BinanceFuturesClient::with_base_url(&config.exchange, url));
         let mut engine = GridTradingEngine::new(state.clone(), client, action_rx, ticker_rx);
-        let ((), ()) = tokio::join!(
-            engine.refresh_mark_price(&config.exchange.symbol, true),
-            async {
-                requested.notified().await;
-                let mut ticker = state.ticker.write().await;
-                ticker.mark_price = dec!(110);
-                ticker.mark_update_time = Utc::now();
-                drop(ticker);
-                release.notify_one();
-            }
-        );
+        let ((), ()) = tokio::join!(engine.refresh_mark_price(&config.exchange.symbol), async {
+            requested.notified().await;
+            let mut ticker = state.ticker.write().await;
+            ticker.mark_price = dec!(110);
+            ticker.mark_update_time = Utc::now();
+            drop(ticker);
+            release.notify_one();
+        });
         assert_eq!(state.ticker.read().await.mark_price, dec!(110));
         server.abort();
     }
@@ -7643,15 +7914,13 @@ mod tests {
         let state = AppState::new(config.clone(), db, action_tx);
         let client = Arc::new(BinanceFuturesClient::with_base_url(&config.exchange, url));
         let mut engine = GridTradingEngine::new(state.clone(), client, action_rx, ticker_rx);
-        let (_, event_time) = tokio::join!(
-            engine.refresh_mark_price(&config.exchange.symbol, true),
-            async {
+        let (_, event_time) =
+            tokio::join!(engine.refresh_mark_price(&config.exchange.symbol), async {
                 requested.notified().await;
                 let event_time = Utc::now();
                 release.notify_one();
                 event_time
-            }
-        );
+            });
         engine
             .handle_ticker_update(TickerInfo {
                 symbol: config.exchange.symbol,
@@ -7662,6 +7931,279 @@ mod tests {
             .await;
         assert_eq!(state.ticker.read().await.mark_price, dec!(110));
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn market_fallbacks_have_one_request_per_type_and_apply_valid_completions() {
+        let started = Arc::new(tokio::sync::Semaphore::new(0));
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let app = Router::new()
+            .route("/fapi/v1/premiumIndex", get({
+                let started = started.clone();
+                let release = release.clone();
+                let calls = calls.clone();
+                move || {
+                    let started = started.clone();
+                    let release = release.clone();
+                    let calls = calls.clone();
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        started.add_permits(1);
+                        release.acquire().await.unwrap().forget();
+                        Json(serde_json::json!({"symbol":"SOLUSDC", "markPrice":"101"}))
+                    }
+                }
+            }))
+            .route("/fapi/v1/ticker/24hr", get({
+                let started = started.clone();
+                let release = release.clone();
+                let calls = calls.clone();
+                move || {
+                    let started = started.clone();
+                    let release = release.clone();
+                    let calls = calls.clone();
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        started.add_permits(1);
+                        release.acquire().await.unwrap().forget();
+                        Json(serde_json::json!({"symbol":"SOLUSDC", "lastPrice":"100", "highPrice":"110", "lowPrice":"90", "priceChange":"1", "priceChangePercent":"1", "volume":"12", "quoteVolume":"1200"}))
+                    }
+                }
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let config = AppConfig::default();
+        let mut engine =
+            pair_recovery_engine(&config, Arc::new(Database::open(":memory:").unwrap()), url).await;
+        *engine.state.status.write().await = BotStatus::Paused;
+        *engine.state.ticker.write().await = TickerInfo {
+            symbol: config.exchange.symbol.clone(),
+            ..Default::default()
+        };
+        for _ in 0..3 {
+            engine
+                .start_mark_price_request(&config.exchange.symbol)
+                .await;
+            engine.start_ticker_request(&config.exchange.symbol).await;
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), started.acquire_many(2))
+            .await
+            .unwrap()
+            .unwrap()
+            .forget();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(engine.state.ticker.read().await.last_price, Decimal::ZERO);
+        release.add_permits(2);
+        let mark = engine.mark_price_task.take().unwrap().await.unwrap();
+        let ticker = engine.ticker_task.take().unwrap().await.unwrap();
+        let mark_requested_at = mark.result.as_ref().unwrap().1;
+        let ticker_requested_at = ticker.result.as_ref().unwrap().update_time;
+        engine.apply_ticker_completion(ticker).await;
+        engine.apply_mark_price_completion(mark).await;
+        let ticker = engine.state.ticker.read().await;
+        assert_eq!(ticker.mark_price, dec!(101));
+        assert_eq!(ticker.last_price, dec!(100));
+        assert_eq!(ticker.mark_update_time, mark_requested_at);
+        assert_eq!(ticker.update_time, ticker_requested_at);
+        assert!(ticker.prices_are_fresh(Utc::now()));
+        assert_eq!(engine.state.position.read().await.unrealized_pnl, dec!(101));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn market_completions_reject_stale_requests_and_retired_or_changed_scopes() {
+        for change in [
+            "stale",
+            "generation",
+            "symbol",
+            "mode",
+            "account",
+            "shutdown",
+        ] {
+            let config = AppConfig::default();
+            let mut engine = pair_recovery_engine(
+                &config,
+                Arc::new(Database::open(":memory:").unwrap()),
+                "http://127.0.0.1:1".into(),
+            )
+            .await;
+            *engine.state.status.write().await = BotStatus::Paused;
+            let scope = engine.market_request_scope(&config.exchange.symbol).await;
+            let previous = engine.state.ticker.read().await.clone();
+            let mut requested_at = Utc::now();
+            match change {
+                "stale" => requested_at -= chrono::Duration::seconds(16),
+                "generation" => engine.retire_market_requests(),
+                "symbol" => engine.state.config.write().await.exchange.symbol = "BTCUSDC".into(),
+                "mode" => {
+                    let mut config = engine.state.config.write().await;
+                    config.exchange.api_key = "different-key".into();
+                    config.exchange.api_secret = "different-secret".into();
+                }
+                "account" => {
+                    let mut changed = config.exchange.clone();
+                    changed.api_key = "other-account".into();
+                    changed.api_secret = "other-secret".into();
+                    engine.client = Arc::new(BinanceFuturesClient::with_base_url(
+                        &changed,
+                        "http://127.0.0.1:1".into(),
+                    ));
+                }
+                "shutdown" => engine.state.request_shutdown(),
+                _ => unreachable!(),
+            }
+            engine
+                .apply_mark_price_completion(super::MarkPriceCompletion {
+                    scope: scope.clone(),
+                    previous: previous.clone(),
+                    result: Ok((dec!(70), requested_at)),
+                })
+                .await;
+            engine
+                .apply_ticker_completion(super::TickerCompletion {
+                    scope,
+                    result: Ok(TickerInfo {
+                        symbol: config.exchange.symbol,
+                        last_price: dec!(70),
+                        update_time: requested_at,
+                        ..Default::default()
+                    }),
+                })
+                .await;
+            let ticker = engine.state.ticker.read().await;
+            assert_eq!(ticker.last_price, previous.last_price, "{change}");
+            assert_eq!(ticker.mark_price, previous.mark_price, "{change}");
+            assert_eq!(ticker.update_time, previous.update_time, "{change}");
+            assert_eq!(
+                ticker.mark_update_time, previous.mark_update_time,
+                "{change}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn ticker_fallback_matches_paper_fill_once_when_its_pending_mark_completes() {
+        for interrupted_by_pause in [false, true] {
+            let config = AppConfig::default();
+            let mut engine = pair_recovery_engine(
+                &config,
+                Arc::new(Database::open(":memory:").unwrap()),
+                "http://127.0.0.1:1".into(),
+            )
+            .await;
+            *engine.state.status.write().await = BotStatus::Running;
+            *engine.state.position.write().await = PositionInfo::default();
+            let now = Utc::now();
+            *engine.state.ticker.write().await = TickerInfo {
+                symbol: config.exchange.symbol.clone(),
+                // A missing mark permits startup fills against the fresh last price.
+                // A previously available, stale mark must defer matching instead.
+                mark_price: dec!(100),
+                mark_update_time: now - chrono::Duration::seconds(16),
+                ..Default::default()
+            };
+            let order = GridOrder {
+                client_order_id: "gb_deferred_market_fill".into(),
+                order_id: None,
+                symbol: config.exchange.symbol.clone(),
+                side: OrderSide::Buy,
+                price: dec!(99),
+                quantity: dec!(1),
+                amount_usdc: dec!(99),
+                status: OrderStatus::New,
+                created_at: now,
+                updated_at: now,
+                grid_level: -1,
+                paired_client_order_id: None,
+                is_take_profit: false,
+                purpose: OrderPurpose::Grid,
+                merge_sources: Vec::new(),
+            };
+            engine
+                .state
+                .active_orders
+                .write()
+                .await
+                .insert(order.client_order_id.clone(), order);
+            let scope = engine.market_request_scope(&config.exchange.symbol).await;
+            let previous = engine.state.ticker.read().await.clone();
+            engine
+                .apply_ticker_completion(super::TickerCompletion {
+                    scope: scope.clone(),
+                    result: Ok(TickerInfo {
+                        symbol: config.exchange.symbol,
+                        last_price: dec!(98),
+                        update_time: now,
+                        ..Default::default()
+                    }),
+                })
+                .await;
+            assert_eq!(engine.state.stats.read().await.total_trades, 0);
+            assert!(engine.pending_paper_ticker.is_some());
+            assert!(!engine
+                .state
+                .ticker
+                .read()
+                .await
+                .prices_are_fresh(Utc::now()));
+            if interrupted_by_pause {
+                engine.state.pause_trading().await.unwrap();
+                engine
+                    .state
+                    .resume_trading_in_mode(TradingMode::Paper, engine.state.pause_epoch())
+                    .await
+                    .unwrap();
+            }
+            engine
+                .apply_mark_price_completion(super::MarkPriceCompletion {
+                    scope,
+                    previous,
+                    result: Ok((dec!(98), now)),
+                })
+                .await;
+            assert!(engine
+                .state
+                .ticker
+                .read()
+                .await
+                .prices_are_fresh(Utc::now()));
+            let expected_trades = if interrupted_by_pause { 0 } else { 1 };
+            assert_eq!(
+                engine.state.stats.read().await.total_trades,
+                expected_trades
+            );
+            assert_eq!(
+                engine.state.position.read().await.size,
+                if interrupted_by_pause {
+                    dec!(0)
+                } else {
+                    dec!(1)
+                }
+            );
+            assert_eq!(
+                engine.state.position.read().await.unrealized_pnl,
+                if interrupted_by_pause {
+                    dec!(0)
+                } else {
+                    dec!(-1)
+                }
+            );
+            assert!(engine.pending_paper_ticker.is_none());
+            engine
+                .handle_ticker_update(TickerInfo {
+                    symbol: "SOLUSDC".into(),
+                    mark_price: dec!(97),
+                    mark_update_time: Utc::now(),
+                    ..Default::default()
+                })
+                .await;
+            assert_eq!(
+                engine.state.stats.read().await.total_trades,
+                expected_trades
+            );
+        }
     }
 
     #[test]

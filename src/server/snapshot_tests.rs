@@ -187,11 +187,17 @@ async fn failed_chart_reads_back_off_and_recover_without_caching_the_error_forev
     let now = test_time();
     let editor = rusqlite::Connection::open(&path).unwrap();
     editor
-        .execute("ALTER TABLE trades RENAME TO unavailable_trades", [])
+        .execute(
+            "ALTER TABLE trade_hourly_rollups RENAME TO unavailable_trade_hourly_rollups",
+            [],
+        )
         .unwrap();
     assert!(state.snapshot_at(now).await.hourly_trade_stats.is_none());
     editor
-        .execute("ALTER TABLE unavailable_trades RENAME TO trades", [])
+        .execute(
+            "ALTER TABLE unavailable_trade_hourly_rollups RENAME TO trade_hourly_rollups",
+            [],
+        )
         .unwrap();
     for offset in [800, 1600, 2400, 3200, 4000] {
         assert!(state
@@ -245,7 +251,8 @@ async fn other_symbols_do_not_invalidate_charts_but_global_cleanup_does() {
 
     // Verification must use the saved row's symbol, not the caller's symbol.
     other.symbol = "SOLUSDC".into();
-    assert!(state.db.verify_trade_pnl(&other).unwrap());
+    let clear_revision = state.db.symbol_trade_clear_revision(&other.symbol);
+    assert!(state.db.verify_trade_pnl(&other, clear_revision).unwrap());
     assert_eq!(total(&state.snapshot_at(now).await), 0);
     assert_eq!(state.db.hourly_stats_query_count(), 1);
     assert_eq!(
@@ -296,13 +303,14 @@ async fn pnl_verification_invalidates_cached_today_stats() {
     fill.realized_pnl = dec!(-1.23456789);
     // The row's persisted symbol determines which chart is invalidated.
     fill.symbol = "BTCUSDT".into();
-    assert!(state.db.verify_trade_pnl(&fill).unwrap());
+    let clear_revision = state.db.symbol_trade_clear_revision(&fill.symbol);
+    assert!(state.db.verify_trade_pnl(&fill, clear_revision).unwrap());
     let after = state.snapshot_at(now).await.hourly_trade_stats.unwrap();
     assert_eq!(after.realized_pnl, dec!(-1.23456789));
     assert_eq!(after.pending_pnl_count, 0);
     assert_eq!(after.buckets.iter().map(|b| b.buy_count).sum::<u64>(), 1);
     assert_eq!(state.db.hourly_stats_query_count(), 2);
-    assert!(!state.db.verify_trade_pnl(&fill).unwrap());
+    assert!(!state.db.verify_trade_pnl(&fill, clear_revision).unwrap());
     state.snapshot_at(now).await;
     assert_eq!(state.db.hourly_stats_query_count(), 2);
 }
@@ -509,21 +517,24 @@ async fn snapshot_push_continues_while_the_trading_engine_waits_for_rest() {
         serde_json::from_str::<serde_json::Value>(&first).unwrap()["type"],
         "snapshot"
     );
-    state.add_log("INFO", "updated while REST is blocked").await;
+    state.ticker.write().await.last_price = dec!(123);
     let second = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             let frame: serde_json::Value =
                 serde_json::from_str(&updates.recv().await.unwrap()).unwrap();
-            if frame["type"] == "snapshot" {
+            if frame["type"] == "snapshot"
+                && frame["data"]["ticker"]["last_price"] == serde_json::json!(dec!(123))
+            {
                 break frame;
             }
         }
     })
     .await
     .unwrap();
+    assert_eq!(second["data"]["status"], "PAUSED");
     assert_eq!(
-        second["data"]["recent_logs"][0]["message"],
-        "updated while REST is blocked"
+        second["data"]["ticker"]["last_price"],
+        serde_json::json!(dec!(123))
     );
     assert_eq!(db.hourly_stats_query_count(), 1);
     trading.abort();
@@ -638,6 +649,45 @@ async fn snapshot_holds_position_until_account_valuation_is_published() {
 }
 
 #[tokio::test]
+async fn overview_summary_rejects_old_chart_generations_and_mode_transitions() {
+    let state = fixture();
+    let now = test_time();
+    let charts = state
+        .snapshot_cache
+        .get(
+            &state.db,
+            SnapshotScope::from_config(&AppConfig::default()),
+            now,
+        )
+        .await;
+    let fill = trade("overview-revision", "SOLUSDC", TradingMode::Paper, now);
+    assert!(state.record_trade(fill, None, None, None).await);
+    assert!(state.collect_overview(Some(charts)).await.is_none());
+    let (summary, recent) = state.overview_snapshot(now).await;
+    assert_eq!(summary.snapshot.today_trade_counts.unwrap().buy, 1);
+    assert_eq!(recent[0].trade_id, "overview-revision");
+
+    let charts = state
+        .snapshot_cache
+        .get(
+            &state.db,
+            SnapshotScope::from_config(&AppConfig::default()),
+            now,
+        )
+        .await;
+    {
+        let mut config = state.config.write().await;
+        config.exchange.api_key = "live-key".into();
+        config.exchange.api_secret = "live-secret".into();
+    }
+    assert!(state.collect_overview(Some(charts)).await.is_none());
+    let (summary, recent) = state.overview_snapshot(now).await;
+    assert_eq!(summary.mode, TradingMode::Live);
+    assert_eq!(summary.snapshot.today_trade_counts.unwrap().buy, 0);
+    assert!(recent.is_empty());
+}
+
+#[tokio::test]
 async fn account_snapshot_matches_full_snapshot_without_chart_queries() {
     let state = fixture();
     for paper in [true, false] {
@@ -675,6 +725,7 @@ async fn account_snapshot_matches_full_snapshot_without_chart_queries() {
                 "mode": full.mode,
                 "snapshot": {
                     "symbol": full.symbol,
+                    "status": full.status,
                     "ticker": {
                         "mark_price": full.ticker.mark_price,
                         "mark_update_time": full.ticker.mark_update_time,
@@ -684,6 +735,7 @@ async fn account_snapshot_matches_full_snapshot_without_chart_queries() {
                         "unrealized_pnl": full.position.unrealized_pnl,
                     },
                     "account": full.account,
+                    "account_cny_rate": full.account_cny_rate,
                 }
             })
         );

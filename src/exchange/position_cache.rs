@@ -1,7 +1,7 @@
-use super::cache_entries::CacheEntries;
+use super::cache_entries::{CacheEntries, ENTRY_WAIT, FAILURE_COOLDOWN};
 use super::client::one_way_position_ref;
 use super::{BinanceFuturesClient, BinancePositionRisk};
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use std::time::{Duration, Instant};
 
 const MAX_AGE: Duration = Duration::from_secs(1);
@@ -47,25 +47,42 @@ impl PositionCache {
         let key = client.account_cache_key();
         loop {
             let (epoch, entry) = self.entries.entry(key).await;
-            let mut cached = entry.lock().await;
+            let mut cached = tokio::time::timeout(ENTRY_WAIT, entry.lock())
+                .await
+                .map_err(|_| anyhow!("shared position request is still in flight"))?;
             if !self.entries.is_current(key, epoch, &entry).await {
                 continue;
             }
             if cached
+                .failed_at
+                .is_some_and(|at| at.elapsed() < FAILURE_COOLDOWN)
+            {
+                return Err(anyhow!("shared position request is cooling down"));
+            }
+            if cached
+                .snapshot
                 .as_ref()
                 .is_none_or(|snapshot| snapshot.received_instant.elapsed() >= MAX_AGE)
             {
-                *cached = None;
+                cached.snapshot = None;
                 let positions = client.get_all_positions().await;
                 if !self.entries.is_current(key, epoch, &entry).await {
                     continue;
                 }
-                *cached = Some(PositionSnapshot {
-                    positions: positions?,
+                let positions = match positions {
+                    Ok(positions) => positions,
+                    Err(error) => {
+                        cached.failed_at = Some(Instant::now());
+                        return Err(error);
+                    }
+                };
+                cached.failed_at = None;
+                cached.snapshot = Some(PositionSnapshot {
+                    positions,
                     received_instant: Instant::now(),
                 });
             }
-            let Some(snapshot) = cached.as_ref() else {
+            let Some(snapshot) = cached.snapshot.as_ref() else {
                 continue;
             };
             let position =
@@ -203,18 +220,56 @@ mod tests {
         let cache = PositionCache::default();
         cache.get(&client, "SOLUSDC").await.unwrap();
         let (_epoch, entry) = cache.entries.entry(client.account_cache_key()).await;
-        entry.lock().await.as_mut().unwrap().received_instant = Instant::now() - MAX_AGE;
+        entry
+            .lock()
+            .await
+            .snapshot
+            .as_mut()
+            .unwrap()
+            .received_instant = Instant::now() - MAX_AGE;
         mode.store(1, Ordering::SeqCst);
-        assert!(cache.get(&client, "SOLUSDC").await.is_err());
-        assert!(entry.lock().await.is_none());
+        let failed =
+            futures_util::future::join_all((0..20).map(|_| cache.get(&client, "SOLUSDC"))).await;
+        assert!(failed.iter().all(Result::is_err));
+        assert!(entry.lock().await.snapshot.is_none());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
         mode.store(0, Ordering::SeqCst);
+        assert!(cache.get(&client, "BTCUSDT").await.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        tokio::time::sleep(FAILURE_COOLDOWN).await;
         assert!(cache.get(&client, "SOLUSDC").await.unwrap().0.is_some());
         assert_eq!(calls.load(Ordering::SeqCst), 3);
         server.abort();
     }
 
     #[tokio::test]
-    async fn invalidation_does_not_wait_for_or_reuse_inflight_snapshot() {
+    async fn critical_refresh_bypasses_failure_cooldown_and_locked_entry() {
+        let (url, calls, mode, server) = server().await;
+        let client = BinanceFuturesClient::with_base_url(&AppConfig::default().exchange, url);
+        let cache = PositionCache::default();
+        mode.store(1, Ordering::SeqCst);
+        assert!(cache.get(&client, "SOLUSDC").await.is_err());
+        mode.store(0, Ordering::SeqCst);
+        assert!(cache.get(&client, "SOLUSDC").await.is_err());
+        let (_, entry) = cache.entries.entry(client.account_cache_key()).await;
+        let held = entry.lock().await;
+        let critical = tokio::time::timeout(
+            Duration::from_secs(1),
+            cache.refresh_critical(&client, "SOLUSDC"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(critical.0.unwrap().symbol, "SOLUSDC");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        drop(held);
+        cache.get(&client, "SOLUSDC").await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn ordinary_wait_is_bounded_and_retired_failure_cannot_poison_new_generation() {
         let calls = Arc::new(AtomicUsize::new(0));
         let started = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
@@ -233,13 +288,17 @@ mod tests {
                         if old {
                             started.notify_one();
                             release.notified().await;
+                            return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({})));
                         }
-                        Json(json!([{
-                            "symbol": "SOLUSDC", "positionSide": "BOTH",
-                            "positionAmt": if old { "0" } else { "1" },
-                            "entryPrice": "100", "markPrice": "100", "unRealizedProfit": "0",
-                            "liquidationPrice": "0", "leverage": "20"
-                        }]))
+                        (
+                            StatusCode::OK,
+                            Json(json!([{
+                                "symbol": "SOLUSDC", "positionSide": "BOTH",
+                                "positionAmt": "1",
+                                "entryPrice": "100", "markPrice": "100", "unRealizedProfit": "0",
+                                "liquidationPrice": "0", "leverage": "20"
+                            }])),
+                        )
                     }
                 }
             }),
@@ -266,6 +325,13 @@ mod tests {
             }
         });
         started.notified().await;
+        let waiting =
+            futures_util::future::join_all((0..20).map(|_| cache.get(&client, "BTCUSDT")));
+        let waiting = tokio::time::timeout(Duration::from_secs(1), waiting)
+            .await
+            .unwrap();
+        assert!(waiting.iter().all(Result::is_err));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
         tokio::time::timeout(Duration::from_secs(1), cache.invalidate(&client))
             .await
             .unwrap();

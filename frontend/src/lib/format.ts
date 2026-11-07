@@ -1,23 +1,24 @@
-import type { Mode, Overview, Snapshot, Status } from './types';
+import type { AccountObservation, Mode, Overview, PairSummary, Snapshot, Status } from './types';
 
 export const modeLabel: Record<Mode, string> = { PAPER: '模拟盘', LIVE: '实盘', UNKNOWN: '未知模式' };
 export const statusLabel: Record<Status, string> = { RUNNING: '运行中', PAUSED: '已暂停', STOPPED: '已停止', ERROR: '异常' };
 export const modeOf = (s: Snapshot): Mode => s.mode;
 export const quoteAsset = (symbol: string) => ['USDC', 'USDT', 'FDUSD', 'BUSD'].find(a => symbol.endsWith(a)) ?? '';
 export const numeric = (value: unknown): number | null => value === null || value === undefined || value === '' || !Number.isFinite(Number(value)) ? null : Number(value);
-export function positionAmount(s: Snapshot): number | null {
+type ValuedPosition = { symbol: string; position: Pick<Snapshot['position'], 'size' | 'mark_price'>; ticker: Pick<Snapshot['ticker'], 'mark_price'> };
+export function positionAmount(s: ValuedPosition): number | null {
   const size = numeric(s.position.size), tickerMark = numeric(s.ticker.mark_price);
   const mark = tickerMark !== null && tickerMark > 0 ? tickerMark : numeric(s.position.mark_price);
   if (size === null || mark === null || mark <= 0) return null;
   const amount = Math.abs(size * mark);
   return Number.isFinite(amount) ? amount : null;
 }
-export function comparePositionAmount(a: Snapshot, b: Snapshot) {
+export function comparePositionAmount(a: ValuedPosition, b: ValuedPosition) {
   const left = positionAmount(a), right = positionAmount(b);
   return (right ?? -1) - (left ?? -1) || a.symbol.localeCompare(b.symbol);
 }
-export function positionGroups(entries: Overview['pairs']) {
-  const groups = new Map<string, { mode: Mode; asset: string; snapshots: Snapshot[] }>();
+export function positionGroups<T extends { mode: Mode; snapshot: ValuedPosition }>(entries: T[]) {
+  const groups = new Map<string, { mode: Mode; asset: string; snapshots: ValuedPosition[] }>();
   for (const { mode, snapshot } of entries) {
     const asset = quoteAsset(snapshot.symbol) || snapshot.symbol;
     const key = `${mode}:${asset}`;
@@ -58,7 +59,11 @@ export function ageText(updatedAt: number, now = Date.now()) {
   return relativeTime(new Date(now - seconds * 1000).toISOString(), now);
 }
 export const beijingDay = (value: number) => new Date(value + 8 * 3600_000).toISOString().slice(0, 10);
-export function todayTradeCounts(s: Snapshot, now = Date.now()) {
+export function todayTradeCounts(s: Snapshot | PairSummary, now = Date.now()) {
+  if ('today_trade_counts' in s) {
+    const counts = s.today_trade_counts;
+    return counts && Number.isFinite(Date.parse(counts.window_end)) && beijingDay(Date.parse(counts.window_end)) === beijingDay(now) ? { buy: counts.buy, sell: counts.sell } : null;
+  }
   const stats = s.hourly_trade_stats;
   if (!stats || !Number.isFinite(Date.parse(stats.window_end)) || beijingDay(Date.parse(stats.window_end)) !== beijingDay(now)) return null;
   return stats.buckets.reduce((counts, b) => ({ buy: counts.buy + b.buy_count, sell: counts.sell + b.sell_count }), { buy: 0, sell: 0 });
@@ -76,7 +81,7 @@ export function todayPnlGroups(stats: Overview['today_pnl'], now = Date.now()) {
   }
   return [...groups.entries()].map(([key, group]) => ({ ...group, key, total: group.available && !group.pending && Number.isFinite(group.total) ? group.total : null }));
 }
-export function todayCount(s: Snapshot, now = Date.now()) {
+export function todayCount(s: Snapshot | PairSummary, now = Date.now()) {
   const counts = todayTradeCounts(s, now);
   return counts ? counts.buy + counts.sell : null;
 }
@@ -84,10 +89,10 @@ export function availableRatio(available: number | null, wallet: number | null):
   return available !== null && wallet !== null && wallet > 0 ? available / wallet * 100 : null;
 }
 
-export function accountGroups(entries: Overview['pairs'], now = Date.now()) {
-  const groups = new Map<string, { mode: Mode; asset: string; snapshots: Snapshot[]; observed: Snapshot[]; observationStale: boolean }>();
-  for (const { snapshot: s, account_observation_stale } of entries) {
-    const mode = modeOf(s), asset = s.account.asset || quoteAsset(s.symbol), key = `${mode}:${asset}`;
+export function accountGroups<T extends AccountObservation>(entries: T[], now = Date.now()) {
+  const groups = new Map<string, { mode: Mode; asset: string; snapshots: AccountObservation['snapshot'][]; observed: AccountObservation['snapshot'][]; observationStale: boolean }>();
+  for (const { mode, snapshot: s, account_observation_stale } of entries) {
+    const asset = s.account.asset || quoteAsset(s.symbol), key = `${mode}:${asset}`;
     const group = groups.get(key) ?? { mode, asset, snapshots: [], observed: [], observationStale: false };
     group.snapshots.push(s);
     if (!account_observation_stale) group.observed.push(s);

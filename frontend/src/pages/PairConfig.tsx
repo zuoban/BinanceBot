@@ -4,8 +4,8 @@ import { UNSAFE_DataRouterContext, useLocation, useNavigate, useParams } from 'r
 import { Alert, App, Button, Card, Col, Form, Input, InputNumber, Row, Select, Space, Switch, type FormInstance } from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, ApiError, pairPath, post } from '../lib/api';
-import { useOverview, usePairs } from '../lib/queries';
-import { EditContext } from '../lib/session';
+import { usePairs } from '../lib/queries';
+import { AccountsContext, EditContext } from '../lib/session';
 import type { GlobalConfig, GridConfig } from '../lib/types';
 import { ErrorNotice, PageBreadcrumb, PageTitle } from '../components/Common';
 import { useDeleteStrategy } from '../components/DeleteStrategy';
@@ -23,9 +23,9 @@ export default function PairConfig() {
   const { pathname } = useLocation();
   const router = useContext(UNSAFE_DataRouterContext)?.router;
   const pairs = usePairs();
-  const overview = useOverview();
+  const accounts = useContext(AccountsContext);
   const pair = pairs.data?.find(p => p.symbol === symbol);
-  const markPrice = overview.data?.pairs.find(entry => entry.snapshot.symbol === symbol)?.snapshot.ticker.mark_price;
+  const markPrice = accounts.find(entry => entry.snapshot.symbol === symbol && entry.mode === pair?.mode && !entry.account_observation_stale)?.snapshot.ticker.mark_price;
   const [form] = Form.useForm<FormValues>();
   const edit = useContext(EditContext);
   const client = useQueryClient();

@@ -82,6 +82,101 @@ async fn test_non_cfg_test_consumer_constructs_grid_trading_engine() {
 }
 
 #[tokio::test]
+async fn overview_is_lightweight_while_status_keeps_full_detail() {
+    use axum::body::{to_bytes, Body};
+    use axum::http::{Request, StatusCode};
+    use binance_grid_bot::server::create_router;
+    use tower::ServiceExt;
+
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    let (tx, _) = mpsc::channel(8);
+    let state = AppState::new(AppConfig::default(), db, tx);
+    let buy = create_test_order(
+        "summary-buy",
+        "SOLUSDC",
+        OrderSide::Buy,
+        dec!(100),
+        dec!(1),
+        0,
+        None,
+    );
+    let sell = create_test_order(
+        "summary-sell",
+        "SOLUSDC",
+        OrderSide::Sell,
+        dec!(101),
+        dec!(1),
+        1,
+        None,
+    );
+    {
+        let mut orders = state.active_orders.write().await;
+        orders.insert(buy.client_order_id.clone(), buy);
+        orders.insert(sell.client_order_id.clone(), sell);
+    }
+    state.add_log("INFO", "detail-only log").await;
+    assert!(
+        state
+            .record_trade(
+                create_test_trade(
+                    "summary-fill",
+                    "summary-order",
+                    "SOLUSDC",
+                    TradingMode::Paper,
+                    OrderSide::Buy,
+                    dec!(100),
+                    dec!(1)
+                ),
+                None,
+                None,
+                None
+            )
+            .await
+    );
+    let router = create_router(state);
+    for path in ["/api/overview", "/api/status", "/api/accounts"] {
+        let response = router
+            .clone()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        let data = &body["data"];
+        match path {
+            "/api/overview" => {
+                let summary = &data["pairs"][0]["snapshot"];
+                assert_eq!(summary["stats"]["active_buy_orders"], 1);
+                assert_eq!(summary["stats"]["active_sell_orders"], 1);
+                assert_eq!(summary["today_trade_counts"]["buy"], 1);
+                for field in [
+                    "active_orders",
+                    "recent_trades",
+                    "recent_logs",
+                    "hourly_trade_stats",
+                ] {
+                    assert!(summary.get(field).is_none());
+                }
+                assert_eq!(data["recent_trades"][0]["trade_id"], "summary-fill");
+            }
+            "/api/status" => {
+                assert_eq!(data["active_orders"].as_array().unwrap().len(), 2);
+                assert_eq!(data["recent_trades"][0]["trade_id"], "summary-fill");
+                assert_eq!(data["recent_logs"][0]["message"], "detail-only log");
+                assert!(data["hourly_trade_stats"]["buckets"].is_array());
+            }
+            _ => {
+                assert!(data["generated_at"].is_string());
+                assert!(data["pairs"][0]["snapshot"]["status"].is_string());
+                assert!(data["pairs"][0]["snapshot"].get("grid_config").is_none());
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_four_argument_record_trade_persists_pair_intent_atomically() {
     let mut config = AppConfig::default();
     config.exchange.symbol = "SOLUSDC".to_string();

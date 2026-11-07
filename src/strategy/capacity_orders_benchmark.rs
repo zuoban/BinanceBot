@@ -336,6 +336,7 @@ async fn simulated_live_orders_and_fills() {
     let mut account_success_ms = Vec::new();
     let mut account_failed_ms = Vec::new();
     let mut rejections = (0, 0, 0);
+    let mut initial_critical_position_requests = 0;
     // Round zero adopts all open orders; later rounds each close a new tranche.
     for round in 0..=rounds {
         exchange.round.store(round, Ordering::SeqCst);
@@ -418,6 +419,10 @@ async fn simulated_live_orders_and_fills() {
             pair_ms.push(pair_elapsed);
             engines.push(engine);
         }
+        if round == 0 {
+            initial_critical_position_requests = exchange.position_calls.load(Ordering::Relaxed)
+                - exchange.all_position_calls.load(Ordering::Relaxed);
+        }
     }
     let cycles = pairs * (rounds + 1);
     println!("sync_results cycles={cycles} order_success={orders_ok} order_failure={} account_success={account_ok} account_failure={} local_rejections_ip_weight={} local_rejections_order_rate={} local_rejections_cooldown={}", cycles - orders_ok, cycles - account_ok, rejections.0, rejections.1, rejections.2);
@@ -440,7 +445,7 @@ async fn simulated_live_orders_and_fills() {
         "sqlite_instrumented_connection_lock_wait_ms",
         &mut db_wait_samples.connection.lock().unwrap(),
     );
-    println!("Rejections count client reservation warnings, not failed stages or server responses; shared caches and multiple requests per stage prevent one-to-one attribution. Unlogged failures remain unknown. Round 0 is adoption; latency includes diagnostics and failed stages may finish early. Batch timing ends when all pair tasks finish, before result processing. Local synthetic burst is not an exchange capacity estimate; order stage includes fill-triggered account and trade requests. Nearest-rank p95/p99 need 20/100 samples for useful tail resolution.");
+    println!("Rejections count client reservation warnings, not failed stages or server responses; shared caches and multiple requests per stage prevent one-to-one attribution. Ordinary cache waits can fail after 100ms while a loader continues; slow-handler runs therefore report account stage failures. Round 0 is adoption; latency includes diagnostics and failed stages may finish early. Batch timing ends when all pair tasks finish, before result processing. Order reconciliation includes one critical risk refresh per pair with terminal fills and durable pending-PnL commits. PnL compensation is measured separately below. Local synthetic burst is not an exchange capacity estimate. Nearest-rank p95/p99 need 20/100 samples for useful tail resolution.");
     percentiles("order_success_ms", &mut order_success_ms);
     percentiles("order_failure_ms", &mut order_failed_ms);
     percentiles("account_success_ms", &mut account_success_ms);
@@ -449,8 +454,49 @@ async fn simulated_live_orders_and_fills() {
     percentiles("account_position_ms", &mut account_ms);
     percentiles("pair_total_ms", &mut pair_ms);
     percentiles("batch_ms", &mut batch_ms);
+    let pending_fills: usize = futures_util::future::join_all(
+        engines
+            .iter()
+            .map(|engine| async { engine.state.stats.read().await.pending_pnl_trades }),
+    )
+    .await
+    .into_iter()
+    .sum();
+    assert_eq!(pending_fills, pairs * fills);
+    let pnl_started = Instant::now();
+    futures_util::future::join_all(engines.iter_mut().map(|engine| async move {
+        while engine.state.stats.read().await.pending_pnl_trades > 0 {
+            let before = engine.state.stats.read().await.pending_pnl_trades;
+            engine.reconcile_unverified_trades().await;
+            if let Some(task) = engine.pnl_reconcile_task.take() {
+                let retry_at = task.await.expect("PnL compensation task failed");
+                if retry_at.is_some() {
+                    engine.pnl_retry_at = retry_at;
+                    break;
+                }
+            }
+            assert!(
+                engine.state.stats.read().await.pending_pnl_trades < before,
+                "PnL compensation made no progress"
+            );
+        }
+    }))
+    .await;
+    let pending_after: usize = futures_util::future::join_all(
+        engines
+            .iter()
+            .map(|engine| async { engine.state.stats.read().await.pending_pnl_trades }),
+    )
+    .await
+    .into_iter()
+    .sum();
+    println!(
+        "pnl_compensation_ms={:.3} pending_before={pending_fills} pending_after={pending_after}; compensation stops at the shared quota and leaves durable pending rows for a later window",
+        pnl_started.elapsed().as_secs_f64() * 1000.0
+    );
     let mut active = 0;
     let mut persisted_fills = 0;
+    let mut verified_fills = 0;
     for engine in &engines {
         let symbol = engine.state.config.read().await.exchange.symbol.clone();
         assert_eq!(*engine.state.status.read().await, BotStatus::Paused);
@@ -466,9 +512,16 @@ async fn simulated_live_orders_and_fills() {
             .get_recent_trades_for(&symbol, TradingMode::Live, fills + 1)
             .unwrap();
         assert_eq!(trades.len(), fills);
+        let verified = trades.iter().filter(|trade| trade.pnl_verified).count();
+        assert_eq!(
+            engine.state.stats.read().await.pending_pnl_trades,
+            trades.len() - verified
+        );
         assert!(trades
             .iter()
-            .all(|trade| trade.pnl_verified && trade.commission == Decimal::new(1, 2)));
+            .filter(|trade| trade.pnl_verified)
+            .all(|trade| trade.commission == Decimal::new(1, 2)));
+        verified_fills += verified;
         persisted_fills += trades.len();
     }
     let open = exchange.open_calls.load(Ordering::Relaxed);
@@ -477,11 +530,20 @@ async fn simulated_live_orders_and_fills() {
     let positions = exchange.position_calls.load(Ordering::Relaxed);
     let all_positions = exchange.all_position_calls.load(Ordering::Relaxed);
     let accounts = exchange.account_calls.load(Ordering::Relaxed);
-    println!("pairs={pairs} orders_per_pair={orders} rounds={rounds} fills_per_round={fills_per_round} db={} cycles={cycles} order_ok={orders_ok} order_failed={} account_ok={account_ok} account_failed={} persisted_fills={persisted_fills} active_orders={active} open_requests={open} lookup_requests={lookups} trade_requests={trade_requests} position_requests={positions} all_position_requests={all_positions} account_requests={accounts}", if disk { "disk" } else { "memory" }, cycles-orders_ok, cycles-account_ok);
+    println!("pairs={pairs} orders_per_pair={orders} rounds={rounds} fills_per_round={fills_per_round} db={} cycles={cycles} order_ok={orders_ok} order_failed={} account_ok={account_ok} account_failed={} persisted_fills={persisted_fills} verified_fills={verified_fills} pending_fills={pending_after} active_orders={active} open_requests={open} lookup_requests={lookups} trade_requests={trade_requests} position_requests={positions} all_position_requests={all_positions} account_requests={accounts}", if disk { "disk" } else { "memory" }, cycles-orders_ok, cycles-account_ok);
     assert_eq!(orders_ok, cycles);
-    assert_eq!(account_ok, cycles);
     assert_eq!(open, cycles);
     assert_eq!(lookups, pairs * fills);
-    assert_eq!(trade_requests, pairs * fills);
+    assert_eq!(trade_requests, verified_fills);
+    assert_eq!(verified_fills + pending_after, pairs * fills);
+    let critical_fill_position_requests =
+        positions - all_positions - initial_critical_position_requests;
+    // A peer's newly observed fills can invalidate an in-flight critical read.
+    // Such retries are required for freshness and are additional HTTP requests.
+    println!("critical_position_requests initial={initial_critical_position_requests} terminal_fills={critical_fill_position_requests} required_observations={}", pairs * rounds);
+    assert!(
+        critical_fill_position_requests >= pairs * rounds,
+        "every terminal-fill observation requires a fresh critical position read"
+    );
     server.abort();
 }

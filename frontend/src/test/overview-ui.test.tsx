@@ -5,7 +5,7 @@ import { MemoryRouter, useLocation } from 'react-router-dom';
 import { beforeEach, expect, it, vi } from 'vitest';
 import OverviewPage from '../pages/Overview';
 import { runBatchControls } from '../components/Controls';
-import { snapshot } from './fixtures';
+import { summarySnapshot } from './fixtures';
 import type { Overview } from '../lib/types';
 import { AccountsContext } from '../lib/session';
 
@@ -36,12 +36,12 @@ it('orders running strategies first, then by absolute position amount, and updat
     ['XRPUSDC', 'RUNNING', 'invalid'],
   ] as const;
   const pairs = strategies.map(([symbol, status, size]) => {
-    const s = snapshot(symbol);
+    const s = summarySnapshot(symbol);
     s.status = status;
     s.position.size = size;
     return { snapshot: s, mode: s.mode, scoped: true };
   });
-  overview.data = { generated_at: new Date().toISOString(), pairs };
+  overview.data = { generated_at: new Date().toISOString(), pairs, recent_trades: [] };
   const page = <MemoryRouter><App><OverviewPage /></App></MemoryRouter>;
   const { rerender } = render(page);
   const symbols = () => [...screen.getByRole('region', { name: '交易策略' }).querySelectorAll('.pair-name')].map(link => link.textContent);
@@ -52,7 +52,7 @@ it('orders running strategies first, then by absolute position amount, and updat
 });
 
 it('places the add link in the strategy section and navigates to it', async () => {
-  overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: snapshot('BTCUSDC'), mode: 'PAPER', scoped: true }] };
+  overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: summarySnapshot('BTCUSDC'), mode: 'PAPER', scoped: true }], recent_trades: [] };
   overview.isPending = false;
   overview.error = null;
   function Location() { return <output data-testid="location">{useLocation().pathname}</output>; }
@@ -70,7 +70,7 @@ it('transfers focus to the strategy add link when loading completes', async () =
   overview.error = null;
   const { rerender } = render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
   screen.getByRole('link', { name: /新增交易对/ }).focus();
-  overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: snapshot('BTCUSDC'), mode: 'PAPER', scoped: true }] };
+  overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: summarySnapshot('BTCUSDC'), mode: 'PAPER', scoped: true }], recent_trades: [] };
   overview.isPending = false;
   rerender(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
   const section = screen.getByRole('region', { name: '交易策略' });
@@ -86,7 +86,7 @@ it('does not steal focus when loading completes', () => {
   const { rerender } = render(<MemoryRouter><App><OverviewPage /><button>其他操作</button></App></MemoryRouter>);
   const other = screen.getByRole('button', { name: '其他操作' });
   other.focus();
-  overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: snapshot('BTCUSDC'), mode: 'PAPER', scoped: true }] };
+  overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: summarySnapshot('BTCUSDC'), mode: 'PAPER', scoped: true }], recent_trades: [] };
   overview.isPending = false;
   rerender(<MemoryRouter><App><OverviewPage /><button>其他操作</button></App></MemoryRouter>);
   expect(other).toHaveFocus();
@@ -111,7 +111,7 @@ it('places the add link in the strategy skeleton while loading', () => {
 });
 
 it('keeps both add links available when there are no strategies', () => {
-  overview.data = { generated_at: new Date().toISOString(), pairs: [] };
+  overview.data = { generated_at: new Date().toISOString(), pairs: [], recent_trades: [] };
   overview.isPending = false;
   overview.error = null;
   render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
@@ -122,7 +122,7 @@ it('keeps both add links available when there are no strategies', () => {
 });
 
 it('keeps the strategy add link after a refresh error', () => {
-  overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: snapshot('BTCUSDC'), mode: 'PAPER', scoped: true }] };
+  overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: summarySnapshot('BTCUSDC'), mode: 'PAPER', scoped: true }], recent_trades: [] };
   overview.isPending = false;
   overview.error = new Error('刷新失败');
   render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
@@ -131,12 +131,12 @@ it('keeps the strategy add link after a refresh error', () => {
 });
 
 it('opens the selected strategy configuration from its card', async () => {
-  const s = snapshot('BTCUSDC');
+  const s = summarySnapshot('BTCUSDC');
   s.status = 'RUNNING';
   overview.dataUpdatedAt = Date.now();
   s.grid_config.max_position_usdc = '2000';
   s.grid_config.pause_on_max_position = true;
-  overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: s, mode: 'PAPER', scoped: true }] };
+  overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: s, mode: 'PAPER', scoped: true }], recent_trades: [] };
   render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
   await userEvent.setup().click(screen.getByRole('button', { name: '查看 BTCUSDC 策略配置' }));
   expect(await screen.findByText('BTCUSDC 策略配置')).toBeInTheDocument();
@@ -152,8 +152,8 @@ it('opens the selected strategy configuration from its card', async () => {
 });
 
 it('navigates when the strategy menu item is activated', async () => {
-  const s = snapshot('BTCUSDC');
-  overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: s, mode: 'PAPER', scoped: true }] };
+  const s = summarySnapshot('BTCUSDC');
+  overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: s, mode: 'PAPER', scoped: true }], recent_trades: [] };
   function Location() { return <output data-testid="location">{useLocation().pathname}</output>; }
   render(<MemoryRouter><App><OverviewPage /><Location /></App></MemoryRouter>);
   const user = userEvent.setup();
@@ -166,10 +166,10 @@ it('navigates when the strategy menu item is activated', async () => {
 });
 
 it('identifies each strategy direction without opening its configuration', () => {
-  const long = snapshot('BTCUSDC'), short = snapshot('ETHUSDC');
+  const long = summarySnapshot('BTCUSDC'), short = summarySnapshot('ETHUSDC');
   long.grid_config.direction = 'LONG';
   short.grid_config.direction = 'SHORT';
-  overview.data = { generated_at: new Date().toISOString(), pairs: [long, short].map(s => ({ snapshot: s, mode: 'PAPER' as const, scoped: true })) };
+  overview.data = { generated_at: new Date().toISOString(), pairs: [long, short].map(s => ({ snapshot: s, mode: 'PAPER' as const, scoped: true })), recent_trades: [] };
   render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
   expect(screen.getByRole('img', { name: '策略方向：做多' }).querySelector('.anticon-arrow-up')).toBeInTheDocument();
   expect(screen.getByRole('img', { name: '策略方向：做空' }).querySelector('.anticon-arrow-down')).toBeInTheDocument();
@@ -197,13 +197,13 @@ it.each([
   ['infinite mark', '1', '100', 'Infinity', '100', '--', ''],
   ['overflowing change', '1', '1e-308', '1e308', '0', '--', ''],
 ])('shows entry and mark change for %s', (_case, size, entry, mark, expectedEntry, expectedChange, color) => {
-  const s = snapshot('BTCUSDC');
+  const s = summarySnapshot('BTCUSDC');
   s.position.size = size;
   s.position.entry_price = entry;
   s.position.mark_price = '123';
   s.ticker.mark_price = mark;
   s.grid_config.direction = size === '-1' ? 'SHORT' : 'LONG';
-  overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: s, mode: 'PAPER', scoped: true }] };
+  overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: s, mode: 'PAPER', scoped: true }], recent_trades: [] };
   render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
   const card = screen.getByRole('link', { name: 'BTCUSDC' }).closest('.strategy-card') as HTMLElement;
   const entryMetric = within(card).getByText('开仓价格').nextElementSibling as HTMLElement;
@@ -215,26 +215,26 @@ it.each([
 
 
 it('only reports normal operation when every strategy is running', () => {
-  const running = snapshot('BTCUSDC'); running.status = 'RUNNING';
-  overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: running, mode: 'PAPER', scoped: true }] };
+  const running = summarySnapshot('BTCUSDC'); running.status = 'RUNNING';
+  overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: running, mode: 'PAPER', scoped: true }], recent_trades: [] };
   const { unmount } = render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
   expect(screen.getByText('全部策略运行正常')).toBeInTheDocument();
   unmount();
-  overview.data = { generated_at: new Date().toISOString(), pairs: [] };
+  overview.data = { generated_at: new Date().toISOString(), pairs: [], recent_trades: [] };
   const empty = render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
   expect(screen.queryByText('全部策略运行正常')).not.toBeInTheDocument();
   empty.unmount();
-  const stopped = snapshot('BTCUSDC'); stopped.status = 'STOPPED';
-  overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: stopped, mode: 'PAPER', scoped: true }] };
+  const stopped = summarySnapshot('BTCUSDC'); stopped.status = 'STOPPED';
+  overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: stopped, mode: 'PAPER', scoped: true }], recent_trades: [] };
   render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
   expect(screen.queryByText('全部策略运行正常')).not.toBeInTheDocument();
   expect(screen.getByText('已停止 1')).toBeInTheDocument();
 });
 
 it('filters the strategy list from the signal strip and keeps the filter in the URL', async () => {
-  const running = snapshot('BTCUSDC'); running.status = 'RUNNING';
-  const error = snapshot('SOLUSDC'); error.status = 'ERROR';
-  overview.data = { generated_at: new Date().toISOString(), pairs: [running, error].map(s => ({ snapshot: s, mode: 'PAPER' as const, scoped: true })) };
+  const running = summarySnapshot('BTCUSDC'); running.status = 'RUNNING';
+  const error = summarySnapshot('SOLUSDC'); error.status = 'ERROR';
+  overview.data = { generated_at: new Date().toISOString(), pairs: [running, error].map(s => ({ snapshot: s, mode: 'PAPER' as const, scoped: true })), recent_trades: [] };
   function Location() { const l = useLocation(); return <output data-testid="url">{l.pathname}{l.search}</output>; }
   render(<MemoryRouter><App><OverviewPage /><Location /></App></MemoryRouter>);
   const user = userEvent.setup();
@@ -251,9 +251,9 @@ it('filters the strategy list from the signal strip and keeps the filter in the 
 });
 
 it('clears search, sort and status together with one click', async () => {
-  const running = snapshot('BTCUSDC'); running.status = 'RUNNING';
-  const error = snapshot('SOLUSDC'); error.status = 'ERROR';
-  overview.data = { generated_at: new Date().toISOString(), pairs: [running, error].map(s => ({ snapshot: s, mode: 'PAPER' as const, scoped: true })) };
+  const running = summarySnapshot('BTCUSDC'); running.status = 'RUNNING';
+  const error = summarySnapshot('SOLUSDC'); error.status = 'ERROR';
+  overview.data = { generated_at: new Date().toISOString(), pairs: [running, error].map(s => ({ snapshot: s, mode: 'PAPER' as const, scoped: true })), recent_trades: [] };
   function Location() { const l = useLocation(); return <output data-testid="url">{l.pathname}{l.search}</output>; }
   render(<MemoryRouter initialEntries={['/?q=sol&sort=symbol&status=ERROR']}><App><OverviewPage /><Location /></App></MemoryRouter>);
   await userEvent.setup().click(screen.getAllByRole('button', { name: '清除筛选' })[0]);
@@ -264,8 +264,8 @@ it('clears search, sort and status together with one click', async () => {
 
 it('shows the validate-first guide only while every strategy is on paper and remembers dismissal', async () => {
   localStorage.removeItem('binance_bot_paper_guide_dismissed');
-  const paper = snapshot('BTCUSDC');
-  overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: paper, mode: 'PAPER', scoped: true }] };
+  const paper = summarySnapshot('BTCUSDC');
+  overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: paper, mode: 'PAPER', scoped: true }], recent_trades: [] };
   const first = render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
   expect(screen.getByRole('complementary', { name: '新手指引' })).toBeInTheDocument();
   expect(screen.getByRole('link', { name: /打开 BTCUSDC 的策略参数/ })).toHaveAttribute('href', '/pairs/BTCUSDC/config');
@@ -280,8 +280,8 @@ it('shows the validate-first guide only while every strategy is on paper and rem
 it('hides the guide once any strategy is live', () => {
   localStorage.removeItem('binance_bot_paper_guide_dismissed');
   overview.data = { generated_at: new Date().toISOString(), pairs: [
-    { snapshot: snapshot('BTCUSDC'), mode: 'PAPER', scoped: true }, { snapshot: snapshot('ETHUSDC', 'LIVE'), mode: 'LIVE', scoped: true },
-  ] };
+    { snapshot: summarySnapshot('BTCUSDC'), mode: 'PAPER', scoped: true }, { snapshot: summarySnapshot('ETHUSDC', 'LIVE'), mode: 'LIVE', scoped: true },
+  ], recent_trades: [] };
   render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
   expect(screen.queryByRole('complementary', { name: '新手指引' })).not.toBeInTheDocument();
 });
@@ -290,7 +290,7 @@ it('marks the summary as stale and shows how old the data is', () => {
   vi.useFakeTimers();
   try {
     overview.dataUpdatedAt = Date.now() - 42_000;
-    overview.data = { generated_at: '', pairs: [{ snapshot: snapshot('BTCUSDC'), mode: 'PAPER', scoped: true }] };
+    overview.data = { generated_at: '', pairs: [{ snapshot: summarySnapshot('BTCUSDC'), mode: 'PAPER', scoped: true }], recent_trades: [] };
     render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
     expect(screen.getByLabelText('策略运行概览')).toHaveClass('is-stale');
     expect(screen.getByText(/上次更新于 4\d秒前/)).toBeInTheDocument();
@@ -300,7 +300,7 @@ it('marks the summary as stale and shows how old the data is', () => {
 });
 
 it('restores search and sort from the URL', () => {
-  overview.data = { generated_at: new Date().toISOString(), pairs: ['BTCUSDC', 'ETHUSDC'].map(symbol => ({ snapshot: snapshot(symbol), mode: 'PAPER' as const, scoped: true })) };
+  overview.data = { generated_at: new Date().toISOString(), pairs: ['BTCUSDC', 'ETHUSDC'].map(symbol => ({ snapshot: summarySnapshot(symbol), mode: 'PAPER' as const, scoped: true })), recent_trades: [] };
   render(<MemoryRouter initialEntries={['/?q=eth&sort=symbol']}><App><OverviewPage /></App></MemoryRouter>);
   expect(screen.getByRole('textbox', { name: '搜索交易对' })).toHaveValue('eth');
   expect(screen.getByRole('link', { name: 'ETHUSDC' })).toBeInTheDocument();
@@ -308,9 +308,9 @@ it('restores search and sort from the URL', () => {
 });
 
 it('summarizes statuses and lets the user clear a search with no results', async () => {
-  const running = snapshot('BTCUSDC'); running.status = 'RUNNING';
-  const error = snapshot('SOLUSDC'); error.status = 'ERROR';
-  overview.data = { generated_at: new Date().toISOString(), pairs: [running, error].map(s => ({ snapshot: s, mode: 'PAPER' as const, scoped: true })) };
+  const running = summarySnapshot('BTCUSDC'); running.status = 'RUNNING';
+  const error = summarySnapshot('SOLUSDC'); error.status = 'ERROR';
+  overview.data = { generated_at: new Date().toISOString(), pairs: [running, error].map(s => ({ snapshot: s, mode: 'PAPER' as const, scoped: true })), recent_trades: [] };
   render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
   const summary = screen.getByLabelText('策略运行概览');
   expect(within(summary).getByText('运行中').parentElement).toHaveTextContent('1');
@@ -326,16 +326,16 @@ it('summarizes statuses and lets the user clear a search with no results', async
 });
 
 it('confirms and resumes the freshly refreshed targets including newly paused live strategies', async () => {
-  const old = snapshot('BTCUSDC'); old.status = 'PAUSED';
-  const running = snapshot('ETHUSDC'); running.status = 'RUNNING';
-  const newlyPaused = snapshot('SOLUSDC'); newlyPaused.status = 'PAUSED';
-  const anotherPaused = snapshot('XRPUSDC'); anotherPaused.status = 'PAUSED';
-  overview.data = { generated_at: '', pairs: [{ snapshot: old, mode: 'PAPER', scoped: true }] };
+  const old = summarySnapshot('BTCUSDC'); old.status = 'PAUSED';
+  const running = summarySnapshot('ETHUSDC'); running.status = 'RUNNING';
+  const newlyPaused = summarySnapshot('SOLUSDC'); newlyPaused.status = 'PAUSED';
+  const anotherPaused = summarySnapshot('XRPUSDC'); anotherPaused.status = 'PAUSED';
+  overview.data = { generated_at: '', pairs: [{ snapshot: old, mode: 'PAPER', scoped: true }], recent_trades: [] };
   overview.refetch.mockResolvedValue({ data: { generated_at: '', pairs: [
     { snapshot: running, mode: 'PAPER', scoped: true },
     { snapshot: newlyPaused, mode: 'LIVE', scoped: true },
     { snapshot: anotherPaused, mode: 'PAPER', scoped: true },
-  ] }, error: null });
+  ], recent_trades: [] }, error: null });
   render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
   const user = userEvent.setup();
   await user.type(screen.getByLabelText('搜索交易对'), 'BTC');
@@ -351,9 +351,9 @@ it('confirms and resumes the freshly refreshed targets including newly paused li
 });
 
 it('does not resume when the refreshed confirmation is cancelled', async () => {
-  const paused = snapshot('SOLUSDC'); paused.status = 'PAUSED';
-  overview.data = { generated_at: '', pairs: [] };
-  overview.refetch.mockResolvedValue({ data: { generated_at: '', pairs: [{ snapshot: paused, mode: 'PAPER', scoped: true }] }, error: null });
+  const paused = summarySnapshot('SOLUSDC'); paused.status = 'PAUSED';
+  overview.data = { generated_at: '', pairs: [], recent_trades: [] };
+  overview.refetch.mockResolvedValue({ data: { generated_at: '', pairs: [{ snapshot: paused, mode: 'PAPER', scoped: true }], recent_trades: [] }, error: null });
   render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
   const user = userEvent.setup();
   await user.click(screen.getByRole('button', { name: /全部策略操作/ }));
@@ -364,10 +364,10 @@ it('does not resume when the refreshed confirmation is cancelled', async () => {
 });
 
 it('reports an empty refreshed resume list without showing a confirmation', async () => {
-  const paused = snapshot('SOLUSDC'); paused.status = 'PAUSED';
-  const running = snapshot('BTCUSDC'); running.status = 'RUNNING';
-  overview.data = { generated_at: '', pairs: [{ snapshot: paused, mode: 'LIVE', scoped: true }] };
-  overview.refetch.mockResolvedValue({ data: { generated_at: '', pairs: [{ snapshot: running, mode: 'PAPER', scoped: true }] }, error: null });
+  const paused = summarySnapshot('SOLUSDC'); paused.status = 'PAUSED';
+  const running = summarySnapshot('BTCUSDC'); running.status = 'RUNNING';
+  overview.data = { generated_at: '', pairs: [{ snapshot: paused, mode: 'LIVE', scoped: true }], recent_trades: [] };
+  overview.refetch.mockResolvedValue({ data: { generated_at: '', pairs: [{ snapshot: running, mode: 'PAPER', scoped: true }], recent_trades: [] }, error: null });
   render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
   const user = userEvent.setup();
   await user.click(screen.getByRole('button', { name: /全部策略操作/ }));
@@ -378,8 +378,8 @@ it('reports an empty refreshed resume list without showing a confirmation', asyn
 });
 
 it('does not offer stale resume targets when refresh fails', async () => {
-  const paused = snapshot('SOLUSDC'); paused.status = 'PAUSED';
-  overview.data = { generated_at: '', pairs: [{ snapshot: paused, mode: 'PAPER', scoped: true }] };
+  const paused = summarySnapshot('SOLUSDC'); paused.status = 'PAUSED';
+  overview.data = { generated_at: '', pairs: [{ snapshot: paused, mode: 'PAPER', scoped: true }], recent_trades: [] };
   overview.refetch.mockResolvedValue({ data: overview.data, error: new Error('连接失败') });
   render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
   const user = userEvent.setup();
@@ -391,11 +391,11 @@ it('does not offer stale resume targets when refresh fails', async () => {
 });
 
 it('refreshes an empty stale snapshot and pauses every returned strategy', async () => {
-  overview.data = { generated_at: '', pairs: [] };
+  overview.data = { generated_at: '', pairs: [], recent_trades: [] };
   overview.dataUpdatedAt = Date.now() - 20_000;
-  const paused = snapshot('SOLUSDC'); paused.status = 'PAUSED';
-  const running = snapshot('BTCUSDC'); running.status = 'RUNNING';
-  overview.refetch.mockResolvedValue({ data: { generated_at: '', pairs: [paused, running].map(s => ({ snapshot: s, mode: 'PAPER', scoped: true })) }, error: null });
+  const paused = summarySnapshot('SOLUSDC'); paused.status = 'PAUSED';
+  const running = summarySnapshot('BTCUSDC'); running.status = 'RUNNING';
+  overview.refetch.mockResolvedValue({ data: { generated_at: '', pairs: [paused, running].map(s => ({ snapshot: s, mode: 'PAPER', scoped: true })), recent_trades: [] }, error: null });
   render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
   const user = userEvent.setup();
   await user.click(screen.getByRole('button', { name: /全部策略操作/ }));
@@ -407,7 +407,7 @@ it('refreshes an empty stale snapshot and pauses every returned strategy', async
 });
 
 it('reports a refresh failure without submitting stale pause targets', async () => {
-  overview.data = { generated_at: '', pairs: [{ snapshot: snapshot(), mode: 'PAPER', scoped: true }] };
+  overview.data = { generated_at: '', pairs: [{ snapshot: summarySnapshot(), mode: 'PAPER', scoped: true }], recent_trades: [] };
   overview.refetch.mockResolvedValue({ data: overview.data, error: new Error('连接失败') });
   render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
   const user = userEvent.setup();
@@ -419,9 +419,9 @@ it('reports a refresh failure without submitting stale pause targets', async () 
 });
 
 it('lists each batch outcome per strategy and only offers a retry when nothing was submitted', async () => {
-  const all = ['SOLUSDC', 'BNBUSDC', 'BTCUSDC', 'ETHUSDC', 'XRPUSDC', 'ADAUSDC'].map(symbol => { const item = snapshot(symbol); item.status = 'RUNNING'; return item; });
+  const all = ['SOLUSDC', 'BNBUSDC', 'BTCUSDC', 'ETHUSDC', 'XRPUSDC', 'ADAUSDC'].map(symbol => { const item = summarySnapshot(symbol); item.status = 'RUNNING'; return item; });
   const s = all[0];
-  overview.data = { generated_at: '', pairs: all.map(item => ({ snapshot: item, mode: 'PAPER' as const, scoped: true })) };
+  overview.data = { generated_at: '', pairs: all.map(item => ({ snapshot: item, mode: 'PAPER' as const, scoped: true })), recent_trades: [] };
   overview.refetch.mockResolvedValue({ data: overview.data, error: null });
   const target = { symbol: s.symbol, status: s.status, mode: 'PAPER' as const, grid_config: s.grid_config, scoped: true };
   vi.mocked(runBatchControls).mockResolvedValue([
@@ -452,11 +452,23 @@ it('lists each batch outcome per strategy and only offers a retry when nothing w
   await user.click(within(rows[0]).getByRole('button', { name: '重试暂停' }));
   expect(actions.run).toHaveBeenCalledWith(expect.objectContaining({ symbol: 'SOLUSDC' }), 'pause');
 });
+it('sorts lightweight strategy summaries by aggregated active orders', () => {
+  const first = summarySnapshot('BTCUSDC'), second = summarySnapshot('ETHUSDC');
+  first.stats.active_buy_orders = 2;
+  first.stats.active_sell_orders = 4;
+  second.stats.active_buy_orders = 4;
+  second.stats.active_sell_orders = 1;
+  overview.data = { generated_at: new Date().toISOString(), pairs: [second, first].map(s => ({ snapshot: s, mode: s.mode, scoped: true })), recent_trades: [] };
+  render(<MemoryRouter initialEntries={['/?sort=orders']}><App><OverviewPage /></App></MemoryRouter>);
+  const symbols = [...screen.getByRole('region', { name: '交易策略' }).querySelectorAll('.pair-name')].map(link => link.textContent);
+  expect(symbols).toEqual(['BTCUSDC', 'ETHUSDC']);
+});
+
 it('shows today’s executed buy and sell counts instead of active orders on the strategy card', () => {
-  const s = snapshot('BTCUSDC');
+  const s = summarySnapshot('BTCUSDC');
   s.stats.active_buy_orders = 7;
   s.stats.active_sell_orders = 9;
-  overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: s, mode: 'PAPER', scoped: true }] };
+  overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: s, mode: 'PAPER', scoped: true }], recent_trades: [] };
   render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
   const card = screen.getByRole('link', { name: 'BTCUSDC' }).closest('.strategy-card') as HTMLElement;
   expect(within(card).getByText('今日成交').parentElement).toHaveTextContent('5 笔');
@@ -465,13 +477,13 @@ it('shows today’s executed buy and sell counts instead of active orders on the
 
 
 it.each(['PAPER', 'LIVE'] as const)('shows shared %s asset balances once when a symbol is added', mode => {
-  const s = snapshot('BTCUSDC', mode);
+  const s = summarySnapshot('BTCUSDC', mode);
   s.account.total_wallet_balance = '1289.95';
   s.account.unrealized_profit = '-525.02';
   s.account.margin_balance = '764.93';
   s.account.available_balance = '300';
   const entries = [{ snapshot: s, mode, scoped: true }];
-  overview.data = { generated_at: new Date().toISOString(), pairs: entries };
+  overview.data = { generated_at: new Date().toISOString(), pairs: entries, recent_trades: [] };
   const page = () => <MemoryRouter><AccountsContext.Provider value={entries}><App><OverviewPage /></App></AccountsContext.Provider></MemoryRouter>;
   const { rerender } = render(page());
   const assets = screen.getByLabelText('USDC账户资产');
@@ -480,7 +492,7 @@ it.each(['PAPER', 'LIVE'] as const)('shows shared %s asset balances once when a 
   expect(screen.getByText('保证金余额').closest('.account-card')).toHaveTextContent('764.93');
   expect(screen.getByText('可用余额').parentElement).toHaveTextContent('300 USDC');
   expect(within(assets).queryByText('可转出')).not.toBeInTheDocument();
-  const second = snapshot('ETHUSDC', mode);
+  const second = summarySnapshot('ETHUSDC', mode);
   second.account = { ...s.account };
   s.position.size = '3';
   second.position.size = '-1';
@@ -496,9 +508,9 @@ it.each(['PAPER', 'LIVE'] as const)('shows shared %s asset balances once when a 
 });
 
 it('shows grouped today pnl and pending trades across all strategies', () => {
-  const a = snapshot('BTCUSDC');
+  const a = summarySnapshot('BTCUSDC');
   const now = new Date().toISOString();
-  overview.data = { generated_at: now, pairs: [{ snapshot: a, mode: 'PAPER', scoped: true }], today_pnl: { window_start: now, window_end: now, groups: [
+  overview.data = { generated_at: now, pairs: [{ snapshot: a, mode: 'PAPER', scoped: true }], recent_trades: [], today_pnl: { window_start: now, window_end: now, groups: [
     { symbol: 'BTCUSDC', mode: 'PAPER', realized_pnl: '8', pending_pnl_count: 1 },
     { symbol: 'DELETEDUSDT', mode: 'LIVE', realized_pnl: '-3', pending_pnl_count: 0 },
   ] } };
@@ -512,9 +524,9 @@ it('shows grouped today pnl and pending trades across all strategies', () => {
 });
 
 it('shows unavailable trade counts when a strategy has no current-day statistics', () => {
-  const s = snapshot('BTCUSDC');
-  s.hourly_trade_stats = null;
-  overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: s, mode: 'PAPER', scoped: true }] };
+  const s = summarySnapshot('BTCUSDC');
+  s.today_trade_counts = null;
+  overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: s, mode: 'PAPER', scoped: true }], recent_trades: [] };
   render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
   const card = screen.getByRole('link', { name: 'BTCUSDC' }).closest('.strategy-card') as HTMLElement;
   expect(within(card).getByText('今日成交').parentElement).toHaveTextContent('-- 笔');
@@ -523,15 +535,14 @@ it('shows unavailable trade counts when a strategy has no current-day statistics
 });
 
 it('shows five newest trades and expands to twenty across strategies', async () => {
-  const btc = snapshot('BTCUSDC'), eth = snapshot('ETHUSDC');
+  const btc = summarySnapshot('BTCUSDC'), eth = summarySnapshot('ETHUSDC');
   const trade = (symbol: string, index: number) => ({
     trade_id: `${symbol}-${index}`, symbol, mode: symbol === 'BTCUSDC' ? 'PAPER' as const : 'LIVE' as const,
     side: 'BUY' as const, price: '123.456789', quantity: '1', amount_usdc: '100', realized_pnl: index === 20 ? '-0.004' : '0', commission: '0',
     pnl_verified: true, is_maker: true, timestamp: new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString(), note: `成交 ${index}`,
   });
-  btc.recent_trades = Array.from({ length: 11 }, (_, i) => trade('BTCUSDC', i * 2));
-  eth.recent_trades = Array.from({ length: 11 }, (_, i) => ({ ...trade('ETHUSDC', i * 2 + 1), side: 'SELL' as const, pnl_verified: i !== 10 }));
-  overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: btc, mode: 'PAPER', scoped: true }, { snapshot: eth, mode: 'LIVE', scoped: true }] };
+  const recentTrades = Array.from({ length: 22 }, (_, i) => i % 2 === 0 ? trade('BTCUSDC', i) : { ...trade('ETHUSDC', i), side: 'SELL' as const, pnl_verified: i !== 21 }).reverse().slice(0, 20);
+  overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: btc, mode: 'PAPER', scoped: true }, { snapshot: eth, mode: 'LIVE', scoped: true }], recent_trades: recentTrades };
   render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
   const table = screen.getByText('最近成交').closest('.ant-card')!;
   const card = within(table as HTMLElement);
@@ -570,17 +581,17 @@ it('shows five newest trades and expands to twenty across strategies', async () 
 });
 
 it('offers creation when there are no strategies', () => {
-  overview.data = { generated_at: new Date().toISOString(), pairs: [] };
+  overview.data = { generated_at: new Date().toISOString(), pairs: [], recent_trades: [] };
   render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
   expect(screen.getByText('暂无策略数据')).toBeInTheDocument();
   expect(screen.getAllByRole('link', { name: /新增交易对/ })).toHaveLength(2);
 });
 
 it('shows position amounts and their long/short shares for all strategies', async () => {
-  const long = snapshot('BTCUSDC'), short = snapshot('ETHUSDC');
+  const long = summarySnapshot('BTCUSDC'), short = summarySnapshot('ETHUSDC');
   long.position.size = '3';
   short.position.size = '-1';
-  overview.data = { generated_at: new Date().toISOString(), pairs: [long, short].map(s => ({ snapshot: s, mode: 'PAPER' as const, scoped: true })) };
+  overview.data = { generated_at: new Date().toISOString(), pairs: [long, short].map(s => ({ snapshot: s, mode: 'PAPER' as const, scoped: true })), recent_trades: [] };
   render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
   expect(screen.getByText('总持仓金额 / USDC').closest('.position-summary')).toHaveTextContent('404');
   expect(screen.getByText('做多持仓金额').parentElement).toHaveTextContent('303');
@@ -592,19 +603,19 @@ it('shows position amounts and their long/short shares for all strategies', asyn
 });
 
 it('shows available balance as a percentage of wallet balance', () => {
-  const s = snapshot('BTCUSDC');
+  const s = summarySnapshot('BTCUSDC');
   const pairs = [{ snapshot: s, mode: 'PAPER' as const, scoped: true }];
-  overview.data = { generated_at: new Date().toISOString(), pairs };
+  overview.data = { generated_at: new Date().toISOString(), pairs, recent_trades: [] };
   render(<MemoryRouter><App><AccountsContext.Provider value={pairs}><OverviewPage /></AccountsContext.Provider></App></MemoryRouter>);
   expect(screen.getByText('可用比例（按钱包余额）').parentElement).toHaveTextContent('80%');
 });
 
 it('does not calculate an available ratio for zero wallet balance', () => {
-  const s = snapshot('BTCUSDC');
+  const s = summarySnapshot('BTCUSDC');
   s.account.total_wallet_balance = '0';
   s.position.unrealized_pnl = '0';
   const pairs = [{ snapshot: s, mode: 'PAPER' as const, scoped: true }];
-  overview.data = { generated_at: new Date().toISOString(), pairs };
+  overview.data = { generated_at: new Date().toISOString(), pairs, recent_trades: [] };
   render(<MemoryRouter><App><AccountsContext.Provider value={pairs}><OverviewPage /></AccountsContext.Provider></App></MemoryRouter>);
   expect(screen.getByText('可用比例（按钱包余额）').parentElement).toHaveTextContent('--');
 });
@@ -613,7 +624,7 @@ it('marks an unchanged overview stale as time passes and clears the warning on r
   vi.useFakeTimers();
   try {
     overview.dataUpdatedAt = Date.now();
-    overview.data = { generated_at: '', pairs: [{ snapshot: snapshot('BTCUSDC'), mode: 'PAPER', scoped: true }] };
+    overview.data = { generated_at: '', pairs: [{ snapshot: summarySnapshot('BTCUSDC'), mode: 'PAPER', scoped: true }], recent_trades: [] };
     const page = <MemoryRouter><App><OverviewPage /></App></MemoryRouter>;
     const { rerender, unmount } = render(page);
     expect(screen.queryByText('数据暂未更新，请检查连接')).not.toBeInTheDocument();
@@ -631,8 +642,8 @@ it('marks an unchanged overview stale as time passes and clears the warning on r
 });
 
 it('disables rebuilding a paused strategy while keeping resume available', async () => {
-  const paused = snapshot('BTCUSDC'); paused.status = 'PAUSED';
-  overview.data = { generated_at: '', pairs: [{ snapshot: paused, mode: 'PAPER', scoped: true }] };
+  const paused = summarySnapshot('BTCUSDC'); paused.status = 'PAUSED';
+  overview.data = { generated_at: '', pairs: [{ snapshot: paused, mode: 'PAPER', scoped: true }], recent_trades: [] };
   render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
   await userEvent.setup().click(screen.getByRole('button', { name: 'BTCUSDC 更多操作' }));
   expect(screen.getByRole('menuitem', { name: /重建 BTCUSDC 网格/ })).toHaveAttribute('aria-disabled', 'true');

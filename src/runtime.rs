@@ -669,24 +669,35 @@ impl TradingRuntime {
         let (ticker_tx, ticker_rx) = broadcast::channel::<TickerInfo>(64);
         let (market_tx, market_rx) = watch::channel(strategy.exchange.symbol.clone());
         let client = Arc::new(self.exchange_client(&strategy.exchange));
-        let state = if multi {
-            AppState::new_for_pair_with_rates(
-                strategy.clone(),
-                db.clone(),
-                action_tx,
-                self.trade_lock.clone(),
-                self.cny_rates.clone(),
-                self.admin_auth.clone(),
-            )
-        } else {
-            AppState::new_with_rates(
-                strategy.clone(),
-                db.clone(),
-                action_tx,
-                self.cny_rates.clone(),
-                self.admin_auth.clone(),
-            )
-        };
+        // Restoring durable state can wait for SQLite and scan trade history.
+        // Keep that work off the Tokio thread that handles membership and shutdown.
+        let state_config = strategy.clone();
+        let state_db = db.clone();
+        let trade_lock = self.trade_lock.clone();
+        let cny_rates = self.cny_rates.clone();
+        let admin_auth = self.admin_auth.clone();
+        let state = db
+            .run_blocking(move |_| {
+                Ok(if multi {
+                    AppState::new_for_pair_with_rates(
+                        state_config,
+                        state_db,
+                        action_tx,
+                        trade_lock,
+                        cny_rates,
+                        admin_auth,
+                    )
+                } else {
+                    AppState::new_with_rates(
+                        state_config,
+                        state_db,
+                        action_tx,
+                        cny_rates,
+                        admin_auth,
+                    )
+                })
+            })
+            .await?;
         if force_paused || previous_unclean {
             *state.status.write().await = crate::types::BotStatus::Paused;
         }
@@ -959,6 +970,14 @@ impl TradingRuntime {
         let mut result =
             remove_engine(&pair.state, &mut pair.engine, Duration::from_secs(30)).await;
         let state = pair.state.clone();
+        for task in pair.background.drain(..) {
+            task.abort();
+            let _ = task.await;
+        }
+        // Retired states reject new verification admission. Finish old commits
+        // before either removing the member or restoring a replacement.
+        // Use the old state's lock, and release it before replacement startup.
+        state.drain_trade_commits().await;
         if result.is_ok() {
             let config = state.config.read().await.clone();
             result = if config.exchange.is_paper() {
@@ -1034,10 +1053,6 @@ impl TradingRuntime {
                 self.pairs[index].state.position.read().await.clone(),
                 self.pairs[index].state.account.read().await.clone(),
             ));
-            for task in self.pairs[index].background.drain(..) {
-                task.abort();
-                let _ = task.await;
-            }
             match self
                 .prepare_pair_with_state(
                     config,
@@ -1074,11 +1089,7 @@ impl TradingRuntime {
                 }
             }
         }
-        let pair = self.pairs.remove(index);
-        for task in pair.background {
-            task.abort();
-            let _ = task.await;
-        }
+        self.pairs.remove(index);
         *self.handle.states.write().await = self.states();
         Ok(())
     }

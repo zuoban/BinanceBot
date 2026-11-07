@@ -51,14 +51,23 @@ fn report(label: &str, samples: &mut [f64]) {
     );
 }
 
-// Run explicitly with --ignored --nocapture. This measures a paused paper engine
-// waiting for market fallback, not exchange order execution or cancellation.
+// Run explicitly with --ignored --nocapture. This measures paper controls while
+// market fallback is pending, including synchronization after resume acknowledgement.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "explicit local event-loop network latency benchmark"]
 async fn control_during_market_request() {
     let rounds = parameter("BENCH_LOOP_ROUNDS", 10);
     let delay_ms = parameter("BENCH_LOOP_DELAY_MS", 100);
     let timeout_ms = parameter("BENCH_LOOP_TIMEOUT_MS", 10000);
+    market_request_samples(rounds, delay_ms, timeout_ms).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn configuration_completes_before_pending_market_http() {
+    market_request_samples(1, 0, 5000).await;
+}
+
+async fn market_request_samples(rounds: u64, delay_ms: u64, timeout_ms: u64) {
     // The exchange HTTP client has a fixed 10-second request timeout; delays
     // near that limit can still time out due to scheduling and handshake time.
     assert!(
@@ -120,11 +129,26 @@ async fn control_during_market_request() {
         };
         let client = Arc::new(BinanceFuturesClient::with_base_url(&config.exchange, url));
         let mut engine = GridTradingEngine::new(state.clone(), client, action_rx, ticker_rx);
+        engine.exchange_rules_loaded = true;
         let engine_task = tokio::spawn(async move { engine.run().await });
         let _request_started = tokio::time::timeout(timeout, started_rx)
             .await
             .expect("engine did not request local mark price")
             .expect("request notification dropped");
+        let (resume_tx, resume_rx) = oneshot::channel();
+        action_tx
+            .send(BotControlAction::Resume {
+                expected_mode: TradingMode::Paper,
+                expected_epoch: state.pause_epoch(),
+                reply: resume_tx,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(timeout, resume_rx)
+            .await
+            .expect("resume control timed out")
+            .expect("resume reply dropped")
+            .expect("resume failed");
         let permit = action_tx.reserve().await.unwrap();
         let (reply_tx, reply_rx) = oneshot::channel();
         let enqueued = Instant::now();
@@ -132,14 +156,33 @@ async fn control_during_market_request() {
             config: Box::new(config),
             reply: reply_tx,
         });
-        // The handler cannot respond before the command has been queued.
-        mock.release.add_permits(1);
         let result = tokio::time::timeout(timeout, reply_rx)
             .await
             .expect("control timed out")
             .expect("control reply dropped");
         control_samples.push(enqueued.elapsed().as_secs_f64() * 1000.0);
         result.expect("configuration update failed");
+        assert!(
+            served_rx.try_recv().is_err(),
+            "HTTP finished before its release"
+        );
+        assert_eq!(
+            state.ticker.read().await.mark_update_time,
+            previous_mark_time
+        );
+        // Configuration retires the pending request. A request from the new
+        // generation must still complete and update the engine through select.
+        mock.release.add_permits(1);
+        tokio::time::timeout(timeout, async {
+            loop {
+                if state.ticker.read().await.mark_price == Decimal::from(100) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("engine did not consume a valid market completion");
         {
             let ticker = state.ticker.read().await;
             assert_eq!(
@@ -212,7 +255,7 @@ async fn control_during_market_request() {
     }
     println!("rounds={rounds} delay_ms={delay_ms} timeout_ms={timeout_ms} db=memory mode=paper workers=4");
     println!("UpdateConfig acknowledgement is configuration completion, not order cancellation; no market-update loss is measured.");
-    println!("Mark update latency runs from broadcast send to observing engine state; mock service time includes the release handshake. Small samples give coarse percentiles.");
+    println!("Control acknowledgement must finish while local HTTP is held. Configuration retires that request; fallback observation waits for a valid new-generation request. Mark push latency runs from broadcast send to observing engine state; mock service time includes the release handshake. Small samples give coarse percentiles.");
     report("control_enqueue_to_ack", &mut control_samples);
     report("mark_update_send_to_observation", &mut update_samples);
     report("mock_handler_service", &mut service_samples);

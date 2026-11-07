@@ -1,4 +1,4 @@
-import type { Pair, Snapshot } from '../lib/types';
+import type { Pair, PairSummary, Snapshot } from '../lib/types';
 
 export function snapshot(symbol = 'SOLUSDC', mode: 'PAPER' | 'LIVE' = 'PAPER'): Snapshot {
   const now = new Date().toISOString();
@@ -16,4 +16,16 @@ export function snapshot(symbol = 'SOLUSDC', mode: 'PAPER' | 'LIVE' = 'PAPER'): 
 export function pair(symbol = 'SOLUSDC'): Pair {
   const s = snapshot(symbol);
   return { symbol, scoped: true, mode: 'PAPER', status: 'PAUSED', grid_config: s.grid_config };
+}
+
+export function summarySnapshot(symbol = 'SOLUSDC', mode: 'PAPER' | 'LIVE' = 'PAPER'): PairSummary {
+  const s = snapshot(symbol, mode);
+  return {
+    symbol, mode, status: s.status, grid_config: s.grid_config,
+    ticker: { mark_price: s.ticker.mark_price, mark_update_time: s.ticker.mark_update_time },
+    position: { size: s.position.size, entry_price: s.position.entry_price, mark_price: s.position.mark_price, unrealized_pnl: s.position.unrealized_pnl },
+    stats: { total_realized_pnl: s.stats.total_realized_pnl, active_buy_orders: s.stats.active_buy_orders, active_sell_orders: s.stats.active_sell_orders },
+    today_trade_counts: { window_start: s.hourly_trade_stats!.window_start, window_end: s.hourly_trade_stats!.window_end, buy: 2, sell: 3 },
+    account: s.account, account_cny_rate: s.account_cny_rate,
+  };
 }

@@ -1,3 +1,4 @@
+/// <reference lib="es2024.promise" />
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -26,36 +27,77 @@ it('only delivers the message type expected by a socket', () => {
   act(() => FakeSocket.instances[0].sendSnapshot('SOLUSDC', '123'));
   expect(onAccounts).not.toHaveBeenCalled();
   expect(result.current.connected).toBe(false);
-  const data = { pairs: [] };
+  const data = { generated_at: new Date().toISOString(), pairs: [] };
   act(() => FakeSocket.instances[0].onmessage?.({ data: JSON.stringify({ type: 'accounts', data }) }));
   expect(onAccounts).toHaveBeenCalledWith(data);
   expect(result.current.connected).toBe(true);
 });
 
-it('expires silent account frames, falls back to HTTP and marks an old HTTP observation stale', async () => {
+it('polls lightweight accounts after silence or rejected older frames and marks old observations stale', async () => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date('2025-01-01T00:00:00Z'));
   tokenStore.set('test-token');
   vi.stubGlobal('WebSocket', FakeSocket);
-  const http = snapshot();
-  const overview = { generated_at: '', pairs: [{ snapshot: http, mode: 'PAPER' as const, scoped: true }] };
-  const updatedAt = Date.now();
-  const { result, unmount } = renderHook(() => useLiveAccounts(overview, updatedAt));
+  const http = { generated_at: new Date().toISOString(), pairs: [{ snapshot: snapshot(), mode: 'PAPER' }] };
+  const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ success: true, data: http }), { status: 200 }))
+    .mockImplementation(() => Promise.withResolvers<Response>().promise);
+  vi.stubGlobal('fetch', fetchMock);
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const wrapper = ({ children }: { children: React.ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+  const { result, unmount } = renderHook(() => useLiveAccounts(), { wrapper });
   try {
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(result.current.accounts[0].snapshot.position.size).toBe('0');
     const streamed = snapshot();
     streamed.position.size = '2';
     streamed.ticker.mark_price = '123';
-    act(() => FakeSocket.instances[0].onmessage?.({ data: JSON.stringify({ type: 'accounts', data: { pairs: [{ mode: 'PAPER', snapshot: streamed }] } }) }));
-    expect(result.current[0].snapshot.position.size).toBe('2');
-    expect(result.current[0].snapshot.ticker.mark_price).toBe('123');
-    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
-    expect(result.current[0].snapshot.position.size).toBe('0');
-    expect(result.current[0].account_observation_stale).toBe(false);
+    act(() => FakeSocket.instances[0].onmessage?.({ data: JSON.stringify({ type: 'accounts', data: { generated_at: new Date().toISOString(), pairs: [{ mode: 'PAPER', snapshot: streamed }] } }) }));
+    expect(result.current.accounts[0].snapshot.position.size).toBe('2');
+    expect(result.current.accounts[0].snapshot.ticker.mark_price).toBe('123');
+    const requests = fetchMock.mock.calls.length;
+    await act(async () => { await vi.advanceTimersByTimeAsync(4999); });
+    expect(fetchMock).toHaveBeenCalledTimes(requests);
+    const older = snapshot();
+    older.position.size = '99';
+    act(() => FakeSocket.instances[0].onmessage?.({ data: JSON.stringify({ type: 'accounts', data: { generated_at: '2024-12-31T23:59:59Z', pairs: [{ mode: 'PAPER', snapshot: older }] } }) }));
+    expect(result.current.accounts[0].snapshot.position.size).toBe('2');
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(fetchMock).toHaveBeenCalledTimes(requests + 1);
+    expect(result.current.accounts[0].account_observation_stale).toBe(false);
     await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
-    expect(result.current[0].account_observation_stale).toBe(true);
+    expect(result.current.accounts[0].account_observation_stale).toBe(true);
+    expect(fetchMock.mock.calls.every(([path]) => path === '/api/accounts')).toBe(true);
   } finally {
     unmount();
+    client.clear();
     vi.useRealTimers();
+  }
+});
+
+it('keeps current account membership and modes and rejects late HTTP or older socket frames', async () => {
+  tokenStore.set('test-token');
+  vi.stubGlobal('WebSocket', FakeSocket);
+  const pending = Promise.withResolvers<Response>();
+  const fetchMock = vi.fn().mockReturnValue(pending.promise);
+  vi.stubGlobal('fetch', fetchMock);
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const wrapper = ({ children }: { children: React.ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+  const { result, unmount } = renderHook(() => useLiveAccounts(), { wrapper });
+  const send = (data: unknown) => act(() => FakeSocket.instances[0].onmessage?.({ data: JSON.stringify({ type: 'accounts', data }) }));
+  const old = { generated_at: '2026-01-01T00:00:00Z', pairs: [{ mode: 'PAPER', snapshot: snapshot() }] };
+  const current = { generated_at: '2026-01-01T00:00:01Z', pairs: [{ mode: 'LIVE', snapshot: snapshot('SOLUSDC', 'LIVE') }, { mode: 'PAPER', snapshot: snapshot() }] };
+  try {
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    send(current);
+    expect(result.current.accounts.map(entry => entry.mode)).toEqual(['LIVE', 'PAPER']);
+    await act(async () => { pending.resolve(new Response(JSON.stringify({ success: true, data: old }), { status: 200 })); });
+    send(old);
+    expect(result.current.accounts.map(entry => entry.mode)).toEqual(['LIVE', 'PAPER']);
+    send({ generated_at: '2026-01-01T00:00:02Z', pairs: [] });
+    expect(result.current.accounts).toEqual([]);
+  } finally {
+    unmount();
+    client.clear();
   }
 });
 

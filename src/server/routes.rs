@@ -2,13 +2,12 @@ use crate::config::{AppConfig, ServerConfig};
 use crate::exchange::rate_limit::RateLimiter;
 use crate::exchange::BinanceFuturesClient;
 use crate::runtime::RuntimeHandle;
-use crate::server::state::snapshot::AccountMessage;
+use crate::server::state::snapshot::{AccountFrame, AccountMessage};
 use crate::server::state::AppState;
 use crate::types::{
     AuthLoginPayload, AuthStatusResponse, AuthTokenResponse, BotControlAction, BotSnapshot,
-    GridOrder, LogEntry, OverviewPairView, OverviewSnapshot, TradeRecord, TradingMode,
-    TradingPairView, UpdateConfigPayload, UpdateGlobalConfigPayload, WebConfigView,
-    WebGlobalConfigView,
+    GridOrder, LogEntry, OverviewSnapshot, TradeRecord, TradingMode, TradingPairView,
+    UpdateConfigPayload, UpdateGlobalConfigPayload, WebConfigView, WebGlobalConfigView,
 };
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, Path, Query, State};
@@ -299,9 +298,11 @@ async fn require_auth_middleware(
 }
 
 pub fn create_router(state: Arc<AppState>) -> Router {
+    let accounts = AccountHub::new(AccountSource::Fixed(Arc::new(vec![state.clone()])));
     let pairs = Router::new()
         .route("/api/pairs", get(get_single_pair_handler))
         .route("/api/overview", get(get_single_overview_handler))
+        .route("/api/accounts", get(get_accounts_handler))
         .route(
             "/api/pairs/:symbol/database/export",
             get(single_pair_export_handler),
@@ -315,7 +316,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             state.clone(),
             require_auth_middleware,
         ))
-        .route("/api/accounts/ws", get(single_accounts_ws_handler))
+        .route("/api/accounts/ws", get(accounts_ws_handler))
+        .layer(Extension(accounts))
         .with_state(state.clone());
     create_base_router(state, true).merge(pairs)
 }
@@ -398,7 +400,9 @@ pub fn create_multi_router(states: Vec<Arc<AppState>>) -> Router {
         return Router::new();
     };
     let mut router = create_base_router(primary.clone(), false);
-    for state in &states {
+    let states = Arc::new(states);
+    let accounts = AccountHub::new(AccountSource::Fixed(states.clone()));
+    for state in states.iter() {
         let Some(symbol) = state.pair_scope() else {
             continue;
         };
@@ -414,6 +418,7 @@ pub fn create_multi_router(states: Vec<Arc<AppState>>) -> Router {
     let global = Router::new()
         .route("/api/pairs", get(get_pairs_handler))
         .route("/api/overview", get(get_overview_handler))
+        .route("/api/accounts", get(get_accounts_handler))
         .route("/api/trades/clear", post(clear_multi_trade_history_handler))
         .route("/api/database/clear", post(multi_database_clear_handler))
         .route_layer(middleware::from_fn_with_state(
@@ -421,7 +426,8 @@ pub fn create_multi_router(states: Vec<Arc<AppState>>) -> Router {
             require_auth_middleware,
         ))
         .route("/api/accounts/ws", get(accounts_ws_handler))
-        .with_state(Arc::new(states));
+        .layer(Extension(accounts))
+        .with_state(states);
     router.merge(global)
 }
 
@@ -462,22 +468,31 @@ async fn collect_overview(states: &[Arc<AppState>]) -> Json<ApiResponse<Overview
         Some(state) => state.db.cached_today_pnl(generated_at).await,
         None => None,
     };
-    let pairs = futures_util::future::join_all(states.iter().map(|state| async move {
-        // Reuse the per-pair chart cache and in-memory live fields used by WebSockets.
-        let snapshot = state.snapshot().await;
-        OverviewPairView {
-            scoped: state.pair_scope().is_some(),
-            mode: snapshot.mode,
-            snapshot,
-        }
-    }))
+    let summaries = futures_util::future::join_all(
+        states
+            .iter()
+            .map(|state| state.overview_snapshot(generated_at)),
+    )
     .await;
+    let mut pairs = Vec::with_capacity(summaries.len());
+    let mut recent_trades = Vec::new();
+    for (pair, trades) in summaries {
+        pairs.push(pair);
+        recent_trades.extend(trades);
+    }
+    recent_trades.sort_unstable_by(|a, b| {
+        b.timestamp
+            .cmp(&a.timestamp)
+            .then_with(|| b.trade_id.cmp(&a.trade_id))
+    });
+    recent_trades.truncate(20);
     Json(ApiResponse {
         success: true,
         data: Some(OverviewSnapshot {
             generated_at,
             pairs,
             today_pnl,
+            recent_trades,
         }),
         message: None,
     })
@@ -500,6 +515,7 @@ pub async fn create_managed_router(handle: RuntimeHandle) -> Router {
             get(get_managed_pairs_handler).post(add_pair_handler),
         )
         .route("/api/overview", get(get_managed_overview_handler))
+        .route("/api/accounts", get(get_accounts_handler))
         .route("/api/overview/history", get(get_overview_history_handler))
         .route("/api/pairs/:symbol", delete(remove_pair_handler))
         .route(
@@ -538,7 +554,10 @@ pub async fn create_managed_router(handle: RuntimeHandle) -> Router {
         ))
         .route("/ws", get(dispatch_pair))
         .route("/api/pairs/:symbol/ws", get(dispatch_pair))
-        .route("/api/accounts/ws", get(managed_accounts_ws_handler))
+        .route("/api/accounts/ws", get(accounts_ws_handler))
+        .layer(Extension(AccountHub::new(AccountSource::Managed(
+            handle.clone(),
+        ))))
         .with_state(handle);
     let account = Router::new()
         .route(
@@ -833,6 +852,7 @@ async fn get_managed_overview_handler(
                 generated_at,
                 pairs: Vec::new(),
                 today_pnl: handle.db.cached_today_pnl(generated_at).await,
+                recent_trades: Vec::new(),
             }),
             message: None,
         });
@@ -2285,39 +2305,112 @@ impl AccountSource {
             Self::Managed(handle) => handle.states.read().await.clone(),
         }
     }
+
+    async fn frame(&self) -> AccountFrame {
+        let generated_at = chrono::Utc::now();
+        let states = self.states().await;
+        let pairs =
+            futures_util::future::join_all(states.iter().map(|state| state.account_snapshot()))
+                .await;
+        AccountFrame {
+            generated_at,
+            pairs,
+        }
+    }
 }
 
-async fn single_accounts_ws_handler(
-    ws: WebSocketUpgrade,
-    headers: HeaderMap,
-    State(state): State<Arc<AppState>>,
-) -> Response {
-    upgrade_accounts_socket(ws, headers, AccountSource::Fixed(Arc::new(vec![state]))).await
+type AccountFrameSender = tokio::sync::watch::Sender<Option<Arc<String>>>;
+
+// Router-owned: clients of this registry share collection and JSON encoding.
+// The sender retains no receiver, so the sampler exits when the last client leaves.
+struct AccountHub {
+    source: AccountSource,
+    sampler: Arc<tokio::sync::Mutex<Option<AccountFrameSender>>>,
+}
+
+impl AccountHub {
+    fn new(source: AccountSource) -> Arc<Self> {
+        Arc::new(Self {
+            source,
+            sampler: Arc::new(tokio::sync::Mutex::new(None)),
+        })
+    }
+
+    async fn subscribe(&self) -> tokio::sync::watch::Receiver<Option<Arc<String>>> {
+        let mut sampler = self.sampler.lock().await;
+        if let Some(sender) = sampler
+            .as_ref()
+            .filter(|sender| sender.receiver_count() > 0)
+        {
+            return sender.subscribe();
+        }
+        let (sender, receiver) = tokio::sync::watch::channel(None);
+        *sampler = Some(sender.clone());
+        let source = self.source.clone();
+        let lifecycle = self.sampler.clone();
+        tokio::spawn(async move {
+            let mut ticks = tokio::time::interval(std::time::Duration::from_secs(1));
+            ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = sender.closed() => {
+                        // A subscriber may arrive after closed() becomes ready.
+                        // Serialize retirement with subscribe before exiting.
+                        let mut current = lifecycle.lock().await;
+                        if sender.receiver_count() > 0 { continue; }
+                        if current.as_ref().is_some_and(|active| active.same_channel(&sender)) {
+                            *current = None;
+                        }
+                        break;
+                    }
+                    message = async {
+                        ticks.tick().await;
+                        serde_json::to_string(&AccountMessage::Accounts(source.frame().await))
+                    } => {
+                        let Ok(message) = message else {
+                            let mut current = lifecycle.lock().await;
+                            if current.as_ref().is_some_and(|active| active.same_channel(&sender)) {
+                                *current = None;
+                            }
+                            break;
+                        };
+                        // If the last subscriber left during collection, the
+                        // closed branch performs the synchronized shutdown.
+                        let _ = sender.send(Some(Arc::new(message)));
+                    }
+                }
+            }
+        });
+        receiver
+    }
+}
+
+async fn get_accounts_handler(
+    Extension(hub): Extension<Arc<AccountHub>>,
+) -> Json<ApiResponse<AccountFrame>> {
+    Json(ApiResponse {
+        success: true,
+        data: Some(hub.source.frame().await),
+        message: None,
+    })
 }
 
 async fn accounts_ws_handler(
     ws: WebSocketUpgrade,
     headers: HeaderMap,
-    State(states): State<Arc<Vec<Arc<AppState>>>>,
+    Extension(hub): Extension<Arc<AccountHub>>,
 ) -> Response {
-    upgrade_accounts_socket(ws, headers, AccountSource::Fixed(states)).await
-}
-
-async fn managed_accounts_ws_handler(
-    ws: WebSocketUpgrade,
-    headers: HeaderMap,
-    State(handle): State<RuntimeHandle>,
-) -> Response {
-    upgrade_accounts_socket(ws, headers, AccountSource::Managed(handle)).await
+    upgrade_accounts_socket(ws, headers, hub).await
 }
 
 async fn upgrade_accounts_socket(
     ws: WebSocketUpgrade,
     headers: HeaderMap,
-    source: AccountSource,
+    hub: Arc<AccountHub>,
 ) -> Response {
     let token = websocket_token(&headers).to_string();
-    let states = source.states().await;
+    let states = hub.source.states().await;
     let Some(primary) = states.first().cloned() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
@@ -2325,33 +2418,42 @@ async fn upgrade_accounts_socket(
         return StatusCode::UNAUTHORIZED.into_response();
     }
     ws.protocols(["auth"]).on_upgrade(move |socket| async move {
+        let mut retired = primary.subscribe_retirement();
+        if *retired.borrow() { return; }
+        let mut frames = hub.subscribe().await;
         let (mut sender, mut receiver) = socket.split();
-        let mut ticks = tokio::time::interval(std::time::Duration::from_secs(1));
-        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut check_auth = tokio::time::interval(std::time::Duration::from_secs(1));
         loop {
-            tokio::select! {
-                _ = ticks.tick() => {
-                    if !primary.is_token_valid(&token).await { break; }
-                    // Resolve current membership without keeping the registry locked.
-                    // Collect only account fields under the pair's snapshot locks.
-                    let states = source.states().await;
-                    let pairs = futures_util::future::join_all(
-                        states.iter().map(|state| state.account_snapshot())
-                    ).await;
-                    let Ok(json) = serde_json::to_string(&AccountMessage::Accounts { pairs }) else {
+            let frame = frames.borrow_and_update().clone();
+            if let Some(frame) = frame {
+                if !primary.is_token_valid(&token).await { break; }
+                if !matches!(tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    send_until_retired(&mut sender, Message::Text((*frame).clone()), &mut retired),
+                ).await, Ok(Some(Ok(())))) { break; }
+            }
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = retired.changed() => return,
+                    _ = check_auth.tick() => {
+                        if !primary.is_token_valid(&token).await { return; }
+                    }
+                    changed = frames.changed() => {
+                        if changed.is_err() { return; }
                         break;
-                    };
-                    if !primary.is_token_valid(&token).await { break; }
-                    let message = Message::Text(json);
-                    if !matches!(tokio::time::timeout(std::time::Duration::from_secs(5), sender.send(message)).await, Ok(Ok(()))) { break; }
-                }
-                message = receiver.next() => {
-                    match message {
-                        Some(Ok(Message::Ping(payload))) => {
-                            if sender.send(Message::Pong(payload)).await.is_err() { break; }
+                    }
+                    message = receiver.next() => {
+                        match message {
+                            Some(Ok(Message::Ping(payload))) => {
+                                if !matches!(tokio::time::timeout(
+                                    std::time::Duration::from_secs(5),
+                                    send_until_retired(&mut sender, Message::Pong(payload), &mut retired),
+                                ).await, Ok(Some(Ok(())))) { return; }
+                            }
+                            Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return,
+                            _ => {}
                         }
-                        Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
-                        _ => {}
                     }
                 }
             }
@@ -2911,6 +3013,71 @@ mod tests {
         (status, serde_json::from_slice(&bytes).unwrap())
     }
 
+    #[test]
+    fn account_routes_can_be_constructed_without_a_tokio_runtime() {
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let (tx, _) = tokio::sync::mpsc::channel(1);
+        let state = AppState::new(AppConfig::default(), db, tx);
+        let _single = create_router(state.clone());
+        let _fixed = create_multi_router(vec![state]);
+    }
+
+    #[tokio::test]
+    async fn account_sampler_shares_frames_cancels_idle_collection_and_restarts() {
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let (tx, _) = tokio::sync::mpsc::channel(1);
+        let trade_lock = Arc::new(tokio::sync::Mutex::new(()));
+        let state = AppState::new_for_pair(AppConfig::default(), db, tx, trade_lock.clone());
+        let hub = AccountHub::new(AccountSource::Fixed(Arc::new(vec![state.clone()])));
+        assert!(hub.sampler.lock().await.is_none());
+        let mut first = hub.subscribe().await;
+        let second = hub.subscribe().await;
+        tokio::time::timeout(std::time::Duration::from_secs(2), first.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        let frame = first.borrow_and_update().clone().unwrap();
+        assert!(Arc::ptr_eq(&frame, second.borrow().as_ref().unwrap()));
+        let decoded: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        assert!(decoded["data"]["generated_at"].is_string());
+        drop(first);
+        drop(second);
+
+        // Force collection to wait after taking the commit lock, then remove
+        // its only subscriber. Cancellation must release that lock promptly.
+        let config = state.config.write().await;
+        let pending = hub.subscribe().await;
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if trade_lock.try_lock().is_err() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(pending);
+        let commit = tokio::time::timeout(std::time::Duration::from_secs(2), trade_lock.lock())
+            .await
+            .unwrap();
+        drop(commit);
+        drop(config);
+
+        state.position.write().await.unrealized_pnl = rust_decimal_macros::dec!(42);
+        let mut restarted = hub.subscribe().await;
+        tokio::time::timeout(std::time::Duration::from_secs(2), restarted.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        let decoded: serde_json::Value =
+            serde_json::from_str(restarted.borrow().as_ref().unwrap()).unwrap();
+        assert_eq!(
+            decoded["data"]["pairs"][0]["snapshot"]["position"]["unrealized_pnl"],
+            "42"
+        );
+    }
+
     #[tokio::test]
     async fn account_stream_authenticates_pushes_live_balances_and_rejects_revoked_sessions() {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -2961,7 +3128,7 @@ mod tests {
             assert_eq!(first["type"], "accounts");
             assert_eq!(first["data"]["pairs"].as_array().unwrap().len(), 1);
             let snapshot = &first["data"]["pairs"][0]["snapshot"];
-            assert_eq!(snapshot.as_object().unwrap().len(), 4);
+            assert_eq!(snapshot.as_object().unwrap().len(), 6);
             assert!(snapshot["ticker"]["mark_update_time"].is_string());
             assert!(snapshot["ticker"]["mark_price"].is_string());
             assert!(snapshot["position"]["size"].is_string());
@@ -3302,11 +3469,29 @@ mod tests {
             .unwrap();
         let snapshot: serde_json::Value = serde_json::from_str(initial.to_text().unwrap()).unwrap();
         assert_eq!(snapshot["type"], "snapshot");
+        let (mut accounts, _) =
+            tokio_tungstenite::connect_async(format!("ws://{address}/api/accounts/ws"))
+                .await
+                .unwrap();
+        let account = tokio::time::timeout(std::time::Duration::from_secs(3), accounts.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let account: serde_json::Value = serde_json::from_str(account.to_text().unwrap()).unwrap();
+        assert_eq!(account["type"], "accounts");
 
         state.retire();
         let closed = tokio::time::timeout(std::time::Duration::from_secs(3), socket.next())
             .await
             .expect("retired state must close its socket");
+        assert!(matches!(
+            closed,
+            None | Some(Ok(Message::Close(_))) | Some(Err(_))
+        ));
+        let closed = tokio::time::timeout(std::time::Duration::from_secs(3), accounts.next())
+            .await
+            .expect("retirement must also close the account stream");
         assert!(matches!(
             closed,
             None | Some(Ok(Message::Close(_))) | Some(Err(_))
@@ -3376,6 +3561,23 @@ mod tests {
             response["data"]["pairs"][0]["snapshot"]["symbol"],
             "SOLUSDC"
         );
+        let summary = &response["data"]["pairs"][0]["snapshot"];
+        for field in [
+            "active_orders",
+            "recent_trades",
+            "recent_logs",
+            "hourly_trade_stats",
+        ] {
+            assert!(
+                summary.get(field).is_none(),
+                "overview retained heavy field {field}"
+            );
+        }
+        assert!(summary["today_trade_counts"]["buy"].is_u64());
+        assert!(response["data"]["recent_trades"]
+            .as_array()
+            .unwrap()
+            .is_empty());
         let serialized = response.to_string();
         for private_value in [
             "overview-private-api-key",
@@ -3405,8 +3607,8 @@ mod tests {
             states.push(auth_pair_state(config, db.clone(), tx, lock.clone()));
         }
         let account_time = chrono::Utc::now() - chrono::Duration::minutes(2);
-        states[0].ticker.write().await.last_price = rust_decimal_macros::dec!(123);
-        states[1].ticker.write().await.last_price = rust_decimal_macros::dec!(67890);
+        states[0].ticker.write().await.mark_price = rust_decimal_macros::dec!(123);
+        states[1].ticker.write().await.mark_price = rust_decimal_macros::dec!(67890);
         states[1].account.write().await.update_time = account_time;
         states[0].add_log("INFO", "SOL scoped log").await;
         states[1].add_log("WARN", "BTC scoped log").await;
@@ -3425,32 +3627,28 @@ mod tests {
         assert_eq!(overview.pairs[0].snapshot.symbol, "SOLUSDC");
         assert_eq!(overview.pairs[1].snapshot.symbol, "BTCUSDT");
         assert_eq!(
-            overview.pairs[0].snapshot.ticker.last_price,
+            overview.pairs[0].snapshot.ticker.mark_price,
             rust_decimal_macros::dec!(123)
         );
         assert_eq!(
-            overview.pairs[1].snapshot.ticker.last_price,
+            overview.pairs[1].snapshot.ticker.mark_price,
             rust_decimal_macros::dec!(67890)
         );
         assert_eq!(overview.pairs[1].snapshot.account.update_time, account_time);
-        assert_eq!(
-            overview.pairs[0].snapshot.recent_logs[0].message,
-            "SOL scoped log"
-        );
-        assert_eq!(
-            overview.pairs[1].snapshot.recent_logs[0].message,
-            "BTC scoped log"
-        );
+        for pair in response["data"]["pairs"].as_array().unwrap() {
+            assert!(pair["snapshot"].get("recent_logs").is_none());
+            assert!(pair["snapshot"].get("active_orders").is_none());
+        }
 
         // No WebSocket subscribers are required for live fields to refresh.
         // Only chart queries are cached between overview polls.
         assert_eq!(db.hourly_stats_query_count(), 2);
-        states[1].ticker.write().await.last_price = rust_decimal_macros::dec!(67900);
+        states[1].ticker.write().await.mark_price = rust_decimal_macros::dec!(67900);
         states[1].account.write().await.update_time = chrono::Utc::now();
         let (_, response) = overview_response(&router, true).await;
         let refreshed: OverviewSnapshot = serde_json::from_value(response["data"].clone()).unwrap();
         assert_eq!(
-            refreshed.pairs[1].snapshot.ticker.last_price,
+            refreshed.pairs[1].snapshot.ticker.mark_price,
             rust_decimal_macros::dec!(67900)
         );
         assert!(refreshed.pairs[1].snapshot.account.update_time > account_time);

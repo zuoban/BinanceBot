@@ -1,7 +1,7 @@
 use crate::config::AppConfig;
 use crate::types::{
-    AccountInfo, BotStatus, GridOrder, GridStats, HourlyTradeCount, HourlyTradeStats, OrderSide,
-    PositionInfo, RemainderPlan, TradeRecord, TradingMode,
+    AccountInfo, BotStatus, GridOrder, GridStats, HourlyTradeStats, OrderSide, PositionInfo,
+    RemainderPlan, TradeRecord, TradingMode,
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration as ChronoDuration, FixedOffset, Utc};
@@ -15,6 +15,7 @@ use std::sync::Mutex;
 use tracing::{info, warn};
 
 mod authentication;
+mod hourly;
 mod paper;
 
 pub(crate) fn beijing_midnight(now: DateTime<Utc>) -> DateTime<Utc> {
@@ -87,6 +88,7 @@ pub struct Database {
     today_pnl_cache: tokio::sync::Mutex<Option<TodayPnlCacheEntry>>,
     session_cache: authentication::SessionCache,
     paper_ledger: Mutex<Option<paper::PaperLedger>>,
+    analysis_export: Mutex<()>,
     #[cfg(test)]
     hourly_stats_queries: AtomicU64,
     #[cfg(test)]
@@ -317,6 +319,7 @@ impl Database {
             today_pnl_cache: tokio::sync::Mutex::new(None),
             session_cache: Default::default(),
             paper_ledger: Mutex::new(None),
+            analysis_export: Mutex::new(()),
             #[cfg(test)]
             hourly_stats_queries: AtomicU64::new(0),
             #[cfg(test)]
@@ -426,6 +429,7 @@ impl Database {
     /// A consistent analysis snapshot, including committed WAL transactions.
     /// Redaction happens only on the copy; never expose a raw live database file.
     pub fn export_analysis_snapshot(&self) -> Result<Vec<u8>> {
+        let _export = self.try_analysis_export()?;
         let mut snapshot = Connection::open_in_memory()?;
         {
             let source = self.conn.lock().unwrap();
@@ -471,6 +475,7 @@ impl Database {
 
     /// Export only rows that can be attributed to this symbol.
     pub fn export_analysis_snapshot_for_symbol(&self, symbol: &str) -> Result<Vec<u8>> {
+        let _export = self.try_analysis_export()?;
         let snapshot = self.analysis_snapshot_with_tables(&[
             "trades",
             "scoped_grid_stats",
@@ -492,6 +497,7 @@ impl Database {
         trade_history: bool,
         account_hourly_snapshots: bool,
     ) -> Result<Vec<u8>> {
+        let _export = self.try_analysis_export()?;
         let mut tables = Vec::new();
         if trade_history {
             // Legacy grid_stats has no symbol or mode and cannot be attributed
@@ -504,6 +510,12 @@ impl Database {
         let snapshot = self.analysis_snapshot_with_tables(&tables)?;
         snapshot.execute_batch("VACUUM;")?;
         Ok(snapshot.serialize(rusqlite::DatabaseName::Main)?.to_vec())
+    }
+
+    fn try_analysis_export(&self) -> Result<std::sync::MutexGuard<'_, ()>> {
+        self.analysis_export
+            .try_lock()
+            .map_err(|_| anyhow::anyhow!("Database analysis export is busy; retry the export"))
     }
 
     fn analysis_snapshot_with_tables(&self, tables: &[&str]) -> Result<Connection> {
@@ -938,6 +950,11 @@ impl Database {
         retire_legacy_testnet_config(&tx)?;
         retire_legacy_dry_run_intent(&tx)?;
         retire_legacy_testnet_rows(&tx)?;
+        tx.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_trades_unverified_scope
+             ON trades (symbol, mode, timestamp DESC) WHERE pnl_verified = 0;",
+        )?;
+        hourly::migrate_on(&tx)?;
         tx.commit()?;
 
         info!("SQLite schema verified for database: {}", self.path);
@@ -1152,10 +1169,14 @@ impl Database {
     }
 
     pub fn insert_trade(&self, trade: &TradeRecord) -> Result<bool> {
-        let conn = self.lock_connection("insert_trade");
+        let mut conn = self.lock_connection("insert_trade");
+        // Acquire write intent before deduplication reads so contention can use
+        // SQLite's busy handler instead of failing a deferred lock upgrade.
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let mut paper_ledger = matches!(trade.mode, TradingMode::Paper | TradingMode::Unknown)
             .then(|| self.paper_ledger.lock().unwrap());
-        let inserted = insert_trade_on(&conn, trade)?;
+        let inserted = insert_trade_on(&tx, trade)?;
+        tx.commit()?;
         if inserted {
             if let Some(ledger) = paper_ledger.as_mut().and_then(|guard| guard.as_mut()) {
                 ledger.record_legacy(&trade.symbol);
@@ -1197,7 +1218,9 @@ impl Database {
             )?;
             preserve_pair_openings_on(&tx, None)?;
             let deleted = tx.execute("DELETE FROM trades", [])?;
-            tx.execute_batch("DELETE FROM scoped_grid_stats; DELETE FROM grid_stats;")?;
+            tx.execute_batch(
+                "DELETE FROM trade_hourly_rollups; DELETE FROM scoped_grid_stats; DELETE FROM grid_stats;",
+            )?;
             deleted
         } else {
             0
@@ -1246,6 +1269,10 @@ impl Database {
         )?;
         preserve_pair_openings_on(&tx, Some(symbol))?;
         let deleted = tx.execute("DELETE FROM trades WHERE symbol = ?1", params![symbol])?;
+        tx.execute(
+            "DELETE FROM trade_hourly_rollups WHERE symbol = ?1",
+            params![symbol],
+        )?;
         tx.execute(
             "DELETE FROM scoped_grid_stats WHERE symbol = ?1",
             params![symbol],
@@ -2045,12 +2072,35 @@ impl Database {
     }
 
     /// Return true only for the first successful PnL verification of a saved trade.
-    pub fn verify_trade_pnl(&self, trade: &TradeRecord) -> Result<bool> {
+    pub fn verify_trade_pnl(
+        &self,
+        trade: &TradeRecord,
+        expected_clear_revision: u64,
+    ) -> Result<bool> {
         let mut conn = self.lock_connection("verify_trade_pnl");
+        let saved_symbol: Option<String> = conn
+            .query_row(
+                "SELECT symbol FROM trades WHERE trade_id = ?1 AND mode = ?2 AND pnl_verified = 0",
+                params![trade.trade_id, trade.mode.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(saved_symbol) = saved_symbol else {
+            return Ok(false);
+        };
+        if self
+            .trade_clear_revisions
+            .lock()
+            .unwrap()
+            .for_symbol(&saved_symbol)
+            != expected_clear_revision
+        {
+            return Ok(false);
+        }
         let tx = conn.transaction()?;
-        let updated_symbol: Option<String> = {
+        let updated_trade: Option<(String, DateTime<Utc>)> = {
             let mut statement = tx.prepare(
-                "UPDATE trades SET realized_pnl = ?1, commission = ?2, is_maker = ?3, pnl_verified = 1 WHERE trade_id = ?4 AND mode = ?5 AND pnl_verified = 0 RETURNING symbol;",
+                "UPDATE trades SET realized_pnl = ?1, commission = ?2, is_maker = ?3, pnl_verified = 1 WHERE trade_id = ?4 AND mode = ?5 AND pnl_verified = 0 RETURNING symbol, timestamp;",
             )?;
             let mut rows = statement.query(params![
                 trade.realized_pnl.to_string(),
@@ -2059,13 +2109,19 @@ impl Database {
                 trade.trade_id,
                 trade.mode.as_str(),
             ])?;
-            let symbol = rows.next()?.map(|row| row.get(0)).transpose()?;
+            let saved = rows
+                .next()?
+                .map(|row| -> rusqlite::Result<_> { Ok((row.get(0)?, row.get(1)?)) })
+                .transpose()?;
             // Step through completion so errors after RETURNING are propagated.
             while rows.next()?.is_some() {}
-            symbol
+            saved
         };
+        if let Some((symbol, timestamp)) = &updated_trade {
+            hourly::verify_on(&tx, symbol, trade.mode, *timestamp, trade.realized_pnl)?;
+        }
         tx.commit()?;
-        if let Some(symbol) = updated_symbol {
+        if let Some((symbol, _)) = updated_trade {
             #[cfg(test)]
             self.before_revision_publish();
             let mut revisions = self.trade_revisions.lock().unwrap();
@@ -2122,67 +2178,8 @@ impl Database {
     ) -> Result<HourlyTradeStats> {
         #[cfg(test)]
         self.hourly_stats_queries.fetch_add(1, Ordering::Relaxed);
-        let window_start = beijing_midnight(now);
-        let first_hour = window_start.timestamp();
-        let last_hour = now.timestamp().div_euclid(3600) * 3600;
-        let mut buckets: Vec<_> = (first_hour..=last_hour)
-            .step_by(3600)
-            .map(|timestamp| HourlyTradeCount {
-                hour_start: DateTime::from_timestamp(timestamp, 0).unwrap(),
-                buy_count: 0,
-                sell_count: 0,
-            })
-            .collect();
-
-        let mut realized_pnl = Decimal::ZERO;
-        let mut pending_pnl_count = 0;
         let conn = self.lock_reconciliation_connection("get_hourly_trade_stats");
-        // Stored timestamps are UTC RFC3339. Coarse day bounds use the scope index;
-        // parse before the exact comparison to preserve fractional-second precision.
-        let mut stmt = conn.prepare(
-            "SELECT timestamp, side, realized_pnl, pnl_verified FROM trades
-             WHERE symbol = ?1 AND mode = ?2 AND timestamp >= ?3 AND timestamp < ?4;",
-        )?;
-        let rows = stmt.query_map(
-            params![
-                symbol,
-                mode.as_str(),
-                window_start.date_naive().to_string(),
-                (now + ChronoDuration::days(1)).date_naive().to_string(),
-            ],
-            |row| {
-                Ok((
-                    row.get::<_, DateTime<Utc>>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, bool>(3)?,
-                ))
-            },
-        )?;
-        for row in rows {
-            let (timestamp, side, pnl, verified) = row?;
-            if timestamp < window_start || timestamp > now {
-                continue;
-            }
-            if verified {
-                realized_pnl += Decimal::from_str(&pnl)?;
-            } else {
-                pending_pnl_count += 1;
-            }
-            let index = ((timestamp.timestamp() - first_hour) / 3600) as usize;
-            match side.as_str() {
-                "BUY" => buckets[index].buy_count += 1,
-                "SELL" => buckets[index].sell_count += 1,
-                _ => {}
-            }
-        }
-        Ok(HourlyTradeStats {
-            window_start,
-            window_end: now,
-            buckets,
-            realized_pnl,
-            pending_pnl_count,
-        })
+        hourly::stats_on(&conn, symbol, mode, now)
     }
 
     /// Aggregate persisted trades across all modes and symbols for the Beijing day.
@@ -2763,8 +2760,9 @@ fn insert_trade_on(conn: &Connection, trade: &TradeRecord) -> Result<bool> {
             r#"
             INSERT OR IGNORE INTO trades (
                 trade_id, client_order_id, symbol, mode, side, price, quantity,
-                amount_usdc, realized_pnl, commission, pnl_verified, is_maker, timestamp, note
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14);
+                amount_usdc, realized_pnl, commission, pnl_verified, is_maker, timestamp, note,
+                stats_hour
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15);
             "#,
             params![
                 trade.trade_id,
@@ -2781,9 +2779,13 @@ fn insert_trade_on(conn: &Connection, trade: &TradeRecord) -> Result<bool> {
                 if trade.is_maker { 1 } else { 0 },
                 trade.timestamp,
                 trade.note,
+                trade.timestamp.timestamp().div_euclid(3600) * 3600,
             ],
         )
         .context("Failed to insert trade into SQLite database")?;
+    if inserted == 1 {
+        hourly::insert_on(conn, trade)?;
+    }
     Ok(inserted == 1)
 }
 
@@ -2966,7 +2968,7 @@ mod tests {
                  INSERT INTO revision_child VALUES (1);
              END;"
         ).unwrap();
-        assert!(db.verify_trade_pnl(&trade).is_err());
+        assert!(db.verify_trade_pnl(&trade, 0).is_err());
         assert_eq!(db.trade_data_revision(), 1);
         assert_eq!(db.symbol_trade_revision("SOLUSDC"), 1);
         assert!(!db.get_recent_trades(1).unwrap()[0].pnl_verified);
@@ -2975,7 +2977,7 @@ mod tests {
             .unwrap()
             .execute_batch("DROP TRIGGER reject_pnl_commit")
             .unwrap();
-        assert!(db.verify_trade_pnl(&trade).unwrap());
+        assert!(db.verify_trade_pnl(&trade, 0).unwrap());
         assert_eq!(db.trade_data_revision(), 2);
     }
 
@@ -3005,7 +3007,7 @@ mod tests {
             "CREATE TRIGGER reject_update BEFORE UPDATE ON trades BEGIN SELECT RAISE(ABORT, 'reject'); END;
              CREATE TRIGGER reject_delete BEFORE DELETE ON trades BEGIN SELECT RAISE(ABORT, 'reject'); END;"
         ).unwrap();
-        assert!(db.verify_trade_pnl(&trade).is_err());
+        assert!(db.verify_trade_pnl(&trade, 0).is_err());
         assert!(db.clear_trade_history_for_symbol("SOLUSDC").is_err());
         assert!(db.clear_selected_database(true, false).is_err());
         assert_eq!(db.trade_data_revision(), 1);
@@ -3019,8 +3021,8 @@ mod tests {
 
         let mut other_symbol = trade.clone();
         other_symbol.symbol = "BTCUSDC".into();
-        assert!(db.verify_trade_pnl(&other_symbol).unwrap());
-        assert!(!db.verify_trade_pnl(&other_symbol).unwrap());
+        assert!(db.verify_trade_pnl(&other_symbol, 0).unwrap());
+        assert!(!db.verify_trade_pnl(&other_symbol, 0).unwrap());
         assert_eq!(db.symbol_trade_revision("SOLUSDC"), 2);
         assert_eq!(db.symbol_trade_revision("BTCUSDC"), 0);
         db.clear_trade_history_for_symbol("SOLUSDC").unwrap();
@@ -3361,7 +3363,7 @@ mod tests {
         assert!(!db.insert_trade(&trade).unwrap());
         trade.trade_id = "cleanup-buy".into();
         trade.pnl_verified = true;
-        assert!(!db.verify_trade_pnl(&trade).unwrap());
+        assert!(!db.verify_trade_pnl(&trade, 0).unwrap());
         assert_eq!(db.clear_trade_history().unwrap(), 0);
         assert_eq!(
             db.get_pair_opening("SOLUSDC", "gb_b_cleanup", TradingMode::Live)
@@ -4293,6 +4295,7 @@ mod tests {
             today_pnl_cache: tokio::sync::Mutex::new(None),
             session_cache: Default::default(),
             paper_ledger: Mutex::new(None),
+            analysis_export: Mutex::new(()),
             hourly_stats_queries: AtomicU64::new(0),
             benchmark_wait_samples: std::sync::OnceLock::new(),
         };
@@ -4315,8 +4318,8 @@ mod tests {
         trade.realized_pnl = dec!(-3.25);
         trade.commission = dec!(0.80);
         trade.pnl_verified = true;
-        assert!(db.verify_trade_pnl(&trade).unwrap());
-        assert!(!db.verify_trade_pnl(&trade).unwrap());
+        assert!(db.verify_trade_pnl(&trade, 0).unwrap());
+        assert!(!db.verify_trade_pnl(&trade, 0).unwrap());
         assert!(db
             .get_unverified_trades("SOLUSDC", TradingMode::Unknown, 10, 0)
             .unwrap()

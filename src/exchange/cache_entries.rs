@@ -1,8 +1,28 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
-type Entry<T> = Arc<Mutex<Option<T>>>;
+pub(super) const FAILURE_COOLDOWN: Duration = Duration::from_secs(2);
+// Match market-cache waiting: ordinary reconciliation yields after 100 ms
+// rather than queuing behind a slow HTTP loader. Critical refreshes detach it.
+pub(super) const ENTRY_WAIT: Duration = Duration::from_millis(100);
+
+pub(super) struct CacheEntry<T> {
+    pub snapshot: Option<T>,
+    pub failed_at: Option<Instant>,
+}
+
+impl<T> Default for CacheEntry<T> {
+    fn default() -> Self {
+        Self {
+            snapshot: None,
+            failed_at: None,
+        }
+    }
+}
+
+type Entry<T> = Arc<Mutex<CacheEntry<T>>>;
 type CacheEntryMap<T> = HashMap<[u8; 32], (u64, Entry<T>)>;
 
 pub(super) struct CacheEntries<T> {

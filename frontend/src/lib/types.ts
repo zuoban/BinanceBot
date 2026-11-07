@@ -52,17 +52,27 @@ export interface Snapshot {
 }
 export interface AccountSnapshot {
   mode: Mode;
-  snapshot: Pick<Snapshot, 'symbol' | 'account'> & {
+  snapshot: Pick<Snapshot, 'symbol' | 'status' | 'account' | 'account_cny_rate'> & {
     position: Pick<Snapshot['position'], 'size' | 'unrealized_pnl'>;
     ticker: Pick<Snapshot['ticker'], 'mark_price' | 'mark_update_time'>;
   };
 }
-export interface AccountFrame { pairs: AccountSnapshot[] }
+export interface AccountFrame { generated_at: string; pairs: AccountSnapshot[] }
+export interface AccountObservation extends AccountSnapshot { account_observation_stale?: boolean }
 export type SocketMessage =
   | { type: 'snapshot'; data: Snapshot }
   | { type: 'accounts'; data: AccountFrame };
 export interface TodayPnl { window_start: string; window_end: string; groups: { symbol: string; mode: Mode; realized_pnl: Decimal; pending_pnl_count: number }[] }
-export interface Overview { generated_at: string; pairs: { scoped: boolean; mode: Mode; snapshot: Snapshot; account_observation_stale?: boolean }[]; today_pnl?: TodayPnl | null }
+export interface PairSummary {
+  symbol: string; status: Status; mode: Mode; grid_config: GridConfig;
+  ticker: Pick<Snapshot['ticker'], 'mark_price' | 'mark_update_time'>;
+  position: Pick<Snapshot['position'], 'size' | 'entry_price' | 'mark_price' | 'unrealized_pnl'>;
+  stats: Pick<Snapshot['stats'], 'total_realized_pnl' | 'active_buy_orders' | 'active_sell_orders'>;
+  today_trade_counts: { window_start: string; window_end: string; buy: number; sell: number } | null;
+  account: Account;
+  account_cny_rate: Snapshot['account_cny_rate'];
+}
+export interface Overview { generated_at: string; pairs: { scoped: boolean; mode: Mode; snapshot: PairSummary }[]; recent_trades: Trade[]; today_pnl?: TodayPnl | null }
 export interface HistoryAccount { mode: Mode; asset: string; account_id: string | null }
 export interface HourlySnapshot {
   hour: number;

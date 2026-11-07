@@ -539,6 +539,67 @@ async fn live_removal_requires_confirmed_zero_exchange_position_after_shutdown()
     }
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn pair_state_restore_does_not_block_runtime_while_database_is_busy() {
+    let mut runtime = fixture();
+    runtime.test_exchange_url = Some("http://127.0.0.1:1".into());
+    let db = runtime.handle.db.clone();
+    let mut config = AppConfig::default();
+    config.exchange.symbol = "ETHUSDT".into();
+    let (reached_tx, reached_rx) = oneshot::channel();
+    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+    db.set_membership_commit_hook("add", reached_tx, resume_rx);
+    let write_db = db.clone();
+    let write_config = config.clone();
+    let writer = tokio::task::spawn_blocking(move || write_db.add_pair_config(&write_config));
+    reached_rx.await.unwrap();
+
+    // An independent thread always releases the SQLite lock, including when
+    // a synchronous restore blocks this runtime's only async worker.
+    let (progress_tx, progress_rx) = std::sync::mpsc::channel();
+    let releaser = std::thread::spawn(move || {
+        let progressed = progress_rx.recv_timeout(Duration::from_secs(3)).is_ok();
+        resume_tx.send(()).unwrap();
+        progressed
+    });
+    let (start_tx, start_rx) = oneshot::channel();
+    let pair = {
+        let preparing = runtime.prepare_pair_with_state(
+            config,
+            PreparePairOptions {
+                multi: true,
+                prearmed: Some(false),
+                start: Some(start_rx),
+                ..Default::default()
+            },
+        );
+        tokio::pin!(preparing);
+        let completed = tokio::select! {
+            biased;
+            result = &mut preparing => Some(result),
+            _ = tokio::task::yield_now() => None,
+        };
+        let _ = progress_tx.send(());
+        match completed {
+            Some(result) => result.unwrap(),
+            None => preparing.await.unwrap(),
+        }
+    };
+    writer.await.unwrap().unwrap();
+    let progressed_while_locked = releaser.join().unwrap();
+    pair.engine.abort();
+    for task in &pair.background {
+        task.abort();
+    }
+    let status = *pair.state.status.read().await;
+    drop(start_tx);
+    assert!(
+        progressed_while_locked,
+        "state restoration blocked the runtime while another transaction held SQLite"
+    );
+    assert_eq!(status, BotStatus::Paused);
+}
+
 #[tokio::test]
 async fn failed_removal_keeps_configuration_and_restarts_paused_engine() {
     let mut runtime = fixture_with_shutdown_failure(true);
@@ -581,6 +642,139 @@ async fn failed_removal_keeps_configuration_and_restarts_paused_engine() {
     assert!(!replacement.is_shutting_down());
     assert_eq!(*replacement.status.read().await, BotStatus::Paused);
     assert!(!runtime.pairs[0].engine.is_finished());
+}
+
+#[tokio::test]
+async fn failed_removal_drains_old_verification_before_restoring_replacement() {
+    use crate::types::{OrderSide, TradeRecord};
+    use rust_decimal_macros::dec;
+
+    for shared_lock in [true, false] {
+        let mut runtime = fixture();
+        runtime.test_exchange_url = Some("http://127.0.0.1:1".into());
+        let old = runtime.pairs.remove(0);
+        let config = old.state.config.read().await.clone();
+        old.engine.abort();
+        let _ = old.engine.await;
+        let old_lock = if shared_lock {
+            runtime.trade_lock.clone()
+        } else {
+            Arc::new(Mutex::new(()))
+        };
+        assert_eq!(Arc::ptr_eq(&old_lock, &runtime.trade_lock), shared_lock);
+        let db = runtime.handle.db.clone();
+        let (tx, mut rx) = mpsc::channel(8);
+        let state = AppState::new_for_pair(config, db.clone(), tx, old_lock.clone());
+        state.pause_trading().await.unwrap();
+        let engine = tokio::spawn(async move {
+            if let Some(BotControlAction::Shutdown { reply, .. }) = rx.recv().await {
+                let _ = reply.send(Err("模拟停机失败".into()));
+            }
+        });
+        let (shutdown_tx, _) = watch::channel(false);
+        runtime.pairs.insert(
+            0,
+            PairTask {
+                state: state.clone(),
+                engine,
+                engine_joined: false,
+                recovery_failed: false,
+                shutdown_tx,
+                background: vec![],
+            },
+        );
+        runtime.handle.register_engine(&runtime.pairs[0]);
+        *runtime.handle.states.write().await = runtime.states();
+
+        let mut trade = TradeRecord {
+            trade_id: "retiring-verification".into(),
+            client_order_id: "gb_b_retiring_verification".into(),
+            symbol: "SOLUSDC".into(),
+            mode: TradingMode::Paper,
+            side: OrderSide::Buy,
+            price: dec!(100),
+            quantity: dec!(1),
+            amount_usdc: dec!(100),
+            realized_pnl: dec!(0),
+            commission: dec!(0),
+            pnl_verified: false,
+            is_maker: true,
+            timestamp: chrono::Utc::now(),
+            note: String::new(),
+        };
+        assert!(state.record_trade(trade.clone(), None, None, None).await);
+        let clear_revision = db.symbol_trade_clear_revision(&trade.symbol);
+        trade.realized_pnl = dec!(3.25);
+        trade.commission = dec!(0.02);
+        trade.pnl_verified = true;
+
+        // Keep publication in flight after SQLite commits. Removal must cancel
+        // this outer worker, then await the detached publication on the old lock.
+        let stats_guard = state.stats.read().await;
+        let (outcome_tx, outcome_rx) = oneshot::channel();
+        runtime.pairs[0].background.push(tokio::spawn({
+            let state = state.clone();
+            let trade = trade.clone();
+            async move {
+                let result = state.verify_trade_pnl(trade, clear_revision).await;
+                let _ = outcome_tx.send(result);
+            }
+        }));
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let totals = db
+                    .run_blocking(|db| db.get_pnl_totals("SOLUSDC", TradingMode::Paper))
+                    .await
+                    .unwrap();
+                if totals == (dec!(3.25), dec!(0.02), 0) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("旧实例的验证应已持锁并提交数据库");
+        assert!(old_lock.try_lock().is_err());
+        assert_eq!(stats_guard.pending_pnl_trades, 1);
+        let mut removal = tokio::spawn(async move {
+            let result = runtime.remove_pair("SOLUSDC").await;
+            (runtime, result)
+        });
+        assert!(tokio::time::timeout(Duration::from_secs(3), outcome_rx)
+            .await
+            .expect("删除应先停止旧引擎并取消外层 PnL worker")
+            .is_err());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut removal)
+                .await
+                .is_err(),
+            "替换实例必须等旧实例的验证发布结束"
+        );
+        drop(stats_guard);
+
+        let (runtime, result) = tokio::time::timeout(Duration::from_secs(3), removal)
+            .await
+            .expect("发布完成后应释放旧锁并完成替换初始化")
+            .unwrap();
+        assert!(result.unwrap_err().to_string().contains("模拟停机失败"));
+        let replacement = runtime.states()[0].clone();
+        assert!(!Arc::ptr_eq(&state, &replacement));
+        let stats = replacement.stats.read().await;
+        assert_eq!(stats.total_realized_pnl, dec!(3.25));
+        assert_eq!(stats.total_commission, dec!(0.02));
+        assert_eq!(stats.pending_pnl_trades, 0);
+        let recent = replacement.recent_trades.read().await;
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].trade_id, trade.trade_id);
+        assert!(recent[0].pnl_verified);
+        assert_eq!(recent[0].realized_pnl, trade.realized_pnl);
+        assert_eq!(recent[0].commission, trade.commission);
+        assert_eq!(recent[0].timestamp, trade.timestamp);
+        assert_eq!(
+            db.get_pnl_totals("SOLUSDC", TradingMode::Paper).unwrap(),
+            (dec!(3.25), dec!(0.02), 0)
+        );
+    }
 }
 
 #[tokio::test]

@@ -64,3 +64,12 @@ it('does not show an available ratio when wallet balance is zero', () => {
   render(view());
   expect(screen.getByText('可用比例（按钱包余额）').parentElement).toHaveTextContent('--');
 });
+
+it('uses the snapshot mode for account freshness while pair metadata catches up', () => {
+  const current = snapshot('SOLUSDC', 'LIVE');
+  current.account = { ...current.account, margin_balance: '100', available_balance: '100', unrealized_profit: '0', update_time: new Date(Date.now() - 60_000).toISOString() };
+  state.data = current;
+  render(view());
+  const card = screen.getByText('账户权益 / USDC').closest('.ant-card')!;
+  expect(card.querySelector('.ant-statistic-content-value')).toHaveTextContent('--');
+});

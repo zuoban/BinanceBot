@@ -2678,6 +2678,21 @@ impl GridTradingEngine {
                 self.last_orders_sync = Some(Instant::now());
                 terminal_orders
                     .sort_by_key(|(_, response)| (response.update_time, response.order_id));
+                if terminal_orders
+                    .iter()
+                    .any(|(_, response)| response.executed_qty > Decimal::ZERO)
+                {
+                    // One refresh covers every execution observed before this
+                    // point. Keep all reservations and the global submission
+                    // barrier until fresh risk inputs and durable commits exist.
+                    self.account_cache.invalidate(&self.client).await;
+                    self.position_cache.invalidate(&self.client).await;
+                    if !self.sync_account_and_position().await {
+                        self.last_orders_sync = None;
+                        self.report_reconciliation_state(true).await;
+                        return false;
+                    }
+                }
                 for (mut order, exchange_order) in terminal_orders {
                     if exchange_order.executed_qty > Decimal::ZERO {
                         order.updated_at = exchange_fill_time(&exchange_order);
@@ -2691,7 +2706,7 @@ impl GridTradingEngine {
                             order.price = exchange_order.price;
                         }
                         order.amount_usdc = order.price * order.quantity;
-                        if !self.on_order_filled(&mut order).await {
+                        if !self.commit_order_fill(&mut order).await {
                             persistence_ok = false;
                         }
                     } else {

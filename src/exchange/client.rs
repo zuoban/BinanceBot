@@ -14,6 +14,10 @@ use std::time::{Duration, Instant};
 use tracing::{debug, info};
 
 #[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub(crate) struct LocalRateLimitError(String);
+
+#[derive(Debug, thiserror::Error)]
 pub enum ExchangeError {
     #[error("Post-Only (GTX) order rejected as it would execute as taker: {0}")]
     PostOnlyRejected(String),
@@ -190,8 +194,9 @@ pub struct BinanceFuturesClient {
 
 impl BinanceFuturesClient {
     pub(crate) fn note_pnl_reconcile_backlog(&self, pending: usize) {
-        // Three records per tick. Each can make an order lookup and three
-        // 10-second requests; allow two full passes and scheduling slack.
+        // Keep a conservative lease of three records per minute even when the
+        // bounded compensation pump advances faster. Each record may need an
+        // order lookup and three 10-second requests; allow retries and slack.
         // A later decrease in backlog must not shorten an existing lease.
         let batches = u64::try_from(pending).unwrap_or(u64::MAX).saturating_add(2) / 3;
         let seconds = batches.saturating_mul(360).saturating_add(120).max(600);
@@ -344,7 +349,7 @@ impl BinanceFuturesClient {
             .reserve(&self.base_url, self.rate_account_key(), weight, class)
             .map_err(|error| {
                 tracing::warn!("{}", error);
-                anyhow!(error)
+                anyhow!(LocalRateLimitError(error))
             })
     }
 
@@ -543,13 +548,38 @@ impl BinanceFuturesClient {
             .ok_or_else(|| anyhow!("Order {} was not found on Binance", client_order_id))
     }
 
+    /// Restore a historical order ID without consuming emergency request capacity.
+    pub(crate) async fn get_order_by_client_id_for_pnl(
+        &self,
+        symbol: &str,
+        client_order_id: &str,
+    ) -> Result<BinanceOrderResponse> {
+        self.lookup_order_by_client_id_with_class(
+            symbol,
+            client_order_id,
+            RequestClass::PnlReconciliation,
+        )
+        .await?
+        .ok_or_else(|| anyhow!("Order {} was not found on Binance", client_order_id))
+    }
+
     /// Only Binance's explicit unknown-order code means it is safe to submit this ID.
     pub async fn lookup_order_by_client_id(
         &self,
         symbol: &str,
         client_order_id: &str,
     ) -> Result<Option<BinanceOrderResponse>> {
-        self.reserve(1, RequestClass::Critical)?;
+        self.lookup_order_by_client_id_with_class(symbol, client_order_id, RequestClass::Critical)
+            .await
+    }
+
+    async fn lookup_order_by_client_id_with_class(
+        &self,
+        symbol: &str,
+        client_order_id: &str,
+        class: RequestClass,
+    ) -> Result<Option<BinanceOrderResponse>> {
+        self.reserve(1, class)?;
         let ts = self.current_timestamp();
         let query = format!(
             "symbol={}&origClientOrderId={}&recvWindow={}&timestamp={}",
@@ -1815,5 +1845,100 @@ mod tests {
                 "{status}: {body}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn pnl_order_lookups_share_compensation_budget_and_leave_critical_capacity() {
+        use axum::{http::StatusCode, routing::get, Json, Router};
+        use serde_json::json;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let lookups = Arc::new(AtomicUsize::new(0));
+        let cancellations = Arc::new(AtomicUsize::new(0));
+        let app = Router::new()
+            .route(
+                "/fapi/v1/exchangeInfo",
+                get(|| async {
+                    Json(json!({
+                        "symbols": [],
+                        "rateLimits": [{
+                            "rateLimitType": "REQUEST_WEIGHT", "interval": "MINUTE",
+                            "intervalNum": 1, "limit": 100
+                        }]
+                    }))
+                }),
+            )
+            .route(
+                "/fapi/v1/order",
+                get({
+                    let lookups = lookups.clone();
+                    move || {
+                        let lookups = lookups.clone();
+                        async move {
+                            lookups.fetch_add(1, Ordering::SeqCst);
+                            (
+                                StatusCode::BAD_REQUEST,
+                                Json(json!({"code": -2013, "msg": "Order does not exist"})),
+                            )
+                        }
+                    }
+                })
+                .delete({
+                    let cancellations = cancellations.clone();
+                    move || {
+                        let cancellations = cancellations.clone();
+                        async move {
+                            cancellations.fetch_add(1, Ordering::SeqCst);
+                            Json(json!({}))
+                        }
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client =
+            BinanceFuturesClient::with_base_url(&crate::config::AppConfig::default().exchange, url);
+        client.get_exchange_info(None).await.unwrap();
+        let missing = client
+            .get_order_by_client_id_for_pnl("SOLUSDC", "missing")
+            .await
+            .unwrap_err();
+        assert!(missing.downcast_ref::<LocalRateLimitError>().is_none());
+        assert_eq!(lookups.load(Ordering::SeqCst), 1);
+
+        let mut limited = false;
+        for _ in 0..60 {
+            let error = client
+                .get_order_by_client_id_for_pnl("SOLUSDC", "missing")
+                .await
+                .unwrap_err();
+            if error.downcast_ref::<LocalRateLimitError>().is_some() {
+                limited = true;
+                break;
+            }
+        }
+        assert!(limited, "historical lookups must share the PnL allowance");
+        let historical_lookups = lookups.load(Ordering::SeqCst);
+        assert!(historical_lookups <= 60);
+        let fills = client
+            .get_user_trades("SOLUSDC", 42, Decimal::ONE, 0)
+            .await
+            .unwrap_err();
+        assert!(fills.downcast_ref::<LocalRateLimitError>().is_some());
+
+        client
+            .cancel_order("SOLUSDC", Some(42), None)
+            .await
+            .unwrap();
+        assert!(client
+            .lookup_order_by_client_id("SOLUSDC", "missing")
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(cancellations.load(Ordering::SeqCst), 1);
+        assert_eq!(lookups.load(Ordering::SeqCst), historical_lookups + 1);
+        server.abort();
+        let _ = server.await;
     }
 }

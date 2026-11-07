@@ -84,6 +84,74 @@ fn cleanup_trade(id: &str, symbol: &str, mode: TradingMode) -> TradeRecord {
 }
 
 #[tokio::test]
+async fn overview_recent_trades_are_globally_bounded_ordered_and_current_mode_only() {
+    let (db, states, _) = fixture();
+    {
+        let mut config = states[1].config.write().await;
+        config.exchange.api_key = "live-key".into();
+        config.exchange.api_secret = "live-secret".into();
+    }
+    let now = Utc::now();
+    // Interleave symbols, with insertion order deliberately unlike timestamp order.
+    for index in (0..30).rev() {
+        let pair = index % 2;
+        let symbol = if pair == 0 { "SOLUSDC" } else { "BTCUSDT" };
+        let mode = if pair == 0 {
+            TradingMode::Paper
+        } else {
+            TradingMode::Live
+        };
+        let mut trade = cleanup_trade(&format!("global-{index:02}"), symbol, mode);
+        trade.timestamp = now - chrono::Duration::seconds(index as i64);
+        assert!(states[pair].record_trade(trade, None, None, None).await);
+    }
+    // Historical modes remain in SQLite but must not enter current-mode recents.
+    let wrong_mode = cleanup_trade("wrong-mode", "SOLUSDC", TradingMode::Live);
+    assert!(db
+        .insert_trade_with_stats(&wrong_mode, &Default::default())
+        .unwrap());
+    states[0].recent_trades.write().await.push_back(wrong_mode);
+    let router = create_multi_router(states);
+    let response = router
+        .clone()
+        .oneshot(request("/api/overview", None, false))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let response = router
+        .clone()
+        .oneshot(request("/api/accounts", None, false))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let response = router
+        .clone()
+        .oneshot(request("/api/accounts", None, true))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let accounts = response_json(response).await;
+    assert!(accounts["data"]["generated_at"].is_string());
+    assert_eq!(accounts["data"]["pairs"].as_array().unwrap().len(), 2);
+    let data = response_json(
+        router
+            .oneshot(request("/api/overview", None, true))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let trades = data["data"]["recent_trades"].as_array().unwrap();
+    assert_eq!(trades.len(), 20);
+    for (index, trade) in trades.iter().enumerate() {
+        assert_eq!(trade["trade_id"], format!("scoped-global-{index:02}"));
+        assert_eq!(trade["mode"], if index % 2 == 0 { "PAPER" } else { "LIVE" });
+    }
+    for entry in data["data"]["pairs"].as_array().unwrap() {
+        assert!(entry["snapshot"].get("recent_trades").is_none());
+    }
+}
+
+#[tokio::test]
 async fn pair_cleanup_and_export_cover_all_modes_without_affecting_other_pairs() {
     let (db, states, _) = fixture();
     let sol = cleanup_trade("sol-paper", "SOLUSDC", TradingMode::Paper);
