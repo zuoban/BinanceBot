@@ -1334,12 +1334,7 @@ async fn post_auth_login_handler(
     }
 
     let token = crate::auth::generate_session_token();
-    let session_token = token.clone();
-    match state
-        .db
-        .run_blocking(move |db| db.create_session(&session_token))
-        .await
-    {
+    match state.create_session(&token).await {
         Ok(()) => {
             state.clear_login_attempts(peer_ip(address)).await;
             info!("Admin authentication successful");
@@ -2166,6 +2161,17 @@ where
     }
 }
 
+fn control_ws_message(action: Option<&str>, response: ApiResponse<String>) -> String {
+    serde_json::json!({
+        "type": "control",
+        "action": action,
+        "success": response.success,
+        "data": response.data,
+        "message": response.message,
+    })
+    .to_string()
+}
+
 async fn handle_socket(socket: WebSocket, state: Arc<AppState>, token: String) {
     let mut retired = state.subscribe_retirement();
     if *retired.borrow() {
@@ -2217,7 +2223,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, token: String) {
                 )
                 .await
                 .0;
-                let _ = results.send(serde_json::json!({"type":"control", "action":name, "success":response.success, "data":response.data, "message":response.message}).to_string());
+                let _ = results.send(control_ws_message(Some(&name), response));
             });
             let _ = ready.await;
         }
@@ -2270,7 +2276,10 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, token: String) {
                 let action = match action {
                     Ok(action) => action,
                     Err(message) => {
-                        let _ = result_tx.send(serde_json::json!({"type":"control", "action":name, "success":false, "data":null, "message":message}).to_string());
+                        let _ = result_tx.send(control_ws_message(
+                            name.as_deref(),
+                            ApiResponse::err(message),
+                        ));
                         continue;
                     }
                 };
@@ -2280,7 +2289,10 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, token: String) {
                 let prepare_queue = control_tx.clone();
                 let preparation = tokio::spawn(async move {
                     if let Err(message) = prepare_control(&prepare_state, &action.0).await {
-                        let _ = prepare_results.send(serde_json::json!({"type":"control", "action":name, "success":false, "data":null, "message":message}).to_string());
+                        let _ = prepare_results.send(control_ws_message(
+                            name.as_deref(),
+                            ApiResponse::err(message),
+                        ));
                     } else if let Some(action_name) = name {
                         let _ = prepare_queue.send((action_name, action, pending_pause));
                     }

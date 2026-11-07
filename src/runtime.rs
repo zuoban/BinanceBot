@@ -861,20 +861,8 @@ impl TradingRuntime {
                     anyhow::anyhow!("暂时无法验证交易对 {}: {}", symbol, error)
                 }
             })?;
-        let rules =
-            SymbolRules::from_trading_exchange_info(&info, symbol).map_err(
-                |error| match error {
-                    crate::strategy::precision::SymbolRulesError::NotFound => {
-                        anyhow::anyhow!("币安交易对 {} 不存在", symbol)
-                    }
-                    crate::strategy::precision::SymbolRulesError::NotTrading => {
-                        anyhow::anyhow!("币安交易对 {} 未处于交易状态", symbol)
-                    }
-                    crate::strategy::precision::SymbolRulesError::MissingFilters => {
-                        anyhow::anyhow!("币安交易对 {} 的交易规则缺失或无效", symbol)
-                    }
-                },
-            )?;
+        let rules = SymbolRules::from_trading_exchange_info(&info, symbol)
+            .map_err(|error| error.into_chinese_error(symbol))?;
         rules.validate_grid_interval(config.grid.grid_interval)?;
         let saved = config.clone();
         let previous_unclean = self

@@ -1,6 +1,9 @@
+import { useContext, useEffect, useRef, useState } from 'react';
+import { App, type ModalFuncProps } from 'antd';
 import type { QueryClient, QueryKey } from '@tanstack/react-query';
 import { authenticatedFetch } from './api';
 import { downloadBlob } from './exportCsv';
+import { EditContext } from './session';
 
 export type DatabaseTarget = 'trade_history' | 'account_hourly_snapshots';
 
@@ -25,4 +28,37 @@ export async function downloadDatabase(path: string, targets?: DatabaseTarget[])
   }
   const filename = response.headers.get('Content-Disposition')?.match(/filename="?([^";]+)"?/)?.[1] ?? 'binancebot-analysis.db';
   downloadBlob(await response.blob(), filename);
+}
+
+export function useDatabaseAction<T extends string>() {
+  const { modal, message } = App.useApp();
+  const edit = useContext(EditContext);
+  const [busy, setBusy] = useState<T | null>(null);
+  const lock = useRef(false);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; edit.setSaving(false); };
+  }, [edit.setSaving]);
+  const run = async (action: T, task: () => Promise<string | void>, confirm?: ModalFuncProps) => {
+    if (lock.current || !mounted.current) return;
+    lock.current = true;
+    try {
+      if (confirm && !await modal.confirm(confirm)) return;
+      if (!mounted.current) return;
+      setBusy(action);
+      edit.setSaving(true);
+      const text = await task();
+      if (mounted.current && text) message.success(text);
+    } catch (error) {
+      if (mounted.current) message.error((error as Error).message);
+    } finally {
+      lock.current = false;
+      if (mounted.current) {
+        setBusy(null);
+        edit.setSaving(false);
+      }
+    }
+  };
+  return { busy, run };
 }

@@ -2,17 +2,18 @@ import { useState } from 'react';
 import { Form, Input } from 'antd';
 import type { FormInstance } from 'antd';
 import { capCoverage, exceeds, exposure, gridPreview, orderSizing, priceDiffPercent, priceRangeError, spacingBelowRoundTripFee, spacingPercent, sumDecimals, tickSizeError } from '../lib/gridPreview';
-import { maxPositionPolicyLabel, trimFractionZeros } from '../lib/format';
+import { maxPositionPolicyLabel, positiveDecimalText } from '../lib/format';
 
 /** Live ladder of the orders the engine would place, from the form values and a reference price. */
 export function GridPreview<Values>({ form, markPrice, tickSize, stepSize, minQty, minNotional, quote }: { form: FormInstance<Values>; markPrice?: string | null; tickSize?: string | null; stepSize?: string | null; minQty?: string | null; minNotional?: string | null; quote: string }) {
   const [typed, setTyped] = useState('');
   const values = Form.useWatch([], form) as Record<string, unknown> | undefined;
-  const hasMark = Number(markPrice) > 0;
-  const reference = hasMark ? trimFractionZeros(String(markPrice)) : typed;
-  const cleanTick = tickSize && Number(tickSize) > 0 ? trimFractionZeros(String(tickSize)) : null;
-  const cleanStep = stepSize && Number(stepSize) > 0 ? trimFractionZeros(String(stepSize)) : null;
-  const cleanMinNotional = minNotional && Number(minNotional) > 0 ? trimFractionZeros(String(minNotional)) : null;
+  const cleanMark = positiveDecimalText(markPrice);
+  const hasMark = cleanMark !== null;
+  const reference = cleanMark ?? typed;
+  const cleanTick = positiveDecimalText(tickSize);
+  const cleanStep = positiveDecimalText(stepSize);
+  const cleanMinNotional = positiveDecimalText(minNotional);
   const tickError = values && cleanTick ? tickSizeError(values.grid_interval, cleanTick) : null;
   const rangeError = values ? priceRangeError('min', values.min_price, values.max_price) ?? priceRangeError('max', values.min_price, values.max_price) : null;
   const preview = values && !tickError && !rangeError ? gridPreview({ reference, interval: values.grid_interval, buyWindow: values.buy_window, sellWindow: values.sell_window, min: values.min_price, max: values.max_price }) : null;

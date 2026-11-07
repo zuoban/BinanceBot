@@ -241,14 +241,7 @@ impl GridTradingEngine {
         if !self.load_pair_intents(&plan.symbol, mode).await?.is_empty() {
             return Ok(()); // Paired exits retain priority and their inventory reservation.
         }
-        if !paper
-            && (self
-                .last_account_sync
-                .is_none_or(|at| at.elapsed() >= Duration::from_secs(10))
-                || self
-                    .last_orders_sync
-                    .is_none_or(|at| at.elapsed() >= Duration::from_secs(10)))
-        {
+        if !paper && !self.sync_timestamps_fresh() {
             return Ok(());
         }
         let rules = self.state.rules.read().await.clone();

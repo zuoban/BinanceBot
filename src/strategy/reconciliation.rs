@@ -147,10 +147,7 @@ impl GridTradingEngine {
                 active
                     .entry(expected.client_order_id.clone())
                     .and_modify(|current| {
-                        if current.client_order_id == expected.client_order_id
-                            && current.symbol == expected.symbol
-                            && current.side == expected.side
-                            && current.order_id.is_none()
+                        if current.has_compatible_identity(&expected) && current.order_id.is_none()
                         {
                             current.order_id = expected.order_id;
                         }
@@ -226,13 +223,10 @@ impl GridTradingEngine {
     ) {
         self.report_reconciliation_state(true).await;
         let managed = self.load_managed_orders(symbol).await.unwrap_or_default();
-        let intents: HashMap<_, _> = self
-            .load_pair_intents(symbol, mode)
+        let intents = self
+            .load_pair_intent_map(symbol, mode)
             .await
-            .unwrap_or_default()
-            .into_iter()
-            .map(|intent| (intent.client_order_id.clone(), intent))
-            .collect();
+            .unwrap_or_default();
         let remainder = self.load_remainder_plan().await.ok().flatten();
         let state = self.state.clone();
         let mut active = state.active_orders.write().await;
@@ -271,22 +265,13 @@ impl GridTradingEngine {
                 order
             });
             if let Some(current) = active.get(&found.client_order_id) {
-                if current.symbol == expected.symbol
-                    && current.side == expected.side
-                    && current
-                        .order_id
-                        .zip(expected.order_id)
-                        .is_none_or(|(a, b)| a == b)
-                {
+                if current.has_compatible_identity(&expected) {
                     expected.quantity = expected.quantity.max(current.quantity);
                     expected.price = expected.price.max(current.price);
                     expected.amount_usdc = expected.price * expected.quantity;
                 }
             }
-            if expected.symbol == found.symbol
-                && expected.side.as_str() == found.side
-                && expected.order_id.is_none_or(|id| id == found.order_id)
-            {
+            if expected.matches_exchange_identity(found) {
                 expected.price = expected.price.max(found.price);
                 expected.quantity = expected.quantity.max(found.orig_qty);
                 expected.amount_usdc = expected.price * expected.quantity;
@@ -300,14 +285,7 @@ impl GridTradingEngine {
             .filter_map(|stored| {
                 active
                     .get(&stored.client_order_id)
-                    .filter(|order| {
-                        order.symbol == stored.symbol
-                            && order.side == stored.side
-                            && order
-                                .order_id
-                                .zip(stored.order_id)
-                                .is_none_or(|(a, b)| a == b)
-                    })
+                    .filter(|order| order.has_compatible_identity(stored))
                     .cloned()
             })
             .collect();
@@ -355,11 +333,8 @@ impl GridTradingEngine {
         let config = self.state.config.read().await.clone();
         let symbol = config.exchange.symbol.clone();
         let mode = config.exchange.trading_mode();
-        let pair_intents = match self.load_pair_intents(&symbol, mode).await {
-            Ok(intents) => intents
-                .into_iter()
-                .map(|intent| (intent.client_order_id.clone(), intent))
-                .collect::<HashMap<_, _>>(),
+        let pair_intents = match self.load_pair_intent_map(&symbol, mode).await {
+            Ok(intents) => intents,
             Err(e) => {
                 error!("Could not load pending pair intents: {}", e);
                 self.report_reconciliation_state(true).await;
@@ -427,19 +402,12 @@ impl GridTradingEngine {
                         .cloned()
                         .unwrap_or_else(|| expected.clone());
                         if authoritative.order_id.is_none()
-                            && authoritative.symbol == expected.symbol
-                            && authoritative.side == expected.side
+                            && authoritative.has_compatible_identity(&expected)
                         {
                             authoritative.order_id = expected.order_id;
                         }
                         for observed in std::iter::once(&expected).chain(active.get(id)) {
-                            if authoritative.symbol == observed.symbol
-                                && authoritative.side == observed.side
-                                && authoritative
-                                    .order_id
-                                    .zip(observed.order_id)
-                                    .is_none_or(|(a, b)| a == b)
-                            {
+                            if authoritative.has_compatible_identity(observed) {
                                 authoritative.price = authoritative.price.max(observed.price);
                                 authoritative.quantity =
                                     authoritative.quantity.max(observed.quantity);
@@ -481,13 +449,7 @@ impl GridTradingEngine {
                     else {
                         continue;
                     };
-                    if durable.symbol != current.symbol
-                        || durable.side != current.side
-                        || durable
-                            .order_id
-                            .zip(current.order_id)
-                            .is_some_and(|(a, b)| a != b)
-                    {
+                    if !durable.has_compatible_identity(&current) {
                         active.insert(id.clone(), durable.clone());
                         let key = (account_key, id.clone());
                         self.order_identity_conflicts
@@ -640,17 +602,9 @@ impl GridTradingEngine {
                                     || !matches!(order.side.as_str(), "BUY" | "SELL")
                             })
                             || orders.iter().skip(1).any(|order| {
-                                order.symbol != first.symbol
-                                    || order.side != first.side
-                                    || order.order_id != first.order_id
-                                    || order.status != first.status
-                                    || order.price != first.price
-                                    || order.avg_price != first.avg_price
-                                    || order.orig_qty != first.orig_qty
-                                    || order.executed_qty != first.executed_qty
+                                !order.matches_snapshot(first)
                                     || order.order_type != first.order_type
                                     || order.time_in_force != first.time_in_force
-                                    || order.update_time != first.update_time
                             })
                     })
                     .cloned()
@@ -679,10 +633,7 @@ impl GridTradingEngine {
                                 && expected.side == current.side
                                 && restored_ids.contains(&current.client_order_id)
                                 && live_orders.iter().any(|found| {
-                                    found.client_order_id == current.client_order_id
-                                        && found.symbol == current.symbol
-                                        && found.side == current.side.as_str()
-                                        && Some(found.order_id) == current.order_id
+                                    current.matches_exchange_identity(found)
                                         && !unresolved_filled_quantity(found)
                                 })
                             {
@@ -773,11 +724,8 @@ impl GridTradingEngine {
                                     .order_identity_conflicts
                                     .get(&key)
                                     .is_some_and(|expected| {
-                                        let found = orders[0];
-                                        expected.client_order_id == found.client_order_id
-                                            && expected.symbol == found.symbol
-                                            && expected.side.as_str() == found.side
-                                            && expected.order_id == Some(found.order_id)
+                                        expected.order_id.is_some()
+                                            && expected.matches_exchange_identity(orders[0])
                                     })
                             {
                                 return false;
@@ -805,9 +753,7 @@ impl GridTradingEngine {
                         if let Some(confirmed) = self.order_identity_conflicts.get(&key) {
                             if expected.order_id.is_none()
                                 && confirmed.order_id.is_some()
-                                && expected.client_order_id == confirmed.client_order_id
-                                && expected.symbol == confirmed.symbol
-                                && expected.side == confirmed.side
+                                && expected.has_compatible_identity(confirmed)
                             {
                                 expected.order_id = confirmed.order_id;
                             }
@@ -858,9 +804,7 @@ impl GridTradingEngine {
                         {
                             if expected.order_id.is_none()
                                 && confirmed.order_id.is_some()
-                                && expected.client_order_id == confirmed.client_order_id
-                                && expected.symbol == confirmed.symbol
-                                && expected.side == confirmed.side
+                                && expected.has_compatible_identity(confirmed)
                             {
                                 expected.order_id = confirmed.order_id;
                             }
@@ -941,9 +885,8 @@ impl GridTradingEngine {
                 for (_, expected) in &conflicts {
                     for found in &live_orders {
                         if found.client_order_id == expected.client_order_id
-                            && (found.symbol != expected.symbol
-                                || found.side != expected.side.as_str()
-                                || expected.order_id.is_none_or(|id| found.order_id != id))
+                            && (expected.order_id.is_none()
+                                || !expected.matches_exchange_identity(found))
                         {
                             self.track_identity_conflict(expected, found);
                             discovered = true;
@@ -1072,13 +1015,7 @@ impl GridTradingEngine {
                                         self.report_reconciliation_state(true).await;
                                         return false;
                                     }
-                                    if previous.status != found.status
-                                        || previous.executed_qty != found.executed_qty
-                                        || previous.orig_qty != found.orig_qty
-                                        || previous.price != found.price
-                                        || previous.avg_price != found.avg_price
-                                        || previous.update_time != found.update_time
-                                    {
+                                    if !previous.matches_snapshot(&found) {
                                         self.report_reconciliation_state(true).await;
                                         return false;
                                     }
@@ -1181,19 +1118,10 @@ impl GridTradingEngine {
                             }
                             let unique = match unique {
                                 Ok(Some(found))
-                                    if found.client_order_id == expected.client_order_id
-                                        && found.symbol == expected.symbol
-                                        && found.side == candidate.side
+                                    if found.matches_snapshot(candidate)
                                         && (expected.purpose
                                             == crate::types::OrderPurpose::Unverified
                                             || found.side == expected.side.as_str())
-                                        && found.order_id == candidate.order_id
-                                        && found.status == candidate.status
-                                        && found.executed_qty == candidate.executed_qty
-                                        && found.orig_qty == candidate.orig_qty
-                                        && found.price == candidate.price
-                                        && found.avg_price == candidate.avg_price
-                                        && found.update_time == candidate.update_time
                                         && !unresolved_filled_quantity(&found)
                                         && BinanceOrderResponse::is_known_status(&found.status) =>
                                 {
@@ -1300,10 +1228,7 @@ impl GridTradingEngine {
                         for order in &live_orders {
                             if order.client_order_id == expected.client_order_id {
                                 seen = true;
-                                if order.symbol != expected.symbol
-                                    || order.side != expected.side.as_str()
-                                    || expected.order_id.is_some_and(|id| order.order_id != id)
-                                {
+                                if !expected.matches_exchange_identity(order) {
                                     consistent = false;
                                 }
                             }
@@ -1319,11 +1244,7 @@ impl GridTradingEngine {
                         match result {
                             Ok(Some(found)) => {
                                 let unknown_id = expected.order_id.is_none();
-                                let identity_matches = found.client_order_id
-                                    == expected.client_order_id
-                                    && found.symbol == expected.symbol
-                                    && found.side == expected.side.as_str()
-                                    && expected.order_id.is_none_or(|id| found.order_id == id);
+                                let identity_matches = expected.matches_exchange_identity(&found);
                                 if unknown_id || !identity_matches {
                                     self.track_identity_conflict(&expected, &found);
                                     if !self
@@ -1408,16 +1329,7 @@ impl GridTradingEngine {
                                         self.report_reconciliation_state(true).await;
                                         return false;
                                     }
-                                    if verified.client_order_id != found.client_order_id
-                                        || verified.symbol != found.symbol
-                                        || verified.side != found.side
-                                        || verified.order_id != found.order_id
-                                        || verified.status != found.status
-                                        || verified.executed_qty != found.executed_qty
-                                        || verified.orig_qty != found.orig_qty
-                                        || verified.price != found.price
-                                        || verified.avg_price != found.avg_price
-                                        || verified.update_time != found.update_time
+                                    if !verified.matches_snapshot(&found)
                                         || unresolved_filled_quantity(&verified)
                                         || !verified.is_terminal()
                                     {
@@ -1465,18 +1377,9 @@ impl GridTradingEngine {
                                         self.report_reconciliation_state(true).await;
                                         return false;
                                     }
-                                    if unique.client_order_id != verified.client_order_id
-                                        || unique.symbol != verified.symbol
-                                        || unique.side != verified.side
-                                        || unique.order_id != verified.order_id
+                                    if !unique.matches_snapshot(&verified)
                                         || unresolved_filled_quantity(&unique)
                                         || !unique.is_terminal()
-                                        || unique.status != verified.status
-                                        || unique.executed_qty != verified.executed_qty
-                                        || unique.orig_qty != verified.orig_qty
-                                        || unique.price != verified.price
-                                        || unique.avg_price != verified.avg_price
-                                        || unique.update_time != verified.update_time
                                     {
                                         self.track_identity_conflict(&expected, &unique);
                                         self.persist_identity_observations(account_key, &symbol)
@@ -1491,11 +1394,7 @@ impl GridTradingEngine {
                                         .await
                                         .get(&expected.client_order_id)
                                         .is_none_or(|order| {
-                                            order.symbol == expected.symbol
-                                                && order.side == expected.side
-                                                && order
-                                                    .order_id
-                                                    .is_none_or(|id| id == verified.order_id)
+                                            order.matches_exchange_identity(&verified)
                                         });
                                     if !compatible {
                                         self.report_reconciliation_state(true).await;
@@ -1574,10 +1473,7 @@ impl GridTradingEngine {
                             if let Some(existing) = active.get(&found.client_order_id) {
                                 let key = (account_key, found.client_order_id.clone());
                                 self.provisional_order_ids.insert(key);
-                                if existing.symbol != found.symbol
-                                    || existing.side.as_str() != found.side
-                                    || existing.order_id.is_some_and(|id| id != found.order_id)
-                                {
+                                if !existing.matches_exchange_identity(found) {
                                     self.track_identity_conflict(existing, found);
                                 }
                                 continue;
@@ -1586,11 +1482,11 @@ impl GridTradingEngine {
                             let remainder = remainder_plan
                                 .as_ref()
                                 .and_then(|plan| plan.find_order(&found.client_order_id));
-                            if [intent, remainder].into_iter().flatten().any(|known| {
-                                known.symbol != found.symbol
-                                    || known.side.as_str() != found.side
-                                    || known.order_id.is_some_and(|id| id != found.order_id)
-                            }) {
+                            if [intent, remainder]
+                                .into_iter()
+                                .flatten()
+                                .any(|known| !known.matches_exchange_identity(found))
+                            {
                                 if let Some(known) = intent.or(remainder) {
                                     self.track_identity_conflict(known, found);
                                     active.insert(known.client_order_id.clone(), known.clone());
@@ -1664,11 +1560,9 @@ impl GridTradingEngine {
                             }
                             let conflict = found.symbol != symbol
                                 || !matches!(found.side.as_str(), "BUY" | "SELL")
-                                || candidates.iter().any(|order| {
-                                    order.symbol != found.symbol
-                                        || order.side.as_str() != found.side
-                                        || order.order_id.is_some_and(|id| id != found.order_id)
-                                });
+                                || candidates
+                                    .iter()
+                                    .any(|order| !order.matches_exchange_identity(found));
                             if conflict {
                                 identity_conflict = true;
                                 if let Some(expected) = candidates.first() {
@@ -1798,10 +1692,7 @@ impl GridTradingEngine {
                                 let key = (account_key, found.client_order_id.clone());
                                 if let Some(existing) = active.get(&found.client_order_id) {
                                     self.provisional_order_ids.insert(key.clone());
-                                    if existing.symbol != found.symbol
-                                        || existing.side.as_str() != found.side
-                                        || existing.order_id.is_some_and(|id| id != found.order_id)
-                                    {
+                                    if !existing.matches_exchange_identity(found) {
                                         self.track_identity_conflict(existing, found);
                                     } else {
                                         let mut conservative = existing.clone();
@@ -1826,10 +1717,7 @@ impl GridTradingEngine {
                                     remainder_plan.as_ref(),
                                 ) {
                                     let mut order = known.clone();
-                                    if known.symbol != found.symbol
-                                        || known.side.as_str() != found.side
-                                        || known.order_id.is_some_and(|id| id != found.order_id)
-                                    {
+                                    if !known.matches_exchange_identity(found) {
                                         self.track_identity_conflict(known, found);
                                     } else {
                                         order.order_id = Some(found.order_id);
@@ -1877,12 +1765,11 @@ impl GridTradingEngine {
                                 .as_ref()
                                 .and_then(|plan| plan.find_order(&found.client_order_id)),
                         ];
-                        if let Some(expected) = candidates.into_iter().flatten().find(|order| {
-                            order.client_order_id != found.client_order_id
-                                || order.symbol != found.symbol
-                                || order.side.as_str() != found.side
-                                || order.order_id.is_some_and(|id| id != found.order_id)
-                        }) {
+                        if let Some(expected) = candidates
+                            .into_iter()
+                            .flatten()
+                            .find(|order| !order.matches_exchange_identity(found))
+                        {
                             conflicts.push((expected.clone(), found.clone()));
                         }
                     }
@@ -1915,13 +1802,7 @@ impl GridTradingEngine {
                         ) {
                             let mut restored = durable.clone();
                             if let Some(current) = active.get(&found.client_order_id) {
-                                if current.symbol == durable.symbol
-                                    && current.side == durable.side
-                                    && current
-                                        .order_id
-                                        .zip(durable.order_id)
-                                        .is_none_or(|(a, b)| a == b)
-                                {
+                                if current.has_compatible_identity(durable) {
                                     restored.order_id = durable.order_id.or(current.order_id);
                                     restored.price = restored.price.max(current.price);
                                     restored.quantity = durable.quantity.max(current.quantity);
@@ -2103,13 +1984,7 @@ impl GridTradingEngine {
                         }
                         Ok(None) => unresolved_orders = true,
                         Ok(Some(exchange_order)) => {
-                            if exchange_order.client_order_id != order.client_order_id
-                                || exchange_order.symbol != order.symbol
-                                || exchange_order.side != order.side.as_str()
-                                || order
-                                    .order_id
-                                    .is_some_and(|id| id != exchange_order.order_id)
-                            {
+                            if !order.matches_exchange_identity(&exchange_order) {
                                 self.track_identity_conflict(&order, &exchange_order);
                                 self.report_reconciliation_state(true).await;
                                 self.persist_identity_observations(account_key, &symbol)

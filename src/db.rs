@@ -1076,7 +1076,7 @@ impl Database {
         status: BotStatus,
         previous_scope: (&str, TradingMode),
     ) -> Result<(BotStatus, bool)> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_connection("save_runtime_config");
         let tx = conn.transaction()?;
         match pair_scope {
             Some(symbol) => save_pair_config_on(&tx, symbol, config)?,
@@ -1115,7 +1115,7 @@ impl Database {
         status: BotStatus,
         legacy: bool,
     ) -> Result<()> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_connection("save_runtime_status");
         let tx = conn.transaction()?;
         save_pair_status_on(&tx, symbol, mode, status)?;
         if legacy {
@@ -1485,11 +1485,9 @@ impl Database {
         let conn = self.lock_connection("load_managed_orders");
         let mut stmt = conn.prepare("SELECT order_json FROM managed_orders WHERE symbol = ?1;")?;
         let json_rows = stmt.query_map(params![symbol], |row| row.get::<_, String>(0))?;
-        let mut orders = Vec::new();
-        for row in json_rows {
-            orders.push(serde_json::from_str(&row?)?);
-        }
-        Ok(orders)
+        json_rows
+            .map(|row| Ok(serde_json::from_str(&row?)?))
+            .collect()
     }
     #[cfg(test)]
     pub(crate) fn save_initial_order_responses(
@@ -2029,7 +2027,7 @@ impl Database {
     }
 
     pub fn get_recent_trades(&self, limit: usize) -> Result<Vec<TradeRecord>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_connection("get_recent_trades");
         let mut stmt = conn.prepare(
             r#"
             SELECT trade_id, client_order_id, symbol, side, price, quantity,
@@ -2041,12 +2039,8 @@ impl Database {
         )?;
 
         let rows = stmt.query_map(params![limit as i64], trade_from_row)?;
-
-        let mut list = Vec::new();
-        for item in rows {
-            list.push(item?);
-        }
-        Ok(list)
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     pub fn get_recent_trades_for(
@@ -2055,7 +2049,7 @@ impl Database {
         mode: TradingMode,
         limit: usize,
     ) -> Result<Vec<TradeRecord>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_connection("get_recent_trades_for");
         let mut stmt = conn.prepare(
             "SELECT trade_id, client_order_id, symbol, side, price, quantity, amount_usdc, realized_pnl, commission, pnl_verified, is_maker, timestamp, note, mode FROM trades WHERE symbol = ?1 AND mode = ?2 ORDER BY timestamp DESC, rowid DESC LIMIT ?3;",
         )?;
@@ -2080,7 +2074,7 @@ impl Database {
     /// Aggregate persisted trades across all modes and symbols for the Beijing day.
     pub fn get_today_pnl(&self, now: DateTime<Utc>) -> Result<crate::types::TodayPnl> {
         let window_start = beijing_midnight(now);
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_connection("get_today_pnl");
         let mut stmt = conn.prepare(
             "SELECT symbol, mode, timestamp, realized_pnl, pnl_verified FROM trades
              WHERE timestamp >= ?1 AND timestamp < ?2",
@@ -2187,7 +2181,7 @@ impl Database {
         limit: usize,
         offset: usize,
     ) -> Result<(Vec<TradeRecord>, u64)> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_connection("get_unverified_trades_with_clear_revision");
         let mut stmt = conn.prepare(
             "SELECT trade_id, client_order_id, symbol, side, price, quantity, amount_usdc, realized_pnl, commission, pnl_verified, is_maker, timestamp, note, mode FROM trades WHERE symbol = ?1 AND mode = ?2 AND pnl_verified = 0 ORDER BY timestamp DESC LIMIT ?3 OFFSET ?4;",
         )?;
@@ -2217,7 +2211,7 @@ impl Database {
         symbol: &str,
         mode: TradingMode,
     ) -> Result<(Decimal, Decimal, usize)> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_connection("get_pnl_totals");
         let mut stmt = conn.prepare(
             "SELECT realized_pnl, commission FROM trades WHERE symbol = ?1 AND mode = ?2 AND pnl_verified != 0;",
         )?;
@@ -2243,7 +2237,7 @@ impl Database {
         symbol: &str,
         mode: TradingMode,
     ) -> Result<Option<(usize, usize, Decimal, Decimal)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_connection("load_scoped_stats");
         conn.query_row(
             "SELECT total_trades, completed_cycles, total_realized_profit, total_volume_usdc FROM scoped_grid_stats WHERE symbol = ?1 AND mode = ?2;",
             params![symbol, mode.as_str()],

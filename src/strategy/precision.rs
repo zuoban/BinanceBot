@@ -44,6 +44,16 @@ pub enum SymbolRulesError {
     MissingFilters,
 }
 
+impl SymbolRulesError {
+    pub fn into_chinese_error(self, symbol: &str) -> anyhow::Error {
+        match self {
+            Self::NotFound => anyhow::anyhow!("币安合约不存在交易对 {symbol}"),
+            Self::NotTrading => anyhow::anyhow!("交易对 {symbol} 当前未处于可交易状态"),
+            Self::MissingFilters => anyhow::anyhow!("无法解析交易对 {symbol} 的价格或数量精度规则"),
+        }
+    }
+}
+
 impl SymbolRules {
     pub fn from_exchange_info(info: &BinanceExchangeInfo, symbol_name: &str) -> Option<Self> {
         let sym = info

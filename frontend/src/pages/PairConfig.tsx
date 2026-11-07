@@ -11,7 +11,7 @@ import { ConflictReloadButton, ErrorNotice, FormRevertButton, isConfigConflict, 
 import { useDeleteStrategy } from '../components/DeleteStrategy';
 import { GridPreview } from '../components/GridPreview';
 import { defaultGridInterval, isPercentDecimal, isPositiveDecimal, orderAmountError, priceRangeError, tickSizeError } from '../lib/gridPreview';
-import { quoteAsset, trimFractionZeros } from '../lib/format';
+import { positiveDecimalText, quoteAsset } from '../lib/format';
 import { describeNewGridConfig, diffGridConfig } from '../lib/configDiff';
 
 type FormValues = Omit<GridConfig, 'post_only'>;
@@ -88,28 +88,34 @@ export default function PairConfig() {
       void client.invalidateQueries({ queryKey: ['pairs'] });
       void client.invalidateQueries({ queryKey: ['overview'] });
       if (adding) void client.resetQueries({ queryKey: ['overview-history'] });
-      void client.invalidateQueries({ queryKey: ['config', symbol] });
+      if (!adding) void client.invalidateQueries({ queryKey: ['config', symbol] });
     },
     onError: error => message.error(error.message),
     onSettled: () => edit.setSaving(false),
   });
   resetMutation.current = mutation.reset;
   const remove = async () => {
-    if (!pair || removing.current) return;
+    if (!pair || removing.current || !page.current) return;
+    const currentPage = page.current;
     removing.current = true;
     edit.setSaving(true);
     let removed = false;
     try {
-      removed = await deletion.remove(pair, async () => !edit.dirty || await modal.confirm({ title: '放弃未保存的修改？', content: '删除策略会放弃当前表单修改。', okText: '继续', cancelText: '取消' }));
+      removed = await deletion.remove(
+        { ...pair, mode: live ? 'LIVE' : pair.mode },
+        async () => (!edit.dirty || await modal.confirm({ title: '放弃未保存的修改？', content: '删除策略会放弃当前表单修改。', okText: '继续', cancelText: '取消' })) && page.current === currentPage,
+      );
     } finally {
       removing.current = false;
-      // Update the shell's blocker before navigating away from a deleted strategy.
-      flushSync(() => {
-        if (removed) edit.setDirty(false);
-        edit.setSaving(false);
-      });
+      if (page.current === currentPage) {
+        // Update the shell's blocker before navigating away from a deleted strategy.
+        flushSync(() => {
+          if (removed) edit.setDirty(false);
+          edit.setSaving(false);
+        });
+      }
     }
-    if (removed) navigate('/');
+    if (removed && page.current === currentPage) navigate('/');
   };
   const submit = async (values: FormValues) => {
     if (submission.current || !page.current) return;
@@ -146,10 +152,10 @@ export default function PairConfig() {
   const selectedSymbol = adding ? watchedSymbol?.trim().toUpperCase() : symbol;
   const quote = quoteAsset(selectedSymbol ?? '');
   const symbolPreview = useQuery({ queryKey: ['symbol-preview', selectedSymbol], queryFn: ({ signal }) => api<{ symbol: string; last_price?: string | null; mark_price?: string | null; tick_size?: string; step_size?: string; min_qty?: string; min_notional?: string }>(`/api/exchange/symbol-preview?environment=mainnet&symbol=${encodeURIComponent(selectedSymbol!)}`, { signal }), enabled: adding && !!selectedSymbol, retry: false, refetchOnWindowFocus: false });
-  const previewLast = symbolPreview.data?.last_price && Number(symbolPreview.data.last_price) > 0 ? symbolPreview.data.last_price : undefined;
-  const previewMark = symbolPreview.data?.mark_price && Number(symbolPreview.data.mark_price) > 0 ? symbolPreview.data.mark_price : undefined;
-  const latestPrice = adding ? (previewLast ?? previewMark) : undefined;
-  const effectiveMark = adding ? (previewMark ?? previewLast) : markPrice;
+  const previewLast = positiveDecimalText(symbolPreview.data?.last_price);
+  const previewMark = positiveDecimalText(symbolPreview.data?.mark_price);
+  const latestPrice = adding ? (previewLast ?? previewMark) : null;
+  const effectiveMark = adding ? (previewMark ?? previewLast ?? undefined) : markPrice;
   const tickSize = adding ? symbolPreview.data?.tick_size : config.data?.tick_size;
   const stepSize = adding ? symbolPreview.data?.step_size : config.data?.step_size;
   const minQty = adding ? symbolPreview.data?.min_qty : config.data?.min_qty;
@@ -182,7 +188,7 @@ export default function PairConfig() {
       <Card title="基本设置">
         {live && <Alert type="warning" showIcon className="config-live-alert" title="实盘使用真实资金，请核对交易方向和风险限制。" />}
         <Row gutter={[20, 16]}>
-          <Col xs={24} md={12}><Form.Item name="symbol" label="合约交易对" rules={[{ required: true, message: '请选择交易对' }]} getValueProps={value => ({ value: value || undefined })} extra={adding && symbols.isError ? <span>交易对加载失败 <Button type="link" onClick={() => void symbols.refetch()}>重试</Button></span> : adding && selectedSymbol ? (symbolPreview.isFetching ? '正在获取最新价格...' : latestPrice && Number(latestPrice) > 0 ? `最新价格：${trimFractionZeros(String(latestPrice))}${quote ? ` ${quote}` : ''}` : undefined) : undefined}>{adding ? <Select showSearch optionFilterProp="label" placeholder={symbols.isFetching ? '正在加载交易对...' : '搜索并选择交易对'} loading={symbols.isFetching} disabled={formDisabled || symbols.isFetching || symbols.isError} notFoundContent="没有匹配的交易对" options={(symbols.data ?? []).map(value => ({ value, label: value }))} /> : <Input disabled />}</Form.Item></Col>
+          <Col xs={24} md={12}><Form.Item name="symbol" label="合约交易对" rules={[{ required: true, message: '请选择交易对' }]} getValueProps={value => ({ value: value || undefined })} extra={adding && symbols.isError ? <span>交易对加载失败 <Button type="link" onClick={() => void symbols.refetch()}>重试</Button></span> : adding && selectedSymbol ? (symbolPreview.isFetching ? '正在获取最新价格...' : latestPrice ? `最新价格：${latestPrice}${quote ? ` ${quote}` : ''}` : undefined) : undefined}>{adding ? <Select showSearch optionFilterProp="label" placeholder={symbols.isFetching ? '正在加载交易对...' : '搜索并选择交易对'} loading={symbols.isFetching} disabled={formDisabled || symbols.isFetching || symbols.isError} notFoundContent="没有匹配的交易对" options={(symbols.data ?? []).map(value => ({ value, label: value }))} /> : <Input disabled />}</Form.Item></Col>
           <Col xs={24} md={12}><Form.Item name="direction" label="交易方向" rules={[{ required: true }]}><Select options={[{ value: 'LONG', label: '做多 · 买入开仓 / 卖出平仓' }, { value: 'SHORT', label: '做空 · 卖出开仓 / 买入平仓' }]} /></Form.Item></Col>
         </Row>
       </Card>
@@ -230,6 +236,12 @@ export default function PairConfig() {
 function SaveBarStatus({ form, adding, dirty, symbol, baseline }: { form: FormInstance<FormValues>; adding: boolean; dirty: boolean; symbol: string | undefined; baseline: { symbol: string; config: GridConfig } | null }) {
   const watched = Form.useWatch([], form) as FormValues | undefined;
   const [showChanges, setShowChanges] = useState(false);
+  useEffect(() => {
+    if (!dirty) setShowChanges(false);
+  }, [dirty]);
+  useEffect(() => {
+    setShowChanges(false);
+  }, [symbol]);
   const pending = !adding && dirty && watched && baseline && baseline.symbol === symbol ? diffGridConfig(baseline.config, watched) : [];
   const expanded = showChanges && pending.length > 0;
   return <div className="save-bar-status">

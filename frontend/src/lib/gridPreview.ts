@@ -15,6 +15,11 @@ function format(n: bigint, scale: number) {
   const whole = digits.slice(0, digits.length - scale), fraction = digits.slice(digits.length - scale);
   return scale === 0 ? whole : `${whole}.${fraction}`.replace(/\.?0+$/, '');
 }
+function scalePair(a: Fixed, b: Fixed): [bigint, bigint, number] {
+  const scale = Math.max(a.s, b.s);
+  return [rescale(a, scale), rescale(b, scale), scale];
+}
+const formatPercent4 = (num: bigint, den: bigint): string => format((num * 1000000n + den / 2n) / den, 4);
 const floorDiv = (a: bigint, b: bigint) => a / b;
 const ceilDiv = (a: bigint, b: bigint) => (a + b - 1n) / b;
 
@@ -62,8 +67,8 @@ export function sumDecimals(values: string[]): string | null {
 export function exceeds(value: string | null, limit: unknown): boolean {
   const a = parse(value), b = parse(limit);
   if (!a || !b) return false;
-  const scale = Math.max(a.s, b.s);
-  return rescale(a, scale) > rescale(b, scale);
+  const [left, right] = scalePair(a, b);
+  return left > right;
 }
 
 /** True when `value` is a positive plain decimal (`> 0`). */
@@ -82,8 +87,8 @@ export function isPercentDecimal(value: unknown): boolean {
 export function sameDecimal(a: unknown, b: unknown): boolean {
   const left = parse(a), right = parse(b);
   if (!left || !right) return false;
-  const scale = Math.max(left.s, right.s);
-  return rescale(left, scale) === rescale(right, scale);
+  const [leftScaled, rightScaled] = scalePair(left, right);
+  return leftScaled === rightScaled;
 }
 
 /** Mirrors `GridConfig::validate` for the price range: both bounds positive, minimum below maximum. */
@@ -93,8 +98,8 @@ export function priceRangeError(field: 'min' | 'max', min: unknown, max: unknown
   if (raw !== null && raw !== undefined && raw !== '' && (!own || own.n === 0n)) return field === 'min' ? '价格下限必须大于 0' : '价格上限必须大于 0';
   const lower = parse(min), upper = parse(max);
   if (lower && upper && lower.n !== 0n && upper.n !== 0n) {
-    const scale = Math.max(lower.s, upper.s);
-    if (rescale(lower, scale) >= rescale(upper, scale)) return '价格下限必须小于上限';
+    const [lowerScaled, upperScaled] = scalePair(lower, upper);
+    if (lowerScaled >= upperScaled) return '价格下限必须小于上限';
   }
   return null;
 }
@@ -103,8 +108,7 @@ export function priceRangeError(field: 'min' | 'max', min: unknown, max: unknown
 export function tickSizeError(interval: unknown, tickSize: unknown): string | null {
   const iv = parse(interval), tick = parse(tickSize);
   if (!iv || !tick || iv.n === 0n || tick.n === 0n) return null;
-  const scale = Math.max(iv.s, tick.s);
-  const ivScaled = rescale(iv, scale), tickScaled = rescale(tick, scale);
+  const [ivScaled, tickScaled] = scalePair(iv, tick);
   if (ivScaled < tickScaled || ivScaled % tickScaled !== 0n) {
     return `网格间距 ${format(iv.n, iv.s)} 必须是价格步长 ${format(tick.n, tick.s)} 的正整数倍`;
   }
@@ -118,8 +122,7 @@ export function defaultGridInterval(markPrice: unknown, tickSize?: unknown): str
   const target: Fixed = { n: mark.n, s: mark.s + 2 };
   const tick = parse(tickSize);
   if (!tick || tick.n === 0n) return format(target.n, target.s);
-  const scale = Math.max(target.s, tick.s);
-  const targetScaled = rescale(target, scale), tickScaled = rescale(tick, scale);
+  const [targetScaled, tickScaled] = scalePair(target, tick);
   const steps = (targetScaled + tickScaled / 2n) / tickScaled;
   const clamped = steps > 0n ? steps : 1n;
   return format(clamped * tick.n, tick.s);
@@ -144,12 +147,14 @@ export function orderSizing(price: unknown, amount: unknown, rules?: SymbolSizin
   const notionalN = qtyN * p.n, notionalScale = step.s + p.s;
   const quantity = format(qtyN, qtyScale), notional = format(notionalN, notionalScale);
   const minQty = parse(rules?.minQty);
-  if (steps === 0n || (minQty && minQty.n > 0n && rescale({ n: qtyN, s: qtyScale }, Math.max(qtyScale, minQty.s)) < rescale(minQty, Math.max(qtyScale, minQty.s)))) {
+  const [qtyScaled, minQtyScaled] = minQty ? scalePair({ n: qtyN, s: qtyScale }, minQty) : [0n, 0n];
+  if (steps === 0n || (minQty && minQty.n > 0n && qtyScaled < minQtyScaled)) {
     const floorQty = minQty && minQty.n > 0n ? format(minQty.n, minQty.s) : format(step.n, step.s);
     return { quantity, notional, error: `按数量步长 ${format(step.n, step.s)} 截断后数量为 ${quantity}，低于最小下单量 ${floorQty}，该档将无法挂单` };
   }
   const minNotional = parse(rules?.minNotional);
-  if (minNotional && minNotional.n > 0n && rescale({ n: notionalN, s: notionalScale }, Math.max(notionalScale, minNotional.s)) < rescale(minNotional, Math.max(notionalScale, minNotional.s))) {
+  const [notionalScaled, minNotionalScaled] = minNotional ? scalePair({ n: notionalN, s: notionalScale }, minNotional) : [0n, 0n];
+  if (minNotional && minNotional.n > 0n && notionalScaled < minNotionalScaled) {
     return { quantity, notional, error: `按数量步长截断后实际金额为 ${notional}，低于最小名义金额 ${format(minNotional.n, minNotional.s)}，该档将无法挂单` };
   }
   return { quantity, notional, error: null };
@@ -161,8 +166,8 @@ export function orderAmountError(amount: unknown, referencePrice?: unknown, rule
   if (!a || a.n === 0n) return null;
   const minNotional = parse(rules?.minNotional);
   if (minNotional && minNotional.n > 0n) {
-    const scale = Math.max(a.s, minNotional.s);
-    if (rescale(a, scale) < rescale(minNotional, scale)) {
+    const [amountScaled, minNotionalScaled] = scalePair(a, minNotional);
+    if (amountScaled < minNotionalScaled) {
       return `每格金额不能低于最小名义金额 ${format(minNotional.n, minNotional.s)}`;
     }
   }
@@ -184,14 +189,14 @@ export const CAP_DROP_WARN_PERCENT = 3;
 export function capCoverage(cap: unknown, amount: unknown, interval: unknown, reference: unknown): { levels: number; percent: string; tight: boolean } | null {
   const c = parse(cap), a = parse(amount), i = parse(interval), r = parse(reference);
   if (!c || !a || !i || !r || a.n === 0n || i.n === 0n || r.n === 0n) return null;
-  const amountScale = Math.max(c.s, a.s);
-  const levels = rescale(c, amountScale) / rescale(a, amountScale);
+  const [capScaled, amountScaled] = scalePair(c, a);
+  const levels = capScaled / amountScaled;
   if (levels === 0n) return null;
-  const scale = Math.max(i.s, r.s);
-  const move = levels * rescale(i, scale), ref = rescale(r, scale);
+  const [intervalScaled, ref] = scalePair(i, r);
+  const move = levels * intervalScaled;
   return {
     levels: Number(levels),
-    percent: format((move * 1000000n + ref / 2n) / ref, 4),
+    percent: formatPercent4(move, ref),
     tight: move * 100n < BigInt(CAP_DROP_WARN_PERCENT) * ref,
   };
 }
@@ -200,31 +205,29 @@ export function capCoverage(cap: unknown, amount: unknown, interval: unknown, re
 export function spacingPercent(interval: unknown, reference: unknown): string | null {
   const i = parse(interval), r = parse(reference);
   if (!i || !r || i.n === 0n || r.n === 0n) return null;
-  const scale = Math.max(i.s, r.s);
-  const iScaled = rescale(i, scale), rScaled = rescale(r, scale);
-  return format((iScaled * 1000000n + rScaled / 2n) / rScaled, 4);
+  const [iScaled, rScaled] = scalePair(i, r);
+  return formatPercent4(iScaled, rScaled);
 }
 
 /** True when spacing is below the Maker round-trip fee estimate of 0.04% (2 × 0.02%) of the reference price. */
 export function spacingBelowRoundTripFee(interval: unknown, reference: unknown): boolean {
   const i = parse(interval), r = parse(reference);
   if (!i || !r || i.n === 0n || r.n === 0n) return false;
-  const scale = Math.max(i.s, r.s);
-  return rescale(i, scale) * 2500n < rescale(r, scale);
+  const [iScaled, rScaled] = scalePair(i, r);
+  return iScaled * 2500n < rScaled;
 }
 
 /** Signed percentage distance `(price - reference) / reference * 100`. */
 export function priceDiffPercent(price: unknown, reference: unknown): string | null {
   const p = parse(price), r = parse(reference);
   if (!p || !r || p.n === 0n || r.n === 0n) return null;
-  const scale = Math.max(p.s, r.s);
-  const pScaled = rescale(p, scale), rScaled = rescale(r, scale);
+  const [pScaled, rScaled] = scalePair(p, r);
   const diff = pScaled - rScaled;
   if (diff === 0n) return '0%';
   const sign = diff > 0n ? '+' : '-';
   const absDiff = diff > 0n ? diff : -diff;
   const rounded2 = (absDiff * 10000n + rScaled / 2n) / rScaled;
   if (rounded2 > 0n) return `${sign}${format(rounded2, 2)}%`;
-  const rounded4 = (absDiff * 1000000n + rScaled / 2n) / rScaled;
-  return rounded4 > 0n ? `${sign}${format(rounded4, 4)}%` : `${sign}<0.0001%`;
+  const percent4 = formatPercent4(absDiff, rScaled);
+  return percent4 !== '0' ? `${sign}${percent4}%` : `${sign}<0.0001%`;
 }

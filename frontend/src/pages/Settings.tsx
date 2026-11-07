@@ -51,25 +51,39 @@ function ProbeButton({ label, path, body, disabled, resetKey }: { label: string;
     <span className={`probe-result${result ? (result.ok ? ' probe-ok' : ' probe-fail') : ''}`} role="status">{result ? `${result.ok ? '✓' : '✕'} ${result.text}` : ''}</span>
   </div>;
 }
-function GlobalSettings() {
-  const [form] = Form.useForm<GlobalForm>();
+function useSettingsFormLifecycle<T>(data: T | undefined, apply: (data: T) => void) {
   const edit = useContext(EditContext);
   const [ready, setReady] = useState(false);
-  const { message, modal } = App.useApp();
-  const client = useQueryClient();
-  const query = useQuery({ queryKey: ['global-config'], queryFn: ({ signal }) => api<GlobalConfig>('/api/global/config', { signal }), refetchOnWindowFocus: false });
-  const baseline = useRef<GlobalConfig | null>(null);
+  const baseline = useRef<T | null>(null);
   const mounted = useRef(true);
   const submitting = useRef(false);
-  const fill = (data: GlobalConfig) => {
-    baseline.current = data;
-    form.setFieldsValue({ ...data, pause_on_zero_available_margin: data.pause_on_zero_available_margin ?? false, api_key: '', api_secret: '', telegram_bot_token: '', clear_api_credentials: false, clear_telegram_credentials: false });
+  const applyRef = useRef(apply);
+  applyRef.current = apply;
+  const fill = (next: T) => {
+    baseline.current = next;
+    applyRef.current(next);
   };
-  useEffect(() => { if (query.data && !ready) { fill(query.data); setReady(true); } }, [query.data, ready]);
+  useEffect(() => {
+    if (data && !ready) {
+      baseline.current = data;
+      applyRef.current(data);
+      setReady(true);
+    }
+  }, [data, ready]);
   useEffect(() => {
     mounted.current = true;
     return () => { mounted.current = false; edit.setDirty(false); edit.setSaving(false); };
   }, [edit.setDirty, edit.setSaving]);
+  return { edit, ready, baseline, mounted, submitting, fill };
+}
+function GlobalSettings() {
+  const [form] = Form.useForm<GlobalForm>();
+  const { message, modal } = App.useApp();
+  const client = useQueryClient();
+  const query = useQuery({ queryKey: ['global-config'], queryFn: ({ signal }) => api<GlobalConfig>('/api/global/config', { signal }), refetchOnWindowFocus: false });
+  const { edit, ready, baseline, mounted, submitting, fill } = useSettingsFormLifecycle(query.data, data => {
+    form.setFieldsValue({ ...data, pause_on_zero_available_margin: data.pause_on_zero_available_margin ?? false, api_key: '', api_secret: '', telegram_bot_token: '', clear_api_credentials: false, clear_telegram_credentials: false });
+  });
   const mutation = useMutation({
     mutationFn: (v: GlobalForm) => post<GlobalConfig>('/api/global/config', {
       baseline_version: baseline.current?.version, recv_window: v.recv_window, sync_interval_secs: v.sync_interval_secs,
@@ -83,8 +97,10 @@ function GlobalSettings() {
     onMutate: () => edit.setSaving(true),
     onSuccess: (data, values) => {
       client.setQueryData(['global-config'], data);
-      fill(data);
-      edit.setDirty(false);
+      if (mounted.current) {
+        fill(data);
+        edit.setDirty(false);
+      }
       message.success('全局设置已保存，所有交易对立即生效');
       if (values.api_key?.trim() || values.api_secret?.trim() || values.clear_api_credentials) {
         void client.resetQueries({ queryKey: ['overview-history'] });
@@ -96,7 +112,8 @@ function GlobalSettings() {
     },
     onError: error => message.error(error.message),
     onSettled: () => {
-      submitting.current = false; edit.setSaving(false);
+      submitting.current = false;
+      if (mounted.current) edit.setSaving(false);
     },
   });
   const submit = async (values: GlobalForm) => {
@@ -198,28 +215,32 @@ function GlobalSettings() {
 }
 function ServerSettings() {
   const [form] = Form.useForm<ServerConfig['saved']>();
-  const [ready, setReady] = useState(false);
-  const edit = useContext(EditContext);
   const { message } = App.useApp();
   const client = useQueryClient();
-  const query = useQuery({ queryKey: ['server-config'], queryFn: ({ signal }) => api<ServerConfig>('/api/server/config', { signal }) });
-  const baseline = useRef<ServerConfig | null>(null);
-  const mounted = useRef(true);
-  const submitting = useRef(false);
-  useEffect(() => { if (query.data && !ready) { baseline.current = query.data; form.setFieldsValue(query.data.saved); setReady(true); } }, [query.data, ready, form]);
-  useEffect(() => {
-    mounted.current = true;
-    return () => { mounted.current = false; edit.setDirty(false); edit.setSaving(false); };
-  }, [edit.setDirty, edit.setSaving]);
+  const query = useQuery({ queryKey: ['server-config'], queryFn: ({ signal }) => api<ServerConfig>('/api/server/config', { signal }), refetchOnWindowFocus: false });
+  const { edit, ready, baseline, mounted, submitting, fill } = useSettingsFormLifecycle(query.data, data => {
+    form.setFieldsValue(data.saved);
+  });
   const mutation = useMutation({
     mutationFn: (values: ServerConfig['saved']) => post<ServerConfig>('/api/server/config', { ...values, baseline_version: baseline.current?.version ?? null }),
     onMutate: () => edit.setSaving(true),
-    onSuccess: data => { client.setQueryData(['server-config'], data); baseline.current = data; form.setFieldsValue(data.saved); edit.setDirty(false); message.success('服务设置已保存，重启后生效'); void query.refetch(); },
+    onSuccess: data => {
+      client.setQueryData(['server-config'], data);
+      if (mounted.current) {
+        fill(data);
+        edit.setDirty(false);
+      }
+      message.success('服务设置已保存，重启后生效');
+      void query.refetch();
+    },
     onError: error => message.error(error.message),
-    onSettled: () => { submitting.current = false; edit.setSaving(false); },
+    onSettled: () => {
+      submitting.current = false;
+      if (mounted.current) edit.setSaving(false);
+    },
   });
   return <><ErrorNotice error={query.error} retry={() => void query.refetch()} /><ErrorNotice error={mutation.error} />
-    {isConfigConflict(mutation.error, '服务设置已被其他请求修改') && <ConflictReloadButton label="服务设置" activeRef={mounted} refetch={query.refetch} onReset={mutation.reset} onLoaded={data => { baseline.current = data; form.setFieldsValue(data.saved); }} />}
+    {isConfigConflict(mutation.error, '服务设置已被其他请求修改') && <ConflictReloadButton label="服务设置" activeRef={mounted} refetch={query.refetch} onReset={mutation.reset} onLoaded={fill} />}
     <Card title="监听设置" className="settings-card"><Alert type="info" showIcon title={`当前监听：${query.data?.active.host ?? '--'}:${query.data?.active.port ?? '--'}。修改后重启生效；使用 Docker 时请同时调整代理配置。`} />
       <Form form={form} layout="vertical" className="settings-fields" disabled={!ready || edit.saving} onValuesChange={() => edit.setDirty(true)} onFinish={v => { if (submitting.current) return; submitting.current = true; mutation.mutate(v); }}>
         <Row gutter={[20, 16]}><Col xs={24} md={12}><Form.Item name="host" label="监听地址" rules={[{ required: true }]}><Input /></Form.Item></Col>

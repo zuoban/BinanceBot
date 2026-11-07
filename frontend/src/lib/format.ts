@@ -7,6 +7,10 @@ export const maxPositionPolicyLabel = (config: { pause_on_max_position?: boolean
   config.pause_on_max_position ? '暂停策略' : config.cancel_opening_on_max_position ? '仅撤开仓单' : '限制开仓';
 export const quoteAsset = (symbol: string) => ['USDC', 'USDT', 'FDUSD', 'BUSD'].find(a => symbol.endsWith(a)) ?? '';
 export const numeric = (value: unknown): number | null => value === null || value === undefined || value === '' || !Number.isFinite(Number(value)) ? null : Number(value);
+const modeAsset = (mode: Mode, symbol: string) => {
+  const asset = quoteAsset(symbol) || symbol;
+  return { asset, key: `${mode}:${asset}` };
+};
 type ValuedPosition = { symbol: string; position: Pick<Snapshot['position'], 'size' | 'mark_price'>; ticker: Pick<Snapshot['ticker'], 'mark_price'> };
 export function positionAmount(s: ValuedPosition): number | null {
   const size = numeric(s.position.size), tickerMark = numeric(s.ticker.mark_price);
@@ -22,8 +26,7 @@ export function comparePositionAmount(a: ValuedPosition, b: ValuedPosition) {
 export function positionGroups<T extends { mode: Mode; snapshot: ValuedPosition }>(entries: T[]) {
   const groups = new Map<string, { mode: Mode; asset: string; snapshots: ValuedPosition[] }>();
   for (const { mode, snapshot } of entries) {
-    const asset = quoteAsset(snapshot.symbol) || snapshot.symbol;
-    const key = `${mode}:${asset}`;
+    const { asset, key } = modeAsset(mode, snapshot.symbol);
     const group = groups.get(key) ?? { mode, asset, snapshots: [] };
     group.snapshots.push(snapshot);
     groups.set(key, group);
@@ -54,9 +57,22 @@ export function positivePrice(value: unknown, compact = false) {
   const n = numeric(value);
   return n !== null && n > 0 ? (compact ? compactPrice(n) : price(n)) : '--';
 }
+export function positiveDecimalText(value: unknown): string | null {
+  const n = numeric(value);
+  return n !== null && n > 0 ? trimFractionZeros(String(value).trim()) : null;
+}
 export function entryPriceText(position: { size: string; entry_price: string }, compact = false) {
   const size = numeric(position.size), entry = numeric(position.entry_price);
   return size !== null && size !== 0 && entry !== null && entry > 0 ? (compact ? compactPrice(entry) : price(entry)) : '--';
+}
+export function entryChange(position: { size: string; entry_price: string }, markPrice: unknown): { text: string; className?: 'positive' | 'negative' } {
+  const size = numeric(position.size), entry = numeric(position.entry_price), mark = numeric(markPrice);
+  const raw = size !== null && size !== 0 && entry !== null && entry > 0 && mark !== null && mark > 0 ? (mark / entry - 1) * 100 : null;
+  const formatted = raw !== null && Number.isFinite(raw) ? compactNumber(raw, 2) : null;
+  const rounded = formatted === null ? null : Number(formatted.replaceAll(',', ''));
+  if (rounded === null) return { text: '--' };
+  if (rounded === 0) return { text: '0%' };
+  return { text: `${rounded > 0 ? '+' : ''}${formatted}%`, className: rounded > 0 ? 'positive' : 'negative' };
 }
 export function cnyText(value: number | null | undefined, compact = false) {
   return value != null && Number.isFinite(value) ? `≈ ¥${compact ? compactNumber(value) : number(value)}` : '人民币估值待更新';
@@ -83,21 +99,23 @@ export function ageText(updatedAt: number, now = Date.now()) {
   return `${formatSeconds(seconds)}前`;
 }
 export const beijingDay = (value = Date.now()) => new Date(value + 8 * 3600_000).toISOString().slice(0, 10);
+const isSameBeijingDay = (windowEnd: string | undefined, now: number) =>
+  !!windowEnd && Number.isFinite(Date.parse(windowEnd)) && beijingDay(Date.parse(windowEnd)) === beijingDay(now);
 const normalizeFloatTotal = (total: number) => Math.abs(total) < 1e-12 ? 0 : Number(total.toPrecision(12));
 export function todayTradeCounts(s: Snapshot | PairSummary, now = Date.now()) {
   if ('today_trade_counts' in s) {
     const counts = s.today_trade_counts;
-    return counts && Number.isFinite(Date.parse(counts.window_end)) && beijingDay(Date.parse(counts.window_end)) === beijingDay(now) ? { buy: counts.buy, sell: counts.sell } : null;
+    return counts && isSameBeijingDay(counts.window_end, now) ? { buy: counts.buy, sell: counts.sell } : null;
   }
   const stats = s.hourly_trade_stats;
-  if (!stats || !Number.isFinite(Date.parse(stats.window_end)) || beijingDay(Date.parse(stats.window_end)) !== beijingDay(now)) return null;
+  if (!stats || !isSameBeijingDay(stats.window_end, now)) return null;
   return stats.buckets.reduce((counts, b) => ({ buy: counts.buy + b.buy_count, sell: counts.sell + b.sell_count }), { buy: 0, sell: 0 });
 }
 export function todayPnlGroups(stats: Overview['today_pnl'], now = Date.now()) {
-  if (!stats || !Number.isFinite(Date.parse(stats.window_end)) || beijingDay(Date.parse(stats.window_end)) !== beijingDay(now)) return null;
+  if (!stats || !isSameBeijingDay(stats.window_end, now)) return null;
   const groups = new Map<string, { mode: Mode; asset: string; total: number; pending: number; available: boolean }>();
   for (const row of stats.groups) {
-    const asset = quoteAsset(row.symbol) || row.symbol, key = `${row.mode}:${asset}`;
+    const { asset, key } = modeAsset(row.mode, row.symbol);
     const group = groups.get(key) ?? { mode: row.mode, asset, total: 0, pending: 0, available: true };
     const pnl = numeric(row.realized_pnl);
     if (pnl === null || !Number.isInteger(row.pending_pnl_count) || row.pending_pnl_count < 0) group.available = false;
@@ -109,8 +127,7 @@ export function todayPnlGroups(stats: Overview['today_pnl'], now = Date.now()) {
 export function groupTradePnl(trades: Trade[]) {
   const groups = new Map<string, { mode: Trade['mode']; asset: string; total: number; available: boolean }>();
   for (const trade of trades) {
-    const asset = quoteAsset(trade.symbol) || trade.symbol;
-    const key = `${trade.mode}:${asset}`;
+    const { asset, key } = modeAsset(trade.mode, trade.symbol);
     const group = groups.get(key) ?? { mode: trade.mode, asset, total: 0, available: true };
     const pnl = numeric(trade.realized_pnl);
     if (!trade.pnl_verified || pnl === null) group.available = false;

@@ -188,6 +188,26 @@ impl GridOrder {
         }
         self.amount_usdc = self.price * self.quantity;
     }
+
+    pub(crate) fn matches_exchange_identity(
+        &self,
+        resp: &crate::exchange::model::BinanceOrderResponse,
+    ) -> bool {
+        self.client_order_id == resp.client_order_id
+            && self.symbol == resp.symbol
+            && resp.side == self.side.as_str()
+            && self.order_id.is_none_or(|id| resp.order_id == id)
+    }
+
+    pub(crate) fn has_compatible_identity(&self, other: &GridOrder) -> bool {
+        self.client_order_id == other.client_order_id
+            && self.symbol == other.symbol
+            && self.side == other.side
+            && self
+                .order_id
+                .zip(other.order_id)
+                .is_none_or(|(a, b)| a == b)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -394,6 +414,22 @@ impl Default for GridStats {
     }
 }
 
+pub(crate) fn is_timestamp_fresh(
+    updated_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+    max_age_secs: i64,
+) -> bool {
+    let age = now.signed_duration_since(updated_at);
+    age >= chrono::Duration::zero() && age < chrono::Duration::seconds(max_age_secs)
+}
+
+pub(crate) fn max_reconciliation_age_secs(sync_interval_secs: u64) -> i64 {
+    sync_interval_secs
+        .saturating_mul(3)
+        .max(30)
+        .min(i64::MAX as u64) as i64
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TickerInfo {
     pub symbol: String,
@@ -412,13 +448,10 @@ impl TickerInfo {
     /// A positive cached mark must be fresh too; do not silently change the
     /// strategy reference to the last price when a previously available mark expires.
     pub fn prices_are_fresh(&self, now: DateTime<Utc>) -> bool {
-        let fresh = |updated_at: DateTime<Utc>| {
-            let age = now.signed_duration_since(updated_at);
-            age >= chrono::Duration::zero() && age < chrono::Duration::seconds(15)
-        };
         self.last_price > Decimal::ZERO
-            && fresh(self.update_time)
-            && (self.mark_price <= Decimal::ZERO || fresh(self.mark_update_time))
+            && is_timestamp_fresh(self.update_time, now, 15)
+            && (self.mark_price <= Decimal::ZERO
+                || is_timestamp_fresh(self.mark_update_time, now, 15))
     }
 
     /// Center the grid on the mark price; use the last price until a mark is available.

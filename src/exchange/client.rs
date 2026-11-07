@@ -1059,7 +1059,10 @@ fn one_way_position(
     positions: Vec<BinancePositionRisk>,
     symbol: &str,
 ) -> Result<Option<BinancePositionRisk>> {
-    Ok(one_way_position_ref(&positions, symbol)?.cloned())
+    one_way_position_ref(&positions, symbol)?;
+    Ok(positions
+        .into_iter()
+        .find(|position| position.symbol.eq_ignore_ascii_case(symbol)))
 }
 
 pub(crate) fn one_way_position_ref<'a>(

@@ -130,6 +130,19 @@ impl BinanceOrderResponse {
                 | "REJECTED"
         )
     }
+
+    pub fn matches_snapshot(&self, other: &Self) -> bool {
+        self.client_order_id == other.client_order_id
+            && self.symbol == other.symbol
+            && self.side == other.side
+            && self.order_id == other.order_id
+            && self.status == other.status
+            && self.executed_qty == other.executed_qty
+            && self.orig_qty == other.orig_qty
+            && self.price == other.price
+            && self.avg_price == other.avg_price
+            && self.update_time == other.update_time
+    }
 }
 
 #[derive(Debug, Deserialize)]

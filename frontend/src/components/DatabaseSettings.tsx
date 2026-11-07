@@ -1,9 +1,8 @@
-import { useContext, useEffect, useRef, useState } from 'react';
-import { App, Button, Card, Checkbox, Space } from 'antd';
+import { useState } from 'react';
+import { Button, Card, Checkbox, Space } from 'antd';
 import { useQueryClient } from '@tanstack/react-query';
 import { post } from '../lib/api';
-import { downloadDatabase, exportSnapshotNotice, exportSnapshotSuccess, refreshClearedQueries, type DatabaseTarget } from '../lib/database';
-import { EditContext } from '../lib/session';
+import { downloadDatabase, exportSnapshotNotice, exportSnapshotSuccess, refreshClearedQueries, useDatabaseAction, type DatabaseTarget } from '../lib/database';
 
 const options: { label: string; value: DatabaseTarget }[] = [
   { label: '成交历史及统计（全部币种、全部模式）', value: 'trade_history' },
@@ -13,22 +12,15 @@ const options: { label: string; value: DatabaseTarget }[] = [
 type ClearResult = { deleted_trades: number; deleted_account_hourly_snapshots: number };
 
 export function DatabaseSettings() {
-  const { modal, message } = App.useApp();
   const client = useQueryClient();
-  const edit = useContext(EditContext);
   const [targets, setTargets] = useState<DatabaseTarget[]>([]);
-  const [busy, setBusy] = useState<'selected' | 'all' | 'clear' | null>(null);
-  const lock = useRef(false);
-  useEffect(() => () => edit.setSaving(false), [edit.setSaving]);
+  const { busy, run: runAction } = useDatabaseAction<'selected' | 'all' | 'clear'>();
 
-  const run = async (action: 'selected' | 'all' | 'clear') => {
-    if (lock.current || (action !== 'all' && targets.length === 0)) return;
-    lock.current = true;
-    try {
-      if (action === 'clear') {
-        const names = options.filter(option => targets.includes(option.value)).map(option => option.label).join('、');
-        if (!await modal.confirm({ title: '清空所选数据库数据？', content: `将永久清空：${names}。此操作无法撤销，建议先导出所选数据。持仓和挂单保留。`, okText: '确认清空', okButtonProps: { danger: true }, cancelText: '取消' })) return;
-        setBusy('clear'); edit.setSaving(true);
+  const run = (action: 'selected' | 'all' | 'clear') => {
+    if (action !== 'all' && targets.length === 0) return;
+    if (action === 'clear') {
+      const names = options.filter(option => targets.includes(option.value)).map(option => option.label).join('、');
+      void runAction('clear', async () => {
         const result = await post<ClearResult>('/api/database/clear', { targets, confirm: true });
         const keys = [
           ...(targets.includes('trade_history') ? [['snapshot'], ['overview']] : []),
@@ -39,14 +31,14 @@ export function DatabaseSettings() {
           ...(targets.includes('trade_history') ? [`${result.deleted_trades} 笔历史成交`] : []),
           ...(targets.includes('account_hourly_snapshots') ? [`${result.deleted_account_hourly_snapshots} 条账户小时快照`] : []),
         ];
-        message.success(`已清空 ${counts.join('、')}`);
-      } else {
-        setBusy(action); edit.setSaving(true);
-        await downloadDatabase('/api/database/export', action === 'selected' ? targets : undefined);
-        message.success(exportSnapshotSuccess(action === 'all' ? '全库' : '所选数据'));
-      }
-    } catch (error) { message.error((error as Error).message); }
-    finally { lock.current = false; setBusy(null); edit.setSaving(false); }
+        return `已清空 ${counts.join('、')}`;
+      }, { title: '清空所选数据库数据？', content: `将永久清空：${names}。此操作无法撤销，建议先导出所选数据。持仓和挂单保留。`, okText: '确认清空', okButtonProps: { danger: true }, cancelText: '取消' });
+      return;
+    }
+    void runAction(action, async () => {
+      await downloadDatabase('/api/database/export', action === 'selected' ? targets : undefined);
+      return exportSnapshotSuccess(action === 'all' ? '全库' : '所选数据');
+    });
   };
 
   return <Card title="数据库操作" className="settings-card">

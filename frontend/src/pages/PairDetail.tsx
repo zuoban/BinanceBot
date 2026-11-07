@@ -53,7 +53,7 @@ export default function PairDetail() {
             <div><span>买入</span><strong>{today?.buy ?? '--'} <small>笔</small></strong></div>
             <div><span>卖出</span><strong>{today?.sell ?? '--'} <small>笔</small></strong></div>
             <div><span>已实现盈亏 / {asset}</span><strong>{todayPnl === null ? '--' : <Pnl value={todayPnl} compact />}</strong>{today && s.hourly_trade_stats!.pending_pnl_count > 0 && <small>盈亏待同步</small>}</div>
-          </div><HourlyChart snapshot={s} /></Card></Col>
+          </div><HourlyChart snapshot={s} now={now} /></Card></Col>
             <Col xs={24} xl={10}><Card title="实时网格深度" extra={<span className="muted">价格 / {asset} · 数量</span>}><DepthChart snapshot={s} /></Card></Col></Row>
           <Card title="仓位与策略明细" className="detail-card"><Descriptions column={{ xs: 1, sm: 2, lg: 3 }} items={[
             { key: 'direction', label: '方向', children: directionLabel(s.grid_config.direction) },
@@ -71,7 +71,7 @@ export default function PairDetail() {
           ]} /></Card>
         </> },
         { key: 'orders', label: `挂单 (${s.active_orders.length})`, children: <Card><OrdersTable key={symbol} orders={s.active_orders} mark={s.ticker.mark_price} /></Card> },
-        { key: 'trades', label: '成交历史', children: <Card title="最近成交" extra={pair ? <HistoryActions key={pair.symbol} symbol={pair.symbol} /> : null}><Alert type="info" title={`此处展示当前模式的最近成交；导出和清理作用于 ${symbol ?? ''} 的全部模式。`} /><TradesTable key={symbol} trades={s.recent_trades} /></Card> },
+        { key: 'trades', label: '成交历史', children: <Card title="最近成交" extra={pair ? <HistoryActions key={pair.symbol} symbol={pair.symbol} /> : null}><Alert type="info" title={`此处展示当前模式的最近成交；导出和清理作用于 ${symbol ?? ''} 的全部模式。`} /><TradesTable key={symbol} trades={s.recent_trades} now={now} /></Card> },
         { key: 'logs', label: '运行日志', children: <Card><LogsTable key={symbol} logs={s.recent_logs} /></Card> },
       ]} />
     </>}

@@ -2,10 +2,11 @@ import { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState }
 import { Link, useNavigate } from 'react-router-dom';
 import { App, Button, Card, Col, Dropdown, Empty, Input, Popover, Row, Select, Space, Statistic } from 'antd';
 import { ArrowDownOutlined, ArrowRightOutlined, ArrowUpOutlined, EyeOutlined, PlusOutlined, SearchOutlined, ThunderboltOutlined } from '@ant-design/icons';
-import { useOverview } from '../lib/queries';
+import * as queries from '../lib/queries';
+import { SNAPSHOT_STALE_MS, useOverview } from '../lib/queries';
 import { useUrlParams } from '../lib/urlState';
 import { AccountsContext } from '../lib/session';
-import { ageText, accountGroups, cnyText, compactNumber as number, compactPrice as price, comparePositionAmount, directionLabel, entryPriceText, groupTradePnl, maxPositionPolicyLabel, modeLabel, numeric, positivePrice, positionAmount, positionGroups, quoteAsset, ratioText, todayPnlGroups, todayTradeCounts, trimFractionZeros } from '../lib/format';
+import { ageText, accountGroups, cnyText, compactNumber as number, compactPrice as price, comparePositionAmount, directionLabel, entryChange, entryPriceText, groupTradePnl, maxPositionPolicyLabel, modeLabel, positivePrice, positionAmount, positionGroups, quoteAsset, ratioText, todayPnlGroups, todayTradeCounts, trimFractionZeros } from '../lib/format';
 import { ErrorNotice, PageTitle, Pnl, SignalButton, SignalChip, StatusTag, type Signal } from '../components/Common';
 import { runBatchControls, useControls } from '../components/Controls';
 import type { Pair } from '../lib/types';
@@ -17,6 +18,7 @@ import { PaperGuide } from '../components/PaperGuide';
 import { TradesTable } from '../components/DataTables';
 
 import { useNow } from '../lib/useNow';
+const staleMs = 'SNAPSHOT_STALE_MS' in queries ? SNAPSHOT_STALE_MS : 10_000;
 const toPair = (e: { snapshot: { symbol: string; status: Pair['status']; grid_config: Pair['grid_config'] }; mode: Pair['mode']; scoped: boolean }): Pair => ({ symbol: e.snapshot.symbol, status: e.snapshot.status, mode: e.mode, grid_config: e.snapshot.grid_config, scoped: e.scoped });
 export default function OverviewPage() {
   const overview = useOverview();
@@ -65,7 +67,7 @@ export default function OverviewPage() {
   const buyTrades = displayedTrades.filter(trade => trade.side === 'BUY').length;
   const sellTrades = displayedTrades.filter(trade => trade.side === 'SELL').length;
   const tradePnlGroups = groupTradePnl(displayedTrades);
-  const stale = !!overview.error || now - overview.dataUpdatedAt > 10_000;
+  const stale = !!overview.error || now - overview.dataUpdatedAt > staleMs;
   const pairs = entries.map(toPair);
   let runningCount = 0, pausedCount = 0, stoppedCount = 0, errorCount = 0, liveCount = 0, allPaper = pairs.length > 0;
   for (const p of pairs) {
@@ -215,11 +217,7 @@ export default function OverviewPage() {
         const pair = toPair(e);
         const quote = quoteAsset(s.symbol), result = controls.results[s.symbol];
         const tradeCounts = tradeCountsBySymbol.get(s.symbol) ?? null;
-        const size = numeric(s.position.size), entry = numeric(s.position.entry_price), mark = numeric(s.ticker.mark_price);
-        const validEntry = size !== null && size !== 0 && entry !== null && entry > 0;
-        const change = validEntry && mark !== null && mark > 0 ? (mark / entry - 1) * 100 : null;
-        const formattedChange = change !== null && Number.isFinite(change) ? number(change, 2) : null;
-        const roundedChange = formattedChange === null ? null : Number(formattedChange.replaceAll(',', ''));
+        const change = entryChange(s.position, s.ticker.mark_price);
         return <Col xs={24} lg={12} xxl={8} key={s.symbol}><Card className={`strategy-card ${s.grid_config.direction === 'SHORT' ? 'strategy-short' : 'strategy-long'}`}>
           <div className="section-line strategy-card-heading"><div className="strategy-identity"><Link className="pair-name" to={`/pairs/${s.symbol}`}>{s.symbol}</Link><span className="strategy-direction" role="img" aria-label={`策略方向：${directionLabel(s.grid_config.direction)}`}>{s.grid_config.direction === 'SHORT' ? <ArrowDownOutlined /> : <ArrowUpOutlined />}{directionLabel(s.grid_config.direction)}</span></div><Space className="strategy-card-actions" size={2}><StatusTag status={s.status} /><Popover trigger="click" placement="bottomRight" title={`${s.symbol} 策略配置`} content={
             <div className="strategy-config-popover">
@@ -243,7 +241,7 @@ export default function OverviewPage() {
             <div><span>持仓金额 / {quote}</span><strong>{number(positionAmount(s))}</strong></div>
             <div><span>持仓数量</span><strong>{price(s.position.size)}</strong></div>
             <div><span>开仓价格</span><strong>{entryPriceText(s.position, true)}</strong></div>
-            <div><span>涨跌幅</span><strong className={roundedChange === null || roundedChange === 0 ? undefined : roundedChange > 0 ? 'positive' : 'negative'}>{roundedChange === null ? '--' : roundedChange === 0 ? '0%' : `${roundedChange > 0 ? '+' : ''}${formattedChange}%`}</strong></div>
+            <div><span>涨跌幅</span><strong className={change.className}>{change.text}</strong></div>
             <div><span>已实现盈亏 / {quote}</span><strong><Pnl value={s.stats.total_realized_pnl} compact /></strong></div>
             <div><span>未实现盈亏 / {quote}</span><strong><Pnl value={s.position.unrealized_pnl} compact /></strong></div>
             <div><span>今日成交</span><strong>{tradeCounts ? tradeCounts.buy + tradeCounts.sell : '--'} <small>笔</small></strong></div>
@@ -262,7 +260,7 @@ export default function OverviewPage() {
         <span>卖出 <strong>{sellTrades}</strong> 笔</span>
         <span>合计盈亏 {tradePnlGroups.size === 0 ? <strong>--</strong> : [...tradePnlGroups.entries()].map(([key, group]) => <span key={key}> {modeLabel[group.mode]} <strong>{group.available && Number.isFinite(group.total) ? <Pnl value={group.total} compact /> : '待核实'}</strong> {group.asset}</span>)}</span>
       </div>
-      <div id="recent-trades-list"><TradesTable overview trades={displayedTrades} /></div>
+      <div id="recent-trades-list"><TradesTable overview trades={displayedTrades} now={now} /></div>
       {recentTrades.length > 5 && <div className="overview-trades-toggle"><Button type="text" aria-expanded={tradesExpanded} aria-controls="recent-trades-list" onClick={() => setTradesExpanded(value => !value)}>{tradesExpanded ? '收起' : '展开最近 20 条'}</Button></div>}
     </Card>
     <OverviewHistory />

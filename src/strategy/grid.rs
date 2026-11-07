@@ -4,7 +4,7 @@ use crate::exchange::market_cache::MarketCache;
 use crate::exchange::position_cache::PositionCache;
 use crate::exchange::{BinanceOrderResponse, BinanceUserTrade};
 use crate::server::state::AppState;
-use crate::strategy::precision::{SymbolRules, SymbolRulesError};
+use crate::strategy::precision::SymbolRules;
 use crate::types::*;
 use anyhow::{anyhow, Result};
 use chrono::Utc;
@@ -912,10 +912,8 @@ impl GridTradingEngine {
     }
 
     fn mark_price_is_fresh(ticker: &TickerInfo) -> bool {
-        let age = Utc::now().signed_duration_since(ticker.mark_update_time);
         ticker.mark_price > Decimal::ZERO
-            && age >= chrono::Duration::zero()
-            && age < chrono::Duration::seconds(15)
+            && is_timestamp_fresh(ticker.mark_update_time, Utc::now(), 15)
     }
 
     fn position_mark_is_fresh(
@@ -923,17 +921,11 @@ impl GridTradingEngine {
         config: &crate::config::AppConfig,
         position: &PositionInfo,
     ) -> bool {
-        let max_age = config
-            .exchange
-            .sync_interval_secs
-            .saturating_mul(3)
-            .max(30)
-            .min(i64::MAX as u64) as i64;
+        let max_age = max_reconciliation_age_secs(config.exchange.sync_interval_secs);
         position.mark_price > Decimal::ZERO
-            && position.update_time.is_some_and(|time| {
-                let age = Utc::now().signed_duration_since(time);
-                age >= chrono::Duration::zero() && age < chrono::Duration::seconds(max_age)
-            })
+            && position
+                .update_time
+                .is_some_and(|time| is_timestamp_fresh(time, Utc::now(), max_age))
     }
 
     fn position_valuation_price(
@@ -1170,6 +1162,29 @@ impl GridTradingEngine {
             .await
     }
 
+    pub(super) async fn load_pair_intent_map(
+        &self,
+        symbol: &str,
+        mode: TradingMode,
+    ) -> Result<HashMap<String, GridOrder>> {
+        Ok(self
+            .load_pair_intents(symbol, mode)
+            .await?
+            .into_iter()
+            .map(|intent| (intent.client_order_id.clone(), intent))
+            .collect())
+    }
+
+    pub(super) async fn insert_restored_managed_orders(&self, restored: Vec<GridOrder>) {
+        let mut active = self.state.active_orders.write().await;
+        for order in restored
+            .into_iter()
+            .filter(|order| is_grid_order(&order.client_order_id))
+        {
+            active.entry(order.client_order_id.clone()).or_insert(order);
+        }
+    }
+
     async fn save_managed_order(&self, order: &GridOrder) -> Result<()> {
         let order = order.clone();
         self.state
@@ -1304,13 +1319,7 @@ impl GridTradingEngine {
         // subsequent initial pause must reconcile these orders before clearing them.
         if !config.exchange.is_paper() {
             let restored = self.load_managed_orders(&symbol).await?;
-            let mut active = self.state.active_orders.write().await;
-            for order in restored
-                .into_iter()
-                .filter(|order| is_grid_order(&order.client_order_id))
-            {
-                active.insert(order.client_order_id.clone(), order);
-            }
+            self.insert_restored_managed_orders(restored).await;
         }
 
         // Synchronize server time
@@ -1397,12 +1406,8 @@ impl GridTradingEngine {
         symbol: &str,
     ) -> Result<SymbolRules> {
         let info = client.get_exchange_info(Some(symbol)).await?;
-        SymbolRules::from_trading_exchange_info(&info, symbol).map_err(|error| match error {
-            SymbolRulesError::NotFound | SymbolRulesError::MissingFilters => {
-                anyhow!("Missing Binance exchange rules for {}", symbol)
-            }
-            SymbolRulesError::NotTrading => anyhow!("Symbol {} is not trading", symbol),
-        })
+        SymbolRules::from_trading_exchange_info(&info, symbol)
+            .map_err(|error| error.into_chinese_error(symbol))
     }
 
     async fn load_exchange_rules(&mut self, symbol: &str) -> Result<()> {
@@ -1759,14 +1764,7 @@ impl GridTradingEngine {
         }
         if !config.exchange.is_paper() {
             let restored = self.load_managed_orders(&config.exchange.symbol).await?;
-            let mut active = self.state.active_orders.write().await;
-            for order in restored
-                .into_iter()
-                .filter(|order| is_grid_order(&order.client_order_id))
-            {
-                active.entry(order.client_order_id.clone()).or_insert(order);
-            }
-            drop(active);
+            self.insert_restored_managed_orders(restored).await;
             // An interrupted initialization may have committed a fill before
             // its runtime statistics were updated. Reload before recording
             // additional cancellation-time executions.
@@ -2061,10 +2059,7 @@ impl GridTradingEngine {
         let (last_updated, mark_updated) = {
             let mut ticker = self.state.ticker.write().await;
             let now = Utc::now();
-            let fresh = |time| {
-                let age = now.signed_duration_since(time);
-                age >= chrono::Duration::zero() && age < chrono::Duration::seconds(15)
-            };
+            let fresh = |time| is_timestamp_fresh(time, now, 15);
             let last_updated = ticker_update.last_price > Decimal::ZERO
                 && fresh(ticker_update.update_time)
                 && ticker_update.update_time >= ticker.update_time;
@@ -2355,11 +2350,13 @@ impl GridTradingEngine {
             return;
         }
         let previous = self.state.ticker.read().await.clone();
-        let age = Utc::now().signed_duration_since(previous.mark_update_time);
         if previous.symbol == symbol
             && previous.mark_price > Decimal::ZERO
-            && age >= chrono::Duration::zero()
-            && age < chrono::Duration::seconds(MARKET_FALLBACK_AFTER_SECS)
+            && is_timestamp_fresh(
+                previous.mark_update_time,
+                Utc::now(),
+                MARKET_FALLBACK_AFTER_SECS,
+            )
         {
             self.mark_retry.reset();
             return;
@@ -2399,10 +2396,9 @@ impl GridTradingEngine {
             Ok((price, requested_at)) if price > Decimal::ZERO => {
                 self.mark_retry.reset();
                 let previous = completion.previous;
-                let age = Utc::now().signed_duration_since(requested_at);
+                let now = Utc::now();
                 let mut ticker = self.state.ticker.write().await;
-                if age < chrono::Duration::zero()
-                    || age >= chrono::Duration::seconds(15)
+                if !is_timestamp_fresh(requested_at, now, 15)
                     || ticker.symbol != previous.symbol
                     || ticker.mark_update_time != previous.mark_update_time
                     || ticker.mark_price != previous.mark_price
@@ -2446,10 +2442,8 @@ impl GridTradingEngine {
             return;
         }
         let ticker = self.state.ticker.read().await.clone();
-        let age = Utc::now() - ticker.update_time;
         if ticker.symbol == symbol
-            && age >= chrono::Duration::zero()
-            && age < chrono::Duration::seconds(MARKET_FALLBACK_AFTER_SECS)
+            && is_timestamp_fresh(ticker.update_time, Utc::now(), MARKET_FALLBACK_AFTER_SECS)
         {
             self.ticker_retry.reset();
             return;
@@ -2574,14 +2568,16 @@ impl GridTradingEngine {
 
     // Compatibility recovery only: adopted exchange orders are reconciled, but
     // an absent legacy counter-order is retired instead of creating a new pair.
-    fn pair_submission_decision(&self) -> PairPlacementDecision {
-        if self
-            .last_account_sync
-            .is_none_or(|at| at.elapsed() >= Duration::from_secs(10))
-            || self
+    pub(super) fn sync_timestamps_fresh(&self) -> bool {
+        self.last_account_sync
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(10))
+            && self
                 .last_orders_sync
-                .is_none_or(|at| at.elapsed() >= Duration::from_secs(10))
-        {
+                .is_some_and(|at| at.elapsed() < Duration::from_secs(10))
+    }
+
+    fn pair_submission_decision(&self) -> PairPlacementDecision {
+        if !self.sync_timestamps_fresh() {
             return PairPlacementDecision::Wait;
         }
         PairPlacementDecision::Skip("paired replenishment retired; sliding window owns new orders")
@@ -2764,12 +2760,7 @@ impl GridTradingEngine {
                     conflict.as_ref().unwrap_or(&intent),
                 ]
                 .into_iter()
-                .find(|expected| {
-                    found.client_order_id != expected.client_order_id
-                        || found.symbol != expected.symbol
-                        || found.side != expected.side.as_str()
-                        || expected.order_id.is_some_and(|id| found.order_id != id)
-                });
+                .find(|expected| !expected.matches_exchange_identity(&found));
                 if let Some(expected) = mismatch {
                     error!(
                         "Pair order {} has mismatched exchange identity",
@@ -3353,13 +3344,7 @@ impl GridTradingEngine {
     }
 
     fn live_reconciliation_ready(&self) -> bool {
-        !self.reconciliation_blocked
-            && self
-                .last_account_sync
-                .is_some_and(|at| at.elapsed() < Duration::from_secs(10))
-            && self
-                .last_orders_sync
-                .is_some_and(|at| at.elapsed() < Duration::from_secs(10))
+        !self.reconciliation_blocked && self.sync_timestamps_fresh()
     }
 
     async fn has_pending_live_pair_intents(&mut self, symbol: &str) -> bool {
@@ -4151,13 +4136,7 @@ impl GridTradingEngine {
                 }
             };
             if let Ok(exchange_order) = &exchange_order {
-                if exchange_order.client_order_id != order.client_order_id
-                    || exchange_order.symbol != order.symbol
-                    || exchange_order.side != order.side.as_str()
-                    || order
-                        .order_id
-                        .is_some_and(|id| exchange_order.order_id != id)
-                {
+                if !order.matches_exchange_identity(exchange_order) {
                     self.track_identity_conflict(order, exchange_order);
                     self.last_orders_sync = None;
                     self.report_reconciliation_state(true).await;
@@ -4221,18 +4200,14 @@ impl GridTradingEngine {
         if ids.is_empty() {
             return true;
         }
-        let scope = symbol.to_owned();
-        let records = self
-            .state
-            .db
-            .run_blocking(move |db| {
-                Ok((
-                    db.load_managed_orders(&scope)?,
-                    db.load_pair_intents(&scope, mode)?,
-                    db.load_remainder_plan(&scope, mode)?,
-                ))
-            })
-            .await;
+        let records = async {
+            Ok::<_, anyhow::Error>((
+                self.load_managed_orders(symbol).await?,
+                self.load_pair_intent_map(symbol, mode).await?,
+                self.load_remainder_plan().await?,
+            ))
+        }
+        .await;
         let (managed, intents, remainder) = match records {
             Ok(records) => records,
             Err(error) => {
@@ -4245,10 +4220,6 @@ impl GridTradingEngine {
                 return false;
             }
         };
-        let intents: HashMap<_, _> = intents
-            .into_iter()
-            .map(|order| (order.client_order_id.clone(), order))
-            .collect();
         let mut conflict = false;
         {
             let state = self.state.clone();
@@ -4272,15 +4243,10 @@ impl GridTradingEngine {
                     continue;
                 };
                 let expected = self.order_identity_conflicts.get(&key).cloned();
-                let compatible = |a: &GridOrder, b: &GridOrder| {
-                    a.client_order_id == b.client_order_id
-                        && a.symbol == b.symbol
-                        && a.side == b.side
-                        && a.order_id.zip(b.order_id).is_none_or(|(a, b)| a == b)
-                };
-                let identities_agree = compatible(durable, &current)
+                let identities_agree = durable.has_compatible_identity(&current)
                     && expected.as_ref().is_none_or(|expected| {
-                        compatible(durable, expected) && compatible(&current, expected)
+                        durable.has_compatible_identity(expected)
+                            && current.has_compatible_identity(expected)
                     });
                 let mut restored = durable.clone();
                 if identities_agree {
@@ -4351,19 +4317,13 @@ impl GridTradingEngine {
         let recovery_sources = if paper {
             Some((HashMap::new(), None))
         } else {
-            let scope = symbol.clone();
-            match self
-                .state
-                .db
-                .run_blocking(move |db| {
-                    let intents = db
-                        .load_pair_intents(&scope, mode)?
-                        .into_iter()
-                        .map(|order| (order.client_order_id.clone(), order))
-                        .collect::<HashMap<_, _>>();
-                    Ok((intents, db.load_remainder_plan(&scope, mode)?))
-                })
-                .await
+            match async {
+                Ok::<_, anyhow::Error>((
+                    self.load_pair_intent_map(&symbol, mode).await?,
+                    self.load_remainder_plan().await?,
+                ))
+            }
+            .await
             {
                 Ok(sources) => Some(sources),
                 Err(error) => {
@@ -4405,15 +4365,7 @@ impl GridTradingEngine {
                 .iter()
                 .map(|order| (order.client_order_id.clone(), order.clone()))
                 .collect();
-            {
-                let mut active = self.state.active_orders.write().await;
-                for order in restored
-                    .into_iter()
-                    .filter(|order| is_grid_order(&order.client_order_id))
-                {
-                    active.entry(order.client_order_id.clone()).or_insert(order);
-                }
-            }
+            self.insert_restored_managed_orders(restored).await;
             let live_orders = match self.client.get_open_orders(&symbol).await {
                 Ok(orders) => orders,
                 Err(e) => {
@@ -4495,30 +4447,20 @@ impl GridTradingEngine {
                                 });
                             if let Some(current) = &current {
                                 if retained.order_id.is_none()
-                                    && retained.symbol == current.symbol
-                                    && retained.side == current.side
+                                    && retained.has_compatible_identity(current)
                                 {
                                     retained.order_id = current.order_id;
                                 }
                             }
                             let identity_matches = order.symbol == symbol
                                 && matches!(order.side.as_str(), "BUY" | "SELL")
-                                && retained.symbol == order.symbol
-                                && retained.side.as_str() == order.side
-                                && retained.order_id.is_none_or(|id| id == order.order_id);
-                            let active_matches = current.as_ref().is_none_or(|current| {
-                                current.symbol == retained.symbol
-                                    && current.side == retained.side
-                                    && current
-                                        .order_id
-                                        .zip(retained.order_id)
-                                        .is_none_or(|(a, b)| a == b)
-                            });
-                            let active_list_matches = current.as_ref().is_none_or(|current| {
-                                current.symbol == order.symbol
-                                    && current.side.as_str() == order.side
-                                    && current.order_id.is_none_or(|id| id == order.order_id)
-                            });
+                                && retained.matches_exchange_identity(&order);
+                            let active_matches = current
+                                .as_ref()
+                                .is_none_or(|current| current.has_compatible_identity(&retained));
+                            let active_list_matches = current
+                                .as_ref()
+                                .is_none_or(|current| current.matches_exchange_identity(&order));
                             if identity_matches
                                 && active_matches
                                 && active_list_matches
@@ -4548,10 +4490,7 @@ impl GridTradingEngine {
                                     self.track_identity_conflict(&retained, found);
                                 }
                             }
-                            if retained.symbol != order.symbol
-                                || retained.side.as_str() != order.side
-                                || retained.order_id.is_some_and(|id| id != order.order_id)
-                            {
+                            if !retained.matches_exchange_identity(&order) {
                                 self.track_identity_conflict(&retained, &order);
                             }
                             if let Some(observed) = previous.as_ref().and_then(known_order_identity)

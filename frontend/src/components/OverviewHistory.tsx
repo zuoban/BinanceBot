@@ -1,4 +1,4 @@
-import { Suspense, lazy, useState } from 'react';
+import { Suspense, lazy, useMemo, useState } from 'react';
 import { Card, Select } from 'antd';
 import { useOverviewHistory } from '../lib/queries';
 import { compactNumber, modeLabel, numeric } from '../lib/format';
@@ -13,43 +13,52 @@ const isUnidentified = (account: HistoryAccount) => account.mode !== 'PAPER' && 
 export function OverviewHistory() {
   const history = useOverviewHistory();
   const [selected, setSelected] = useState<{ current: string; key: string }>();
-  const snapshots = history.data?.snapshots ?? [];
-  const currentAccounts = history.data?.current_accounts ?? [];
-  const currentKeys = new Set(currentAccounts.map(accountKey));
-  const current = JSON.stringify([...currentKeys].sort());
-  const groups = new Map<string, HistoryAccount>();
-  for (const account of currentAccounts) groups.set(accountKey(account), account);
-  for (const hour of snapshots) for (const group of hour.groups) groups.set(accountKey(group), group);
-  const categoryCounts = new Map<string, number>();
-  const entries = [...groups.entries()].map(([value, group]) => {
-    const category = isUnidentified(group) ? '身份未知' : currentKeys.has(value) ? '当前账户' : '历史账户';
-    const numberKey = `${modeLabel[group.mode]} · ${group.asset} · ${category}`;
-    categoryCounts.set(numberKey, (categoryCounts.get(numberKey) ?? 0) + 1);
-    return { value, numberKey };
-  });
-  const historicalNumbers = new Map<string, number>();
-  const options = entries.map(({ value, numberKey }) => {
-    const count = (historicalNumbers.get(numberKey) ?? 0) + 1;
-    historicalNumbers.set(numberKey, count);
-    const peers = categoryCounts.get(numberKey) ?? 1;
-    return { value, label: `${numberKey}${peers > 1 ? ` ${count}` : ''}` };
-  });
-  const key = selected?.current === current && groups.has(selected.key) ? selected.key : currentAccounts[0] ? accountKey(currentAccounts[0]) : options[0]?.value;
+  const snapshots = history.data?.snapshots;
+  const currentAccounts = history.data?.current_accounts;
+  const { current, groups, options } = useMemo(() => {
+    const snapshotList = snapshots ?? [];
+    const accountList = currentAccounts ?? [];
+    const currentKeys = new Set(accountList.map(accountKey));
+    const current = JSON.stringify([...currentKeys].sort());
+    const groups = new Map<string, HistoryAccount>();
+    for (const account of accountList) groups.set(accountKey(account), account);
+    for (const hour of snapshotList) for (const group of hour.groups) groups.set(accountKey(group), group);
+    const categoryCounts = new Map<string, number>();
+    const entries = [...groups.entries()].map(([value, group]) => {
+      const category = isUnidentified(group) ? '身份未知' : currentKeys.has(value) ? '当前账户' : '历史账户';
+      const numberKey = `${modeLabel[group.mode]} · ${group.asset} · ${category}`;
+      categoryCounts.set(numberKey, (categoryCounts.get(numberKey) ?? 0) + 1);
+      return { value, numberKey };
+    });
+    const historicalNumbers = new Map<string, number>();
+    const options = entries.map(({ value, numberKey }) => {
+      const count = (historicalNumbers.get(numberKey) ?? 0) + 1;
+      historicalNumbers.set(numberKey, count);
+      const peers = categoryCounts.get(numberKey) ?? 1;
+      return { value, label: `${numberKey}${peers > 1 ? ` ${count}` : ''}` };
+    });
+    return { current, groups, options };
+  }, [snapshots, currentAccounts]);
+  const key = selected?.current === current && groups.has(selected.key) ? selected.key : currentAccounts?.[0] ? accountKey(currentAccounts[0]) : options[0]?.value;
   const account = key ? groups.get(key) : undefined;
   const asset = account?.asset;
   const discrete = account ? isUnidentified(account) : false;
   const lastHour = Math.floor(Date.now() / 3600_000) * 3600;
-  const byHour = new Map(snapshots.map(point => [point.hour, point]));
-  const pointAt = (hour: number) => {
-    const group = byHour.get(hour)?.groups.find(g => accountKey(g) === key);
-    return { hour, equity: numeric(group?.equity), recorded: !!group };
-  };
-  const data = Array.from({ length: 24 }, (_, i) => pointAt(lastHour - (23 - i) * 3600));
-  const midnight = Math.floor((lastHour + 8 * 3600) / (24 * 3600)) * 24 * 3600 - 8 * 3600;
-  const dailyData = Array.from({ length: 7 }, (_, i) => pointAt(midnight - (6 - i) * 24 * 3600));
-  const latestDay = [...dailyData].reverse().find(point => point.recorded);
-  const latest = [...data].reverse().find(point => point.recorded);
-  const ticks = data.filter(point => point.hour % (4 * 3600) === 0).map(point => point.hour);
+  const { data, dailyData, latestDay, latest, ticks, dailyTicks } = useMemo(() => {
+    const byHour = new Map((snapshots ?? []).map(point => [point.hour, point]));
+    const pointAt = (hour: number) => {
+      const group = byHour.get(hour)?.groups.find(g => accountKey(g) === key);
+      return { hour, equity: numeric(group?.equity), recorded: !!group };
+    };
+    const data = Array.from({ length: 24 }, (_, i) => pointAt(lastHour - (23 - i) * 3600));
+    const midnight = Math.floor((lastHour + 8 * 3600) / (24 * 3600)) * 24 * 3600 - 8 * 3600;
+    const dailyData = Array.from({ length: 7 }, (_, i) => pointAt(midnight - (6 - i) * 24 * 3600));
+    const latestDay = [...dailyData].reverse().find(point => point.recorded);
+    const latest = [...data].reverse().find(point => point.recorded);
+    const ticks = data.filter(point => point.hour % (4 * 3600) === 0).map(point => point.hour);
+    const dailyTicks = dailyData.map(point => point.hour);
+    return { data, dailyData, latestDay, latest, ticks, dailyTicks };
+  }, [snapshots, key, lastHour]);
   const renderPlot = (points: typeof data, plotTicks: number[], label: string, ariaLabel: string, emptyText: string, daily = false) =>
     points.some(point => point.equity !== null) ? <div className="history-plot chart" role="group" aria-label={ariaLabel}>
       <LoadErrorBoundary label={label}>
@@ -66,7 +75,7 @@ export function OverviewHistory() {
       {renderPlot(data, ticks, '24 小时权益图', `近24小时${asset ?? ''}账户权益折线图，最近记录 ${latest ? `${formatDate(latest.hour)}，权益 ${compactNumber(latest.equity)}` : '暂无'}`, '近 24 小时暂无可用的权益快照')}
       <div className="history-daily">
         <div className="history-caption"><div className="history-caption-main"><h3>近 7 天</h3><span>单位 {asset} · 每日 00:00 · 北京时间</span></div><span>最近零点记录 {latestDay ? formatDate(latestDay.hour) : '--'}</span></div>
-        {renderPlot(dailyData, dailyData.map(point => point.hour), '7 天权益图', `近7天${asset ?? ''}账户权益折线图，每日北京时间零点，最近记录 ${latestDay ? `${formatDate(latestDay.hour)}，权益 ${compactNumber(latestDay.equity)}` : '暂无'}`, '近 7 天暂无可用的零点权益快照', true)}
+        {renderPlot(dailyData, dailyTicks, '7 天权益图', `近7天${asset ?? ''}账户权益折线图，每日北京时间零点，最近记录 ${latestDay ? `${formatDate(latestDay.hour)}，权益 ${compactNumber(latestDay.equity)}` : '暂无'}`, '近 7 天暂无可用的零点权益快照', true)}
       </div>
 
     </>}

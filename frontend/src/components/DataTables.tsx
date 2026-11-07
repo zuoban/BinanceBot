@@ -43,7 +43,7 @@ export function OrdersTable({ orders, mark }: { orders: Order[]; mark?: string }
     ['方向', '价格', '数量', '金额', '用途', '状态', '时间（北京）'],
     rows.map(o => [o.side === 'BUY' ? '买入' : '卖出', o.price, o.quantity, o.amount_usdc, orderPurpose(o), o.status, time(o.created_at)]),
   ));
-  const columns: ColumnsType<Order> = [
+  const columns = useMemo<ColumnsType<Order>>(() => [
     { title: '方向', dataIndex: 'side', render: side, width: 90, fixed: 'left' },
     { title: '价格', align: 'right', className: 'table-numeric', dataIndex: 'price', render: (v: string) => <Copyable value={v}>{price(v)}</Copyable>, sorter: (a, b) => Number(a.price) - Number(b.price) },
     { title: '距标记价格', align: 'right', className: 'table-numeric', render: (_, o) => priceDiffPercent(o.price, mark) ?? '--' },
@@ -52,7 +52,7 @@ export function OrdersTable({ orders, mark }: { orders: Order[]; mark?: string }
     { title: '用途', render: (_, o) => orderPurpose(o) },
     { title: '状态', dataIndex: 'status' },
     { title: '时间（北京）', dataIndex: 'created_at', render: time, width: 185 },
-  ];
+  ], [mark]);
   return <><TableFilterBar label="按方向筛选" value={filter} onChange={setFilter} options={sideOptions} shown={rows.length} total={orders.length} onExport={exportRows} /><div className="table-desktop"><p className="table-scroll-hint">左右滑动查看完整挂单信息</p><Table<Order> rowKey="client_order_id" columns={columns} dataSource={rows} size="small" scroll={{ x: 900 }}
     pagination={{ pageSize: 15, showSizeChanger: false, hideOnSinglePage: true }}
     expandable={{ rowExpandable: o => !!o.merge_sources?.length, expandedRowRender: o => <ul>{o.merge_sources.map(source => <li key={source.client_order_id}>{source.client_order_id} · {price(source.price)} × {price(source.quantity)}</li>)}</ul> }} /></div>
@@ -65,10 +65,11 @@ export function OrdersTable({ orders, mark }: { orders: Order[]; mark?: string }
       </dl>
     </li>)}</ul> : <div className="trade-list-empty">暂无挂单</div>}</div></>;
 }
-export function TradesTable({ trades: allTrades, overview = false }: { trades: Trade[]; overview?: boolean }) {
+export function TradesTable({ trades: allTrades, overview = false, now: currentNow }: { trades: Trade[]; overview?: boolean; now?: number }) {
   const [filter, setFilter] = useState<SideFilter>('ALL');
   const trades = useMemo(() => overview || filter === 'ALL' ? allTrades : allTrades.filter(trade => trade.side === filter), [allTrades, filter, overview]);
-  const now = useNow(1000, trades.length > 0);
+  const fallbackNow = useNow(1000, currentNow === undefined && trades.length > 0);
+  const now = currentNow ?? fallbackNow;
   const exportRows = () => downloadCsv(`trades-${beijingDay()}.csv`, toCsv(
     ['时间（北京）', '方向', '成交价格', '数量', '金额', '已实现盈亏', '手续费', '成交方式', '备注'],
     trades.map(t => [time(t.timestamp), t.side === 'BUY' ? '买入' : '卖出', t.price, t.quantity, t.amount_usdc, t.pnl_verified ? t.realized_pnl : '待同步', t.pnl_verified ? t.commission : '待同步', t.pnl_verified ? (t.is_maker ? 'Maker' : 'Taker') : '待同步', t.note]),
@@ -87,8 +88,8 @@ export function TradesTable({ trades: allTrades, overview = false }: { trades: T
   ];
   return <div>
     {!overview && <TableFilterBar label="按方向筛选" value={filter} onChange={setFilter} options={sideOptions} shown={trades.length} total={allTrades.length} onExport={exportRows} />}
-    <p className={overview ? 'overview-trades-scroll-hint' : 'table-scroll-hint'}>左右滑动查看完整成交信息</p>
-    <div className={overview ? 'overview-trades-desktop' : 'table-desktop'}><Table<Trade> rowKey="trade_id" columns={columns} dataSource={trades} size="small" scroll={{ x: 1000 }} pagination={overview ? false : { pageSize: 15, showSizeChanger: false, hideOnSinglePage: true }} /></div>
+    {overview && <p className="overview-trades-scroll-hint">左右滑动查看完整成交信息</p>}
+    <div className={overview ? 'overview-trades-desktop' : 'table-desktop'}>{!overview && <p className="table-scroll-hint">左右滑动查看完整成交信息</p>}<Table<Trade> rowKey="trade_id" columns={columns} dataSource={trades} size="small" scroll={{ x: 1000 }} pagination={overview ? false : { pageSize: 15, showSizeChanger: false, hideOnSinglePage: true }} /></div>
     <div className={overview ? 'overview-trades-mobile' : 'table-mobile'}>{trades.length ? <ul className="trade-list" aria-label="成交列表">{(overview ? trades : trades.slice(0, 50)).map(trade => <li className="trade-list-item" key={trade.trade_id}>
       <div className="trade-list-heading">{overview ? <><strong>{trade.symbol}</strong>{side(trade.side)}</> : <>{side(trade.side)}<strong><Copyable value={trade.price}>{price(trade.price)}</Copyable></strong></>}<RelativeTime value={trade.timestamp} now={now} className="trade-list-time" /></div>
       <dl>
@@ -102,6 +103,11 @@ export function TradesTable({ trades: allTrades, overview = false }: { trades: T
 const levels = ['ALL', 'ERROR', 'WARN', 'INFO', 'DEBUG'] as const;
 type LevelFilter = typeof levels[number];
 const levelOptions: { value: LevelFilter; label: string }[] = levels.map(value => ({ value, label: value === 'ALL' ? '全部' : value }));
+const logColumns: ColumnsType<Log> = [
+  { title: '时间（北京）', dataIndex: 'timestamp', render: time, width: 185 },
+  { title: '级别', dataIndex: 'level', width: 90, render: v => <span className={`log-level log-level-${String(v).toLowerCase()}`}>{v}</span> },
+  { title: '内容', dataIndex: 'message', className: 'log-message' },
+];
 export function LogsTable({ logs }: { logs: Log[] }) {
   const [level, setLevel] = useState<LevelFilter>('ALL');
   const rows = useMemo(() => level === 'ALL' ? logs : logs.filter(log => log.level === level), [logs, level]);
@@ -109,11 +115,7 @@ export function LogsTable({ logs }: { logs: Log[] }) {
   return <>
     <TableFilterBar label="按级别筛选" value={level} onChange={setLevel} options={levelOptions} shown={rows.length} total={logs.length} onExport={exportRows} />
     <div className="table-desktop"><p className="table-scroll-hint">左右滑动查看完整日志</p>
-    <Table<Log> rowKey={l => `${l.timestamp}-${l.level}-${l.message}`} dataSource={rows} size="small" scroll={{ x: 600 }} pagination={{ pageSize: 30, showSizeChanger: false }} columns={[
-      { title: '时间（北京）', dataIndex: 'timestamp', render: time, width: 185 },
-      { title: '级别', dataIndex: 'level', width: 90, render: v => <span className={`log-level log-level-${String(v).toLowerCase()}`}>{v}</span> },
-      { title: '内容', dataIndex: 'message', className: 'log-message' },
-    ]} /></div>
+    <Table<Log> rowKey={l => `${l.timestamp}-${l.level}-${l.message}`} dataSource={rows} size="small" scroll={{ x: 600 }} pagination={{ pageSize: 30, showSizeChanger: false }} columns={logColumns} /></div>
     <div className="table-mobile">{rows.length ? <ul className="trade-list" aria-label="日志列表">{rows.slice(0, 100).map((l, i) => <li className="trade-list-item" key={`${l.timestamp}-${l.level}-${i}-${l.message}`}>
       <div className="trade-list-heading"><span className={`log-level log-level-${l.level.toLowerCase()}`}>{l.level}</span><span className="trade-list-time">{time(l.timestamp)}</span></div>
       <p className="log-message">{l.message}</p>

@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, Outlet, useBlocker, useLocation, useNavigate } from 'react-router-dom';
 import { App, Button, Drawer, Modal } from 'antd';
 import { AppstoreOutlined, ArrowDownOutlined, ArrowUpOutlined, BulbOutlined, EditOutlined, LineChartOutlined, LogoutOutlined, MenuOutlined, PauseOutlined, PlayCircleOutlined, PlusOutlined, QuestionCircleOutlined, ReloadOutlined, SearchOutlined, SettingOutlined, StopOutlined } from '@ant-design/icons';
-import { useLiveAccounts, usePairs } from '../lib/queries';
+import * as queries from '../lib/queries';
+import { SNAPSHOT_STALE_MS, useLiveAccounts, usePairs } from '../lib/queries';
 import { AccountsContext, EditContext, useSession } from '../lib/session';
 import { accountGroups, compactNumber, ratioText, statusLabel } from '../lib/format';
 import type { Mode, Pair } from '../lib/types';
@@ -13,7 +14,7 @@ import { useTheme, type ThemePreference } from '../lib/theme';
 import { defaultTitle, useDocumentTitle } from '../lib/documentTitle';
 import { ModeTag } from './Common';
 
-
+const staleMs = 'SNAPSHOT_STALE_MS' in queries ? SNAPSHOT_STALE_MS : 10_000;
 function routeSymbol(pathname: string) {
   const symbol = pathname.match(/^\/pairs\/([^/]+)/)?.[1];
   return symbol && symbol !== 'new' ? symbol : undefined;
@@ -89,7 +90,7 @@ export default function Shell() {
       <button type="button" className={`bottombar-item${page === 'pair' ? ' bottombar-item-active' : ''}`} aria-label="切换或查看交易对" aria-expanded={drawer} onClick={() => setDrawer(open => !open)}><LineChartOutlined aria-hidden="true" /><span>交易对</span></button>
       <Link to="/settings" className={`bottombar-item${page === 'settings' ? ' bottombar-item-active' : ''}`} aria-current={page === 'settings' ? 'page' : undefined}><SettingOutlined aria-hidden="true" /><span>设置</span></Link>
     </nav>
-    <PaletteHost open={palette} setOpen={setPalette} pairs={currentPairs} stale={!!pairs.error || !!liveAccounts.error || liveAccounts.stale || !!pairModeChanged || liveAccounts.now - pairs.dataUpdatedAt > 10_000} authEnabled={authEnabled} saving={saving} onLogout={logOut} />
+    <PaletteHost open={palette} setOpen={setPalette} pairs={currentPairs} stale={!!pairs.error || !!liveAccounts.error || liveAccounts.stale || !!pairModeChanged || liveAccounts.now - pairs.dataUpdatedAt > staleMs} authEnabled={authEnabled} saving={saving} onLogout={logOut} />
   </div></ControlProvider></AccountsContext.Provider></EditContext.Provider>;
 }
 

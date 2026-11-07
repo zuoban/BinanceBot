@@ -163,7 +163,11 @@ impl SnapshotCache {
 }
 
 impl AppState {
-    async fn read_position_and_account(&self, config: &AppConfig) -> (PositionInfo, AccountInfo) {
+    async fn with_position_and_account<R>(
+        &self,
+        config: &AppConfig,
+        project: impl FnOnce(&PositionInfo) -> R,
+    ) -> (R, AccountInfo) {
         // Valuation updates take position -> account without the commit lock.
         // Keep both reads together until the shared valuation is published.
         let position = self.position.read().await;
@@ -174,7 +178,7 @@ impl AppState {
             &position,
             &local_account,
         );
-        (position.clone(), account)
+        (project(&position), account)
     }
 
     pub(crate) async fn account_snapshot(&self) -> AccountSnapshot {
@@ -191,11 +195,12 @@ impl AppState {
                 mark_update_time: ticker.mark_update_time,
             }
         };
-        let (position, account) = self.read_position_and_account(&config).await;
-        let position = AccountPosition {
-            size: position.size,
-            unrealized_pnl: position.unrealized_pnl,
-        };
+        let (position, account) = self
+            .with_position_and_account(&config, |position| AccountPosition {
+                size: position.size,
+                unrealized_pnl: position.unrealized_pnl,
+            })
+            .await;
         let account_cny_rate = self.cny_rates.get(&account.asset).await;
         AccountSnapshot {
             mode: config.exchange.trading_mode(),
@@ -248,13 +253,14 @@ impl AppState {
                 mark_update_time: ticker.mark_update_time,
             }
         };
-        let (position, account) = self.read_position_and_account(&config).await;
-        let position = SummaryPosition {
-            size: position.size,
-            entry_price: position.entry_price,
-            mark_price: position.mark_price,
-            unrealized_pnl: position.unrealized_pnl,
-        };
+        let (position, account) = self
+            .with_position_and_account(&config, |position| SummaryPosition {
+                size: position.size,
+                entry_price: position.entry_price,
+                mark_price: position.mark_price,
+                unrealized_pnl: position.unrealized_pnl,
+            })
+            .await;
         let account_cny_rate = self.cny_rates.get(&account.asset).await;
         let orders = self.active_orders.read().await;
         let active_buy_orders = orders
@@ -322,7 +328,9 @@ impl AppState {
         let status = *self.status.read().await;
         let ticker = self.ticker.read().await.clone();
         let stats = self.stats.read().await.clone();
-        let (position, account) = self.read_position_and_account(&config).await;
+        let (position, account) = self
+            .with_position_and_account(&config, PositionInfo::clone)
+            .await;
         BotSnapshot {
             status,
             mode: config.exchange.trading_mode(),
@@ -374,7 +382,9 @@ impl AppState {
         let status = *self.status.read().await;
         let ticker = self.ticker.read().await.clone();
         let mut stats = self.stats.read().await.clone();
-        let (position, account) = self.read_position_and_account(&config).await;
+        let (position, account) = self
+            .with_position_and_account(&config, PositionInfo::clone)
+            .await;
         let account_cny_rate = self.cny_rates.get(&account.asset).await;
         let mut active_orders: Vec<_> = self.active_orders.read().await.values().cloned().collect();
         active_orders.sort_by_key(|order| std::cmp::Reverse(order.price));
@@ -382,10 +392,7 @@ impl AppState {
             .iter()
             .filter(|order| order.side == OrderSide::Buy)
             .count();
-        stats.active_sell_orders = active_orders
-            .iter()
-            .filter(|order| order.side == OrderSide::Sell)
-            .count();
+        stats.active_sell_orders = active_orders.len() - stats.active_buy_orders;
         stats.uptime_secs = (now - stats.start_time).num_seconds().max(0) as u64;
         let recent_trades = self
             .recent_trades

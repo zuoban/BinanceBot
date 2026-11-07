@@ -17,9 +17,10 @@ export function todayHourlyData(stats: NonNullable<Snapshot['hourly_trade_stats'
   });
 }
 
-export function HourlyChart({ snapshot }: { snapshot: Snapshot }) {
+export function HourlyChart({ snapshot, now: currentNow }: { snapshot: Snapshot; now?: number }) {
   const { token } = theme.useToken();
-  const now = useNow();
+  const fallbackNow = useNow(1000, currentNow === undefined);
+  const now = currentNow ?? fallbackNow;
   if (todayCount(snapshot, now) === null) return <NoData />;
   const data = todayHourlyData(snapshot.hourly_trade_stats!, now);
   const axisTick = { fontSize: 11, fontFamily: 'ui-monospace, "SF Mono", Menlo, Consolas, monospace', fill: token.colorTextTertiary };

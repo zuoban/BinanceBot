@@ -187,15 +187,9 @@ impl GlobalPositionLimit {
                     ),
                 }
             };
-            let max_age = sync_interval_secs
-                .saturating_mul(3)
-                .max(30)
-                .min(i64::MAX as u64) as i64;
+            let max_age = crate::types::max_reconciliation_age_secs(sync_interval_secs);
             let now = Utc::now();
-            let fresh = |time| {
-                let age = now.signed_duration_since(time);
-                age >= chrono::Duration::zero() && age <= chrono::Duration::seconds(max_age)
-            };
+            let fresh = |time| crate::types::is_timestamp_fresh(time, now, max_age);
             if margin_guard {
                 let account = state.current_account().await;
                 if account.asset.is_empty() || (!is_paper && !fresh(account.update_time)) {
@@ -1256,10 +1250,6 @@ impl AppState {
         self.db
             .run_blocking(move |db| db.delete_session(&token))
             .await
-    }
-
-    pub async fn clear_all_sessions(&self) -> anyhow::Result<()> {
-        self.db.run_blocking(Database::clear_all_sessions).await
     }
 
     pub async fn begin_login_attempt(&self, source: IpAddr) -> bool {
