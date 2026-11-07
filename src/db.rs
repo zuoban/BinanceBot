@@ -223,7 +223,10 @@ impl Database {
         .context("Database worker stopped")?
     }
 
-    fn lock_connection(&self, operation: &'static str) -> std::sync::MutexGuard<'_, Connection> {
+    pub(super) fn lock_connection(
+        &self,
+        operation: &'static str,
+    ) -> std::sync::MutexGuard<'_, Connection> {
         let waiting_since = tracing::enabled!(tracing::Level::DEBUG).then(std::time::Instant::now);
         #[cfg(test)]
         let benchmark_wait = self
@@ -318,7 +321,7 @@ impl Database {
         &self.path
     }
     pub(crate) fn history_account_id(&self, identity: [u8; 32]) -> Result<String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_connection("history_account_id");
         if let Some(id) = conn
             .query_row(
                 "SELECT account_id FROM history_account_ids WHERE identity = ?1",
@@ -346,7 +349,7 @@ impl Database {
         groups: &[crate::snapshots::SnapshotGroup],
     ) -> Result<()> {
         let payload = serde_json::to_string(groups)?;
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_connection("save_hourly_account_snapshot");
         let tx = conn.transaction()?;
         tx.execute(
             "INSERT OR IGNORE INTO account_hourly_snapshots (hour, payload) VALUES (?1, ?2)",
@@ -361,10 +364,11 @@ impl Database {
     }
 
     pub fn cleanup_hourly_account_snapshots(&self, now: i64) -> Result<()> {
-        self.conn.lock().unwrap().execute(
-            "DELETE FROM account_hourly_snapshots WHERE hour < ?1",
-            params![now - 30 * 24 * 3600],
-        )?;
+        self.lock_connection("cleanup_hourly_account_snapshots")
+            .execute(
+                "DELETE FROM account_hourly_snapshots WHERE hour < ?1",
+                params![now - 30 * 24 * 3600],
+            )?;
         Ok(())
     }
 
@@ -372,7 +376,7 @@ impl Database {
         &self,
         since: i64,
     ) -> Result<Vec<crate::snapshots::HourlySnapshot>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_connection("hourly_account_snapshots");
         let mut statement = conn.prepare(
             "SELECT hour, payload FROM account_hourly_snapshots WHERE hour >= ?1 ORDER BY hour",
         )?;
@@ -497,7 +501,7 @@ impl Database {
     fn backup_to_memory(&self) -> Result<Connection> {
         let mut snapshot = Connection::open_in_memory()?;
         {
-            let source = self.conn.lock().unwrap();
+            let source = self.lock_connection("backup_to_memory");
             let backup = rusqlite::backup::Backup::new(&source, &mut snapshot)?;
             anyhow::ensure!(
                 backup.step(-1)? == rusqlite::backup::StepResult::Done,
@@ -540,7 +544,7 @@ impl Database {
     }
 
     pub fn load_bot_status(&self) -> Result<Option<BotStatus>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_connection("load_bot_status");
         let value: Option<String> = conn
             .query_row("SELECT status FROM bot_runtime WHERE id = 1;", [], |row| {
                 row.get(0)
@@ -552,12 +556,12 @@ impl Database {
     }
 
     pub fn save_bot_status(&self, status: BotStatus) -> Result<()> {
-        save_bot_status_on(&self.conn.lock().unwrap(), status)
+        save_bot_status_on(&self.lock_connection("save_bot_status"), status)
     }
 
     pub fn load_pair_status(&self, symbol: &str, mode: TradingMode) -> Result<Option<BotStatus>> {
         let value: Option<String> = {
-            let conn = self.conn.lock().unwrap();
+            let conn = self.lock_connection("load_pair_status");
             conn.query_row(
                 "SELECT status FROM pair_runtime WHERE symbol = ?1 AND mode = ?2",
                 params![symbol, mode.as_str()],
@@ -583,11 +587,16 @@ impl Database {
         mode: TradingMode,
         status: BotStatus,
     ) -> Result<()> {
-        save_pair_status_on(&self.conn.lock().unwrap(), symbol, mode, status)
+        save_pair_status_on(
+            &self.lock_connection("save_pair_status"),
+            symbol,
+            mode,
+            status,
+        )
     }
 
     pub fn init_tables(&self) -> Result<()> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_connection("init_tables");
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS app_config (
@@ -943,7 +952,7 @@ impl Database {
     }
 
     pub fn load_config(&self) -> Result<Option<AppConfig>> {
-        load_config_on(&self.conn.lock().unwrap())
+        load_config_on(&self.lock_connection("load_config"))
     }
 
     pub(crate) async fn load_saved_config(self: &std::sync::Arc<Self>) -> Result<AppConfig> {
@@ -953,16 +962,16 @@ impl Database {
     }
 
     pub fn save_config(&self, config: &AppConfig) -> Result<()> {
-        save_config_on(&self.conn.lock().unwrap(), config)
+        save_config_on(&self.lock_connection("save_config"), config)
     }
 
     /// Merge while holding the database mutex so simultaneous pair updates cannot lose changes.
     pub fn save_pair_config(&self, symbol: &str, config: &AppConfig) -> Result<()> {
-        save_pair_config_on(&self.conn.lock().unwrap(), symbol, config)
+        save_pair_config_on(&self.lock_connection("save_pair_config"), symbol, config)
     }
 
     pub fn save_global_config(&self, global: &crate::config::GlobalConfig) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_connection("save_global_config");
         let mut saved = load_required_config_on(&conn)?;
         saved.ensure_pair_list()?;
         global.apply_to(&mut saved);
@@ -1003,7 +1012,7 @@ impl Database {
     /// The caller must use this result for startup recovery and must not arm it again.
     pub fn add_pair_config(&self, config: &AppConfig) -> Result<bool> {
         config.validate()?;
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_connection("add_pair_config");
         let tx = conn.transaction()?;
         let mut saved = load_required_config_on(&tx)?;
         saved.ensure_pair_list()?;
@@ -1033,7 +1042,7 @@ impl Database {
     }
 
     pub fn remove_pair_config(&self, symbol: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_connection("remove_pair_config");
         let mut saved = load_required_config_on(&conn)?;
         anyhow::ensure!(saved.pairs.len() > 1, "至少保留一个交易对");
         let index = saved
@@ -1059,7 +1068,7 @@ impl Database {
         baseline_version: Option<&str>,
     ) -> Result<()> {
         server.socket_addr()?;
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_connection("save_server_config_checked");
         let mut saved = load_required_config_on(&conn)?;
         if baseline_version.is_some_and(|version| version != config_version(&saved.server)) {
             anyhow::bail!("服务设置已被其他请求修改，请刷新后重试");
@@ -1128,7 +1137,7 @@ impl Database {
     /// Arm before starting an engine. An armed guard means the previous engine
     /// did not finish a clean shutdown, so its saved Running state is unsafe.
     pub fn arm_execution_guard(&self, symbol: &str, mode: TradingMode) -> Result<bool> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_connection("arm_execution_guard");
         let tx = conn.transaction()?;
         let dirty = arm_execution_guard_on(&tx, symbol, mode)?;
         tx.commit()?;
@@ -1136,7 +1145,7 @@ impl Database {
     }
 
     pub fn clear_execution_guard(&self, symbol: &str, mode: TradingMode) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_connection("clear_execution_guard");
         conn.execute(
             "UPDATE pair_execution_guard SET dirty = 0 WHERE symbol = ?1 AND mode = ?2",
             params![symbol, mode.as_str()],
@@ -1888,7 +1897,7 @@ impl Database {
         client_order_id: &str,
         mode: TradingMode,
     ) -> Result<Option<TradeRecord>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_connection("get_trade_by_client_id");
         let mut stmt = conn.prepare(
             "SELECT trade_id, client_order_id, symbol, side, price, quantity, amount_usdc, realized_pnl, commission, pnl_verified, is_maker, timestamp, note, mode FROM trades WHERE client_order_id = ?1 AND mode = ?2 ORDER BY timestamp DESC LIMIT 1;",
         )?;
@@ -2199,7 +2208,7 @@ impl Database {
     }
 
     pub fn symbol_trade_clear_revision(&self, symbol: &str) -> u64 {
-        let _conn = self.conn.lock().unwrap();
+        let _conn = self.lock_connection("symbol_trade_clear_revision");
         self.trade_clear_revisions
             .lock()
             .unwrap()
@@ -2250,7 +2259,7 @@ impl Database {
 
     /// Legacy un-scoped grid stats accessor retained for backward-compatibility tests.
     pub fn load_stats(&self) -> Result<Option<(usize, usize, Decimal, Decimal)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_connection("load_stats");
         conn.query_row(
             "SELECT total_trades, completed_cycles, total_realized_profit, total_volume_usdc FROM grid_stats WHERE id = 1;",
             [],
@@ -2263,7 +2272,7 @@ impl Database {
 
     /// Legacy un-scoped grid stats writer retained for backward-compatibility tests.
     pub fn save_stats(&self, stats: &GridStats) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_connection("save_stats");
         conn.execute(
             r#"
             INSERT INTO grid_stats (id, total_trades, completed_cycles, total_realized_profit, total_volume_usdc, updated_at)

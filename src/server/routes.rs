@@ -18,6 +18,7 @@ use axum::routing::{delete, get, post};
 use axum::{Extension, Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
+use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -333,9 +334,8 @@ fn pair_resource_routes() -> Router<Arc<AppState>> {
         .route("/trades/clear", post(scoped_clear_handler))
 }
 
-fn create_base_router(state: Arc<AppState>, history_clear: bool) -> Router {
-    let limiter = Arc::new(RateLimiter::default());
-    let mut api_protected = Router::new()
+fn exchange_routes<S: Clone + Send + Sync + 'static>(limiter: Arc<RateLimiter>) -> Router<S> {
+    Router::new()
         .route(
             "/api/exchange/symbols",
             get(exchange_symbols_handler).layer(Extension(limiter.clone())),
@@ -344,6 +344,10 @@ fn create_base_router(state: Arc<AppState>, history_clear: bool) -> Router {
             "/api/exchange/symbol-preview",
             get(exchange_symbol_preview_handler).layer(Extension(limiter)),
         )
+}
+
+fn create_base_router(state: Arc<AppState>, history_clear: bool) -> Router {
+    let mut api_protected = exchange_routes(Arc::new(RateLimiter::default()))
         .route("/api/status", get(get_status_handler))
         .route("/api/orders", get(get_orders_handler))
         .route("/api/trades", get(get_trades_handler))
@@ -477,15 +481,7 @@ async fn collect_overview(states: &[Arc<AppState>]) -> Json<ApiResponse<Overview
 /// Dispatch through the current registry so newly added pairs are immediately addressable.
 pub async fn create_managed_router(handle: RuntimeHandle) -> Router {
     let primary = handle.states.read().await[0].clone();
-    let protected = Router::new()
-        .route(
-            "/api/exchange/symbols",
-            get(exchange_symbols_handler).layer(Extension(handle.rate_limiter.clone())),
-        )
-        .route(
-            "/api/exchange/symbol-preview",
-            get(exchange_symbol_preview_handler).layer(Extension(handle.rate_limiter.clone())),
-        )
+    let protected = exchange_routes(handle.rate_limiter.clone())
         .route(
             "/api/pairs",
             get(get_managed_pairs_handler).post(add_pair_handler),
@@ -1044,13 +1040,7 @@ async fn load_probe_config<T, P>(
     if let Some(throttled) = probe_throttled(gate) {
         return Err(throttled);
     }
-    let Some(saved) = handle
-        .db
-        .run_blocking(|db| db.load_config())
-        .await
-        .ok()
-        .flatten()
-    else {
+    let Ok(saved) = handle.db.load_saved_config().await else {
         return Err(json_err("无法读取全局设置"));
     };
     resolve(&saved, payload).map_err(json_err)
@@ -1201,9 +1191,12 @@ async fn post_server_config_handler(
     }
 }
 
-async fn clear_multi_trade_history_handler(
-    State(states): State<Arc<Vec<Arc<AppState>>>>,
-    Json(payload): Json<ClearTradeHistoryRequest>,
+async fn run_clear_trade_history(
+    states: &[Arc<AppState>],
+    payload: ClearTradeHistoryRequest,
+    clear: impl Future<Output = anyhow::Result<usize>>,
+    log_msg: impl FnOnce(usize) -> String,
+    response_msg: impl FnOnce(usize) -> String,
 ) -> (StatusCode, Json<ApiResponse<ClearTradeHistoryResponse>>) {
     if !payload.confirm {
         return status_err(
@@ -1211,17 +1204,13 @@ async fn clear_multi_trade_history_handler(
             "请先确认清理全部交易对和运行模式的历史成交及累计统计",
         );
     }
-    match AppState::clear_trade_history_for(&states).await {
+    match clear.await {
         Ok(deleted_trades) => {
             // Invalidate every client's cached statistics after the shared database cleanup.
+            let log_message = log_msg(deleted_trades);
             let mut primary_snapshot = None;
-            for state in states.iter() {
-                state
-                    .add_log(
-                        "WARN",
-                        format!("已清理全部历史成交记录，共 {} 笔", deleted_trades),
-                    )
-                    .await;
+            for state in states {
+                state.add_log("WARN", log_message.clone()).await;
                 let snapshot = state.broadcast_snapshot().await;
                 if primary_snapshot.is_none() {
                     primary_snapshot = Some(snapshot);
@@ -1237,10 +1226,7 @@ async fn clear_multi_trade_history_handler(
                         deleted_trades,
                         snapshot,
                     },
-                    format!(
-                        "已清理 {} 笔历史成交记录，全部交易对累计统计已重置",
-                        deleted_trades
-                    ),
+                    response_msg(deleted_trades),
                 ),
             )
         }
@@ -1252,6 +1238,25 @@ async fn clear_multi_trade_history_handler(
             )
         }
     }
+}
+
+async fn clear_multi_trade_history_handler(
+    State(states): State<Arc<Vec<Arc<AppState>>>>,
+    Json(payload): Json<ClearTradeHistoryRequest>,
+) -> (StatusCode, Json<ApiResponse<ClearTradeHistoryResponse>>) {
+    run_clear_trade_history(
+        &states,
+        payload,
+        AppState::clear_trade_history_for(&states),
+        |deleted_trades| format!("已清理全部历史成交记录，共 {} 笔", deleted_trades),
+        |deleted_trades| {
+            format!(
+                "已清理 {} 笔历史成交记录，全部交易对累计统计已重置",
+                deleted_trades
+            )
+        },
+    )
+    .await
 }
 
 async fn get_auth_status_handler(
@@ -1424,43 +1429,19 @@ async fn clear_trade_history_handler(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<ClearTradeHistoryRequest>,
 ) -> (StatusCode, Json<ApiResponse<ClearTradeHistoryResponse>>) {
-    if !payload.confirm {
-        return status_err(
-            StatusCode::BAD_REQUEST,
-            "请先确认清理全部交易对和运行模式的历史成交及累计统计",
-        );
-    }
-    match state.clear_trade_history().await {
-        Ok(deleted_trades) => {
-            state
-                .add_log(
-                    "WARN",
-                    format!(
-                        "已清理全部历史成交记录，共 {} 笔，累计统计已重置",
-                        deleted_trades
-                    ),
-                )
-                .await;
-            let snapshot = state.broadcast_snapshot().await;
-            (
-                StatusCode::OK,
-                json_ok_msg(
-                    ClearTradeHistoryResponse {
-                        deleted_trades,
-                        snapshot,
-                    },
-                    format!("已清理 {} 笔历史成交记录，累计统计已重置", deleted_trades),
-                ),
+    run_clear_trade_history(
+        std::slice::from_ref(&state),
+        payload,
+        state.clear_trade_history(),
+        |deleted_trades| {
+            format!(
+                "已清理全部历史成交记录，共 {} 笔，累计统计已重置",
+                deleted_trades
             )
-        }
-        Err(error) => {
-            error!("Trade history cleanup failed: {}", error);
-            status_err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "历史记录清理失败，请稍后重试或查看服务器日志",
-            )
-        }
-    }
+        },
+        |deleted_trades| format!("已清理 {} 笔历史成交记录，累计统计已重置", deleted_trades),
+    )
+    .await
 }
 
 async fn export_database_handler(State(state): State<Arc<AppState>>) -> Response {

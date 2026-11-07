@@ -260,7 +260,6 @@ kbd {
 .section-heading h2 { margin: 0; font-size: 16px; line-height: 24px; font-weight: 600; letter-spacing: -0.01em; text-wrap: balance; }
 .overview-finance-group .section-heading { margin-top: 0; }
 .overview-finances { display: grid; grid-template-columns: minmax(0, 1fr); gap: 24px; margin-top: 24px; align-items: start; }
-.overview-finances .ant-col { flex: 0 0 100%; max-width: 100%; }
 @media (min-width: 1280px) { .overview-finances { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 
 /* ---------- Ant surfaces: one elevation language (hairline border, no shadow) ---------- */
@@ -546,7 +545,6 @@ kbd {
 
 /* ---------- Desktop table / mobile card list swap ---------- */
 .table-mobile { display: none; }
-.table-mobile .trade-list-heading strong { font-weight: 500; }
 .table-mobile .log-message { margin: 8px 0 0; }
 
 /* ---------- Responsive ---------- */

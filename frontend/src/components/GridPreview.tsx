@@ -20,7 +20,7 @@ export function GridPreview<Values>({ form, markPrice, tickSize, stepSize, minQt
   const sizings = new Map(
     preview && cleanStep ? [...preview.sells, ...preview.buys].map(price => [price, orderSizing(price, values?.order_amount_usdc, { stepSize: cleanStep, minQty, minNotional })] as const) : [],
   );
-  const unplaceable = preview && cleanStep ? [...preview.sells, ...preview.buys].flatMap(price => { const s = sizings.get(price); return s?.error ? [s.error] : []; }) : [];
+  const unplaceable = [...sizings.values()].flatMap(s => s?.error ? [s.error] : []);
   const short = values?.direction === 'SHORT';
   const openingLabel = short ? '卖单' : '买单';
   const openingPrices = preview ? (short ? preview.sells : preview.buys) : [];

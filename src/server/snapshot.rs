@@ -9,6 +9,7 @@ use crate::types::{
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::Serialize;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
@@ -124,6 +125,13 @@ struct SnapshotCharts {
     trades: Option<HourlyTradeStats>,
 }
 
+impl SnapshotCharts {
+    fn is_current(&self, config: &AppConfig, db: &Database) -> bool {
+        self.scope == SnapshotScope::from_config(config)
+            && self.revision == db.symbol_trade_revision(&self.scope.symbol)
+    }
+}
+
 impl SnapshotCache {
     async fn get(
         &self,
@@ -215,20 +223,33 @@ impl AppState {
         }
     }
 
+    async fn collect_with_charts<T, F, Fut>(&self, now: DateTime<Utc>, mut collect: F) -> T
+    where
+        F: FnMut(Option<SnapshotCharts>) -> Fut,
+        Fut: Future<Output = Option<T>>,
+    {
+        // A trade commit, cleanup, or scope transition during a database read
+        // must not combine old chart rows with the new in-memory state.
+        for _ in 0..3 {
+            let scope = SnapshotScope::from_config(&*self.config.read().await);
+            let charts = self.snapshot_cache.get(&self.db, scope, now).await;
+            if let Some(value) = collect(Some(charts)).await {
+                return value;
+            }
+        }
+        // Keep status, orders and logs updating under continuous writes. Charts
+        // that cannot be validated will be retried on the next snapshot.
+        collect(None)
+            .await
+            .expect("An uncached snapshot has no scope or revision to invalidate")
+    }
+
     pub(crate) async fn overview_snapshot(
         &self,
         now: DateTime<Utc>,
     ) -> (OverviewPairView, Vec<TradeRecord>) {
-        for _ in 0..3 {
-            let scope = SnapshotScope::from_config(&*self.config.read().await);
-            let charts = self.snapshot_cache.get(&self.db, scope, now).await;
-            if let Some(summary) = self.collect_overview(Some(charts)).await {
-                return summary;
-            }
-        }
-        self.collect_overview(None)
+        self.collect_with_charts(now, |charts| self.collect_overview(charts))
             .await
-            .expect("An uncached summary has no scope or revision to invalidate")
     }
 
     async fn collect_overview(
@@ -239,10 +260,10 @@ impl AppState {
         let _commit = self.trade_commit_lock.lock().await;
         let config = self.config.read().await;
         let mode = config.exchange.trading_mode();
-        if charts.as_ref().is_some_and(|charts| {
-            charts.scope != SnapshotScope::from_config(&config)
-                || charts.revision != self.db.symbol_trade_revision(&charts.scope.symbol)
-        }) {
+        if charts
+            .as_ref()
+            .is_some_and(|charts| !charts.is_current(&config, &self.db))
+        {
             return None;
         }
         let status = *self.status.read().await;
@@ -349,20 +370,8 @@ impl AppState {
     }
 
     async fn snapshot_at(&self, now: DateTime<Utc>) -> BotSnapshot {
-        // A trade commit, cleanup, or scope transition during a database read
-        // must not combine old chart rows with the new in-memory state.
-        for _ in 0..3 {
-            let scope = SnapshotScope::from_config(&*self.config.read().await);
-            let charts = self.snapshot_cache.get(&self.db, scope, now).await;
-            if let Some(snapshot) = self.collect_snapshot(Some(charts), now).await {
-                return snapshot;
-            }
-        }
-        // Keep status, orders and logs updating under continuous writes. Charts
-        // that cannot be validated will be retried on the next snapshot.
-        self.collect_snapshot(None, now)
+        self.collect_with_charts(now, |charts| self.collect_snapshot(charts, now))
             .await
-            .expect("An uncached snapshot has no scope or revision to invalidate")
     }
 
     async fn collect_snapshot(
@@ -373,10 +382,10 @@ impl AppState {
         let _scope = self.snapshot_scope_lock.read().await;
         let _commit = self.trade_commit_lock.lock().await;
         let config = self.config.read().await;
-        if charts.as_ref().is_some_and(|charts| {
-            charts.scope != SnapshotScope::from_config(&config)
-                || charts.revision != self.db.symbol_trade_revision(&charts.scope.symbol)
-        }) {
+        if charts
+            .as_ref()
+            .is_some_and(|charts| !charts.is_current(&config, &self.db))
+        {
             return None;
         }
         let status = *self.status.read().await;

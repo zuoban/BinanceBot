@@ -90,8 +90,8 @@ function GlobalSettings() {
       global_max_position_notional: v.global_max_position_notional ?? null,
       pause_on_zero_available_margin: v.pause_on_zero_available_margin ?? false,
       min_available_margin_pct: v.min_available_margin_pct || null,
-      api_key: v.api_key?.trim() || null, api_secret: v.api_secret?.trim() || null,
-      telegram_bot_token: v.telegram_bot_token?.trim() || null, telegram_chat_id: v.telegram_chat_id?.trim() || '',
+      api_key: v.clear_api_credentials ? '' : v.api_key?.trim() || null, api_secret: v.clear_api_credentials ? '' : v.api_secret?.trim() || null,
+      telegram_bot_token: v.clear_telegram_credentials ? '' : v.telegram_bot_token?.trim() || null, telegram_chat_id: v.clear_telegram_credentials ? '' : v.telegram_chat_id?.trim() || '',
       telegram_enabled: !!v.telegram_enabled, clear_api_credentials: !!v.clear_api_credentials, clear_telegram_credentials: !!v.clear_telegram_credentials,
     }),
     onMutate: () => edit.setSaving(true),
@@ -177,7 +177,7 @@ function GlobalSettings() {
           <Col xs={24} md={12}><Form.Item name="sync_interval_secs" label="同步间隔（秒）" extra="策略定期同步订单、账户和持仓的间隔。" rules={[{ required: true }]}><InputNumber min={1} precision={0} className="full-width-input" /></Form.Item></Col>
         </Row>
         <div className="settings-card-footer">
-          <ProbeButton label="测试连接" path="/api/global/test-exchange" disabled={!ready || edit.saving || Boolean(clearApi)}
+          <ProbeButton label="测试连接" path="/api/global/test-exchange" disabled={!ready || edit.saving || clearApi}
             resetKey={JSON.stringify([version, apiKey ?? '', apiSecret ?? '', recvWindow ?? '', clearApi])}
             body={() => ({ api_key: form.getFieldValue('api_key'), api_secret: form.getFieldValue('api_secret'), recv_window: form.getFieldValue('recv_window') })} />
           <Form.Item name="clear_api_credentials" valuePropName="checked" className="settings-checkbox-item"><Checkbox>清除已保存的 API Key 和 Secret（清除后所有交易对将以模拟盘运行）</Checkbox></Form.Item>
@@ -201,7 +201,7 @@ function GlobalSettings() {
               <Col xs={24} sm={12}><Form.Item name="telegram_chat_id" label="Chat ID" extra="向机器人发送消息后，可通过 Telegram Bot API 的 getUpdates 获取会话 ID。"><Input disabled={!ready || edit.saving || clearTelegram} /></Form.Item></Col>
             </Row>
             <div className="settings-card-footer">
-              <ProbeButton label="发送测试消息" path="/api/global/test-telegram" disabled={!ready || edit.saving || Boolean(clearTelegram)}
+              <ProbeButton label="发送测试消息" path="/api/global/test-telegram" disabled={!ready || edit.saving || clearTelegram}
                 resetKey={JSON.stringify([version, botToken ?? '', chatId ?? '', clearTelegram])}
                 body={() => ({ bot_token: form.getFieldValue('telegram_bot_token'), chat_id: form.getFieldValue('telegram_chat_id') })} />
               <Form.Item name="clear_telegram_credentials" valuePropName="checked" className="settings-checkbox-item"><Checkbox>清除 Telegram 凭证（请先关闭通知）</Checkbox></Form.Item>
@@ -222,7 +222,7 @@ function ServerSettings() {
     form.setFieldsValue(data.saved);
   });
   const mutation = useMutation({
-    mutationFn: (values: ServerConfig['saved']) => post<ServerConfig>('/api/server/config', { ...values, baseline_version: baseline.current?.version ?? null }),
+    mutationFn: (values: ServerConfig['saved']) => post<ServerConfig>('/api/server/config', { ...values, host: values.host.trim(), baseline_version: baseline.current?.version ?? null }),
     onMutate: () => edit.setSaving(true),
     onSuccess: data => {
       client.setQueryData(['server-config'], data);
@@ -243,7 +243,7 @@ function ServerSettings() {
     {isConfigConflict(mutation.error, '服务设置已被其他请求修改') && <ConflictReloadButton label="服务设置" activeRef={mounted} refetch={query.refetch} onReset={mutation.reset} onLoaded={fill} />}
     <Card title="监听设置" className="settings-card"><Alert type="info" showIcon title={`当前监听：${query.data?.active.host ?? '--'}:${query.data?.active.port ?? '--'}。修改后重启生效；使用 Docker 时请同时调整代理配置。`} />
       <Form form={form} layout="vertical" className="settings-fields" disabled={!ready || edit.saving} onValuesChange={() => edit.setDirty(true)} onFinish={v => { if (submitting.current) return; submitting.current = true; mutation.mutate(v); }}>
-        <Row gutter={[20, 16]}><Col xs={24} md={12}><Form.Item name="host" label="监听地址" rules={[{ required: true }]}><Input /></Form.Item></Col>
+        <Row gutter={[20, 16]}><Col xs={24} md={12}><Form.Item name="host" label="监听地址" rules={[{ required: true, whitespace: true }]}><Input /></Form.Item></Col>
           <Col xs={24} md={12}><Form.Item name="port" label="端口" rules={[{ required: true }]}><InputNumber min={1} max={65535} precision={0} className="full-width-input" /></Form.Item></Col></Row>
         <div className="settings-card-footer settings-card-actions">
           <span className="muted" role="status">{edit.dirty ? '有未保存的修改' : '修改后需重启后端生效'}</span>

@@ -777,6 +777,17 @@ impl GridTradingEngine {
         blocked
     }
 
+    pub(super) fn insert_identity_observation(
+        &mut self,
+        key: ([u8; 32], String),
+        observed: ObservedOrderIdentity,
+    ) {
+        let observations = self.order_identity_observations.entry(key).or_default();
+        if !observations.contains(&observed) {
+            observations.push(observed);
+        }
+    }
+
     fn record_identity_conflict_observation(
         &mut self,
         account: [u8; 32],
@@ -787,10 +798,7 @@ impl GridTradingEngine {
         self.provisional_order_ids.insert(key.clone());
         self.order_identity_conflicts
             .insert(key.clone(), expected.clone());
-        let observations = self.order_identity_observations.entry(key).or_default();
-        if !observations.contains(&observed) {
-            observations.push(observed);
-        }
+        self.insert_identity_observation(key, observed);
     }
 
     fn record_differing_identity(
@@ -801,26 +809,16 @@ impl GridTradingEngine {
     ) {
         if let Some(observed) = known_order_identity(candidate) {
             if identity_differs_from_order(&observed, expected) {
-                let items = self
-                    .order_identity_observations
-                    .entry(key.clone())
-                    .or_default();
-                if !items.contains(&observed) {
-                    items.push(observed);
-                }
+                self.insert_identity_observation(key.clone(), observed);
             }
         }
     }
 
     fn promote_provisional_observations(&mut self, key: &([u8; 32], String), expected: &GridOrder) {
         if let Some(observed) = self.provisional_order_observations.remove(key) {
-            let items = self
-                .order_identity_observations
-                .entry(key.clone())
-                .or_default();
             for item in observed {
-                if identity_differs_from_order(&item, expected) && !items.contains(&item) {
-                    items.push(item);
+                if identity_differs_from_order(&item, expected) {
+                    self.insert_identity_observation(key.clone(), item);
                 }
             }
         }
@@ -1193,6 +1191,25 @@ impl GridTradingEngine {
             .await
     }
 
+    pub(super) async fn save_managed_orders(&self, orders: Vec<GridOrder>) -> Result<()> {
+        self.state
+            .db
+            .run_blocking(move |db| db.save_managed_orders(&orders))
+            .await
+    }
+
+    pub(super) async fn has_recorded_order(
+        &self,
+        client_order_id: &str,
+        mode: TradingMode,
+    ) -> Result<bool> {
+        let client_order_id = client_order_id.to_string();
+        self.state
+            .db
+            .run_blocking(move |db| db.has_recorded_order(&client_order_id, mode))
+            .await
+    }
+
     async fn delete_managed_order(&self, client_order_id: &str) -> Result<()> {
         let client_order_id = client_order_id.to_string();
         self.state
@@ -1548,23 +1565,40 @@ impl GridTradingEngine {
                     .map_err(|error| error.to_string());
                 let _ = reply.send(result);
             }
-            BotControlAction::Pause | BotControlAction::PauseAlreadyPersisted => {
-                info!("Bot paused by user command");
-                if matches!(action, BotControlAction::Pause) {
+            BotControlAction::Pause
+            | BotControlAction::PauseAlreadyPersisted
+            | BotControlAction::CancelAll
+            | BotControlAction::CancelAllAlreadyPersisted => {
+                let is_cancel_all = matches!(
+                    action,
+                    BotControlAction::CancelAll | BotControlAction::CancelAllAlreadyPersisted
+                );
+                let already_persisted = matches!(
+                    action,
+                    BotControlAction::PauseAlreadyPersisted
+                        | BotControlAction::CancelAllAlreadyPersisted
+                );
+                let (info_msg, ok_log, err_log) = if is_cancel_all {
+                    (
+                        "Cancel all orders requested",
+                        "Managed grid orders canceled; bot paused",
+                        "Cancellation incomplete; bot paused",
+                    )
+                } else {
+                    (
+                        "Bot paused by user command",
+                        "Trading bot paused and managed orders canceled",
+                        "Trading bot paused, but some managed orders may still be open on Binance",
+                    )
+                };
+                info!("{}", info_msg);
+                if !already_persisted {
                     self.pause_trading().await;
                 }
-                if self
-                    .cancel_all_orders_inner(matches!(
-                        action,
-                        BotControlAction::PauseAlreadyPersisted
-                    ))
-                    .await
-                {
-                    self.state
-                        .add_log("WARN", "Trading bot paused and managed orders canceled")
-                        .await;
+                if self.cancel_all_orders_inner(already_persisted).await {
+                    self.state.add_log("WARN", ok_log).await;
                 } else {
-                    self.state.add_log("ERROR", "Trading bot paused, but some managed orders may still be open on Binance").await;
+                    self.state.add_log("ERROR", err_log).await;
                 }
             }
             BotControlAction::GlobalRiskCancel => {
@@ -1640,27 +1674,6 @@ impl GridTradingEngine {
                     .await;
                 let _ = reply.send(Ok(()));
                 self.sync_cycle(false).await;
-            }
-            BotControlAction::CancelAll | BotControlAction::CancelAllAlreadyPersisted => {
-                info!("Cancel all orders requested");
-                if matches!(action, BotControlAction::CancelAll) {
-                    self.pause_trading().await;
-                }
-                if self
-                    .cancel_all_orders_inner(matches!(
-                        action,
-                        BotControlAction::CancelAllAlreadyPersisted
-                    ))
-                    .await
-                {
-                    self.state
-                        .add_log("WARN", "Managed grid orders canceled; bot paused")
-                        .await;
-                } else {
-                    self.state
-                        .add_log("ERROR", "Cancellation incomplete; bot paused")
-                        .await;
-                }
             }
             BotControlAction::Rebalance {
                 expected_mode,
@@ -2790,8 +2803,7 @@ impl GridTradingEngine {
                 }
                 intent.order_id = Some(found.order_id);
                 original.order_id = Some(found.order_id);
-                original.quantity = original.quantity.max(found.orig_qty);
-                original.amount_usdc = original.price * original.quantity;
+                original.reserve_quantity(found.orig_qty);
                 if unresolved_filled_quantity(&found) {
                     self.invalidate_account_and_position_caches().await;
                     self.state
@@ -3174,10 +3186,7 @@ impl GridTradingEngine {
         let recorded = if config.exchange.is_paper() {
             self.state.has_recorded_paper_order(recorded_id, mode).await
         } else {
-            self.state
-                .db
-                .run_blocking(move |db| db.has_recorded_order(&recorded_id, mode))
-                .await
+            self.has_recorded_order(&recorded_id, mode).await
         };
         match recorded {
             Ok(true) => {
@@ -4273,8 +4282,7 @@ impl GridTradingEngine {
                     continue;
                 }
                 let mut restored = durable.clone();
-                restored.quantity = durable.quantity.max(current.quantity);
-                restored.amount_usdc = restored.price * restored.quantity;
+                restored.reserve_quantity(current.quantity);
                 active.insert(id, restored);
                 self.clear_provisional_order(&key);
             }
@@ -4467,11 +4475,10 @@ impl GridTradingEngine {
                                 && !confirmation_conflict
                             {
                                 retained.order_id = Some(order.order_id);
-                                retained.quantity = retained.quantity.max(order.orig_qty);
+                                retained.reserve_quantity(order.orig_qty);
                                 if let Some(current) = &current {
-                                    retained.quantity = retained.quantity.max(current.quantity);
+                                    retained.reserve_quantity(current.quantity);
                                 }
-                                retained.amount_usdc = retained.price * retained.quantity;
                             }
                             active.insert(retained.client_order_id.clone(), retained.clone());
                             (

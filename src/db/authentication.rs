@@ -48,7 +48,7 @@ impl Database {
     }
 
     pub fn create_session(&self, token: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_connection("create_session");
         self.session_cache.remove(token);
         conn.execute(
             "INSERT OR REPLACE INTO auth_sessions (token, created_at) VALUES (?1, ?2);",
@@ -59,7 +59,7 @@ impl Database {
     }
 
     pub fn is_session_valid(&self, token: &str) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_connection("is_session_valid");
         let created: Option<String> = conn
             .query_row(
                 "SELECT created_at FROM auth_sessions WHERE token = ?1;",
@@ -89,7 +89,7 @@ impl Database {
     }
 
     pub fn delete_session(&self, token: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_connection("delete_session");
         self.session_cache.remove(token);
         conn.execute(
             "DELETE FROM auth_sessions WHERE token = ?1;",
@@ -100,7 +100,7 @@ impl Database {
     }
 
     pub fn clear_all_sessions(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_connection("clear_all_sessions");
         self.session_cache.clear();
         conn.execute("DELETE FROM auth_sessions;", [])
             .context("Failed to clear sessions from SQLite database")?;

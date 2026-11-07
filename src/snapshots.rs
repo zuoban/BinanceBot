@@ -1,5 +1,5 @@
 use crate::runtime::RuntimeHandle;
-use crate::types::{quote_asset, BotSnapshot, TradingMode};
+use crate::types::{is_timestamp_fresh, quote_asset, BotSnapshot, TradingMode};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -39,10 +39,8 @@ pub struct OverviewHistory {
     pub current_accounts: Vec<HistoryAccount>,
 }
 
-fn fresh(now: DateTime<Utc>, updated: DateTime<Utc>, seconds: u64) -> bool {
-    now.signed_duration_since(updated)
-        .to_std()
-        .is_ok_and(|age| age < Duration::from_secs(seconds))
+fn snapshot_max_age_secs(interval: u64) -> i64 {
+    interval.saturating_add(15).max(30).min(i64::MAX as u64) as i64
 }
 
 type SnapshotBucketKey = (String, String, Option<String>);
@@ -73,10 +71,10 @@ fn aggregate(
                 .filter(|(s, interval)| {
                     s.account.asset == asset
                         && (mode == TradingMode::Paper
-                            || fresh(
-                                now,
+                            || is_timestamp_fresh(
                                 s.account.update_time,
-                                interval.saturating_add(15).max(30),
+                                now,
+                                snapshot_max_age_secs(*interval),
                             ))
                 })
                 .max_by_key(|(s, _)| s.account.update_time)
@@ -85,12 +83,12 @@ fn aggregate(
                 if snapshots.iter().all(|(s, interval)| {
                     s.account.asset == asset
                         && (s.position.size.is_zero()
-                            || (fresh(
-                                now,
+                            || (is_timestamp_fresh(
                                 s.account.update_time,
-                                interval.saturating_add(15).max(30),
+                                now,
+                                snapshot_max_age_secs(*interval),
                             ) && s.ticker.mark_price > Decimal::ZERO
-                                && fresh(now, s.ticker.mark_update_time, 15)))
+                                && is_timestamp_fresh(s.ticker.mark_update_time, now, 15)))
                 }) {
                     latest.map(|(s, _)| s.account.margin_balance)
                 } else {
@@ -104,10 +102,9 @@ fn aggregate(
             let mut valid = true;
             for (snapshot, interval) in snapshots {
                 if mode != TradingMode::Paper
-                    && !snapshot
-                        .position
-                        .update_time
-                        .is_some_and(|at| fresh(now, at, interval.saturating_add(15).max(30)))
+                    && !snapshot.position.update_time.is_some_and(|at| {
+                        is_timestamp_fresh(at, now, snapshot_max_age_secs(interval))
+                    })
                 {
                     valid = false;
                     continue;
@@ -117,7 +114,9 @@ fn aggregate(
                     continue;
                 }
                 let mark = snapshot.ticker.mark_price;
-                if mark <= Decimal::ZERO || !fresh(now, snapshot.ticker.mark_update_time, 15) {
+                if mark <= Decimal::ZERO
+                    || !is_timestamp_fresh(snapshot.ticker.mark_update_time, now, 15)
+                {
                     valid = false;
                     continue;
                 }

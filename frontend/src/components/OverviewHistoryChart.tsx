@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 
 type HistoryPoint = { hour: number; equity: number | null };
@@ -10,7 +11,7 @@ function HistoryDot({ cx, cy, payload, stroke, index, data, discrete }: { cx?: n
   return <circle cx={cx} cy={cy} r={2} fill={discrete ? 'var(--history-equity)' : stroke} className={payload.hour % (4 * 3600) === 0 || isolated ? undefined : 'history-point-hourly'} />;
 }
 
-export default function OverviewHistoryChart({ data, ticks, asset, formatValue, formatDate, daily = false, discrete = false }: {
+export default memo(function OverviewHistoryChart({ data, ticks, asset, formatValue, formatDate, daily = false, discrete = false }: {
   data: HistoryPoint[];
   ticks: number[];
   asset: string | undefined;
@@ -38,4 +39,4 @@ export default function OverviewHistoryChart({ data, ticks, asset, formatValue, 
       <Line name="账户权益" dataKey="equity" stroke={discrete ? 'none' : 'var(--history-equity)'} strokeWidth={2} dot={<HistoryDot data={data} discrete={discrete} />} activeDot={{ r: 4, fill: 'var(--history-equity)' }} connectNulls={false} isAnimationActive={false} />
     </LineChart>
   </ResponsiveContainer>;
-}
+});

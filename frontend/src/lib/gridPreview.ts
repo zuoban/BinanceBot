@@ -93,8 +93,8 @@ export function sameDecimal(a: unknown, b: unknown): boolean {
 
 /** Mirrors `GridConfig::validate` for the price range: both bounds positive, minimum below maximum. */
 export function priceRangeError(field: 'min' | 'max', min: unknown, max: unknown): string | null {
-  const own = parse(field === 'min' ? min : max);
   const raw = field === 'min' ? min : max;
+  const own = parse(raw);
   if (raw !== null && raw !== undefined && raw !== '' && (!own || own.n === 0n)) return field === 'min' ? '价格下限必须大于 0' : '价格上限必须大于 0';
   const lower = parse(min), upper = parse(max);
   if (lower && upper && lower.n !== 0n && upper.n !== 0n) {

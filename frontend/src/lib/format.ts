@@ -1,5 +1,6 @@
 import type { AccountObservation, GridConfig, Mode, Overview, PairSummary, Snapshot, Status, Trade } from './types';
 
+export const SNAPSHOT_STALE_MS = 10_000;
 export const modeLabel: Record<Mode, string> = { PAPER: '模拟盘', LIVE: '实盘', UNKNOWN: '未知模式' };
 export const statusLabel: Record<Status, string> = { RUNNING: '运行中', PAUSED: '已暂停', STOPPED: '已停止', ERROR: '异常' };
 export const directionLabel = (direction?: GridConfig['direction'] | string) => direction === 'SHORT' ? '做空' : '做多';

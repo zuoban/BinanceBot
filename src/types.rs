@@ -208,6 +208,16 @@ impl GridOrder {
                 .zip(other.order_id)
                 .is_none_or(|(a, b)| a == b)
     }
+
+    pub(crate) fn reserve_quantity(&mut self, min_quantity: Decimal) {
+        self.quantity = self.quantity.max(min_quantity);
+        self.amount_usdc = self.price * self.quantity;
+    }
+
+    pub(crate) fn reserve_max(&mut self, min_price: Decimal, min_quantity: Decimal) {
+        self.price = self.price.max(min_price);
+        self.reserve_quantity(min_quantity);
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

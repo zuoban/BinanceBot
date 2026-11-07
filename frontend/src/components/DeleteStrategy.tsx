@@ -35,6 +35,8 @@ export function useDeleteStrategy() {
       await api(`/api/pairs/${encodeURIComponent(pair.symbol)}`, { method: 'DELETE', body: JSON.stringify({ confirm: true }), timeoutMs: 90_000 });
       message.success('策略已删除，历史记录保留');
       controls?.clearResult?.(pair.symbol);
+      client.removeQueries({ queryKey: ['snapshot', pair.symbol] });
+      client.removeQueries({ queryKey: ['config', pair.symbol] });
       void client.invalidateQueries({ queryKey: ['pairs'] });
       void client.invalidateQueries({ queryKey: ['overview'] });
       void client.resetQueries({ queryKey: ['overview-history'] });

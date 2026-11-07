@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useQueryClient, type QueryKey, type UseQueryResult } from '@tanstack/react-query';
 import { api, pairPath, socketUrl, tokenStore } from './api';
+import { SNAPSHOT_STALE_MS } from './format';
 import type { AccountFrame, AccountObservation, OverviewHistoryData, Overview, Pair, Snapshot, SocketMessage } from './types';
 import { useNow } from './useNow';
 const SOCKET_LIVE_MS = 5000;
 const HTTP_FALLBACK_MS = 3000;
-export const SNAPSHOT_STALE_MS = 10_000;
+export { SNAPSHOT_STALE_MS };
 
 export function usePairs() {
   return useQuery({ queryKey: ['pairs'], queryFn: ({ signal }) => api<Pair[]>('/api/pairs', { signal }), refetchInterval: 10_000 });

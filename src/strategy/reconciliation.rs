@@ -214,6 +214,82 @@ impl GridTradingEngine {
         }
     }
 
+    async fn record_and_check_initial_timeline(
+        &mut self,
+        account_key: [u8; 32],
+        symbol: &str,
+        client_order_id: &str,
+        found: &BinanceOrderResponse,
+        initial_responses: &[BinanceOrderResponse],
+    ) -> bool {
+        if !self
+            .record_initial_order_response(account_key, symbol, client_order_id, found)
+            .await
+        {
+            self.report_reconciliation_state(true).await;
+            return false;
+        }
+        let mut historical_disagreement = false;
+        for initial in initial_responses {
+            if terminal_responses_disagree(initial, found) {
+                self.record_terminal_disagreement(
+                    account_key,
+                    symbol,
+                    client_order_id,
+                    initial,
+                    found,
+                )
+                .await;
+                historical_disagreement = true;
+            }
+        }
+        if historical_disagreement {
+            self.report_reconciliation_state(true).await;
+            return false;
+        }
+        true
+    }
+
+    async fn verify_consistent_terminal_followup(
+        &mut self,
+        account_key: [u8; 32],
+        symbol: &str,
+        expected: &GridOrder,
+        previous: &BinanceOrderResponse,
+        current: &BinanceOrderResponse,
+    ) -> bool {
+        if !self
+            .record_initial_order_response(account_key, symbol, &expected.client_order_id, current)
+            .await
+        {
+            self.report_reconciliation_state(true).await;
+            return false;
+        }
+        if terminal_responses_disagree(previous, current) {
+            self.record_terminal_disagreement(
+                account_key,
+                symbol,
+                &expected.client_order_id,
+                previous,
+                current,
+            )
+            .await;
+            self.report_reconciliation_state(true).await;
+            return false;
+        }
+        if !current.matches_snapshot(previous)
+            || unresolved_filled_quantity(current)
+            || !current.is_terminal()
+        {
+            self.track_identity_conflict(expected, current);
+            self.persist_identity_observations(account_key, symbol)
+                .await;
+            self.report_reconciliation_state(true).await;
+            return false;
+        }
+        true
+    }
+
     async fn retain_invalid_price_snapshot(
         &mut self,
         account: [u8; 32],
@@ -266,15 +342,11 @@ impl GridTradingEngine {
             });
             if let Some(current) = active.get(&found.client_order_id) {
                 if current.has_compatible_identity(&expected) {
-                    expected.quantity = expected.quantity.max(current.quantity);
-                    expected.price = expected.price.max(current.price);
-                    expected.amount_usdc = expected.price * expected.quantity;
+                    expected.reserve_max(current.price, current.quantity);
                 }
             }
             if expected.matches_exchange_identity(found) {
-                expected.price = expected.price.max(found.price);
-                expected.quantity = expected.quantity.max(found.orig_qty);
-                expected.amount_usdc = expected.price * expected.quantity;
+                expected.reserve_max(found.price, found.orig_qty);
             }
             self.track_identity_conflict(&expected, found);
             active.insert(expected.client_order_id.clone(), expected);
@@ -305,12 +377,7 @@ impl GridTradingEngine {
             .await
             && !conservative.is_empty()
         {
-            if let Err(error) = self
-                .state
-                .db
-                .run_blocking(move |db| db.save_managed_orders(&conservative))
-                .await
-            {
+            if let Err(error) = self.save_managed_orders(conservative).await {
                 error!(
                     "Could not persist conservative invalid-snapshot reservations: {}",
                     error
@@ -408,11 +475,7 @@ impl GridTradingEngine {
                         }
                         for observed in std::iter::once(&expected).chain(active.get(id)) {
                             if authoritative.has_compatible_identity(observed) {
-                                authoritative.price = authoritative.price.max(observed.price);
-                                authoritative.quantity =
-                                    authoritative.quantity.max(observed.quantity);
-                                authoritative.amount_usdc =
-                                    authoritative.price * authoritative.quantity;
+                                authoritative.reserve_max(observed.price, observed.quantity);
                             }
                         }
                         if let Some(observed) = active.get(id).and_then(known_order_identity) {
@@ -422,13 +485,10 @@ impl GridTradingEngine {
                                     .order_id
                                     .is_none_or(|order_id| order_id != observed.order_id)
                             {
-                                let items = self
-                                    .order_identity_observations
-                                    .entry((account_key, id.clone()))
-                                    .or_default();
-                                if !items.contains(&observed) {
-                                    items.push(observed);
-                                }
+                                self.insert_identity_observation(
+                                    (account_key, id.clone()),
+                                    observed,
+                                );
                             }
                         }
                         active.insert(id.clone(), authoritative.clone());
@@ -454,22 +514,13 @@ impl GridTradingEngine {
                         let key = (account_key, id.clone());
                         self.order_identity_conflicts
                             .insert(key.clone(), durable.clone());
-                        if let Some(observed) = known_order_identity(&current) {
-                            let items = self
-                                .order_identity_observations
-                                .entry(key.clone())
-                                .or_default();
-                            if !items.contains(&observed) {
-                                items.push(observed);
-                            }
-                        }
+                        self.record_differing_identity(&key, &current, durable);
                         self.promote_provisional_observations(&key, durable);
                         conflict = true;
                     } else {
                         let mut restored = durable.clone();
                         restored.order_id = durable.order_id.or(current.order_id);
-                        restored.quantity = durable.quantity.max(current.quantity);
-                        restored.amount_usdc = restored.price * restored.quantity;
+                        restored.reserve_quantity(current.quantity);
                         active.insert(id.clone(), restored);
                     }
                     restored_ids.insert(id.clone());
@@ -811,10 +862,8 @@ impl GridTradingEngine {
                         }
                         if expected.purpose == crate::types::OrderPurpose::Unverified {
                             for found in &observations {
-                                expected.price = expected.price.max(found.price);
-                                expected.quantity = expected.quantity.max(found.orig_qty);
+                                expected.reserve_max(found.price, found.orig_qty);
                             }
-                            expected.amount_usdc = expected.price * expected.quantity;
                         }
                         for found in observations {
                             self.track_identity_conflict(&expected, found);
@@ -960,33 +1009,15 @@ impl GridTradingEngine {
                         {
                             Ok(found) => {
                                 if !self
-                                    .record_initial_order_response(
+                                    .record_and_check_initial_timeline(
                                         account_key,
                                         &symbol,
                                         &expected.client_order_id,
                                         &found,
+                                        &initial_responses,
                                     )
                                     .await
                                 {
-                                    self.report_reconciliation_state(true).await;
-                                    return false;
-                                }
-                                let mut historical_disagreement = false;
-                                for initial in &initial_responses {
-                                    if terminal_responses_disagree(initial, &found) {
-                                        self.record_terminal_disagreement(
-                                            account_key,
-                                            &symbol,
-                                            &expected.client_order_id,
-                                            initial,
-                                            &found,
-                                        )
-                                        .await;
-                                        historical_disagreement = true;
-                                    }
-                                }
-                                if historical_disagreement {
-                                    self.report_reconciliation_state(true).await;
                                     return false;
                                 }
                                 let query_key = (
@@ -1254,37 +1285,17 @@ impl GridTradingEngine {
                                         return false;
                                     }
                                 }
+                                if !self
+                                    .record_and_check_initial_timeline(
+                                        account_key,
+                                        &symbol,
+                                        &expected.client_order_id,
+                                        &found,
+                                        &initial_responses,
+                                    )
+                                    .await
                                 {
-                                    if !self
-                                        .record_initial_order_response(
-                                            account_key,
-                                            &symbol,
-                                            &expected.client_order_id,
-                                            &found,
-                                        )
-                                        .await
-                                    {
-                                        self.report_reconciliation_state(true).await;
-                                        return false;
-                                    }
-                                    let mut historical_disagreement = false;
-                                    for initial in &initial_responses {
-                                        if terminal_responses_disagree(initial, &found) {
-                                            self.record_terminal_disagreement(
-                                                account_key,
-                                                &symbol,
-                                                &expected.client_order_id,
-                                                initial,
-                                                &found,
-                                            )
-                                            .await;
-                                            historical_disagreement = true;
-                                        }
-                                    }
-                                    if historical_disagreement {
-                                        self.report_reconciliation_state(true).await;
-                                        return false;
-                                    }
+                                    return false;
                                 }
                                 if !identity_matches
                                     || unresolved_filled_quantity(&found)
@@ -1306,37 +1317,15 @@ impl GridTradingEngine {
                                         }
                                     };
                                     if !self
-                                        .record_initial_order_response(
+                                        .verify_consistent_terminal_followup(
                                             account_key,
                                             &symbol,
-                                            &expected.client_order_id,
+                                            &expected,
+                                            &found,
                                             &verified,
                                         )
                                         .await
                                     {
-                                        self.report_reconciliation_state(true).await;
-                                        return false;
-                                    }
-                                    if terminal_responses_disagree(&found, &verified) {
-                                        self.record_terminal_disagreement(
-                                            account_key,
-                                            &symbol,
-                                            &expected.client_order_id,
-                                            &found,
-                                            &verified,
-                                        )
-                                        .await;
-                                        self.report_reconciliation_state(true).await;
-                                        return false;
-                                    }
-                                    if !verified.matches_snapshot(&found)
-                                        || unresolved_filled_quantity(&verified)
-                                        || !verified.is_terminal()
-                                    {
-                                        self.track_identity_conflict(&expected, &verified);
-                                        self.persist_identity_observations(account_key, &symbol)
-                                            .await;
-                                        self.report_reconciliation_state(true).await;
                                         return false;
                                     }
                                     let unique = match self
@@ -1354,37 +1343,15 @@ impl GridTradingEngine {
                                         }
                                     };
                                     if !self
-                                        .record_initial_order_response(
+                                        .verify_consistent_terminal_followup(
                                             account_key,
                                             &symbol,
-                                            &expected.client_order_id,
+                                            &expected,
+                                            &verified,
                                             &unique,
                                         )
                                         .await
                                     {
-                                        self.report_reconciliation_state(true).await;
-                                        return false;
-                                    }
-                                    if terminal_responses_disagree(&verified, &unique) {
-                                        self.record_terminal_disagreement(
-                                            account_key,
-                                            &symbol,
-                                            &expected.client_order_id,
-                                            &verified,
-                                            &unique,
-                                        )
-                                        .await;
-                                        self.report_reconciliation_state(true).await;
-                                        return false;
-                                    }
-                                    if !unique.matches_snapshot(&verified)
-                                        || unresolved_filled_quantity(&unique)
-                                        || !unique.is_terminal()
-                                    {
-                                        self.track_identity_conflict(&expected, &unique);
-                                        self.persist_identity_observations(account_key, &symbol)
-                                            .await;
-                                        self.report_reconciliation_state(true).await;
                                         return false;
                                     }
                                     let compatible = self
@@ -1507,8 +1474,7 @@ impl GridTradingEngine {
                                 )
                             });
                             order.order_id = Some(found.order_id);
-                            order.quantity = order.quantity.max(found.orig_qty);
-                            order.amount_usdc = order.price * order.quantity;
+                            order.reserve_quantity(found.orig_qty);
                             provisional_ids.insert(order.client_order_id.clone());
                             self.provisional_order_ids
                                 .insert((account_key, order.client_order_id.clone()));
@@ -1598,8 +1564,7 @@ impl GridTradingEngine {
                                 )
                             });
                             order.order_id = Some(found.order_id);
-                            order.quantity = order.quantity.max(found.orig_qty);
-                            order.amount_usdc = order.price * order.quantity;
+                            order.reserve_quantity(found.orig_qty);
                             active.insert(order.client_order_id.clone(), order.clone());
                             persisted_ids.push(order.client_order_id.clone());
                             to_persist.push(order);
@@ -1615,12 +1580,7 @@ impl GridTradingEngine {
                             self.provisional_order_ids.remove(&key);
                         }
                     }
-                    if let Err(error) = self
-                        .state
-                        .db
-                        .run_blocking(move |db| db.save_managed_orders(&to_persist))
-                        .await
-                    {
+                    if let Err(error) = self.save_managed_orders(to_persist).await {
                         error!(
                             "Could not persist orders with unknown fill quantities: {}",
                             error
@@ -1696,11 +1656,7 @@ impl GridTradingEngine {
                                         self.track_identity_conflict(existing, found);
                                     } else {
                                         let mut conservative = existing.clone();
-                                        conservative.price = conservative.price.max(found.price);
-                                        conservative.quantity =
-                                            conservative.quantity.max(found.orig_qty);
-                                        conservative.amount_usdc =
-                                            conservative.price * conservative.quantity;
+                                        conservative.reserve_max(found.price, found.orig_qty);
                                         active.insert(found.client_order_id.clone(), conservative);
                                     }
                                     continue;
@@ -1721,9 +1677,7 @@ impl GridTradingEngine {
                                         self.track_identity_conflict(known, found);
                                     } else {
                                         order.order_id = Some(found.order_id);
-                                        order.price = order.price.max(found.price);
-                                        order.quantity = order.quantity.max(found.orig_qty);
-                                        order.amount_usdc = order.price * order.quantity;
+                                        order.reserve_max(found.price, found.orig_qty);
                                     }
                                     self.provisional_order_ids.insert(key);
                                     active.insert(order.client_order_id.clone(), order);
@@ -1804,13 +1758,10 @@ impl GridTradingEngine {
                             if let Some(current) = active.get(&found.client_order_id) {
                                 if current.has_compatible_identity(durable) {
                                     restored.order_id = durable.order_id.or(current.order_id);
-                                    restored.price = restored.price.max(current.price);
-                                    restored.quantity = durable.quantity.max(current.quantity);
-                                    restored.amount_usdc = restored.price * restored.quantity;
+                                    restored.reserve_max(current.price, current.quantity);
                                 }
                             }
-                            restored.price = restored.price.max(found.price);
-                            restored.amount_usdc = restored.price * restored.quantity;
+                            restored.reserve_max(found.price, restored.quantity);
                             active.insert(restored.client_order_id.clone(), restored);
                             restored_ids.insert(found.client_order_id.clone());
                         }
@@ -1907,12 +1858,7 @@ impl GridTradingEngine {
                 }
 
                 if !orders_to_persist.is_empty() {
-                    if let Err(e) = self
-                        .state
-                        .db
-                        .run_blocking(move |db| db.save_managed_orders(&orders_to_persist))
-                        .await
-                    {
+                    if let Err(e) = self.save_managed_orders(orders_to_persist).await {
                         error!("Could not persist reconciled orders: {}", e);
                         self.report_reconciliation_state(true).await;
                         return false;

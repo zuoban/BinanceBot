@@ -2,10 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, Outlet, useBlocker, useLocation, useNavigate } from 'react-router-dom';
 import { App, Button, Drawer, Modal } from 'antd';
 import { AppstoreOutlined, ArrowDownOutlined, ArrowUpOutlined, BulbOutlined, EditOutlined, LineChartOutlined, LogoutOutlined, MenuOutlined, PauseOutlined, PlayCircleOutlined, PlusOutlined, QuestionCircleOutlined, ReloadOutlined, SearchOutlined, SettingOutlined, StopOutlined } from '@ant-design/icons';
-import * as queries from '../lib/queries';
-import { SNAPSHOT_STALE_MS, useLiveAccounts, usePairs } from '../lib/queries';
+import { useLiveAccounts, usePairs } from '../lib/queries';
 import { AccountsContext, EditContext, useSession } from '../lib/session';
-import { accountGroups, compactNumber, ratioText, statusLabel } from '../lib/format';
+import { accountGroups, compactNumber, ratioText, SNAPSHOT_STALE_MS, statusLabel } from '../lib/format';
 import type { Mode, Pair } from '../lib/types';
 import { ControlProvider, useControls } from './Controls';
 import { CommandPalette, type Command } from './CommandPalette';
@@ -14,7 +13,6 @@ import { useTheme, type ThemePreference } from '../lib/theme';
 import { defaultTitle, useDocumentTitle } from '../lib/documentTitle';
 import { ModeTag } from './Common';
 
-const staleMs = 'SNAPSHOT_STALE_MS' in queries ? SNAPSHOT_STALE_MS : 10_000;
 function routeSymbol(pathname: string) {
   const symbol = pathname.match(/^\/pairs\/([^/]+)/)?.[1];
   return symbol && symbol !== 'new' ? symbol : undefined;
@@ -71,7 +69,7 @@ export default function Shell() {
   useEffect(() => { setDrawer(false); }, [location.pathname]);
   const mode = pairs.data?.[0]?.mode;
   const page: SidebarProps['page'] = location.pathname.startsWith('/settings') ? 'settings' : location.pathname.startsWith('/pairs/') ? 'pair' : 'overview';
-  const sidebarProps = { pairs: currentPairs, pending: pairs.isPending, symbol, page, pathname: location.pathname, mode, authEnabled, saving, onNavigate: () => setDrawer(false), onSearch: () => { setDrawer(false); setPalette(true); }, onLogout: () => void logOut() };
+  const sidebarProps = { pairs: currentPairs, pending: pairs.isPending, symbol, page, pathname: location.pathname, mode, authEnabled, saving, onNavigate: () => setDrawer(false), onSearch: () => { if (saving) return; setDrawer(false); setPalette(true); }, onLogout: () => void logOut() };
   return <EditContext.Provider value={context}><AccountsContext.Provider value={accounts}><ControlProvider pairs={currentPairs}><div className="app-layout">
     <a className="skip-link" href="#main">跳到主内容</a>
     <aside className="sidebar"><SidebarBody idPrefix="rail" {...sidebarProps} /></aside>
@@ -79,7 +77,7 @@ export default function Shell() {
       <Link className="sidebar-brand" to="/" aria-label="Grid Console 首页"><img className="sidebar-logo" src="/logo.svg" alt="" /><span>Grid Console</span></Link>
       <div className="mobilebar-actions">
         {mode && <ModeTag mode={mode} />}
-        <Button type="text" icon={<SearchOutlined />} aria-label="打开命令面板" onClick={() => setPalette(true)} />
+        <Button type="text" icon={<SearchOutlined />} aria-label="打开命令面板" disabled={saving} onClick={() => { if (!saving) setPalette(true); }} />
         <Button type="text" icon={<MenuOutlined />} aria-label="打开主导航" onClick={() => setDrawer(true)} />
       </div>
     </header>
@@ -90,7 +88,7 @@ export default function Shell() {
       <button type="button" className={`bottombar-item${page === 'pair' ? ' bottombar-item-active' : ''}`} aria-label="切换或查看交易对" aria-expanded={drawer} onClick={() => setDrawer(open => !open)}><LineChartOutlined aria-hidden="true" /><span>交易对</span></button>
       <Link to="/settings" className={`bottombar-item${page === 'settings' ? ' bottombar-item-active' : ''}`} aria-current={page === 'settings' ? 'page' : undefined}><SettingOutlined aria-hidden="true" /><span>设置</span></Link>
     </nav>
-    <PaletteHost open={palette} setOpen={setPalette} pairs={currentPairs} stale={!!pairs.error || !!liveAccounts.error || liveAccounts.stale || !!pairModeChanged || liveAccounts.now - pairs.dataUpdatedAt > staleMs} authEnabled={authEnabled} saving={saving} onLogout={logOut} />
+    <PaletteHost open={palette} setOpen={setPalette} pairs={currentPairs} stale={!!pairs.error || !!liveAccounts.error || liveAccounts.stale || !!pairModeChanged || liveAccounts.now - pairs.dataUpdatedAt > SNAPSHOT_STALE_MS} authEnabled={authEnabled} saving={saving} onLogout={logOut} />
   </div></ControlProvider></AccountsContext.Provider></EditContext.Provider>;
 }
 
@@ -194,12 +192,12 @@ function SidebarBody({ idPrefix, pairs, pending, symbol, page, pathname, mode, a
   const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/i.test((navigator as Navigator & { userAgentData?: { platform?: string } }).userAgentData?.platform ?? navigator.platform);
   return <div className="sidebar-inner">
     <Link className="sidebar-brand" to="/" aria-label="Grid Console 首页" onClick={onNavigate}><img className="sidebar-logo" src="/logo.svg" alt="" /><span className="sidebar-brand-name"><strong>Grid Console</strong><small>Binance Futures</small></span></Link>
-    <button type="button" className="sidebar-search" onClick={onSearch} aria-label="打开命令面板"><SearchOutlined aria-hidden="true" /><span>搜索与跳转</span><kbd aria-hidden="true">{isMac ? '⌘K' : 'Ctrl K'}</kbd></button>
+    <button type="button" className="sidebar-search" disabled={saving} onClick={onSearch} aria-label="打开命令面板"><SearchOutlined aria-hidden="true" /><span>搜索与跳转</span><kbd aria-hidden="true">{isMac ? '⌘K' : 'Ctrl K'}</kbd></button>
     <nav className="sidebar-nav" aria-label="主导航">
       <Link to="/" onClick={onNavigate} className={`sidebar-link${page === 'overview' ? ' sidebar-link-active' : ''}`} aria-current={page === 'overview' ? 'page' : undefined}><AppstoreOutlined aria-hidden="true" />策略总览</Link>
       <Link to="/settings" onClick={onNavigate} className={`sidebar-link${page === 'settings' ? ' sidebar-link-active' : ''}`} aria-current={page === 'settings' ? 'page' : undefined}><SettingOutlined aria-hidden="true" />全局设置</Link>
     </nav>
-    <div className="sidebar-section"><span id={`${idPrefix}-pairs-label`}>交易对</span><Link to="/pairs/new" onClick={onNavigate} className="sidebar-add" aria-label="新增交易对" title="新增交易对"><PlusOutlined aria-hidden="true" /></Link></div>
+    <div className="sidebar-section"><span id={`${idPrefix}-pairs-label`}>交易对</span><Link to="/pairs/new" onClick={onNavigate} className="sidebar-add" aria-label="新增交易对" aria-current={pathname === '/pairs/new' ? 'page' : undefined} title="新增交易对"><PlusOutlined aria-hidden="true" /></Link></div>
     <nav className="sidebar-pairs" aria-labelledby={`${idPrefix}-pairs-label`}>
       {pending && !pairs && [0, 1, 2].map(item => <div className="sidebar-pair-skeleton" key={item} aria-hidden="true" />)}
       {pairs?.map(pair => {

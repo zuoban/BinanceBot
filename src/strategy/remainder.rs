@@ -227,12 +227,9 @@ impl GridTradingEngine {
         if !paper && self.adopt_remainder_target(plan).await? {
             return Ok(());
         }
-        let id = plan.target.client_order_id.clone();
         let mode = plan.mode;
         if self
-            .state
-            .db
-            .run_blocking(move |db| db.has_recorded_order(&id, mode))
+            .has_recorded_order(&plan.target.client_order_id, mode)
             .await?
         {
             plan.phase = RemainderPhase::Complete;
@@ -512,8 +509,7 @@ impl GridTradingEngine {
             .await?;
         order.order_id = Some(found.order_id);
         if inconsistent_fill {
-            order.quantity = order.quantity.max(found.orig_qty);
-            order.amount_usdc = order.price * order.quantity;
+            order.reserve_quantity(found.orig_qty);
             self.state
                 .active_orders
                 .write()
@@ -544,8 +540,7 @@ impl GridTradingEngine {
                 ));
             }
             let mut original = order.clone();
-            original.quantity = original.quantity.max(found.orig_qty);
-            original.amount_usdc = original.price * original.quantity;
+            original.reserve_quantity(found.orig_qty);
             order.price = found.price;
             if !self
                 .adopt_open_exchange_order(&mut order, original, &found)

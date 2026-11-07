@@ -1156,35 +1156,33 @@ impl TradingRuntime {
         let results = join_all(self.pairs.iter_mut().zip(pair_stops).map(
             |(pair, early_stop)| async move {
                 let symbol = pair.state.config.read().await.exchange.symbol.clone();
-                let result = if pair.engine_joined {
-                    if let Some(early_stop) = early_stop {
-                        let _ = early_stop.await;
-                    }
-                    let paused = pair.state.pause_trading().await;
-                    paused.and(Err(anyhow::anyhow!("策略引擎已退出，请核实交易所挂单")))
-                } else if let Some(early_stop) = early_stop {
-                    match early_stop.await {
-                        Ok(early) => {
-                            crate::lifecycle::finish_stop_engine(
-                                &pair.state,
-                                &mut pair.engine,
-                                early,
-                            )
-                            .await
+                let result =
+                    if pair.engine_joined || (early_stop.is_none() && pair.engine.is_finished()) {
+                        if let Some(early_stop) = early_stop {
+                            let _ = early_stop.await;
                         }
-                        Err(error) => {
-                            pair.engine.abort();
-                            let _ = (&mut pair.engine).await;
-                            let _ = pair.state.pause_trading().await;
-                            Err(anyhow::anyhow!("停机任务失败: {error}"))
+                        let paused = pair.state.pause_trading().await;
+                        paused.and(Err(anyhow::anyhow!("策略引擎已退出，请核实交易所挂单")))
+                    } else if let Some(early_stop) = early_stop {
+                        match early_stop.await {
+                            Ok(early) => {
+                                crate::lifecycle::finish_stop_engine(
+                                    &pair.state,
+                                    &mut pair.engine,
+                                    early,
+                                )
+                                .await
+                            }
+                            Err(error) => {
+                                pair.engine.abort();
+                                let _ = (&mut pair.engine).await;
+                                let _ = pair.state.pause_trading().await;
+                                Err(anyhow::anyhow!("停机任务失败: {error}"))
+                            }
                         }
-                    }
-                } else if pair.engine.is_finished() {
-                    let paused = pair.state.pause_trading().await;
-                    paused.and(Err(anyhow::anyhow!("策略引擎已退出，请核实交易所挂单")))
-                } else {
-                    stop_engine(&pair.state, &mut pair.engine, limit).await
-                };
+                    } else {
+                        stop_engine(&pair.state, &mut pair.engine, limit).await
+                    };
                 for task in pair.background.drain(..) {
                     task.abort();
                     let _ = task.await;

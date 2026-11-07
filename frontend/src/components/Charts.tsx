@@ -40,8 +40,8 @@ export function HourlyChart({ snapshot, now: currentNow }: { snapshot: Snapshot;
 export function DepthChart({ snapshot }: { snapshot: Snapshot }) {
   const orders = snapshot.active_orders;
   if (!orders.length) return <NoData />;
-  const mark = Number(snapshot.ticker.mark_price);
-  const hasMark = Number.isFinite(mark) && mark > 0;
+  const mark = numeric(snapshot.ticker.mark_price);
+  const hasMark = mark !== null && mark > 0;
   const entries = orders.map(order => ({ kind: 'order' as const, value: numeric(order.price) ?? -Infinity, order }));
   const rows: ({ kind: 'order'; value: number; order: typeof orders[number] } | { kind: 'mark'; value: number })[] = entries;
   if (hasMark) rows.push({ kind: 'mark', value: mark });

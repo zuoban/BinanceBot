@@ -2,11 +2,10 @@ import { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState }
 import { Link, useNavigate } from 'react-router-dom';
 import { App, Button, Card, Col, Dropdown, Empty, Input, Popover, Row, Select, Space, Statistic } from 'antd';
 import { ArrowDownOutlined, ArrowRightOutlined, ArrowUpOutlined, EyeOutlined, PlusOutlined, SearchOutlined, ThunderboltOutlined } from '@ant-design/icons';
-import * as queries from '../lib/queries';
-import { SNAPSHOT_STALE_MS, useOverview } from '../lib/queries';
+import { useOverview } from '../lib/queries';
 import { useUrlParams } from '../lib/urlState';
 import { AccountsContext } from '../lib/session';
-import { ageText, accountGroups, cnyText, compactNumber as number, compactPrice as price, comparePositionAmount, directionLabel, entryChange, entryPriceText, groupTradePnl, maxPositionPolicyLabel, modeLabel, positivePrice, positionAmount, positionGroups, quoteAsset, ratioText, todayPnlGroups, todayTradeCounts, trimFractionZeros } from '../lib/format';
+import { ageText, accountGroups, cnyText, compactNumber as number, compactPrice as price, comparePositionAmount, directionLabel, entryChange, entryPriceText, groupTradePnl, maxPositionPolicyLabel, modeLabel, positivePrice, positionAmount, positionGroups, quoteAsset, ratioText, SNAPSHOT_STALE_MS, todayPnlGroups, todayTradeCounts, trimFractionZeros } from '../lib/format';
 import { ErrorNotice, PageTitle, Pnl, SignalButton, SignalChip, StatusTag, type Signal } from '../components/Common';
 import { runBatchControls, useControls } from '../components/Controls';
 import type { Pair } from '../lib/types';
@@ -18,7 +17,6 @@ import { PaperGuide } from '../components/PaperGuide';
 import { TradesTable } from '../components/DataTables';
 
 import { useNow } from '../lib/useNow';
-const staleMs = 'SNAPSHOT_STALE_MS' in queries ? SNAPSHOT_STALE_MS : 10_000;
 const toPair = (e: { snapshot: { symbol: string; status: Pair['status']; grid_config: Pair['grid_config'] }; mode: Pair['mode']; scoped: boolean }): Pair => ({ symbol: e.snapshot.symbol, status: e.snapshot.status, mode: e.mode, grid_config: e.snapshot.grid_config, scoped: e.scoped });
 export default function OverviewPage() {
   const overview = useOverview();
@@ -67,7 +65,7 @@ export default function OverviewPage() {
   const buyTrades = displayedTrades.filter(trade => trade.side === 'BUY').length;
   const sellTrades = displayedTrades.filter(trade => trade.side === 'SELL').length;
   const tradePnlGroups = groupTradePnl(displayedTrades);
-  const stale = !!overview.error || now - overview.dataUpdatedAt > staleMs;
+  const stale = !!overview.error || now - overview.dataUpdatedAt > SNAPSHOT_STALE_MS;
   const pairs = entries.map(toPair);
   let runningCount = 0, pausedCount = 0, stoppedCount = 0, errorCount = 0, liveCount = 0, allPaper = pairs.length > 0;
   for (const p of pairs) {
@@ -83,13 +81,18 @@ export default function OverviewPage() {
   const batch = async (action: 'pause' | 'resume') => {
     if (batchLock.current) return;
     batchLock.current = true; setBatchBusy(true);
+    const refreshPairs = async () => {
+      const refreshed = await overview.refetch();
+      if (!mounted.current) return null;
+      if (refreshed.error || !refreshed.data) throw refreshed.error ?? new Error('无法刷新策略列表');
+      return refreshed.data.pairs;
+    };
     try {
       let targets: Pair[] = [];
       if (action === 'resume') {
-        const refreshed = await overview.refetch();
-        if (!mounted.current) return;
-        if (refreshed.error || !refreshed.data) throw refreshed.error ?? new Error('无法刷新策略列表');
-        targets = refreshed.data.pairs.filter(e => e.snapshot.status !== 'RUNNING').map(toPair);
+        const latest = await refreshPairs();
+        if (!latest) return;
+        targets = latest.filter(e => e.snapshot.status !== 'RUNNING').map(toPair);
         if (!targets.length) { message.info('当前没有可恢复的策略'); return; }
       }
       const accepted = await modal.confirm({
@@ -100,10 +103,9 @@ export default function OverviewPage() {
       if (!accepted || !mounted.current) return;
       let selected = targets;
       if (action === 'pause') {
-        const refreshed = await overview.refetch();
-        if (!mounted.current) return;
-        if (refreshed.error || !refreshed.data) throw refreshed.error ?? new Error('无法刷新策略列表');
-        selected = refreshed.data.pairs.map(toPair);
+        const latest = await refreshPairs();
+        if (!latest) return;
+        selected = latest.map(toPair);
         if (!selected.length) { message.info('当前没有可暂停的策略'); return; }
       }
       const outcomes = await runBatchControls(selected, action, controls.run);
@@ -116,7 +118,7 @@ export default function OverviewPage() {
   };
   const matchesStatus = (e: typeof entries[number]) => statusFilter === 'all' || (statusFilter === 'LIVE' ? e.mode === 'LIVE' : e.snapshot.status === statusFilter);
   const visible = entries.filter(e => e.snapshot.symbol.includes(search.toUpperCase().trim()) && matchesStatus(e))
-    .sort((a, b) => sort === 'position' ? Number(b.snapshot.status === 'RUNNING') - Number(a.snapshot.status === 'RUNNING') || comparePositionAmount(a.snapshot, b.snapshot) : sort === 'today' ? totalToday(b.snapshot.symbol) - totalToday(a.snapshot.symbol) : sort === 'orders' ? (b.snapshot.stats.active_buy_orders + b.snapshot.stats.active_sell_orders) - (a.snapshot.stats.active_buy_orders + a.snapshot.stats.active_sell_orders) : a.snapshot.symbol.localeCompare(b.snapshot.symbol));
+    .sort((a, b) => sort === 'position' ? Number(b.snapshot.status === 'RUNNING') - Number(a.snapshot.status === 'RUNNING') || comparePositionAmount(a.snapshot, b.snapshot) : sort === 'today' ? totalToday(b.snapshot.symbol) - totalToday(a.snapshot.symbol) || a.snapshot.symbol.localeCompare(b.snapshot.symbol) : sort === 'orders' ? (b.snapshot.stats.active_buy_orders + b.snapshot.stats.active_sell_orders) - (a.snapshot.stats.active_buy_orders + a.snapshot.stats.active_sell_orders) || a.snapshot.symbol.localeCompare(b.snapshot.symbol) : a.snapshot.symbol.localeCompare(b.snapshot.symbol));
   const clearFilters = () => updateFilters({ q: '', sort: 'position', status: 'all' });
   const counts = [...tradeCountsBySymbol.values()];
   const today = counts.every(c => c !== null) ? counts.reduce<{ buy: number; sell: number }>((sum, c) => ({ buy: sum.buy + c.buy, sell: sum.sell + c.sell }), { buy: 0, sell: 0 }) : null;
@@ -157,7 +159,7 @@ export default function OverviewPage() {
     {accountList.length > 0 && <section className="overview-finance-group" aria-labelledby="accounts-heading">
     <div className="section-heading"><h2 id="accounts-heading">账户概览</h2></div>
     <Row gutter={[16, 16]}>
-      {accountList.map(group => <Col xs={24} xl={12} key={group.key}><Card className="account-card finance-card" size="small">
+      {accountList.map(group => <Col span={24} key={group.key}><Card className="account-card finance-card" size="small">
         <div className="section-line finance-card-heading"><span>保证金余额</span></div>
         <div className="finance-card-primary"><Statistic value={group.equity ?? '--'} formatter={() => number(group.equity)} suffix={group.asset} />
           <span className="finance-card-note muted">{cnyText(group.cny, true)}</span></div>
@@ -176,7 +178,7 @@ export default function OverviewPage() {
     {positionList.length > 0 && <section className="overview-finance-group" aria-labelledby="positions-heading">
       <div className="section-heading"><h2 id="positions-heading">持仓概览</h2><span className="muted">按标记价格计算 · 全部策略</span></div>
       <Row gutter={[16, 16]}>
-        {positionList.map(group => <Col xs={24} xl={12} key={group.key}>
+        {positionList.map(group => <Col span={24} key={group.key}>
           <Card className="position-summary finance-card" size="small">
             <div className="section-line finance-card-heading"><span>总持仓金额 / {group.asset}</span></div>
             <div className="finance-card-primary">
@@ -266,7 +268,7 @@ export default function OverviewPage() {
     <OverviewHistory />
     <BatchResultDrawer report={report} busy={controls.busy} onClose={() => setReport(null)} onRetry={(pair, action) => void (async () => {
       const result = await controls.run(pair, action);
-      if (!result || (result === 'not_submitted' && !controls.busy.has(pair.symbol))) return;
+      if (!mounted.current || !result || (result === 'not_submitted' && !controls.busy.has(pair.symbol))) return;
       setReport(current => {
         if (!current) return null;
         const outcomes = result === 'confirmed'

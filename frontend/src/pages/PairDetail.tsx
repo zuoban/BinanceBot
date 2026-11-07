@@ -36,7 +36,7 @@ export default function PairDetail() {
     <ErrorNotice error={pairs.error || query.error} retry={() => { void pairs.refetch(); void query.refetch(); }} />
     {pairs.data && !pair && <Alert type="warning" title="该交易对不存在或已移除" />}
     {controls.results[symbol ?? ''] && <Alert type={controls.results[symbol ?? ''].startsWith('未提交') ? 'error' : 'info'} title={controls.results[symbol ?? '']} />}
-    {pair && <div className="detail-status signal-strip"><StatusTag status={currentPair!.status} /><ModeTag mode={currentPair!.mode} /><SignalChip tier={query.live ? 'calm' : 'yellow'}>{query.live ? '实时连接' : 'HTTP 自动刷新'}</SignalChip><span className="muted freshness" title={query.dataUpdatedAt ? `最近同步 ${new Date(query.dataUpdatedAt).toLocaleTimeString('zh-CN')}` : undefined}>{query.dataUpdatedAt ? `更新于 ${ageText(query.dataUpdatedAt, now)}` : '等待首次快照'}</span></div>}
+    {pair && <div className="detail-status signal-strip"><StatusTag status={currentPair!.status} /><ModeTag mode={currentPair!.mode} /><SignalChip tier={query.live ? 'calm' : 'yellow'}>{query.live ? '实时连接' : 'HTTP 自动刷新'}</SignalChip><span className="muted freshness" title={query.dataUpdatedAt ? `最近同步 ${new Date(query.dataUpdatedAt).toLocaleTimeString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' })}` : undefined}>{query.dataUpdatedAt ? `更新于 ${ageText(query.dataUpdatedAt, now)}` : '等待首次快照'}</span></div>}
     {query.stale && s && <Alert type="warning" showIcon title="快照暂未更新，数值可能已过期；仍可撤单并暂停。" />}
     {!s && (pairs.isPending || (pair && query.isPending)) && <DetailLoading />}
     {s && <>

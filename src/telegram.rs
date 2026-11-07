@@ -268,10 +268,14 @@ pub fn format_trade_message(trade: &TradeRecord, context: &TradeNotificationCont
     )
 }
 
+fn format_beijing_time(now: DateTime<Utc>) -> String {
+    now.with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap())
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string()
+}
+
 fn format_global_risk_message(reason: &str, now: DateTime<Utc>) -> String {
-    let time = now
-        .with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap())
-        .format("%Y-%m-%d %H:%M:%S");
+    let time = format_beijing_time(now);
     format!(
         "<b>⚠️ 全局风控已触发</b>\n原因：{}\n时间：{time}（北京时间）",
         escape_html(reason)
@@ -279,9 +283,7 @@ fn format_global_risk_message(reason: &str, now: DateTime<Utc>) -> String {
 }
 
 fn format_test_message(now: DateTime<Utc>) -> String {
-    let time = now
-        .with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap())
-        .format("%Y-%m-%d %H:%M:%S");
+    let time = format_beijing_time(now);
     format!("<b>✅ Grid Console 测试消息</b>\n通知渠道可用。\n时间：{time}（北京时间）")
 }
 

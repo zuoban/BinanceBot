@@ -27,7 +27,13 @@ export async function downloadDatabase(path: string, targets?: DatabaseTarget[])
     throw new Error(result?.message || '数据库导出失败，请重试');
   }
   const filename = response.headers.get('Content-Disposition')?.match(/filename="?([^";]+)"?/)?.[1] ?? 'binancebot-analysis.db';
-  downloadBlob(await response.blob(), filename);
+  let blob: Blob;
+  try {
+    blob = await response.blob();
+  } catch {
+    throw new Error('无法连接后端服务，请检查网络后重试');
+  }
+  downloadBlob(blob, filename);
 }
 
 export function useDatabaseAction<T extends string>() {

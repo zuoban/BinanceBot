@@ -74,7 +74,7 @@ export function TradesTable({ trades: allTrades, overview = false, now: currentN
     ['时间（北京）', '方向', '成交价格', '数量', '金额', '已实现盈亏', '手续费', '成交方式', '备注'],
     trades.map(t => [time(t.timestamp), t.side === 'BUY' ? '买入' : '卖出', t.price, t.quantity, t.amount_usdc, t.pnl_verified ? t.realized_pnl : '待同步', t.pnl_verified ? t.commission : '待同步', t.pnl_verified ? (t.is_maker ? 'Maker' : 'Taker') : '待同步', t.note]),
   ));
-  const columns: ColumnsType<Trade> = [
+  const columns = useMemo<ColumnsType<Trade>>(() => [
     ...(overview ? [{ title: '交易对', dataIndex: 'symbol', className: 'trade-symbol', width: 130 }] : []),
     { title: '方向', dataIndex: 'side', render: side, width: 90, fixed: overview ? undefined : 'left' },
     { title: overview ? '成交时间' : '时间（北京）', dataIndex: 'timestamp', render: overview ? (value: string) => <RelativeTime value={value} now={now} /> : time, width: overview ? 90 : 185 },
@@ -85,7 +85,7 @@ export function TradesTable({ trades: allTrades, overview = false, now: currentN
     { title: '手续费', align: 'right', className: 'table-numeric', render: (_, t) => t.pnl_verified ? number(t.commission, 4) : <Tag>待同步</Tag> },
     { title: '成交方式', render: (_, t) => t.pnl_verified ? (t.is_maker ? 'Maker' : 'Taker') : <Tag>待同步</Tag> },
     { title: '备注', dataIndex: 'note', ellipsis: true },
-  ];
+  ], [overview, overview ? now : 0]);
   return <div>
     {!overview && <TableFilterBar label="按方向筛选" value={filter} onChange={setFilter} options={sideOptions} shown={trades.length} total={allTrades.length} onExport={exportRows} />}
     {overview && <p className="overview-trades-scroll-hint">左右滑动查看完整成交信息</p>}
@@ -115,7 +115,7 @@ export function LogsTable({ logs }: { logs: Log[] }) {
   return <>
     <TableFilterBar label="按级别筛选" value={level} onChange={setLevel} options={levelOptions} shown={rows.length} total={logs.length} onExport={exportRows} />
     <div className="table-desktop"><p className="table-scroll-hint">左右滑动查看完整日志</p>
-    <Table<Log> rowKey={l => `${l.timestamp}-${l.level}-${l.message}`} dataSource={rows} size="small" scroll={{ x: 600 }} pagination={{ pageSize: 30, showSizeChanger: false }} columns={logColumns} /></div>
+    <Table<Log> rowKey={(l, i) => `${l.timestamp}-${l.level}-${i}-${l.message}`} dataSource={rows} size="small" scroll={{ x: 600 }} pagination={{ pageSize: 30, showSizeChanger: false, hideOnSinglePage: true }} columns={logColumns} /></div>
     <div className="table-mobile">{rows.length ? <ul className="trade-list" aria-label="日志列表">{rows.slice(0, 100).map((l, i) => <li className="trade-list-item" key={`${l.timestamp}-${l.level}-${i}-${l.message}`}>
       <div className="trade-list-heading"><span className={`log-level log-level-${l.level.toLowerCase()}`}>{l.level}</span><span className="trade-list-time">{time(l.timestamp)}</span></div>
       <p className="log-message">{l.message}</p>
