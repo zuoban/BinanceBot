@@ -1023,7 +1023,7 @@ impl GridTradingEngine {
         false
     }
 
-    async fn ensure_flat_for_direction_change(&mut self) -> Result<()> {
+    async fn ensure_flat_for_direction_change(&mut self, direction: GridDirection) -> Result<()> {
         if !self.state.config.read().await.exchange.is_paper() {
             anyhow::ensure!(
                 self.sync_account_and_position().await,
@@ -1031,7 +1031,7 @@ impl GridTradingEngine {
             );
         }
         anyhow::ensure!(
-            self.state.position.read().await.size.is_zero(),
+            self.state.position.read().await.size * direction.sign() >= Decimal::ZERO,
             "切换做多 / 做空方向前，请先平掉当前持仓"
         );
         Ok(())
@@ -1666,7 +1666,8 @@ impl GridTradingEngine {
         let old_config = self.state.config.read().await.clone();
         let direction_changed = old_config.grid.direction != new_config.grid.direction;
         if direction_changed {
-            self.ensure_flat_for_direction_change().await?;
+            self.ensure_flat_for_direction_change(new_config.grid.direction)
+                .await?;
         }
         let strategy_changed =
             old_config.exchange != new_config.exchange || old_config.grid != new_config.grid;
@@ -1699,9 +1700,9 @@ impl GridTradingEngine {
                 .await?;
             anyhow::ensure!(
                 !direction_changed
-                    || state
-                        .as_ref()
-                        .is_none_or(|(position, _)| position.size.is_zero()),
+                    || state.as_ref().is_none_or(|(position, _)| {
+                        position.size * new_config.grid.direction.sign() >= Decimal::ZERO
+                    }),
                 "切换做多 / 做空方向前，请先平掉目标账户的持仓"
             );
             state
@@ -1721,7 +1722,9 @@ impl GridTradingEngine {
                 .await?
                 .ok_or_else(|| anyhow!("New symbol has no position information"))?;
             anyhow::ensure!(
-                !direction_changed || new_position.position_amt.is_zero(),
+                !direction_changed
+                    || new_position.position_amt * new_config.grid.direction.sign()
+                        >= Decimal::ZERO,
                 "切换做多 / 做空方向前，请先平掉目标账户的持仓"
             );
             let account = new_client.get_account().await?;
@@ -1786,7 +1789,10 @@ impl GridTradingEngine {
         // Cancellation may reveal a racing fill. Recheck the old account before
         // committing the new direction so an exit cannot become an opening order.
         if direction_changed {
-            if let Err(error) = self.ensure_flat_for_direction_change().await {
+            if let Err(error) = self
+                .ensure_flat_for_direction_change(new_config.grid.direction)
+                .await
+            {
                 self.pause_trading_with_reason("撤单后未确认空仓，交易方向未切换")
                     .await;
                 return Err(error);
@@ -1801,9 +1807,9 @@ impl GridTradingEngine {
                 .await?;
             anyhow::ensure!(
                 !direction_changed
-                    || paper_state
-                        .as_ref()
-                        .is_none_or(|(position, _)| position.size.is_zero()),
+                    || paper_state.as_ref().is_none_or(|(position, _)| {
+                        position.size * new_config.grid.direction.sign() >= Decimal::ZERO
+                    }),
                 "切换做多 / 做空方向前，请先平掉目标账户的持仓"
             );
         }

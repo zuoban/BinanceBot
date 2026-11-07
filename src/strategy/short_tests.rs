@@ -571,6 +571,42 @@ async fn incompatible_manual_position_pauses_instead_of_opening_orders() {
     }
 }
 
+#[tokio::test]
+async fn direction_change_allows_aligning_with_existing_position() {
+    for (initial_direction, target_direction, size) in [
+        (GridDirection::Long, GridDirection::Short, dec!(-2)),
+        (GridDirection::Short, GridDirection::Long, dec!(2)),
+    ] {
+        let fake = FakeExchange::default();
+        *fake.position.lock().unwrap() = size;
+        let (url, server) = fake_server(fake.clone()).await;
+        let mut engine = live_engine(initial_direction, url).await;
+        engine.maintain_grid_window().await;
+        assert_eq!(*engine.state.status.read().await, BotStatus::Paused);
+        assert!(active(&engine).await.is_empty());
+
+        let mut next = engine.state.config.read().await.clone();
+        next.grid.direction = target_direction;
+        engine.apply_config(next).await.unwrap();
+        assert_eq!(
+            engine.state.config.read().await.grid.direction,
+            target_direction
+        );
+        assert_eq!(
+            engine
+                .state
+                .db
+                .load_config()
+                .unwrap()
+                .unwrap()
+                .grid
+                .direction,
+            target_direction
+        );
+        server.abort();
+    }
+}
+
 #[derive(Clone, Default)]
 struct FakeExchange {
     position: Arc<Mutex<Decimal>>,
