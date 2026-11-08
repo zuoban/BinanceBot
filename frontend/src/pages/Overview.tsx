@@ -228,7 +228,7 @@ export default function OverviewPage() {
         const tradeCounts = tradeCountsBySymbol.get(s.symbol) ?? null;
         const change = entryChange(s.position, s.ticker.mark_price);
         return <Col xs={24} lg={12} xxl={8} key={s.symbol}><Card className={`strategy-card ${s.grid_config.direction === 'SHORT' ? 'strategy-short' : 'strategy-long'}`}>
-          <div className="section-line strategy-card-heading"><div className="strategy-identity"><Link className="pair-name" to={`/pairs/${s.symbol}`}>{s.symbol}</Link><span className="strategy-direction" role="img" aria-label={`策略方向：${directionLabel(s.grid_config.direction)}`}>{s.grid_config.direction === 'SHORT' ? <ArrowDownOutlined /> : <ArrowUpOutlined />}{directionLabel(s.grid_config.direction)}</span></div><Space className="strategy-card-actions" size={2}><StatusTag status={s.status} /><Popover trigger="click" placement="bottomRight" title={`${s.symbol} 策略配置`} content={
+          <div className="section-line strategy-card-heading"><div className="strategy-identity"><Link className="pair-name" to={`/pairs/${s.symbol}`}>{s.symbol}</Link><span className="strategy-direction" role="img" aria-label={`策略方向：${directionLabel(s.grid_config.direction)}`}>{s.grid_config.direction === 'SHORT' ? <ArrowDownOutlined /> : <ArrowUpOutlined />}{directionLabel(s.grid_config.direction)}</span></div><Space className="strategy-card-actions" size={6}><StatusTag status={s.status} /><Popover trigger="click" placement="bottomRight" title={`${s.symbol} 策略配置`} content={
             <div className="strategy-config-popover">
               <dl>
                 <div><dt>交易方向</dt><dd>{directionLabel(s.grid_config.direction)}</dd></div>
