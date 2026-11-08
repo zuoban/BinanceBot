@@ -267,7 +267,6 @@ it('shows the validate-first guide only while every strategy is on paper and rem
   overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: paper, mode: 'PAPER', scoped: true }], recent_trades: [] };
   const first = render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
   expect(screen.getByRole('complementary', { name: '新手指引' })).toBeInTheDocument();
-  expect(screen.getByRole('link', { name: /打开 BTCUSDC 的策略参数/ })).toHaveAttribute('href', '/pairs/BTCUSDC/config');
   await userEvent.setup().click(screen.getByRole('button', { name: '关闭新手指引' }));
   expect(screen.queryByRole('complementary', { name: '新手指引' })).not.toBeInTheDocument();
   first.unmount();

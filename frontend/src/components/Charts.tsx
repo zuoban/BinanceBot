@@ -25,18 +25,18 @@ export function HourlyChart({ snapshot, now: currentNow }: { snapshot: Snapshot;
   const hourBucket = Math.floor(now / 3600_000);
   const data = useMemo(() => snapshot.hourly_trade_stats ? todayHourlyData(snapshot.hourly_trade_stats, now) : [], [snapshot.hourly_trade_stats, hourBucket]);
   if (todayCount(snapshot, now) === null) return <NoData />;
-  const axisTick = { fontSize: 11, fontFamily: 'var(--font-mono)', fill: token.colorTextTertiary };
+  const axisTick = { fontSize: 12, fontFamily: 'var(--font-mono)', fill: token.colorTextTertiary };
   return <>
-    <div className="muted chart-caption">北京时间 · 最近时段在左侧 · 可横向滚动查看</div>
-    <div className="hourly-chart-scroll" role="region" tabIndex={0} aria-label="北京时间今日每小时成交笔数，可横向滚动"><div className="chart hourly-chart"><ResponsiveContainer width="100%" height={270}>
-      <BarChart data={data} barGap={4} margin={{ top: 16, right: 12, bottom: 4, left: -12 }}>
+    <div className="muted chart-caption">北京时间 · 最近时段在左侧 · 选择柱形查看每小时明细</div>
+    <div className="chart hourly-chart" role="region" aria-label="北京时间今日每小时成交笔数"><ResponsiveContainer width="100%" height={270}>
+      <BarChart accessibilityLayer data={data} barGap={2} margin={{ top: 16, right: 12, bottom: 4, left: -12 }}>
         <CartesianGrid strokeDasharray="3 5" vertical={false} stroke={token.colorBorderSecondary} />
-        <XAxis dataKey="hour" interval={0} tickLine={false} axisLine={false} tick={axisTick} />
+        <XAxis dataKey="hour" interval="preserveStartEnd" minTickGap={24} tickLine={false} axisLine={false} tick={axisTick} />
         <YAxis allowDecimals={false} axisLine={false} tickLine={false} tick={axisTick} />
         <Legend /><Tooltip cursor={{ fill: token.colorFillSecondary }} contentStyle={{ background: token.colorBgElevated, borderColor: token.colorBorder, borderRadius: 8, color: token.colorText }} labelStyle={{ color: token.colorText }} />
         <Bar dataKey="买入" fill={token.colorSuccess} radius={[3, 3, 0, 0]} /><Bar dataKey="卖出" fill={token.colorError} radius={[3, 3, 0, 0]} />
       </BarChart>
-    </ResponsiveContainer></div></div>
+    </ResponsiveContainer></div>
   </>;
 }
 export function DepthChart({ snapshot }: { snapshot: Snapshot }) {

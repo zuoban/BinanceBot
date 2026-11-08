@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { ConfigProvider, theme as antdTheme } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
+import { componentColors, dimensions, fonts, palettes } from './designTokens';
 
 export type ThemePreference = 'system' | 'light' | 'dark';
 const storageKey = 'binance_bot_theme';
@@ -23,6 +24,8 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const [preference, setPreferenceState] = useState<ThemePreference>(readPreference);
   const [darkSystem, setDarkSystem] = useState(systemDark);
   const dark = preference === 'dark' || (preference === 'system' && darkSystem);
+  const palette = palettes[dark ? 'dark' : 'light'];
+  const colors = componentColors[dark ? 'dark' : 'light'];
   const setPreference = useCallback((value: ThemePreference) => {
     setPreferenceState(value);
     try { localStorage.setItem(storageKey, value); } catch { /* Keep the choice for this session. */ }
@@ -47,66 +50,71 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     document.documentElement.dataset.theme = dark ? 'dark' : 'light';
     document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
-  }, [dark]);
+    document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')?.setAttribute('content', palette['--bg-page']);
+  }, [dark, palette]);
 
   return <ThemeContext.Provider value={value}>
     <ConfigProvider locale={zhCN} theme={{
       algorithm: dark ? antdTheme.darkAlgorithm : antdTheme.defaultAlgorithm,
       token: {
-        colorPrimary: dark ? '#6ea0ff' : '#1d4ed8',
-        colorInfo: dark ? '#6ea0ff' : '#1d4ed8',
-        colorInfoBg: dark ? '#0f1f3d' : '#eef3ff',
-        colorInfoBorder: dark ? '#1e3a6e' : '#c7d7fb',
-        colorSuccess: dark ? '#3fcf96' : '#0f7a52',
-        colorSuccessBg: dark ? '#0d2a21' : '#ecf8f2',
-        colorSuccessBorder: dark ? '#1b4d3b' : '#bde5d1',
-        colorError: dark ? '#ff7a66' : '#b4382c',
-        colorErrorBg: dark ? '#2e1613' : '#fdf0ee',
-        colorErrorBorder: dark ? '#5a2a24' : '#f3c6bf',
-        colorWarning: dark ? '#f0b94d' : '#a35a07',
-        colorWarningBg: dark ? '#2b2010' : '#fff7e8',
-        colorWarningBorder: dark ? '#55401c' : '#f4d9a6',
-        borderRadius: 8,
-        borderRadiusSM: 6,
-        borderRadiusLG: 12,
-        controlHeight: 36,
-        controlHeightSM: 28,
-        fontFamily: 'system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif',
-        fontFamilyCode: 'ui-monospace, "SF Mono", Menlo, Consolas, monospace',
-        colorBgLayout: dark ? '#0a1220' : '#f2f5f9',
-        colorBgContainer: dark ? '#101a2b' : '#ffffff',
-        colorBgElevated: dark ? '#16223a' : '#ffffff',
-        colorBorder: dark ? '#2b3d5c' : '#cbd5e1',
-        colorBorderSecondary: dark ? '#1f2e47' : '#e1e7ef',
-        colorText: dark ? '#e6edf7' : '#0f1a2b',
-        colorTextSecondary: dark ? '#a7b5c9' : '#44546a',
-        colorTextTertiary: dark ? '#8394ad' : '#5f6f85',
-        colorTextPlaceholder: dark ? '#8394ad' : '#5f6f85',
-        colorTextDisabled: dark ? '#7a8ba5' : '#6b7a90',
-        colorBgContainerDisabled: dark ? '#16223a' : '#eef2f7',
-        controlItemBgHover: dark ? '#17253f' : '#f2f5f9',
-        controlItemBgActive: dark ? 'rgba(110, 160, 255, 0.16)' : 'rgba(29, 78, 216, 0.08)',
-        controlItemBgActiveHover: dark ? 'rgba(110, 160, 255, 0.22)' : 'rgba(29, 78, 216, 0.13)',
+        colorPrimary: palette['--accent'],
+        colorInfo: palette['--accent'],
+        colorInfoBg: palette['--sig-blue-bg'],
+        colorInfoBorder: palette['--sig-blue-line'],
+        colorSuccess: palette['--positive'],
+        colorSuccessBg: palette['--sig-calm-bg'],
+        colorSuccessBorder: palette['--sig-calm-line'],
+        colorError: palette['--negative'],
+        colorErrorBg: palette['--sig-red-bg'],
+        colorErrorBorder: palette['--sig-red-line'],
+        colorWarning: palette['--sig-yellow'],
+        colorWarningBg: palette['--sig-yellow-bg'],
+        colorWarningBorder: palette['--sig-yellow-line'],
+        borderRadius: dimensions.radiusControl,
+        borderRadiusSM: dimensions.radiusChip,
+        borderRadiusLG: dimensions.radiusPanel,
+        controlHeight: dimensions.controlHeight,
+        controlHeightSM: dimensions.controlHeightSM,
+        controlHeightLG: dimensions.controlTouch,
+        fontSize: dimensions.textBase,
+        fontSizeSM: dimensions.textXs,
+        fontSizeLG: dimensions.textSection,
+        fontFamily: fonts.sans,
+        fontFamilyCode: fonts.mono,
+        colorBgLayout: palette['--bg-page'],
+        colorBgContainer: palette['--bg-card'],
+        colorBgElevated: colors.elevated,
+        colorBorder: palette['--border-strong'],
+        colorBorderSecondary: palette['--border-hairline'],
+        colorText: palette['--text-primary'],
+        colorTextSecondary: palette['--text-secondary'],
+        colorTextTertiary: palette['--text-muted'],
+        colorTextPlaceholder: palette['--text-muted'],
+        colorTextDisabled: colors.disabledText,
+        colorBgContainerDisabled: colors.disabledBg,
+        controlItemBgHover: colors.hover,
+        controlItemBgActive: colors.active,
+        controlItemBgActiveHover: colors.activeHover,
       },
       components: {
-        Card: { borderRadiusLG: 12, headerFontSize: 15, headerHeight: 52 },
+        Card: { borderRadiusLG: dimensions.radiusPanel, headerFontSize: dimensions.textSection, headerHeight: 52 },
         Table: {
-          headerBg: dark ? '#0c1626' : '#f6f8fb',
-          headerColor: dark ? '#a7b5c9' : '#44546a',
+          headerBg: colors.tableHeader,
+          headerColor: palette['--text-secondary'],
           headerSplitColor: 'transparent',
-          rowHoverBg: dark ? '#14213a' : '#f6f9fe',
-          borderColor: dark ? '#1f2e47' : '#e1e7ef',
+          rowHoverBg: colors.tableHover,
+          borderColor: palette['--border-hairline'],
         },
-        Dropdown: { paddingBlock: 6, borderRadiusLG: 12, borderRadiusSM: 6 },
+        Dropdown: { paddingBlock: dimensions.radiusChip, borderRadiusLG: dimensions.radiusPanel, borderRadiusSM: dimensions.radiusChip },
         Select: {
-          optionPadding: '8px 12px',
+          optionPadding: `${dimensions.space2}px ${dimensions.space3}px`,
           optionSelectedFontWeight: 600,
-          optionSelectedColor: dark ? '#6ea0ff' : '#1d4ed8',
+          optionSelectedColor: palette['--accent'],
         },
-        // White on the light dark-theme fills is about 2.6:1; dark ink is about 7.3:1.
-        Button: dark ? { primaryColor: '#0a1220', dangerColor: '#0a1220' } : {},
-        Tabs: { horizontalMargin: '0 0 20px', titleFontSize: 14 },
-        Segmented: { trackBg: dark ? '#0c1626' : '#e9eef5' },
+        // Dark ink preserves contrast on the brighter dark-theme action fills.
+        Button: { primaryColor: colors.buttonForeground, dangerColor: colors.buttonForeground },
+        Tabs: { horizontalMargin: `0 0 ${dimensions.space5}px`, titleFontSize: dimensions.textBase },
+        Segmented: { trackBg: colors.segmentedTrack },
       },
     }}>{children}</ConfigProvider>
   </ThemeContext.Provider>;

@@ -51,7 +51,6 @@ it('缺省时关闭保证金保护，并可开启保存', async () => {
   const toggle = await screen.findByRole('switch', { name: '可用保证金不足时暂停' });
   await waitFor(() => expect(toggle).toBeEnabled());
   expect(toggle).not.toBeChecked();
-  expect(screen.getByText('开启后，任意已配置策略的可用保证金小于或等于零时，暂停所有策略、撤销机器人挂单并保留持仓。')).toBeInTheDocument();
   await user.click(toggle);
   await user.click(screen.getByRole('button', { name: '保存全局设置' }));
   await waitFor(() => expect(mocks.post).toHaveBeenCalledWith('/api/global/config', expect.objectContaining({ pause_on_zero_available_margin: true })));

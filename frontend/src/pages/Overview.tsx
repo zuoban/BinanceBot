@@ -1,6 +1,6 @@
 import { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { App, Button, Card, Col, Dropdown, Empty, Input, Popover, Row, Select, Space, Statistic } from 'antd';
+import { App, Button, Card, Col, Dropdown, Empty, Grid, Input, Popover, Row, Select, Space, Statistic } from 'antd';
 import { ArrowDownOutlined, ArrowRightOutlined, ArrowUpOutlined, EyeOutlined, PlusOutlined, SearchOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { useOverview } from '../lib/queries';
 import { useUrlParams } from '../lib/urlState';
@@ -55,6 +55,8 @@ export default function OverviewPage() {
   const [batchBusy, setBatchBusy] = useState(false);
   const [report, setReport] = useState<BatchReport | null>(null);
   const [tradesExpanded, setTradesExpanded] = useState(false);
+  const compactFinance = Grid.useBreakpoint().md === false;
+  const [financesExpanded, setFinancesExpanded] = useState(false);
   const now = useNow();
   const batchLock = useRef(false);
   const mounted = useRef(true);
@@ -162,7 +164,15 @@ export default function OverviewPage() {
       </div>
     </section>
     {overview.isPending && !overview.data ? <OverviewLoading addPairLink={addPairLink} /> : !overview.data ? <section className="strategies-section" aria-labelledby="strategies-heading"><div className="section-heading"><h2 id="strategies-heading">交易策略</h2>{addPairLink}</div></section> : <>
-    {(accountList.length > 0 || positionList.length > 0) && <div className={`overview-finances${stale ? ' is-stale' : ''}`}>
+    {(accountList.length > 0 || positionList.length > 0) && <details className="finance-disclosure" open={!compactFinance || financesExpanded} onToggle={event => { if (compactFinance) setFinancesExpanded(event.currentTarget.open); }}>
+      <summary className="finance-disclosure-summary">
+        <span className="finance-disclosure-label">账户与持仓明细<ArrowRightOutlined aria-hidden="true" /></span>
+        <span className={`finance-summary-values${stale ? ' is-stale' : ''}`}>
+          {accountList.map(group => <span key={`account-${group.key}`}><small>账户权益 / {group.asset}</small><strong>{number(group.equity)}</strong></span>)}
+          {positionList.map(group => <span key={`position-${group.key}`}><small>总持仓 / {group.asset}</small><strong>{number(group.total)}</strong></span>)}
+        </span>
+      </summary>
+    <div className={`overview-finances${stale ? ' is-stale' : ''}`}>
     {accountList.length > 0 && <section className="overview-finance-group" aria-labelledby="accounts-heading">
     <div className="section-heading"><h2 id="accounts-heading">账户概览</h2></div>
     <Row gutter={[16, 16]}>
@@ -205,7 +215,7 @@ export default function OverviewPage() {
         </Col>)}
       </Row>
     </section>}
-    </div>}
+    </div></details>}
     <section className={`strategies-section${stale ? ' is-stale' : ''}`} aria-labelledby="strategies-heading">
     <div className="section-heading"><h2 id="strategies-heading">交易策略</h2>
       <div className="strategy-heading-actions">
@@ -220,14 +230,14 @@ export default function OverviewPage() {
       <Select aria-label="策略排序" value={sort} onChange={setSort} options={[{ value: 'position', label: '按状态与持仓排序' }, { value: 'symbol', label: '按交易对排序' }, { value: 'today', label: '按今日成交排序' }, { value: 'orders', label: '按挂单数排序' }]} />
       {(search || sort !== 'position' || statusFilter !== 'all') && <Button type="text" onClick={clearFilters}>清除筛选</Button>}
     </div>
-    <Row gutter={[20, 20]}>
+    <div className="strategy-grid">
       {visible.map(e => {
         const { snapshot: s } = e;
         const pair = toPair(e);
         const quote = quoteAsset(s.symbol), result = controls.results[s.symbol];
         const tradeCounts = tradeCountsBySymbol.get(s.symbol) ?? null;
         const change = entryChange(s.position, s.ticker.mark_price);
-        return <Col xs={24} lg={12} xxl={8} key={s.symbol}><Card className={`strategy-card ${s.grid_config.direction === 'SHORT' ? 'strategy-short' : 'strategy-long'}`}>
+        return <Card key={s.symbol} className={`strategy-card ${s.grid_config.direction === 'SHORT' ? 'strategy-short' : 'strategy-long'}`}>
           <div className="section-line strategy-card-heading"><div className="strategy-identity"><Link className="pair-name" to={`/pairs/${s.symbol}`}>{s.symbol}</Link><span className="strategy-direction" role="img" aria-label={`策略方向：${directionLabel(s.grid_config.direction)}`}>{s.grid_config.direction === 'SHORT' ? <ArrowDownOutlined /> : <ArrowUpOutlined />}{directionLabel(s.grid_config.direction)}</span></div><Space className="strategy-card-actions" size={6}><StatusTag status={s.status} /><Popover trigger="click" placement="bottomRight" title={`${s.symbol} 策略配置`} content={
             <div className="strategy-config-popover">
               <dl>
@@ -257,10 +267,10 @@ export default function OverviewPage() {
             <div><span>买单 / 卖单</span><strong>{tradeCounts?.buy ?? '--'} <small>/</small> {tradeCounts?.sell ?? '--'}</strong></div>
           </div>
           {result && <div className={result.startsWith('未提交') ? 'negative operation-result' : 'muted operation-result'} role="status">{result}</div>}
-        </Card></Col>;
+        </Card>;
       })}
-      {!visible.length && <Col span={24}><Card><Empty description={pairs.length ? '没有符合筛选条件的策略' : '暂无策略数据'}>{pairs.length ? <Button onClick={clearFilters}>清除筛选</Button> : addPairButton({ type: 'primary' })}</Empty></Card></Col>}
-    </Row>
+      {!visible.length && <Card className="strategy-empty"><Empty description={pairs.length ? '没有符合筛选条件的策略' : '暂无策略数据'}>{pairs.length ? <Button onClick={clearFilters}>清除筛选</Button> : addPairButton({ type: 'primary' })}</Empty></Card>}
+    </div>
     </section>
     <Card className="overview-trades" title="最近成交" extra={<span className="muted">全部策略当前模式 · 最近 20 条</span>}>
       <div className="recent-trades-summary" aria-label="当前显示成交汇总">
