@@ -1,6 +1,6 @@
 import React, { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react';
 import ReactDOM from 'react-dom/client';
-import { App as AntApp } from 'antd';
+import { App as AntApp, Button } from 'antd';
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
 import { createBrowserRouter, RouterProvider } from 'react-router-dom';
 import { api, ApiError, post, tokenStore } from './lib/api';
@@ -48,7 +48,7 @@ function Root() {
   useEffect(() => { if (loggedIn && authEnabled && authStatus.data && !authStatus.data.authenticated) { tokenStore.clear(); client.removeQueries({ predicate: query => query.queryKey[0] !== 'auth-status' }); setLoggedIn(false); } }, [loggedIn, authEnabled, authStatus.data]);
   const session = useMemo(() => ({ logout, authEnabled }), [logout, authEnabled]);
   if (authStatus.isPending) return <LoadingScreen label={loggedIn ? '正在验证会话' : '正在连接控制台'} />;
-  if (authStatus.error && !authStatus.data) return <div className="loading-screen"><div>无法连接后端服务：{authStatus.error.message}<br /><button type="button" onClick={() => void authStatus.refetch()}>重试</button></div></div>;
+  if (authStatus.error && !authStatus.data) return <div className="loading-screen" role="alert"><div className="loading-brand"><img className="brand-symbol" src="/logo.svg" alt="" /><span>Grid Console<small>Strategy Workspace</small></span></div><p>无法连接后端服务：{authStatus.error.message}</p><Button onClick={() => void authStatus.refetch()}>重试</Button></div>;
   if (!authEnabled) return <SessionContext.Provider value={session}><RouterProvider router={router} /></SessionContext.Provider>;
   return <SessionContext.Provider value={session}>{loggedIn && authStatus.data?.authenticated ? <RouterProvider router={router} /> : <Login onLogin={() => { client.clear(); setLoggedIn(true); }} />}</SessionContext.Provider>;
 }
