@@ -52,7 +52,7 @@ export default function PairDetail() {
             <div><span>成交总数</span><strong>{today ? today.buy + today.sell : '--'} <small>笔</small></strong></div>
             <div><span>买入</span><strong>{today?.buy ?? '--'} <small>笔</small></strong></div>
             <div><span>卖出</span><strong>{today?.sell ?? '--'} <small>笔</small></strong></div>
-            <div><span>已实现盈亏 / {asset}</span><strong><Pnl value={todayPnl} compact /></strong>{today && s.hourly_trade_stats!.pending_pnl_count > 0 && <small>盈亏待同步</small>}</div>
+            <div><span>已实现盈亏 / {asset}</span><strong><Pnl value={todayPnl} compact /></strong>{today && s.hourly_trade_stats!.pending_pnl_count > 0 && <small className="pending-pnl-warn">盈亏待同步</small>}</div>
           </div><HourlyChart snapshot={s} now={now} /></Card></Col>
             <Col xs={24} xl={10}><Card title="实时网格深度" extra={<span className="muted">价格 / {asset} · 数量</span>}><DepthChart snapshot={s} /></Card></Col></Row>
           <Card title="仓位与策略明细" className="detail-card"><Descriptions column={{ xs: 1, sm: 2, lg: 3 }} items={[
@@ -65,7 +65,7 @@ export default function PairDetail() {
             { key: 'commission', label: '累计手续费', children: number(s.stats.total_commission, 4) },
             { key: 'cycles', label: '历史配对循环', children: s.stats.completed_cycles },
             { key: 'trades', label: '累计成交', children: s.stats.total_trades },
-            { key: 'pending', label: '待核实盈亏', children: `${s.stats.pending_pnl_trades} 笔` },
+            { key: 'pending', label: '待核实盈亏', children: s.stats.pending_pnl_trades > 0 ? <span className="pending-pnl-warn">{s.stats.pending_pnl_trades} 笔</span> : `${s.stats.pending_pnl_trades} 笔` },
             { key: 'volume', label: '累计成交额', children: `${number(s.stats.total_volume_usdc)} ${asset}` },
             { key: 'available', label: '可用比例（按钱包余额）', children: ratioText(account?.ratio) },
           ]} /></Card>

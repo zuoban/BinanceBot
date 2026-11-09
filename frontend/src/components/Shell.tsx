@@ -191,6 +191,15 @@ interface SidebarProps { idPrefix: string; pairs: Pair[] | undefined; pending: b
 
 function SidebarBody({ idPrefix, pairs, pending, symbol, page, pathname, mode, authEnabled, saving, onNavigate, onSearch, onLogout }: SidebarProps) {
   const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/i.test((navigator as Navigator & { userAgentData?: { platform?: string } }).userAgentData?.platform ?? navigator.platform);
+  const pairsRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const container = pairsRef.current;
+    const activeNode = container?.querySelector<HTMLElement>('[aria-current="page"]');
+    if (!container || !activeNode || container.scrollHeight <= container.clientHeight) return;
+    const top = activeNode.offsetTop, bottom = top + activeNode.offsetHeight;
+    if (top < container.scrollTop) container.scrollTop = top;
+    else if (bottom > container.scrollTop + container.clientHeight) container.scrollTop = bottom - container.clientHeight;
+  }, [symbol, pairs?.length]);
   return <div className="sidebar-inner">
     <Link className="sidebar-brand" to="/" aria-label="Grid Console 首页" onClick={onNavigate}><img className="sidebar-logo" src="/logo.svg" alt="" /><span className="sidebar-brand-name"><strong>Grid Console</strong><small>Binance Futures</small></span></Link>
     <button type="button" className="sidebar-search" disabled={saving} onClick={onSearch} aria-label="打开命令面板"><SearchOutlined aria-hidden="true" /><span>搜索与跳转</span><kbd aria-hidden="true">{isMac ? '⌘K' : 'Ctrl K'}</kbd></button>
@@ -199,12 +208,12 @@ function SidebarBody({ idPrefix, pairs, pending, symbol, page, pathname, mode, a
       <Link to="/settings" onClick={onNavigate} className={`sidebar-link${page === 'settings' ? ' sidebar-link-active' : ''}`} aria-current={page === 'settings' ? 'page' : undefined}><SettingOutlined aria-hidden="true" />全局设置</Link>
     </nav>
     <div className="sidebar-section"><span id={`${idPrefix}-pairs-label`}>交易对</span><Link to="/pairs/new" onClick={onNavigate} className="sidebar-add" aria-label="新增交易对" aria-current={pathname === '/pairs/new' ? 'page' : undefined} title="新增交易对"><PlusOutlined aria-hidden="true" /></Link></div>
-    <nav className="sidebar-pairs" aria-labelledby={`${idPrefix}-pairs-label`}>
+    <nav ref={pairsRef} className="sidebar-pairs" aria-labelledby={`${idPrefix}-pairs-label`}>
       {pending && !pairs && [0, 1, 2].map(item => <div className="sidebar-pair-skeleton" key={item} aria-hidden="true" />)}
       {pairs?.map(pair => {
         const short = pair.grid_config.direction === 'SHORT';
         const active = pair.symbol === symbol;
-        return <Link key={pair.symbol} to={`/pairs/${pair.symbol}${pathname.endsWith('/config') ? '/config' : ''}`} onClick={onNavigate} className={`sidebar-pair${active ? ' sidebar-pair-active' : ''}`} aria-current={active ? 'page' : undefined}>
+        return <Link key={pair.symbol} to={`/pairs/${pair.symbol}${pathname.endsWith('/config') ? '/config' : ''}`} onClick={onNavigate} className={`sidebar-pair${active ? ' sidebar-pair-active' : ''}`} aria-current={active ? 'page' : undefined} title={`${pair.symbol} · ${statusLabel[pair.status]} · ${directionLabel(pair.grid_config.direction)}`}>
           <span className={`status-dot status-dot-${pair.status.toLowerCase()}`} aria-hidden="true" />
           <span className="sidebar-pair-symbol">{pair.symbol}</span>
           <span className={`sidebar-pair-side ${short ? 'short' : 'long'}`} aria-hidden="true">{short ? <ArrowDownOutlined /> : <ArrowUpOutlined />}</span>

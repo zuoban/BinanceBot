@@ -29,6 +29,7 @@ it('renders live grid depth levels with percentage distance from mark price', ()
     { client_order_id: 'b1', order_id: 2, symbol: 'SOLUSDC', side: 'BUY', price: '98.5', quantity: '1', amount_usdc: '98.5', status: 'NEW', created_at: '2026-11-05T00:00:00Z', grid_level: -1, is_take_profit: false, purpose: 'GRID', merge_sources: [] },
   ];
   render(createElement(DepthChart, { snapshot: s }));
+  expect(screen.getByText('买单 1 笔 · 卖单 1 笔')).toBeInTheDocument();
   expect(screen.getByText('+1.5%')).toBeInTheDocument();
   expect(screen.getByText('-1.5%')).toBeInTheDocument();
 });

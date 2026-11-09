@@ -81,9 +81,12 @@ kbd {
 .side-buy { color: var(--positive); }
 .side-sell { color: var(--negative); }
 .log-level { font: 500 11px/1 var(--font-mono); color: var(--text-muted); }
-.log-level-error { color: var(--sig-red); }
-.log-level-warn { color: var(--sig-yellow); }
-
+.log-level-error { color: var(--sig-red); font-weight: 600; }
+.log-level-warn { color: var(--sig-yellow); font-weight: 600; }
+.ant-table-wrapper .ant-table-tbody > tr.log-row-error > td { background: var(--sig-red-bg); }
+.ant-table-wrapper .ant-table-tbody > tr.log-row-error .log-message, .log-item-error .log-message { color: var(--sig-red); }
+.ant-table-wrapper .ant-table-tbody > tr.log-row-warn .log-message, .log-item-warn .log-message { color: var(--sig-yellow); }
+.pending-pnl-warn { color: var(--sig-yellow) !important; font-weight: 500; }
 .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--text-muted); }
 .status-dot-running { background: var(--rail-running); }
 .status-dot-paused, .status-dot-stopped { background: transparent; box-shadow: inset 0 0 0 1.5px var(--rail-accent); }
@@ -135,7 +138,7 @@ kbd {
 .sidebar-add { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 6px; color: var(--rail-muted); text-decoration: none; transition: transform 140ms var(--ease-out), background-color 150ms var(--ease-out), color 150ms var(--ease-out); }
 .sidebar-add:active { transform: scale(0.95); }
 
-.sidebar-pairs { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 1px; margin: 0 -4px; padding: 0 4px; scrollbar-color: var(--rail-border-strong) transparent; }
+.sidebar-pairs { position: relative; flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 1px; margin: 0 -4px; padding: 0 4px; scrollbar-color: var(--rail-border-strong) transparent; }
 .sidebar-pair {
   display: flex; align-items: center; gap: 10px; min-height: 34px; padding: 0 10px; border-radius: 8px;
   color: var(--rail-text); text-decoration: none; font: 500 13px/1 var(--font-mono);
@@ -274,7 +277,7 @@ kbd {
 .overview-pnl-group:not(:only-of-type) strong { font-size: 18px; line-height: 24px; }
 .overview-pnl-group:not(:only-of-type) strong small { font-size: 12px; line-height: 16px; }
 .overview-pnl-group + .overview-pnl-group { padding-top: 6px; border-top: 1px solid var(--border-hairline); }
-.overview-pnl-group > span { color: var(--text-muted); font-size: 12px; line-height: 16px; white-space: nowrap; }
+.overview-pnl-group > span { color: var(--sig-yellow); font-size: 12px; line-height: 16px; font-weight: 500; white-space: nowrap; }
 .skeleton-overview-banner .overview-stat { display: grid; align-content: start; gap: 10px; }
 
 @container overview-banner (max-width: 760px) {

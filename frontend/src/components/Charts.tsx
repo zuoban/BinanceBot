@@ -52,17 +52,25 @@ export function DepthChart({ snapshot }: { snapshot: Snapshot }) {
     }
   }, [snapshot.symbol, orders.length, hasMark]);
   if (!orders.length) return <NoData />;
+  let buyCount = 0, sellCount = 0;
+  for (const order of orders) {
+    if (order.side === 'BUY') buyCount++;
+    else sellCount++;
+  }
   const entries = orders.map(order => ({ kind: 'order' as const, value: numeric(order.price) ?? -Infinity, order }));
   const rows: ({ kind: 'order'; value: number; order: typeof orders[number] } | { kind: 'mark'; value: number })[] = entries;
   if (hasMark) rows.push({ kind: 'mark', value: mark });
   rows.sort((a, b) => b.value - a.value);
-  return <div ref={containerRef} className="grid-levels" role="region" aria-label="按价格从高到低排列的实时网格挂单" tabIndex={0}>
-    {rows.map(row => {
-      if (row.kind === 'mark') return <div className="grid-level grid-level-mark" key="mark"><span>标记价</span><span className="grid-level-line" /><strong>{price(row.value)}</strong></div>;
-      const diff = hasMark ? priceDiffPercent(row.order.price, snapshot.ticker.mark_price) : null;
-      return <div className={`grid-level grid-level-${row.order.side.toLowerCase()}`} key={row.order.client_order_id}>
-        <span>{row.order.side === 'BUY' ? '买单' : '卖单'} <span className="grid-level-quantity">{price(row.order.quantity)}</span></span><span className="grid-level-line" />{diff && <span className="grid-level-diff">{diff}</span>}<strong>{price(row.order.price)}</strong>
-      </div>;
-    })}
-  </div>;
+  return <>
+    <div className="muted chart-caption">买单 {buyCount} 笔 · 卖单 {sellCount} 笔</div>
+    <div ref={containerRef} className="grid-levels" role="region" aria-label="按价格从高到低排列的实时网格挂单" tabIndex={0}>
+      {rows.map(row => {
+        if (row.kind === 'mark') return <div className="grid-level grid-level-mark" key="mark"><span>标记价</span><span className="grid-level-line" /><strong>{price(row.value)}</strong></div>;
+        const diff = hasMark ? priceDiffPercent(row.order.price, snapshot.ticker.mark_price) : null;
+        return <div className={`grid-level grid-level-${row.order.side.toLowerCase()}`} key={row.order.client_order_id}>
+          <span>{row.order.side === 'BUY' ? '买单' : '卖单'} <span className="grid-level-quantity">{price(row.order.quantity)}</span></span><span className="grid-level-line" />{diff && <span className="grid-level-diff">{diff}</span>}<strong>{price(row.order.price)}</strong>
+        </div>;
+      })}
+    </div>
+  </>;
 }

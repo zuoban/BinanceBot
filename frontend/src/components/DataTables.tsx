@@ -82,7 +82,7 @@ export function OrdersTable({ orders, mark }: { orders: Order[]; mark?: string }
         <div><dt>距标记价</dt><dd>{priceDiffPercent(o.price, mark) ?? '--'}</dd></div>
       </dl>
       {o.merge_sources?.length > 0 && <ul className="order-merge-sources order-merge-sources-mobile">{o.merge_sources.map(source => <li key={source.client_order_id}>{source.client_order_id} · {price(source.price)} × {price(source.quantity)}</li>)}</ul>}
-    </li>)}</ul> : <div className="trade-list-empty">暂无挂单</div>}</div></>;
+    </li>)}</ul> : <div className="trade-list-empty">{orders.length ? '没有符合筛选条件的挂单' : '暂无挂单'}</div>}</div></>;
 }
 export function TradesTable({ trades: allTrades, overview = false, now: currentNow }: { trades: Trade[]; overview?: boolean; now?: number }) {
   const [filter, setFilter] = useState<SideFilter>('ALL');
@@ -115,7 +115,7 @@ export function TradesTable({ trades: allTrades, overview = false, now: currentN
         <div><dt>金额</dt><dd>{number(trade.amount_usdc)}</dd></div>
         <div><dt>盈亏</dt><dd>{trade.pnl_verified ? <Pnl value={trade.realized_pnl} /> : <Tag>待同步</Tag>}</dd></div>
       </dl>
-    </li>)}</ul> : <div className="trade-list-empty">暂无成交记录</div>}{!overview && trades.length > 50 && <p className="muted">仅显示最近 50 条，完整数据请导出 CSV。</p>}</div>
+    </li>)}</ul> : <div className="trade-list-empty">{allTrades.length && !overview ? '没有符合筛选条件的成交记录' : '暂无成交记录'}</div>}{!overview && trades.length > 50 && <p className="muted">仅显示最近 50 条，完整数据请导出 CSV。</p>}</div>
   </div></NowContext.Provider>;
 }
 const levels = ['ALL', 'ERROR', 'WARN', 'INFO', 'DEBUG'] as const;
@@ -133,10 +133,10 @@ export function LogsTable({ logs }: { logs: Log[] }) {
   return <>
     <TableFilterBar label="按级别筛选" value={level} onChange={setLevel} options={levelOptions} shown={rows.length} total={logs.length} onExport={exportRows} />
     <div className="table-desktop"><p className="table-scroll-hint">左右滑动查看完整日志</p>
-    <Table<Log> rowKey={(l, i) => `${l.timestamp}-${l.level}-${i}-${l.message}`} dataSource={rows} size="small" scroll={{ x: 600 }} pagination={{ pageSize: 30, showSizeChanger: false, hideOnSinglePage: true }} columns={logColumns} /></div>
-    <div className="table-mobile">{rows.length ? <ul className="trade-list" aria-label="日志列表">{rows.slice(0, 100).map((l, i) => <li className="trade-list-item" key={`${l.timestamp}-${l.level}-${i}-${l.message}`}>
+    <Table<Log> rowKey={(l, i) => `${l.timestamp}-${l.level}-${i}-${l.message}`} rowClassName={l => l.level === 'ERROR' ? 'log-row-error' : l.level === 'WARN' ? 'log-row-warn' : ''} dataSource={rows} size="small" scroll={{ x: 600 }} pagination={{ pageSize: 30, showSizeChanger: false, hideOnSinglePage: true }} columns={logColumns} /></div>
+    <div className="table-mobile">{rows.length ? <ul className="trade-list" aria-label="日志列表">{rows.slice(0, 100).map((l, i) => <li className={`trade-list-item log-item-${l.level.toLowerCase()}`} key={`${l.timestamp}-${l.level}-${i}-${l.message}`}>
       <div className="trade-list-heading"><span className={`log-level log-level-${l.level.toLowerCase()}`}>{l.level}</span><span className="trade-list-time">{time(l.timestamp)}</span></div>
       <p className="log-message">{l.message}</p>
-    </li>)}</ul> : <div className="trade-list-empty">暂无日志</div>}{rows.length > 100 && <p className="muted">仅显示最近 100 条，完整数据请导出 CSV。</p>}</div>
+    </li>)}</ul> : <div className="trade-list-empty">{logs.length ? '没有符合筛选条件的日志' : '暂无日志'}</div>}{rows.length > 100 && <p className="muted">仅显示最近 100 条，完整数据请导出 CSV。</p>}</div>
   </>;
 }
