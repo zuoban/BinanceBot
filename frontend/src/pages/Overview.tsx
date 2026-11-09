@@ -157,7 +157,7 @@ export default function OverviewPage() {
         <div className="overview-stat" aria-label="今日已实现盈亏">
           <span>今日已实现盈亏</span>
           {!pnlGroups ? <strong>--</strong> : !pnlGroups.length ? <strong>0</strong> : pnlGroups.map(group => <div className="overview-pnl-group" key={group.key}>
-            <strong><Pnl value={group.total} compact /> <small>{group.asset}</small></strong>
+            <strong><Pnl value={group.total} compact /><small>{group.asset}</small></strong>
             {group.pending > 0 && <span>盈亏待同步</span>}
           </div>)}
         </div>

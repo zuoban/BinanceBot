@@ -230,6 +230,7 @@ kbd {
   .finance-disclosure[open] .finance-disclosure-label .anticon { transform: rotate(90deg); }
   .finance-summary-values { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); margin-top: var(--space-2); }
   .finance-summary-values > span { display: grid; gap: var(--space-1); min-width: 0; }
+  .finance-summary-values > span:nth-child(even) { padding-left: var(--space-3); border-left: 1px solid var(--border-hairline); }
   .finance-summary-values small { color: var(--text-secondary); font-size: var(--text-xs); }
   .finance-summary-values strong { font: 500 18px/24px var(--font-mono); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
   .finance-disclosure[open] .finance-summary-values { display: none; }
@@ -275,7 +276,7 @@ kbd {
 .overview-stat strong small { color: var(--text-muted); font: 400 13px/20px var(--font-sans); letter-spacing: 0; white-space: nowrap; }
 .overview-trade-breakdown { color: var(--text-muted); font-size: 12px; font-style: normal; line-height: 16px; font-variant-numeric: tabular-nums; text-wrap: balance; }
 .overview-pnl-group { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 8px; min-width: 0; }
-.overview-pnl-group strong { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 2px 6px; min-width: 0; }
+.overview-pnl-group strong { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 2px 4px; min-width: 0; }
 .overview-pnl-group:not(:only-of-type) strong { font-size: 18px; line-height: 24px; }
 .overview-pnl-group:not(:only-of-type) strong small { font-size: 12px; line-height: 16px; }
 .overview-pnl-group + .overview-pnl-group { padding-top: 6px; border-top: 1px solid var(--border-hairline); }
@@ -288,7 +289,7 @@ kbd {
   .overview-stat:nth-child(n+3) { border-top: 1px solid var(--border-hairline); }
 }
 @container overview-banner (max-width: 520px) {
-  .overview-banner > .signal-strip { padding: 8px 14px; gap: 6px; }
+  .overview-banner > .signal-strip { padding: 10px 16px; gap: 8px; }
   .overview-banner > .signal-strip .freshness { order: 0; flex: 1 0 110px; margin-left: auto; text-align: right; }
   .overview-stat { padding: 14px 16px; }
   .overview-stat strong { font-size: 22px; line-height: 28px; }
@@ -684,13 +685,15 @@ kbd {
   .ant-input, .ant-input-affix-wrapper, .ant-input-number, .ant-select-single { min-height: 44px; }
   .ant-input-affix-wrapper .ant-input { min-height: 0; }
   .ant-input-number .ant-input-number-input { min-height: 42px; }
-  .config-form .ant-btn, .settings-page .ant-btn, .strategy-card-actions .ant-btn, .overview-trades-toggle .ant-btn, .filter-bar .ant-btn, .table-toolbar .ant-btn, .ant-modal-confirm .ant-btn { min-height: var(--control-touch); }
+  .config-form .ant-btn, .settings-page .ant-btn, .strategy-heading-actions .ant-btn, .strategy-card-actions .ant-btn, .overview-trades-toggle .ant-btn, .filter-bar .ant-btn, .table-toolbar .ant-btn, .ant-modal-confirm .ant-btn { min-height: var(--control-touch); }
   .strategy-card-actions .ant-btn { min-width: var(--control-touch); }
   .strategy-toggle.ant-btn { min-width: 80px; }
   .strategy-card-actions .ant-btn-icon-only { width: 44px; }
   .sidebar-link, .sidebar-pair { min-height: 44px; }
   .sidebar-add { width: 44px; height: 44px; }
-  .signal-button { height: auto; min-height: var(--control-touch); padding: 0 12px; border-radius: var(--radius-control); font-size: var(--text-sm); touch-action: manipulation; }
+  .signal-strip .signal, .signal-strip .strategy-direction { height: 28px; padding: 0 10px; border-radius: var(--radius-chip); font-size: var(--text-xs); }
+  .signal-button { position: relative; touch-action: manipulation; }
+  .signal-button::before { content: ''; position: absolute; inset-inline: 0; top: 50%; min-width: var(--control-touch); height: var(--control-touch); transform: translateY(-50%); }
   .batch-results .ant-btn { min-height: 36px; }
   .palette-item { min-height: 44px; }
   .palette-esc { min-width: var(--control-touch); min-height: var(--control-touch); align-items: center; justify-content: center; touch-action: manipulation; }
