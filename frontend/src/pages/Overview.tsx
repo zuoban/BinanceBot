@@ -1,12 +1,12 @@
 import { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { App, Button, Card, Col, Dropdown, Empty, Grid, Input, Popover, Row, Select, Space, Statistic } from 'antd';
-import { ArrowDownOutlined, ArrowRightOutlined, ArrowUpOutlined, CloseOutlined, EyeOutlined, PlusOutlined, SearchOutlined, ThunderboltOutlined } from '@ant-design/icons';
+import { ArrowRightOutlined, CloseOutlined, EyeOutlined, PlusOutlined, SearchOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { useOverview } from '../lib/queries';
 import { useUrlParams } from '../lib/urlState';
 import { AccountsContext } from '../lib/session';
-import { ageText, accountGroups, beijingDay, cnyText, compactNumber as number, compactPrice as price, comparePositionAmount, directionLabel, entryChange, entryPriceText, groupTradePnl, maxPositionPolicyLabel, modeLabel, positivePrice, positionAmount, positionGroups, quoteAsset, ratioText, SNAPSHOT_STALE_MS, todayPnlGroups, todayTradeCounts, trimFractionZeros } from '../lib/format';
-import { controlResultMeta, ErrorNotice, PageTitle, Pnl, SignalButton, SignalChip, signalIcon, StatusTag, type Signal } from '../components/Common';
+import { ageText, accountGroups, beijingDay, cnyText, compactNumber as number, compactPrice as price, comparePositionAmount, entryChange, entryPriceText, groupTradePnl, maxPositionPolicyLabel, modeLabel, positivePrice, positionAmount, positionGroups, quoteAsset, ratioText, SNAPSHOT_STALE_MS, todayPnlGroups, todayTradeCounts, trimFractionZeros } from '../lib/format';
+import { controlResultMeta, DirectionTag, DirectionText, ErrorNotice, PageTitle, Pnl, SignalButton, SignalChip, signalIcon, StatusTag, type Signal } from '../components/Common';
 import { runBatchControls, useControls } from '../components/Controls';
 import type { Overview, Pair, Trade } from '../lib/types';
 import { OverviewLoading } from '../components/Loading';
@@ -238,10 +238,10 @@ export default function OverviewPage() {
         const tradeCounts = tradeCountsBySymbol.get(s.symbol) ?? null;
         const change = entryChange(s.position, s.ticker.mark_price);
         return <Card key={s.symbol} className={`strategy-card ${s.grid_config.direction === 'SHORT' ? 'strategy-short' : 'strategy-long'}`}>
-          <div className="section-line strategy-card-heading"><div className="strategy-identity"><Link className="pair-name" to={`/pairs/${s.symbol}`}>{s.symbol}</Link><span className="strategy-direction" role="img" aria-label={`策略方向：${directionLabel(s.grid_config.direction)}`}>{s.grid_config.direction === 'SHORT' ? <ArrowDownOutlined /> : <ArrowUpOutlined />}{directionLabel(s.grid_config.direction)}</span></div><Space className="strategy-card-actions" size={6}><StatusTag status={s.status} /><Popover trigger="click" placement="bottomRight" title={`${s.symbol} 策略配置`} content={
+          <div className="section-line strategy-card-heading"><div className="strategy-identity"><Link className="pair-name" to={`/pairs/${s.symbol}`}>{s.symbol}</Link><DirectionTag direction={s.grid_config.direction} /></div><Space className="strategy-card-actions" size={6}><StatusTag status={s.status} /><Popover trigger="click" placement="bottomRight" title={`${s.symbol} 策略配置`} content={
             <div className="strategy-config-popover">
               <dl>
-                <div><dt>交易方向</dt><dd>{directionLabel(s.grid_config.direction)}</dd></div>
+                <div><dt>交易方向</dt><dd><DirectionText direction={s.grid_config.direction} /></dd></div>
                 <div><dt>网格间距</dt><dd>{trimFractionZeros(s.grid_config.grid_interval)} {quote}</dd></div>
                 <div><dt>每格金额</dt><dd>{trimFractionZeros(s.grid_config.order_amount_usdc)} {quote}</dd></div>
                 <div><dt>买单 / 卖单窗口</dt><dd>{s.grid_config.buy_window} / {s.grid_config.sell_window}</dd></div>

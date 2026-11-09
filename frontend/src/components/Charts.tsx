@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useLayoutEffect, useMemo, useRef } from 'react';
 import { theme } from 'antd';
 import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import type { Snapshot } from '../lib/types';
@@ -41,14 +41,22 @@ export function HourlyChart({ snapshot, now: currentNow }: { snapshot: Snapshot;
 }
 export function DepthChart({ snapshot }: { snapshot: Snapshot }) {
   const orders = snapshot.active_orders;
-  if (!orders.length) return <NoData />;
+  const containerRef = useRef<HTMLDivElement>(null);
   const mark = numeric(snapshot.ticker.mark_price);
   const hasMark = mark !== null && mark > 0;
+  useLayoutEffect(() => {
+    const container = containerRef.current;
+    const markNode = container?.querySelector<HTMLElement>('.grid-level-mark');
+    if (container && markNode && container.scrollHeight > container.clientHeight) {
+      container.scrollTop = Math.max(0, markNode.offsetTop - container.clientHeight / 2 + markNode.clientHeight / 2);
+    }
+  }, [snapshot.symbol, orders.length, hasMark]);
+  if (!orders.length) return <NoData />;
   const entries = orders.map(order => ({ kind: 'order' as const, value: numeric(order.price) ?? -Infinity, order }));
   const rows: ({ kind: 'order'; value: number; order: typeof orders[number] } | { kind: 'mark'; value: number })[] = entries;
   if (hasMark) rows.push({ kind: 'mark', value: mark });
   rows.sort((a, b) => b.value - a.value);
-  return <div className="grid-levels" role="region" aria-label="按价格从高到低排列的实时网格挂单" tabIndex={0}>
+  return <div ref={containerRef} className="grid-levels" role="region" aria-label="按价格从高到低排列的实时网格挂单" tabIndex={0}>
     {rows.map(row => {
       if (row.kind === 'mark') return <div className="grid-level grid-level-mark" key="mark"><span>标记价</span><span className="grid-level-line" /><strong>{price(row.value)}</strong></div>;
       const diff = hasMark ? priceDiffPercent(row.order.price, snapshot.ticker.mark_price) : null;

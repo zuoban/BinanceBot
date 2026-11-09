@@ -2,8 +2,8 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { Alert, Button, Card, Col, Descriptions, Row, Statistic, Tabs } from 'antd';
 import { SettingOutlined } from '@ant-design/icons';
 import { usePairSnapshot, usePairs } from '../lib/queries';
-import { accountGroups, cnyText, directionLabel, entryPriceText, number, numeric, positivePrice, price, quoteAsset, ageText, ratioText, todayTradeCounts, trimFractionZeros } from '../lib/format';
-import { controlResultMeta, ErrorNotice, ModeTag, PageBreadcrumb, PageTitle, Pnl, SignalChip, StatusTag } from '../components/Common';
+import { accountGroups, cnyText, entryPriceText, number, numeric, positivePrice, price, quoteAsset, ageText, ratioText, todayTradeCounts, trimFractionZeros } from '../lib/format';
+import { controlResultMeta, DirectionTag, DirectionText, ErrorNotice, ModeTag, PageBreadcrumb, PageTitle, Pnl, SignalChip, StatusTag } from '../components/Common';
 import { PairControls, useControls } from '../components/Controls';
 import { DepthChart, HourlyChart } from '../components/Charts';
 import { LogsTable, OrdersTable, TradesTable } from '../components/DataTables';
@@ -36,7 +36,7 @@ export default function PairDetail() {
     <ErrorNotice error={pairs.error || query.error} retry={() => { void pairs.refetch(); void query.refetch(); }} />
     {pairs.data && !pair && <Alert type="warning" title="该交易对不存在或已移除" />}
     {controls.results[symbol ?? ''] && (() => { const result = controls.results[symbol ?? ''], meta = controlResultMeta(result); return <Alert showIcon type={meta.alertType} title={result} closable={!meta.pending && !!controls.clearResult} onClose={() => controls.clearResult?.(symbol ?? '')} />; })()}
-    {pair && <div className="detail-status signal-strip"><StatusTag status={currentPair!.status} /><ModeTag mode={currentPair!.mode} /><SignalChip tier={query.live ? 'calm' : 'yellow'}>{query.live ? '实时连接' : 'HTTP 自动刷新'}</SignalChip><span className="muted freshness" title={query.dataUpdatedAt ? `最近同步 ${new Date(query.dataUpdatedAt).toLocaleTimeString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' })}` : undefined}>{query.dataUpdatedAt ? `更新于 ${ageText(query.dataUpdatedAt, now)}` : '等待首次快照'}</span></div>}
+    {pair && <div className="detail-status signal-strip"><StatusTag status={currentPair!.status} /><DirectionTag direction={currentPair!.grid_config.direction} /><ModeTag mode={currentPair!.mode} /><SignalChip tier={query.live ? 'calm' : 'yellow'}>{query.live ? '实时连接' : 'HTTP 自动刷新'}</SignalChip><span className="muted freshness" title={query.dataUpdatedAt ? `最近同步 ${new Date(query.dataUpdatedAt).toLocaleTimeString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' })}` : undefined}>{query.dataUpdatedAt ? `更新于 ${ageText(query.dataUpdatedAt, now)}` : '等待首次快照'}</span></div>}
     {query.stale && s && <Alert type="warning" showIcon title="快照暂未更新，数值可能已过期；仍可撤单并暂停。" />}
     {!s && (pairs.isPending || (pair && query.isPending)) && <DetailLoading />}
     {s && <>
@@ -56,7 +56,7 @@ export default function PairDetail() {
           </div><HourlyChart snapshot={s} now={now} /></Card></Col>
             <Col xs={24} xl={10}><Card title="实时网格深度" extra={<span className="muted">价格 / {asset} · 数量</span>}><DepthChart snapshot={s} /></Card></Col></Row>
           <Card title="仓位与策略明细" className="detail-card"><Descriptions column={{ xs: 1, sm: 2, lg: 3 }} items={[
-            { key: 'direction', label: '方向', children: directionLabel(s.grid_config.direction) },
+            { key: 'direction', label: '方向', children: <DirectionText direction={s.grid_config.direction} /> },
             { key: 'entry', label: '持仓均价', children: entryPriceText(s.position) },
             { key: 'liquidation', label: '预估强平价', children: positivePrice(s.position.liquidation_price) },
             { key: 'leverage', label: '杠杆', children: `${s.position.leverage}×` },

@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { App, Button, Segmented, Table, Tag } from 'antd';
 import { CheckOutlined, CopyOutlined, DownloadOutlined } from '@ant-design/icons';
+import { Link, useInRouterContext } from 'react-router-dom';
 import type { ColumnsType } from 'antd/es/table';
 import { beijingDay, number, price, relativeTime, time } from '../lib/format';
 import { priceDiffPercent } from '../lib/gridPreview';
@@ -21,7 +22,7 @@ function RelativeTime({ value, className }: { value: string; className?: string 
   return <span className={className} title={Number.isFinite(timestamp) ? `${time(timestamp)}（北京时间）` : undefined}>{relativeTime(timestamp, now)}</span>;
 }
 /** Click-to-copy for a price or quantity. The visible text stays the formatted value; the raw value is what gets copied. */
-function Copyable({ value, children }: { value: string; children: React.ReactNode }) {
+export function Copyable({ value, children }: { value: string; children: React.ReactNode }) {
   const { message } = App.useApp();
   const [copied, setCopied] = useState(false);
   const timer = useRef<number | null>(null);
@@ -39,7 +40,10 @@ function Copyable({ value, children }: { value: string; children: React.ReactNod
     {children}{copied ? <CheckOutlined aria-hidden="true" /> : <CopyOutlined aria-hidden="true" />}
   </button>;
 }
-
+function SymbolCell({ symbol }: { symbol: string }) {
+  const inRouter = useInRouterContext();
+  return inRouter ? <Link className="trade-symbol-link" to={`/pairs/${symbol}`}>{symbol}</Link> : <span>{symbol}</span>;
+}
 type SideFilter = 'ALL' | 'BUY' | 'SELL';
 const sideOptions: { value: SideFilter; label: string }[] = [{ value: 'ALL', label: '全部' }, { value: 'BUY', label: '买入' }, { value: 'SELL', label: '卖出' }];
 function TableFilterBar<T extends string>({ label, value, onChange, options, shown, total, onExport }: { label: string; value: T; onChange: (value: T) => void; options: { value: T; label: string }[]; shown: number; total: number; onExport: () => void }) {
@@ -69,7 +73,7 @@ export function OrdersTable({ orders, mark }: { orders: Order[]; mark?: string }
   ], [mark]);
   return <><TableFilterBar label="按方向筛选" value={filter} onChange={setFilter} options={sideOptions} shown={rows.length} total={orders.length} onExport={exportRows} /><div className="table-desktop"><p className="table-scroll-hint">左右滑动查看完整挂单信息</p><Table<Order> rowKey="client_order_id" columns={columns} dataSource={rows} size="small" scroll={{ x: 900 }}
     pagination={{ pageSize: 15, showSizeChanger: false, hideOnSinglePage: true }}
-    expandable={{ rowExpandable: o => !!o.merge_sources?.length, expandedRowRender: o => <ul>{o.merge_sources.map(source => <li key={source.client_order_id}>{source.client_order_id} · {price(source.price)} × {price(source.quantity)}</li>)}</ul> }} /></div>
+    expandable={{ rowExpandable: o => !!o.merge_sources?.length, expandedRowRender: o => <ul className="order-merge-sources">{o.merge_sources.map(source => <li key={source.client_order_id}>{source.client_order_id} · {price(source.price)} × {price(source.quantity)}</li>)}</ul> }} /></div>
     <div className="table-mobile">{rows.length ? <ul className="trade-list" aria-label="挂单列表">{rows.map(o => <li className="trade-list-item" key={o.client_order_id}>
       <div className="trade-list-heading">{side(o.side)}<strong><Copyable value={o.price}>{price(o.price)}</Copyable></strong><span className="trade-list-time">{orderPurpose(o)}</span></div>
       <dl>
@@ -77,6 +81,7 @@ export function OrdersTable({ orders, mark }: { orders: Order[]; mark?: string }
         <div><dt>金额</dt><dd>{number(o.amount_usdc)}</dd></div>
         <div><dt>距标记价</dt><dd>{priceDiffPercent(o.price, mark) ?? '--'}</dd></div>
       </dl>
+      {o.merge_sources?.length > 0 && <ul className="order-merge-sources order-merge-sources-mobile">{o.merge_sources.map(source => <li key={source.client_order_id}>{source.client_order_id} · {price(source.price)} × {price(source.quantity)}</li>)}</ul>}
     </li>)}</ul> : <div className="trade-list-empty">暂无挂单</div>}</div></>;
 }
 export function TradesTable({ trades: allTrades, overview = false, now: currentNow }: { trades: Trade[]; overview?: boolean; now?: number }) {
@@ -89,7 +94,7 @@ export function TradesTable({ trades: allTrades, overview = false, now: currentN
     trades.map(t => [time(t.timestamp), t.side === 'BUY' ? '买入' : '卖出', t.price, t.quantity, t.amount_usdc, t.pnl_verified ? t.realized_pnl : '待同步', t.pnl_verified ? t.commission : '待同步', t.pnl_verified ? (t.is_maker ? 'Maker' : 'Taker') : '待同步', t.note]),
   ));
   const columns = useMemo<ColumnsType<Trade>>(() => [
-    ...(overview ? [{ title: '交易对', dataIndex: 'symbol', className: 'trade-symbol', width: 130 }] : []),
+    ...(overview ? [{ title: '交易对', dataIndex: 'symbol', className: 'trade-symbol', width: 130, render: (symbol: string) => <SymbolCell symbol={symbol} /> }] : []),
     { title: '方向', dataIndex: 'side', render: side, width: 90, fixed: overview ? undefined : 'left' },
     { title: overview ? '成交时间' : '时间（北京）', dataIndex: 'timestamp', render: overview ? (value: string) => <RelativeTime value={value} /> : time, width: overview ? 90 : 185 },
     { title: '成交价格', align: 'right', className: 'table-numeric', dataIndex: 'price', render: (v: string) => overview ? price(v) : <Copyable value={v}>{price(v)}</Copyable> },
@@ -104,7 +109,7 @@ export function TradesTable({ trades: allTrades, overview = false, now: currentN
     {!overview && <TableFilterBar label="按方向筛选" value={filter} onChange={setFilter} options={sideOptions} shown={trades.length} total={allTrades.length} onExport={exportRows} />}
     <div className="table-desktop"><p className="table-scroll-hint">左右滑动查看完整成交信息</p><Table<Trade> rowKey="trade_id" columns={columns} dataSource={trades} size="small" scroll={{ x: 1000 }} pagination={overview ? false : { pageSize: 15, showSizeChanger: false, hideOnSinglePage: true }} /></div>
     <div className={overview ? 'overview-trades-mobile' : 'table-mobile'}>{trades.length ? <ul className="trade-list" aria-label="成交列表">{(overview ? trades : trades.slice(0, 50)).map(trade => <li className="trade-list-item" key={trade.trade_id}>
-      <div className="trade-list-heading">{overview ? <><strong>{trade.symbol}</strong>{side(trade.side)}</> : <>{side(trade.side)}<strong><Copyable value={trade.price}>{price(trade.price)}</Copyable></strong></>}<RelativeTime value={trade.timestamp} className="trade-list-time" /></div>
+      <div className="trade-list-heading">{overview ? <><strong><SymbolCell symbol={trade.symbol} /></strong>{side(trade.side)}</> : <>{side(trade.side)}<strong><Copyable value={trade.price}>{price(trade.price)}</Copyable></strong></>}<RelativeTime value={trade.timestamp} className="trade-list-time" /></div>
       <dl>
         <div><dt>{overview ? '成交均价' : '数量'}</dt><dd>{price(overview ? trade.price : trade.quantity)}</dd></div>
         <div><dt>金额</dt><dd>{number(trade.amount_usdc)}</dd></div>

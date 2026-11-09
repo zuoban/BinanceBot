@@ -1,10 +1,11 @@
 import { useContext, useRef } from 'react';
 import { Alert, App, Button, Empty, Space } from 'antd';
-import { CheckCircleFilled, ClockCircleFilled, CloseCircleFilled, ExclamationCircleFilled, InfoCircleFilled, MinusCircleFilled, ReloadOutlined, ThunderboltFilled } from '@ant-design/icons';
+import { ArrowDownOutlined, ArrowUpOutlined, CheckCircleFilled, ClockCircleFilled, CloseCircleFilled, ExclamationCircleFilled, InfoCircleFilled, MinusCircleFilled, ReloadOutlined, ThunderboltFilled } from '@ant-design/icons';
 import { Link } from 'react-router-dom';
 import { EditContext } from '../lib/session';
-import type { Mode, Status } from '../lib/types';
-import { compactNumber, modeLabel, number, numeric, statusLabel } from '../lib/format';
+import type { GridConfig, Mode, Status } from '../lib/types';
+type Direction = GridConfig['direction'];
+import { compactNumber, directionLabel, modeLabel, number, numeric, statusLabel } from '../lib/format';
 
 export function ErrorNotice({ error, retry }: { error: Error | null; retry?: () => void }) {
   if (!error) return null;
@@ -34,6 +35,14 @@ const statusMeta: Record<Status, { tier: Signal; icon: React.ReactNode }> = {
   ERROR: { tier: 'red', icon: <CloseCircleFilled /> },
 };
 export const StatusTag = ({ status }: { status: Status }) => <SignalChip tier={statusMeta[status].tier} icon={statusMeta[status].icon}>{statusLabel[status]}</SignalChip>;
+export function DirectionTag({ direction }: { direction: Direction }) {
+  const short = direction === 'SHORT';
+  return <span className={`strategy-direction strategy-direction-${short ? 'short' : 'long'}`} role="img" aria-label={`策略方向：${directionLabel(direction)}`}>{short ? <ArrowDownOutlined /> : <ArrowUpOutlined />}{directionLabel(direction)}</span>;
+}
+export function DirectionText({ direction }: { direction: Direction }) {
+  const short = direction === 'SHORT';
+  return <span className={`side-tag side-${short ? 'sell' : 'buy'}`}><span aria-hidden="true">{short ? '↓' : '↑'}</span>{directionLabel(direction)}</span>;
+}
 export function Pnl({ value, compact = false }: { value: unknown; compact?: boolean }) {
   const n = numeric(value);
   if (compact && n !== null && Math.abs(n) > 0 && Math.abs(n) < 0.01) {

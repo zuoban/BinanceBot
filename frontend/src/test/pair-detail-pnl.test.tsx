@@ -71,3 +71,10 @@ it('uses the snapshot mode for account freshness while pair metadata catches up'
   const card = screen.getByText('账户权益 / USDC').closest('.ant-card')!;
   expect(card.querySelector('.ant-statistic-content-value')).toHaveTextContent('--');
 });
+
+it('displays the strategy direction badge in the detail signal strip', () => {
+  state.data!.grid_config.direction = 'SHORT';
+  render(view());
+  expect(screen.getByRole('img', { name: '策略方向：做空' })).toHaveClass('strategy-direction-short');
+  expect(screen.getByText('方向').parentElement).toHaveTextContent('↓做空');
+});

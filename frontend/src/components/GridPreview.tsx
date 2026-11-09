@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useLayoutEffect, useRef, useState } from 'react';
 import { Form, Input } from 'antd';
 import type { FormInstance } from 'antd';
 import { CloseCircleOutlined, WarningOutlined } from '@ant-design/icons';
@@ -8,6 +8,7 @@ import { maxPositionPolicyLabel, positiveDecimalText } from '../lib/format';
 /** Live ladder of the orders the engine would place, from the form values and a reference price. */
 export function GridPreview<Values>({ form, markPrice, tickSize, stepSize, minQty, minNotional, quote }: { form: FormInstance<Values>; markPrice?: string | null; tickSize?: string | null; stepSize?: string | null; minQty?: string | null; minNotional?: string | null; quote: string }) {
   const [typed, setTyped] = useState('');
+  const ladderRef = useRef<HTMLOListElement>(null);
   const values = Form.useWatch([], form) as Record<string, unknown> | undefined;
   const cleanMark = positiveDecimalText(markPrice);
   const hasMark = cleanMark !== null;
@@ -26,6 +27,13 @@ export function GridPreview<Values>({ form, markPrice, tickSize, stepSize, minQt
   const openingLabel = short ? '卖单' : '买单';
   const openingPrices = preview ? (short ? preview.sells : preview.buys) : [];
   const orders = preview ? preview.buys.length + preview.sells.length : 0;
+  useLayoutEffect(() => {
+    const container = ladderRef.current;
+    const markNode = container?.querySelector<HTMLElement>('.grid-preview-mark');
+    if (container && markNode && container.scrollHeight > container.clientHeight) {
+      container.scrollTop = Math.max(0, markNode.offsetTop - container.clientHeight / 2 + markNode.clientHeight / 2);
+    }
+  }, [preview?.sells.length, preview?.buys.length]);
   const worstCase = preview && values ? (cleanStep
     ? sumDecimals(openingPrices.flatMap(price => { const s = sizings.get(price); return s && !s.error ? [s.notional] : []; }))
     : exposure(values.order_amount_usdc, openingPrices.length)) : null;
@@ -49,7 +57,7 @@ export function GridPreview<Values>({ form, markPrice, tickSize, stepSize, minQt
     </div>
     {tickError || rangeError ? <p className="grid-preview-notice grid-preview-error" role="alert"><CloseCircleOutlined aria-hidden="true" /><span><strong className="grid-preview-notice-title">参数错误：</strong>{tickError ?? rangeError}</span></p>
       : !preview ? <p className="muted grid-preview-empty">填写网格间距、买卖窗口{hasMark ? '' : '和参考价格'}后显示将挂出的价位。</p> : <>
-      <ol className="grid-preview-ladder" aria-label="预计挂单价位，由高到低">
+      <ol ref={ladderRef} className="grid-preview-ladder" aria-label="预计挂单价位，由高到低">
         {[...preview.sells].reverse().map(price => renderLevel('sell', price))}
         <li className="grid-preview-level grid-preview-mark"><span className="grid-preview-order">参考价</span><strong className="grid-preview-price grid-preview-value">{reference}</strong></li>
         {preview.buys.map(price => renderLevel('buy', price))}

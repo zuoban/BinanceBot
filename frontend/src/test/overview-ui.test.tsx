@@ -672,3 +672,18 @@ it('renders strategy operation results with signal tier styling and allows dismi
   await userEvent.setup().click(screen.getByRole('button', { name: '关闭 BTCUSDC 操作提示' }));
   expect(actions.clearResult).toHaveBeenCalledWith('BTCUSDC');
 });
+
+it('links recent trade symbols to their strategy detail pages', async () => {
+  const s = summarySnapshot('BTCUSDC');
+  overview.data = {
+    generated_at: '', pairs: [{ snapshot: s, mode: 'PAPER', scoped: true }],
+    recent_trades: [{ trade_id: 't1', symbol: 'BTCUSDC', mode: 'PAPER', side: 'BUY', price: '100', quantity: '1', amount_usdc: '100', realized_pnl: '0', commission: '0', pnl_verified: true, is_maker: true, timestamp: new Date().toISOString(), note: '' }],
+  };
+  function Location() { return <output data-testid="location">{useLocation().pathname}</output>; }
+  render(<MemoryRouter><App><OverviewPage /><Location /></App></MemoryRouter>);
+  const table = screen.getByText('最近成交').closest('.ant-card') as HTMLElement;
+  const links = within(table).getAllByRole('link', { name: 'BTCUSDC' });
+  expect(links[0]).toHaveAttribute('href', '/pairs/BTCUSDC');
+  await userEvent.setup().click(links[0]);
+  expect(screen.getByTestId('location')).toHaveTextContent('/pairs/BTCUSDC');
+});
