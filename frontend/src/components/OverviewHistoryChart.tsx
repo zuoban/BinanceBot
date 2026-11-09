@@ -28,8 +28,8 @@ export default memo(function OverviewHistoryChart({ data, ticks, asset, formatVa
     labelFormatter: (value: unknown) => `${formatDate(Number(value))} · 北京时间`,
     formatter: (value: unknown) => `${formatValue(value)} ${asset ?? ''}`,
     cursor: { stroke: 'var(--border-strong)', strokeDasharray: '3 4' },
-    contentStyle: { background: 'var(--bg-raised)', borderColor: 'var(--border-strong)', borderRadius: 8, color: 'var(--text-primary)', fontSize: 12 },
-    labelStyle: { color: 'var(--text-primary)', marginBottom: 4 },
+    contentStyle: { background: 'var(--bg-raised)', borderColor: 'var(--border-strong)', borderRadius: 8, boxShadow: 'var(--overlay-shadow)', color: 'var(--text-primary)', fontSize: 12 },
+    labelStyle: { color: 'var(--text-primary)', fontFamily: 'var(--font-mono)', fontWeight: 600, marginBottom: 4 },
     itemStyle: { color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' },
   };
   return <ResponsiveContainer width="100%" height={200}>

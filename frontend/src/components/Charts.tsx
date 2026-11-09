@@ -33,7 +33,7 @@ export function HourlyChart({ snapshot, now: currentNow }: { snapshot: Snapshot;
         <CartesianGrid strokeDasharray="3 5" vertical={false} stroke={token.colorBorderSecondary} />
         <XAxis dataKey="hour" interval="preserveStartEnd" minTickGap={24} tickLine={false} axisLine={false} tick={axisTick} />
         <YAxis allowDecimals={false} axisLine={false} tickLine={false} tick={axisTick} />
-        <Legend /><Tooltip cursor={{ fill: token.colorFillSecondary }} contentStyle={{ background: token.colorBgElevated, borderColor: token.colorBorder, borderRadius: 8, color: token.colorText }} labelStyle={{ color: token.colorText }} />
+        <Legend /><Tooltip cursor={{ fill: token.colorFillSecondary }} contentStyle={{ background: token.colorBgElevated, borderColor: token.colorBorder, borderRadius: 8, boxShadow: 'var(--overlay-shadow)', color: token.colorText, fontSize: 12 }} labelStyle={{ color: token.colorText, fontFamily: 'var(--font-mono)', fontWeight: 600, marginBottom: 4 }} itemStyle={{ fontFamily: 'var(--font-mono)' }} />
         <Bar dataKey="买入" fill={token.colorSuccess} radius={[3, 3, 0, 0]} /><Bar dataKey="卖出" fill={token.colorError} radius={[3, 3, 0, 0]} />
       </BarChart>
     </ResponsiveContainer></div>

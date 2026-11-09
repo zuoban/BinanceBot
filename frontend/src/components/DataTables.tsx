@@ -69,7 +69,7 @@ export function OrdersTable({ orders, mark }: { orders: Order[]; mark?: string }
     { title: '金额', align: 'right', className: 'table-numeric', dataIndex: 'amount_usdc', render: (v: string) => number(v) },
     { title: '用途', render: (_, o) => orderPurpose(o) },
     { title: '状态', dataIndex: 'status' },
-    { title: '时间（北京）', dataIndex: 'created_at', render: time, width: 185 },
+    { title: '时间（北京）', className: 'table-numeric', dataIndex: 'created_at', render: time, width: 185 },
   ], [mark]);
   return <><TableFilterBar label="按方向筛选" value={filter} onChange={setFilter} options={sideOptions} shown={rows.length} total={orders.length} onExport={exportRows} /><div className="table-desktop"><p className="table-scroll-hint">左右滑动查看完整挂单信息</p><Table<Order> rowKey="client_order_id" columns={columns} dataSource={rows} size="small" scroll={{ x: 900 }}
     pagination={{ pageSize: 15, showSizeChanger: false, hideOnSinglePage: true }}
@@ -96,7 +96,7 @@ export function TradesTable({ trades: allTrades, overview = false, now: currentN
   const columns = useMemo<ColumnsType<Trade>>(() => [
     ...(overview ? [{ title: '交易对', dataIndex: 'symbol', className: 'trade-symbol', width: 130, render: (symbol: string) => <SymbolCell symbol={symbol} /> }] : []),
     { title: '方向', dataIndex: 'side', render: side, width: 90, fixed: overview ? undefined : 'left' },
-    { title: overview ? '成交时间' : '时间（北京）', dataIndex: 'timestamp', render: overview ? (value: string) => <RelativeTime value={value} /> : time, width: overview ? 90 : 185 },
+    { title: overview ? '成交时间' : '时间（北京）', className: 'table-numeric', dataIndex: 'timestamp', render: overview ? (value: string) => <RelativeTime value={value} /> : time, width: overview ? 90 : 185 },
     { title: '成交价格', align: 'right', className: 'table-numeric', dataIndex: 'price', render: (v: string) => overview ? price(v) : <Copyable value={v}>{price(v)}</Copyable> },
     { title: '数量', align: 'right', className: 'table-numeric', dataIndex: 'quantity', render: price },
     { title: '金额', align: 'right', className: 'table-numeric', dataIndex: 'amount_usdc', render: (v: string) => number(v) },
@@ -122,7 +122,7 @@ const levels = ['ALL', 'ERROR', 'WARN', 'INFO', 'DEBUG'] as const;
 type LevelFilter = typeof levels[number];
 const levelOptions: { value: LevelFilter; label: string }[] = levels.map(value => ({ value, label: value === 'ALL' ? '全部' : value }));
 const logColumns: ColumnsType<Log> = [
-  { title: '时间（北京）', dataIndex: 'timestamp', render: time, width: 185 },
+  { title: '时间（北京）', className: 'table-numeric', dataIndex: 'timestamp', render: time, width: 185 },
   { title: '级别', dataIndex: 'level', width: 90, render: v => <span className={`log-level log-level-${String(v).toLowerCase()}`}>{v}</span> },
   { title: '内容', dataIndex: 'message', className: 'log-message' },
 ];

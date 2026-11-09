@@ -43,7 +43,7 @@ code {
   font: 400 12px/18px var(--font-mono);
 }
 
-a { color: inherit; transition: color 150ms var(--ease-out); }
+a { color: inherit; text-underline-offset: 3px; transition: color 150ms var(--ease-out); }
 
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
 .muted { color: var(--text-secondary); font-size: var(--text-xs); line-height: 18px; }
@@ -401,7 +401,7 @@ kbd {
 .trade-list-item:last-child { border-bottom: 0; }
 .trade-list-heading { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .trade-list-heading strong { min-width: 0; font: 500 13px var(--font-mono); overflow-wrap: anywhere; }
-.trade-list-time { margin-left: auto; color: var(--text-secondary); font-size: 12px; white-space: nowrap; flex: none; }
+.trade-list-time { margin-left: auto; color: var(--text-secondary); font: 400 12px/16px var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; flex: none; }
 .trade-list dl { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px 12px; margin: 10px 0 0; }
 .trade-list dl > div { min-width: 0; }
 .trade-list dl > div:nth-child(2) { text-align: center; }
