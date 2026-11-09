@@ -34,10 +34,10 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
       <Typography.Title level={2}>{configured ? '登录交易控制台' : '无需登录'}</Typography.Title>
       <Typography.Paragraph type="secondary">{configured ? '输入管理员密码，进入策略工作台' : '服务端未设置管理员密码，可直接进入控制台'}</Typography.Paragraph>
       <ErrorNotice error={status.error} retry={() => void status.refetch()} /><ErrorNotice error={mutation.error} />
-      {!configured && <><Alert type="info" showIcon title="未启用管理员密码认证，所有能访问该端口的人都可以操作。" /><Button type="primary" size="large" block onClick={onLogin}>进入控制台</Button></>}
+      {!configured && <><Alert type="info" showIcon title="未启用管理员密码认证，所有能访问该端口的人都可以操作。" /><Button type="primary" size="large" block autoFocus onClick={onLogin}>进入控制台</Button></>}
       {configured && <Form layout="vertical" onFinish={values => mutation.mutate(values)} disabled={mutation.isPending || !status.data}>
         <Form.Item name="password" label="管理员密码" rules={[{ required: true, message: '请输入密码' }]}>
-          <Input.Password prefix={<LockOutlined />} size="large" autoComplete="current-password" />
+          <Input.Password prefix={<LockOutlined />} size="large" autoComplete="current-password" autoFocus />
         </Form.Item>
         <Button type="primary" size="large" htmlType="submit" block loading={mutation.isPending}>进入控制台</Button>
       </Form>}
