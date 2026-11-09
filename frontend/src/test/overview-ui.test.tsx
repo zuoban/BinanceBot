@@ -640,6 +640,16 @@ it('marks an unchanged overview stale as time passes and clears the warning on r
   }
 });
 
+it('does not mark the overview banner stale while initial data is still loading', () => {
+  overview.data = undefined;
+  overview.isPending = true;
+  overview.error = null;
+  overview.dataUpdatedAt = 0;
+  render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+  expect(screen.getByLabelText('策略运行概览')).not.toHaveClass('is-stale');
+  expect(screen.queryByText('数据暂未更新，请检查连接')).not.toBeInTheDocument();
+});
+
 it('disables rebuilding a paused strategy while keeping resume available', async () => {
   const paused = summarySnapshot('BTCUSDC'); paused.status = 'PAUSED';
   overview.data = { generated_at: '', pairs: [{ snapshot: paused, mode: 'PAPER', scoped: true }], recent_trades: [] };

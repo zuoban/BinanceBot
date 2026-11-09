@@ -70,7 +70,7 @@ export default function OverviewPage() {
   const buyTrades = displayedTrades.filter(trade => trade.side === 'BUY').length;
   const sellTrades = displayedTrades.filter(trade => trade.side === 'SELL').length;
   const tradePnlGroups = useMemo(() => groupTradePnl(displayedTrades), [displayedTrades]);
-  const stale = !!overview.error || now - overview.dataUpdatedAt > SNAPSHOT_STALE_MS;
+  const stale = !!overview.error || (!!overview.data && now - overview.dataUpdatedAt > SNAPSHOT_STALE_MS);
   const pairs = entries.map(toPair);
   let runningCount = 0, pausedCount = 0, stoppedCount = 0, errorCount = 0, liveCount = 0, allPaper = pairs.length > 0;
   for (const p of pairs) {
