@@ -301,7 +301,8 @@ kbd {
   .overview-trade-breakdown { font-size: 11px; }
 }
 /* Finance cards */
-.finance-card .ant-card-body { padding: 20px; }
+.finance-card { height: 100%; }
+.finance-card .ant-card-body { display: flex; flex-direction: column; height: 100%; padding: 20px; }
 .finance-card-heading { margin-bottom: 8px; color: var(--text-secondary); font-size: 13px; font-weight: 500; }
 .finance-card-primary { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 4px 16px; margin-bottom: 16px; }
 .finance-card-primary .ant-statistic-content { font-size: 30px; line-height: 36px; }
@@ -315,7 +316,8 @@ kbd {
 .finance-metrics strong small { color: var(--text-muted); font: 400 12px var(--font-sans); }
 .position-long { color: var(--positive); }
 .position-short { color: var(--negative); }
-.account-card .ant-card-body > .muted, .position-summary-footer { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border-hairline); color: var(--text-muted); }
+.account-card .ant-card-body > .muted, .position-summary-footer { margin-top: auto; padding-top: 12px; border-top: 1px solid var(--border-hairline); color: var(--text-muted); }
+.finance-metrics + .muted, .finance-metrics + .position-summary-footer { padding-top: 12px; }
 
 /* Strategy cards */
 .strategies-section { margin-top: 8px; }
@@ -324,7 +326,7 @@ kbd {
 .filter-bar .ant-input-affix-wrapper { width: 260px; max-width: 100%; }
 .filter-bar .ant-select { min-width: 176px; }
 .filter-bar > .ant-btn { color: var(--accent); }
-.filter-count { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.filter-count { margin-left: auto; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .strategy-grid, .skeleton-grid-strategies { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 522px), 1fr)); gap: var(--space-5); }
 .strategy-empty { grid-column: 1 / -1; }
 .strategy-empty .ant-card-body { padding: 32px 20px; }
@@ -706,6 +708,7 @@ kbd {
 
 /* ---------- Save bar change list ---------- */
 .save-bar-status { display: flex; align-items: center; flex-wrap: wrap; gap: 0 8px; min-width: 0; }
+.save-bar-status .ant-btn-link { padding-inline: 4px; font-weight: 500; }
 .save-bar-changes { flex-basis: 100%; display: grid; gap: var(--space-1); margin: var(--space-2) 0 0; padding: 0; list-style: none; max-height: min(32vh, 320px); overflow-y: auto; overscroll-behavior: contain; }
 .save-bar-changes li { display: flex; justify-content: space-between; gap: 16px; padding: 4px 10px; border-radius: 6px; background: var(--bg-card); font-size: 12px; }
 .save-bar-changes li > span:last-child { font-family: var(--font-mono); }
@@ -836,7 +839,7 @@ kbd {
   .detail-tabs .ant-card-head-wrapper { flex-wrap: wrap; padding-block: 8px; }
   .history-actions { align-items: stretch; width: 100%; text-align: left; }
   .save-bar-changes li { flex-wrap: wrap; gap: 4px 12px; }
-  .save-bar-changes li > span, .confirm-changes dd { min-width: 0; overflow-wrap: anywhere; }
+  .save-bar-changes li > span, .confirm-changes dd, .confirm-changes li { min-width: 0; overflow-wrap: anywhere; }
   .confirm-changes dl > div { flex-direction: column; gap: 4px; }
   .confirm-changes dd { text-align: left; }
   .overview-trades .ant-card-body { padding: 0 16px 8px; }
@@ -868,7 +871,9 @@ kbd {
 @media (min-width: 360px) and (max-width: 600px) {
   .filter-bar { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .filter-bar .ant-select { min-width: 0; }
+  .filter-count { margin-left: 0; align-self: center; }
   .filter-bar > .ant-btn { grid-column: 1 / -1; }
+  .filter-bar > .filter-count + .ant-btn { grid-column: auto; }
 }
 @media (max-width: 575px) {
   .skeleton-detail-info-grid, .skeleton-grid-finances { grid-template-columns: 1fr; }
