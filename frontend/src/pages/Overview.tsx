@@ -242,7 +242,7 @@ export default function OverviewPage() {
           <div className="section-line strategy-card-heading"><div className="strategy-identity"><Link className="pair-name" to={`/pairs/${s.symbol}`}>{s.symbol}</Link><DirectionTag direction={s.grid_config.direction} /><StatusTag status={s.status} /></div></div>
           <div className="strategy-main">
             <div className="strategy-price"><span className="muted">标记价格 / {quote}</span><strong>{positivePrice(s.ticker.mark_price, true)}</strong></div>
-            <Space className="strategy-card-actions" size={6}><Popover trigger="click" placement="bottomRight" title={`${s.symbol} 策略配置`} content={
+            <Space className="strategy-card-actions" size={6}><Popover trigger="click" placement="bottom" title={`${s.symbol} 策略配置`} content={
               <div className="strategy-config-popover">
                 <dl>
                   <div><dt>交易方向</dt><dd><DirectionText direction={s.grid_config.direction} /></dd></div>

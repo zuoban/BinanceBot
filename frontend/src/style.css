@@ -374,7 +374,7 @@ kbd {
   .strategy-card-actions { width: 100%; justify-content: flex-end; }
 }
 
-.strategy-config-popover { min-width: min(240px, calc(100vw - 48px)); max-width: min(320px, calc(100vw - 48px)); }
+.strategy-config-popover { width: min(236px, calc(100vw - 56px)); }
 .strategy-config-popover dl { display: grid; gap: 8px; margin: 0 0 12px; }
 .strategy-config-popover dl > div { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; }
 .strategy-config-popover dt { color: var(--text-secondary); font-size: 12px; line-height: 18px; }
