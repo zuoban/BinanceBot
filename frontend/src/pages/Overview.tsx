@@ -254,7 +254,7 @@ export default function OverviewPage() {
               </dl>
               <Link to={`/pairs/${s.symbol}/config`}>查看完整配置 <ArrowRightOutlined /></Link>
             </div>
-          }><Button type="text" size="small" icon={<EyeOutlined />} aria-label={`查看 ${s.symbol} 策略配置`} /></Popover><StrategyToggle pair={pair} stale={stale} /><StrategyMenu pair={pair} stale={stale} /></Space></div>
+          }><Button size="small" icon={<EyeOutlined />} aria-label={`查看 ${s.symbol} 策略配置`} /></Popover><StrategyToggle pair={pair} stale={stale} /><StrategyMenu pair={pair} stale={stale} /></Space></div>
           <div className="strategy-price"><span className="muted">标记价格 / {quote}</span><strong>{positivePrice(s.ticker.mark_price, true)}</strong></div>
           <div className="strategy-metrics" aria-label={`${s.symbol} 策略指标`}>
             <div><span>持仓金额 / {quote}</span><strong>{number(positionAmount(s))}</strong></div>
@@ -269,7 +269,7 @@ export default function OverviewPage() {
           {result && <div className={result.startsWith('未提交') ? 'negative operation-result' : 'muted operation-result'} role="status">{result}</div>}
         </Card>;
       })}
-      {!visible.length && <Card className="strategy-empty"><Empty description={pairs.length ? '没有符合筛选条件的策略' : '暂无策略数据'}>{pairs.length ? <Button onClick={clearFilters}>清除筛选</Button> : addPairButton({ type: 'primary' })}</Empty></Card>}
+      {!visible.length && <Card className="strategy-empty"><Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={pairs.length ? '没有符合筛选条件的策略' : '暂无策略数据'}>{pairs.length ? <Button onClick={clearFilters}>清除筛选</Button> : addPairButton({ type: 'primary' })}</Empty></Card>}
     </div>
     </section>
     <Card className="overview-trades" title="最近成交" extra={<span className="muted">全部策略当前模式 · 最近 20 条</span>}>
