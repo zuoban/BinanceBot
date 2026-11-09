@@ -22,7 +22,7 @@ export function useDeleteStrategy() {
       const live = pair.mode === 'LIVE';
       const dialog = modal.confirm({
         title: `删除 ${pair.symbol} 策略？`,
-        content: <div>
+        content: <div className="delete-confirm-dialog">
           <p>请先暂停策略、等待挂单撤销并平仓。删除不会自动平仓，成交历史和恢复数据会保留；至少需要保留一个交易对。</p>
           {live && <Input aria-label="输入交易对名称以确认删除" placeholder={`输入 ${pair.symbol} 以确认`} autoComplete="off"
             onChange={event => dialog.update({ okButtonProps: { danger: true, disabled: event.target.value.trim().toUpperCase() !== pair.symbol.toUpperCase() } })} />}

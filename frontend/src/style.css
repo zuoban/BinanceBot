@@ -259,6 +259,7 @@ kbd {
 .ant-statistic .ant-statistic-content { font-weight: 500; letter-spacing: -0.01em; }
 
 .ant-alert { margin-bottom: 16px; }
+.conflict-reload-btn { margin-bottom: 16px; }
 
 /* ---------- Overview: bulletin band ---------- */
 .overview-banner { container: overview-banner / inline-size; margin-bottom: 8px; border: 1px solid var(--border-hairline); border-radius: 12px; background: var(--bg-card); overflow: hidden; }
@@ -424,7 +425,7 @@ kbd {
 .history-caption-main { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
 .history-caption h3 { margin: 0; color: var(--text-primary); font-size: 14px; font-weight: 600; }
 .history-daily { margin-top: 20px; padding-top: 4px; border-top: 1px solid var(--border-hairline); }
-.history-empty { padding: 28px 0; text-align: center; color: var(--text-muted); font-size: 13px; }
+.history-empty { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px; padding: 28px 0; text-align: center; color: var(--text-muted); font-size: 13px; }
 .history-plot { min-width: 0; }
 .history-plot-loading { min-height: 180px; display: grid; place-content: center; }
 
@@ -605,13 +606,16 @@ kbd {
 /* ---------- Interaction additions ---------- */
 .strategy-toggle.ant-btn { min-width: 76px; }
 .confirm-changes p { margin: 0 0 10px; }
-.confirm-changes dl { display: grid; gap: 6px; margin: 0; }
-.confirm-changes dl > div { display: flex; justify-content: space-between; gap: 16px; padding: 6px 10px; border-radius: 8px; background: var(--bg-raised); }
+.confirm-changes dl, .confirm-changes ul { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; max-height: min(48vh, 360px); overflow-y: auto; overscroll-behavior: contain; }
+.confirm-changes dl > div, .confirm-changes li { display: flex; justify-content: space-between; gap: 16px; padding: 6px 10px; border-radius: 8px; background: var(--bg-raised); font-size: 13px; line-height: 1.5; }
 .confirm-changes dt { color: var(--text-secondary); font-size: 13px; }
 .confirm-changes dd { margin: 0; font: 500 13px var(--font-mono); text-align: right; }
 .confirm-changes dd s { color: var(--text-muted); font-weight: 400; }
 .confirm-changes .confirm-risky { background: var(--sig-yellow-bg); }
 .confirm-changes .confirm-risky dt { color: var(--sig-yellow); font-weight: 600; }
+.delete-confirm-dialog { display: grid; gap: 12px; }
+.delete-confirm-dialog p { margin: 0; }
+.delete-confirm-dialog .ant-input { font-family: var(--font-mono); }
 .signal-button { font-family: inherit; cursor: pointer; transition: transform 140ms var(--ease-out), border-color 150ms var(--ease-out), box-shadow 150ms var(--ease-out), filter 150ms var(--ease-out); }
 .signal-button:active { transform: scale(0.97); }
 @media (hover: hover) and (pointer: fine) {

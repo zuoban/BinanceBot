@@ -74,7 +74,7 @@ export function ConflictReloadButton<T>({ label, activeRef, refetch, onLoaded, o
   const { modal, message } = App.useApp();
   const edit = useContext(EditContext);
   const running = useRef(false);
-  return <Button disabled={edit.saving} onClick={async () => {
+  return <Button className="conflict-reload-btn" disabled={edit.saving} onClick={async () => {
     const current = activeRef.current;
     if (running.current || edit.saving || !current) return;
     running.current = true;

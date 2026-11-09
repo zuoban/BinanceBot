@@ -140,7 +140,7 @@ function GlobalSettings() {
     try {
       if (changes.length && !await modal.confirm({
         title: '确认保存全局设置？',
-        content: <div><p>以下变更保存后立即生效：</p><ul>{changes.map(change => <li key={change}>{change}</li>)}</ul></div>,
+        content: <div className="confirm-changes"><p>以下变更保存后立即生效：</p><ul>{changes.map(change => <li key={change}>{change}</li>)}</ul></div>,
         okText: '确认保存', cancelText: '继续编辑',
       })) {
         submitting.current = false;
