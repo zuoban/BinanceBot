@@ -235,23 +235,23 @@ export default function OverviewPage() {
       {visible.map(e => {
         const { snapshot: s } = e;
         const pair = toPair(e);
-        const quote = quoteAsset(s.symbol), result = controls.results[s.symbol], resultMeta = result ? controlResultMeta(result) : null;
+        const quote = quoteAsset(s.symbol), quoteSuffix = quote ? ` / ${quote}` : '', quoteUnit = quote ? ` ${quote}` : '';
+        const result = controls.results[s.symbol], resultMeta = result ? controlResultMeta(result) : null;
         const tradeCounts = tradeCountsBySymbol.get(s.symbol) ?? null;
         const change = entryChange(s.position, s.ticker.mark_price);
         return <Card key={s.symbol} className={`strategy-card ${s.grid_config.direction === 'SHORT' ? 'strategy-short' : 'strategy-long'}`}>
-          <div className="section-line strategy-card-heading"><div className="strategy-identity"><Link className="pair-name" to={`/pairs/${s.symbol}`}>{s.symbol}</Link><DirectionTag direction={s.grid_config.direction} /><StatusTag status={s.status} /></div></div>
-          <div className="strategy-main">
-            <div className="strategy-price"><span className="muted">标记价格 / {quote}</span><strong>{positivePrice(s.ticker.mark_price, true)}</strong></div>
+          <div className="section-line strategy-card-heading">
+            <div className="strategy-identity"><Link className="pair-name" to={`/pairs/${s.symbol}`}>{s.symbol}</Link></div>
             <Space className="strategy-card-actions" size={6}><Popover trigger="click" placement="bottom" title={`${s.symbol} 策略配置`} content={
               <div className="strategy-config-popover">
                 <dl>
                   <div><dt>交易方向</dt><dd><DirectionText direction={s.grid_config.direction} /></dd></div>
-                  <div><dt>网格间距</dt><dd>{trimFractionZeros(s.grid_config.grid_interval)} {quote}</dd></div>
-                  <div><dt>每格金额</dt><dd>{trimFractionZeros(s.grid_config.order_amount_usdc)} {quote}</dd></div>
+                  <div><dt>网格间距</dt><dd>{trimFractionZeros(s.grid_config.grid_interval)}{quoteUnit}</dd></div>
+                  <div><dt>每格金额</dt><dd>{trimFractionZeros(s.grid_config.order_amount_usdc)}{quoteUnit}</dd></div>
                   <div><dt>买单 / 卖单窗口</dt><dd>{s.grid_config.buy_window} / {s.grid_config.sell_window}</dd></div>
                   <div><dt>最低价格</dt><dd>{s.grid_config.min_price == null ? '未设置' : trimFractionZeros(s.grid_config.min_price)}</dd></div>
                   <div><dt>最高价格</dt><dd>{s.grid_config.max_price == null ? '未设置' : trimFractionZeros(s.grid_config.max_price)}</dd></div>
-                  <div><dt>最大持仓名义价值</dt><dd>{s.grid_config.max_position_usdc == null ? '未设置' : `${trimFractionZeros(s.grid_config.max_position_usdc)} ${quote}`}</dd></div>
+                  <div><dt>最大持仓名义价值</dt><dd>{s.grid_config.max_position_usdc == null ? '未设置' : `${trimFractionZeros(s.grid_config.max_position_usdc)}${quoteUnit}`}</dd></div>
                   <div><dt>持仓上限处理方式</dt><dd>{maxPositionPolicyLabel(s.grid_config)}</dd></div>
                   <div><dt>强平距离阈值</dt><dd>{s.grid_config.min_liquidation_distance_pct == null ? '未设置' : `${trimFractionZeros(s.grid_config.min_liquidation_distance_pct)}%`}</dd></div>
                   <div><dt>仅挂单</dt><dd>{s.grid_config.post_only ? '开启' : '关闭'}</dd></div>
@@ -260,13 +260,17 @@ export default function OverviewPage() {
               </div>
             }><Button size="small" icon={<EyeOutlined />} aria-label={`查看 ${s.symbol} 策略配置`} /></Popover><StrategyToggle pair={pair} stale={stale} /><StrategyMenu pair={pair} stale={stale} /></Space>
           </div>
+          <div className="strategy-main">
+            <div className="strategy-price"><span className="muted">标记价格{quoteSuffix}</span><strong>{positivePrice(s.ticker.mark_price, true)}</strong></div>
+            <div className="strategy-tags"><DirectionTag direction={s.grid_config.direction} /><StatusTag status={s.status} /></div>
+          </div>
           <div className="strategy-metrics" aria-label={`${s.symbol} 策略指标`}>
-            <div><span>持仓金额 / {quote}</span><strong>{number(positionAmount(s))}</strong></div>
+            <div><span>持仓金额{quoteSuffix}</span><strong>{number(positionAmount(s))}</strong></div>
             <div><span>持仓数量</span><strong>{price(s.position.size)}</strong></div>
             <div><span>开仓价格</span><strong>{entryPriceText(s.position, true)}</strong></div>
             <div><span>涨跌幅</span><strong className={change.className}>{change.text}</strong></div>
-            <div><span>已实现盈亏 / {quote}</span><strong><Pnl value={s.stats.total_realized_pnl} compact /></strong></div>
-            <div><span>未实现盈亏 / {quote}</span><strong><Pnl value={s.position.unrealized_pnl} compact /></strong></div>
+            <div><span>已实现盈亏{quoteSuffix}</span><strong><Pnl value={s.stats.total_realized_pnl} compact /></strong></div>
+            <div><span>未实现盈亏{quoteSuffix}</span><strong><Pnl value={s.position.unrealized_pnl} compact /></strong></div>
             <div><span>今日成交</span><strong>{tradeCounts ? tradeCounts.buy + tradeCounts.sell : '--'} <small>笔</small></strong></div>
             <div><span>买单 / 卖单</span><strong>{tradeCounts?.buy ?? '--'} <small>/</small> {tradeCounts?.sell ?? '--'}</strong></div>
           </div>

@@ -237,7 +237,7 @@ kbd {
 }
 
 /* ---------- Ant surfaces: one elevation language (hairline border, no shadow) ---------- */
-.ant-card { border: 1px solid var(--border-hairline); box-shadow: none; background: var(--bg-card); }
+.ant-card { border: 1px solid var(--border-hairline); box-shadow: none; background: var(--bg-card); color: var(--text-primary); }
 .ant-card .ant-card-head { border-bottom: 1px solid var(--border-hairline); min-height: 52px; }
 .ant-card .ant-card-head-title { font-size: var(--text-section); font-weight: 600; }
 .ant-card-extra { color: var(--text-secondary); }
@@ -333,26 +333,27 @@ kbd {
 .strategy-empty .ant-card-body { padding: 32px 20px; }
 .strategy-card { container: strategy-card / inline-size; min-width: 0; height: 100%; }
 .strategy-card .ant-card-body { display: flex; flex-direction: column; height: 100%; padding: var(--space-5) var(--space-5) 0; }
-.strategy-card-heading { margin-bottom: 14px; align-items: center; }
-.strategy-identity { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; min-width: 0; }
-.pair-name { font: 600 17px/24px var(--font-mono); letter-spacing: -0.01em; text-decoration: none; overflow-wrap: anywhere; }
-.pair-name:hover { color: var(--accent); }
+.strategy-card-heading { gap: 8px 12px; margin-bottom: var(--space-3); align-items: center; }
+.strategy-identity { display: flex; align-items: center; min-width: 0; }
+.pair-name { border-radius: 4px; font: 600 17px/24px var(--font-mono); letter-spacing: -0.01em; text-decoration: none; overflow-wrap: anywhere; }
+@media (hover: hover) and (pointer: fine) { .pair-name:hover { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; } }
 .strategy-direction { display: inline-flex; align-items: center; gap: 4px; height: 24px; padding: 0 8px; border: 1px solid transparent; border-radius: 6px; font-size: 12px; font-weight: 500; line-height: 1; white-space: nowrap; }
 .strategy-long .strategy-direction, .strategy-direction-long { color: var(--positive); background: var(--sig-calm-bg); border-color: var(--sig-calm-line); }
 .strategy-short .strategy-direction, .strategy-direction-short { color: var(--negative); background: var(--sig-red-bg); border-color: var(--sig-red-line); }
-.strategy-main { display: flex; align-items: flex-end; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 18px; }
+.strategy-main { display: flex; align-items: flex-end; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; margin-bottom: 18px; }
+.strategy-tags { display: flex; align-items: center; justify-content: flex-end; gap: 6px; flex: none; margin-left: auto; }
 .strategy-card-actions { flex: none; align-items: center; margin-left: auto; }
-.strategy-card-actions .ant-btn { min-height: 32px; }
+.strategy-card-actions .ant-btn { min-height: 32px; border-radius: var(--radius-control); }
 .strategy-card-actions .ant-btn-icon-only { width: 32px; }
 .strategy-price { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .strategy-price > span { font-size: 12px; line-height: 16px; }
 .strategy-price strong { font: 500 28px/34px var(--font-mono); font-variant-numeric: tabular-nums; letter-spacing: -0.02em; overflow-wrap: anywhere; }
 .strategy-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: auto -20px 0; border-top: 1px solid var(--border-hairline); }
-.strategy-metrics > div { display: flex; flex-direction: column; gap: 4px; min-width: 0; padding: 12px 20px; border-bottom: 1px solid var(--border-hairline); text-align: left; }
+.strategy-metrics > div { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; min-width: 0; padding: 12px 20px; border-bottom: 1px solid var(--border-hairline); text-align: right; }
 .strategy-metrics > div:nth-child(even) { border-left: 1px solid var(--border-hairline); }
 .strategy-metrics > div:nth-last-child(-n+2) { border-bottom: 0; }
 .strategy-metrics span { color: var(--text-secondary); font-size: 12px; line-height: 16px; }
-.strategy-metrics strong { display: inline-flex; align-items: baseline; flex-wrap: wrap; gap: 2px 4px; font: 500 15px/22px var(--font-mono); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.strategy-metrics strong { display: inline-flex; align-items: baseline; justify-content: flex-end; flex-wrap: wrap; gap: 2px 4px; font: 500 14px/20px var(--font-mono); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .strategy-metrics strong small { color: var(--text-muted); font: 400 12px/16px var(--font-sans); }
 .operation-result { display: flex; align-items: flex-start; gap: 8px; margin-top: 12px; padding: 8px 12px; border: 1px solid var(--sig-line, var(--border-hairline)); border-radius: 8px; background: var(--sig-bg, var(--bg-raised)); color: var(--sig-fg, var(--text-secondary)); font-size: 12px; line-height: 18px; }
 .operation-result .signal-icon { margin-top: 3px; flex: none; }
@@ -370,17 +371,18 @@ kbd {
   .strategy-metrics > div:not(:nth-child(4n+1)) { border-left: 1px solid var(--border-hairline); }
   .strategy-metrics > div:nth-last-child(-n+4) { border-bottom: 0; }
 }
-@container strategy-card (max-width: 340px) {
+@container strategy-card (max-width: 320px) {
+  .strategy-card-heading { flex-wrap: wrap; }
   .strategy-card-actions { width: 100%; justify-content: flex-end; }
 }
 
 .strategy-config-popover { width: min(236px, calc(100vw - 56px)); }
 .strategy-config-popover dl { display: grid; gap: 8px; margin: 0 0 12px; }
-.strategy-config-popover dl > div { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; }
+.strategy-config-popover dl > div { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; min-width: 0; }
 .strategy-config-popover dt { color: var(--text-secondary); font-size: 12px; line-height: 18px; }
-.strategy-config-popover dd { margin: 0; font: 500 12px/18px var(--font-mono); font-variant-numeric: tabular-nums; text-align: right; }
-.strategy-config-popover a { display: inline-flex; align-items: center; gap: 6px; width: 100%; padding-top: 10px; border-top: 1px solid var(--border-hairline); color: var(--accent); font-size: 13px; font-weight: 500; text-decoration: none; }
-.strategy-config-popover a:hover { text-decoration: underline; text-underline-offset: 3px; }
+.strategy-config-popover dd { min-width: 0; margin: 0; font: 500 12px/18px var(--font-mono); font-variant-numeric: tabular-nums; text-align: right; overflow-wrap: anywhere; }
+.strategy-config-popover a { display: inline-flex; align-items: center; gap: 6px; width: 100%; padding-top: 10px; border-top: 1px solid var(--border-hairline); border-radius: 4px; color: var(--accent); font-size: 13px; font-weight: 500; text-decoration: none; }
+@media (hover: hover) and (pointer: fine) { .strategy-config-popover a:hover { text-decoration: underline; text-underline-offset: 3px; } }
 
 /* Recent trades */
 .overview-trades { margin: 28px 0 24px; overflow: hidden; }
@@ -566,6 +568,7 @@ kbd {
 .skeleton-card > .skeleton-line-large { margin-bottom: 16px; }
 .skeleton-card-content { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 24px; margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--border-hairline); }
 .skeleton-card-content > div { display: grid; gap: 8px; }
+.skeleton-grid-strategies .skeleton-card-content > div { justify-items: end; }
 .skeleton-page-panel { display: grid; gap: 16px; min-height: 160px; margin-bottom: 20px; align-content: center; }
 .skeleton-page-panel > .skeleton-line-large { margin: 0; }
 .skeleton-grid { display: grid; gap: 16px; }
@@ -603,7 +606,7 @@ kbd {
 }
 
 /* ---------- Interaction additions ---------- */
-.strategy-toggle.ant-btn { min-width: 76px; }
+.strategy-toggle.ant-btn { min-width: 76px; padding-inline: 10px; }
 .confirm-changes p { margin: 0 0 10px; }
 .confirm-changes dl, .confirm-changes ul { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; max-height: min(48vh, 360px); overflow-y: auto; overscroll-behavior: contain; }
 .confirm-changes dl > div, .confirm-changes li { display: flex; justify-content: space-between; gap: 16px; padding: 6px 10px; border-radius: 8px; background: var(--bg-raised); font-size: 13px; line-height: 1.5; }
@@ -680,10 +683,9 @@ kbd {
   .ant-input, .ant-input-affix-wrapper, .ant-input-number, .ant-select-single { min-height: 44px; }
   .ant-input-affix-wrapper .ant-input { min-height: 0; }
   .ant-input-number .ant-input-number-input { min-height: 42px; }
-  .config-form .ant-btn, .settings-page .ant-btn, .strategy-heading-actions .ant-btn, .overview-trades-toggle .ant-btn, .filter-bar .ant-btn, .table-toolbar .ant-btn, .ant-modal-confirm .ant-btn { min-height: var(--control-touch); }
   .strategy-card-actions .ant-btn { position: relative; min-width: 36px; min-height: 36px; touch-action: manipulation; }
   .strategy-card-actions .ant-btn::before { content: ''; position: absolute; inset-inline: -2px; top: 50%; min-width: var(--control-touch); height: var(--control-touch); transform: translateY(-50%); }
-  .strategy-toggle.ant-btn { min-width: 72px; }
+  .strategy-toggle.ant-btn { min-width: 72px; padding-inline: 8px; }
   .strategy-card-actions .ant-btn-icon-only { width: 36px; }
   .sidebar-link, .sidebar-pair { min-height: 44px; }
   .sidebar-add { width: 44px; height: 44px; }
@@ -806,7 +808,7 @@ kbd {
   .filter-bar > .ant-btn { justify-self: end; margin-left: auto; padding-inline: 10px; }
   .finance-card .ant-card-body { padding: 16px; }
   .strategy-card .ant-card-body { padding: 16px 16px 0; }
-  .strategy-card-heading { margin-bottom: 12px; }
+  .strategy-card-heading { margin-bottom: 10px; }
   .strategy-main { margin-bottom: 16px; }
   .strategy-price strong { font-size: 24px; line-height: 30px; }
   .strategy-metrics { margin: auto -16px 0; }
