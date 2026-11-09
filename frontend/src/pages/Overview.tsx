@@ -239,7 +239,7 @@ export default function OverviewPage() {
         const tradeCounts = tradeCountsBySymbol.get(s.symbol) ?? null;
         const change = entryChange(s.position, s.ticker.mark_price);
         return <Card key={s.symbol} className={`strategy-card ${s.grid_config.direction === 'SHORT' ? 'strategy-short' : 'strategy-long'}`}>
-          <div className="section-line strategy-card-heading"><div className="strategy-identity"><Link className="pair-name" to={`/pairs/${s.symbol}`}>{s.symbol}</Link><DirectionTag direction={s.grid_config.direction} /></div><Space className="strategy-card-actions" size={6}><StatusTag status={s.status} /><Popover trigger="click" placement="bottomRight" title={`${s.symbol} 策略配置`} content={
+          <div className="section-line strategy-card-heading"><div className="strategy-identity"><Link className="pair-name" to={`/pairs/${s.symbol}`}>{s.symbol}</Link><DirectionTag direction={s.grid_config.direction} /><StatusTag status={s.status} /></div><Space className="strategy-card-actions" size={6}><Popover trigger="click" placement="bottomRight" title={`${s.symbol} 策略配置`} content={
             <div className="strategy-config-popover">
               <dl>
                 <div><dt>交易方向</dt><dd><DirectionText direction={s.grid_config.direction} /></dd></div>
