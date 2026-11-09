@@ -222,7 +222,8 @@ kbd {
 .finance-disclosure-summary { display: none; }
 @media (max-width: 767px) {
   .finance-disclosure { margin-top: var(--space-4); }
-  .finance-disclosure-summary { display: block; padding: var(--space-3) var(--space-4); border: 1px solid var(--border-hairline); border-radius: var(--radius-panel); background: var(--bg-card); cursor: pointer; list-style: none; touch-action: manipulation; }
+  .finance-disclosure-summary { display: block; padding: var(--space-3) var(--space-4); border: 1px solid var(--border-hairline); border-radius: var(--radius-panel); background: var(--bg-card); cursor: pointer; list-style: none; user-select: none; touch-action: manipulation; transition: transform 140ms var(--ease-out), border-color 150ms var(--ease-out); }
+  .finance-disclosure-summary:active { transform: scale(0.99); }
   .finance-disclosure-summary::-webkit-details-marker { display: none; }
   .finance-disclosure-label { display: flex; justify-content: space-between; align-items: center; gap: var(--space-3); min-height: 24px; color: var(--text-secondary); font-size: var(--text-sm); font-weight: 500; }
   .finance-disclosure-label .anticon { transition: transform 150ms var(--ease-out); }
@@ -323,7 +324,7 @@ kbd {
 .filter-bar .ant-input-affix-wrapper { width: 260px; max-width: 100%; }
 .filter-bar .ant-select { min-width: 176px; }
 .filter-bar > .ant-btn { color: var(--accent); }
-
+.filter-count { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .strategy-grid, .skeleton-grid-strategies { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 522px), 1fr)); gap: var(--space-5); }
 .strategy-empty { grid-column: 1 / -1; }
 .strategy-empty .ant-card-body { padding: 32px 20px; }
