@@ -1,12 +1,12 @@
 import { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { App, Button, Card, Col, Dropdown, Empty, Grid, Input, Popover, Row, Select, Space, Statistic } from 'antd';
-import { ArrowDownOutlined, ArrowRightOutlined, ArrowUpOutlined, EyeOutlined, PlusOutlined, SearchOutlined, ThunderboltOutlined } from '@ant-design/icons';
+import { ArrowDownOutlined, ArrowRightOutlined, ArrowUpOutlined, CloseOutlined, EyeOutlined, PlusOutlined, SearchOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { useOverview } from '../lib/queries';
 import { useUrlParams } from '../lib/urlState';
 import { AccountsContext } from '../lib/session';
 import { ageText, accountGroups, beijingDay, cnyText, compactNumber as number, compactPrice as price, comparePositionAmount, directionLabel, entryChange, entryPriceText, groupTradePnl, maxPositionPolicyLabel, modeLabel, positivePrice, positionAmount, positionGroups, quoteAsset, ratioText, SNAPSHOT_STALE_MS, todayPnlGroups, todayTradeCounts, trimFractionZeros } from '../lib/format';
-import { ErrorNotice, PageTitle, Pnl, SignalButton, SignalChip, StatusTag, type Signal } from '../components/Common';
+import { controlResultMeta, ErrorNotice, PageTitle, Pnl, SignalButton, SignalChip, signalIcon, StatusTag, type Signal } from '../components/Common';
 import { runBatchControls, useControls } from '../components/Controls';
 import type { Overview, Pair, Trade } from '../lib/types';
 import { OverviewLoading } from '../components/Loading';
@@ -234,7 +234,7 @@ export default function OverviewPage() {
       {visible.map(e => {
         const { snapshot: s } = e;
         const pair = toPair(e);
-        const quote = quoteAsset(s.symbol), result = controls.results[s.symbol];
+        const quote = quoteAsset(s.symbol), result = controls.results[s.symbol], resultMeta = result ? controlResultMeta(result) : null;
         const tradeCounts = tradeCountsBySymbol.get(s.symbol) ?? null;
         const change = entryChange(s.position, s.ticker.mark_price);
         return <Card key={s.symbol} className={`strategy-card ${s.grid_config.direction === 'SHORT' ? 'strategy-short' : 'strategy-long'}`}>
@@ -266,7 +266,7 @@ export default function OverviewPage() {
             <div><span>今日成交</span><strong>{tradeCounts ? tradeCounts.buy + tradeCounts.sell : '--'} <small>笔</small></strong></div>
             <div><span>买单 / 卖单</span><strong>{tradeCounts?.buy ?? '--'} <small>/</small> {tradeCounts?.sell ?? '--'}</strong></div>
           </div>
-          {result && <div className={result.startsWith('未提交') ? 'negative operation-result' : 'muted operation-result'} role="status">{result}</div>}
+          {result && resultMeta && <div className={`operation-result signal-${resultMeta.tier}`} role="status"><span className="signal-icon" aria-hidden="true">{signalIcon[resultMeta.tier]}</span><span className="operation-result-text">{result}</span>{!resultMeta.pending && controls.clearResult && <button type="button" className="operation-result-close" aria-label={`关闭 ${s.symbol} 操作提示`} onClick={() => controls.clearResult?.(s.symbol)}><CloseOutlined aria-hidden="true" /></button>}</div>}
         </Card>;
       })}
       {!visible.length && <Card className="strategy-empty"><Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={pairs.length ? '没有符合筛选条件的策略' : '暂无策略数据'}>{pairs.length ? <Button onClick={clearFilters}>清除筛选</Button> : addPairButton({ type: 'primary' })}</Empty></Card>}

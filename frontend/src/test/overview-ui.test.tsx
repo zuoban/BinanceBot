@@ -16,12 +16,14 @@ beforeEach(() => {
   overview.error = null;
   overview.dataUpdatedAt = Date.now();
   overview.refetch.mockReset();
+  actions.results = {};
+  actions.clearResult.mockReset();
   vi.mocked(runBatchControls).mockReset().mockResolvedValue([]);
 });
 vi.mock('../lib/queries', () => ({ useOverview: () => overview, useOverviewHistory: () => ({ data: { snapshots: [], current_accounts: [] }, isPending: false, error: null }) }));
-const actions = vi.hoisted(() => ({ run: vi.fn(), remove: vi.fn(), busy: new Set<string>(), pending: {} as Record<string, string>, deleting: false }));
+const actions = vi.hoisted(() => ({ run: vi.fn(), clearResult: vi.fn(), results: {} as Record<string, string>, remove: vi.fn(), busy: new Set<string>(), pending: {} as Record<string, string>, deleting: false }));
 vi.mock('../components/DeleteStrategy', () => ({ useDeleteStrategy: () => ({ remove: actions.remove, busy: actions.deleting }) }));
-vi.mock('../components/Controls', () => ({ useControls: () => ({ busy: actions.busy, pending: actions.pending, results: {}, run: actions.run }), runBatchControls: vi.fn(), pendingLabel: { pause: '暂停中…', resume: '恢复中…', cancel_all: '撤单中…', rebalance: '重建中…' } }));
+vi.mock('../components/Controls', () => ({ useControls: () => ({ busy: actions.busy, pending: actions.pending, results: actions.results, clearResult: actions.clearResult, run: actions.run }), runBatchControls: vi.fn(), pendingLabel: { pause: '暂停中…', resume: '恢复中…', cancel_all: '撤单中…', rebalance: '重建中…' } }));
 
 it('orders running strategies first, then by absolute position amount, and updates after a status change', () => {
   const strategies = [
@@ -657,4 +659,16 @@ it('disables rebuilding a paused strategy while keeping resume available', async
   await userEvent.setup().click(screen.getByRole('button', { name: 'BTCUSDC 更多操作' }));
   expect(screen.getByRole('menuitem', { name: /重建 BTCUSDC 网格/ })).toHaveAttribute('aria-disabled', 'true');
   expect(screen.getByRole('button', { name: '恢复 BTCUSDC' })).toBeEnabled();
+});
+
+it('renders strategy operation results with signal tier styling and allows dismissing settled results', async () => {
+  const s = summarySnapshot('BTCUSDC');
+  actions.results = { BTCUSDC: '已暂停，撤单结果尚未确认，请检查交易所挂单及日志' };
+  overview.data = { generated_at: '', pairs: [{ snapshot: s, mode: 'PAPER', scoped: true }], recent_trades: [] };
+  render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+  const banner = screen.getByRole('status');
+  expect(banner).toHaveClass('operation-result', 'signal-yellow');
+  expect(banner).toHaveTextContent('已暂停，撤单结果尚未确认，请检查交易所挂单及日志');
+  await userEvent.setup().click(screen.getByRole('button', { name: '关闭 BTCUSDC 操作提示' }));
+  expect(actions.clearResult).toHaveBeenCalledWith('BTCUSDC');
 });

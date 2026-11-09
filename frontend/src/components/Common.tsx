@@ -11,7 +11,13 @@ export function ErrorNotice({ error, retry }: { error: Error | null; retry?: () 
   return <Alert type="error" showIcon title={error.message} action={retry && <Button size="small" onClick={retry} icon={<ReloadOutlined />}>重试</Button>} />;
 }
 export type Signal = 'calm' | 'blue' | 'yellow' | 'orange' | 'red';
-const signalIcon: Record<Signal, React.ReactNode> = { calm: <CheckCircleFilled />, blue: <InfoCircleFilled />, yellow: <ExclamationCircleFilled />, orange: <ThunderboltFilled />, red: <CloseCircleFilled /> };
+export const signalIcon: Record<Signal, React.ReactNode> = { calm: <CheckCircleFilled />, blue: <InfoCircleFilled />, yellow: <ExclamationCircleFilled />, orange: <ThunderboltFilled />, red: <CloseCircleFilled /> };
+export function controlResultMeta(result: string): { tier: Signal; alertType: 'error' | 'warning' | 'success' | 'info'; pending: boolean } {
+  if (result.startsWith('未提交')) return { tier: 'red', alertType: 'error', pending: false };
+  if (result.includes('尚未确认') || result.includes('结果不明')) return { tier: 'yellow', alertType: 'warning', pending: false };
+  if (result === '已确认') return { tier: 'calm', alertType: 'success', pending: false };
+  return { tier: 'blue', alertType: 'info', pending: result === '正在提交…' };
+}
 /** Tiered state chip: colour is never the only channel, every tier carries an icon and words. */
 export function SignalChip({ tier, icon, children, title }: { tier: Signal; icon?: React.ReactNode; children: React.ReactNode; title?: string }) {
   return <span className={`signal signal-${tier}`} title={title}><span className="signal-icon" aria-hidden="true">{icon ?? signalIcon[tier]}</span>{children}</span>;

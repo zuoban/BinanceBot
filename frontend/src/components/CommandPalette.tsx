@@ -37,6 +37,8 @@ export function CommandPalette({ open, onClose, commands }: { open: boolean; onC
     if (event.nativeEvent.isComposing || event.keyCode === 229) return;
     if (event.key === 'ArrowDown') { event.preventDefault(); setActive(results.length ? (currentActive + 1) % results.length : 0); }
     else if (event.key === 'ArrowUp') { event.preventDefault(); setActive(results.length ? (currentActive - 1 + results.length) % results.length : 0); }
+    else if (event.key === 'Home' && results.length) { event.preventDefault(); setActive(0); }
+    else if (event.key === 'End' && results.length) { event.preventDefault(); setActive(results.length - 1); }
     else if (event.key === 'Enter') { event.preventDefault(); choose(results[currentActive]); }
   };
   let lastGroup = '';
@@ -44,7 +46,7 @@ export function CommandPalette({ open, onClose, commands }: { open: boolean; onC
     <div className="palette-search">
       <SearchOutlined aria-hidden="true" />
       <Input ref={input} variant="borderless" aria-label="搜索命令" placeholder="搜索交易对、页面或操作" value={query} onChange={event => setQuery(event.target.value)} onKeyDown={onKeyDown} role="combobox" aria-expanded={results.length > 0} aria-controls="palette-list" aria-activedescendant={results[currentActive] ? `palette-${results[currentActive].key}` : undefined} autoComplete="off" />
-      <kbd>Esc</kbd>
+      <button type="button" className="palette-esc" onClick={onClose} aria-label="关闭命令面板"><kbd>Esc</kbd></button>
     </div>
     <ul className="palette-list" id="palette-list" role="listbox" aria-label="命令列表" ref={list}>
       {results.map((command, index) => {

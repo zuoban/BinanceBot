@@ -245,7 +245,7 @@ function ServerSettings() {
       <Form form={form} layout="vertical" className="settings-fields" disabled={!ready || edit.saving} onValuesChange={() => edit.setDirty(true)} onFinish={v => { if (submitting.current) return; submitting.current = true; mutation.mutate(v); }}>
         <Row gutter={[20, 16]}><Col xs={24} md={12}><Form.Item name="host" label="监听地址" rules={[{ required: true, whitespace: true }]}><Input /></Form.Item></Col>
           <Col xs={24} md={12}><Form.Item name="port" label="端口" rules={[{ required: true }]}><InputNumber min={1} max={65535} precision={0} className="full-width-input" /></Form.Item></Col></Row>
-        <div className="settings-card-footer settings-card-actions">
+        <div className={`settings-card-footer settings-card-actions${edit.dirty ? ' settings-card-actions-dirty' : ''}`}>
           <span className="muted" role="status">{edit.dirty ? '有未保存的修改' : '修改后需重启后端生效'}</span>
           <Space wrap>
             <FormRevertButton activeRef={mounted} onReset={mutation.reset} onRevert={() => { if (baseline.current) fill(baseline.current); }} />

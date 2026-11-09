@@ -1,6 +1,6 @@
-import { createContext, useContext, useMemo, useState } from 'react';
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { App, Button, Segmented, Table, Tag } from 'antd';
-import { CopyOutlined, DownloadOutlined } from '@ant-design/icons';
+import { CheckOutlined, CopyOutlined, DownloadOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import { beijingDay, number, price, relativeTime, time } from '../lib/format';
 import { priceDiffPercent } from '../lib/gridPreview';
@@ -23,8 +23,20 @@ function RelativeTime({ value, className }: { value: string; className?: string 
 /** Click-to-copy for a price or quantity. The visible text stays the formatted value; the raw value is what gets copied. */
 function Copyable({ value, children }: { value: string; children: React.ReactNode }) {
   const { message } = App.useApp();
-  return <button type="button" className="copyable" title="点击复制" aria-label={`复制 ${value}`} onClick={() => void copyText(value).then(ok => ok ? message.success(`已复制 ${value}`) : message.error('复制失败，请手动选择文本'))}>
-    {children}<CopyOutlined aria-hidden="true" />
+  const [copied, setCopied] = useState(false);
+  const timer = useRef<number | null>(null);
+  useEffect(() => () => { if (timer.current !== null) window.clearTimeout(timer.current); }, []);
+  return <button type="button" className={`copyable${copied ? ' copyable-copied' : ''}`} title={copied ? '已复制' : '点击复制'} aria-label={`复制 ${value}`} onClick={() => void copyText(value).then(ok => {
+    if (ok) {
+      setCopied(true);
+      if (timer.current !== null) window.clearTimeout(timer.current);
+      timer.current = window.setTimeout(() => setCopied(false), 1500);
+      void message.success(`已复制 ${value}`);
+    } else {
+      void message.error('复制失败，请手动选择文本');
+    }
+  })}>
+    {children}{copied ? <CheckOutlined aria-hidden="true" /> : <CopyOutlined aria-hidden="true" />}
   </button>;
 }
 

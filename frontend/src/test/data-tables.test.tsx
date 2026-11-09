@@ -54,6 +54,7 @@ it('copies the raw price rather than the formatted one', async () => {
   await userEvent.setup().click(buttons[0]);
   expect(exported.copy).toHaveBeenCalledWith('67420.50000000');
   expect(await screen.findByText('已复制 67420.50000000')).toBeInTheDocument();
+  expect(buttons[0]).toHaveClass('copyable-copied');
 });
 
 it('filters orders by side and disables export when nothing matches', async () => {
