@@ -829,9 +829,11 @@ kbd {
   .grid-preview-price { grid-column: 2; grid-row: 1; }
   .grid-preview-qty { grid-column: 1 / -1; grid-row: 2; }
   .save-bar { padding: 12px 14px; gap: 10px; }
-  .save-bar > .ant-space { width: 100%; display: flex; }
-  .save-bar > .ant-space > .ant-space-item { flex: 1 1 0; }
-  .save-bar > .ant-space .ant-btn { width: 100%; min-height: 44px; }
+  .save-bar > .ant-space, .settings-card-actions > .ant-space, .database-actions > .ant-space, .history-actions > .ant-space { width: 100%; display: flex; }
+  .save-bar > .ant-space > .ant-space-item, .settings-card-actions > .ant-space > .ant-space-item, .database-actions > .ant-space > .ant-space-item, .history-actions > .ant-space > .ant-space-item { flex: 1 1 0; }
+  .save-bar > .ant-space .ant-btn, .settings-card-actions .ant-btn, .database-actions .ant-btn, .history-actions .ant-btn { width: 100%; min-height: 44px; }
+  .detail-tabs .ant-card-head-wrapper { flex-wrap: wrap; padding-block: 8px; }
+  .history-actions { align-items: stretch; width: 100%; text-align: left; }
   .save-bar-changes li { flex-wrap: wrap; gap: 4px 12px; }
   .save-bar-changes li > span, .confirm-changes dd { min-width: 0; overflow-wrap: anywhere; }
   .confirm-changes dl > div { flex-direction: column; gap: 4px; }
