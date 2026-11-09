@@ -627,7 +627,7 @@ kbd {
 .signal-active { box-shadow: 0 0 0 2px var(--sig-fg); }
 
 /* ---------- Grid preview ---------- */
-.grid-preview { margin-bottom: var(--space-5); padding: 18px var(--space-5); border: 1px solid var(--border-hairline); border-radius: var(--radius-panel); background: var(--bg-card); min-width: 0; }
+.grid-preview { margin-bottom: var(--space-5); padding: 18px var(--space-5); border: 1px solid var(--border-hairline); border-radius: var(--radius-panel); background: var(--bg-card); min-width: 0; font-variant-numeric: tabular-nums; }
 .grid-preview-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); flex-wrap: wrap; margin-bottom: var(--space-3); }
 .grid-preview-head h3 { margin: 0; font-size: var(--text-section); font-weight: 600; }
 .grid-preview-meta { display: flex; align-items: center; gap: var(--space-2) var(--space-3); flex-wrap: wrap; min-width: 0; }
@@ -635,12 +635,14 @@ kbd {
 .grid-preview-empty { margin: 0; }
 .grid-preview-ladder { position: relative; margin: 0 0 var(--space-3); padding: 0; list-style: none; max-height: 320px; overflow-y: auto; overscroll-behavior: contain; }
 .grid-preview-ladder li { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: center; gap: var(--space-2) var(--space-3); min-height: 28px; padding: var(--space-1) var(--space-2); border-radius: var(--radius-chip); font-size: var(--text-xs); transition: background-color 140ms var(--ease-out); }
-@media (hover: hover) and (pointer: fine) { .grid-preview-ladder li:not(.grid-preview-mark):hover { background: var(--bg-raised); } }
+@media (hover: hover) and (pointer: fine) { .grid-preview-ladder li:not(.grid-preview-mark):not(.grid-preview-unplaceable):hover { background: var(--bg-raised); } }
 .grid-preview-ladder li > span { min-width: 0; overflow-wrap: anywhere; }
 .grid-preview-ladder strong { min-width: 0; overflow-wrap: anywhere; font: 500 var(--text-sm) var(--font-mono); font-variant-numeric: tabular-nums; }
 .grid-preview-sell > span:first-child { color: var(--negative); }
 .grid-preview-buy > span:first-child { color: var(--positive); }
 .grid-preview-qty, .grid-preview-diff { color: var(--text-muted); font: 400 var(--text-xs) var(--font-mono); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.grid-preview-unplaceable { background: var(--sig-red-bg); }
+.grid-preview-unplaceable .grid-preview-qty, .grid-preview-unplaceable .grid-preview-value { color: var(--sig-red); }
 .grid-preview-price { display: flex; justify-content: flex-end; align-items: baseline; flex-wrap: wrap; min-width: 0; gap: var(--space-1) var(--space-2); }
 .grid-preview-mark > strong { text-align: right; }
 .grid-preview-mark { margin: 4px 0; background: var(--sig-yellow-bg); color: var(--sig-yellow); font-weight: 600; }

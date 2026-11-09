@@ -42,7 +42,7 @@ export function GridPreview<Values>({ form, markPrice, tickSize, stepSize, minQt
   const thinSpacing = !!preview && !!values && spacingBelowRoundTripFee(values.grid_interval, reference);
   const renderLevel = (side: 'sell' | 'buy', price: string) => {
     const s = sizings.get(price), diff = priceDiffPercent(price, reference);
-    return <li key={`${side[0]}${price}`} className={`grid-preview-level grid-preview-${side}`}><span className="grid-preview-order"><span className="grid-preview-side">{side === 'sell' ? '卖' : '买'}</span>{s && <small className="grid-preview-qty"> · {s.quantity} ({s.notional} {quote})</small>}</span><span className="grid-preview-price">{diff && <small className="grid-preview-diff">{diff}</small>}<strong className="grid-preview-value">{price}</strong></span></li>;
+    return <li key={`${side[0]}${price}`} className={`grid-preview-level grid-preview-${side}${s?.error ? ' grid-preview-unplaceable' : ''}`} title={s?.error ?? undefined}><span className="grid-preview-order"><span className="grid-preview-side">{side === 'sell' ? '卖' : '买'}</span>{s && <small className="grid-preview-qty"> · {s.quantity} ({s.notional} {quote})</small>}</span><span className="grid-preview-price">{diff && <small className="grid-preview-diff">{diff}</small>}<strong className="grid-preview-value">{price}</strong></span></li>;
   };
   return <section className="grid-preview" aria-label="网格预览">
     <div className="grid-preview-head">
