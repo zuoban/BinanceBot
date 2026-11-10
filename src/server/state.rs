@@ -869,6 +869,8 @@ impl AppState {
             );
             return false;
         }
+        let notify_trade =
+            telegram.enabled && (trade.pnl_verified || trade.side != direction.closing_side());
         let mut notification_stats = None;
         {
             let _commit = self.trade_commit_lock.lock().await;
@@ -923,19 +925,9 @@ impl AppState {
                     &current_account,
                 );
             }
-            if telegram.enabled {
-                let symbol = trade.symbol.clone();
-                let mode = trade.mode;
-                let timestamp = trade.timestamp;
+            if notify_trade {
                 // Capture counts while commits are serialized, before another fill can advance them.
-                match self
-                    .db
-                    .run_blocking(move |db| db.get_hourly_trade_stats(&symbol, mode, timestamp))
-                    .await
-                {
-                    Ok(stats) => notification_stats = Some(stats),
-                    Err(error) => warn!("Could not load Telegram trade counts: {}", error),
-                }
+                notification_stats = self.trade_notification_stats(&trade).await;
             }
 
             // Keep the cache update in the same critical section as persistence
@@ -949,11 +941,28 @@ impl AppState {
             let _ = self.ws_broadcast_tx.send(json);
         }
 
-        if telegram.enabled {
+        if notify_trade {
             self.spawn_trade_telegram_notification(telegram, trade, notification_stats, direction)
                 .await;
         }
         true
+    }
+
+    async fn trade_notification_stats(&self, trade: &TradeRecord) -> Option<HourlyTradeStats> {
+        let symbol = trade.symbol.clone();
+        let mode = trade.mode;
+        let timestamp = trade.timestamp;
+        match self
+            .db
+            .run_blocking(move |db| db.get_hourly_trade_stats(&symbol, mode, timestamp))
+            .await
+        {
+            Ok(stats) => Some(stats),
+            Err(error) => {
+                warn!("Could not load Telegram trade counts: {}", error);
+                None
+            }
+        }
     }
 
     async fn spawn_trade_telegram_notification(
@@ -1004,26 +1013,52 @@ impl AppState {
         let state = self.clone();
         // Once admitted, finish publishing even if the requester stops.
         tokio::spawn(async move {
-            let _commit = commit;
-            state
-                .verify_trade_pnl_inner(trade, expected_clear_revision)
-                .await
+            if !state
+                .verify_trade_pnl_inner(&trade, expected_clear_revision)
+                .await?
+            {
+                return Ok(());
+            }
+            let notification = {
+                let config = state.config.read().await;
+                (config.telegram.enabled
+                    && trade.symbol == config.exchange.symbol
+                    && trade.mode == config.exchange.trading_mode()
+                    && trade.side == config.grid.direction.closing_side())
+                .then(|| (config.telegram.clone(), config.grid.direction))
+            };
+            if let Some((telegram, direction)) = notification {
+                let notification_stats = state.trade_notification_stats(&trade).await;
+                // Account capture takes the same lock; finish publication before preparing it.
+                drop(commit);
+                let mut trade = trade;
+                trade.pnl_verified = true;
+                state
+                    .spawn_trade_telegram_notification(
+                        telegram,
+                        trade,
+                        notification_stats,
+                        direction,
+                    )
+                    .await;
+            }
+            Ok(())
         })
         .await?
     }
 
     async fn verify_trade_pnl_inner(
         &self,
-        trade: TradeRecord,
+        trade: &TradeRecord,
         expected_clear_revision: u64,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<bool> {
         let stored_trade = trade.clone();
         if !self
             .db
             .run_blocking(move |db| db.verify_trade_pnl(&stored_trade, expected_clear_revision))
             .await?
         {
-            return Ok(());
+            return Ok(false);
         }
         let config = self.config.read().await;
         let current_mode = config.exchange.trading_mode();
@@ -1046,7 +1081,7 @@ impl AppState {
             existing.is_maker = trade.is_maker;
             existing.pnl_verified = true;
         }
-        Ok(())
+        Ok(true)
     }
 
     pub(crate) async fn drain_trade_commits(&self) {
@@ -2915,6 +2950,159 @@ mod tests {
             no_more_notifications(&mut fixture).await;
             task.abort();
             no_more_notifications(&mut fixture).await;
+            fixture.server.abort();
+        }
+    }
+
+    async fn live_notification_fixture(direction: GridDirection) -> NotificationFixture {
+        let fixture = notification_fixture(true, false).await;
+        {
+            let mut config = fixture.state.config.write().await;
+            config.exchange.api_key = "live-key".into();
+            config.exchange.api_secret = "live-secret".into();
+            config.grid.direction = direction;
+        }
+        fixture
+    }
+
+    #[tokio::test]
+    async fn trade_notifications_wait_for_closing_pnl_and_send_each_verified_trade_once() {
+        for (direction, pnl, expected) in [
+            (GridDirection::Long, dec!(3.25), "+3.2500"),
+            (GridDirection::Short, dec!(-2.5), "-2.5000"),
+        ] {
+            let mut fixture = live_notification_fixture(direction).await;
+            let mut closing = cache_test_trade("closing", 1, TradingMode::Live);
+            closing.side = direction.closing_side();
+            let mut later = cache_test_trade("closing-later", 2, TradingMode::Live);
+            later.side = direction.closing_side();
+            assert!(
+                fixture
+                    .state
+                    .record_trade(closing.clone(), None, None, None)
+                    .await
+            );
+            assert!(
+                fixture
+                    .state
+                    .record_trade(later.clone(), None, None, None)
+                    .await
+            );
+            no_more_notifications(&mut fixture).await;
+
+            let revision = fixture
+                .state
+                .db
+                .symbol_trade_clear_revision(&closing.symbol);
+            closing.realized_pnl = pnl;
+            closing.commission = dec!(0.02);
+            closing.pnl_verified = true;
+            fixture
+                .state
+                .verify_trade_pnl(closing.clone(), revision)
+                .await
+                .unwrap();
+            let message = next_notification(&mut fixture).await;
+            let text = message["text"].as_str().unwrap();
+            assert!(text.contains("｜1D｜1H</b>"));
+            assert!(text.ends_with(&format!("已实现盈亏：{expected} USDC")));
+
+            fixture
+                .state
+                .verify_trade_pnl(closing, revision)
+                .await
+                .unwrap();
+            later.pnl_verified = true;
+            fixture
+                .state
+                .verify_trade_pnl(later, revision)
+                .await
+                .unwrap();
+            let message = next_notification(&mut fixture).await;
+            let text = message["text"].as_str().unwrap();
+            assert!(text.contains("｜2D｜2H</b>"));
+            assert!(text.ends_with("已实现盈亏：+0.0000 USDC"));
+            no_more_notifications(&mut fixture).await;
+            assert_eq!(fixture.state.stats.read().await.pending_pnl_trades, 0);
+            assert_eq!(fixture.state.stats.read().await.total_realized_pnl, pnl);
+            fixture.server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn trade_notifications_keep_openings_immediate_without_repeating_on_pnl_verification() {
+        for direction in [GridDirection::Long, GridDirection::Short] {
+            let mut fixture = live_notification_fixture(direction).await;
+            let mut opening = cache_test_trade("opening", 1, TradingMode::Live);
+            opening.side = direction.opening_side();
+            assert!(
+                fixture
+                    .state
+                    .record_trade(opening.clone(), None, None, None)
+                    .await
+            );
+            let message = next_notification(&mut fixture).await;
+            assert!(!message["text"].as_str().unwrap().contains("已实现盈亏"));
+
+            let revision = fixture
+                .state
+                .db
+                .symbol_trade_clear_revision(&opening.symbol);
+            opening.pnl_verified = true;
+            fixture
+                .state
+                .verify_trade_pnl(opening, revision)
+                .await
+                .unwrap();
+            no_more_notifications(&mut fixture).await;
+            assert_eq!(fixture.state.stats.read().await.pending_pnl_trades, 0);
+            fixture.server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn trade_notifications_skip_disabled_or_cleared_pnl_verifications() {
+        for clear_history in [false, true] {
+            let mut fixture = live_notification_fixture(GridDirection::Long).await;
+            let mut closing = cache_test_trade("closing", 1, TradingMode::Live);
+            closing.side = OrderSide::Sell;
+            assert!(
+                fixture
+                    .state
+                    .record_trade(closing.clone(), None, None, None)
+                    .await
+            );
+            let revision = fixture
+                .state
+                .db
+                .symbol_trade_clear_revision(&closing.symbol);
+            if clear_history {
+                assert_eq!(
+                    AppState::clear_trade_history_for(&[fixture.state.clone()])
+                        .await
+                        .unwrap(),
+                    1
+                );
+            } else {
+                fixture.state.config.write().await.telegram.enabled = false;
+            }
+
+            closing.realized_pnl = dec!(3.25);
+            closing.pnl_verified = true;
+            fixture
+                .state
+                .verify_trade_pnl(closing, revision)
+                .await
+                .unwrap();
+            no_more_notifications(&mut fixture).await;
+            assert_eq!(fixture.state.stats.read().await.pending_pnl_trades, 0);
+            let saved = fixture.state.db.get_recent_trades(1).unwrap();
+            if clear_history {
+                assert!(saved.is_empty());
+            } else {
+                assert!(saved[0].pnl_verified);
+                assert_eq!(saved[0].realized_pnl, dec!(3.25));
+            }
             fixture.server.abort();
         }
     }
