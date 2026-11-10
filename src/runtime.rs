@@ -253,31 +253,7 @@ impl RuntimeHandle {
             }
         }
         if let Some(error) = failure {
-            let mut rollback_errors = Vec::new();
-            for (state, old) in attempted.into_iter().rev() {
-                if GlobalConfig::from_app(&*state.config.read().await) == old {
-                    continue;
-                }
-                if let Err(rollback) = Self::send_global_config(&state, &old).await {
-                    let symbol = state.config.read().await.exchange.symbol.clone();
-                    rollback_errors.push(format!("{}: {}", symbol, rollback));
-                }
-            }
-            if !rollback_errors.is_empty() {
-                for state in &states {
-                    let _ = state.pause_trading().await;
-                    let _ = state
-                        .action_tx
-                        .send(crate::types::BotControlAction::Pause)
-                        .await;
-                }
-                anyhow::bail!(
-                    "全局配置更新失败: {}；恢复失败，策略已暂停: {}",
-                    error,
-                    rollback_errors.join("; ")
-                );
-            }
-            anyhow::bail!("全局配置更新失败，已恢复原配置: {}", error);
+            return Err(Self::rollback_global_config_attempt(&states, attempted, error).await);
         }
         self.global_position_limit
             .commit_config(config.clone())
@@ -285,31 +261,74 @@ impl RuntimeHandle {
         Ok(config)
     }
 
-    pub async fn add_pair(&self, config: AppConfig) -> anyhow::Result<()> {
+    async fn rollback_global_config_attempt(
+        states: &[Arc<AppState>],
+        attempted: Vec<(Arc<AppState>, GlobalConfig)>,
+        error: anyhow::Error,
+    ) -> anyhow::Error {
+        let mut rollback_errors = Vec::new();
+        for (state, old) in attempted.into_iter().rev() {
+            if GlobalConfig::from_app(&*state.config.read().await) == old {
+                continue;
+            }
+            if let Err(rollback) = Self::send_global_config(&state, &old).await {
+                let symbol = state.config.read().await.exchange.symbol.clone();
+                rollback_errors.push(format!("{}: {}", symbol, rollback));
+            }
+        }
+        if !rollback_errors.is_empty() {
+            for state in states {
+                let _ = state.pause_trading().await;
+                let _ = state
+                    .action_tx
+                    .send(crate::types::BotControlAction::Pause)
+                    .await;
+            }
+            return anyhow::anyhow!(
+                "全局配置更新失败: {}；恢复失败，策略已暂停: {}",
+                error,
+                rollback_errors.join("; ")
+            );
+        }
+        anyhow::anyhow!("全局配置更新失败，已恢复原配置: {}", error)
+    }
+
+    async fn send_command(
+        &self,
+        build: impl FnOnce(oneshot::Sender<Result<(), String>>) -> RuntimeCommand,
+        shutting_down_msg: &'static str,
+        incomplete_msg: &'static str,
+    ) -> anyhow::Result<()> {
         let (reply, response) = oneshot::channel();
         self.commands
-            .send(RuntimeCommand::Add {
-                config: Box::new(config),
-                reply,
-            })
+            .send(build(reply))
             .await
-            .map_err(|_| anyhow::anyhow!("程序正在退出，无法添加交易对"))?;
+            .map_err(|_| anyhow::anyhow!(shutting_down_msg))?;
         response
             .await
-            .map_err(|_| anyhow::anyhow!("添加交易对未完成"))?
+            .map_err(|_| anyhow::anyhow!(incomplete_msg))?
             .map_err(anyhow::Error::msg)
     }
 
+    pub async fn add_pair(&self, config: AppConfig) -> anyhow::Result<()> {
+        self.send_command(
+            |reply| RuntimeCommand::Add {
+                config: Box::new(config),
+                reply,
+            },
+            "程序正在退出，无法添加交易对",
+            "添加交易对未完成",
+        )
+        .await
+    }
+
     pub async fn remove_pair(&self, symbol: String) -> anyhow::Result<()> {
-        let (reply, response) = oneshot::channel();
-        self.commands
-            .send(RuntimeCommand::Remove { symbol, reply })
-            .await
-            .map_err(|_| anyhow::anyhow!("程序正在退出，无法移除交易对"))?;
-        response
-            .await
-            .map_err(|_| anyhow::anyhow!("移除交易对未完成"))?
-            .map_err(anyhow::Error::msg)
+        self.send_command(
+            |reply| RuntimeCommand::Remove { symbol, reply },
+            "程序正在退出，无法移除交易对",
+            "移除交易对未完成",
+        )
+        .await
     }
 }
 
@@ -680,7 +699,7 @@ impl TradingRuntime {
         let force_paused = options.force_paused;
         let prearmed = options.prearmed;
         let start = options.start;
-        let mut startup_shutdown = options.startup_shutdown;
+        let startup_shutdown = options.startup_shutdown;
         #[cfg(test)]
         let prepare_hook = options.prepare_hook;
         let previous_unclean = if let Some(prearmed) = prearmed {
@@ -776,10 +795,47 @@ impl TradingRuntime {
         );
         engine.set_market_stream_tx(market_tx);
         let stream = BinanceWsStream::new(market_rx, ticker_tx);
-        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
-        let engine_state = state.clone();
-        let mut runtime_shutdown = Some(self.handle.stop.subscribe());
-        let engine_task = tokio::spawn(async move {
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let engine_task = Self::spawn_pair_engine_task(
+            engine,
+            state.clone(),
+            start,
+            startup_shutdown,
+            Some(self.handle.stop.subscribe()),
+            shutdown_rx,
+        );
+        #[cfg(test)]
+        let spawn_background = self.test_exchange_url.is_none();
+        #[cfg(not(test))]
+        let spawn_background = true;
+        let background = if spawn_background {
+            vec![
+                tokio::spawn(stream.run()),
+                tokio::spawn(state.clone().run_cny_rate_refresh()),
+                tokio::spawn(state.clone().run_snapshot_broadcast()),
+            ]
+        } else {
+            Vec::new()
+        };
+        Ok(PairTask {
+            state,
+            engine: engine_task,
+            engine_joined: false,
+            recovery_failed: false,
+            shutdown_tx,
+            background,
+        })
+    }
+
+    fn spawn_pair_engine_task(
+        mut engine: GridTradingEngine,
+        engine_state: Arc<AppState>,
+        start: Option<oneshot::Receiver<()>>,
+        mut startup_shutdown: Option<watch::Receiver<bool>>,
+        mut runtime_shutdown: Option<watch::Receiver<bool>>,
+        mut shutdown_rx: watch::Receiver<bool>,
+    ) -> JoinHandle<()> {
+        tokio::spawn(async move {
             // Do not initialize until startup has registered the new engine.
             let permitted = if let Some(start) = start {
                 tokio::select! {
@@ -823,27 +879,6 @@ impl TradingRuntime {
             engine_state.check_global_position_limit().await;
             engine.reconcile_initial_pause().await;
             engine.run().await;
-        });
-        #[cfg(test)]
-        let spawn_background = self.test_exchange_url.is_none();
-        #[cfg(not(test))]
-        let spawn_background = true;
-        let background = if spawn_background {
-            vec![
-                tokio::spawn(stream.run()),
-                tokio::spawn(state.clone().run_cny_rate_refresh()),
-                tokio::spawn(state.clone().run_snapshot_broadcast()),
-            ]
-        } else {
-            Vec::new()
-        };
-        Ok(PairTask {
-            state,
-            engine: engine_task,
-            engine_joined: false,
-            recovery_failed: false,
-            shutdown_tx,
-            background,
         })
     }
 
@@ -915,7 +950,8 @@ impl TradingRuntime {
     }
 
     async fn remove_pair(&mut self, symbol: &str) -> anyhow::Result<()> {
-        let _membership = self.handle.membership_lock.lock().await;
+        let membership_lock = self.handle.membership_lock.clone();
+        let _membership = membership_lock.lock().await;
         anyhow::ensure!(self.pairs.len() > 1, "至少保留一个交易对");
         let index = self
             .pairs
@@ -964,54 +1000,7 @@ impl TradingRuntime {
         // Use the old state's lock, and release it before replacement startup.
         state.drain_trade_commits().await;
         if result.is_ok() {
-            let config = state.config.read().await.clone();
-            result = if config.exchange.is_paper() {
-                let paper_symbol = symbol.to_string();
-                let saved = state
-                    .db
-                    .run_blocking(move |db| db.load_paper_state(&paper_symbol))
-                    .await;
-                if let Err(error) = saved {
-                    Err(error.context("无法确认模拟盘持仓，无法移除交易对"))
-                } else if state.position.read().await.size.is_zero() {
-                    Ok(())
-                } else {
-                    Err(anyhow::anyhow!("仍有持仓，请先平仓再移除交易对"))
-                }
-            } else {
-                let client = self.exchange_client(&config.exchange);
-                let position = match client.sync_server_time().await {
-                    Ok(_) => client.get_position(symbol).await,
-                    Err(error) => Err(error.context("同步交易所时间失败")),
-                };
-                match position {
-                    Ok(Some(position)) => {
-                        let has_position = !position.position_amt.is_zero();
-                        *state.position.write().await =
-                            position.into_position_info(Some(chrono::Utc::now()));
-                        if has_position {
-                            self.global_position_limit.check().await;
-                            Err(anyhow::anyhow!("仍有持仓，请先平仓再移除交易对"))
-                        } else {
-                            Ok(())
-                        }
-                    }
-                    Ok(None) => {
-                        state
-                            .global_position_ready
-                            .store(false, std::sync::atomic::Ordering::SeqCst);
-                        self.global_position_limit.check().await;
-                        Err(anyhow::anyhow!("无法确认交易所持仓，请稍后重试"))
-                    }
-                    Err(error) => {
-                        state
-                            .global_position_ready
-                            .store(false, std::sync::atomic::Ordering::SeqCst);
-                        self.global_position_limit.check().await;
-                        Err(error.context("查询交易所持仓失败，无法移除交易对"))
-                    }
-                }
-            };
+            result = self.verify_pair_flat_before_removal(&state, symbol).await;
         }
         if result.is_ok() {
             let symbol = symbol.to_string();
@@ -1022,52 +1011,115 @@ impl TradingRuntime {
                 .await;
         }
         if let Err(error) = result {
-            // The engine may have committed a configuration update while stopping.
-            let config = self.pairs[index].state.config.read().await.clone();
-            // Keep the last known exposure visible while a replacement reconciles.
-            let previous_state = Some((
-                self.pairs[index].state.position.read().await.clone(),
-                self.pairs[index].state.account.read().await.clone(),
-            ));
-            match self
-                .prepare_pair_with_state(
-                    config,
-                    PreparePairOptions {
-                        multi: true,
-                        previous_state,
-                        force_paused: true,
-                        ..Default::default()
-                    },
-                )
-                .await
-            {
-                Ok(replacement) => {
-                    self.handle.register_engine(&replacement);
-                    self.pairs[index] = replacement;
-                    *self.handle.states.write().await = self.states();
-                    self.global_position_limit.check().await;
-                    return Err(error);
-                }
-                Err(restart_error) => {
-                    self.pairs[index].recovery_failed = true;
-                    // Keep the retired member in the risk set. Its position can
-                    // still exist, but its stopped engine can no longer refresh it.
-                    self.pairs[index]
-                        .state
-                        .global_position_initialized
-                        .store(true, std::sync::atomic::Ordering::SeqCst);
-                    self.pairs[index]
-                        .state
-                        .global_position_ready
-                        .store(false, std::sync::atomic::Ordering::SeqCst);
-                    self.global_position_limit.check().await;
-                    return Err(error.context(format!("删除失败后无法重启策略: {restart_error:#}")));
-                }
-            }
+            return self.recover_pair_after_failed_removal(index, error).await;
         }
         self.pairs.remove(index);
         *self.handle.states.write().await = self.states();
         Ok(())
+    }
+
+    async fn verify_pair_flat_before_removal(
+        &self,
+        state: &Arc<AppState>,
+        symbol: &str,
+    ) -> anyhow::Result<()> {
+        let config = state.config.read().await.clone();
+        if config.exchange.is_paper() {
+            let paper_symbol = symbol.to_string();
+            let saved = state
+                .db
+                .run_blocking(move |db| db.load_paper_state(&paper_symbol))
+                .await;
+            if let Err(error) = saved {
+                Err(error.context("无法确认模拟盘持仓，无法移除交易对"))
+            } else if state.position.read().await.size.is_zero() {
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!("仍有持仓，请先平仓再移除交易对"))
+            }
+        } else {
+            let client = self.exchange_client(&config.exchange);
+            let position = match client.sync_server_time().await {
+                Ok(_) => client.get_position(symbol).await,
+                Err(error) => Err(error.context("同步交易所时间失败")),
+            };
+            match position {
+                Ok(Some(position)) => {
+                    let has_position = !position.position_amt.is_zero();
+                    *state.position.write().await =
+                        position.into_position_info(Some(chrono::Utc::now()));
+                    if has_position {
+                        self.global_position_limit.check().await;
+                        Err(anyhow::anyhow!("仍有持仓，请先平仓再移除交易对"))
+                    } else {
+                        Ok(())
+                    }
+                }
+                Ok(None) => {
+                    state
+                        .global_position_ready
+                        .store(false, std::sync::atomic::Ordering::SeqCst);
+                    self.global_position_limit.check().await;
+                    Err(anyhow::anyhow!("无法确认交易所持仓，请稍后重试"))
+                }
+                Err(error) => {
+                    state
+                        .global_position_ready
+                        .store(false, std::sync::atomic::Ordering::SeqCst);
+                    self.global_position_limit.check().await;
+                    Err(error.context("查询交易所持仓失败，无法移除交易对"))
+                }
+            }
+        }
+    }
+
+    async fn recover_pair_after_failed_removal(
+        &mut self,
+        index: usize,
+        error: anyhow::Error,
+    ) -> anyhow::Result<()> {
+        // The engine may have committed a configuration update while stopping.
+        let config = self.pairs[index].state.config.read().await.clone();
+        // Keep the last known exposure visible while a replacement reconciles.
+        let previous_state = Some((
+            self.pairs[index].state.position.read().await.clone(),
+            self.pairs[index].state.account.read().await.clone(),
+        ));
+        match self
+            .prepare_pair_with_state(
+                config,
+                PreparePairOptions {
+                    multi: true,
+                    previous_state,
+                    force_paused: true,
+                    ..Default::default()
+                },
+            )
+            .await
+        {
+            Ok(replacement) => {
+                self.handle.register_engine(&replacement);
+                self.pairs[index] = replacement;
+                *self.handle.states.write().await = self.states();
+                self.global_position_limit.check().await;
+                Err(error)
+            }
+            Err(restart_error) => {
+                self.pairs[index].recovery_failed = true;
+                // Keep the retired member in the risk set. Its position can
+                // still exist, but its stopped engine can no longer refresh it.
+                self.pairs[index]
+                    .state
+                    .global_position_initialized
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                self.pairs[index]
+                    .state
+                    .global_position_ready
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+                self.global_position_limit.check().await;
+                Err(error.context(format!("删除失败后无法重启策略: {restart_error:#}")))
+            }
+        }
     }
 
     pub async fn run(&mut self) -> String {

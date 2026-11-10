@@ -250,22 +250,34 @@ fn default_port() -> u16 {
     8080
 }
 
+impl Default for ExchangeConfig {
+    fn default() -> Self {
+        Self {
+            symbol: default_symbol(),
+            api_key: String::new(),
+            api_secret: String::new(),
+            recv_window: default_recv_window(),
+            sync_interval_secs: default_sync_interval(),
+        }
+    }
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            host: default_host(),
+            port: default_port(),
+        }
+    }
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            exchange: ExchangeConfig {
-                symbol: "SOLUSDC".to_string(),
-                api_key: String::new(),
-                api_secret: String::new(),
-                recv_window: 5000,
-                sync_interval_secs: 3,
-            },
+            exchange: ExchangeConfig::default(),
             grid: GridConfig::default(),
             pairs: Vec::new(),
-            server: ServerConfig {
-                host: default_host(),
-                port: default_port(),
-            },
+            server: ServerConfig::default(),
             telegram: TelegramConfig::default(),
             global_max_position_notional: None,
             pause_on_zero_available_margin: false,
@@ -278,11 +290,11 @@ impl Default for GridConfig {
     fn default() -> Self {
         Self {
             direction: crate::types::GridDirection::Long,
-            grid_interval: dec!(0.1),
-            order_amount_usdc: dec!(100.0),
-            buy_window: 5,
-            sell_window: 5,
-            post_only: true,
+            grid_interval: default_grid_interval(),
+            order_amount_usdc: default_order_amount(),
+            buy_window: default_window_size(),
+            sell_window: default_window_size(),
+            post_only: default_true(),
             min_price: None,
             max_price: None,
             max_position_usdc: Some(dec!(2000.0)),

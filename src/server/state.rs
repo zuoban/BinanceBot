@@ -169,87 +169,19 @@ impl GlobalPositionLimit {
         let mut initialized_incomplete = false;
         let mut zero_margin = false;
         for state in &states {
-            let initialized = state.global_position_initialized.load(Ordering::SeqCst);
-            let mut member_incomplete = !initialized
-                || !state.global_position_ready.load(Ordering::SeqCst)
-                || state.paper_restore_failed.load(Ordering::SeqCst);
-            let (sync_interval_secs, is_paper) = {
-                let config = state.config.read().await;
-                match committed_ref {
-                    Some(committed) => (
-                        committed.sync_interval_secs,
-                        committed.api_key.trim().is_empty()
-                            && committed.api_secret.trim().is_empty(),
-                    ),
-                    None => (
-                        config.exchange.sync_interval_secs,
-                        config.exchange.is_paper(),
-                    ),
-                }
-            };
-            let max_age = crate::types::max_reconciliation_age_secs(sync_interval_secs);
-            let now = Utc::now();
-            let fresh = |time| crate::types::is_timestamp_fresh(time, now, max_age);
-            if margin_guard {
-                let account = state.current_account().await;
-                if account.asset.is_empty() || (!is_paper && !fresh(account.update_time)) {
-                    member_incomplete = true;
-                } else if account.available_balance <= Decimal::ZERO
-                    || margin_pct.is_some_and(|pct| {
-                        account.margin_balance > Decimal::ZERO
-                            && account.available_balance * Decimal::ONE_HUNDRED
-                                <= pct * account.margin_balance
-                    })
-                {
-                    zero_margin = true;
-                }
-            }
-            if limit.is_none() {
-                incomplete |= member_incomplete;
-                initialized_incomplete |= initialized && member_incomplete;
-                continue;
-            }
-            let (position_size, position_mark_price, position_update_time) = {
-                let position = state.position.read().await;
-                (position.size, position.mark_price, position.update_time)
-            };
-            if !is_paper && !position_update_time.is_some_and(fresh) {
-                member_incomplete = true;
-            }
-            let (ticker_mark_price, ticker_mark_update_time, ticker_last_price, ticker_update_time) = {
-                let ticker = state.ticker.read().await;
-                (
-                    ticker.mark_price,
-                    ticker.mark_update_time,
-                    ticker.last_price,
-                    ticker.update_time,
+            let (member_incomplete, member_init_incomplete, member_zero_margin) =
+                Self::evaluate_member_risk(
+                    state,
+                    committed_ref,
+                    margin_guard,
+                    margin_pct,
+                    limit,
+                    &mut total,
                 )
-            };
-            let price = if ticker_mark_price > Decimal::ZERO && fresh(ticker_mark_update_time) {
-                ticker_mark_price
-            } else if position_mark_price > Decimal::ZERO && position_update_time.is_some_and(fresh)
-            {
-                position_mark_price
-            } else if ticker_last_price > Decimal::ZERO && fresh(ticker_update_time) {
-                ticker_last_price
-            } else {
-                Decimal::ZERO
-            };
-            if !position_size.is_zero() && price <= Decimal::ZERO {
-                member_incomplete = true;
-            }
-            if price > Decimal::ZERO {
-                match position_size
-                    .abs()
-                    .checked_mul(price)
-                    .and_then(|v| total.checked_add(v))
-                {
-                    Some(value) => total = value,
-                    None => member_incomplete = true,
-                }
-            }
+                .await;
             incomplete |= member_incomplete;
-            initialized_incomplete |= initialized && member_incomplete;
+            initialized_incomplete |= member_init_incomplete;
+            zero_margin |= member_zero_margin;
         }
         let position_limit_reached = limit.is_some_and(|limit| total >= limit);
         let unsafe_now = initialized_incomplete || position_limit_reached || zero_margin;
@@ -270,6 +202,115 @@ impl GlobalPositionLimit {
                 state.global_cancel_pending.store(true, Ordering::SeqCst);
             }
         }
+        let reason = Self::format_global_risk_reason(
+            zero_margin,
+            incomplete,
+            position_limit_reached,
+            total,
+            limit,
+        );
+        for state in &states {
+            if unsafe_now && (first_trigger || *state.status.read().await == BotStatus::Running) {
+                state.global_cancel_pending.store(true, Ordering::SeqCst);
+                if let Err(error) = Box::pin(state.pause_trading()).await {
+                    state
+                        .add_log("ERROR", format!("全局风控暂停状态保存失败: {}", error))
+                        .await;
+                }
+                state.add_log("WARN", &reason).await;
+            }
+            state.queue_global_cancel();
+        }
+        if first_trigger {
+            Self::spawn_global_risk_notification(first, committed_ref, reason).await;
+        }
+        incomplete || position_limit_reached || zero_margin
+    }
+
+    async fn evaluate_member_risk(
+        state: &Arc<AppState>,
+        committed_ref: Option<&crate::config::GlobalConfig>,
+        margin_guard: bool,
+        margin_pct: Option<Decimal>,
+        limit: Option<Decimal>,
+        total: &mut Decimal,
+    ) -> (bool, bool, bool) {
+        let initialized = state.global_position_initialized.load(Ordering::SeqCst);
+        let mut member_incomplete = !initialized
+            || !state.global_position_ready.load(Ordering::SeqCst)
+            || state.paper_restore_failed.load(Ordering::SeqCst);
+        let mut zero_margin = false;
+        let (sync_interval_secs, is_paper) = {
+            let config = state.config.read().await;
+            match committed_ref {
+                Some(committed) => (
+                    committed.sync_interval_secs,
+                    committed.api_key.trim().is_empty() && committed.api_secret.trim().is_empty(),
+                ),
+                None => (
+                    config.exchange.sync_interval_secs,
+                    config.exchange.is_paper(),
+                ),
+            }
+        };
+        let max_age = crate::types::max_reconciliation_age_secs(sync_interval_secs);
+        let now = Utc::now();
+        let fresh = |time| crate::types::is_timestamp_fresh(time, now, max_age);
+        if margin_guard {
+            let account = state.current_account().await;
+            if account.asset.is_empty() || (!is_paper && !fresh(account.update_time)) {
+                member_incomplete = true;
+            } else if account.available_balance <= Decimal::ZERO
+                || margin_pct.is_some_and(|pct| {
+                    account.margin_balance > Decimal::ZERO
+                        && account.available_balance * Decimal::ONE_HUNDRED
+                            <= pct * account.margin_balance
+                })
+            {
+                zero_margin = true;
+            }
+        }
+        if limit.is_none() {
+            return (
+                member_incomplete,
+                initialized && member_incomplete,
+                zero_margin,
+            );
+        }
+        let position = state.position.read().await.clone();
+        let position_size = position.size;
+        if !is_paper && !position.update_time.is_some_and(fresh) {
+            member_incomplete = true;
+        }
+        let ticker = state.ticker.read().await.clone();
+        let price = position.fresh_market_valuation_price(&ticker, fresh);
+        if !position_size.is_zero() && price <= Decimal::ZERO {
+            member_incomplete = true;
+        }
+        if price > Decimal::ZERO {
+            match position_size
+                .abs()
+                .checked_mul(price)
+                .and_then(|v| total.checked_add(v))
+            {
+                Some(value) => *total = value,
+                None => member_incomplete = true,
+            }
+        }
+        (
+            member_incomplete,
+            initialized && member_incomplete,
+            zero_margin,
+        )
+    }
+
+    fn format_global_risk_reason(
+        zero_margin: bool,
+        incomplete: bool,
+        position_limit_reached: bool,
+        total: Decimal,
+        limit: Option<Decimal>,
+    ) -> String {
         let mut reasons = Vec::new();
         if zero_margin {
             reasons.push("可用保证金已达到零或低于设定比例".to_string());
@@ -285,48 +326,40 @@ impl GlobalPositionLimit {
                 ));
             }
         }
-        let reason = if reasons.is_empty() {
+        if reasons.is_empty() {
             String::new()
         } else {
             format!("{}，需手动恢复", reasons.join("；"))
+        }
+    }
+
+    async fn spawn_global_risk_notification(
+        first: &Arc<AppState>,
+        committed_ref: Option<&crate::config::GlobalConfig>,
+        reason: String,
+    ) {
+        let telegram = match committed_ref {
+            Some(committed) => committed.telegram.clone(),
+            None => first.config.read().await.telegram.clone(),
         };
-        for state in &states {
-            if unsafe_now && (first_trigger || *state.status.read().await == BotStatus::Running) {
-                state.global_cancel_pending.store(true, Ordering::SeqCst);
-                if let Err(error) = Box::pin(state.pause_trading()).await {
+        if telegram.enabled {
+            let notifier = first.telegram_notifier.clone();
+            let state = Arc::clone(first);
+            tokio::spawn(async move {
+                if let Err(error) = notifier
+                    .send_global_risk_notification(&telegram, &reason)
+                    .await
+                {
+                    warn!(
+                        "Failed to send Telegram global risk notification: {}",
+                        error
+                    );
                     state
-                        .add_log("ERROR", format!("全局风控暂停状态保存失败: {}", error))
+                        .add_log("WARN", format!("Telegram 全局风控通知发送失败: {}", error))
                         .await;
                 }
-                state.add_log("WARN", &reason).await;
-            }
-            state.queue_global_cancel();
+            });
         }
-        if first_trigger {
-            let telegram = match committed_ref {
-                Some(committed) => committed.telegram.clone(),
-                None => first.config.read().await.telegram.clone(),
-            };
-            if telegram.enabled {
-                let notifier = first.telegram_notifier.clone();
-                let state = Arc::clone(first);
-                tokio::spawn(async move {
-                    if let Err(error) = notifier
-                        .send_global_risk_notification(&telegram, &reason)
-                        .await
-                    {
-                        warn!(
-                            "Failed to send Telegram global risk notification: {}",
-                            error
-                        );
-                        state
-                            .add_log("WARN", format!("Telegram 全局风控通知发送失败: {}", error))
-                            .await;
-                    }
-                });
-            }
-        }
-        incomplete || position_limit_reached || zero_margin
     }
 
     pub(crate) fn initialize_config(&self, config: crate::config::GlobalConfig) {
@@ -416,6 +449,12 @@ impl Drop for PendingSafetyPause<'_> {
         self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
+
+const MAX_RECENT_LOGS: usize = 250;
+const LOGIN_WINDOW: Duration = Duration::from_secs(60);
+const MAX_GLOBAL_LOGIN_ATTEMPTS: usize = 100;
+const MAX_LOGIN_SOURCES: usize = 10_000;
+const MAX_SOURCE_LOGIN_ATTEMPTS: usize = 10;
 
 #[derive(Default)]
 struct LoginAttempts {
@@ -660,7 +699,7 @@ impl AppState {
             cny_rates,
             active_orders: RwLock::new(HashMap::new()),
             recent_trades: RwLock::new(recent_trades),
-            recent_logs: RwLock::new(VecDeque::with_capacity(300)),
+            recent_logs: RwLock::new(VecDeque::with_capacity(MAX_RECENT_LOGS)),
             global_position_limit: std::sync::OnceLock::new(),
             global_position_ready: AtomicBool::new(false),
             global_position_initialized: AtomicBool::new(false),
@@ -911,34 +950,45 @@ impl AppState {
         }
 
         if telegram.enabled {
-            let account = self.current_account().await;
-            let position = self.position.read().await.clone();
-            let ticker = self.ticker.read().await.clone();
-            let cny_rate = self.cny_rates.get(&account.asset).await;
-            let context = TradeNotificationContext::for_trade(
-                &trade,
-                notification_stats.as_ref(),
-                &account,
-                cny_rate.as_ref(),
-                Utc::now(),
-            )
-            .with_position(&trade, &position, &ticker)
-            .with_direction(direction);
-            let notifier = self.telegram_notifier.clone();
-            let state = Arc::clone(self);
-            tokio::spawn(async move {
-                if let Err(err) = notifier
-                    .send_trade_notification(&telegram, &trade, &context)
-                    .await
-                {
-                    warn!("Failed to send Telegram trade notification: {}", err);
-                    state
-                        .add_log("WARN", format!("Telegram 成交通知发送失败: {}", err))
-                        .await;
-                }
-            });
+            self.spawn_trade_telegram_notification(telegram, trade, notification_stats, direction)
+                .await;
         }
         true
+    }
+
+    async fn spawn_trade_telegram_notification(
+        self: &Arc<Self>,
+        telegram: crate::config::TelegramConfig,
+        trade: TradeRecord,
+        notification_stats: Option<crate::types::HourlyTradeStats>,
+        direction: crate::types::GridDirection,
+    ) {
+        let account = self.current_account().await;
+        let position = self.position.read().await.clone();
+        let ticker = self.ticker.read().await.clone();
+        let cny_rate = self.cny_rates.get(&account.asset).await;
+        let context = TradeNotificationContext::for_trade(
+            &trade,
+            notification_stats.as_ref(),
+            &account,
+            cny_rate.as_ref(),
+            Utc::now(),
+        )
+        .with_position(&trade, &position, &ticker)
+        .with_direction(direction);
+        let notifier = self.telegram_notifier.clone();
+        let state = Arc::clone(self);
+        tokio::spawn(async move {
+            if let Err(err) = notifier
+                .send_trade_notification(&telegram, &trade, &context)
+                .await
+            {
+                warn!("Failed to send Telegram trade notification: {}", err);
+                state
+                    .add_log("WARN", format!("Telegram 成交通知发送失败: {}", err))
+                    .await;
+            }
+        });
     }
 
     pub async fn verify_trade_pnl(
@@ -1188,7 +1238,7 @@ impl AppState {
         };
 
         let mut logs = self.recent_logs.write().await;
-        if logs.len() >= 250 {
+        if logs.len() >= MAX_RECENT_LOGS {
             logs.pop_front();
         }
         logs.push_back(entry.clone());
@@ -1254,21 +1304,21 @@ impl AppState {
     pub async fn begin_login_attempt(&self, source: IpAddr) -> bool {
         let mut failures = self.login_failures.lock().await;
         failures.by_source.retain(|_, attempts| {
-            attempts.retain(|time| time.elapsed() < Duration::from_secs(60));
+            attempts.retain(|time| time.elapsed() < LOGIN_WINDOW);
             !attempts.is_empty()
         });
-        failures
-            .global
-            .retain(|time| time.elapsed() < Duration::from_secs(60));
-        if failures.global.len() >= 100 {
+        failures.global.retain(|time| time.elapsed() < LOGIN_WINDOW);
+        if failures.global.len() >= MAX_GLOBAL_LOGIN_ATTEMPTS {
             return false;
         }
         // Active windows must not be evicted by churn from other sources.
-        if !failures.by_source.contains_key(&source) && failures.by_source.len() >= 10_000 {
+        if !failures.by_source.contains_key(&source)
+            && failures.by_source.len() >= MAX_LOGIN_SOURCES
+        {
             return false;
         }
         let attempts = failures.by_source.entry(source).or_default();
-        if attempts.len() >= 10 {
+        if attempts.len() >= MAX_SOURCE_LOGIN_ATTEMPTS {
             return false;
         }
         let now = Instant::now();

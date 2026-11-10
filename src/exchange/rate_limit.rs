@@ -115,6 +115,27 @@ pub(crate) struct RateLimiter {
     endpoints: Mutex<HashMap<String, EndpointLimits>>,
 }
 
+fn scaled_limit(
+    default_normal: u64,
+    default_critical: u64,
+    advertised: Option<u64>,
+    normal_pct: u64,
+    critical_pct: u64,
+    is_critical: bool,
+) -> u64 {
+    let base = if is_critical {
+        default_critical
+    } else {
+        default_normal
+    };
+    let pct = if is_critical {
+        critical_pct
+    } else {
+        normal_pct
+    };
+    base.min(advertised.map_or(u64::MAX, |limit| limit.saturating_mul(pct) / 100))
+}
+
 impl RateLimiter {
     fn endpoint_mut<'a>(
         endpoints: &'a mut HashMap<String, EndpointLimits>,
@@ -140,14 +161,14 @@ impl RateLimiter {
             return Err("Binance rate-limit cooldown is active".into());
         }
         endpoint.weight.prune(now, MINUTE);
-        let weight_limit = if class.critical() {
-            IP_CRITICAL
-        } else {
-            IP_NORMAL
-        }
-        .min(endpoint.ip_limit.map_or(u64::MAX, |limit| {
-            limit.saturating_mul(if class.critical() { 95 } else { 75 }) / 100
-        }));
+        let weight_limit = scaled_limit(
+            IP_NORMAL,
+            IP_CRITICAL,
+            endpoint.ip_limit,
+            75,
+            95,
+            class.critical(),
+        );
         let weight_limit = if matches!(class, RequestClass::MarketFallback) {
             weight_limit.saturating_mul(3) / 4
         } else {
@@ -177,22 +198,22 @@ impl RateLimiter {
         account.orders_10s.prune(now, TEN_SECONDS);
         account.orders_1m.prune(now, MINUTE);
         if class.order() {
-            let limit_10s = if class.critical() {
-                ORDERS_CRITICAL_10S
-            } else {
-                ORDERS_NORMAL_10S
-            }
-            .min(endpoint.order_10s_limit.map_or(u64::MAX, |limit| {
-                limit.saturating_mul(if class.critical() { 95 } else { 80 }) / 100
-            }));
-            let limit_1m = if class.critical() {
-                ORDERS_CRITICAL_1M
-            } else {
-                ORDERS_NORMAL_1M
-            }
-            .min(endpoint.order_1m_limit.map_or(u64::MAX, |limit| {
-                limit.saturating_mul(if class.critical() { 95 } else { 80 }) / 100
-            }));
+            let limit_10s = scaled_limit(
+                ORDERS_NORMAL_10S,
+                ORDERS_CRITICAL_10S,
+                endpoint.order_10s_limit,
+                80,
+                95,
+                class.critical(),
+            );
+            let limit_1m = scaled_limit(
+                ORDERS_NORMAL_1M,
+                ORDERS_CRITICAL_1M,
+                endpoint.order_1m_limit,
+                80,
+                95,
+                class.critical(),
+            );
             if account.orders_10s.total() >= limit_10s || account.orders_1m.total() >= limit_1m {
                 return Err("local Binance order-rate budget reached".into());
             }

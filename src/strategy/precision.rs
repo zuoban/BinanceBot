@@ -52,6 +52,15 @@ impl SymbolRulesError {
             Self::MissingFilters => anyhow::anyhow!("无法解析交易对 {symbol} 的价格或数量精度规则"),
         }
     }
+
+    pub fn preview_status_and_message(self) -> (axum::http::StatusCode, &'static str) {
+        use axum::http::StatusCode;
+        match self {
+            Self::NotFound => (StatusCode::NOT_FOUND, "交易对不存在"),
+            Self::NotTrading => (StatusCode::BAD_REQUEST, "该交易对当前未处于交易状态"),
+            Self::MissingFilters => (StatusCode::BAD_GATEWAY, "交易对精度规则缺失"),
+        }
+    }
 }
 
 impl SymbolRules {
@@ -319,6 +328,31 @@ impl SymbolRules {
         }
 
         Some(qty)
+    }
+
+    /// Plan a remainder/closing order quantity bounded by `available` and a single grid order's
+    /// full quantity. Returns `(quantity, OrderPurpose)` when `quantity` meets `min_qty` and
+    /// `min_notional`.
+    pub fn plan_remainder_quantity(
+        &self,
+        price: Decimal,
+        order_amount_usdc: Decimal,
+        available: Decimal,
+    ) -> Option<(Decimal, crate::types::OrderPurpose)> {
+        let full_quantity = self.calculate_quantity(price, order_amount_usdc)?;
+        let quantity = self.round_quantity(available).min(full_quantity);
+        if quantity <= Decimal::ZERO
+            || quantity < self.min_qty
+            || quantity * price < self.min_notional
+        {
+            return None;
+        }
+        let purpose = if quantity == full_quantity {
+            crate::types::OrderPurpose::Grid
+        } else {
+            crate::types::OrderPurpose::Remainder
+        };
+        Some((quantity, purpose))
     }
 
     pub fn format_price(&self, price: Decimal) -> String {

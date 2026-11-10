@@ -64,6 +64,13 @@ impl GridDirection {
     pub fn position_quantity(self, size: Decimal) -> Decimal {
         (size * self.sign()).max(Decimal::ZERO)
     }
+
+    pub fn closing_price_cmp(self, a: Decimal, b: Decimal) -> std::cmp::Ordering {
+        match self {
+            Self::Long => a.cmp(&b),
+            Self::Short => b.cmp(&a),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -334,6 +341,67 @@ impl PositionInfo {
             self.entry_price
         };
         self.size.abs() * valuation_price / Decimal::from(self.leverage.max(1))
+    }
+
+    /// Best-effort market valuation price using an optional ticker (`mark_price`,
+    /// then `self.mark_price`, then `ticker.last_price`), without falling back to `entry_price`.
+    pub fn market_valuation_price(&self, ticker: Option<&TickerInfo>) -> Decimal {
+        if let Some(price) = ticker.map(|t| t.mark_price).filter(|p| *p > Decimal::ZERO) {
+            price
+        } else if self.mark_price > Decimal::ZERO {
+            self.mark_price
+        } else if let Some(price) = ticker.map(|t| t.last_price).filter(|p| *p > Decimal::ZERO) {
+            price
+        } else {
+            Decimal::ZERO
+        }
+    }
+
+    /// Strictly fresh market valuation price (`ticker.mark_price`, `self.mark_price`, or `ticker.last_price`).
+    pub fn fresh_market_valuation_price(
+        &self,
+        ticker: &TickerInfo,
+        mut is_fresh: impl FnMut(DateTime<Utc>) -> bool,
+    ) -> Decimal {
+        if ticker.mark_price > Decimal::ZERO && is_fresh(ticker.mark_update_time) {
+            ticker.mark_price
+        } else if self.mark_price > Decimal::ZERO && self.update_time.is_some_and(&mut is_fresh) {
+            self.mark_price
+        } else if ticker.last_price > Decimal::ZERO && is_fresh(ticker.update_time) {
+            ticker.last_price
+        } else {
+            Decimal::ZERO
+        }
+    }
+
+    /// Valuation price preferring fresh mark prices, falling back to best-effort market price or `entry_price`.
+    pub fn valuation_price_with_freshness(
+        &self,
+        ticker: &TickerInfo,
+        ticker_fresh: bool,
+        position_fresh: bool,
+    ) -> Decimal {
+        if ticker_fresh && position_fresh {
+            if self
+                .update_time
+                .is_some_and(|time| time > ticker.mark_update_time)
+            {
+                self.mark_price
+            } else {
+                ticker.mark_price
+            }
+        } else if ticker_fresh {
+            ticker.mark_price
+        } else if position_fresh {
+            self.mark_price
+        } else {
+            let market_price = self.market_valuation_price(Some(ticker));
+            if market_price > Decimal::ZERO {
+                market_price
+            } else {
+                self.entry_price
+            }
+        }
     }
 }
 

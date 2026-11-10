@@ -12,6 +12,19 @@ const modeAsset = (mode: Mode, symbol: string) => {
   const asset = quoteAsset(symbol) || symbol;
   return { asset, key: `${mode}:${asset}` };
 };
+function groupByKey<T, G>(items: Iterable<T>, getKey: (item: T) => string, init: (item: T, key: string) => G, accumulate: (group: G, item: T) => void): Map<string, G> {
+  const groups = new Map<string, G>();
+  for (const item of items) {
+    const key = getKey(item);
+    let group = groups.get(key);
+    if (!group) {
+      group = init(item, key);
+      groups.set(key, group);
+    }
+    accumulate(group, item);
+  }
+  return groups;
+}
 type ValuedPosition = { symbol: string; position: Pick<Snapshot['position'], 'size' | 'mark_price'>; ticker: Pick<Snapshot['ticker'], 'mark_price'> };
 export function positionAmount(s: ValuedPosition): number | null {
   const size = numeric(s.position.size), tickerMark = numeric(s.ticker.mark_price);
@@ -24,14 +37,22 @@ export function comparePositionAmount(a: ValuedPosition, b: ValuedPosition) {
   const left = positionAmount(a), right = positionAmount(b);
   return (right ?? -1) - (left ?? -1) || a.symbol.localeCompare(b.symbol);
 }
-export function positionGroups<T extends { mode: Mode; snapshot: ValuedPosition }>(entries: T[]) {
-  const groups = new Map<string, { mode: Mode; asset: string; snapshots: ValuedPosition[] }>();
-  for (const { mode, snapshot } of entries) {
-    const { asset, key } = modeAsset(mode, snapshot.symbol);
-    const group = groups.get(key) ?? { mode, asset, snapshots: [] };
-    group.snapshots.push(snapshot);
-    groups.set(key, group);
-  }
+export interface PositionGroup {
+  key: string;
+  mode: Mode;
+  asset: string;
+  count: number;
+  long: number | null;
+  short: number | null;
+  total: number | null;
+}
+export function positionGroups<T extends { mode: Mode; snapshot: ValuedPosition }>(entries: T[]): PositionGroup[] {
+  const groups = groupByKey(
+    entries,
+    ({ mode, snapshot }) => modeAsset(mode, snapshot.symbol).key,
+    ({ mode, snapshot }) => ({ mode, asset: modeAsset(mode, snapshot.symbol).asset, snapshots: [] as ValuedPosition[] }),
+    (group, { snapshot }) => { group.snapshots.push(snapshot); },
+  );
   return [...groups.entries()].map(([key, group]) => {
     let long = 0, short = 0, complete = true;
     for (const s of group.snapshots) {
@@ -127,27 +148,29 @@ export function todayTradeCounts(s: Snapshot | PairSummary, now = Date.now()) {
 }
 export function todayPnlGroups(stats: Overview['today_pnl'], now = Date.now()) {
   if (!stats || !isSameBeijingDay(stats.window_end, now)) return null;
-  const groups = new Map<string, { mode: Mode; asset: string; total: number; pending: number; available: boolean }>();
-  for (const row of stats.groups) {
-    const { asset, key } = modeAsset(row.mode, row.symbol);
-    const group = groups.get(key) ?? { mode: row.mode, asset, total: 0, pending: 0, available: true };
-    const pnl = numeric(row.realized_pnl);
-    if (pnl === null || !Number.isInteger(row.pending_pnl_count) || row.pending_pnl_count < 0) group.available = false;
-    else { group.total += pnl; group.pending += row.pending_pnl_count; }
-    groups.set(key, group);
-  }
+  const groups = groupByKey(
+    stats.groups,
+    row => modeAsset(row.mode, row.symbol).key,
+    row => ({ mode: row.mode, asset: modeAsset(row.mode, row.symbol).asset, total: 0, pending: 0, available: true }),
+    (group, row) => {
+      const pnl = numeric(row.realized_pnl);
+      if (pnl === null || !Number.isInteger(row.pending_pnl_count) || row.pending_pnl_count < 0) group.available = false;
+      else { group.total += pnl; group.pending += row.pending_pnl_count; }
+    },
+  );
   return [...groups.entries()].map(([key, group]) => ({ ...group, key, total: group.available && !group.pending && Number.isFinite(group.total) ? normalizeFloatTotal(group.total) : null }));
 }
 export function groupTradePnl(trades: Trade[]) {
-  const groups = new Map<string, { mode: Trade['mode']; asset: string; total: number; available: boolean }>();
-  for (const trade of trades) {
-    const { asset, key } = modeAsset(trade.mode, trade.symbol);
-    const group = groups.get(key) ?? { mode: trade.mode, asset, total: 0, available: true };
-    const pnl = numeric(trade.realized_pnl);
-    if (!trade.pnl_verified || pnl === null) group.available = false;
-    else group.total += pnl;
-    groups.set(key, group);
-  }
+  const groups = groupByKey(
+    trades,
+    trade => modeAsset(trade.mode, trade.symbol).key,
+    trade => ({ mode: trade.mode, asset: modeAsset(trade.mode, trade.symbol).asset, total: 0, available: true }),
+    (group, trade) => {
+      const pnl = numeric(trade.realized_pnl);
+      if (!trade.pnl_verified || pnl === null) group.available = false;
+      else group.total += pnl;
+    },
+  );
   for (const group of groups.values()) group.total = normalizeFloatTotal(group.total);
   return groups;
 }
@@ -159,16 +182,29 @@ export function availableRatio(available: number | null, wallet: number | null):
   return available !== null && wallet !== null && wallet > 0 ? available / wallet * 100 : null;
 }
 
-export function accountGroups<T extends AccountObservation>(entries: T[], now = Date.now()) {
-  const groups = new Map<string, { mode: Mode; asset: string; snapshots: AccountObservation['snapshot'][]; observed: AccountObservation['snapshot'][]; observationStale: boolean }>();
-  for (const { mode, snapshot: s, account_observation_stale } of entries) {
-    const asset = s.account.asset || quoteAsset(s.symbol), key = `${mode}:${asset}`;
-    const group = groups.get(key) ?? { mode, asset, snapshots: [], observed: [], observationStale: false };
-    group.snapshots.push(s);
-    if (!account_observation_stale) group.observed.push(s);
-    group.observationStale ||= !!account_observation_stale || (mode === 'PAPER' && !s.account.asset);
-    groups.set(key, group);
-  }
+export interface AccountGroup {
+  key: string;
+  mode: Mode;
+  asset: string;
+  count: number;
+  equity: number | null;
+  available: number | null;
+  wallet: number | null;
+  unrealized: number | null;
+  ratio: number | null;
+  cny: number | null;
+}
+export function accountGroups<T extends AccountObservation>(entries: T[], now = Date.now()): AccountGroup[] {
+  const groups = groupByKey(
+    entries,
+    ({ mode, snapshot: s }) => `${mode}:${s.account.asset || quoteAsset(s.symbol)}`,
+    ({ mode, snapshot: s }) => ({ mode, asset: s.account.asset || quoteAsset(s.symbol), snapshots: [] as AccountObservation['snapshot'][], observed: [] as AccountObservation['snapshot'][], observationStale: false }),
+    (group, { mode, snapshot: s, account_observation_stale }) => {
+      group.snapshots.push(s);
+      if (!account_observation_stale) group.observed.push(s);
+      group.observationStale ||= !!account_observation_stale || (mode === 'PAPER' && !s.account.asset);
+    },
+  );
   return [...groups.values()].map(({ mode, asset, snapshots, observed, observationStale }) => {
     // Exchange timestamps can lead the browser clock slightly.
     const recent = (timestamp: string, maxAge: number) => {

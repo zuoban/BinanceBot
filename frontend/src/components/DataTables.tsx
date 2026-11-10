@@ -7,10 +7,10 @@ import { beijingDay, number, price, relativeTime, time } from '../lib/format';
 import { priceDiffPercent } from '../lib/gridPreview';
 import { useNow } from '../lib/useNow';
 import type { Log, Order, Trade } from '../lib/types';
-import { Pnl } from './Common';
+import { Pnl, SideTag } from './Common';
 import { copyText, downloadCsv, toCsv } from '../lib/exportCsv';
 
-const side = (value: string) => <span className={`side-tag side-${value === 'BUY' ? 'buy' : 'sell'}`}><span aria-hidden="true">{value === 'BUY' ? '↑' : '↓'}</span>{value === 'BUY' ? '买入' : '卖出'}</span>;
+const side = (value: string) => <SideTag side={value === 'BUY' ? 'BUY' : 'SELL'} />;
 const purposeLabel: Record<string, string> = { GRID: '网格', TAKE_PROFIT: '止盈', REMAINDER: '余量合并', LEGACY: '历史订单' };
 function orderPurpose(o: Order) {
   return purposeLabel[o.purpose] ?? (o.is_take_profit ? '止盈' : '历史订单');
@@ -53,7 +53,27 @@ function TableFilterBar<T extends string>({ label, value, onChange, options, sho
     <Button size="small" icon={<DownloadOutlined />} disabled={!shown} onClick={onExport}>导出 CSV</Button>
   </div>;
 }
-
+function ResponsiveTableSection({ hint, desktop, mobileClassName = 'table-mobile', hasRows, totalCount, emptyFilteredText, emptyAllText, listLabel, mobileRows, truncatedLimit, totalFilteredCount }: {
+  hint: string;
+  desktop: React.ReactNode;
+  mobileClassName?: string;
+  hasRows: boolean;
+  totalCount: number;
+  emptyFilteredText: string;
+  emptyAllText: string;
+  listLabel: string;
+  mobileRows: React.ReactNode;
+  truncatedLimit?: number;
+  totalFilteredCount?: number;
+}) {
+  return <>
+    <div className="table-desktop"><p className="table-scroll-hint">{hint}</p>{desktop}</div>
+    <div className={mobileClassName}>
+      {hasRows ? <ul className="trade-list" aria-label={listLabel}>{mobileRows}</ul> : <div className="trade-list-empty">{totalCount ? emptyFilteredText : emptyAllText}</div>}
+      {truncatedLimit !== undefined && (totalFilteredCount ?? 0) > truncatedLimit && <p className="muted">仅显示最近 {truncatedLimit} 条，完整数据请导出 CSV。</p>}
+    </div>
+  </>;
+}
 export function OrdersTable({ orders, mark }: { orders: Order[]; mark?: string }) {
   const [filter, setFilter] = useState<SideFilter>('ALL');
   const rows = useMemo(() => filter === 'ALL' ? orders : orders.filter(order => order.side === filter), [orders, filter]);
@@ -71,18 +91,29 @@ export function OrdersTable({ orders, mark }: { orders: Order[]; mark?: string }
     { title: '状态', dataIndex: 'status' },
     { title: '时间（北京）', className: 'table-numeric', dataIndex: 'created_at', render: time, width: 185 },
   ], [mark]);
-  return <><TableFilterBar label="按方向筛选" value={filter} onChange={setFilter} options={sideOptions} shown={rows.length} total={orders.length} onExport={exportRows} /><div className="table-desktop"><p className="table-scroll-hint">左右滑动查看完整挂单信息</p><Table<Order> rowKey="client_order_id" columns={columns} dataSource={rows} size="small" scroll={{ x: 900 }}
-    pagination={{ pageSize: 15, showSizeChanger: false, hideOnSinglePage: true }}
-    expandable={{ rowExpandable: o => !!o.merge_sources?.length, expandedRowRender: o => <ul className="order-merge-sources">{o.merge_sources.map(source => <li key={source.client_order_id}>{source.client_order_id} · {price(source.price)} × {price(source.quantity)}</li>)}</ul> }} /></div>
-    <div className="table-mobile">{rows.length ? <ul className="trade-list" aria-label="挂单列表">{rows.map(o => <li className="trade-list-item" key={o.client_order_id}>
-      <div className="trade-list-heading">{side(o.side)}<strong><Copyable value={o.price}>{price(o.price)}</Copyable></strong><span className="trade-list-time">{orderPurpose(o)}</span></div>
-      <dl>
-        <div><dt>数量</dt><dd>{price(o.quantity)}</dd></div>
-        <div><dt>金额</dt><dd>{number(o.amount_usdc)}</dd></div>
-        <div><dt>距标记价</dt><dd>{priceDiffPercent(o.price, mark) ?? '--'}</dd></div>
-      </dl>
-      {o.merge_sources?.length > 0 && <ul className="order-merge-sources order-merge-sources-mobile">{o.merge_sources.map(source => <li key={source.client_order_id}>{source.client_order_id} · {price(source.price)} × {price(source.quantity)}</li>)}</ul>}
-    </li>)}</ul> : <div className="trade-list-empty">{orders.length ? '没有符合筛选条件的挂单' : '暂无挂单'}</div>}</div></>;
+  return <>
+    <TableFilterBar label="按方向筛选" value={filter} onChange={setFilter} options={sideOptions} shown={rows.length} total={orders.length} onExport={exportRows} />
+    <ResponsiveTableSection
+      hint="左右滑动查看完整挂单信息"
+      desktop={<Table<Order> rowKey="client_order_id" columns={columns} dataSource={rows} size="small" scroll={{ x: 900 }}
+        pagination={{ pageSize: 15, showSizeChanger: false, hideOnSinglePage: true }}
+        expandable={{ rowExpandable: o => !!o.merge_sources?.length, expandedRowRender: o => <ul className="order-merge-sources">{o.merge_sources.map(source => <li key={source.client_order_id}>{source.client_order_id} · {price(source.price)} × {price(source.quantity)}</li>)}</ul> }} />}
+      hasRows={rows.length > 0}
+      totalCount={orders.length}
+      emptyFilteredText="没有符合筛选条件的挂单"
+      emptyAllText="暂无挂单"
+      listLabel="挂单列表"
+      mobileRows={rows.map(o => <li className="trade-list-item" key={o.client_order_id}>
+        <div className="trade-list-heading">{side(o.side)}<strong><Copyable value={o.price}>{price(o.price)}</Copyable></strong><span className="trade-list-time">{orderPurpose(o)}</span></div>
+        <dl>
+          <div><dt>数量</dt><dd>{price(o.quantity)}</dd></div>
+          <div><dt>金额</dt><dd>{number(o.amount_usdc)}</dd></div>
+          <div><dt>距标记价</dt><dd>{priceDiffPercent(o.price, mark) ?? '--'}</dd></div>
+        </dl>
+        {o.merge_sources?.length > 0 && <ul className="order-merge-sources order-merge-sources-mobile">{o.merge_sources.map(source => <li key={source.client_order_id}>{source.client_order_id} · {price(source.price)} × {price(source.quantity)}</li>)}</ul>}
+      </li>)}
+    />
+  </>;
 }
 export function TradesTable({ trades: allTrades, overview = false, now: currentNow }: { trades: Trade[]; overview?: boolean; now?: number }) {
   const [filter, setFilter] = useState<SideFilter>('ALL');
@@ -107,15 +138,26 @@ export function TradesTable({ trades: allTrades, overview = false, now: currentN
   ], [overview]);
   return <NowContext.Provider value={now}><div>
     {!overview && <TableFilterBar label="按方向筛选" value={filter} onChange={setFilter} options={sideOptions} shown={trades.length} total={allTrades.length} onExport={exportRows} />}
-    <div className="table-desktop"><p className="table-scroll-hint">左右滑动查看完整成交信息</p><Table<Trade> rowKey="trade_id" columns={columns} dataSource={trades} size="small" scroll={{ x: 1000 }} pagination={overview ? false : { pageSize: 15, showSizeChanger: false, hideOnSinglePage: true }} /></div>
-    <div className={overview ? 'overview-trades-mobile' : 'table-mobile'}>{trades.length ? <ul className="trade-list" aria-label="成交列表">{(overview ? trades : trades.slice(0, 50)).map(trade => <li className="trade-list-item" key={trade.trade_id}>
-      <div className="trade-list-heading">{overview ? <><strong><SymbolCell symbol={trade.symbol} /></strong>{side(trade.side)}</> : <>{side(trade.side)}<strong><Copyable value={trade.price}>{price(trade.price)}</Copyable></strong></>}<RelativeTime value={trade.timestamp} className="trade-list-time" /></div>
-      <dl>
-        <div><dt>{overview ? '成交均价' : '数量'}</dt><dd>{price(overview ? trade.price : trade.quantity)}</dd></div>
-        <div><dt>金额</dt><dd>{number(trade.amount_usdc)}</dd></div>
-        <div><dt>盈亏</dt><dd>{trade.pnl_verified ? <Pnl value={trade.realized_pnl} /> : <Tag>待同步</Tag>}</dd></div>
-      </dl>
-    </li>)}</ul> : <div className="trade-list-empty">{allTrades.length && !overview ? '没有符合筛选条件的成交记录' : '暂无成交记录'}</div>}{!overview && trades.length > 50 && <p className="muted">仅显示最近 50 条，完整数据请导出 CSV。</p>}</div>
+    <ResponsiveTableSection
+      hint="左右滑动查看完整成交信息"
+      desktop={<Table<Trade> rowKey="trade_id" columns={columns} dataSource={trades} size="small" scroll={{ x: 1000 }} pagination={overview ? false : { pageSize: 15, showSizeChanger: false, hideOnSinglePage: true }} />}
+      mobileClassName={overview ? 'overview-trades-mobile' : 'table-mobile'}
+      hasRows={trades.length > 0}
+      totalCount={overview ? 0 : allTrades.length}
+      emptyFilteredText="没有符合筛选条件的成交记录"
+      emptyAllText="暂无成交记录"
+      listLabel="成交列表"
+      truncatedLimit={overview ? undefined : 50}
+      totalFilteredCount={trades.length}
+      mobileRows={(overview ? trades : trades.slice(0, 50)).map(trade => <li className="trade-list-item" key={trade.trade_id}>
+        <div className="trade-list-heading">{overview ? <><strong><SymbolCell symbol={trade.symbol} /></strong>{side(trade.side)}</> : <>{side(trade.side)}<strong><Copyable value={trade.price}>{price(trade.price)}</Copyable></strong></>}<RelativeTime value={trade.timestamp} className="trade-list-time" /></div>
+        <dl>
+          <div><dt>{overview ? '成交均价' : '数量'}</dt><dd>{price(overview ? trade.price : trade.quantity)}</dd></div>
+          <div><dt>金额</dt><dd>{number(trade.amount_usdc)}</dd></div>
+          <div><dt>盈亏</dt><dd>{trade.pnl_verified ? <Pnl value={trade.realized_pnl} /> : <Tag>待同步</Tag>}</dd></div>
+        </dl>
+      </li>)}
+    />
   </div></NowContext.Provider>;
 }
 const levels = ['ALL', 'ERROR', 'WARN', 'INFO', 'DEBUG'] as const;
@@ -132,11 +174,20 @@ export function LogsTable({ logs }: { logs: Log[] }) {
   const exportRows = () => downloadCsv(`logs-${beijingDay()}.csv`, toCsv(['时间（北京）', '级别', '内容'], rows.map(l => [time(l.timestamp), l.level, l.message])));
   return <>
     <TableFilterBar label="按级别筛选" value={level} onChange={setLevel} options={levelOptions} shown={rows.length} total={logs.length} onExport={exportRows} />
-    <div className="table-desktop"><p className="table-scroll-hint">左右滑动查看完整日志</p>
-    <Table<Log> rowKey={(l, i) => `${l.timestamp}-${l.level}-${i}-${l.message}`} rowClassName={l => l.level === 'ERROR' ? 'log-row-error' : l.level === 'WARN' ? 'log-row-warn' : ''} dataSource={rows} size="small" scroll={{ x: 600 }} pagination={{ pageSize: 30, showSizeChanger: false, hideOnSinglePage: true }} columns={logColumns} /></div>
-    <div className="table-mobile">{rows.length ? <ul className="trade-list" aria-label="日志列表">{rows.slice(0, 100).map((l, i) => <li className={`trade-list-item log-item-${l.level.toLowerCase()}`} key={`${l.timestamp}-${l.level}-${i}-${l.message}`}>
-      <div className="trade-list-heading"><span className={`log-level log-level-${l.level.toLowerCase()}`}>{l.level}</span><span className="trade-list-time">{time(l.timestamp)}</span></div>
-      <p className="log-message">{l.message}</p>
-    </li>)}</ul> : <div className="trade-list-empty">{logs.length ? '没有符合筛选条件的日志' : '暂无日志'}</div>}{rows.length > 100 && <p className="muted">仅显示最近 100 条，完整数据请导出 CSV。</p>}</div>
+    <ResponsiveTableSection
+      hint="左右滑动查看完整日志"
+      desktop={<Table<Log> rowKey={(l, i) => `${l.timestamp}-${l.level}-${i}-${l.message}`} rowClassName={l => l.level === 'ERROR' ? 'log-row-error' : l.level === 'WARN' ? 'log-row-warn' : ''} dataSource={rows} size="small" scroll={{ x: 600 }} pagination={{ pageSize: 30, showSizeChanger: false, hideOnSinglePage: true }} columns={logColumns} />}
+      hasRows={rows.length > 0}
+      totalCount={logs.length}
+      emptyFilteredText="没有符合筛选条件的日志"
+      emptyAllText="暂无日志"
+      listLabel="日志列表"
+      truncatedLimit={100}
+      totalFilteredCount={rows.length}
+      mobileRows={rows.slice(0, 100).map((l, i) => <li className={`trade-list-item log-item-${l.level.toLowerCase()}`} key={`${l.timestamp}-${l.level}-${i}-${l.message}`}>
+        <div className="trade-list-heading"><span className={`log-level log-level-${l.level.toLowerCase()}`}>{l.level}</span><span className="trade-list-time">{time(l.timestamp)}</span></div>
+        <p className="log-message">{l.message}</p>
+      </li>)}
+    />
   </>;
 }

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useQuery, useQueryClient, type QueryKey, type UseQueryResult } from '@tanstack/react-query';
+import { useQuery, useQueryClient, type QueryClient, type QueryKey, type UseQueryResult } from '@tanstack/react-query';
 import { api, pairPath, socketUrl, tokenStore } from './api';
 import { SNAPSHOT_STALE_MS } from './format';
 import type { AccountFrame, AccountObservation, OverviewHistoryData, Overview, Pair, Snapshot, SocketMessage } from './types';
@@ -74,14 +74,17 @@ function useSocketFallbackQuery<TData>(key: QueryKey, queryFn: (signal: AbortSig
   return { query, now };
 }
 
+function publishSocketQueryData<TData>(client: QueryClient, key: QueryKey, data: TData) {
+  void client.cancelQueries({ queryKey: key });
+  client.setQueryData(key, data);
+}
+
 export function usePairSnapshot(pair: Pair | undefined) {
   const client = useQueryClient();
   const key = ['snapshot', pair?.symbol, pair?.scoped];
   const acceptSnapshot = (data: Snapshot) => {
     if (data.symbol !== pair?.symbol) return false;
-    // Cancel a pre-frame HTTP read before publishing the newer socket observation.
-    void client.cancelQueries({ queryKey: key });
-    client.setQueryData(key, data);
+    publishSocketQueryData(client, key, data);
   };
   const socket = useSocket(pair && pairPath(pair, 'ws'), 'snapshot', acceptSnapshot);
   const { query, now } = useSocketFallbackQuery(key, signal => api<Snapshot>(pairPath(pair!, 'status'), { signal }), socket, !!pair);
@@ -96,8 +99,7 @@ export function useLiveAccounts() {
     if (!Number.isFinite(generatedAt)) return false;
     const current = client.getQueryData<AccountFrame>(key);
     if (current && generatedAt < Date.parse(current.generated_at)) return false;
-    void client.cancelQueries({ queryKey: key });
-    client.setQueryData(key, data);
+    publishSocketQueryData(client, key, data);
   });
   const { query, now } = useSocketFallbackQuery(key, async signal => {
     const data = await api<AccountFrame>('/api/accounts', { signal });

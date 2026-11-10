@@ -668,6 +668,114 @@ impl BinanceFuturesClient {
         Ok(Some(resp.json().await?))
     }
 
+    fn acquire_fill_progress_slot(
+        &self,
+        symbol: &str,
+        order_id: i64,
+        expected_qty: Decimal,
+        clear_revision: u64,
+        key: &(String, i64),
+    ) -> Result<(
+        Arc<tokio::sync::Mutex<FillProgress>>,
+        tokio::sync::OwnedMutexGuard<FillProgress>,
+    )> {
+        let mut cache = self.fill_progress.lock().unwrap();
+        {
+            let mut generations = self.fill_generations.lock().unwrap();
+            if !generations.contains_key(symbol) && generations.len() >= 1024 {
+                return Err(anyhow!("Trade reconciliation symbol limit reached"));
+            }
+            let generation = generations
+                .entry(symbol.to_owned())
+                .or_insert(clear_revision);
+            if clear_revision < *generation {
+                return Err(anyhow!("Trade history was cleared during reconciliation"));
+            }
+            if clear_revision > *generation {
+                *generation = clear_revision;
+                cache.retain(|(cached_symbol, _), _| cached_symbol != symbol);
+                self.fill_waiters
+                    .lock()
+                    .unwrap()
+                    .retain(|((waiting_symbol, _), _)| waiting_symbol != symbol);
+            }
+        }
+        if !cache.contains_key(key) {
+            let mut waiters = self.fill_waiters.lock().unwrap();
+            let now = Instant::now();
+            waiters.retain(|(_, last_seen)| {
+                now.duration_since(*last_seen)
+                    < Duration::from_secs(self.fill_retention_seconds.load(Ordering::Relaxed))
+            });
+            if let Some((_, last_seen)) = waiters.iter_mut().find(|(waiting, _)| waiting == key) {
+                *last_seen = now;
+            } else if cache.len() >= 8 || !waiters.is_empty() {
+                if waiters.len() >= 1024 {
+                    if let Some(index) = waiters.iter().position(|(_, last_seen)| {
+                        now.duration_since(*last_seen) >= FILL_WAITER_ACTIVE_LEASE
+                    }) {
+                        waiters.remove(index);
+                    } else {
+                        return Err(anyhow!("Trade reconciliation waiting queue is full"));
+                    }
+                }
+                waiters.push_back((key.clone(), now));
+            }
+            // Keep FIFO positions for slow backlog scans, but let a recently
+            // polled waiter pass an inactive head. Three minutes tolerates
+            // normal one-minute reconciliation ticks and a missed tick.
+            let active = waiters.iter().position(|(_, last_seen)| {
+                now.duration_since(*last_seen) < FILL_WAITER_ACTIVE_LEASE
+            });
+            let turn = active.is_none_or(|index| &waiters[index].0 == key);
+            if turn && active.is_some() && cache.len() >= 8 {
+                // Preserve healthy cursors while releasing repeated failures
+                // and cursors abandoned before the fill lookup can run.
+                let retention = Duration::from_secs(
+                    self.fill_retention_seconds
+                        .load(Ordering::Relaxed)
+                        .max(2 * 60 * 60),
+                );
+                let victim = cache
+                    .iter()
+                    .filter(|(_, entry)| {
+                        (entry.stalled_attempts >= 3 || entry.last_used.elapsed() >= retention)
+                            && Arc::strong_count(&entry.progress) == 1
+                    })
+                    .min_by_key(|(_, entry)| entry.last_used)
+                    .map(|(victim_key, _)| victim_key.clone());
+                if let Some(victim) = victim {
+                    cache.remove(&victim);
+                }
+            }
+            if cache.len() >= 8 || !turn {
+                return Err(anyhow!(
+                    "Trade reconciliation for order {} is waiting for a progress slot",
+                    order_id
+                ));
+            }
+            if let Some(index) = active {
+                waiters.remove(index);
+            }
+        }
+        let entry = cache.entry(key.clone()).or_insert_with(|| FillCacheEntry {
+            progress: Arc::new(tokio::sync::Mutex::new(FillProgress::new(expected_qty))),
+            last_used: Instant::now(),
+            stalled_attempts: 0,
+        });
+        let shared = Arc::clone(&entry.progress);
+        let mut progress = Arc::clone(&shared).try_lock_owned().map_err(|_| {
+            anyhow!(
+                "Trade reconciliation already in progress for order {}",
+                order_id
+            )
+        })?;
+        if progress.expected_qty != expected_qty {
+            *progress = FillProgress::new(expected_qty);
+        }
+        Ok((shared, progress))
+    }
+
     /// Binance execution records contain the exchange-calculated realized PnL and fee.
     pub async fn get_user_trades(
         &self,
@@ -680,105 +788,8 @@ impl BinanceFuturesClient {
             return Err(anyhow!("Invalid executed quantity for order {}", order_id));
         }
         let key = (symbol.to_owned(), order_id);
-        let (shared, mut progress) = {
-            let mut cache = self.fill_progress.lock().unwrap();
-            {
-                let mut generations = self.fill_generations.lock().unwrap();
-                if !generations.contains_key(symbol) && generations.len() >= 1024 {
-                    return Err(anyhow!("Trade reconciliation symbol limit reached"));
-                }
-                let generation = generations
-                    .entry(symbol.to_owned())
-                    .or_insert(clear_revision);
-                if clear_revision < *generation {
-                    return Err(anyhow!("Trade history was cleared during reconciliation"));
-                }
-                if clear_revision > *generation {
-                    *generation = clear_revision;
-                    cache.retain(|(cached_symbol, _), _| cached_symbol != symbol);
-                    self.fill_waiters
-                        .lock()
-                        .unwrap()
-                        .retain(|((waiting_symbol, _), _)| waiting_symbol != symbol);
-                }
-            }
-            if !cache.contains_key(&key) {
-                let mut waiters = self.fill_waiters.lock().unwrap();
-                let now = Instant::now();
-                waiters.retain(|(_, last_seen)| {
-                    now.duration_since(*last_seen)
-                        < Duration::from_secs(self.fill_retention_seconds.load(Ordering::Relaxed))
-                });
-                if let Some((_, last_seen)) =
-                    waiters.iter_mut().find(|(waiting, _)| waiting == &key)
-                {
-                    *last_seen = now;
-                } else if cache.len() >= 8 || !waiters.is_empty() {
-                    if waiters.len() >= 1024 {
-                        if let Some(index) = waiters.iter().position(|(_, last_seen)| {
-                            now.duration_since(*last_seen) >= FILL_WAITER_ACTIVE_LEASE
-                        }) {
-                            waiters.remove(index);
-                        } else {
-                            return Err(anyhow!("Trade reconciliation waiting queue is full"));
-                        }
-                    }
-                    waiters.push_back((key.clone(), now));
-                }
-                // Keep FIFO positions for slow backlog scans, but let a recently
-                // polled waiter pass an inactive head. Three minutes tolerates
-                // normal one-minute reconciliation ticks and a missed tick.
-                let active = waiters.iter().position(|(_, last_seen)| {
-                    now.duration_since(*last_seen) < FILL_WAITER_ACTIVE_LEASE
-                });
-                let turn = active.is_none_or(|index| waiters[index].0 == key);
-                if turn && active.is_some() && cache.len() >= 8 {
-                    // Preserve healthy cursors while releasing repeated failures
-                    // and cursors abandoned before the fill lookup can run.
-                    let retention = Duration::from_secs(
-                        self.fill_retention_seconds
-                            .load(Ordering::Relaxed)
-                            .max(2 * 60 * 60),
-                    );
-                    let victim = cache
-                        .iter()
-                        .filter(|(_, entry)| {
-                            (entry.stalled_attempts >= 3 || entry.last_used.elapsed() >= retention)
-                                && Arc::strong_count(&entry.progress) == 1
-                        })
-                        .min_by_key(|(_, entry)| entry.last_used)
-                        .map(|(key, _)| key.clone());
-                    if let Some(victim) = victim {
-                        cache.remove(&victim);
-                    }
-                }
-                if cache.len() >= 8 || !turn {
-                    return Err(anyhow!(
-                        "Trade reconciliation for order {} is waiting for a progress slot",
-                        order_id
-                    ));
-                }
-                if let Some(index) = active {
-                    waiters.remove(index);
-                }
-            }
-            let entry = cache.entry(key.clone()).or_insert_with(|| FillCacheEntry {
-                progress: Arc::new(tokio::sync::Mutex::new(FillProgress::new(expected_qty))),
-                last_used: Instant::now(),
-                stalled_attempts: 0,
-            });
-            let shared = Arc::clone(&entry.progress);
-            let progress = Arc::clone(&shared).try_lock_owned().map_err(|_| {
-                anyhow!(
-                    "Trade reconciliation already in progress for order {}",
-                    order_id
-                )
-            })?;
-            (shared, progress)
-        };
-        if progress.expected_qty != expected_qty {
-            *progress = FillProgress::new(expected_qty);
-        }
+        let (shared, progress) =
+            self.acquire_fill_progress_slot(symbol, order_id, expected_qty, clear_revision, &key)?;
         let initial_advances = progress.advances;
         let mut cleanup = FillCacheCleanup {
             cache: &self.fill_progress,

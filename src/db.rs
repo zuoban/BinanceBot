@@ -376,6 +376,8 @@ impl Database {
         )?)
     }
 
+    const HOURLY_SNAPSHOT_RETENTION_SECS: i64 = 30 * 24 * 3600;
+
     pub fn save_hourly_account_snapshot(
         &self,
         hour: i64,
@@ -390,7 +392,7 @@ impl Database {
         )?;
         tx.execute(
             "DELETE FROM account_hourly_snapshots WHERE hour < ?1",
-            params![hour - 30 * 24 * 3600],
+            params![hour - Self::HOURLY_SNAPSHOT_RETENTION_SECS],
         )?;
         tx.commit()?;
         Ok(())
@@ -400,7 +402,7 @@ impl Database {
         self.lock_connection("cleanup_hourly_account_snapshots")
             .execute(
                 "DELETE FROM account_hourly_snapshots WHERE hour < ?1",
-                params![now - 30 * 24 * 3600],
+                params![now - Self::HOURLY_SNAPSHOT_RETENTION_SECS],
             )?;
         Ok(())
     }
@@ -460,19 +462,7 @@ impl Database {
         let snapshot = self.backup_to_memory()?;
 
         if let Some(mut config) = load_config_on(&snapshot)? {
-            // Typed serialization also drops unrecognized config fields.
-            config.exchange.api_key.clear();
-            config.exchange.api_secret.clear();
-            config.telegram.bot_token.clear();
-            config.telegram.chat_id.clear();
-            for pair in &mut config.pairs {
-                pair.exchange.api_key = None;
-                pair.exchange.api_secret = None;
-                if let Some(telegram) = &mut pair.telegram {
-                    telegram.bot_token.clear();
-                    telegram.chat_id.clear();
-                }
-            }
+            redact_config_credentials(&mut config);
             snapshot.execute(
                 "UPDATE app_config SET config_json = ?1 WHERE id = 1",
                 params![serde_json::to_string(&config)?],
@@ -818,165 +808,7 @@ impl Database {
         )
         .context("Failed to initialize SQLite tables")?;
 
-        let has_legacy_admin_auth: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'admin_auth')",
-            [],
-            |row| row.get(0),
-        )?;
-        if has_legacy_admin_auth {
-            conn.execute_batch(
-                "PRAGMA secure_delete = ON;
-                 DROP TABLE admin_auth;
-                 VACUUM;
-                 PRAGMA wal_checkpoint(TRUNCATE);",
-            )
-            .context("Failed to remove the legacy administrator password from SQLite")?;
-            warn!(
-                "Removed the legacy administrator password from SQLite; \
-                 set ADMIN_PASSWORD or --admin-password to require console authentication"
-            );
-        }
-
-        // Rebuild the old key atomically, retaining the identities in the stored JSON.
-        let tx = conn.transaction()?;
-        let has_observed_client_id: i64 = tx.query_row(
-            "SELECT count(*) FROM pragma_table_info('order_identity_observations') WHERE name = 'observed_client_order_id'",
-            [],
-            |row| row.get(0),
-        )?;
-        if has_observed_client_id == 0 {
-            tx.execute_batch(
-                r#"
-                CREATE TABLE order_identity_observations_new (
-                    account_key BLOB NOT NULL,
-                    client_order_id TEXT NOT NULL,
-                    expected_symbol TEXT NOT NULL,
-                    observed_client_order_id TEXT NOT NULL,
-                    observed_symbol TEXT NOT NULL,
-                    observed_side TEXT NOT NULL,
-                    observed_order_id INTEGER NOT NULL,
-                    expected_json TEXT NOT NULL,
-                    observed_json TEXT NOT NULL,
-                    PRIMARY KEY (account_key, client_order_id, expected_symbol, observed_client_order_id, observed_symbol, observed_side, observed_order_id)
-                );
-                INSERT INTO order_identity_observations_new
-                    (account_key, client_order_id, expected_symbol, observed_client_order_id, observed_symbol, observed_side, observed_order_id, expected_json, observed_json)
-                SELECT account_key, client_order_id, expected_symbol,
-                    json_extract(observed_json, '$.client_order_id'), observed_symbol,
-                    json_extract(observed_json, '$.side'), observed_order_id, expected_json, observed_json
-                FROM order_identity_observations;
-                DROP TABLE order_identity_observations;
-                ALTER TABLE order_identity_observations_new RENAME TO order_identity_observations;
-                "#,
-            )?;
-        }
-        // Older versions deduplicated by response content. Preserve the order
-        // of surviving rows; observations already discarded cannot be restored.
-        let has_observation_id: i64 = tx.query_row(
-            "SELECT count(*) FROM pragma_table_info('initial_order_responses') WHERE name = 'observation_id'",
-            [],
-            |row| row.get(0),
-        )?;
-        if has_observation_id == 0 {
-            tx.execute_batch(
-                r#"
-                CREATE TABLE initial_order_responses_new (
-                    account_key BLOB NOT NULL,
-                    expected_symbol TEXT NOT NULL,
-                    client_order_id TEXT NOT NULL,
-                    observed_client_order_id TEXT NOT NULL,
-                    observed_symbol TEXT NOT NULL,
-                    observed_side TEXT NOT NULL,
-                    observed_order_id INTEGER NOT NULL,
-                    response_json TEXT NOT NULL,
-                    observation_id TEXT NOT NULL UNIQUE
-                );
-                INSERT INTO initial_order_responses_new
-                    (account_key, expected_symbol, client_order_id, observed_client_order_id,
-                     observed_symbol, observed_side, observed_order_id, response_json, observation_id)
-                SELECT account_key, expected_symbol, client_order_id, observed_client_order_id,
-                    observed_symbol, observed_side, observed_order_id, response_json,
-                    'legacy:' || rowid
-                FROM initial_order_responses ORDER BY rowid;
-                DROP TABLE initial_order_responses;
-                ALTER TABLE initial_order_responses_new RENAME TO initial_order_responses;
-                "#,
-            )?;
-        }
-        let has_batch_id: i64 = tx.query_row(
-            "SELECT count(*) FROM pragma_table_info('initial_order_responses') WHERE name = 'batch_id'",
-            [],
-            |row| row.get(0),
-        )?;
-        if has_batch_id == 0 {
-            tx.execute_batch(
-                "ALTER TABLE initial_order_responses ADD COLUMN batch_id TEXT NOT NULL DEFAULT 'legacy';",
-            )?;
-        }
-        let terminal_key_columns: i64 = tx.query_row(
-            "SELECT count(*) FROM pragma_table_info('terminal_order_disagreements') WHERE pk > 0",
-            [],
-            |row| row.get(0),
-        )?;
-        if terminal_key_columns == 3 {
-            tx.execute_batch(
-                r#"
-                CREATE TABLE terminal_order_disagreements_new (
-                    account_key BLOB NOT NULL,
-                    expected_symbol TEXT NOT NULL,
-                    client_order_id TEXT NOT NULL,
-                    first_json TEXT NOT NULL,
-                    conflicting_json TEXT NOT NULL,
-                    PRIMARY KEY (account_key, expected_symbol, client_order_id, first_json, conflicting_json)
-                );
-                INSERT INTO terminal_order_disagreements_new
-                    (account_key, expected_symbol, client_order_id, first_json, conflicting_json)
-                SELECT account_key, expected_symbol, client_order_id, first_json, conflicting_json
-                FROM terminal_order_disagreements;
-                DROP TABLE terminal_order_disagreements;
-                ALTER TABLE terminal_order_disagreements_new RENAME TO terminal_order_disagreements;
-                "#,
-            )?;
-        }
-        tx.commit()?;
-
-        let has_pnl_verified: i64 = conn.query_row(
-            "SELECT count(*) FROM pragma_table_info('trades') WHERE name = 'pnl_verified';",
-            [],
-            |row| row.get(0),
-        )?;
-        if has_pnl_verified == 0 {
-            conn.execute(
-                "ALTER TABLE trades ADD COLUMN pnl_verified INTEGER NOT NULL DEFAULT 0;",
-                [],
-            )?;
-        }
-
-        let has_mode: i64 = conn.query_row(
-            "SELECT count(*) FROM pragma_table_info('trades') WHERE name = 'mode';",
-            [],
-            |row| row.get(0),
-        )?;
-        if has_mode == 0 {
-            conn.execute(
-                "ALTER TABLE trades ADD COLUMN mode TEXT NOT NULL DEFAULT 'UNKNOWN';",
-                [],
-            )?;
-        }
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_trades_scope ON trades (symbol, mode, timestamp DESC);",
-            [],
-        )?;
-        let tx = conn.transaction()?;
-        retire_legacy_testnet_config(&tx)?;
-        retire_legacy_dry_run_intent(&tx)?;
-        retire_legacy_testnet_rows(&tx)?;
-        tx.execute_batch(
-            "CREATE INDEX IF NOT EXISTS idx_trades_unverified_scope
-             ON trades (symbol, mode, timestamp DESC) WHERE pnl_verified = 0;",
-        )?;
-        hourly::migrate_on(&tx)?;
-        tx.commit()?;
+        run_schema_migrations(&mut conn)?;
 
         info!("SQLite schema verified for database: {}", self.path);
         Ok(())
@@ -1608,85 +1440,10 @@ impl Database {
         let tx = conn.transaction()?;
         Self::save_identity_observation_rows(&tx, account, identities)?;
         let observations: Vec<_> = observations.into_iter().collect();
-        // An earlier identical snapshot already precedes every later individual
-        // query, so it supplies the same comparison evidence. Start a new
-        // snapshot batch whenever the snapshot changes.
-        let duplicate_snapshot = if deduplicate_snapshot
-            && !observations.is_empty()
-            && observations[0].2.starts_with("snapshot:")
-            && observations.iter().all(|row| row.2 == observations[0].2)
-        {
-            let last_batch: Option<String> = tx.query_row(
-                "SELECT batch_id FROM initial_order_responses WHERE account_key=?1 AND expected_symbol=?2 AND substr(batch_id,1,9)='snapshot:' ORDER BY rowid DESC LIMIT 1",
-                params![&account[..], symbol],
-                |row| row.get(0),
-            ).optional()?;
-            if let Some(last_batch) = last_batch.filter(|batch| {
-                batch.starts_with("snapshot:") && batch.as_str() != observations[0].2
-            }) {
-                let mut statement = tx.prepare("SELECT client_order_id, response_json FROM initial_order_responses WHERE account_key=?1 AND expected_symbol=?2 AND batch_id=?3 ORDER BY rowid")?;
-                let previous: Vec<(String, String)> = statement
-                    .query_map(params![&account[..], symbol, last_batch], |row| {
-                        Ok((row.get(0)?, row.get(1)?))
-                    })?
-                    .collect::<rusqlite::Result<_>>()?;
-                if previous.len() != observations.len() {
-                    false
-                } else {
-                    let mut same = true;
-                    for ((client, json), (new_client, _, _, response)) in
-                        previous.iter().zip(&observations)
-                    {
-                        if client.as_str() != *new_client
-                            || json.as_str() != serde_json::to_string(response)?
-                        {
-                            same = false;
-                            break;
-                        }
-                    }
-                    same
-                }
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-        // Compare the latest evidence for this exact order identity. Queries
-        // for other identities cannot affect its transition history.
-        let duplicate_query = if deduplicate_snapshot && observations.len() == 1 {
-            let (client, observation_id, batch_id, response) = observations[0];
-            if uuid::Uuid::parse_str(observation_id).is_ok()
-                && uuid::Uuid::parse_str(batch_id).is_ok()
-            {
-                let previous: Option<(String, String)> = tx.query_row(
-                    "SELECT batch_id, response_json FROM initial_order_responses WHERE account_key=?1 AND expected_symbol=?2 AND client_order_id=?3 AND observed_client_order_id=?4 AND observed_symbol=?5 AND observed_side=?6 AND observed_order_id=?7 ORDER BY rowid DESC LIMIT 1",
-                    params![&account[..], symbol, client, response.client_order_id, response.symbol, response.side, response.order_id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                ).optional()?;
-                if let Some((previous_batch, previous_json)) = previous {
-                    let same = uuid::Uuid::parse_str(&previous_batch).is_ok()
-                        && previous_batch != batch_id
-                        && previous_json == serde_json::to_string(response)?;
-                    if same {
-                        let safe: bool = tx.query_row(
-                            "SELECT (SELECT count(*) FROM initial_order_responses WHERE account_key=?1 AND expected_symbol=?2 AND batch_id=?3)=1 AND NOT EXISTS(SELECT 1 FROM initial_order_responses WHERE observation_id=?4 OR (account_key=?1 AND expected_symbol=?2 AND batch_id=?5))",
-                            params![&account[..], symbol, previous_batch, observation_id, batch_id],
-                            |row| row.get(0),
-                        )?;
-                        safe
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                }
-            } else {
-                false
-            }
-        } else {
-            false
-        };
+        let duplicate_snapshot = deduplicate_snapshot
+            && is_duplicate_response_snapshot(&tx, account, symbol, &observations)?;
+        let duplicate_query = deduplicate_snapshot
+            && is_duplicate_single_response_query(&tx, account, symbol, &observations)?;
         {
             let mut statement = tx.prepare(
                 "INSERT INTO initial_order_responses (account_key, expected_symbol, client_order_id, observed_client_order_id, observed_symbol, observed_side, observed_order_id, response_json, observation_id, batch_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(observation_id) DO NOTHING"
@@ -2760,33 +2517,300 @@ fn save_scoped_stats_on(
     Ok(())
 }
 
+fn run_schema_migrations(conn: &mut Connection) -> Result<()> {
+    let has_legacy_admin_auth: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'admin_auth')",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_legacy_admin_auth {
+        conn.execute_batch(
+            "PRAGMA secure_delete = ON;
+             DROP TABLE admin_auth;
+             VACUUM;
+             PRAGMA wal_checkpoint(TRUNCATE);",
+        )
+        .context("Failed to remove the legacy administrator password from SQLite")?;
+        warn!(
+            "Removed the legacy administrator password from SQLite; \
+             set ADMIN_PASSWORD or --admin-password to require console authentication"
+        );
+    }
+
+    // Rebuild the old key atomically, retaining the identities in the stored JSON.
+    let tx = conn.transaction()?;
+    let has_observed_client_id: i64 = tx.query_row(
+        "SELECT count(*) FROM pragma_table_info('order_identity_observations') WHERE name = 'observed_client_order_id'",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_observed_client_id == 0 {
+        tx.execute_batch(
+            r#"
+            CREATE TABLE order_identity_observations_new (
+                account_key BLOB NOT NULL,
+                client_order_id TEXT NOT NULL,
+                expected_symbol TEXT NOT NULL,
+                observed_client_order_id TEXT NOT NULL,
+                observed_symbol TEXT NOT NULL,
+                observed_side TEXT NOT NULL,
+                observed_order_id INTEGER NOT NULL,
+                expected_json TEXT NOT NULL,
+                observed_json TEXT NOT NULL,
+                PRIMARY KEY (account_key, client_order_id, expected_symbol, observed_client_order_id, observed_symbol, observed_side, observed_order_id)
+            );
+            INSERT INTO order_identity_observations_new
+                (account_key, client_order_id, expected_symbol, observed_client_order_id, observed_symbol, observed_side, observed_order_id, expected_json, observed_json)
+            SELECT account_key, client_order_id, expected_symbol,
+                json_extract(observed_json, '$.client_order_id'), observed_symbol,
+                json_extract(observed_json, '$.side'), observed_order_id, expected_json, observed_json
+            FROM order_identity_observations;
+            DROP TABLE order_identity_observations;
+            ALTER TABLE order_identity_observations_new RENAME TO order_identity_observations;
+            "#,
+        )?;
+    }
+    // Older versions deduplicated by response content. Preserve the order
+    // of surviving rows; observations already discarded cannot be restored.
+    let has_observation_id: i64 = tx.query_row(
+        "SELECT count(*) FROM pragma_table_info('initial_order_responses') WHERE name = 'observation_id'",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_observation_id == 0 {
+        tx.execute_batch(
+            r#"
+            CREATE TABLE initial_order_responses_new (
+                account_key BLOB NOT NULL,
+                expected_symbol TEXT NOT NULL,
+                client_order_id TEXT NOT NULL,
+                observed_client_order_id TEXT NOT NULL,
+                observed_symbol TEXT NOT NULL,
+                observed_side TEXT NOT NULL,
+                observed_order_id INTEGER NOT NULL,
+                response_json TEXT NOT NULL,
+                observation_id TEXT NOT NULL UNIQUE
+            );
+            INSERT INTO initial_order_responses_new
+                (account_key, expected_symbol, client_order_id, observed_client_order_id,
+                 observed_symbol, observed_side, observed_order_id, response_json, observation_id)
+            SELECT account_key, expected_symbol, client_order_id, observed_client_order_id,
+                observed_symbol, observed_side, observed_order_id, response_json,
+                'legacy:' || rowid
+            FROM initial_order_responses ORDER BY rowid;
+            DROP TABLE initial_order_responses;
+            ALTER TABLE initial_order_responses_new RENAME TO initial_order_responses;
+            "#,
+        )?;
+    }
+    let has_batch_id: i64 = tx.query_row(
+        "SELECT count(*) FROM pragma_table_info('initial_order_responses') WHERE name = 'batch_id'",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_batch_id == 0 {
+        tx.execute_batch(
+            "ALTER TABLE initial_order_responses ADD COLUMN batch_id TEXT NOT NULL DEFAULT 'legacy';",
+        )?;
+    }
+    let terminal_key_columns: i64 = tx.query_row(
+        "SELECT count(*) FROM pragma_table_info('terminal_order_disagreements') WHERE pk > 0",
+        [],
+        |row| row.get(0),
+    )?;
+    if terminal_key_columns == 3 {
+        tx.execute_batch(
+            r#"
+            CREATE TABLE terminal_order_disagreements_new (
+                account_key BLOB NOT NULL,
+                expected_symbol TEXT NOT NULL,
+                client_order_id TEXT NOT NULL,
+                first_json TEXT NOT NULL,
+                conflicting_json TEXT NOT NULL,
+                PRIMARY KEY (account_key, expected_symbol, client_order_id, first_json, conflicting_json)
+            );
+            INSERT INTO terminal_order_disagreements_new
+                (account_key, expected_symbol, client_order_id, first_json, conflicting_json)
+            SELECT account_key, expected_symbol, client_order_id, first_json, conflicting_json
+            FROM terminal_order_disagreements;
+            DROP TABLE terminal_order_disagreements;
+            ALTER TABLE terminal_order_disagreements_new RENAME TO terminal_order_disagreements;
+            "#,
+        )?;
+    }
+    tx.commit()?;
+
+    let has_pnl_verified: i64 = conn.query_row(
+        "SELECT count(*) FROM pragma_table_info('trades') WHERE name = 'pnl_verified';",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_pnl_verified == 0 {
+        conn.execute(
+            "ALTER TABLE trades ADD COLUMN pnl_verified INTEGER NOT NULL DEFAULT 0;",
+            [],
+        )?;
+    }
+
+    let has_mode: i64 = conn.query_row(
+        "SELECT count(*) FROM pragma_table_info('trades') WHERE name = 'mode';",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_mode == 0 {
+        conn.execute(
+            "ALTER TABLE trades ADD COLUMN mode TEXT NOT NULL DEFAULT 'UNKNOWN';",
+            [],
+        )?;
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_trades_scope ON trades (symbol, mode, timestamp DESC);",
+        [],
+    )?;
+    let tx = conn.transaction()?;
+    retire_legacy_testnet_config(&tx)?;
+    retire_legacy_dry_run_intent(&tx)?;
+    retire_legacy_testnet_rows(&tx)?;
+    tx.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_trades_unverified_scope
+         ON trades (symbol, mode, timestamp DESC) WHERE pnl_verified = 0;",
+    )?;
+    hourly::migrate_on(&tx)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// An earlier identical snapshot already precedes every later individual
+/// query, so it supplies the same comparison evidence.
+fn is_duplicate_response_snapshot(
+    tx: &Connection,
+    account: [u8; 32],
+    symbol: &str,
+    observations: &[(&str, &str, &str, &crate::exchange::BinanceOrderResponse)],
+) -> Result<bool> {
+    if observations.is_empty()
+        || !observations[0].2.starts_with("snapshot:")
+        || !observations.iter().all(|row| row.2 == observations[0].2)
+    {
+        return Ok(false);
+    }
+    let last_batch: Option<String> = tx
+        .query_row(
+            "SELECT batch_id FROM initial_order_responses WHERE account_key=?1 AND expected_symbol=?2 AND substr(batch_id,1,9)='snapshot:' ORDER BY rowid DESC LIMIT 1",
+            params![&account[..], symbol],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(last_batch) = last_batch
+        .filter(|batch| batch.starts_with("snapshot:") && batch.as_str() != observations[0].2)
+    else {
+        return Ok(false);
+    };
+    let mut statement = tx.prepare(
+        "SELECT client_order_id, response_json FROM initial_order_responses WHERE account_key=?1 AND expected_symbol=?2 AND batch_id=?3 ORDER BY rowid",
+    )?;
+    let previous: Vec<(String, String)> = statement
+        .query_map(params![&account[..], symbol, last_batch], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    if previous.len() != observations.len() {
+        return Ok(false);
+    }
+    for ((client, json), (new_client, _, _, response)) in previous.iter().zip(observations) {
+        if client.as_str() != *new_client || json.as_str() != serde_json::to_string(response)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Compare the latest evidence for this exact order identity. Queries
+/// for other identities cannot affect its transition history.
+fn is_duplicate_single_response_query(
+    tx: &Connection,
+    account: [u8; 32],
+    symbol: &str,
+    observations: &[(&str, &str, &str, &crate::exchange::BinanceOrderResponse)],
+) -> Result<bool> {
+    if observations.len() != 1 {
+        return Ok(false);
+    }
+    let (client, observation_id, batch_id, response) = observations[0];
+    if uuid::Uuid::parse_str(observation_id).is_err() || uuid::Uuid::parse_str(batch_id).is_err() {
+        return Ok(false);
+    }
+    let previous: Option<(String, String)> = tx
+        .query_row(
+            "SELECT batch_id, response_json FROM initial_order_responses WHERE account_key=?1 AND expected_symbol=?2 AND client_order_id=?3 AND observed_client_order_id=?4 AND observed_symbol=?5 AND observed_side=?6 AND observed_order_id=?7 ORDER BY rowid DESC LIMIT 1",
+            params![
+                &account[..],
+                symbol,
+                client,
+                response.client_order_id,
+                response.symbol,
+                response.side,
+                response.order_id
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((previous_batch, previous_json)) = previous else {
+        return Ok(false);
+    };
+    if uuid::Uuid::parse_str(&previous_batch).is_err()
+        || previous_batch == batch_id
+        || previous_json != serde_json::to_string(response)?
+    {
+        return Ok(false);
+    }
+    let safe: bool = tx.query_row(
+        "SELECT (SELECT count(*) FROM initial_order_responses WHERE account_key=?1 AND expected_symbol=?2 AND batch_id=?3)=1 AND NOT EXISTS(SELECT 1 FROM initial_order_responses WHERE observation_id=?4 OR (account_key=?1 AND expected_symbol=?2 AND batch_id=?5))",
+        params![&account[..], symbol, previous_batch, observation_id, batch_id],
+        |row| row.get(0),
+    )?;
+    Ok(safe)
+}
+
+fn decimal_col_or_zero(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<Decimal> {
+    let raw: String = row.get(index)?;
+    Ok(Decimal::from_str(&raw).unwrap_or(Decimal::ZERO))
+}
+
 fn trade_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TradeRecord> {
     let side: String = row.get(3)?;
-    let price: String = row.get(4)?;
-    let quantity: String = row.get(5)?;
-    let amount: String = row.get(6)?;
-    let pnl: String = row.get(7)?;
-    let commission: String = row.get(8)?;
     Ok(TradeRecord {
         trade_id: row.get(0)?,
         client_order_id: row.get(1)?,
         symbol: row.get(2)?,
         mode: TradingMode::from_db(&row.get::<_, String>(13)?),
-        side: if side == "BUY" {
-            OrderSide::Buy
-        } else {
-            OrderSide::Sell
-        },
-        price: Decimal::from_str(&price).unwrap_or(Decimal::ZERO),
-        quantity: Decimal::from_str(&quantity).unwrap_or(Decimal::ZERO),
-        amount_usdc: Decimal::from_str(&amount).unwrap_or(Decimal::ZERO),
-        realized_pnl: Decimal::from_str(&pnl).unwrap_or(Decimal::ZERO),
-        commission: Decimal::from_str(&commission).unwrap_or(Decimal::ZERO),
+        side: OrderSide::from_exchange_str(&side).unwrap_or(OrderSide::Sell),
+        price: decimal_col_or_zero(row, 4)?,
+        quantity: decimal_col_or_zero(row, 5)?,
+        amount_usdc: decimal_col_or_zero(row, 6)?,
+        realized_pnl: decimal_col_or_zero(row, 7)?,
+        commission: decimal_col_or_zero(row, 8)?,
         pnl_verified: row.get::<_, i32>(9)? != 0,
         is_maker: row.get::<_, i32>(10)? != 0,
         timestamp: row.get(11)?,
         note: row.get(12)?,
     })
+}
+
+fn redact_config_credentials(config: &mut AppConfig) {
+    // Typed serialization also drops unrecognized config fields.
+    config.exchange.api_key.clear();
+    config.exchange.api_secret.clear();
+    config.telegram.bot_token.clear();
+    config.telegram.chat_id.clear();
+    for pair in &mut config.pairs {
+        pair.exchange.api_key = None;
+        pair.exchange.api_secret = None;
+        if let Some(telegram) = &mut pair.telegram {
+            telegram.bot_token.clear();
+            telegram.chat_id.clear();
+        }
+    }
 }
 
 #[cfg(test)]

@@ -27,6 +27,61 @@ struct EventTimes {
     mark: Option<i64>,
 }
 
+fn stream_matches_symbol(stream: Option<&str>, suffix: &str, symbol: &str) -> bool {
+    stream.is_none_or(|stream| {
+        stream
+            .strip_suffix(suffix)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(symbol))
+    })
+}
+
+fn decode_24hr_ticker_event(payload: Value, symbol: &str) -> Option<(i64, TickerInfo)> {
+    let msg: BinanceWs24hrTicker = serde_json::from_value(payload).ok()?;
+    if msg.event_type != "24hrTicker"
+        || !msg.symbol.eq_ignore_ascii_case(symbol)
+        || msg.close_price <= Decimal::ZERO
+    {
+        return None;
+    }
+    let change = msg.close_price - msg.open_price;
+    let change_pct = if msg.open_price.is_zero() {
+        Decimal::ZERO
+    } else {
+        change / msg.open_price * rust_decimal_macros::dec!(100)
+    };
+    Some((
+        msg.event_time,
+        TickerInfo {
+            symbol: symbol.to_string(),
+            last_price: msg.close_price,
+            high_24h: msg.high_price,
+            low_24h: msg.low_price,
+            change_24h: change,
+            change_percent_24h: change_pct,
+            volume_24h: msg.volume,
+            ..Default::default()
+        },
+    ))
+}
+
+fn decode_mark_price_event(payload: Value, symbol: &str) -> Option<(i64, TickerInfo)> {
+    let msg: BinanceWsMarkPrice = serde_json::from_value(payload).ok()?;
+    if msg.event_type != "markPriceUpdate"
+        || !msg.symbol.eq_ignore_ascii_case(symbol)
+        || msg.mark_price <= Decimal::ZERO
+    {
+        return None;
+    }
+    Some((
+        msg.event_time,
+        TickerInfo {
+            symbol: symbol.to_string(),
+            mark_price: msg.mark_price,
+            ..Default::default()
+        },
+    ))
+}
+
 fn parse_market_update(
     text: &str,
     symbol: &str,
@@ -43,66 +98,13 @@ fn parse_market_update(
     }
     let event_type = payload.get("e")?.as_str()?;
     let (event_time, info, last_time) = match event_type {
-        "24hrTicker" => {
-            if stream.as_deref().is_some_and(|stream| {
-                !stream
-                    .strip_suffix("@ticker")
-                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case(symbol))
-            }) {
-                return None;
-            }
-            let msg: BinanceWs24hrTicker = serde_json::from_value(payload).ok()?;
-            if msg.event_type != "24hrTicker"
-                || !msg.symbol.eq_ignore_ascii_case(symbol)
-                || msg.close_price <= Decimal::ZERO
-            {
-                return None;
-            }
-            let change = msg.close_price - msg.open_price;
-            let change_pct = if msg.open_price.is_zero() {
-                Decimal::ZERO
-            } else {
-                change / msg.open_price * rust_decimal_macros::dec!(100)
-            };
-            (
-                msg.event_time,
-                TickerInfo {
-                    symbol: symbol.to_string(),
-                    last_price: msg.close_price,
-                    high_24h: msg.high_price,
-                    low_24h: msg.low_price,
-                    change_24h: change,
-                    change_percent_24h: change_pct,
-                    volume_24h: msg.volume,
-                    ..Default::default()
-                },
-                &mut times.ticker,
-            )
+        "24hrTicker" if stream_matches_symbol(stream.as_deref(), "@ticker", symbol) => {
+            let (event_time, info) = decode_24hr_ticker_event(payload, symbol)?;
+            (event_time, info, &mut times.ticker)
         }
-        "markPriceUpdate" => {
-            if stream.as_deref().is_some_and(|stream| {
-                !stream
-                    .strip_suffix("@markPrice@1s")
-                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case(symbol))
-            }) {
-                return None;
-            }
-            let msg: BinanceWsMarkPrice = serde_json::from_value(payload).ok()?;
-            if msg.event_type != "markPriceUpdate"
-                || !msg.symbol.eq_ignore_ascii_case(symbol)
-                || msg.mark_price <= Decimal::ZERO
-            {
-                return None;
-            }
-            (
-                msg.event_time,
-                TickerInfo {
-                    symbol: symbol.to_string(),
-                    mark_price: msg.mark_price,
-                    ..Default::default()
-                },
-                &mut times.mark,
-            )
+        "markPriceUpdate" if stream_matches_symbol(stream.as_deref(), "@markPrice@1s", symbol) => {
+            let (event_time, info) = decode_mark_price_event(payload, symbol)?;
+            (event_time, info, &mut times.mark)
         }
         _ => return None,
     };

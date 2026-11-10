@@ -65,74 +65,90 @@ fn aggregate(
     groups
         .into_iter()
         .map(|((mode, asset, account_id), snapshots)| {
-            let mode = TradingMode::from_db(&mode);
-            let latest = snapshots
-                .iter()
-                .filter(|(s, interval)| {
-                    s.account.asset == asset
-                        && (mode == TradingMode::Paper
-                            || is_timestamp_fresh(
-                                s.account.update_time,
-                                now,
-                                snapshot_max_age_secs(*interval),
-                            ))
-                })
-                .max_by_key(|(s, _)| s.account.update_time)
-                .copied();
-            let equity = if mode == TradingMode::Paper {
-                if snapshots.iter().all(|(s, interval)| {
-                    s.account.asset == asset
-                        && (s.position.size.is_zero()
-                            || (is_timestamp_fresh(
-                                s.account.update_time,
-                                now,
-                                snapshot_max_age_secs(*interval),
-                            ) && s.ticker.mark_price_is_fresh(now)))
-                }) {
-                    latest.map(|(s, _)| s.account.margin_balance)
-                } else {
-                    None
-                }
-            } else {
-                latest.map(|(s, _)| s.account.margin_balance)
-            };
-            let mut long = Decimal::ZERO;
-            let mut short = Decimal::ZERO;
-            let mut valid = true;
-            for (snapshot, interval) in snapshots {
-                if mode != TradingMode::Paper
-                    && !snapshot.position.update_time.is_some_and(|at| {
-                        is_timestamp_fresh(at, now, snapshot_max_age_secs(interval))
-                    })
-                {
-                    valid = false;
-                    continue;
-                }
-                let size = snapshot.position.size;
-                if size.is_zero() {
-                    continue;
-                }
-                if !snapshot.ticker.mark_price_is_fresh(now) {
-                    valid = false;
-                    continue;
-                }
-                let amount = size.abs() * snapshot.ticker.mark_price;
-                if size > Decimal::ZERO {
-                    long += amount;
-                } else {
-                    short += amount;
-                }
-            }
-            SnapshotGroup {
-                mode,
+            aggregate_snapshot_bucket(
+                TradingMode::from_db(&mode),
                 asset,
                 account_id,
-                equity,
-                long: valid.then_some(long),
-                short: valid.then_some(short),
-            }
+                snapshots,
+                now,
+            )
         })
         .collect()
+}
+
+fn aggregate_snapshot_bucket(
+    mode: TradingMode,
+    asset: String,
+    account_id: Option<String>,
+    snapshots: Vec<(&BotSnapshot, u64)>,
+    now: DateTime<Utc>,
+) -> SnapshotGroup {
+    let latest = snapshots
+        .iter()
+        .filter(|(s, interval)| {
+            s.account.asset == asset
+                && (mode == TradingMode::Paper
+                    || is_timestamp_fresh(
+                        s.account.update_time,
+                        now,
+                        snapshot_max_age_secs(*interval),
+                    ))
+        })
+        .max_by_key(|(s, _)| s.account.update_time)
+        .copied();
+    let equity = if mode == TradingMode::Paper {
+        if snapshots.iter().all(|(s, interval)| {
+            s.account.asset == asset
+                && (s.position.size.is_zero()
+                    || (is_timestamp_fresh(
+                        s.account.update_time,
+                        now,
+                        snapshot_max_age_secs(*interval),
+                    ) && s.ticker.mark_price_is_fresh(now)))
+        }) {
+            latest.map(|(s, _)| s.account.margin_balance)
+        } else {
+            None
+        }
+    } else {
+        latest.map(|(s, _)| s.account.margin_balance)
+    };
+    let mut long = Decimal::ZERO;
+    let mut short = Decimal::ZERO;
+    let mut valid = true;
+    for (snapshot, interval) in snapshots {
+        if mode != TradingMode::Paper
+            && !snapshot
+                .position
+                .update_time
+                .is_some_and(|at| is_timestamp_fresh(at, now, snapshot_max_age_secs(interval)))
+        {
+            valid = false;
+            continue;
+        }
+        let size = snapshot.position.size;
+        if size.is_zero() {
+            continue;
+        }
+        if !snapshot.ticker.mark_price_is_fresh(now) {
+            valid = false;
+            continue;
+        }
+        let amount = size.abs() * snapshot.ticker.mark_price;
+        if size > Decimal::ZERO {
+            long += amount;
+        } else {
+            short += amount;
+        }
+    }
+    SnapshotGroup {
+        mode,
+        asset,
+        account_id,
+        equity,
+        long: valid.then_some(long),
+        short: valid.then_some(short),
+    }
 }
 
 fn resolve_snapshot_asset<'a>(symbol: &'a str, account_asset: &'a str) -> &'a str {

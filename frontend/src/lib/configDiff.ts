@@ -1,4 +1,4 @@
-import type { GridConfig } from './types';
+import type { GlobalConfig, GridConfig } from './types';
 import { directionLabel, maxPositionPolicyLabel } from './format';
 import { sameDecimal } from './gridPreview';
 type Editable = Omit<GridConfig, 'post_only'>;
@@ -13,7 +13,7 @@ const fields: { key: keyof Editable; label: string; risky: boolean; show: (confi
   { key: 'min_price', label: '最低价格', risky: true, show: c => c.min_price ? String(c.min_price) : '未设置' },
   { key: 'max_price', label: '最高价格', risky: true, show: c => c.max_price ? String(c.max_price) : '未设置' },
   { key: 'max_position_usdc', label: '最大持仓名义价值', risky: true, show: c => c.max_position_usdc ? String(c.max_position_usdc) : '未设置' },
-  { key: 'pause_on_max_position', label: '持仓上限处理方式', risky: true, show: c => maxPositionPolicyLabel({ pause_on_max_position: c.pause_on_max_position }) },
+  { key: 'pause_on_max_position', label: '持仓上限处理方式', risky: true, show: c => maxPositionPolicyLabel(c) },
   { key: 'min_liquidation_distance_pct', label: '强平距离阈值', risky: true, show: c => c.min_liquidation_distance_pct ? `${c.min_liquidation_distance_pct}%` : '未设置' },
   { key: 'cancel_opening_on_max_position', label: '达到上限时仅撤开仓单', risky: true, show: c => c.cancel_opening_on_max_position ? '开启' : '关闭' },
 ];
@@ -34,4 +34,37 @@ export function diffGridConfig(before: Editable, after: Editable): FieldChange[]
 /** Every field of a new strategy, shown as it will be created. */
 export function describeNewGridConfig(config: Editable): { label: string; value: string; risky: boolean }[] {
   return fields.map(({ label, risky, show }) => ({ label, risky, value: show(config) }));
+}
+
+export function diffGlobalConfig(
+  baseline: GlobalConfig | null | undefined,
+  values: {
+    global_max_position_notional?: string | null;
+    pause_on_zero_available_margin?: boolean;
+    min_available_margin_pct?: string | null;
+    api_key?: string;
+    api_secret?: string;
+    clear_api_credentials?: boolean;
+    clear_telegram_credentials?: boolean;
+  },
+): string[] {
+  const changes: string[] = [];
+  const nextNotional = values.global_max_position_notional || null, baseNotional = baseline?.global_max_position_notional || null;
+  if (nextNotional !== baseNotional && !sameDecimal(nextNotional, baseNotional)) {
+    changes.push(`全局最大持仓金额：${values.global_max_position_notional || '关闭'}`);
+  }
+  if (!!values.pause_on_zero_available_margin !== !!baseline?.pause_on_zero_available_margin) {
+    changes.push(`保证金不足时暂停：${values.pause_on_zero_available_margin ? '开启' : '关闭'}`);
+  }
+  const nextMarginPct = values.min_available_margin_pct || null, baseMarginPct = baseline?.min_available_margin_pct || null;
+  if (nextMarginPct !== baseMarginPct && !sameDecimal(nextMarginPct, baseMarginPct)) {
+    changes.push(`可用保证金比例下限：${values.min_available_margin_pct ? `${values.min_available_margin_pct}%` : '关闭'}`);
+  }
+  if (values.clear_api_credentials) {
+    changes.push('清除已保存的 API Key 和 Secret（所有交易对将以模拟盘运行并保持暂停）');
+  } else if (values.api_key?.trim() || values.api_secret?.trim()) {
+    changes.push(baseline?.has_api_key ? '更新 API Key 或 Secret（所有交易对将以新账户实盘运行并保持暂停）' : '配置 API Key 和 Secret（所有交易对将以实盘运行并保持暂停）');
+  }
+  if (values.clear_telegram_credentials) changes.push('清除已保存的 Telegram 凭证');
+  return changes;
 }

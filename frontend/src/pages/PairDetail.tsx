@@ -3,7 +3,7 @@ import { Alert, Button, Card, Col, Descriptions, Row, Statistic, Tabs } from 'an
 import { SettingOutlined } from '@ant-design/icons';
 import { usePairSnapshot, usePairs } from '../lib/queries';
 import { accountGroups, cnyText, entryPriceText, number, numeric, positivePrice, price, quoteAsset, ageText, ratioText, todayTradeCounts, trimFractionZeros } from '../lib/format';
-import { controlResultMeta, DirectionTag, DirectionText, ErrorNotice, ModeTag, PageBreadcrumb, PageTitle, Pnl, SignalChip, StatusTag } from '../components/Common';
+import { ControlResultBanner, DirectionTag, DirectionText, ErrorNotice, ModeTag, PageBreadcrumb, PageTitle, Pnl, SignalChip, StatusTag } from '../components/Common';
 import { PairControls, useControls } from '../components/Controls';
 import { DepthChart, HourlyChart } from '../components/Charts';
 import { LogsTable, OrdersTable, TradesTable } from '../components/DataTables';
@@ -35,7 +35,7 @@ export default function PairDetail() {
       extra={<div className="detail-actions">{currentPair && <PairControls pair={currentPair} stale={query.stale || !!query.error} />}<Button icon={<SettingOutlined />} onClick={() => navigate(`/pairs/${symbol}/config`)}>策略参数</Button></div>} />
     <ErrorNotice error={pairs.error || query.error} retry={() => { void pairs.refetch(); void query.refetch(); }} />
     {pairs.data && !pair && <Alert type="warning" title="该交易对不存在或已移除" />}
-    {controls.results[symbol ?? ''] && (() => { const result = controls.results[symbol ?? ''], meta = controlResultMeta(result); return <Alert showIcon type={meta.alertType} title={result} closable={!meta.pending && !!controls.clearResult} onClose={() => controls.clearResult?.(symbol ?? '')} />; })()}
+    {symbol && <ControlResultBanner symbol={symbol} results={controls.results} clearResult={controls.clearResult} variant="alert" />}
     {pair && <div className="detail-status signal-strip"><StatusTag status={currentPair!.status} /><DirectionTag direction={currentPair!.grid_config.direction} /><ModeTag mode={currentPair!.mode} /><SignalChip tier={query.live ? 'calm' : 'yellow'}>{query.live ? '实时连接' : 'HTTP 自动刷新'}</SignalChip><span className="muted freshness" title={query.dataUpdatedAt ? `最近同步 ${new Date(query.dataUpdatedAt).toLocaleTimeString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' })}` : undefined}>{query.dataUpdatedAt ? `更新于 ${ageText(query.dataUpdatedAt, now)}` : '等待首次快照'}</span></div>}
     {query.stale && s && <Alert type="warning" showIcon title="快照暂未更新，数值可能已过期；仍可撤单并暂停。" />}
     {!s && (pairs.isPending || (pair && query.isPending)) && <DetailLoading />}

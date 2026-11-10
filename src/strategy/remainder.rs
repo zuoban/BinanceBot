@@ -85,27 +85,14 @@ impl GridTradingEngine {
         if !rules.is_valid_maker_grid_price(&config.grid, closing_side, price, market) {
             return Ok(());
         }
-        let Some(full_quantity) = rules.calculate_quantity(price, config.grid.order_amount_usdc)
-        else {
-            return Ok(());
-        };
         let position = self.state.position.read().await.size;
-        let quantity = rules
-            .round_quantity(closing_quantity_available(
-                direction,
-                position,
-                &other_orders,
-            ))
-            .min(full_quantity);
-        if quantity < rules.min_qty || quantity * price < rules.min_notional {
-            return Ok(());
-        }
+        let available = closing_quantity_available(direction, position, &other_orders);
         // Once a full grid unit can be funded, promote it; later cycles allocate
         // further whole units first and leave at most one final remainder.
-        let purpose = if quantity == full_quantity {
-            OrderPurpose::Grid
-        } else {
-            OrderPurpose::Remainder
+        let Some((quantity, purpose)) =
+            rules.plan_remainder_quantity(price, config.grid.order_amount_usdc, available)
+        else {
+            return Ok(());
         };
         if sources.len() == 1 {
             let source = &sources[0];
@@ -170,35 +157,12 @@ impl GridTradingEngine {
         let config = self.state.config.read().await.clone();
         let paper = config.exchange.is_paper();
         let pause_epoch = self.state.pause_epoch();
-        if plan.phase == RemainderPhase::Canceling {
-            for source in &plan.sources {
-                if self.state.pause_epoch() != pause_epoch {
-                    return Ok(());
-                }
-                if paper {
-                    if !self.cancel_single_order(source).await {
-                        return Err(anyhow!("Could not cancel paper remainder"));
-                    }
-                } else {
-                    // Query first: a prior cancellation may have succeeded even if
-                    // its response was lost or the process exited immediately after it.
-                    let found = self
-                        .client
-                        .get_order_by_client_id(&plan.symbol, &source.client_order_id)
-                        .await?;
-                    self.cancel_and_settle_remainder_order(source.clone(), found, None)
-                        .await?;
-                }
-            }
-            // All sources are now terminal. Live quantities must be recalculated
-            // from the exchange position, never from the pre-cancellation sum.
-            if !paper && !self.sync_account_and_position().await {
-                return Err(anyhow!(
-                    "Position refresh failed after remainder cancellation"
-                ));
-            }
-            plan.phase = RemainderPhase::Submitting;
-            self.persist_remainder_plan(plan).await?;
+        if plan.phase == RemainderPhase::Canceling
+            && !self
+                .cancel_remainder_plan_sources(plan, paper, pause_epoch)
+                .await?
+        {
+            return Ok(());
         }
         if self.state.pause_epoch() != pause_epoch
             || *self.state.status.read().await != BotStatus::Running
@@ -289,6 +253,68 @@ impl GridTradingEngine {
             plan.phase = RemainderPhase::Complete;
             return self.persist_remainder_plan(plan).await;
         }
+        self.submit_remainder_plan_target(
+            &config,
+            &rules,
+            plan,
+            paper,
+            pause_epoch,
+            closing_side,
+            price,
+            quantity,
+        )
+        .await
+    }
+
+    async fn cancel_remainder_plan_sources(
+        &mut self,
+        plan: &mut RemainderPlan,
+        paper: bool,
+        pause_epoch: u64,
+    ) -> Result<bool> {
+        for source in &plan.sources {
+            if self.state.pause_epoch() != pause_epoch {
+                return Ok(false);
+            }
+            if paper {
+                if !self.cancel_single_order(source).await {
+                    return Err(anyhow!("Could not cancel paper remainder"));
+                }
+            } else {
+                // Query first: a prior cancellation may have succeeded even if
+                // its response was lost or the process exited immediately after it.
+                let found = self
+                    .client
+                    .get_order_by_client_id(&plan.symbol, &source.client_order_id)
+                    .await?;
+                self.cancel_and_settle_remainder_order(source.clone(), found, None)
+                    .await?;
+            }
+        }
+        // All sources are now terminal. Live quantities must be recalculated
+        // from the exchange position, never from the pre-cancellation sum.
+        if !paper && !self.sync_account_and_position().await {
+            return Err(anyhow!(
+                "Position refresh failed after remainder cancellation"
+            ));
+        }
+        plan.phase = RemainderPhase::Submitting;
+        self.persist_remainder_plan(plan).await?;
+        Ok(true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn submit_remainder_plan_target(
+        &mut self,
+        config: &crate::config::AppConfig,
+        rules: &SymbolRules,
+        plan: &mut RemainderPlan,
+        paper: bool,
+        pause_epoch: u64,
+        closing_side: OrderSide,
+        price: Decimal,
+        quantity: Decimal,
+    ) -> Result<()> {
         let Some(_submission) = self.state.try_order_submission() else {
             return Ok(());
         };

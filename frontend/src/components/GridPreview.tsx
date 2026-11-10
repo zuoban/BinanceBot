@@ -1,15 +1,17 @@
-import { useLayoutEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import { Form, Input } from 'antd';
 import type { FormInstance } from 'antd';
 import { CloseCircleOutlined, WarningOutlined } from '@ant-design/icons';
 import { capCoverage, exceeds, exposure, gridPreview, orderSizing, priceDiffPercent, priceRangeError, spacingBelowRoundTripFee, spacingPercent, sumDecimals, tickSizeError } from '../lib/gridPreview';
 import { maxPositionPolicyLabel, positiveDecimalText } from '../lib/format';
+import type { GridConfig } from '../lib/types';
+import { useCenterElementScroll } from './Common';
 
 /** Live ladder of the orders the engine would place, from the form values and a reference price. */
-export function GridPreview<Values>({ form, markPrice, tickSize, stepSize, minQty, minNotional, quote }: { form: FormInstance<Values>; markPrice?: string | null; tickSize?: string | null; stepSize?: string | null; minQty?: string | null; minNotional?: string | null; quote: string }) {
+export function GridPreview<Values extends Partial<Omit<GridConfig, 'post_only'>>>({ form, markPrice, tickSize, stepSize, minQty, minNotional, quote }: { form: FormInstance<Values>; markPrice?: string | null; tickSize?: string | null; stepSize?: string | null; minQty?: string | null; minNotional?: string | null; quote: string }) {
   const [typed, setTyped] = useState('');
   const ladderRef = useRef<HTMLOListElement>(null);
-  const values = Form.useWatch([], form) as Record<string, unknown> | undefined;
+  const values = Form.useWatch([], form) as Partial<Omit<GridConfig, 'post_only'>> | undefined;
   const cleanMark = positiveDecimalText(markPrice);
   const hasMark = cleanMark !== null;
   const reference = cleanMark ?? typed;
@@ -27,13 +29,7 @@ export function GridPreview<Values>({ form, markPrice, tickSize, stepSize, minQt
   const openingLabel = short ? '卖单' : '买单';
   const openingPrices = preview ? (short ? preview.sells : preview.buys) : [];
   const orders = preview ? preview.buys.length + preview.sells.length : 0;
-  useLayoutEffect(() => {
-    const container = ladderRef.current;
-    const markNode = container?.querySelector<HTMLElement>('.grid-preview-mark');
-    if (container && markNode && container.scrollHeight > container.clientHeight) {
-      container.scrollTop = Math.max(0, markNode.offsetTop - container.clientHeight / 2 + markNode.clientHeight / 2);
-    }
-  }, [preview?.sells.length, preview?.buys.length]);
+  useCenterElementScroll(ladderRef, '.grid-preview-mark', [preview?.sells.length, preview?.buys.length]);
   const worstCase = preview && values ? (cleanStep
     ? sumDecimals(openingPrices.flatMap(price => { const s = sizings.get(price); return s && !s.error ? [s.notional] : []; }))
     : exposure(values.order_amount_usdc, openingPrices.length)) : null;

@@ -67,6 +67,49 @@ fn load_saved_config(db: &Database) -> anyhow::Result<AppConfig> {
     Ok(config)
 }
 
+fn run_migrate_legacy_paper(db: PathBuf, symbol: String, confirm: String) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        confirm == "INITIALIZE-EMPTY-PAPER-ACCOUNT",
+        "Confirmation must be exactly INITIALIZE-EMPTY-PAPER-ACCOUNT"
+    );
+    binance_grid_bot::config::validate_symbol(&symbol).map_err(|_| {
+        anyhow::anyhow!("Trading pair must contain 3–32 uppercase ASCII letters or digits")
+    })?;
+    #[cfg(not(unix))]
+    anyhow::bail!("Offline paper migration requires Unix process locking");
+    #[cfg(unix)]
+    {
+        let metadata = std::fs::symlink_metadata(&db)
+            .map_err(|e| anyhow::anyhow!("Cannot inspect existing database {:?}: {}", db, e))?;
+        anyhow::ensure!(
+            metadata.file_type().is_file(),
+            "Migration requires an existing regular database file, not a symlink"
+        );
+        let _process_lock = database_process_lock::DatabaseProcessLock::acquire(&db)?;
+        Database::open(&db)?.initialize_legacy_paper_account(&symbol)?;
+        println!("Initialized paper subledger for {} with an empty position and a 10000 accounting baseline; no funds were added to the shared paper account. Historical positions and balances were not restored. Restart the bot and manually resume the paused strategy after reviewing the baseline.", symbol);
+        Ok(())
+    }
+}
+
+fn resolve_admin_auth(
+    cli_password: Option<String>,
+) -> anyhow::Result<Option<Arc<binance_grid_bot::auth::AdminAuth>>> {
+    let admin_password = cli_password
+        .filter(|password| !password.is_empty())
+        .or_else(|| {
+            std::env::var("ADMIN_PASSWORD")
+                .ok()
+                .filter(|password| !password.is_empty())
+        });
+    match admin_password {
+        Some(password) => Ok(Some(Arc::new(
+            binance_grid_bot::auth::AdminAuth::from_password(&password)?,
+        ))),
+        None => Ok(None),
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::registry()
@@ -86,46 +129,12 @@ async fn main() -> anyhow::Result<()> {
         confirm,
     }) = args.command
     {
-        anyhow::ensure!(
-            confirm == "INITIALIZE-EMPTY-PAPER-ACCOUNT",
-            "Confirmation must be exactly INITIALIZE-EMPTY-PAPER-ACCOUNT"
-        );
-        binance_grid_bot::config::validate_symbol(&symbol).map_err(|_| {
-            anyhow::anyhow!("Trading pair must contain 3–32 uppercase ASCII letters or digits")
-        })?;
-        #[cfg(not(unix))]
-        anyhow::bail!("Offline paper migration requires Unix process locking");
-        #[cfg(unix)]
-        {
-            let metadata = std::fs::symlink_metadata(&db)
-                .map_err(|e| anyhow::anyhow!("Cannot inspect existing database {:?}: {}", db, e))?;
-            anyhow::ensure!(
-                metadata.file_type().is_file(),
-                "Migration requires an existing regular database file, not a symlink"
-            );
-            let _process_lock = database_process_lock::DatabaseProcessLock::acquire(&db)?;
-            Database::open(&db)?.initialize_legacy_paper_account(&symbol)?;
-            println!("Initialized paper subledger for {} with an empty position and a 10000 accounting baseline; no funds were added to the shared paper account. Historical positions and balances were not restored. Restart the bot and manually resume the paused strategy after reviewing the baseline.", symbol);
-            return Ok(());
-        }
+        return run_migrate_legacy_paper(db, symbol, confirm);
     }
     let mut signals = ShutdownSignals::register().await?;
     let signal = signals.wait();
     tokio::pin!(signal);
-    let admin_password = args
-        .admin_password
-        .filter(|password| !password.is_empty())
-        .or_else(|| {
-            std::env::var("ADMIN_PASSWORD")
-                .ok()
-                .filter(|password| !password.is_empty())
-        });
-    let admin_auth = match admin_password {
-        Some(password) => Some(Arc::new(binance_grid_bot::auth::AdminAuth::from_password(
-            &password,
-        )?)),
-        None => None,
-    };
+    let admin_auth = resolve_admin_auth(args.admin_password)?;
     let _process_lock = database_process_lock::DatabaseProcessLock::acquire(&args.db)?;
     let db = Arc::new(Database::open(&args.db)?);
     db.clear_all_sessions()

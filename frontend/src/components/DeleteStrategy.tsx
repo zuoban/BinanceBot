@@ -1,9 +1,15 @@
 import { useRef, useState } from 'react';
 import { App, Input } from 'antd';
-import { useQueryClient } from '@tanstack/react-query';
+import { useQueryClient, type QueryClient } from '@tanstack/react-query';
 import { api, ApiError } from '../lib/api';
 import type { Pair } from '../lib/types';
 import { useControls } from './Controls';
+
+function invalidateStrategyListQueries(client: QueryClient) {
+  void client.invalidateQueries({ queryKey: ['pairs'] });
+  void client.invalidateQueries({ queryKey: ['overview'] });
+  void client.resetQueries({ queryKey: ['overview-history'] });
+}
 
 export function useDeleteStrategy() {
   const { modal, message } = App.useApp();
@@ -37,15 +43,11 @@ export function useDeleteStrategy() {
       controls?.clearResult?.(pair.symbol);
       client.removeQueries({ queryKey: ['snapshot', pair.symbol] });
       client.removeQueries({ queryKey: ['config', pair.symbol] });
-      void client.invalidateQueries({ queryKey: ['pairs'] });
-      void client.invalidateQueries({ queryKey: ['overview'] });
-      void client.resetQueries({ queryKey: ['overview-history'] });
+      invalidateStrategyListQueries(client);
       return true;
     } catch (error) {
       if (deleteStarted) {
-        void client.invalidateQueries({ queryKey: ['pairs'] });
-        void client.invalidateQueries({ queryKey: ['overview'] });
-        void client.resetQueries({ queryKey: ['overview-history'] });
+        invalidateStrategyListQueries(client);
       }
       const uncertain = deleteStarted && error instanceof ApiError && error.kind === 'invalid-response';
       message.error(`${(error as Error).message}${uncertain ? '；删除结果可能已生效，请刷新状态或查看日志后再操作' : ''}`);

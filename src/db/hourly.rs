@@ -225,21 +225,7 @@ pub(super) fn stats_on(
         let value = if stored.latest.is_some_and(|latest| latest <= now) {
             stored
         } else {
-            // Only the boundary hour can contain entries after the upper bound.
-            // Parse timestamps before comparing so nanoseconds remain exact.
-            let mut boundary = conn.prepare(
-                "SELECT timestamp, side, realized_pnl, pnl_verified FROM trades
-                 WHERE symbol = ?1 AND mode = ?2 AND stats_hour = ?3",
-            )?;
-            let mut entries = boundary.query(params![symbol, mode.as_str(), bucket])?;
-            let mut value = Rollup::default();
-            while let Some(entry) = entries.next()? {
-                let timestamp: DateTime<Utc> = entry.get(0)?;
-                if timestamp >= window_start && timestamp <= now {
-                    value.add_row(timestamp, entry)?;
-                }
-            }
-            value
+            load_boundary_rollup_on(conn, symbol, mode, bucket, window_start, now)?
         };
         let index = ((bucket - first_hour) / 3600) as usize;
         result.buckets[index].buy_count = value.buys as u64;
@@ -248,6 +234,31 @@ pub(super) fn stats_on(
         result.pending_pnl_count += value.pending as u64;
     }
     Ok(result)
+}
+
+/// Only the boundary hour can contain entries after the upper bound.
+/// Parse timestamps before comparing so nanoseconds remain exact.
+fn load_boundary_rollup_on(
+    conn: &Connection,
+    symbol: &str,
+    mode: TradingMode,
+    bucket: i64,
+    window_start: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> Result<Rollup> {
+    let mut boundary = conn.prepare(
+        "SELECT timestamp, side, realized_pnl, pnl_verified FROM trades
+         WHERE symbol = ?1 AND mode = ?2 AND stats_hour = ?3",
+    )?;
+    let mut entries = boundary.query(params![symbol, mode.as_str(), bucket])?;
+    let mut value = Rollup::default();
+    while let Some(entry) = entries.next()? {
+        let timestamp: DateTime<Utc> = entry.get(0)?;
+        if timestamp >= window_start && timestamp <= now {
+            value.add_row(timestamp, entry)?;
+        }
+    }
+    Ok(value)
 }
 
 #[cfg(test)]

@@ -8,8 +8,8 @@ import type { GlobalConfig, ServerConfig } from '../lib/types';
 import { ConflictReloadButton, ErrorNotice, FormRevertButton, isConfigConflict, PageTitle } from '../components/Common';
 import { LoadErrorBoundary } from '../components/LoadErrorBoundary';
 import { useUrlParam } from '../lib/urlState';
-import { isPercentDecimal, isPositiveDecimal, sameDecimal } from '../lib/gridPreview';
-
+import { isPercentDecimal, isPositiveDecimal } from '../lib/gridPreview';
+import { diffGlobalConfig } from '../lib/configDiff';
 const DatabaseSettings = lazy(() => import('../components/DatabaseSettings').then(module => ({ default: module.DatabaseSettings })));
 
 type GlobalForm = GlobalConfig & { api_key?: string; api_secret?: string; telegram_bot_token?: string; clear_api_credentials: boolean; clear_telegram_credentials: boolean };
@@ -120,23 +120,7 @@ function GlobalSettings() {
     if (submitting.current) return;
     submitting.current = true;
     flushSync(() => edit.setSaving(true));
-    const changes: string[] = [];
-    const nextNotional = values.global_max_position_notional || null, baseNotional = baseline.current?.global_max_position_notional || null;
-    if (nextNotional !== baseNotional && !sameDecimal(nextNotional, baseNotional)) {
-      changes.push(`全局最大持仓金额：${values.global_max_position_notional || '关闭'}`);
-    }
-    if (!!values.pause_on_zero_available_margin !== !!baseline.current?.pause_on_zero_available_margin) {
-      changes.push(`保证金不足时暂停：${values.pause_on_zero_available_margin ? '开启' : '关闭'}`);
-    }
-    const nextMarginPct = values.min_available_margin_pct || null, baseMarginPct = baseline.current?.min_available_margin_pct || null;
-    if (nextMarginPct !== baseMarginPct && !sameDecimal(nextMarginPct, baseMarginPct)) {
-      changes.push(`可用保证金比例下限：${values.min_available_margin_pct ? `${values.min_available_margin_pct}%` : '关闭'}`);
-    }
-    if (values.clear_api_credentials) changes.push('清除已保存的 API Key 和 Secret（所有交易对将以模拟盘运行并保持暂停）');
-    else if (values.api_key?.trim() || values.api_secret?.trim()) {
-      changes.push(baseline.current?.has_api_key ? '更新 API Key 或 Secret（所有交易对将以新账户实盘运行并保持暂停）' : '配置 API Key 和 Secret（所有交易对将以实盘运行并保持暂停）');
-    }
-    if (values.clear_telegram_credentials) changes.push('清除已保存的 Telegram 凭证');
+    const changes = diffGlobalConfig(baseline.current, values);
     try {
       if (changes.length && !await modal.confirm({
         title: '确认保存全局设置？',

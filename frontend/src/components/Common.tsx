@@ -1,12 +1,11 @@
-import { useContext, useRef } from 'react';
+import { useContext, useLayoutEffect, useRef, type DependencyList, type RefObject } from 'react';
 import { Alert, App, Button, Empty, Space } from 'antd';
-import { ArrowDownOutlined, ArrowUpOutlined, CheckCircleFilled, ClockCircleFilled, CloseCircleFilled, ExclamationCircleFilled, InfoCircleFilled, MinusCircleFilled, ReloadOutlined, ThunderboltFilled } from '@ant-design/icons';
+import { ArrowDownOutlined, ArrowUpOutlined, CheckCircleFilled, ClockCircleFilled, CloseCircleFilled, CloseOutlined, ExclamationCircleFilled, InfoCircleFilled, MinusCircleFilled, ReloadOutlined, ThunderboltFilled } from '@ant-design/icons';
 import { Link } from 'react-router-dom';
 import { EditContext } from '../lib/session';
 import type { GridConfig, Mode, Status } from '../lib/types';
 type Direction = GridConfig['direction'];
 import { compactNumber, directionLabel, modeLabel, number, numeric, statusLabel } from '../lib/format';
-
 export function ErrorNotice({ error, retry }: { error: Error | null; retry?: () => void }) {
   if (!error) return null;
   return <Alert type="error" showIcon title={error.message} action={retry && <Button size="small" onClick={retry} icon={<ReloadOutlined />}>重试</Button>} />;
@@ -18,6 +17,19 @@ export function controlResultMeta(result: string): { tier: Signal; alertType: 'e
   if (result.includes('尚未确认') || result.includes('结果不明')) return { tier: 'yellow', alertType: 'warning', pending: false };
   if (result === '已确认') return { tier: 'calm', alertType: 'success', pending: false };
   return { tier: 'blue', alertType: 'info', pending: result === '正在提交…' };
+}
+export function ControlResultBanner({ symbol, results, clearResult, variant = 'inline' }: { symbol: string; results: Record<string, string>; clearResult?: (symbol: string) => void; variant?: 'inline' | 'alert' }) {
+  const result = results[symbol];
+  if (!result) return null;
+  const meta = controlResultMeta(result);
+  if (variant === 'alert') {
+    return <Alert showIcon type={meta.alertType} title={result} closable={!meta.pending && !!clearResult} onClose={() => clearResult?.(symbol)} />;
+  }
+  return <div className={`operation-result signal-${meta.tier}`} role="status">
+    <span className="signal-icon" aria-hidden="true">{signalIcon[meta.tier]}</span>
+    <span className="operation-result-text">{result}</span>
+    {!meta.pending && clearResult && <button type="button" className="operation-result-close" aria-label={`关闭 ${symbol} 操作提示`} onClick={() => clearResult(symbol)}><CloseOutlined aria-hidden="true" /></button>}
+  </div>;
 }
 /** Tiered state chip: colour is never the only channel, every tier carries an icon and words. */
 export function SignalChip({ tier, icon, children, title }: { tier: Signal; icon?: React.ReactNode; children: React.ReactNode; title?: string }) {
@@ -39,9 +51,12 @@ export function DirectionTag({ direction }: { direction: Direction }) {
   const short = direction === 'SHORT';
   return <span className={`strategy-direction strategy-direction-${short ? 'short' : 'long'}`} role="img" aria-label={`策略方向：${directionLabel(direction)}`}>{short ? <ArrowDownOutlined /> : <ArrowUpOutlined />}{directionLabel(direction)}</span>;
 }
+export function SideTag({ side, label }: { side: 'BUY' | 'SELL'; label?: string }) {
+  const buy = side === 'BUY';
+  return <span className={`side-tag side-${buy ? 'buy' : 'sell'}`}><span aria-hidden="true">{buy ? '↑' : '↓'}</span>{label ?? (buy ? '买入' : '卖出')}</span>;
+}
 export function DirectionText({ direction }: { direction: Direction }) {
-  const short = direction === 'SHORT';
-  return <span className={`side-tag side-${short ? 'sell' : 'buy'}`}><span aria-hidden="true">{short ? '↓' : '↑'}</span>{directionLabel(direction)}</span>;
+  return <SideTag side={direction === 'SHORT' ? 'SELL' : 'BUY'} label={directionLabel(direction)} />;
 }
 export function Pnl({ value, compact = false }: { value: unknown; compact?: boolean }) {
   const n = numeric(value);
@@ -61,8 +76,17 @@ export function PageBreadcrumb({ items, disabled = false }: { items: { label: st
 export function PageTitle({ title, description, extra }: { title: string; description?: string; extra?: React.ReactNode }) {
   return <div className="page-heading"><div><h1>{title}</h1>{description && <p>{description}</p>}</div>{extra != null && extra !== false && <Space wrap>{extra}</Space>}</div>;
 }
+export function useCenterElementScroll<T extends HTMLElement>(ref: RefObject<T | null>, selector: string, deps: DependencyList) {
+  useLayoutEffect(() => {
+    const container = ref.current;
+    const target = container?.querySelector<HTMLElement>(selector);
+    if (container && target && container.scrollHeight > container.clientHeight) {
+      container.scrollTop = Math.max(0, target.offsetTop - container.clientHeight / 2 + target.clientHeight / 2);
+    }
+  }, deps);
+}
 export function isConfigConflict(error: Error | null | undefined, messageFragment: string): boolean {
-  return (error as { status?: number } | null | undefined)?.status === 409 || Boolean(error?.message.includes(messageFragment));
+  return Boolean(error && (('status' in error && error.status === 409) || error.message.includes(messageFragment)));
 }
 export function ConflictReloadButton<T>({ label, activeRef, refetch, onLoaded, onReset }: {
   label: string;

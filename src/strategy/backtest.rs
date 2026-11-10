@@ -299,12 +299,25 @@ impl<'a> Sim<'a> {
         if self.paused.is_some() || self.pause_at_position_limit() {
             return;
         }
+        let opening = self.p.grid.direction.opening_side();
+        let (buys, sells) = self.compute_window_prices();
+        let (opening_prices, closing_prices) = if opening == OrderSide::Buy {
+            (buys.clone(), sells.clone())
+        } else {
+            (sells.clone(), buys.clone())
+        };
+        self.prune_and_trim_orders(&buys, &sells);
+        if !self.replenish_opening_orders(&opening_prices) {
+            return;
+        }
+        self.replenish_closing_and_remainder_orders(&closing_prices);
+    }
+
+    fn compute_window_prices(&self) -> (Vec<Decimal>, Vec<Decimal>) {
         let grid = &self.p.grid;
         let direction = grid.direction;
         let opening = direction.opening_side();
-        let closing = direction.closing_side();
         let market = self.market;
-        let limit = self.limit();
         let position_value = self.size.abs() * market;
         let interval = grid.grid_interval;
         let last_fill = self.last_fill;
@@ -329,7 +342,7 @@ impl<'a> Sim<'a> {
         }
         let suspended = grid.cancel_opening_on_max_position
             && !grid.pause_on_max_position
-            && limit.is_some_and(|limit| position_value >= limit);
+            && self.limit().is_some_and(|limit| position_value >= limit);
         if suspended {
             if opening == OrderSide::Buy {
                 buys.clear();
@@ -337,11 +350,12 @@ impl<'a> Sim<'a> {
                 sells.clear();
             }
         }
-        let (opening_prices, closing_prices) = if opening == OrderSide::Buy {
-            (buys.clone(), sells.clone())
-        } else {
-            (sells.clone(), buys.clone())
-        };
+        (buys, sells)
+    }
+
+    fn prune_and_trim_orders(&mut self, buys: &[Decimal], sells: &[Decimal]) {
+        let direction = self.p.grid.direction;
+        let closing = direction.closing_side();
         self.orders.retain(|order| {
             if order.side == OrderSide::Buy {
                 buys.contains(&order.price)
@@ -349,19 +363,13 @@ impl<'a> Sim<'a> {
                 sells.contains(&order.price)
             }
         });
-
         // Keep closing orders within the position, nearest first.
         let mut position_qty = direction.position_quantity(self.size);
         let mut closing_orders: Vec<usize> = (0..self.orders.len())
             .filter(|&i| self.orders[i].side == closing)
             .collect();
         closing_orders.sort_by(|&a, &b| {
-            let (pa, pb) = (self.orders[a].price, self.orders[b].price);
-            if direction == GridDirection::Long {
-                pa.cmp(&pb)
-            } else {
-                pb.cmp(&pa)
-            }
+            direction.closing_price_cmp(self.orders[a].price, self.orders[b].price)
         });
         let mut drop = Vec::new();
         for index in closing_orders {
@@ -375,8 +383,15 @@ impl<'a> Sim<'a> {
         for index in drop {
             self.orders.remove(index);
         }
+    }
 
-        for &price in &opening_prices {
+    fn replenish_opening_orders(&mut self, opening_prices: &[Decimal]) -> bool {
+        let direction = self.p.grid.direction;
+        let opening = direction.opening_side();
+        let market = self.market;
+        let limit = self.limit();
+        let position_value = self.size.abs() * market;
+        for &price in opening_prices {
             if self
                 .orders
                 .iter()
@@ -397,7 +412,7 @@ impl<'a> Sim<'a> {
                     let projected = (self.size + direction.sign() * qty).abs() * market;
                     if projected > limit && projected > position_value {
                         self.pause("下一笔开仓单成交后预计持仓名义价值超过上限");
-                        return;
+                        return false;
                     }
                 }
                 let valuation = market.max(price);
@@ -420,7 +435,13 @@ impl<'a> Sim<'a> {
                 remainder: false,
             });
         }
+        true
+    }
 
+    fn replenish_closing_and_remainder_orders(&mut self, closing_prices: &[Decimal]) {
+        let direction = self.p.grid.direction;
+        let closing = direction.closing_side();
+        let market = self.market;
         let reserved = |orders: &[BtOrder]| -> Decimal {
             orders
                 .iter()
@@ -428,7 +449,7 @@ impl<'a> Sim<'a> {
                 .map(|o| o.qty)
                 .sum()
         };
-        for &price in &closing_prices {
+        for &price in closing_prices {
             if self
                 .orders
                 .iter()
@@ -478,17 +499,14 @@ impl<'a> Sim<'a> {
                     price < market
                 }
         }) {
-            let Some(full_quantity) = self.qty_at(price) else {
+            let Some((qty, purpose)) = self.p.rules.plan_remainder_quantity(
+                price,
+                self.p.grid.order_amount_usdc,
+                available,
+            ) else {
                 return;
             };
-            let qty = self.p.rules.round_quantity(available).min(full_quantity);
-            if qty <= Decimal::ZERO
-                || qty < self.p.rules.min_qty
-                || qty * price < self.p.rules.min_notional
-            {
-                return;
-            }
-            let remainder = qty < full_quantity;
+            let remainder = purpose == crate::types::OrderPurpose::Remainder;
             let mut sources = self
                 .orders
                 .iter()
@@ -511,7 +529,7 @@ impl<'a> Sim<'a> {
     }
 }
 
-pub fn run(params: &BacktestParams, candles: &[Candle]) -> Result<BacktestReport> {
+fn validate_backtest_inputs(params: &BacktestParams, candles: &[Candle]) -> Result<()> {
     let grid = &params.grid;
     ensure!(!candles.is_empty(), "没有可回放的行情数据");
     grid.validate()?;
@@ -547,7 +565,11 @@ pub fn run(params: &BacktestParams, candles: &[Candle]) -> Result<BacktestReport
             candle.time_ms
         );
     }
+    Ok(())
+}
 
+pub fn run(params: &BacktestParams, candles: &[Candle]) -> Result<BacktestReport> {
+    validate_backtest_inputs(params, candles)?;
     let first = candles[0];
     let mut sim = Sim::new(params, first.open, first.time_ms);
     sim.maintain();

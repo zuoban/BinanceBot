@@ -192,14 +192,9 @@ async fn fetch_exchange_symbol_preview(
     let rules =
         match crate::strategy::precision::SymbolRules::from_trading_exchange_info(&info, symbol) {
             Ok(rules) => rules,
-            Err(crate::strategy::precision::SymbolRulesError::NotFound) => {
-                return status_err(StatusCode::NOT_FOUND, "交易对不存在");
-            }
-            Err(crate::strategy::precision::SymbolRulesError::NotTrading) => {
-                return status_err(StatusCode::BAD_REQUEST, "该交易对当前未处于交易状态");
-            }
-            Err(crate::strategy::precision::SymbolRulesError::MissingFilters) => {
-                return status_err(StatusCode::BAD_GATEWAY, "交易对精度规则缺失");
+            Err(err) => {
+                let (status, message) = err.preview_status_and_message();
+                return status_err(status, message);
             }
         };
     let last_price = last_res
@@ -1700,6 +1695,16 @@ impl Drop for PendingControlPause {
     }
 }
 
+fn require_expected_mode(
+    payload: &ControlRequest,
+    action_label: &str,
+) -> Result<TradingMode, String> {
+    payload
+        .expected_mode
+        .filter(|mode| *mode != TradingMode::Unknown)
+        .ok_or_else(|| format!("{}需要提供确认时的运行模式", action_label))
+}
+
 fn control_action(
     payload: ControlRequest,
     expected_epoch: u64,
@@ -1708,10 +1713,7 @@ fn control_action(
         "pause" => Ok((BotControlAction::Pause, None)),
         "cancel_all" => Ok((BotControlAction::CancelAll, None)),
         "resume" => {
-            let expected_mode = payload
-                .expected_mode
-                .filter(|mode| *mode != TradingMode::Unknown)
-                .ok_or_else(|| "恢复策略需要提供确认时的运行模式".to_string())?;
+            let expected_mode = require_expected_mode(&payload, "恢复策略")?;
             let (reply, receiver) = tokio::sync::oneshot::channel();
             Ok((
                 BotControlAction::Resume {
@@ -1723,10 +1725,7 @@ fn control_action(
             ))
         }
         "rebalance" => {
-            let expected_mode = payload
-                .expected_mode
-                .filter(|mode| *mode != TradingMode::Unknown)
-                .ok_or_else(|| "重建网格需要提供确认时的运行模式".to_string())?;
+            let expected_mode = require_expected_mode(&payload, "重建网格")?;
             let (reply, receiver) = tokio::sync::oneshot::channel();
             Ok((
                 BotControlAction::Rebalance {
@@ -2092,8 +2091,8 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, token: String) {
     if *retired.borrow() {
         return;
     }
-    let (mut sender, mut receiver) = socket.split();
-    let mut rx = state.ws_broadcast_tx.subscribe();
+    let (mut sender, receiver) = socket.split();
+    let rx = state.ws_broadcast_tx.subscribe();
 
     // Send initial snapshot immediately upon connection
     let initial_snapshot = state.snapshot().await;
@@ -2109,15 +2108,32 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, token: String) {
         }
     }
 
-    let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-    let (control_tx, mut control_rx) = tokio::sync::mpsc::unbounded_channel::<(
-        String,
-        (BotControlAction, Option<ControlReply>),
-        Option<PendingControlPause>,
-    )>();
-    let worker_state = state.clone();
-    let worker_results = result_tx.clone();
-    let worker_token = token.clone();
+    let (result_tx, result_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (control_tx, control_rx) = tokio::sync::mpsc::unbounded_channel();
+    spawn_socket_control_worker(state.clone(), result_tx.clone(), token.clone(), control_rx);
+    let mut send_task =
+        spawn_socket_send_task(sender, state.clone(), token.clone(), retired, result_rx, rx);
+    let mut recv_task = spawn_socket_recv_task(receiver, state, token, result_tx, control_tx);
+
+    // If either task exits, abort the other
+    tokio::select! {
+        _ = (&mut send_task) => recv_task.abort(),
+        _ = (&mut recv_task) => send_task.abort(),
+    };
+}
+
+type SocketControlEntry = (
+    String,
+    (BotControlAction, Option<ControlReply>),
+    Option<PendingControlPause>,
+);
+
+fn spawn_socket_control_worker(
+    worker_state: Arc<AppState>,
+    worker_results: tokio::sync::mpsc::UnboundedSender<String>,
+    worker_token: String,
+    mut control_rx: tokio::sync::mpsc::UnboundedReceiver<SocketControlEntry>,
+) {
     tokio::spawn(async move {
         while let Some((name, action, pending_pause)) = control_rx.recv().await {
             let (submitted, ready) = tokio::sync::oneshot::channel();
@@ -2140,9 +2156,17 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, token: String) {
             let _ = ready.await;
         }
     });
-    let send_state = state.clone();
-    let send_token = token.clone();
-    let mut send_task = tokio::spawn(async move {
+}
+
+fn spawn_socket_send_task(
+    mut sender: futures_util::stream::SplitSink<WebSocket, Message>,
+    send_state: Arc<AppState>,
+    send_token: String,
+    mut retired: tokio::sync::watch::Receiver<bool>,
+    mut result_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    mut rx: tokio::sync::broadcast::Receiver<String>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
         let mut check_auth = tokio::time::interval(std::time::Duration::from_secs(1));
         loop {
             tokio::select! {
@@ -2168,10 +2192,17 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, token: String) {
                 }
             }
         }
-    });
+    })
+}
 
-    let state_clone = state.clone();
-    let mut recv_task = tokio::spawn(async move {
+fn spawn_socket_recv_task(
+    mut receiver: futures_util::stream::SplitStream<WebSocket>,
+    state_clone: Arc<AppState>,
+    token: String,
+    result_tx: tokio::sync::mpsc::UnboundedSender<String>,
+    control_tx: tokio::sync::mpsc::UnboundedSender<SocketControlEntry>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
         while let Some(Ok(msg)) = receiver.next().await {
             if let Message::Text(text) = msg {
                 if !state_clone.is_token_valid(&token).await {
@@ -2214,13 +2245,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, token: String) {
                 }
             }
         }
-    });
-
-    // If either task exits, abort the other
-    tokio::select! {
-        _ = (&mut send_task) => recv_task.abort(),
-        _ = (&mut recv_task) => send_task.abort(),
-    };
+    })
 }
 
 #[cfg(test)]

@@ -73,6 +73,7 @@ impl ShutdownSignals {
 }
 
 /// Both interactive and container shutdowns use the same order-cleanup path.
+#[cfg(test)]
 pub async fn shutdown_signal() -> Result<&'static str> {
     ShutdownSignals::register().await?.wait().await
 }

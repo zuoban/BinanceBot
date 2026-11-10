@@ -1,10 +1,10 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { App, Button, Dropdown, Space, Tooltip } from 'antd';
-import { MoreOutlined, PauseOutlined, PlayCircleOutlined, ReloadOutlined, StopOutlined } from '@ant-design/icons';
+import { App, Button, Dropdown, Space } from 'antd';
+import { MoreOutlined } from '@ant-design/icons';
 import { useQueryClient } from '@tanstack/react-query';
 import { api, pairPath, post } from '../lib/api';
 import type { Action, Pair, Snapshot } from '../lib/types';
-
+import { StrategyToggle, strategySecondaryItems } from './StrategyMenu';
 async function confirmControlState(pair: Pair, action: Action): Promise<boolean> {
   if (action === 'rebalance') return true;
   for (let attempt = 0; attempt < 5; attempt++) {
@@ -33,6 +33,33 @@ export async function runBatchControls(pairs: Pair[], action: 'pause' | 'resume'
     }
   }
   return outcomes;
+}
+function controlConfirmCopy(pair: Pair, action: Action) {
+  const titleAction = action === 'resume' ? '恢复策略' : action === 'rebalance' ? '重建网格' : '撤单并暂停';
+  const content = action === 'resume'
+    ? (pair.mode === 'LIVE' ? '恢复后将使用真实资金下单，请确认交易对和参数。' : '恢复后将按当前参数继续维护网格。')
+    : action === 'rebalance'
+      ? '将撤销机器人挂单并重新构建网格，请确认交易对和参数。'
+      : '将撤销此交易对的机器人挂单并暂停，保留持仓。';
+  return { title: `${pair.symbol} · ${titleAction}`, content };
+}
+function resolveControlOutcome(action: Action, observedState: boolean): { resultText: string; confirmedState: boolean; outcome: ControlResult } {
+  const cancellationUnverified = action === 'pause' || action === 'cancel_all';
+  const confirmedState = observedState && !cancellationUnverified;
+  if (cancellationUnverified) {
+    return {
+      resultText: observedState
+        ? '已暂停，撤单结果尚未确认，请检查交易所挂单及日志'
+        : '已提交，暂停状态及撤单结果尚未确认，请检查交易所挂单及日志',
+      confirmedState: false,
+      outcome: observedState ? 'cancellation_unconfirmed' : 'state_unconfirmed',
+    };
+  }
+  return {
+    resultText: confirmedState ? (action === 'rebalance' ? '重建请求已提交，请查看挂单及日志' : '已确认') : '已提交，状态尚未确认，请查看日志',
+    confirmedState,
+    outcome: confirmedState ? 'confirmed' : 'state_unconfirmed',
+  };
 }
 const Context = createContext<ControlState>(null!);
 export const useControls = () => useContext(Context);
@@ -66,11 +93,8 @@ export function ControlProvider({ pairs, children }: { pairs?: Pair[]; children:
     try {
       const dangerous = action === 'rebalance' || action === 'cancel_all' || (action === 'resume' && pair.mode === 'LIVE');
       if (dangerous && !confirmed) {
-        const accepted = await modal.confirm({
-          title: `${pair.symbol} · ${action === 'resume' ? '恢复策略' : action === 'rebalance' ? '重建网格' : '撤单并暂停'}`,
-          content: action === 'resume' ? (pair.mode === 'LIVE' ? '恢复后将使用真实资金下单，请确认交易对和参数。' : '恢复后将按当前参数继续维护网格。') : action === 'rebalance' ? '将撤销机器人挂单并重新构建网格，请确认交易对和参数。' : '将撤销此交易对的机器人挂单并暂停，保留持仓。',
-          okText: '确认执行', cancelText: '取消',
-        });
+        const { title, content } = controlConfirmCopy(pair, action);
+        const accepted = await modal.confirm({ title, content, okText: '确认执行', cancelText: '取消' });
         if (!accepted) return 'not_submitted';
       }
       setResults(r => ({ ...r, [pair.symbol]: '正在提交…' }));
@@ -78,14 +102,10 @@ export function ControlProvider({ pairs, children }: { pairs?: Pair[]; children:
       submitted = true;
       await post(pairPath(pair, 'control'), action === 'resume' || action === 'rebalance' ? { action, expected_mode: pair.mode } : { action });
       const observedState = await confirmControlState(pair, action).catch(() => false);
-      const cancellationUnverified = action === 'pause' || action === 'cancel_all';
-      const confirmedState = observedState && !cancellationUnverified;
-      const result = cancellationUnverified
-        ? observedState ? '已暂停，撤单结果尚未确认，请检查交易所挂单及日志' : '已提交，暂停状态及撤单结果尚未确认，请检查交易所挂单及日志'
-        : confirmedState ? (action === 'rebalance' ? '重建请求已提交，请查看挂单及日志' : '已确认') : '已提交，状态尚未确认，请查看日志';
-      setResults(r => ({ ...r, [pair.symbol]: result }));
-      if (!confirmedState) message.warning(`${pair.symbol}：${result}`);
-      return cancellationUnverified ? (observedState ? 'cancellation_unconfirmed' : 'state_unconfirmed') : (confirmedState ? 'confirmed' : 'state_unconfirmed');
+      const { resultText, confirmedState, outcome } = resolveControlOutcome(action, observedState);
+      setResults(r => ({ ...r, [pair.symbol]: resultText }));
+      if (!confirmedState) message.warning(`${pair.symbol}：${resultText}`);
+      return outcome;
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
       if (submitted) {
@@ -111,19 +131,10 @@ export function ControlProvider({ pairs, children }: { pairs?: Pair[]; children:
   return <Context.Provider value={value}>{children}</Context.Provider>;
 }
 export function PairControls({ pair, stale = false }: { pair: Pair; stale?: boolean }) {
-  const { busy, pending, run } = useControls();
-  const running = pair.status === 'RUNNING';
-  const active = pending[pair.symbol];
+  const { busy, run } = useControls();
   return <Space>
-    <Tooltip title={stale && !running ? '状态过期，恢复前请刷新' : undefined}>
-      <Button size="middle" loading={busy.has(pair.symbol)} disabled={stale && !running}
-        icon={running ? <PauseOutlined /> : <PlayCircleOutlined />}
-        onClick={() => void run(pair, running ? 'pause' : 'resume')}>{active ? pendingLabel[active] : running ? '暂停' : '恢复'}</Button>
-    </Tooltip>
-    <Dropdown trigger={['click']} menu={{ items: [
-      { key: 'rebalance', icon: <ReloadOutlined aria-hidden="true" />, label: `重建 ${pair.symbol} 网格`, disabled: stale || !running },
-      { key: 'cancel_all', icon: <StopOutlined aria-hidden="true" />, label: `撤单并暂停 ${pair.symbol}`, danger: true },
-    ], onClick: ({ key }) => void run(pair, key as Action) }} disabled={busy.has(pair.symbol)}>
+    <StrategyToggle pair={pair} stale={stale} size="middle" className={undefined} withSymbolAriaLabel={false} />
+    <Dropdown trigger={['click']} menu={{ items: strategySecondaryItems(pair, stale), onClick: ({ key }) => void run(pair, key as Action) }} disabled={busy.has(pair.symbol)}>
       <Button size="middle" icon={<MoreOutlined />} aria-label={`${pair.symbol} 更多操作`}>更多操作</Button>
     </Dropdown>
   </Space>;

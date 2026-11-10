@@ -1,12 +1,11 @@
-import { useLayoutEffect, useMemo, useRef } from 'react';
+import { useMemo, useRef } from 'react';
 import { theme } from 'antd';
 import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import type { Snapshot } from '../lib/types';
 import { numeric, price, todayCount } from '../lib/format';
 import { priceDiffPercent } from '../lib/gridPreview';
 import { useNow } from '../lib/useNow';
-import { NoData } from './Common';
-
+import { NoData, useCenterElementScroll } from './Common';
 export function todayHourlyData(stats: NonNullable<Snapshot['hourly_trade_stats']>, now = Date.now()) {
   const start = Date.parse(stats.window_start);
   const currentHour = Math.min(23, Math.max(0, Math.floor((now - start) / 3600_000)));
@@ -44,13 +43,7 @@ export function DepthChart({ snapshot }: { snapshot: Snapshot }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mark = numeric(snapshot.ticker.mark_price);
   const hasMark = mark !== null && mark > 0;
-  useLayoutEffect(() => {
-    const container = containerRef.current;
-    const markNode = container?.querySelector<HTMLElement>('.grid-level-mark');
-    if (container && markNode && container.scrollHeight > container.clientHeight) {
-      container.scrollTop = Math.max(0, markNode.offsetTop - container.clientHeight / 2 + markNode.clientHeight / 2);
-    }
-  }, [snapshot.symbol, orders.length, hasMark]);
+  useCenterElementScroll(containerRef, '.grid-level-mark', [snapshot.symbol, orders.length, hasMark]);
   if (!orders.length) return <NoData />;
   let buyCount = 0, sellCount = 0;
   for (const order of orders) {

@@ -195,16 +195,8 @@ impl TradeNotificationContext {
         if !matching_position {
             return self;
         }
-        let matching_ticker = ticker.symbol == trade.symbol;
-        let valuation_price = if matching_ticker && ticker.mark_price > Decimal::ZERO {
-            ticker.mark_price
-        } else if position.mark_price > Decimal::ZERO {
-            position.mark_price
-        } else if matching_ticker {
-            ticker.last_price
-        } else {
-            Decimal::ZERO
-        };
+        let matching_ticker = (ticker.symbol == trade.symbol).then_some(ticker);
+        let valuation_price = position.market_valuation_price(matching_ticker);
         self.position_amount = if position.size.is_zero() {
             Some(Decimal::ZERO)
         } else if valuation_price > Decimal::ZERO {
