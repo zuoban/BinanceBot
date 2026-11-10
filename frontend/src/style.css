@@ -430,6 +430,24 @@ kbd {
 .history-plot { min-width: 0; }
 .history-plot-loading { min-height: 180px; display: grid; place-content: center; }
 
+.daily-snapshot-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 16px; margin-top: 8px; }
+.daily-snapshot-block { display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; border: 1px solid var(--border-hairline); border-radius: 10px; background: var(--bg-raised); min-width: 0; }
+.daily-snapshot-block h4 { margin: 0; font-size: 13px; font-weight: 600; color: var(--text-secondary); }
+.daily-snapshot-item { display: grid; gap: 10px; }
+.daily-snapshot-item + .daily-snapshot-item { padding-top: 10px; border-top: 1px solid var(--border-hairline); }
+.daily-snapshot-item-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px; }
+.daily-snapshot-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; }
+.daily-snapshot-metrics > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.daily-snapshot-metrics span { color: var(--text-secondary); font-size: 12px; line-height: 16px; }
+.daily-snapshot-metrics strong { font: 500 13px/18px var(--font-mono); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.daily-snapshot-metrics strong small { color: var(--text-muted); font: 400 11px var(--font-sans); }
+.daily-snapshot-span { grid-column: 1 / -1; }
+.daily-snapshot-pnl-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-top: 2px; }
+.daily-snapshot-pnl-row em { font-style: normal; font-size: 11px; margin-left: 4px; }
+.daily-snapshot-sublist { display: grid; gap: 6px; padding-top: 8px; border-top: 1px dashed var(--border-hairline); font-size: 12px; }
+.daily-snapshot-subrow { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.daily-snapshot-subrow strong { font: 500 12px/16px var(--font-mono); font-variant-numeric: tabular-nums; }
+.daily-snapshot-subrow em { font-style: normal; font-size: 11px; }
 /* ---------- Charts ---------- */
 .chart { width: 100%; min-width: 0; }
 .chart-caption { margin-bottom: 8px; }

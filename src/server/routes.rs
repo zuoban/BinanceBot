@@ -763,13 +763,16 @@ async fn get_overview_history_handler(
     let since = chrono::Utc::now().timestamp() - 7 * 24 * 3600;
     let result = async {
         let current_accounts = crate::snapshots::current_accounts(&handle).await?;
-        let snapshots = handle
+        let (snapshots, daily_snapshots) = handle
             .db
-            .run_blocking(move |db| db.hourly_account_snapshots(since))
+            .run_blocking(move |db| {
+                Ok((db.hourly_account_snapshots(since)?, db.daily_snapshots(30)?))
+            })
             .await?;
         Ok::<_, anyhow::Error>(crate::snapshots::OverviewHistory {
             snapshots,
             current_accounts,
+            daily_snapshots,
         })
     }
     .await;

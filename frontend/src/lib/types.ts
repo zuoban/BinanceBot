@@ -78,7 +78,58 @@ export interface HourlySnapshot {
   hour: number;
   groups: (HistoryAccount & { equity: Decimal | null })[];
 }
-export interface OverviewHistoryData { snapshots: HourlySnapshot[]; current_accounts: HistoryAccount[] }
+export interface DailyAccountGroup {
+  mode: Mode;
+  asset: string;
+  account_id: string | null;
+  count: number;
+  equity: Decimal | null;
+  available: Decimal | null;
+  wallet: Decimal | null;
+  unrealized: Decimal | null;
+}
+export interface DailyPositionGroup {
+  mode: Mode;
+  asset: string;
+  count: number;
+  long: Decimal | null;
+  short: Decimal | null;
+  total: Decimal | null;
+}
+export interface DailyPositionItem {
+  symbol: string;
+  mode: Mode;
+  direction: GridConfig['direction'];
+  status: Status;
+  size: Decimal;
+  entry_price: Decimal;
+  mark_price: Decimal | null;
+  position_amount: Decimal | null;
+  unrealized_pnl: Decimal | null;
+}
+export interface DailyTradeGroup {
+  symbol: string;
+  mode: Mode;
+  buy_count: number;
+  sell_count: number;
+  realized_pnl: Decimal;
+  pending_pnl_count: number;
+}
+export interface DailySnapshot {
+  date: string;
+  window_start: string;
+  window_end: string;
+  generated_at: string;
+  accounts: DailyAccountGroup[];
+  positions: DailyPositionGroup[];
+  pair_positions: DailyPositionItem[];
+  trades: DailyTradeGroup[];
+}
+export interface OverviewHistoryData {
+  snapshots: HourlySnapshot[];
+  current_accounts: HistoryAccount[];
+  daily_snapshots?: DailySnapshot[];
+}
 export interface GlobalConfig {
   version: string;
   recv_window: number; sync_interval_secs: number; global_max_position_notional: Decimal | null; pause_on_zero_available_margin: boolean; min_available_margin_pct: Decimal | null; has_api_key: boolean; has_api_secret: boolean;

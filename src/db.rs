@@ -428,6 +428,100 @@ impl Database {
         .collect()
     }
 
+    const DAILY_SNAPSHOT_RETENTION_DAYS: i64 = 90;
+
+    pub fn save_daily_snapshot(&self, snapshot: &crate::snapshots::DailySnapshot) -> Result<bool> {
+        let payload = serde_json::to_string(snapshot)?;
+        let cutoff = chrono::NaiveDate::parse_from_str(&snapshot.date, "%Y-%m-%d")
+            .ok()
+            .map(|date| {
+                (date - ChronoDuration::days(Self::DAILY_SNAPSHOT_RETENTION_DAYS)).to_string()
+            });
+        let mut conn = self.lock_connection("save_daily_snapshot");
+        let tx = conn.transaction()?;
+        let inserted = tx.execute(
+            "INSERT OR IGNORE INTO daily_snapshots (date, payload) VALUES (?1, ?2)",
+            params![snapshot.date, payload],
+        )?;
+        if let Some(cutoff) = cutoff {
+            tx.execute(
+                "DELETE FROM daily_snapshots WHERE date < ?1",
+                params![cutoff],
+            )?;
+        }
+        tx.commit()?;
+        Ok(inserted == 1)
+    }
+
+    pub fn cleanup_daily_snapshots(&self, now: DateTime<Utc>) -> Result<()> {
+        let today = now
+            .with_timezone(&crate::types::beijing_offset())
+            .date_naive();
+        let cutoff =
+            (today - ChronoDuration::days(Self::DAILY_SNAPSHOT_RETENTION_DAYS)).to_string();
+        self.lock_connection("cleanup_daily_snapshots").execute(
+            "DELETE FROM daily_snapshots WHERE date < ?1",
+            params![cutoff],
+        )?;
+        Ok(())
+    }
+
+    pub fn daily_snapshots(&self, limit: usize) -> Result<Vec<crate::snapshots::DailySnapshot>> {
+        let conn = self.lock_connection("daily_snapshots");
+        let mut statement =
+            conn.prepare("SELECT payload FROM daily_snapshots ORDER BY date DESC LIMIT ?1")?;
+        let rows = statement.query_map(params![limit as i64], |row| row.get::<_, String>(0))?;
+        rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+    }
+
+    pub fn daily_trade_summaries(
+        &self,
+        window_start: DateTime<Utc>,
+        window_end: DateTime<Utc>,
+    ) -> Result<Vec<crate::snapshots::DailyTradeGroup>> {
+        let first_hour = hourly::hour(window_start);
+        let last_hour = hourly::hour(window_end).saturating_sub(3600);
+        let conn = self.lock_connection("daily_trade_summaries");
+        let mut statement = conn.prepare(
+            "SELECT symbol, mode, buy_count, sell_count, realized_pnl, pending_pnl_count
+             FROM trade_hourly_rollups
+             WHERE hour >= ?1 AND hour <= ?2
+             ORDER BY mode, symbol, hour",
+        )?;
+        let rows = statement.query_map(params![first_hour, last_hour], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })?;
+        let mut groups: std::collections::BTreeMap<
+            (String, String),
+            crate::snapshots::DailyTradeGroup,
+        > = std::collections::BTreeMap::new();
+        for row in rows {
+            let (symbol, mode, buys, sells, pnl, pending) = row?;
+            let entry = groups
+                .entry((mode, symbol))
+                .or_insert_with_key(|(mode, symbol)| crate::snapshots::DailyTradeGroup {
+                    symbol: symbol.clone(),
+                    mode: TradingMode::from_db(mode),
+                    buy_count: 0,
+                    sell_count: 0,
+                    realized_pnl: Decimal::ZERO,
+                    pending_pnl_count: 0,
+                });
+            entry.buy_count += buys.max(0) as u64;
+            entry.sell_count += sells.max(0) as u64;
+            entry.realized_pnl += Decimal::from_str(&pnl)?;
+            entry.pending_pnl_count += pending.max(0) as u64;
+        }
+        Ok(groups.into_values().collect())
+    }
+
     pub(crate) fn trade_data_revision(&self) -> u64 {
         self.trade_revisions.current()
     }
@@ -506,7 +600,7 @@ impl Database {
             tables.extend(["trades", "scoped_grid_stats"]);
         }
         if account_hourly_snapshots {
-            tables.push("account_hourly_snapshots");
+            tables.extend(["account_hourly_snapshots", "daily_snapshots"]);
         }
         let snapshot = self.analysis_snapshot_with_tables(&tables)?;
         snapshot.execute_batch("VACUUM;")?;
@@ -632,6 +726,11 @@ impl Database {
                 payload TEXT NOT NULL
             );
 
+
+            CREATE TABLE IF NOT EXISTS daily_snapshots (
+                date TEXT PRIMARY KEY,
+                payload TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS history_account_ids (
                 identity BLOB PRIMARY KEY,
                 account_id TEXT NOT NULL UNIQUE
@@ -1050,7 +1149,9 @@ impl Database {
             0
         };
         let deleted_snapshots = if snapshots {
-            tx.execute("DELETE FROM account_hourly_snapshots", [])?
+            let hourly = tx.execute("DELETE FROM account_hourly_snapshots", [])?;
+            let daily = tx.execute("DELETE FROM daily_snapshots", [])?;
+            hourly + daily
         } else {
             0
         };

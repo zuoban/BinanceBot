@@ -76,3 +76,105 @@ it('keeps legacy paper capital separate from the shared paper account series', a
   expect(within(screen.getByLabelText('最近一次快照')).getByText('20,000')).toBeInTheDocument();
   expect(screen.getAllByTestId('history-chart').every(chart => !chart.getAttribute('data-equities')?.includes('10020'))).toBe(true);
 });
+
+it('renders daily snapshots with account overview, trade counts, realized pnl, and position overview, and switches dates', async () => {
+  const hour = Math.floor(Date.now() / 3600000) * 3600;
+  history.data = {
+    snapshots: [{ hour, groups: [group(paper, '10050')] }],
+    current_accounts: [paper],
+    daily_snapshots: [
+      {
+        date: '2026-11-09',
+        window_start: '2026-11-08T16:00:00Z',
+        window_end: '2026-11-09T16:00:00Z',
+        generated_at: '2026-11-09T16:00:05Z',
+        accounts: [{
+          mode: 'PAPER',
+          asset: 'USDC',
+          account_id: 'paper-shared-v1',
+          count: 2,
+          equity: '10050.25',
+          available: '9000.00',
+          wallet: '10000.00',
+          unrealized: '50.25',
+        }],
+        positions: [{
+          mode: 'PAPER',
+          asset: 'USDC',
+          count: 2,
+          long: '1500.50',
+          short: '200.00',
+          total: '1700.50',
+        }],
+        pair_positions: [{
+          symbol: 'SOLUSDC',
+          mode: 'PAPER',
+          direction: 'LONG',
+          status: 'RUNNING',
+          size: '10',
+          entry_price: '145',
+          mark_price: '150.05',
+          position_amount: '1500.50',
+          unrealized_pnl: '50.50',
+        }],
+        trades: [{
+          symbol: 'SOLUSDC',
+          mode: 'PAPER',
+          buy_count: 8,
+          sell_count: 7,
+          realized_pnl: '32.75',
+          pending_pnl_count: 0,
+        }],
+      },
+      {
+        date: '2026-11-08',
+        window_start: '2026-11-07T16:00:00Z',
+        window_end: '2026-11-08T16:00:00Z',
+        generated_at: '2026-11-08T16:00:03Z',
+        accounts: [{
+          mode: 'PAPER',
+          asset: 'USDC',
+          account_id: 'paper-shared-v1',
+          count: 1,
+          equity: '9980.00',
+          available: '9980.00',
+          wallet: '9980.00',
+          unrealized: '0',
+        }],
+        positions: [{
+          mode: 'PAPER',
+          asset: 'USDC',
+          count: 1,
+          long: '0',
+          short: '0',
+          total: '0',
+        }],
+        pair_positions: [],
+        trades: [{
+          symbol: 'SOLUSDC',
+          mode: 'PAPER',
+          buy_count: 2,
+          sell_count: 1,
+          realized_pnl: '-20',
+          pending_pnl_count: 1,
+        }],
+      },
+    ],
+  };
+  const user = userEvent.setup();
+  render(<OverviewHistory />);
+  const section = screen.getByLabelText('每日运行快照');
+  expect(within(section).getByText('每日运行快照')).toBeInTheDocument();
+  expect(within(section).getByText('成交与实现盈亏（2026-11-09）')).toBeInTheDocument();
+  expect(within(section).getByText(/10,050\.25/)).toBeInTheDocument();
+  expect(within(section).getByText(/^15/)).toBeInTheDocument();
+  expect(within(section).getAllByText('32.75').length).toBeGreaterThan(0);
+  expect(within(section).getByText(/1,700\.5/)).toBeInTheDocument();
+  expect(within(section).getByLabelText('持仓明细')).toHaveTextContent('SOLUSDC');
+
+  await user.click(within(section).getByRole('combobox', { name: '选择每日快照日期' }));
+  await user.click(screen.getByText('2026-11-08（北京时间）'));
+  expect(within(section).getByText('成交与实现盈亏（2026-11-08）')).toBeInTheDocument();
+  expect(within(section).getAllByText(/9,980/).length).toBeGreaterThan(0);
+  expect(within(section).getByText('（1 笔待同步）')).toBeInTheDocument();
+});
