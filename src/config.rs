@@ -3,7 +3,7 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppConfig {
     pub exchange: ExchangeConfig,
     #[serde(default)]
@@ -267,21 +267,6 @@ impl Default for ServerConfig {
         Self {
             host: default_host(),
             port: default_port(),
-        }
-    }
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            exchange: ExchangeConfig::default(),
-            grid: GridConfig::default(),
-            pairs: Vec::new(),
-            server: ServerConfig::default(),
-            telegram: TelegramConfig::default(),
-            global_max_position_notional: None,
-            pause_on_zero_available_margin: false,
-            min_available_margin_pct: None,
         }
     }
 }
