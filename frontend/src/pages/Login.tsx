@@ -7,6 +7,20 @@ import { ErrorNotice } from '../components/Common';
 import { LoadingScreen } from '../components/Loading';
 import { ThemeSwitch } from '../components/ThemeSwitch';
 
+const sellLevels = [
+  { y: 40, bar: 148, step: '+2.0%' },
+  { y: 62, bar: 116, step: '+1.5%' },
+  { y: 84, bar: 88, step: '+1.0%' },
+  { y: 106, bar: 62, step: '+0.5%' },
+] as const;
+
+const buyLevels = [
+  { y: 154, bar: 68, step: '-0.5%' },
+  { y: 176, bar: 96, step: '-1.0%' },
+  { y: 198, bar: 126, step: '-1.5%' },
+  { y: 220, bar: 158, step: '-2.0%' },
+] as const;
+
 export default function Login({ onLogin }: { onLogin: () => void }) {
   const status = useQuery({ queryKey: ['auth-status'], queryFn: () => api<AuthStatus>('/api/auth/status'), retry: false });
   const configured = status.data?.initialized !== false;
@@ -22,20 +36,39 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
         <img src="/logo.svg" alt="" className="login-logo" />
         <div><strong>Grid Console</strong><span>Binance Futures</span></div>
       </div>
-      <svg className="login-ladder" viewBox="0 0 320 220" aria-hidden="true" focusable="false">
-        {[20, 44, 68, 92].map(y => <g key={y}><line x1="24" x2="296" y1={y} y2={y} className="ladder-sell" /><rect x="24" y={y - 3} width="6" height="6" className="ladder-sell-mark" /></g>)}
-        <line x1="0" x2="320" y1="116" y2="116" className="ladder-mark" />
-        <rect x="236" y="104" width="84" height="24" rx="4" className="ladder-mark-tag" />
-        <text x="278" y="120" textAnchor="middle" className="ladder-mark-text">MARK</text>
-        {[140, 164, 188, 212].map(y => <g key={y}><line x1="24" x2="296" y1={y} y2={y} className="ladder-buy" /><rect x="24" y={y - 3} width="6" height="6" className="ladder-buy-mark" /></g>)}
+      <svg className="login-ladder" viewBox="0 0 360 256" aria-hidden="true" focusable="false">
+        <text x="16" y="18" className="ladder-caption ladder-caption-sell">↓ 卖单挂单 · SELL</text>
+        <text x="344" y="18" textAnchor="end" className="ladder-caption">相对基准</text>
+        <line x1="19" x2="19" y1="40" y2="220" className="ladder-axis" />
+        {sellLevels.map(({ y, bar, step }) => <g key={y}>
+          <line x1="22" x2="292" y1={y} y2={y} className="ladder-sell" />
+          <rect x="28" y={y - 3.5} width={bar} height="7" rx="2" className="ladder-sell-depth" />
+          <rect x="16" y={y - 3} width="6" height="6" rx="1" className="ladder-sell-mark" />
+          <text x="344" y={y + 3.5} textAnchor="end" className="ladder-step ladder-step-sell">{step}</text>
+        </g>)}
+        <rect x="8" y="117" width="344" height="26" rx="6" className="ladder-mark-band" />
+        <line x1="16" x2="262" y1="130" y2="130" className="ladder-mark" />
+        <rect x="15.5" y="126.5" width="7" height="7" rx="1.5" transform="rotate(45 19 130)" className="ladder-mark-tag" />
+        <rect x="262" y="119" width="82" height="22" rx="4" className="ladder-mark-tag" />
+        <text x="303" y="133.5" textAnchor="middle" className="ladder-mark-text">MARK 基准</text>
+        {buyLevels.map(({ y, bar, step }) => <g key={y}>
+          <line x1="22" x2="292" y1={y} y2={y} className="ladder-buy" />
+          <rect x="28" y={y - 3.5} width={bar} height="7" rx="2" className="ladder-buy-depth" />
+          <rect x="16" y={y - 3} width="6" height="6" rx="1" className="ladder-buy-mark" />
+          <text x="344" y={y + 3.5} textAnchor="end" className="ladder-step ladder-step-buy">{step}</text>
+        </g>)}
+        <text x="16" y="244" className="ladder-caption ladder-caption-buy">↑ 买单挂单 · BUY</text>
+        <text x="344" y="244" textAnchor="end" className="ladder-caption">Post-Only</text>
       </svg>
     </aside>
     <section className="login-form"><div className="login-form-content">
-      <Typography.Title level={2}>{configured ? '登录交易控制台' : '无需登录'}</Typography.Title>
-      <Typography.Paragraph type="secondary">{configured ? '输入管理员密码，进入策略工作台' : '服务端未设置管理员密码，可直接进入控制台'}</Typography.Paragraph>
+      <div className="login-form-header">
+        <Typography.Title level={1}>{configured ? '登录交易控制台' : '无需登录'}</Typography.Title>
+        <Typography.Paragraph type="secondary">{configured ? '输入管理员密码，进入策略工作台' : '服务端未设置管理员密码，可直接进入控制台'}</Typography.Paragraph>
+      </div>
       <ErrorNotice error={status.error} retry={() => void status.refetch()} /><ErrorNotice error={mutation.error} />
-      {!configured && <><Alert type="info" showIcon title="未启用管理员密码认证，所有能访问该端口的人都可以操作。" /><Button type="primary" size="large" block autoFocus onClick={onLogin}>进入控制台</Button></>}
-      {configured && <Form layout="vertical" onFinish={values => mutation.mutate(values)} disabled={mutation.isPending || !status.data}>
+      {!configured && <div className="login-unconfigured"><Alert type="info" showIcon title="未启用管理员密码认证，所有能访问该端口的人都可以操作。" /><Button type="primary" size="large" block autoFocus onClick={onLogin}>进入控制台</Button></div>}
+      {configured && <Form layout="vertical" requiredMark={false} onFinish={values => mutation.mutate(values)} disabled={mutation.isPending || !status.data}>
         <Form.Item name="password" label="管理员密码" rules={[{ required: true, message: '请输入密码' }]}>
           <Input.Password prefix={<LockOutlined />} size="large" autoComplete="current-password" autoFocus />
         </Form.Item>
