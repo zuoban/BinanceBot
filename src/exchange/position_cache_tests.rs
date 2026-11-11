@@ -119,11 +119,11 @@ async fn missing_positions_use_symbol_fallback_and_hedge_is_rejected() {
     mode.store(2, Ordering::SeqCst);
     assert!(cache.get(&client, "SOLUSDC").await.unwrap().0.is_none());
     assert_eq!(calls.load(Ordering::SeqCst), 2);
-    cache.invalidate(&client).await;
+    cache.invalidate(&client);
     mode.store(4, Ordering::SeqCst);
     assert!(cache.get(&client, "SOLUSDC").await.unwrap().0.is_some());
     assert_eq!(calls.load(Ordering::SeqCst), 4);
-    cache.invalidate(&client).await;
+    cache.invalidate(&client);
     mode.store(3, Ordering::SeqCst);
     assert!(cache.get(&client, "SOLUSDC").await.is_err());
     assert_eq!(calls.load(Ordering::SeqCst), 5);
@@ -136,7 +136,7 @@ async fn expired_positions_are_not_served_after_failure_and_can_recover() {
     let client = BinanceFuturesClient::with_base_url(&AppConfig::default().exchange, url);
     let cache = PositionCache::default();
     cache.get(&client, "SOLUSDC").await.unwrap();
-    let (_epoch, entry) = cache.entries.entry(&client.account_cache_key()).await;
+    let (_epoch, entry) = cache.entries.entry(&client.account_cache_key());
     entry
         .lock()
         .await
@@ -168,7 +168,7 @@ async fn critical_refresh_bypasses_failure_cooldown_and_locked_entry() {
     assert!(cache.get(&client, "SOLUSDC").await.is_err());
     mode.store(0, Ordering::SeqCst);
     assert!(cache.get(&client, "SOLUSDC").await.is_err());
-    let (_, entry) = cache.entries.entry(&client.account_cache_key()).await;
+    let (_, entry) = cache.entries.entry(&client.account_cache_key());
     let held = entry.lock().await;
     let critical = tokio::time::timeout(
         Duration::from_secs(1),
@@ -248,9 +248,7 @@ async fn ordinary_wait_is_bounded_and_retired_failure_cannot_poison_new_generati
         .unwrap();
     assert!(waiting.iter().all(Result::is_err));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    tokio::time::timeout(Duration::from_secs(1), cache.invalidate(&client))
-        .await
-        .unwrap();
+    cache.invalidate(&client);
     let fresh = tokio::time::timeout(Duration::from_secs(1), cache.get(&client, "SOLUSDC"))
         .await
         .unwrap()
@@ -317,7 +315,7 @@ async fn critical_position_retries_when_another_pair_invalidates_in_flight() {
         async move { cache.refresh_critical(&client, "SOLUSDC").await.unwrap() }
     });
     started.notified().await;
-    cache.invalidate(&client).await;
+    cache.invalidate(&client);
     release.notify_one();
     assert_eq!(
         critical.await.unwrap().0.unwrap().position_amt,
@@ -378,5 +376,63 @@ async fn concurrent_critical_position_refreshes_do_not_invalidate_each_other() {
         .unwrap();
     assert!(first.is_ok() && second.is_ok());
     assert_eq!(calls.load(Ordering::SeqCst), 2);
+    server.abort();
+}
+
+#[tokio::test]
+async fn periodic_position_miss_caches_single_symbol_and_leaves_critical_capacity() {
+    let (url, calls, mode, server) = server().await;
+    let client = BinanceFuturesClient::with_base_url(&AppConfig::default().exchange, url);
+    let cache = PositionCache::default();
+    mode.store(2, Ordering::SeqCst);
+    assert!(cache.get(&client, "SOLUSDC").await.unwrap().0.is_none());
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    // Subsequent periodic reads within TTL reuse the cached flat symbol result.
+    assert!(cache.get(&client, "SOLUSDC").await.unwrap().0.is_none());
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+    cache.invalidate(&client);
+    mode.store(4, Ordering::SeqCst);
+    assert!(cache.get(&client, "SOLUSDC").await.unwrap().0.is_some());
+    assert_eq!(calls.load(Ordering::SeqCst), 4);
+    assert!(cache.get(&client, "SOLUSDC").await.unwrap().0.is_some());
+    assert_eq!(calls.load(Ordering::SeqCst), 4);
+
+    // Exhaust Normal budget while Critical reserve remains available.
+    cache.invalidate(&client);
+    while client
+        .limiter()
+        .reserve(
+            client.market_cache_key(),
+            [0u8; 32],
+            5,
+            crate::exchange::rate_limit::RequestClass::Normal,
+        )
+        .is_ok()
+    {}
+    let exhausted = BinanceFuturesClient::with_base_url(
+        &AppConfig::default().exchange,
+        client.market_cache_key().to_owned(),
+    );
+    let shared_limiter = client.limiter();
+    let periodic_client = BinanceFuturesClient::with_base_url_and_limiter(
+        &AppConfig::default().exchange,
+        exhausted.market_cache_key().to_owned(),
+        shared_limiter,
+    );
+    // Prime bulk snapshot, then exhaust Normal budget for periodic_client's account key.
+    cache.invalidate(&periodic_client);
+    while periodic_client
+        .get_position_for_periodic_sync("SOLUSDC")
+        .await
+        .is_ok()
+    {}
+    // Critical get_position / refresh_critical still has emergency capacity.
+    assert!(cache
+        .refresh_critical(&periodic_client, "SOLUSDC")
+        .await
+        .unwrap()
+        .0
+        .is_some());
     server.abort();
 }

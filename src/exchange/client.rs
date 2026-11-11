@@ -18,7 +18,8 @@ use tracing::{debug, info, warn};
 static MAINNET_TIME_OFFSET_MS: AtomicI64 = AtomicI64::new(0);
 static MONOTONIC_EPOCH: std::sync::LazyLock<Instant> = std::sync::LazyLock::new(Instant::now);
 const REACTIVE_TIME_SYNC_THROTTLE_MS: u64 = 10_000;
-
+const MAX_ERROR_BODY_BYTES: usize = 8 * 1024;
+const MAX_SUMMARIZED_ERROR_CHARS: usize = 256;
 fn monotonic_now_ms() -> u64 {
     (MONOTONIC_EPOCH.elapsed().as_millis() as u64).saturating_add(1)
 }
@@ -64,49 +65,114 @@ impl ExchangeError {
     }
 }
 
-pub(super) fn order_response_error(status: reqwest::StatusCode, body: String) -> ExchangeError {
-    let api_error = serde_json::from_str::<BinanceApiError>(&body).ok();
+pub(super) async fn read_bounded_error_body(
+    mut resp: reqwest::Response,
+) -> std::result::Result<String, reqwest::Error> {
+    let mut buf = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(reqwest::Error::without_url)? {
+        let remaining = MAX_ERROR_BODY_BYTES.saturating_sub(buf.len());
+        if remaining == 0 {
+            break;
+        }
+        let take = chunk.len().min(remaining);
+        buf.extend_from_slice(&chunk[..take]);
+        if buf.len() >= MAX_ERROR_BODY_BYTES {
+            break;
+        }
+    }
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
+pub(super) fn summarize_non_json_body(body: &str) -> String {
+    let trimmed = body.trim().trim_start_matches('\u{feff}').trim_start();
+    if trimmed.is_empty() {
+        return "empty response body".to_string();
+    }
+    let lower_prefix: String = trimmed.chars().take(9).collect();
+    if trimmed.starts_with('<')
+        || lower_prefix.eq_ignore_ascii_case("<!doctype")
+        || lower_prefix
+            .get(..5)
+            .is_some_and(|p| p.eq_ignore_ascii_case("<html"))
+    {
+        return "upstream HTML error response".to_string();
+    }
+    let mut out = String::with_capacity(trimmed.len().min(MAX_SUMMARIZED_ERROR_CHARS));
+    let mut chars = 0usize;
+    for word in trimmed.split_whitespace() {
+        if chars > 0 {
+            if chars + 1 > MAX_SUMMARIZED_ERROR_CHARS {
+                break;
+            }
+            out.push(' ');
+            chars += 1;
+        }
+        for ch in word.chars() {
+            if chars >= MAX_SUMMARIZED_ERROR_CHARS {
+                return out;
+            }
+            out.push(ch);
+            chars += 1;
+        }
+    }
+    out
+}
+
+pub(super) fn is_valid_client_order_id(cid: &str) -> bool {
+    !cid.is_empty()
+        && cid.len() <= 36
+        && cid
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'/' | b'-'))
+}
+
+pub(super) fn order_response_error(status: reqwest::StatusCode, body: &str) -> ExchangeError {
+    let api_error = serde_json::from_str::<BinanceApiError>(body).ok();
     let code = api_error.as_ref().map(|error| error.code);
-    let msg = api_error
+    let raw_msg = api_error
         .as_ref()
         .map(|error| error.msg.as_str())
-        .unwrap_or(&body);
+        .unwrap_or(body);
+    let summary = summarize_non_json_body(raw_msg);
     // These overload responses explicitly mean the submission failed. Other
     // server errors and backend timeouts may have accepted an order already.
     let known_failure = status == reqwest::StatusCode::SERVICE_UNAVAILABLE
         && (code == Some(-1008)
-            || msg == "Service Unavailable."
-            || msg == "Internal error; unable to process your request. Please try again.");
+            || raw_msg == "Service Unavailable."
+            || raw_msg == "Internal error; unable to process your request. Please try again.");
     if !known_failure
         && (matches!(code, Some(-1000 | -1001 | -1006 | -1007))
             || status == reqwest::StatusCode::REQUEST_TIMEOUT
             || status.is_server_error())
     {
-        return ExchangeError::ExecutionUnknown {
-            code,
-            msg: msg.to_string(),
-        };
+        return ExchangeError::ExecutionUnknown { code, msg: summary };
     }
     match api_error {
-        Some(error) if error.code == -5022 => ExchangeError::PostOnlyRejected(error.msg),
+        Some(error) if error.code == -5022 => ExchangeError::PostOnlyRejected(summary),
         Some(error) => ExchangeError::ApiError {
             code: error.code,
-            msg: error.msg,
+            msg: summary,
         },
         None if known_failure => {
-            ExchangeError::RequestRejected(format!("HTTP {}: {}", status, body))
+            ExchangeError::RequestRejected(format!("HTTP {}: {}", status, summary))
         }
-        None => ExchangeError::Other(format!("HTTP error {}: {}", status, body)),
+        None => ExchangeError::Other(format!("HTTP error {}: {}", status, summary)),
     }
 }
-fn parse_api_error_body(status: reqwest::StatusCode, body: String) -> anyhow::Error {
-    match serde_json::from_str::<BinanceApiError>(&body) {
+
+pub(super) fn parse_api_error_body(status: reqwest::StatusCode, body: &str) -> anyhow::Error {
+    match serde_json::from_str::<BinanceApiError>(body) {
         Ok(error) => ExchangeError::ApiError {
             code: error.code,
-            msg: error.msg,
+            msg: summarize_non_json_body(&error.msg),
         }
         .into(),
-        Err(_) => ExchangeError::Other(format!("HTTP error {}: {}", status, body)).into(),
+        Err(_) => ExchangeError::Other(format!(
+            "HTTP error {}: {}",
+            status,
+            summarize_non_json_body(body)
+        ))
+        .into(),
     }
 }
 
@@ -115,8 +181,8 @@ async fn checked_response(response: reqwest::Response) -> Result<reqwest::Respon
         return Ok(response);
     }
     let status = response.status();
-    let body = response.text().await.map_err(reqwest::Error::without_url)?;
-    Err(parse_api_error_body(status, body))
+    let body = read_bounded_error_body(response).await?;
+    Err(parse_api_error_body(status, &body))
 }
 
 #[path = "endpoints.rs"]
@@ -290,28 +356,25 @@ impl BinanceFuturesClient {
             return Ok(response);
         }
         let status = response.status();
-        let body = response.text().await.map_err(reqwest::Error::without_url)?;
+        let body = read_bounded_error_body(response).await?;
         self.maybe_resync_on_invalid_timestamp(&body).await;
-        Err(parse_api_error_body(status, body))
+        Err(parse_api_error_body(status, &body))
     }
 
     pub(super) async fn ensure_signed_success(
         &self,
         resp: reqwest::Response,
         context: &str,
-        include_status: bool,
     ) -> Result<reqwest::Response> {
         if resp.status().is_success() {
             return Ok(resp);
         }
         let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
+        let body = read_bounded_error_body(resp).await?;
         self.maybe_resync_on_invalid_timestamp(&body).await;
-        if include_status {
-            Err(anyhow!("{}: {} - {}", context, status, body))
-        } else {
-            Err(anyhow!("{}: {}", context, body))
-        }
+        let err = parse_api_error_body(status, &body);
+        let detail = format!("{context} ({status}): {err}");
+        Err(err.context(detail))
     }
 
     fn current_timestamp(&self) -> i64 {
@@ -437,14 +500,9 @@ impl BinanceFuturesClient {
         &self,
         url: &str,
         context: &str,
-        include_status: bool,
     ) -> Result<T> {
         let resp = self
-            .ensure_signed_success(
-                self.send(self.client.get(url)).await?,
-                context,
-                include_status,
-            )
+            .ensure_signed_success(self.send(self.client.get(url)).await?, context)
             .await?;
         Ok(resp.json().await.map_err(reqwest::Error::without_url)?)
     }

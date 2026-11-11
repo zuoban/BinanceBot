@@ -177,3 +177,36 @@ it('还原修改时一并清除字段校验错误', async () => {
   await waitFor(() => expect(input).toHaveValue('123.45'));
   await waitFor(() => expect(screen.queryByText('请输入大于 0 的金额')).not.toBeInTheDocument());
 });
+
+it('未保存密钥时仅填写单边 API Key 或 Secret 会在打开确认弹窗前阻止提交', async () => {
+  setup();
+  const user = userEvent.setup();
+  const key = await screen.findByLabelText('API Key');
+  await waitFor(() => expect(key).toBeEnabled());
+  await user.type(key, 'only-key');
+  await user.click(screen.getByRole('button', { name: '保存全局设置' }));
+  expect(await screen.findByText('请同时填写 API Key 和 API Secret')).toBeInTheDocument();
+  expect(mocks.confirm).not.toHaveBeenCalled();
+  expect(mocks.post).not.toHaveBeenCalled();
+}, 40000);
+
+it('启用 Telegram 通知时校验凭证完整性与清除冲突，并在超限金额时拦截提交', async () => {
+  setup();
+  const user = userEvent.setup();
+  const notional = await screen.findByLabelText('全局最大持仓金额');
+  await waitFor(() => expect(notional).toHaveValue('123.45'));
+  await user.clear(notional);
+  await user.type(notional, '1000000000001');
+  await user.click(await screen.findByRole('switch', { name: '通知开关' }));
+  await user.click(screen.getByRole('button', { name: '保存全局设置' }));
+  expect(await screen.findByText('全局最大持仓金额超出允许上限')).toBeInTheDocument();
+  expect(await screen.findByText('请填写 Bot Token')).toBeInTheDocument();
+  expect(await screen.findByText('请填写 Chat ID')).toBeInTheDocument();
+  expect(mocks.confirm).not.toHaveBeenCalled();
+
+  await user.click(screen.getByRole('checkbox', { name: /清除 Telegram 凭证/ }));
+  await user.click(screen.getByRole('button', { name: '保存全局设置' }));
+  expect(await screen.findByText('请先关闭通知后再清除 Telegram 凭证')).toBeInTheDocument();
+  expect(mocks.confirm).not.toHaveBeenCalled();
+  expect(mocks.post).not.toHaveBeenCalled();
+}, 40000);

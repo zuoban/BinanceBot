@@ -1,11 +1,16 @@
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
-use binance_grid_bot::auth::AdminAuth;
+#[path = "common/auth.rs"]
+mod auth;
+mod common;
+#[path = "common/http.rs"]
+mod http;
+#[path = "common/trades.rs"]
+mod trades;
 use binance_grid_bot::config::AppConfig;
 use binance_grid_bot::db::Database;
 use binance_grid_bot::server::{create_router, AppState};
 use binance_grid_bot::types::{GridStats, OrderSide, TradeRecord, TradingMode};
-use chrono::Utc;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde_json::{json, Value};
@@ -18,31 +23,23 @@ fn auth_state(
     db: Arc<Database>,
     action_tx: mpsc::Sender<binance_grid_bot::types::BotControlAction>,
 ) -> Arc<AppState> {
-    AppState::new_with_admin_auth(
-        config,
-        db,
-        action_tx,
-        Some(Arc::new(AdminAuth::from_password("test-password").unwrap())),
-    )
+    auth::auth_state(config, db, action_tx, "test-password")
 }
 
 fn trade(id: usize, symbol: &str, mode: TradingMode) -> TradeRecord {
-    TradeRecord {
-        trade_id: format!("cleanup-{id}"),
-        client_order_id: format!("gb_b_cleanup_{id}"),
-        symbol: symbol.into(),
+    let mut record = trades::sample_trade(
+        &format!("cleanup-{id}"),
+        &format!("gb_b_cleanup_{id}"),
+        symbol,
         mode,
-        side: OrderSide::Buy,
-        price: dec!(100),
-        quantity: dec!(1),
-        amount_usdc: dec!(100),
-        realized_pnl: dec!(2),
-        commission: dec!(0.1),
-        pnl_verified: id != 0,
-        is_maker: true,
-        timestamp: Utc::now(),
-        note: String::new(),
-    }
+        OrderSide::Buy,
+        dec!(100),
+        dec!(1),
+    );
+    record.realized_pnl = dec!(2);
+    record.commission = dec!(0.1);
+    record.pnl_verified = id != 0;
+    record
 }
 
 #[tokio::test]
@@ -96,7 +93,8 @@ async fn single_pair_routes_export_and_clear_only_the_requested_symbol() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let path = std::env::temp_dir().join(format!("single-pair-export-{}.db", uuid::Uuid::new_v4()));
+    let temp = common::TempTestDir::new("single-pair-export");
+    let path = temp.path().join("export.db");
     std::fs::write(&path, bytes).unwrap();
     let exported = rusqlite::Connection::open(&path).unwrap();
     let symbols: Vec<String> = exported
@@ -108,7 +106,6 @@ async fn single_pair_routes_export_and_clear_only_the_requested_symbol() {
         .collect();
     assert_eq!(symbols, vec!["SOLUSDC"]);
     drop(exported);
-    std::fs::remove_file(path).unwrap();
 
     for (confirm, expected) in [(false, StatusCode::BAD_REQUEST), (true, StatusCode::OK)] {
         let response = app
@@ -215,8 +212,7 @@ async fn cleanup_requires_auth_and_confirmation_then_clears_every_scope() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    let result = http::body_json(response).await;
     assert_eq!(result["success"], true);
     assert_eq!(result["data"]["deleted_trades"], 68);
     assert_eq!(result["data"]["snapshot"]["recent_trades"], json!([]));

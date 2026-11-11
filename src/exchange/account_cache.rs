@@ -47,8 +47,8 @@ impl AccountCache {
             .await
     }
 
-    pub(crate) async fn invalidate(&self, client: &BinanceFuturesClient) {
-        self.entries.retire(&client.account_cache_key()).await;
+    pub(crate) fn invalidate(&self, client: &BinanceFuturesClient) {
+        self.entries.retire(&client.account_cache_key());
     }
 
     async fn get_inner(

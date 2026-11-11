@@ -227,7 +227,11 @@ fn print_sweep(rows: &[SweepRow], candles: &[Candle], capital: Decimal) {
     println!("{OPTIMISM_NOTE}");
 }
 
-pub async fn run_cli(args: &BacktestArgs) -> Result<()> {
+fn validate_cli_args(args: &BacktestArgs) -> Result<()> {
+    ensure!(
+        args.csv.is_some() || args.symbol.is_some(),
+        "请提供 --csv 或 --symbol"
+    );
     if args.csv.is_none() && args.symbol.is_some() {
         validate_kline_interval(&args.interval)?;
         ensure!(
@@ -235,18 +239,6 @@ pub async fn run_cli(args: &BacktestArgs) -> Result<()> {
             "--days 必须在 1..={MAX_BACKTEST_DAYS} 之间"
         );
     }
-    let rules = load_rules(args).await?;
-    let candles = match (&args.csv, &args.symbol) {
-        (Some(path), _) => parse_csv(
-            &std::fs::read_to_string(path).with_context(|| format!("无法读取 {path:?}"))?,
-        )?,
-        (None, Some(symbol)) => {
-            let end = chrono::Utc::now().timestamp_millis();
-            let start = end.saturating_sub(i64::from(args.days) * 24 * 60 * 60 * 1000);
-            fetch_klines(symbol, &args.interval, start, end).await?
-        }
-        (None, None) => bail!("请提供 --csv 或 --symbol"),
-    };
     ensure!(
         !args.grid_interval.is_empty()
             && !args.amount.is_empty()
@@ -254,6 +246,27 @@ pub async fn run_cli(args: &BacktestArgs) -> Result<()> {
             && !args.sell_window.is_empty(),
         "至少需要一组参数"
     );
+    Ok(())
+}
+
+async fn load_backtest_candles(args: &BacktestArgs) -> Result<Vec<Candle>> {
+    match (&args.csv, &args.symbol) {
+        (Some(path), _) => {
+            parse_csv(&std::fs::read_to_string(path).with_context(|| format!("无法读取 {path:?}"))?)
+        }
+        (None, Some(symbol)) => {
+            let end = chrono::Utc::now().timestamp_millis();
+            let start = end.saturating_sub(i64::from(args.days) * 24 * 60 * 60 * 1000);
+            fetch_klines(symbol, &args.interval, start, end).await
+        }
+        (None, None) => bail!("请提供 --csv 或 --symbol"),
+    }
+}
+
+pub async fn run_cli(args: &BacktestArgs) -> Result<()> {
+    validate_cli_args(args)?;
+    let rules = load_rules(args).await?;
+    let candles = load_backtest_candles(args).await?;
     let base = BacktestParams {
         grid: GridConfig {
             direction: match args.direction {

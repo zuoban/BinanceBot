@@ -122,7 +122,7 @@ async fn critical_refresh_waits_for_inflight_snapshot_then_fetches_again() {
         cache.get(&client).await.unwrap().account.assets[0].available_balance,
         rust_decimal_macros::dec!(3)
     );
-    cache.invalidate(&client).await;
+    cache.invalidate(&client);
     cache.get(&client).await.unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 3);
     server.abort();
@@ -162,7 +162,7 @@ async fn expired_snapshot_is_not_served_when_refresh_fails() {
     let client = BinanceFuturesClient::with_base_url(&AppConfig::default().exchange, url);
     let cache = AccountCache::default();
     cache.get(&client).await.unwrap();
-    let (_epoch, entry) = cache.entries.entry(&client.account_cache_key()).await;
+    let (_epoch, entry) = cache.entries.entry(&client.account_cache_key());
     entry
         .lock()
         .await
@@ -194,7 +194,7 @@ async fn critical_refresh_bypasses_failure_cooldown_and_locked_entry() {
     assert!(cache.get(&client).await.is_err());
     fail.store(false, Ordering::SeqCst);
     assert!(cache.refresh(&client).await.is_err());
-    let (_, entry) = cache.entries.entry(&client.account_cache_key()).await;
+    let (_, entry) = cache.entries.entry(&client.account_cache_key());
     let held = entry.lock().await;
     let critical = tokio::time::timeout(Duration::from_secs(1), cache.refresh_critical(&client))
         .await
@@ -259,9 +259,7 @@ async fn ordinary_wait_is_bounded_and_retired_failure_cannot_poison_new_generati
         .unwrap();
     assert!(waiting.iter().all(Result::is_err));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    tokio::time::timeout(Duration::from_secs(1), cache.invalidate(&client))
-        .await
-        .unwrap();
+    cache.invalidate(&client);
     let fresh = tokio::time::timeout(Duration::from_secs(1), cache.get(&client))
         .await
         .unwrap()
@@ -322,7 +320,7 @@ async fn concurrent_invalidation_forces_critical_refresh_to_retry_and_yield_fres
     });
     started.notified().await;
     // Sibling pair fills an order while the first pair's request is in flight.
-    cache.invalidate(&client).await;
+    cache.invalidate(&client);
     release.notify_one();
     let snapshot = critical_task.await.unwrap();
     assert_eq!(

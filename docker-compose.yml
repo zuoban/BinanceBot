@@ -13,6 +13,10 @@ services:
     environment:
       RUST_LOG: binance_grid_bot=info
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
   frontend:
     build:
       context: .
@@ -23,3 +27,5 @@ services:
       - binance-bot
     ports:
       - "127.0.0.1:8080:80"
+    security_opt:
+      - no-new-privileges:true

@@ -1,11 +1,8 @@
 use super::evidence_book::terminal_responses_disagree;
+use super::snapshot_identities::{ConflictObservationCandidates, VerifiedConflictObservations};
 use super::*;
 
 type ResolvedConflicts = (HashMap<String, BinanceOrderResponse>, Vec<String>);
-struct VerifiedConflictObservations {
-    corrected_expected: Option<BinanceOrderResponse>,
-    harmless_identities: HashSet<(String, String, i64)>,
-}
 
 impl GridTradingEngine {
     async fn discover_live_conflict_observations(
@@ -141,11 +138,7 @@ impl GridTradingEngine {
         expected: &GridOrder,
         initial_responses: &[BinanceOrderResponse],
     ) -> Option<VerifiedConflictObservations> {
-        let mut corrected_expected: Option<BinanceOrderResponse> = None;
-        let mut ambiguous_candidate = false;
-        let mut harmless_candidate: Option<BinanceOrderResponse> = None;
-        let mut ambiguous_harmless = false;
-        let mut harmless_identities = HashSet::new();
+        let mut candidates = ConflictObservationCandidates::default();
         let mut queried_orders = HashMap::new();
         let observations = self
             .evidence
@@ -163,51 +156,13 @@ impl GridTradingEngine {
                     &mut queried_orders,
                 )
                 .await?;
-            if harmless_terminal {
-                harmless_identities.insert((
-                    found.client_order_id.clone(),
-                    found.symbol.clone(),
-                    found.order_id,
-                ));
-            }
-            if corrected_to_expected
-                && harmless_terminal
-                && expected.purpose == OrderPurpose::Unverified
-            {
-                if harmless_candidate
-                    .as_ref()
-                    .is_some_and(|old| old.order_id != found.order_id)
-                {
-                    ambiguous_harmless = true;
-                } else {
-                    harmless_candidate = Some(found);
-                }
-            } else if corrected_to_expected && (expected.order_id.is_some() || !harmless_terminal) {
-                if corrected_expected
-                    .as_ref()
-                    .is_some_and(|old| old.order_id != found.order_id)
-                {
-                    ambiguous_candidate = true;
-                } else {
-                    corrected_expected = Some(found);
-                }
-            }
+            candidates.record(expected, found, harmless_terminal, corrected_to_expected);
         }
-        if corrected_expected.is_none() && expected.purpose == OrderPurpose::Unverified {
-            if ambiguous_harmless {
-                self.report_reconciliation_state(true).await;
-                return None;
-            }
-            corrected_expected = harmless_candidate;
-        }
-        if ambiguous_candidate {
+        let Some(verified) = candidates.finish(expected) else {
             self.report_reconciliation_state(true).await;
             return None;
-        }
-        Some(VerifiedConflictObservations {
-            corrected_expected,
-            harmless_identities,
-        })
+        };
+        Some(verified)
     }
 
     async fn adopt_confirmed_unique_candidate(
@@ -436,6 +391,45 @@ impl GridTradingEngine {
             .await
     }
 
+    fn apply_verified_conflict_to_snapshot(
+        expected: &GridOrder,
+        verified: VerifiedConflictObservations,
+        live_orders: &mut Vec<BinanceOrderResponse>,
+        corrected_terminal: &mut HashMap<String, BinanceOrderResponse>,
+    ) -> Option<bool> {
+        live_orders.retain(|order| {
+            !verified.harmless_identities.contains(&(
+                order.client_order_id.clone(),
+                order.symbol.clone(),
+                order.order_id,
+            ))
+        });
+        if let Some(corrected) = verified.corrected_expected {
+            // A single-order query is authoritative for this same
+            // exchange ID even if the list still has the old side.
+            live_orders.retain(|order| {
+                !(order.client_order_id == corrected.client_order_id
+                    && order.symbol == corrected.symbol
+                    && order.order_id == corrected.order_id)
+            });
+            if corrected.is_terminal() {
+                corrected_terminal.insert(corrected.client_order_id.clone(), corrected);
+            } else {
+                live_orders.push(corrected);
+            }
+        }
+        let (seen, matching) = live_orders
+            .iter()
+            .filter(|order| order.client_order_id == expected.client_order_id)
+            .fold((false, true), |(_, consistent), order| {
+                (
+                    true,
+                    consistent && expected.matches_exchange_identity(order),
+                )
+            });
+        matching.then_some(seen)
+    }
+
     async fn resolve_single_identity_conflict(
         &mut self,
         account_key: [u8; 32],
@@ -470,40 +464,15 @@ impl GridTradingEngine {
             self.report_reconciliation_state(true).await;
             return None;
         }
-        live_orders.retain(|order| {
-            !verified.harmless_identities.contains(&(
-                order.client_order_id.clone(),
-                order.symbol.clone(),
-                order.order_id,
-            ))
-        });
-        if let Some(corrected) = verified.corrected_expected {
-            // A single-order query is authoritative for this same
-            // exchange ID even if the list still has the old side.
-            live_orders.retain(|order| {
-                !(order.client_order_id == corrected.client_order_id
-                    && order.symbol == corrected.symbol
-                    && order.order_id == corrected.order_id)
-            });
-            if corrected.is_terminal() {
-                corrected_terminal.insert(corrected.client_order_id.clone(), corrected);
-            } else {
-                live_orders.push(corrected);
-            }
-        }
-        let (seen, matching) = live_orders
-            .iter()
-            .filter(|order| order.client_order_id == expected.client_order_id)
-            .fold((false, true), |(_, consistent), order| {
-                (
-                    true,
-                    consistent && expected.matches_exchange_identity(order),
-                )
-            });
-        if !matching {
+        let Some(seen) = Self::apply_verified_conflict_to_snapshot(
+            &expected,
+            verified,
+            live_orders,
+            corrected_terminal,
+        ) else {
             self.report_reconciliation_state(true).await;
             return None;
-        }
+        };
         if !seen && !corrected_terminal.contains_key(&expected.client_order_id) {
             let found = self
                 .resolve_absent_conflict_order(

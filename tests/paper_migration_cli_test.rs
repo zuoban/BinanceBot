@@ -1,5 +1,6 @@
 #![cfg(unix)]
 
+mod common;
 use binance_grid_bot::db::Database;
 use rusqlite::Connection;
 use std::os::fd::AsRawFd;
@@ -8,16 +9,14 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 struct Fixture {
-    directory: PathBuf,
+    directory: common::TempTestDir,
     database: PathBuf,
 }
 
 impl Fixture {
     fn new() -> Self {
-        let directory =
-            std::env::temp_dir().join(format!("paper-migration-cli-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir(&directory).unwrap();
-        let database = directory.join("bot.db");
+        let directory = common::TempTestDir::new("paper-migration-cli");
+        let database = directory.path().join("bot.db");
         drop(Database::open(&database).unwrap());
         let conn = Connection::open(&database).unwrap();
         conn.execute_batch(
@@ -29,12 +28,6 @@ impl Fixture {
             directory,
             database,
         }
-    }
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.directory);
     }
 }
 
@@ -69,7 +62,7 @@ fn migration_requires_confirmation_and_exclusive_lock() {
         .success());
     assert_eq!(paper_account_count(&fixture.database), 0);
 
-    let lock_path = fixture.directory.join("bot.db.process-lock");
+    let lock_path = fixture.directory.path().join("bot.db.process-lock");
     let lock = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -107,7 +100,7 @@ fn migration_requires_confirmation_and_exclusive_lock() {
 #[test]
 fn migration_rejects_database_with_hard_link_alias() {
     let fixture = Fixture::new();
-    std::fs::hard_link(&fixture.database, fixture.directory.join("alias.db")).unwrap();
+    std::fs::hard_link(&fixture.database, fixture.directory.path().join("alias.db")).unwrap();
     let result = migrate(
         &fixture.database,
         "SOLUSDC",

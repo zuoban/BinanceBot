@@ -476,7 +476,7 @@ impl ExchangeConfig {
 mod config_validation;
 pub use config_validation::validate_symbol;
 pub(crate) use config_validation::{
-    validate_global_position_limit, validate_min_available_margin_pct,
+    validate_global_position_limit, validate_min_available_margin_pct, MAX_SYNC_INTERVAL_SECS,
 };
 
 #[cfg(test)]

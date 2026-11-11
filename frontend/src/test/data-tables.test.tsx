@@ -65,6 +65,11 @@ it('filters orders by side and disables export when nothing matches', async () =
   expect(screen.getByRole('button', { name: /导出 CSV/ })).toBeDisabled();
 });
 
+it('renders UNVERIFIED order purpose as 待核实', () => {
+  view(<OrdersTable orders={[{ ...order('o-unverified', 'BUY', '99'), purpose: 'UNVERIFIED' }]} mark="100" />);
+  expect(screen.getAllByText('待核实').length).toBeGreaterThan(0);
+});
+
 it('filters logs by level and exports the filtered rows', async () => {
   view(<LogsTable logs={[log('INFO', '网格已对账'), log('ERROR', '撤单失败'), log('WARN', '接近上限')]} />);
   const user = userEvent.setup();

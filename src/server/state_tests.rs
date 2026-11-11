@@ -1947,3 +1947,98 @@ async fn live_trade_notification_uses_configured_sync_interval_for_account_fresh
     assert!(text.contains("可用余额：8000.00 USDC｜80.00%"), "{text}");
     fixture.server.abort();
 }
+
+#[tokio::test]
+async fn refresh_current_scope_wipes_old_mode_on_sqlite_error_and_recovers_durable_stats_on_next_fill(
+) {
+    struct TempDbDir(std::path::PathBuf);
+    impl Drop for TempDbDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let dir =
+        TempDbDir(std::env::temp_dir().join(format!("state-dirty-stats-{}", uuid::Uuid::new_v4())));
+    std::fs::create_dir_all(&dir.0).unwrap();
+    let db_path = dir.0.join("bot.db");
+    let db = Arc::new(Database::open(&db_path).unwrap());
+    let config = AppConfig::default();
+    db.save_config(&config).unwrap();
+    let (tx, _rx) = mpsc::channel(4);
+    let state = AppState::new(config, db.clone(), tx);
+
+    let mut p1 = cache_test_trade("paper-1", 1, TradingMode::Paper);
+    p1.amount_usdc = dec!(100);
+    p1.realized_pnl = dec!(1.5);
+    p1.pnl_verified = true;
+    assert!(state.record_trade(p1, None, None, None).await);
+
+    let mut p2 = cache_test_trade("paper-2", 2, TradingMode::Paper);
+    p2.side = OrderSide::Sell;
+    p2.amount_usdc = dec!(100);
+    p2.realized_pnl = dec!(2.5);
+    p2.pnl_verified = true;
+    assert!(state.record_trade(p2, Some(dec!(5)), None, None).await);
+    assert_eq!(state.stats.read().await.total_trades, 2);
+    assert!(!state.is_stats_dirty());
+
+    {
+        let mut cfg = state.config.write().await;
+        cfg.exchange.api_key = "live-key".into();
+        cfg.exchange.api_secret = "live-secret".into();
+    }
+    state.refresh_current_scope().await;
+    assert_eq!(state.stats.read().await.total_trades, 0);
+    let mut live_trade = cache_test_trade("live-1", 3, TradingMode::Live);
+    live_trade.amount_usdc = dec!(500);
+    live_trade.realized_pnl = dec!(99);
+    assert!(
+        state
+            .record_trade(live_trade, Some(dec!(99)), None, None)
+            .await
+    );
+    assert_eq!(state.stats.read().await.total_trades, 1);
+    assert_eq!(state.recent_trades.read().await.len(), 1);
+
+    {
+        let mut cfg = state.config.write().await;
+        cfg.exchange.api_key.clear();
+        cfg.exchange.api_secret.clear();
+    }
+    let external = rusqlite::Connection::open(&db_path).unwrap();
+    external
+        .execute_batch("ALTER TABLE scoped_grid_stats RENAME TO scoped_grid_stats_bak;")
+        .unwrap();
+
+    state.refresh_current_scope().await;
+    assert!(state.is_stats_dirty());
+    assert!(state.recent_trades.read().await.is_empty());
+    assert_eq!(state.stats.read().await.total_trades, 0);
+    assert_eq!(state.stats.read().await.total_realized_pnl, Decimal::ZERO);
+    assert!(state.snapshot().await.recent_trades.is_empty());
+
+    external
+        .execute_batch("ALTER TABLE scoped_grid_stats_bak RENAME TO scoped_grid_stats;")
+        .unwrap();
+    drop(external);
+
+    let mut p3 = cache_test_trade("paper-3", 4, TradingMode::Paper);
+    p3.side = OrderSide::Sell;
+    p3.amount_usdc = dec!(100);
+    p3.realized_pnl = dec!(2);
+    p3.pnl_verified = true;
+    assert!(state.record_trade(p3, Some(dec!(3)), None, None).await);
+    assert!(!state.is_stats_dirty());
+
+    let recovered = state.stats.read().await.clone();
+    assert_eq!(recovered.total_trades, 3);
+    assert_eq!(recovered.completed_cycles, 2);
+    assert_eq!(recovered.total_realized_profit, dec!(8));
+    assert_eq!(recovered.total_volume_usdc, dec!(300));
+    assert_eq!(recovered.total_realized_pnl, dec!(6));
+    assert_eq!(state.recent_trades.read().await.len(), 3);
+    assert_eq!(
+        db.load_scoped_stats("SOLUSDC", TradingMode::Paper).unwrap(),
+        Some((3, 2, dec!(8), dec!(300)))
+    );
+}

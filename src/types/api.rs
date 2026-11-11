@@ -27,6 +27,8 @@ pub(crate) struct PairSummary {
     pub(crate) symbol: String,
     pub(crate) status: BotStatus,
     pub(crate) mode: TradingMode,
+    #[serde(default = "super::default_sync_interval_secs")]
+    pub(crate) sync_interval_secs: u64,
     pub(crate) grid_config: crate::config::GridConfigSummary,
     pub(crate) ticker: SummaryTicker,
     pub(crate) position: SummaryPosition,
@@ -209,13 +211,11 @@ impl UpdateGlobalConfigPayload {
             config.telegram.bot_token.clear();
             config.telegram.chat_id.clear();
         } else {
-            for (target, value) in [
-                (&mut config.telegram.bot_token, self.telegram_bot_token),
-                (&mut config.telegram.chat_id, self.telegram_chat_id),
-            ] {
-                if let Some(value) = non_blank(value) {
-                    *target = value;
-                }
+            if let Some(value) = non_blank(self.telegram_bot_token) {
+                config.telegram.bot_token = value;
+            }
+            if let Some(chat_id) = self.telegram_chat_id {
+                config.telegram.chat_id = chat_id.trim().to_string();
             }
         }
     }
@@ -405,9 +405,18 @@ pub(crate) struct AuthStatusResponse {
     pub(crate) authenticated: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub(crate) struct AuthLoginPayload {
     pub(crate) password: String,
+}
+
+impl std::fmt::Debug for AuthLoginPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self { password } = self;
+        f.debug_struct("AuthLoginPayload")
+            .field("password", &crate::config::redact_secret(password))
+            .finish()
+    }
 }
 
 #[derive(Debug, Serialize)]

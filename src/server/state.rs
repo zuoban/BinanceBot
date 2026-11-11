@@ -20,6 +20,8 @@ mod auth_context;
 mod global_risk;
 #[path = "snapshot.rs"]
 pub(crate) mod snapshot;
+#[path = "state_cleanup.rs"]
+mod state_cleanup;
 #[path = "state_lifecycle.rs"]
 mod state_lifecycle;
 #[path = "state_trades.rs"]
@@ -59,6 +61,7 @@ pub struct AppState {
     pub(crate) global_position_ready: AtomicBool,
     pub(crate) global_position_initialized: AtomicBool,
     pub(crate) paper_restore_failed: AtomicBool,
+    pub(super) stats_dirty: AtomicBool,
     pub(crate) global_cancel_pending: AtomicBool,
     pub(crate) global_cancel_queued: AtomicBool,
     pause_epoch: AtomicU64,
@@ -208,6 +211,43 @@ impl AppState {
         )
     }
 
+    fn restore_initial_trades_and_stats(
+        db: &Database,
+        symbol: &str,
+        mode: crate::types::TradingMode,
+    ) -> (VecDeque<TradeRecord>, GridStats, bool) {
+        let mut stats_dirty = false;
+        let saved_trades = match db.get_recent_trades_for(symbol, mode, RECENT_TRADE_LIMIT) {
+            Ok(trades) => trades,
+            Err(e) => {
+                warn!("Failed to load recent trades: {}", e);
+                stats_dirty = true;
+                Vec::new()
+            }
+        };
+        let scoped_stats = match db.load_scoped_stats(symbol, mode) {
+            Ok(stats) => stats,
+            Err(e) => {
+                warn!("Failed to load scoped grid stats: {}", e);
+                stats_dirty = true;
+                None
+            }
+        };
+        let pnl_totals = match db.get_pnl_totals(symbol, mode) {
+            Ok(totals) => Some(totals),
+            Err(e) => {
+                warn!("Failed to load realized PnL totals: {}", e);
+                stats_dirty = true;
+                None
+            }
+        };
+        (
+            recent_trade_cache(saved_trades),
+            build_grid_stats(scoped_stats, pnl_totals),
+            stats_dirty,
+        )
+    }
+
     pub(crate) fn build_with_auth(
         config: AppConfig,
         db: Arc<Database>,
@@ -222,23 +262,8 @@ impl AppState {
         let mode = config.exchange.trading_mode();
         let (initial_status, initial_position, initial_account, paper_restore_failed) =
             Self::restore_initial_status_and_paper(&config, &db, pair_scope.as_deref());
-        // Preload recent trades from SQLite database
-        let saved_trades = db
-            .get_recent_trades_for(&symbol, mode, RECENT_TRADE_LIMIT)
-            .unwrap_or_default();
-        let recent_trades = recent_trade_cache(saved_trades);
-
-        // Restore cumulative grid stats from SQLite database if available
-        let scoped_stats = db.load_scoped_stats(&symbol, mode).ok().flatten();
-        let pnl_totals = match db.get_pnl_totals(&symbol, mode) {
-            Ok(totals) => Some(totals),
-            Err(e) => {
-                warn!("Failed to load realized PnL totals: {}", e);
-                None
-            }
-        };
-        let initial_stats = build_grid_stats(scoped_stats, pnl_totals);
-
+        let (recent_trades, initial_stats, stats_dirty) =
+            Self::restore_initial_trades_and_stats(&db, &symbol, mode);
         Arc::new(Self {
             db,
             config: RwLock::new(config),
@@ -261,6 +286,7 @@ impl AppState {
             global_position_ready: AtomicBool::new(false),
             global_position_initialized: AtomicBool::new(false),
             paper_restore_failed: AtomicBool::new(paper_restore_failed),
+            stats_dirty: AtomicBool::new(stats_dirty),
             global_cancel_pending: AtomicBool::new(false),
             global_cancel_queued: AtomicBool::new(false),
             pause_epoch: AtomicU64::new(0),
@@ -285,6 +311,10 @@ impl AppState {
             managed_router: std::sync::OnceLock::new(),
             telegram_notifier: TelegramNotifier::new(),
         })
+    }
+
+    pub(crate) fn is_stats_dirty(&self) -> bool {
+        self.stats_dirty.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub(crate) fn pair_scope(&self) -> Option<&str> {

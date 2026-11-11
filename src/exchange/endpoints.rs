@@ -145,8 +145,7 @@ impl BinanceFuturesClient {
             "/fapi/v1/order",
             format_args!("symbol={}&orderId={}", symbol, order_id),
         )?;
-        self.get_signed_json_url(&url, "Failed to get order", true)
-            .await
+        self.get_signed_json_url(&url, "Failed to get order").await
     }
 
     /// Resolve a persisted client order ID after a restart.
@@ -196,6 +195,10 @@ impl BinanceFuturesClient {
         client_order_id: &str,
         class: RequestClass,
     ) -> Result<Option<BinanceOrderResponse>> {
+        anyhow::ensure!(
+            is_valid_client_order_id(client_order_id),
+            "Invalid client_order_id"
+        );
         self.reserve(1, class)?;
         let url = self.signed_url_fmt(
             "/fapi/v1/order",
@@ -204,7 +207,7 @@ impl BinanceFuturesClient {
         let resp = self.send(self.client.get(&url)).await?;
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
+            let body = read_bounded_error_body(resp).await?;
             if status == reqwest::StatusCode::BAD_REQUEST
                 && serde_json::from_str::<BinanceApiError>(&body)
                     .is_ok_and(|error| error.code == -2013)
@@ -212,12 +215,9 @@ impl BinanceFuturesClient {
                 return Ok(None);
             }
             self.maybe_resync_on_invalid_timestamp(&body).await;
-            return Err(anyhow!(
-                "Failed to resolve order {}: {} - {}",
-                client_order_id,
-                status,
-                body
-            ));
+            let err = parse_api_error_body(status, &body);
+            let detail = format!("Failed to resolve order {client_order_id} ({status}): {err}");
+            return Err(err.context(detail));
         }
         Ok(Some(
             resp.json().await.map_err(reqwest::Error::without_url)?,
@@ -230,6 +230,11 @@ impl BinanceFuturesClient {
         &self,
         order: NewOrderRequest<'_>,
     ) -> std::result::Result<BinanceOrderResponse, ExchangeError> {
+        if !is_valid_client_order_id(order.client_order_id) {
+            return Err(ExchangeError::RequestRejected(
+                "Invalid client_order_id".to_string(),
+            ));
+        }
         self.reserve(
             0,
             if order.reduce_only {
@@ -267,9 +272,9 @@ impl BinanceFuturesClient {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
+            let body = read_bounded_error_body(resp).await?;
             self.maybe_resync_on_invalid_timestamp(&body).await;
-            return Err(order_response_error(status, body));
+            return Err(order_response_error(status, &body));
         }
 
         let order: BinanceOrderResponse = resp
@@ -287,6 +292,11 @@ impl BinanceFuturesClient {
         order_id: Option<i64>,
         client_order_id: Option<&str>,
     ) -> Result<()> {
+        if order_id.is_none() {
+            if let Some(cid) = client_order_id {
+                anyhow::ensure!(is_valid_client_order_id(cid), "Invalid client_order_id");
+            }
+        }
         self.reserve(1, RequestClass::Critical)?;
         let url = if let Some(id) = order_id {
             self.signed_url_fmt(
@@ -305,7 +315,6 @@ impl BinanceFuturesClient {
         self.ensure_signed_success(
             self.send(self.client.delete(&url)).await?,
             "Failed to cancel order",
-            false,
         )
         .await?;
         Ok(())
@@ -313,14 +322,31 @@ impl BinanceFuturesClient {
 
     /// Fetch position risk information for symbol
     pub(crate) async fn get_position(&self, symbol: &str) -> Result<Option<BinancePositionRisk>> {
+        self.get_position_with_class(symbol, RequestClass::Critical)
+            .await
+    }
+
+    pub(crate) async fn get_position_for_periodic_sync(
+        &self,
+        symbol: &str,
+    ) -> Result<Option<BinancePositionRisk>> {
+        self.get_position_with_class(symbol, RequestClass::Normal)
+            .await
+    }
+
+    async fn get_position_with_class(
+        &self,
+        symbol: &str,
+        class: RequestClass,
+    ) -> Result<Option<BinancePositionRisk>> {
         let url = self.prepare_signed_get_url(
             5,
-            RequestClass::Critical,
+            class,
             "/fapi/v2/positionRisk",
             format_args!("symbol={}", symbol),
         )?;
         let positions: Vec<BinancePositionRisk> = self
-            .get_signed_json_url(&url, "Failed to get position risk", false)
+            .get_signed_json_url(&url, "Failed to get position risk")
             .await?;
         one_way_position(positions, symbol)
     }
@@ -333,7 +359,7 @@ impl BinanceFuturesClient {
             "/fapi/v2/positionRisk",
             format_args!(""),
         )?;
-        self.get_signed_json_url(&url, "Failed to get position risk", false)
+        self.get_signed_json_url(&url, "Failed to get position risk")
             .await
     }
 
@@ -351,7 +377,7 @@ impl BinanceFuturesClient {
         class: RequestClass,
     ) -> Result<BinanceAccountInfoResponse> {
         let url = self.prepare_signed_get_url(5, class, "/fapi/v2/account", format_args!(""))?;
-        self.get_signed_json_url(&url, "Failed to get account info", false)
+        self.get_signed_json_url(&url, "Failed to get account info")
             .await
     }
 }

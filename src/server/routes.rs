@@ -10,6 +10,8 @@ use axum::{Extension, Json, Router};
 use std::sync::Arc;
 use tower::ServiceExt;
 
+#[path = "routes/accounts_ws.rs"]
+mod accounts_ws;
 #[path = "routes/auth.rs"]
 mod auth;
 #[path = "routes/config_probes.rs"]
@@ -39,6 +41,7 @@ pub(crate) use database::ClearTradeHistoryRequest;
 pub(crate) use probes::ProbeGate;
 pub(crate) use probes::ProbeGates;
 
+use accounts_ws::{accounts_ws_handler, get_accounts_handler, AccountHub, AccountSource};
 use auth::{
     get_auth_status_handler, post_auth_login_handler, post_auth_logout_handler,
     require_auth_middleware,
@@ -65,7 +68,7 @@ use queries::{
     get_overview_handler, get_overview_history_handler, get_pairs_handler,
     get_single_overview_handler, get_single_pair_handler, get_status_handler, get_trades_handler,
 };
-use ws::{accounts_ws_handler, get_accounts_handler, ws_handler, AccountHub, AccountSource};
+use ws::ws_handler;
 
 fn json_ok<T>(data: T) -> Json<ApiResponse<T>> {
     Json(ApiResponse::ok(data))

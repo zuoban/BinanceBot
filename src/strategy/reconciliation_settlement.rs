@@ -73,10 +73,9 @@ impl GridTradingEngine {
             // One refresh covers every execution observed before this
             // point. Keep all reservations and the global submission
             // barrier until fresh risk inputs and durable commits exist.
-            self.invalidate_account_and_position_caches().await;
+            self.invalidate_account_and_position_caches();
             if !self.sync_account_and_position().await {
-                self.last_orders_sync = None;
-                self.report_reconciliation_state(true).await;
+                self.mark_orders_reconciliation_blocked().await;
                 return None;
             }
         }
@@ -102,8 +101,7 @@ impl GridTradingEngine {
             self.last_orders_sync = None;
         }
         if self.state.pause_epoch() != pause_epoch {
-            self.last_orders_sync = None;
-            self.report_reconciliation_state(true).await;
+            self.mark_orders_reconciliation_blocked().await;
             return None;
         }
         if persistence_ok
@@ -208,7 +206,7 @@ impl GridTradingEngine {
             .is_ok_and(|found| found.as_ref().is_some_and(unresolved_filled_quantity));
         if inconsistent {
             self.report_reconciliation_state(true).await;
-            self.invalidate_account_and_position_caches().await;
+            self.invalidate_account_and_position_caches();
         }
         if self.state.pause_epoch() != pause_epoch {
             return None;

@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { defaultGridInterval, exceeds, exposure, gridPreview, isPercentDecimal, isPositiveDecimal, orderAmountError, orderSizing, priceDiffPercent, priceRangeError, capCoverage, sameDecimal, spacingBelowRoundTripFee, spacingPercent, sumDecimals, tickSizeError } from '../lib/gridPreview';
+import { capCoverage, defaultGridInterval, exceeds, exposure, gridIntervalError, gridPreview, isPercentDecimal, isPositiveDecimal, MAX_CONFIG_NOTIONAL_OR_PRICE, orderAmountError, orderSizing, priceDiffPercent, priceRangeError, sameDecimal, spacingBelowRoundTripFee, spacingPercent, sumDecimals, tickSizeError } from '../lib/gridPreview';
 
 const base = { interval: '0.5', buyWindow: 3, sellWindow: 3 };
 
@@ -124,4 +124,21 @@ it('validates positive, percentage, and equal plain decimals without float round
   expect(isPercentDecimal('0')).toBe(false);
   expect(sameDecimal('100.50', '100.5')).toBe(true);
   expect(sameDecimal('100.0000000000000001', '100')).toBe(false);
+});
+
+it('enforces MAX_CONFIG_NOTIONAL_OR_PRICE across intervals, order amounts, price bounds, and capCoverage', () => {
+  expect(MAX_CONFIG_NOTIONAL_OR_PRICE).toBe('1000000000000');
+  const over = '1000000000000.01';
+  expect(priceRangeError('min', MAX_CONFIG_NOTIONAL_OR_PRICE, null)).toBeNull();
+  expect(priceRangeError('min', over, null)).toBe('价格下限超出允许上限');
+  expect(priceRangeError('max', null, over)).toBe('价格上限超出允许上限');
+  expect(orderAmountError(MAX_CONFIG_NOTIONAL_OR_PRICE)).toBeNull();
+  expect(orderAmountError(over)).toBe('每格金额超出允许上限');
+  expect(gridIntervalError(MAX_CONFIG_NOTIONAL_OR_PRICE, '0.1')).toBeNull();
+  expect(gridIntervalError(over, '0.1')).toBe('网格间距超出允许上限');
+  expect(gridIntervalError(over)).toBe('网格间距超出允许上限');
+  expect(gridPreview({ ...base, reference: '100', interval: over })).toBeNull();
+  expect(gridPreview({ ...base, reference: '100', max: over })).toBeNull();
+  expect(capCoverage(over, '100', '1', '1000')).toBeNull();
+  expect(capCoverage(MAX_CONFIG_NOTIONAL_OR_PRICE, '0.00000001', '1', '1000')).toBeNull();
 });

@@ -22,18 +22,22 @@ import { useAccountGroups, useBeijingDay } from '../lib/useNow';
 const detailTabs = ['monitor', 'orders', 'trades', 'logs'] as const;
 const fallbackClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 
-function resolveTrades(snapshot: Snapshot | undefined, fetched: Trade[] | undefined, isError: boolean, fetchedAt: number, snapshotAt: number): Trade[] {
+export function resolveTrades(snapshot: Snapshot | undefined, fetched: Trade[] | undefined, isError: boolean, fetchedAt: number, snapshotAt: number): Trade[] {
   const recent = snapshot?.recent_trades ?? [];
-  if (!snapshot || isError || !Array.isArray(fetched) || !fetchedAt) return recent;
-  if (snapshot.stats.total_trades === 0 && !recent.length && snapshotAt > fetchedAt) return recent;
-  const scoped = fetched.filter(trade => trade.mode === snapshot.mode);
+  if (!snapshot) return recent;
+  const scopedRecent = recent.filter(trade => trade.symbol === snapshot.symbol && trade.mode === snapshot.mode);
+  if (isError || !Array.isArray(fetched) || !fetchedAt) return scopedRecent;
+  const scoped = fetched.filter(trade => trade.symbol === snapshot.symbol && trade.mode === snapshot.mode);
   if (fetchedAt >= snapshotAt) return scoped;
-  const byId = new Map(recent.map(trade => [trade.trade_id, trade]));
+  if (snapshot.stats.total_trades <= scopedRecent.length) return scopedRecent.slice(0, snapshot.stats.total_trades);
+  const byId = new Map(scopedRecent.map(trade => [trade.trade_id, trade]));
   const seen = new Set(scoped.map(trade => trade.trade_id));
-  return [...recent.filter(trade => !seen.has(trade.trade_id)), ...scoped.map(trade => byId.get(trade.trade_id) ?? trade)];
+  return [...scopedRecent.filter(trade => !seen.has(trade.trade_id)), ...scoped.map(trade => byId.get(trade.trade_id) ?? trade)]
+    .sort((a, b) => (Date.parse(b.timestamp) - Date.parse(a.timestamp)) || b.trade_id.localeCompare(a.trade_id))
+    .slice(0, Math.max(snapshot.stats.total_trades, scopedRecent.length));
 }
 
-function resolveLogs(snapshot: Snapshot | undefined, fetched: LogItem[] | undefined, isError: boolean, fetchedAt: number, snapshotAt: number): LogItem[] {
+export function resolveLogs(snapshot: Snapshot | undefined, fetched: LogItem[] | undefined, isError: boolean, fetchedAt: number, snapshotAt: number): LogItem[] {
   const recent = snapshot?.recent_logs ?? [];
   if (!snapshot || isError || !Array.isArray(fetched) || !fetchedAt) return recent;
   if (!fetched.length) return snapshotAt > fetchedAt ? recent : fetched;
@@ -43,7 +47,10 @@ function resolveLogs(snapshot: Snapshot | undefined, fetched: LogItem[] | undefi
   if (fetchedAt >= snapshotAt || !recent.length) return ordered;
   const head = ordered[0];
   const overlap = recent.findIndex(item => item.timestamp === head.timestamp && item.level === head.level && item.message === head.message);
-  return overlap > 0 ? [...recent.slice(0, overlap), ...ordered] : overlap === 0 ? ordered : ordered.length >= recent.length ? ordered : recent;
+  if (overlap > 0) return [...recent.slice(0, overlap), ...ordered].slice(0, 250);
+  if (overlap === 0) return ordered;
+  if (Date.parse(recent[recent.length - 1].timestamp) >= Date.parse(head.timestamp)) return [...recent, ...ordered].slice(0, 250);
+  return ordered.length >= recent.length ? ordered : recent;
 }
 
 function usePairTabHistory(pair: Pair | undefined, tab: (typeof detailTabs)[number], snapshot: Snapshot | undefined, snapshotUpdatedAt = 0) {

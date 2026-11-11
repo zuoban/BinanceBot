@@ -36,15 +36,9 @@ function usePageSubmissionGuard(pathname: string) {
 }
 
 function usePairConfigActions({ adding, symbol, pair, live, baseline, form, refetchGlobal, pathname, navigate }: {
-  adding: boolean;
-  symbol: string | undefined;
-  pair: Pair | undefined;
-  live: boolean;
-  baseline: React.RefObject<BaselineState | null>;
-  form: FormInstance<FormValues>;
-  refetchGlobal: () => Promise<{ data?: GlobalConfig }>;
-  pathname: string;
-  navigate: NavigateFunction;
+  adding: boolean; symbol: string | undefined; pair: Pair | undefined; live: boolean;
+  baseline: React.RefObject<BaselineState | null>; form: FormInstance<FormValues>;
+  refetchGlobal: () => Promise<{ data?: GlobalConfig }>; pathname: string; navigate: NavigateFunction;
 }) {
   const { page, removing, submission } = usePageSubmissionGuard(pathname);
   const edit = useContext(EditContext), client = useQueryClient(), { message } = App.useApp();
@@ -174,14 +168,19 @@ export default function PairConfig() {
     const nextInterval = defaultGridInterval(effectiveMark, tickSize);
     if (nextInterval) { appliedSymbol.current = selectedSymbol; form.setFieldValue('grid_interval', nextInterval); void form.validateFields(['grid_interval', 'order_amount_usdc']).catch(() => {}); }
   }, [adding, ready, edit.saving, selectedSymbol, effectiveMark, tickSize, form, submission]);
-  useEffect(() => { if ((tickSize || stepSize || minQty || minNotional) && ready) void form.validateFields(['grid_interval', 'order_amount_usdc']).catch(() => {}); }, [tickSize, stepSize, minQty, minNotional, effectiveMark, ready, form]);
+  useEffect(() => {
+    if (tickSize && ready && (form.isFieldTouched('grid_interval') || form.getFieldError('grid_interval').length > 0)) void form.validateFields(['grid_interval']).catch(() => {});
+  }, [tickSize, ready, form]);
+  useEffect(() => {
+    if ((stepSize || minQty || minNotional) && ready && (form.isFieldTouched('order_amount_usdc') || form.getFieldError('order_amount_usdc').length > 0)) void form.validateFields(['order_amount_usdc']).catch(() => {});
+  }, [stepSize, minQty, minNotional, effectiveMark, ready, form]);
   return <div className="config-page">
     {!adding && symbol && <AccountMarkBridge symbol={symbol} mode={pair?.mode} onMark={setLiveMark} />}
     <PageBreadcrumb disabled={edit.saving} items={!symbol ? [{ label: '策略总览', to: '/' }, { label: '新增交易对' }] : [{ label: '策略总览', to: '/' }, { label: symbol, to: pairRoute(symbol) }, { label: '策略参数' }]} />
     <PageTitle title={adding ? '新增交易对' : `${symbol} 策略参数`} description={adding ? '新策略创建后保持暂停，检查参数后手动恢复' : '参数保存后立即生效，请先核对策略设置'} />
     <ErrorNotice error={pairs.error || config.error} retry={() => { if (pairs.error) void pairs.refetch(); if (!adding && pair) void config.refetch(); }} />
     <ErrorNotice error={mutation.error} />
-    {!adding && isConfigConflict(mutation.error, '无法确认配置版本') && <ConflictReloadButton label="策略配置" activeRef={page} resetKey={symbol} refetch={config.refetch} onReset={mutation.reset} onLoaded={data => { if (!symbol || data.symbol !== symbol) return false; baseline.current = { symbol, config: data }; form.setFieldsValue(data); }} />}
+    {!adding && isConfigConflict(mutation.error, '无法确认配置版本') && <ConflictReloadButton form={form} label="策略配置" activeRef={page} resetKey={symbol} refetch={config.refetch} onReset={mutation.reset} onLoaded={data => { if (!symbol || data.symbol !== symbol) return false; baseline.current = { symbol, config: data }; form.setFieldsValue(data); }} />}
     {pairs.data && !pair && !adding && !pairs.isFetching && <Alert type="warning" title="该交易对不存在或已移除" />}
     <Form<FormValues> className="config-form" form={form} layout="vertical" disabled={formDisabled} onFinish={values => void submit(values)} onValuesChange={changed => {
       if ('symbol' in changed) { form.setFieldValue('grid_interval', defaults.grid_interval); customInterval.current = false; appliedSymbol.current = undefined; }

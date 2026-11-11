@@ -284,7 +284,7 @@ impl GridTradingEngine {
         mode_changed: bool,
         credentials_changed: bool,
     ) -> Result<()> {
-        let ready = if new_config.exchange.is_paper() {
+        let scope_ready = if new_config.exchange.is_paper() {
             self.update_paper_valuation().await;
             !self
                 .state
@@ -293,6 +293,7 @@ impl GridTradingEngine {
         } else {
             self.sync_live_orders().await && self.sync_account_and_position().await
         };
+        let ready = scope_ready && !self.state.is_stats_dirty();
         // A dirty target scope is installed paused, but reconciliation can have
         // recovered its live orders. Apply the same cancellation as startup.
         let cancellation_complete = if (market_changed || mode_changed || credentials_changed)
@@ -437,12 +438,14 @@ impl GridTradingEngine {
             client_changed,
             fetch_rules,
         } = reset;
-        self.client = new_client;
+        if client_changed {
+            self.client = new_client;
+        }
         self.sync_interval_secs = new_config.exchange.sync_interval_secs.max(1);
         if !new_config.exchange.is_paper() {
             self.next_time_sync_at = Instant::now() + super::PERIODIC_TIME_SYNC_INTERVAL;
         }
-        if market_changed || mode_changed || client_changed {
+        if market_changed || mode_changed || credentials_changed {
             if let Some(task) = self.pnl_reconcile_task.take() {
                 task.abort();
             }
@@ -453,13 +456,11 @@ impl GridTradingEngine {
             self.reconciliation_blocked = false;
             self.market_data_blocked = false;
             self.paper_window_cache = None;
-        }
-        if market_changed || mode_changed || credentials_changed {
             self.last_account_sync = None;
             self.last_orders_sync = None;
             self.evidence = OrderEvidenceBook::default();
         }
-        if client_changed {
+        if credentials_changed {
             self.state.position.write().await.update_time = None;
             self.state.account.write().await.update_time = chrono::DateTime::<Utc>::default();
         }

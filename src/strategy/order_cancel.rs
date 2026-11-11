@@ -19,68 +19,72 @@ struct UncertainCanceledOrder<'a> {
 }
 
 impl GridTradingEngine {
+    async fn confirm_live_order_canceled(&mut self, order: &GridOrder) -> Option<bool> {
+        if let Err(e) = self
+            .client
+            .cancel_order(&order.symbol, order.order_id, Some(&order.client_order_id))
+            .await
+        {
+            warn!("Failed to cancel order {}: {}", order.client_order_id, e);
+            // A lost response or a fill preceding cancellation can still
+            // leave a terminal order. Confirm it through the query below.
+        }
+        let exchange_order = self.lookup_order(order).await;
+        if let Ok(Some(exchange_order)) = &exchange_order {
+            if !order.matches_exchange_identity(exchange_order) {
+                self.track_identity_conflict(order, exchange_order);
+                self.mark_orders_reconciliation_blocked().await;
+                if !self
+                    .persist_identity_observations(
+                        self.client.account_identity_key(),
+                        &order.symbol,
+                    )
+                    .await
+                {
+                    self.pause_trading().await;
+                }
+                return Some(false);
+            }
+        }
+        match exchange_order {
+            Ok(Some(exchange_order)) if unresolved_filled_quantity(&exchange_order) => {
+                self.block_reconciliation_and_invalidate_caches().await;
+                Some(false)
+            }
+            Ok(Some(exchange_order)) if !exchange_order.is_terminal() => {
+                self.last_orders_sync = None;
+                warn!("Cancellation is not terminal for {}", order.client_order_id);
+                Some(false)
+            }
+            Ok(Some(exchange_order)) if exchange_order.executed_qty > Decimal::ZERO => {
+                let mut filled = order.clone();
+                filled.apply_terminal_fill(&exchange_order, exchange_fill_time(&exchange_order));
+                Some(self.on_order_filled(&mut filled).await)
+            }
+            Ok(Some(_)) => None,
+            Ok(None) => {
+                warn!(
+                    "Canceled order {} but could not confirm fill status: order not found",
+                    order.client_order_id
+                );
+                Some(false)
+            }
+            Err(e) => {
+                warn!(
+                    "Canceled order {} but could not confirm fill status: {}",
+                    order.client_order_id, e
+                );
+                Some(false)
+            }
+        }
+    }
+
     /// Cancel a single order
     pub(super) async fn cancel_single_order(&mut self, order: &GridOrder) -> bool {
         let paper = self.state.config.read().await.exchange.is_paper();
         if !paper {
-            if let Err(e) = self
-                .client
-                .cancel_order(&order.symbol, order.order_id, Some(&order.client_order_id))
-                .await
-            {
-                warn!("Failed to cancel order {}: {}", order.client_order_id, e);
-                // A lost response or a fill preceding cancellation can still
-                // leave a terminal order. Confirm it through the query below.
-            }
-            let exchange_order = self.lookup_order(order).await;
-            if let Ok(Some(exchange_order)) = &exchange_order {
-                if !order.matches_exchange_identity(exchange_order) {
-                    self.track_identity_conflict(order, exchange_order);
-                    self.last_orders_sync = None;
-                    self.report_reconciliation_state(true).await;
-                    if !self
-                        .persist_identity_observations(
-                            self.client.account_identity_key(),
-                            &order.symbol,
-                        )
-                        .await
-                    {
-                        self.pause_trading().await;
-                    }
-                    return false;
-                }
-            }
-            match exchange_order {
-                Ok(Some(exchange_order)) if unresolved_filled_quantity(&exchange_order) => {
-                    self.block_reconciliation_and_invalidate_caches().await;
-                    return false;
-                }
-                Ok(Some(exchange_order)) if !exchange_order.is_terminal() => {
-                    self.last_orders_sync = None;
-                    warn!("Cancellation is not terminal for {}", order.client_order_id);
-                    return false;
-                }
-                Ok(Some(exchange_order)) if exchange_order.executed_qty > Decimal::ZERO => {
-                    let mut filled = order.clone();
-                    filled
-                        .apply_terminal_fill(&exchange_order, exchange_fill_time(&exchange_order));
-                    return self.on_order_filled(&mut filled).await;
-                }
-                Ok(Some(_)) => {}
-                Ok(None) => {
-                    warn!(
-                        "Canceled order {} but could not confirm fill status: order not found",
-                        order.client_order_id
-                    );
-                    return false;
-                }
-                Err(e) => {
-                    warn!(
-                        "Canceled order {} but could not confirm fill status: {}",
-                        order.client_order_id, e
-                    );
-                    return false;
-                }
+            if let Some(outcome) = self.confirm_live_order_canceled(order).await {
+                return outcome;
             }
         }
         if let Err(e) = self
@@ -91,8 +95,7 @@ impl GridTradingEngine {
                 "Could not delete managed order {}: {}",
                 order.client_order_id, e
             );
-            self.last_orders_sync = None;
-            self.report_reconciliation_state(true).await;
+            self.mark_orders_reconciliation_blocked().await;
             self.pause_trading().await;
             return false;
         }
@@ -124,8 +127,7 @@ impl GridTradingEngine {
                 Ok(sources) => Some(sources),
                 Err(error) => {
                     error!("Could not load cancellation recovery sources: {}", error);
-                    self.last_orders_sync = None;
-                    self.report_reconciliation_state(true).await;
+                    self.mark_orders_reconciliation_blocked().await;
                     None
                 }
             }

@@ -18,17 +18,21 @@ macro_rules! select_trades_sql {
 
 mod authentication;
 mod config_runtime;
+mod evidence;
 mod grid_stats;
 mod hourly;
 mod migrations;
-mod orders_evidence;
+mod orders;
 mod paper;
+mod process_lock;
 mod snapshots_export;
 #[cfg(test)]
 mod tests;
+mod trades_cleanup;
 mod trades_stats;
 
 pub(crate) use config_runtime::config_version;
+pub use process_lock::DatabaseProcessLock;
 
 pub(crate) fn beijing_midnight(now: DateTime<Utc>) -> DateTime<Utc> {
     let beijing = crate::types::beijing_offset();
@@ -186,16 +190,18 @@ pub struct Database {
 }
 
 #[cfg(unix)]
-fn validate_database_file(path: &Path, expected_uid: u32) -> std::io::Result<()> {
+pub(super) fn effective_uid() -> u32 {
+    let uid = unsafe { libc::geteuid() };
+    uid as u32
+}
+
+#[cfg(unix)]
+pub(super) fn validate_regular_file_ownership_and_mode(
+    metadata: &std::fs::Metadata,
+    expected_uid: u32,
+) -> std::io::Result<()> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
-    let metadata = std::fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "SQLite database and sidecar paths must not be symbolic links",
-        ));
-    }
     if metadata.is_file() && metadata.nlink() != 1 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -222,9 +228,21 @@ fn validate_database_file(path: &Path, expected_uid: u32) -> std::io::Result<()>
 }
 
 #[cfg(unix)]
+fn validate_database_file(path: &Path, expected_uid: u32) -> std::io::Result<()> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "SQLite database and sidecar paths must not be symbolic links",
+        ));
+    }
+    validate_regular_file_ownership_and_mode(&metadata, expected_uid)
+}
+
+#[cfg(unix)]
 pub(super) fn validate_database_and_sidecars(path: &Path) -> Result<()> {
-    let effective_uid = unsafe { libc::geteuid() } as u32;
-    let validate = |target: &Path| validate_database_file(target, effective_uid);
+    let expected_uid = effective_uid();
+    let validate = |target: &Path| validate_database_file(target, expected_uid);
     validate(path).with_context(|| {
         format!(
             "Insecure SQLite database path {:?}; ensure it is owned by the service user, remove group and other permissions and avoid symbolic links",
@@ -449,8 +467,6 @@ impl Database {
                 stats_hour INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades (timestamp DESC);
-            CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades (symbol);
-            CREATE INDEX IF NOT EXISTS idx_trades_client_order_id ON trades (client_order_id);
             CREATE TABLE IF NOT EXISTS cleared_trade_ids (trade_id TEXT PRIMARY KEY, client_order_id TEXT NOT NULL, mode TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS idx_cleared_trade_order ON cleared_trade_ids (client_order_id, mode);
             CREATE TABLE IF NOT EXISTS cleared_pair_openings (symbol TEXT NOT NULL, mode TEXT NOT NULL, client_order_id TEXT NOT NULL, side TEXT NOT NULL, price TEXT NOT NULL, quantity TEXT NOT NULL, PRIMARY KEY (symbol, mode, client_order_id));
@@ -459,15 +475,18 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_managed_orders_symbol ON managed_orders (symbol);
             CREATE TABLE IF NOT EXISTS order_identity_observations (account_key BLOB NOT NULL, client_order_id TEXT NOT NULL, expected_symbol TEXT NOT NULL, observed_client_order_id TEXT NOT NULL, observed_symbol TEXT NOT NULL, observed_side TEXT NOT NULL, observed_order_id INTEGER NOT NULL, expected_json TEXT NOT NULL, observed_json TEXT NOT NULL, PRIMARY KEY (account_key, client_order_id, expected_symbol, observed_client_order_id, observed_symbol, observed_side, observed_order_id));
             CREATE TABLE IF NOT EXISTS initial_order_responses (account_key BLOB NOT NULL, expected_symbol TEXT NOT NULL, client_order_id TEXT NOT NULL, observed_client_order_id TEXT NOT NULL, observed_symbol TEXT NOT NULL, observed_side TEXT NOT NULL, observed_order_id INTEGER NOT NULL, response_json TEXT NOT NULL, observation_id TEXT NOT NULL UNIQUE, batch_id TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS idx_initial_order_responses_snapshot_scope ON initial_order_responses (account_key, expected_symbol) WHERE batch_id GLOB 'snapshot:*';
             CREATE TABLE IF NOT EXISTS terminal_order_disagreements (account_key BLOB NOT NULL, expected_symbol TEXT NOT NULL, client_order_id TEXT NOT NULL, first_json TEXT NOT NULL, conflicting_json TEXT NOT NULL, PRIMARY KEY (account_key, expected_symbol, client_order_id, first_json, conflicting_json));
             CREATE TABLE IF NOT EXISTS pair_intents (parent_client_order_id TEXT PRIMARY KEY, symbol TEXT NOT NULL, mode TEXT NOT NULL, order_json TEXT NOT NULL, created_at TEXT NOT NULL);
-            CREATE INDEX IF NOT EXISTS idx_pair_intents_scope ON pair_intents (symbol, mode);
+            CREATE INDEX IF NOT EXISTS idx_pair_intents_scope_created ON pair_intents (symbol, mode, created_at);
             CREATE TABLE IF NOT EXISTS remainder_plans (target_client_order_id TEXT PRIMARY KEY, symbol TEXT NOT NULL, mode TEXT NOT NULL, active INTEGER NOT NULL, plan_json TEXT NOT NULL, updated_at TEXT NOT NULL);
             CREATE UNIQUE INDEX IF NOT EXISTS idx_active_remainder_plan ON remainder_plans (symbol, mode) WHERE active = 1;
+            CREATE INDEX IF NOT EXISTS idx_remainder_plans_inactive_scope ON remainder_plans (symbol, mode) WHERE active = 0;
             CREATE TABLE IF NOT EXISTS bot_runtime (id INTEGER PRIMARY KEY CHECK (id = 1), status TEXT NOT NULL, updated_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS grid_stats (id INTEGER PRIMARY KEY CHECK (id = 1), total_trades INTEGER NOT NULL, completed_cycles INTEGER NOT NULL, total_realized_profit TEXT NOT NULL, total_volume_usdc TEXT NOT NULL, updated_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS scoped_grid_stats (symbol TEXT NOT NULL, mode TEXT NOT NULL, total_trades INTEGER NOT NULL, completed_cycles INTEGER NOT NULL, total_realized_profit TEXT NOT NULL, total_volume_usdc TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (symbol, mode));
             CREATE TABLE IF NOT EXISTS auth_sessions (token TEXT PRIMARY KEY, created_at TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS idx_auth_sessions_created_at ON auth_sessions (created_at);
             "#,
         )
         .context("Failed to initialize SQLite tables")?;

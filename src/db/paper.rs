@@ -391,11 +391,10 @@ impl Database {
     ) -> Result<Option<(PositionInfo, AccountInfo)>> {
         let conn = self.lock_connection("load_paper_state");
         let saved: Option<(String, String)> = conn
-            .query_row(
+            .prepare_cached(
                 "SELECT position_json, account_json FROM paper_accounts WHERE symbol = ?1",
-                params![symbol],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
+            )?
+            .query_row(params![symbol], |row| Ok((row.get(0)?, row.get(1)?)))
             .optional()?;
         if let Some((position, account)) = saved {
             return Ok(Some((

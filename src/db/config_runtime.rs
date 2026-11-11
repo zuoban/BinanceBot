@@ -10,9 +10,8 @@ impl Database {
     pub(crate) fn load_bot_status(&self) -> Result<Option<BotStatus>> {
         let conn = self.lock_connection("load_bot_status");
         let value: Option<String> = conn
-            .query_row("SELECT status FROM bot_runtime WHERE id = 1;", [], |row| {
-                row.get(0)
-            })
+            .prepare_cached("SELECT status FROM bot_runtime WHERE id = 1;")?
+            .query_row([], |row| row.get(0))
             .optional()?;
         value
             .map(|status| serde_json::from_str(&format!("\"{}\"", status)).map_err(Into::into))
@@ -27,12 +26,11 @@ impl Database {
     pub fn load_pair_status(&self, symbol: &str, mode: TradingMode) -> Result<Option<BotStatus>> {
         let value: Option<String> = {
             let conn = self.lock_connection("load_pair_status");
-            conn.query_row(
+            let mut stmt = conn.prepare_cached(
                 "SELECT status FROM pair_runtime WHERE symbol = ?1 AND mode = ?2",
-                params![symbol, mode.as_str()],
-                |row| row.get(0),
-            )
-            .optional()?
+            )?;
+            stmt.query_row(params![symbol, mode.as_str()], |row| row.get(0))
+                .optional()?
         };
         if let Some(value) = value {
             return Ok(Some(serde_json::from_str(&value)?));
@@ -216,10 +214,10 @@ impl Database {
             // derives from globally persisted credentials, so a crash between
             // this pair commit and the global commit must not resume it live.
             save_pair_status_on(&tx, previous_scope.0, previous_scope.1, BotStatus::Paused)?;
-            tx.execute(
+            tx.prepare_cached(
                 "UPDATE pair_execution_guard SET dirty = 0 WHERE symbol = ?1 AND mode = ?2",
-                params![previous_scope.0, previous_scope.1.as_str()],
-            )?;
+            )?
+            .execute(params![previous_scope.0, previous_scope.1.as_str()])?;
         }
         let status = if guarded { BotStatus::Paused } else { status };
         save_pair_status_on(&tx, &config.exchange.symbol, mode, status)?;
@@ -269,16 +267,14 @@ impl Database {
 }
 
 pub(super) fn load_config_on(conn: &Connection) -> Result<Option<AppConfig>> {
-    conn.query_row(
-        "SELECT config_json FROM app_config WHERE id = 1",
-        [],
-        |row| row.get::<_, String>(0),
-    )
-    .optional()?
-    .map(|json| {
-        serde_json::from_str(&json).context("Failed to deserialize AppConfig from SQLite database")
-    })
-    .transpose()
+    conn.prepare_cached("SELECT config_json FROM app_config WHERE id = 1")?
+        .query_row([], |row| row.get::<_, String>(0))
+        .optional()?
+        .map(|json| {
+            serde_json::from_str(&json)
+                .context("Failed to deserialize AppConfig from SQLite database")
+        })
+        .transpose()
 }
 
 fn load_required_config_on(conn: &Connection) -> Result<AppConfig> {
@@ -313,12 +309,16 @@ pub(super) fn save_raw_config_value_on(
 fn save_config_on(conn: &Connection, config: &AppConfig) -> Result<()> {
     let json =
         serde_json::to_string_pretty(config).context("Failed to serialize AppConfig to JSON")?;
-    conn.execute(
+    conn.prepare_cached(
         "INSERT INTO app_config (id, symbol, config_json, updated_at) VALUES (1, ?1, ?2, ?3)
          ON CONFLICT(id) DO UPDATE SET symbol = excluded.symbol,
          config_json = excluded.config_json, updated_at = excluded.updated_at",
-        params![config.exchange.symbol, json, Utc::now().to_rfc3339()],
-    )
+    )?
+    .execute(params![
+        config.exchange.symbol,
+        json,
+        Utc::now().to_rfc3339()
+    ])
     .context("Failed to save config to SQLite database")?;
     Ok(())
 }
@@ -367,17 +367,14 @@ fn save_pair_config_on(conn: &Connection, symbol: &str, config: &AppConfig) -> R
 
 fn arm_execution_guard_on(conn: &Connection, symbol: &str, mode: TradingMode) -> Result<bool> {
     let dirty: Option<bool> = conn
-        .query_row(
-            "SELECT dirty FROM pair_execution_guard WHERE symbol = ?1 AND mode = ?2",
-            params![symbol, mode.as_str()],
-            |row| row.get(0),
-        )
+        .prepare_cached("SELECT dirty FROM pair_execution_guard WHERE symbol = ?1 AND mode = ?2")?
+        .query_row(params![symbol, mode.as_str()], |row| row.get(0))
         .optional()?;
-    conn.execute(
+    conn.prepare_cached(
         "INSERT INTO pair_execution_guard (symbol, mode, dirty) VALUES (?1, ?2, 1)
          ON CONFLICT(symbol, mode) DO UPDATE SET dirty = 1",
-        params![symbol, mode.as_str()],
-    )?;
+    )?
+    .execute(params![symbol, mode.as_str()])?;
     Ok(dirty.unwrap_or(false))
 }
 
@@ -387,11 +384,16 @@ pub(super) fn save_pair_status_on(
     mode: TradingMode,
     status: BotStatus,
 ) -> Result<()> {
-    conn.execute(
+    conn.prepare_cached(
         "INSERT INTO pair_runtime (symbol, mode, status, updated_at) VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT(symbol, mode) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at",
-        params![symbol, mode.as_str(), serde_json::to_string(&status)?, Utc::now().to_rfc3339()],
-    )?;
+    )?
+    .execute(params![
+        symbol,
+        mode.as_str(),
+        serde_json::to_string(&status)?,
+        Utc::now().to_rfc3339()
+    ])?;
     Ok(())
 }
 
@@ -400,10 +402,10 @@ fn save_bot_status_on(conn: &Connection, status: BotStatus) -> Result<()> {
     let name = value
         .as_str()
         .context("Invalid bot status representation")?;
-    conn.execute(
+    conn.prepare_cached(
         "INSERT INTO bot_runtime (id, status, updated_at) VALUES (1, ?1, ?2)
          ON CONFLICT(id) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at",
-        params![name, Utc::now().to_rfc3339()],
-    )?;
+    )?
+    .execute(params![name, Utc::now().to_rfc3339()])?;
     Ok(())
 }

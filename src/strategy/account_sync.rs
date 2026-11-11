@@ -118,7 +118,7 @@ impl GridTradingEngine {
                 "Periodic sync stage finished"
             );
         }
-        let ready = orders_ready && account_ready;
+        let ready = orders_ready && account_ready && !self.state.is_stats_dirty();
         self.set_global_reconciliation_ready(ready).await;
         Ok(ready)
     }
@@ -148,6 +148,9 @@ impl GridTradingEngine {
             )
         };
         self.sync_interval_secs = risk.sync_interval_secs.max(1);
+        if self.state.is_stats_dirty() {
+            self.state.refresh_current_scope().await;
+        }
         self.maybe_sync_server_time().await;
         if let Some(reason) = self
             .refresh_sync_cycle_market(&symbol, wait_for_market, pause_epoch, started)
@@ -173,8 +176,9 @@ impl GridTradingEngine {
                 }
             }
         } else {
-            self.set_global_reconciliation_ready(true).await;
-            true
+            let ready = !self.state.is_stats_dirty();
+            self.set_global_reconciliation_ready(ready).await;
+            ready
         };
 
         if self.state.pause_epoch() != pause_epoch {
@@ -277,16 +281,15 @@ impl GridTradingEngine {
         }
     }
 
-    pub(super) async fn invalidate_account_and_position_caches(&mut self) {
-        self.account_cache.invalidate(&self.client).await;
-        self.position_cache.invalidate(&self.client).await;
+    pub(super) fn invalidate_account_and_position_caches(&mut self) {
+        self.account_cache.invalidate(&self.client);
+        self.position_cache.invalidate(&self.client);
         self.last_account_sync = None;
     }
 
     pub(super) async fn block_reconciliation_and_invalidate_caches(&mut self) {
-        self.last_orders_sync = None;
-        self.report_reconciliation_state(true).await;
-        self.invalidate_account_and_position_caches().await;
+        self.mark_orders_reconciliation_blocked().await;
+        self.invalidate_account_and_position_caches();
     }
 
     pub(super) async fn sync_account_and_position_inner(&mut self, shared_position: bool) -> bool {
@@ -382,7 +385,7 @@ impl GridTradingEngine {
             })
         };
         if needs_position_refresh || inconsistent_fill {
-            self.invalidate_account_and_position_caches().await;
+            self.invalidate_account_and_position_caches();
         }
         let position_ready = if inconsistent_fill || self.state.pause_epoch() != pause_epoch {
             false

@@ -1,4 +1,4 @@
-import { formatDecimalDisplay } from './decimal';
+import { formatDecimal, formatDecimalDisplay, parseUnsignedDecimal } from './decimal';
 import type { GridConfig, Mode, Status } from './types';
 
 export const modeLabel: Record<Mode, string> = { PAPER: '模拟盘', LIVE: '实盘', UNKNOWN: '未知模式' };
@@ -31,8 +31,8 @@ export function positivePrice(value: unknown, compact = false) {
   return n !== null && n > 0 ? (compact ? compactPrice(n) : price(n)) : '--';
 }
 export function positiveDecimalText(value: unknown): string | null {
-  const n = numeric(value);
-  return n !== null && n > 0 ? trimFractionZeros(String(value).trim()) : null;
+  const parsed = parseUnsignedDecimal(value);
+  return parsed && parsed.n > 0n ? formatDecimal(parsed.n, parsed.s) : null;
 }
 export function cnyText(value: number | null | undefined, compact = false) {
   return value != null && Number.isFinite(value) ? `≈ ¥${compact ? compactNumber(value) : number(value)}` : '人民币估值待更新';

@@ -76,7 +76,7 @@ async fn bulk_mark_requests_are_shared_and_failures_are_cooled_down() {
     );
     assert_eq!(single.load(Ordering::SeqCst), 11);
 
-    let (_, entry) = cache.entries.entry(url.as_str()).await;
+    let (_, entry) = cache.entries.entry(url.as_str());
     entry.lock().await.snapshot = None;
     fail.store(true, Ordering::SeqCst);
     let failed = futures_util::future::join_all((0..10).map(|i| {

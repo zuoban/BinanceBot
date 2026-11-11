@@ -93,7 +93,8 @@ export function useCenterElementScroll<T extends HTMLElement>(ref: RefObject<T |
 export function isConfigConflict(error: Error | null | undefined, ...messageFragments: string[]): boolean {
   return Boolean(error && (('status' in error && error.status === 409) || messageFragments.some(fragment => error.message.includes(fragment))));
 }
-export function ConflictReloadButton<T>({ label, activeRef, resetKey, refetch, onLoaded, onReset }: {
+export function ConflictReloadButton<T>({ form, label, activeRef, resetKey, refetch, onLoaded, onReset }: {
+  form?: FormInstance;
   label: string;
   activeRef: { current: unknown };
   resetKey?: unknown;
@@ -115,6 +116,7 @@ export function ConflictReloadButton<T>({ label, activeRef, resetKey, refetch, o
       if (activeRef.current !== current) return;
       if (result.error) { message.error(errorMessage(result.error)); return; }
       if (!result.data || onLoaded(result.data) === false) return;
+      if (form) clearFormErrors(form);
       edit.setDirty(false);
       onReset();
     });

@@ -111,7 +111,7 @@ fn validate_optional_baseline_version(
     }
 }
 
-fn versioned_update_error<T>(error: anyhow::Error) -> (StatusCode, Json<ApiResponse<T>>) {
+fn versioned_update_error<T>(error: &anyhow::Error) -> (StatusCode, Json<ApiResponse<T>>) {
     let status = if error
         .downcast_ref::<crate::config::ConfigVersionConflict>()
         .is_some()
@@ -150,7 +150,7 @@ pub(super) async fn post_global_config_handler(
                 json_ok_msg(view, "全局设置已保存，所有交易对立即生效"),
             )
         }
-        Err(error) => versioned_update_error(error),
+        Err(error) => versioned_update_error(&error),
     }
 }
 
@@ -228,7 +228,7 @@ pub(super) async fn post_server_config_handler(
                 "服务设置已保存，重启程序后生效",
             ),
         ),
-        Err(error) => versioned_update_error(error),
+        Err(error) => versioned_update_error(&error),
     }
 }
 

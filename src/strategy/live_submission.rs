@@ -54,8 +54,7 @@ impl GridTradingEngine {
                 "Order {} was accepted but could not be persisted: {}",
                 resp.client_order_id, e
             );
-            self.last_orders_sync = None;
-            self.report_reconciliation_state(true).await;
+            self.mark_orders_reconciliation_blocked().await;
             self.pause_trading().await;
             false
         } else {
@@ -67,7 +66,7 @@ impl GridTradingEngine {
             .await
             .insert(resp.client_order_id.clone(), order.clone());
         if !persisted && resp.executed_qty > Decimal::ZERO {
-            self.invalidate_account_and_position_caches().await;
+            self.invalidate_account_and_position_caches();
         }
         persisted
     }
@@ -134,8 +133,7 @@ impl GridTradingEngine {
                         "Could not clear terminal order {}: {}",
                         order.client_order_id, error
                     );
-                    self.last_orders_sync = None;
-                    self.report_reconciliation_state(true).await;
+                    self.mark_orders_reconciliation_blocked().await;
                     self.pause_trading().await;
                 }
                 return false;
@@ -175,7 +173,7 @@ impl GridTradingEngine {
             Ok(found) => {
                 if found.executed_qty > Decimal::ZERO || unresolved_filled_quantity(&found) {
                     self.report_reconciliation_state(true).await;
-                    self.invalidate_account_and_position_caches().await;
+                    self.invalidate_account_and_position_caches();
                 }
                 order.order_id = Some(found.order_id);
                 order.status = found.open_order_status();

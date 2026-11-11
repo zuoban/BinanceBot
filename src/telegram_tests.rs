@@ -639,3 +639,34 @@ async fn send_message_rejects_malformed_bot_token_before_http_request() {
         );
     }
 }
+
+#[tokio::test]
+async fn send_message_rejects_oversized_gateway_response_without_unbounded_buffering() {
+    use axum::{http::StatusCode, routing::post, Router};
+
+    let oversized_html = format!("<html><body>{}</body></html>", "x".repeat(16 * 1024));
+    let app = Router::new().route(
+        "/bot123456:valid-token/sendMessage",
+        post(move || {
+            let body = oversized_html.clone();
+            async move { (StatusCode::BAD_GATEWAY, body) }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let notifier = TelegramNotifier::with_base_url(TelegramNotifier::shared_client(), url);
+    let config = TelegramConfig {
+        enabled: true,
+        bot_token: "123456:valid-token".into(),
+        chat_id: "999".into(),
+    };
+    let err = notifier.send_test_message(&config).await.unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("Telegram returned an invalid response (HTTP 502"),
+        "{err}"
+    );
+    server.abort();
+}

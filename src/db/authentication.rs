@@ -54,10 +54,11 @@ impl Database {
         let conn = self.lock_connection("create_session");
         self.session_cache.remove(token);
         let cutoff = (Utc::now() - ChronoDuration::hours(24)).to_rfc3339();
-        let _ = conn.execute(
-            "DELETE FROM auth_sessions WHERE created_at <= ?1;",
-            params![cutoff],
-        );
+        if let Ok(mut stmt) =
+            conn.prepare_cached("DELETE FROM auth_sessions WHERE created_at <= ?1;")
+        {
+            let _ = stmt.execute(params![cutoff]);
+        }
         conn.prepare_cached(
             "INSERT OR REPLACE INTO auth_sessions (token, created_at) VALUES (?1, ?2);",
         )?
@@ -96,6 +97,13 @@ impl Database {
     pub fn delete_session(&self, token: &str) -> Result<()> {
         let conn = self.lock_connection("delete_session");
         self.session_cache.remove(token);
+        let exists: bool = conn
+            .prepare_cached("SELECT EXISTS(SELECT 1 FROM auth_sessions WHERE token = ?1);")?
+            .query_row(params![token], |row| row.get(0))
+            .context("Failed to check session token in SQLite database")?;
+        if !exists {
+            return Ok(());
+        }
         conn.prepare_cached("DELETE FROM auth_sessions WHERE token = ?1;")?
             .execute(params![token])
             .context("Failed to delete session token from SQLite database")?;

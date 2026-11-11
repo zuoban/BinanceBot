@@ -123,17 +123,9 @@ fn retire_legacy_testnet_config(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Run mode used to be stored per pair. A saved paper-mode configuration could
-/// still carry API credentials, which now select live mode. Force that derived
-/// live scope to start paused and drop the retired flag so an operator's later
-/// resume is not undone on the next restart.
-fn retire_legacy_dry_run_intent(conn: &Connection) -> Result<()> {
-    let Some(mut config) = load_raw_config_value_on(conn)? else {
-        return Ok(());
-    };
-    let Some(root) = config.as_object_mut() else {
-        return Ok(());
-    };
+fn extract_legacy_dry_run_intents(
+    root: &mut serde_json::Map<String, serde_json::Value>,
+) -> Option<(bool, HashMap<String, bool>)> {
     let mut removed = false;
     let global_intent = root
         .get_mut("exchange")
@@ -170,9 +162,23 @@ fn retire_legacy_dry_run_intent(conn: &Connection) -> Result<()> {
             }
         }
     }
-    if !removed {
+    removed.then_some((default_intent, pair_intents))
+}
+
+/// Run mode used to be stored per pair. A saved paper-mode configuration could
+/// still carry API credentials, which now select live mode. Force that derived
+/// live scope to start paused and drop the retired flag so an operator's later
+/// resume is not undone on the next restart.
+fn retire_legacy_dry_run_intent(conn: &Connection) -> Result<()> {
+    let Some(mut config) = load_raw_config_value_on(conn)? else {
         return Ok(());
-    }
+    };
+    let Some(root) = config.as_object_mut() else {
+        return Ok(());
+    };
+    let Some((default_intent, pair_intents)) = extract_legacy_dry_run_intents(root) else {
+        return Ok(());
+    };
     let mut app: AppConfig = serde_json::from_value(config.clone())?;
     // Match the promotion performed by AppConfig::ensure_pair_list at startup.
     app.ensure_pair_list()?;
@@ -227,13 +233,13 @@ fn retire_legacy_testnet_rows(conn: &Connection) -> Result<()> {
 }
 
 pub(super) fn has_legacy_paper_history_on(conn: &Connection, symbol: &str) -> Result<bool> {
-    Ok(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM trades WHERE symbol = ?1 AND mode IN ('PAPER', 'UNKNOWN')) \
-         OR EXISTS(SELECT 1 FROM execution_frontiers WHERE symbol = ?1 AND mode IN ('PAPER', 'UNKNOWN')) \
-         OR EXISTS(SELECT 1 FROM cleared_pair_openings WHERE symbol = ?1 AND mode IN ('PAPER', 'UNKNOWN'))",
-        params![symbol],
-        |row| row.get(0),
-    )?)
+    Ok(conn
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM trades WHERE symbol = ?1 AND mode IN ('PAPER', 'UNKNOWN')) \
+             OR EXISTS(SELECT 1 FROM execution_frontiers WHERE symbol = ?1 AND mode IN ('PAPER', 'UNKNOWN')) \
+             OR EXISTS(SELECT 1 FROM cleared_pair_openings WHERE symbol = ?1 AND mode IN ('PAPER', 'UNKNOWN'))",
+        )?
+        .query_row(params![symbol], |row| row.get(0))?)
 }
 
 fn remove_legacy_admin_auth(conn: &Connection) -> Result<()> {
@@ -401,16 +407,27 @@ fn finalize_legacy_retirements_and_rollups(conn: &mut Connection) -> Result<()> 
     retire_legacy_dry_run_intent(&tx)?;
     retire_legacy_testnet_rows(&tx)?;
     tx.execute_batch(
-        "CREATE INDEX IF NOT EXISTS idx_trades_unverified_scope
+        "DROP INDEX IF EXISTS idx_trades_symbol;
+         DROP INDEX IF EXISTS idx_trades_client_order_id;
+         DROP INDEX IF EXISTS idx_pair_intents_scope;
+         CREATE INDEX IF NOT EXISTS idx_trades_unverified_scope
          ON trades (symbol, mode, timestamp DESC) WHERE pnl_verified = 0;
          CREATE INDEX IF NOT EXISTS idx_trades_client_order_mode
          ON trades (client_order_id, mode, timestamp DESC);
+         CREATE INDEX IF NOT EXISTS idx_pair_intents_scope_created
+         ON pair_intents (symbol, mode, created_at);
+         CREATE INDEX IF NOT EXISTS idx_remainder_plans_inactive_scope
+         ON remainder_plans (symbol, mode) WHERE active = 0;
+         CREATE INDEX IF NOT EXISTS idx_auth_sessions_created_at
+         ON auth_sessions (created_at);
          CREATE INDEX IF NOT EXISTS idx_order_identity_observations_scope
          ON order_identity_observations (account_key, expected_symbol, client_order_id);
          CREATE INDEX IF NOT EXISTS idx_initial_order_responses_order
          ON initial_order_responses (account_key, expected_symbol, client_order_id);
          CREATE INDEX IF NOT EXISTS idx_initial_order_responses_batch
-         ON initial_order_responses (account_key, expected_symbol, batch_id);",
+         ON initial_order_responses (account_key, expected_symbol, batch_id);
+         CREATE INDEX IF NOT EXISTS idx_initial_order_responses_snapshot_scope
+         ON initial_order_responses (account_key, expected_symbol) WHERE batch_id GLOB 'snapshot:*';",
     )?;
     hourly::migrate_on(&tx)?;
     tx.execute_batch(

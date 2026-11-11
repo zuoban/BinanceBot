@@ -10,6 +10,25 @@ use reqwest::Client;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
+const MAX_TELEGRAM_RESPONSE_BYTES: usize = 8 * 1024;
+
+async fn read_bounded_bytes(mut response: reqwest::Response, limit: usize) -> Option<Vec<u8>> {
+    if response
+        .content_length()
+        .is_some_and(|len| len > limit as u64)
+    {
+        return None;
+    }
+    let mut buf = Vec::new();
+    while let Some(chunk) = response.chunk().await.ok()? {
+        if buf.len().saturating_add(chunk.len()) > limit {
+            return None;
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Some(buf)
+}
+
 #[derive(Serialize)]
 struct SendMessage<'a> {
     chat_id: &'a str,
@@ -109,9 +128,10 @@ impl TelegramNotifier {
                 )
             })?;
         let status = response.status();
-        let body: TelegramResponse = response
-            .json()
+        let bytes = read_bounded_bytes(response, MAX_TELEGRAM_RESPONSE_BYTES)
             .await
+            .ok_or_else(|| anyhow!("Telegram returned an invalid response (HTTP {})", status))?;
+        let body: TelegramResponse = serde_json::from_slice(&bytes)
             .map_err(|_| anyhow!("Telegram returned an invalid response (HTTP {})", status))?;
         if !status.is_success() || !body.ok {
             return Err(anyhow!(

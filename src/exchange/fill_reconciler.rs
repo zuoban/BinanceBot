@@ -363,14 +363,11 @@ impl BinanceFuturesClient {
         if !resp.status().is_success() {
             *failed_query = true;
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
+            let body = read_bounded_error_body(resp).await?;
             self.maybe_resync_on_invalid_timestamp(&body).await;
-            return Err(anyhow!(
-                "Failed to fetch trades for order {}: {} - {}",
-                order_id,
-                status,
-                body
-            ));
+            let err = parse_api_error_body(status, &body);
+            let detail = format!("Failed to fetch trades for order {order_id} ({status}): {err}");
+            return Err(err.context(detail));
         }
         resp.json()
             .await
@@ -379,6 +376,58 @@ impl BinanceFuturesClient {
                 *failed_query = true;
                 error.into()
             })
+    }
+
+    fn ensure_fill_generation_unchanged(&self, symbol: &str, clear_revision: u64) -> Result<()> {
+        if self
+            .fill_reconciler
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .generations
+            .get(symbol)
+            .copied()
+            != Some(clear_revision)
+        {
+            return Err(anyhow!("Trade history was cleared during reconciliation"));
+        }
+        Ok(())
+    }
+
+    fn finish_fill_progress(
+        &self,
+        key: &(String, i64),
+        shared: &Arc<tokio::sync::Mutex<FillProgress>>,
+    ) {
+        let mut state = self
+            .fill_reconciler
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if state
+            .progress
+            .get(key)
+            .is_some_and(|entry| Arc::ptr_eq(&entry.progress, shared))
+        {
+            state.progress.remove(key);
+        }
+    }
+
+    fn touch_fill_progress(
+        &self,
+        key: &(String, i64),
+        shared: &Arc<tokio::sync::Mutex<FillProgress>>,
+    ) {
+        if let Some(entry) = self
+            .fill_reconciler
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .progress
+            .get_mut(key)
+        {
+            if Arc::ptr_eq(&entry.progress, shared) {
+                entry.last_used = Instant::now();
+                entry.stalled_attempts = 0;
+            }
+        }
     }
 
     /// Binance execution records contain the exchange-calculated realized PnL and fee.
@@ -411,49 +460,17 @@ impl BinanceFuturesClient {
             let page = self
                 .fetch_user_trades_page(symbol, order_id, from_id, &mut cleanup.failed_query)
                 .await?;
-            if self
-                .fill_reconciler
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .generations
-                .get(symbol)
-                .copied()
-                != Some(clear_revision)
-            {
-                return Err(anyhow!("Trade history was cleared during reconciliation"));
-            }
+            self.ensure_fill_generation_unchanged(symbol, clear_revision)?;
             // From here until the next await, validation either fails or advances.
             cleanup.failed_query = true;
             if let Some(trades) =
                 accumulate_fill_page(&mut cleanup.progress, order_id, expected_qty, page)?
             {
-                let mut state = self
-                    .fill_reconciler
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                if state
-                    .progress
-                    .get(&key)
-                    .is_some_and(|entry| Arc::ptr_eq(&entry.progress, &shared))
-                {
-                    state.progress.remove(&key);
-                }
-                drop(state);
+                self.finish_fill_progress(&key, &shared);
                 return Ok(trades);
             }
             cleanup.failed_query = false;
-            if let Some(entry) = self
-                .fill_reconciler
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .progress
-                .get_mut(&key)
-            {
-                if Arc::ptr_eq(&entry.progress, &shared) {
-                    entry.last_used = Instant::now();
-                    entry.stalled_attempts = 0;
-                }
-            }
+            self.touch_fill_progress(&key, &shared);
         }
         Err(anyhow!(
             "Trade reconciliation for order {} will continue later",

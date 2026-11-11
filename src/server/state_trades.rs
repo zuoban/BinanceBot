@@ -1,8 +1,8 @@
 use super::AppState;
 use crate::telegram::TradeNotificationContext;
 use crate::types::{
-    AccountInfo, BotSnapshot, GridDirection, GridOrder, GridStats, HourlyTradeStats, PositionInfo,
-    TradeRecord, TradingMode,
+    AccountInfo, GridDirection, GridOrder, GridStats, HourlyTradeStats, PositionInfo, TradeRecord,
+    TradingMode,
 };
 use chrono::Utc;
 use rust_decimal::Decimal;
@@ -74,6 +74,23 @@ fn updated_stats_for_trade(
         updated.pending_pnl_trades = updated.pending_pnl_trades.saturating_add(1);
     }
     updated
+}
+
+fn reload_durable_base_stats(
+    db: &crate::db::Database,
+    symbol: &str,
+    mode: TradingMode,
+    cached: &GridStats,
+) -> anyhow::Result<GridStats> {
+    let mut base = build_grid_stats(
+        db.load_scoped_stats(symbol, mode)?,
+        Some(db.get_pnl_totals(symbol, mode)?),
+    );
+    base.start_time = cached.start_time;
+    base.uptime_secs = cached.uptime_secs;
+    base.active_buy_orders = cached.active_buy_orders;
+    base.active_sell_orders = cached.active_sell_orders;
+    Ok(base)
 }
 
 impl AppState {
@@ -198,61 +215,99 @@ impl AppState {
         notify_trade: bool,
     ) -> Result<(bool, Option<HourlyTradeStats>), ()> {
         let _commit = self.trade_commit_lock.lock().await;
-        let updated = updated_stats_for_trade(&*self.stats.read().await, trade, cycle_profit);
+        let dirty = self.stats_dirty.load(Ordering::SeqCst);
+        let cached_stats = self.stats.read().await.clone();
         let stored_trade = trade.clone();
-        let stored_stats = updated.clone();
         let stored_paper_state = paper_state.clone();
-        let notification_stats = match self
+        let persisted = self
             .db
             .run_blocking(move |db| {
+                let base = if dirty {
+                    reload_durable_base_stats(
+                        db,
+                        &stored_trade.symbol,
+                        stored_trade.mode,
+                        &cached_stats,
+                    )?
+                } else {
+                    cached_stats
+                };
+                let updated = updated_stats_for_trade(&base, &stored_trade, cycle_profit);
                 let inserted = db.insert_trade_with_paper_recovery(
                     &stored_trade,
-                    &stored_stats,
+                    &updated,
                     pair_intent.as_ref(),
                     consumed_pair_source.as_deref(),
                     stored_paper_state.as_ref(),
                 )?;
-                let stats = if inserted && notify_trade {
-                    db.get_hourly_trade_stats(
+                let reloaded_trades = if dirty {
+                    Some(recent_trade_cache(db.get_recent_trades_for(
                         &stored_trade.symbol,
                         stored_trade.mode,
-                        stored_trade.timestamp,
-                    )
-                    .map_err(|error| warn!("Could not load Telegram trade counts: {}", error))
-                    .ok()
+                        RECENT_TRADE_LIMIT,
+                    )?))
                 } else {
                     None
                 };
-                Ok((inserted, stats))
+                let hourly = (inserted && notify_trade)
+                    .then(|| {
+                        db.get_hourly_trade_stats(
+                            &stored_trade.symbol,
+                            stored_trade.mode,
+                            stored_trade.timestamp,
+                        )
+                        .map_err(|error| warn!("Could not load Telegram trade counts: {}", error))
+                        .ok()
+                    })
+                    .flatten();
+                Ok((
+                    inserted,
+                    if inserted { updated } else { base },
+                    reloaded_trades,
+                    hourly,
+                ))
             })
-            .await
-        {
-            Ok((true, stats)) => {
-                *self.stats.write().await = updated;
-                stats
-            }
-            Ok((false, _)) => return Ok((false, None)),
+            .await;
+        let (inserted, next_stats, reloaded_trades, notification_stats) = match persisted {
+            Ok(outcome) => outcome,
             Err(e) => {
                 error!("Failed to persist trade and grid stats to SQLite database: {e}");
                 return Err(());
             }
         };
+        let had_reloaded_trades = reloaded_trades.is_some();
+        if let Some(reloaded) = reloaded_trades {
+            *self.recent_trades.write().await = reloaded;
+        }
+        *self.stats.write().await = next_stats;
+        self.stats_dirty.store(false, Ordering::SeqCst);
+        if !inserted {
+            return Ok((false, None));
+        }
         if let Some((position, account)) = paper_state {
-            let mut current_position = self.position.write().await;
-            let mut current_account = self.account.write().await;
-            *current_position = position;
-            *current_account = account;
-            self.account_view(
-                &trade.symbol,
-                trade.mode,
-                &current_position,
-                &current_account,
-            );
+            self.apply_committed_paper_state(&trade.symbol, trade.mode, position, account)
+                .await;
         }
         // Keep the cache update in the same critical section as persistence
         // so cleanup cannot be followed by an old trade reappearing here.
-        cache_recent_trade(&mut *self.recent_trades.write().await, trade.clone());
+        if !had_reloaded_trades {
+            cache_recent_trade(&mut *self.recent_trades.write().await, trade.clone());
+        }
         Ok((true, notification_stats))
+    }
+
+    async fn apply_committed_paper_state(
+        &self,
+        symbol: &str,
+        mode: TradingMode,
+        position: PositionInfo,
+        account: AccountInfo,
+    ) {
+        let mut current_position = self.position.write().await;
+        let mut current_account = self.account.write().await;
+        *current_position = position;
+        *current_account = account;
+        self.account_view(symbol, mode, &current_position, &current_account);
     }
 
     async fn record_trade_inner(
@@ -441,7 +496,7 @@ impl AppState {
         let current_mode = config.exchange.trading_mode();
         let current_symbol = config.exchange.symbol.clone();
         drop(config);
-        if trade.symbol == current_symbol && trade.mode == current_mode {
+        if trade.symbol == current_symbol && trade.mode == current_mode && !self.is_stats_dirty() {
             let mut stats = self.stats.write().await;
             stats.total_realized_pnl = stats.total_realized_pnl.saturating_add(trade.realized_pnl);
             stats.total_commission = stats.total_commission.saturating_add(trade.commission);
@@ -463,126 +518,5 @@ impl AppState {
 
     pub(crate) async fn drain_trade_commits(&self) {
         let _commit = self.trade_commit_lock.lock().await;
-    }
-
-    pub async fn refresh_current_scope(&self) {
-        let _commit = self.trade_commit_lock.lock().await;
-        let config = self.config.read().await;
-        let symbol = config.exchange.symbol.clone();
-        let mode = config.exchange.trading_mode();
-        drop(config);
-        let query_symbol = symbol.clone();
-        let result = self
-            .db
-            .run_blocking(move |db| {
-                Ok((
-                    db.load_scoped_stats(&query_symbol, mode)?,
-                    db.get_pnl_totals(&query_symbol, mode)?,
-                    db.get_recent_trades_for(&query_symbol, mode, RECENT_TRADE_LIMIT)?,
-                ))
-            })
-            .await;
-        let (saved_stats, pnl_totals, trades) = match result {
-            Ok(result) => result,
-            Err(e) => {
-                error!("Failed to load scoped statistics: {}", e);
-                return;
-            }
-        };
-        *self.stats.write().await = build_grid_stats(saved_stats, Some(pnl_totals));
-        *self.recent_trades.write().await = recent_trade_cache(trades);
-    }
-
-    pub(crate) async fn clear_trade_history(self: &Arc<Self>) -> anyhow::Result<usize> {
-        Self::clear_trade_history_for(std::slice::from_ref(self)).await
-    }
-
-    pub(crate) async fn clear_symbol_trade_history(
-        self: &Arc<Self>,
-        symbol: String,
-    ) -> anyhow::Result<(usize, BotSnapshot)> {
-        let state = Arc::clone(self);
-        tokio::spawn(async move {
-            let deleted = {
-                let _commit = state.trade_commit_lock.lock().await;
-                let db_symbol = symbol.clone();
-                let deleted = state
-                    .db
-                    .run_blocking(move |db| db.clear_trade_history_for_symbol(&db_symbol))
-                    .await?;
-                let config = state.config.read().await;
-                if config.exchange.symbol == symbol {
-                    state.reset_trade_history_cache().await;
-                }
-                deleted
-            };
-            let snapshot = state.broadcast_snapshot().await;
-            Ok((deleted, snapshot))
-        })
-        .await?
-    }
-
-    pub(crate) async fn clear_trade_history_for(states: &[Arc<Self>]) -> anyhow::Result<usize> {
-        Ok(
-            Self::clear_selected_database_inner(states, true, false, None, false)
-                .await?
-                .0,
-        )
-    }
-
-    pub(crate) async fn clear_selected_database_for(
-        states: &[Arc<Self>],
-        trades: bool,
-        snapshots: bool,
-        membership_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
-    ) -> anyhow::Result<(usize, usize)> {
-        Self::clear_selected_database_inner(states, trades, snapshots, membership_guard, true).await
-    }
-
-    async fn clear_selected_database_inner(
-        states: &[Arc<Self>],
-        trades: bool,
-        snapshots: bool,
-        membership_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
-        broadcast: bool,
-    ) -> anyhow::Result<(usize, usize)> {
-        let states = states.to_vec();
-        anyhow::ensure!(!states.is_empty(), "没有运行中的交易对");
-        tokio::spawn(async move {
-            let _guard = membership_guard;
-            let deleted = {
-                let first = &states[0];
-                let _commit = first.trade_commit_lock.lock().await;
-                let deleted = first
-                    .db
-                    .run_blocking(move |db| db.clear_selected_database(trades, snapshots))
-                    .await?;
-                if trades {
-                    for state in &states {
-                        state.reset_trade_history_cache().await;
-                    }
-                }
-                deleted
-            };
-            if trades && broadcast {
-                for state in &states {
-                    state.broadcast_snapshot().await;
-                }
-            }
-            Ok(deleted)
-        })
-        .await?
-    }
-
-    async fn reset_trade_history_cache(&self) {
-        let mut stats = self.stats.write().await;
-        *stats = GridStats {
-            start_time: stats.start_time,
-            uptime_secs: stats.uptime_secs,
-            active_buy_orders: stats.active_buy_orders,
-            active_sell_orders: stats.active_sell_orders,
-            ..GridStats::default()
-        };
-        self.recent_trades.write().await.clear();
     }
 }

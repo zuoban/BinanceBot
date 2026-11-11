@@ -1,9 +1,12 @@
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
-use binance_grid_bot::auth::AdminAuth;
+#[path = "common/auth.rs"]
+mod auth;
+#[path = "common/http.rs"]
+mod http;
 use binance_grid_bot::config::AppConfig;
 use binance_grid_bot::db::Database;
-use binance_grid_bot::server::{create_router, AppState};
+use binance_grid_bot::server::create_router;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tower::ServiceExt;
@@ -12,12 +15,7 @@ use tower::ServiceExt;
 async fn database_export_requires_auth_and_returns_a_private_sqlite_attachment() {
     let db = Arc::new(Database::open(":memory:").unwrap());
     let (action_tx, _action_rx) = mpsc::channel(1);
-    let state = AppState::new_with_admin_auth(
-        AppConfig::default(),
-        db.clone(),
-        action_tx,
-        Some(Arc::new(AdminAuth::from_password("test-password").unwrap())),
-    );
+    let state = auth::auth_state(AppConfig::default(), db.clone(), action_tx, "test-password");
     state
         .create_session("export-test-valid-token")
         .await
@@ -35,8 +33,7 @@ async fn database_export_requires_auth_and_returns_a_private_sqlite_attachment()
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let json = http::body_json(response).await;
         assert_eq!(json["success"], false);
     }
 

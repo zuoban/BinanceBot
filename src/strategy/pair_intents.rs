@@ -191,8 +191,7 @@ impl GridTradingEngine {
                 intent.client_order_id
             );
             self.track_identity_conflict(expected, found);
-            self.last_orders_sync = None;
-            self.report_reconciliation_state(true).await;
+            self.mark_orders_reconciliation_blocked().await;
             if !self
                 .persist_identity_observations(self.client.account_identity_key(), &intent.symbol)
                 .await
@@ -202,8 +201,7 @@ impl GridTradingEngine {
             return false;
         }
         if conflict.is_some_and(|order| order.order_id.is_none()) {
-            self.last_orders_sync = None;
-            self.report_reconciliation_state(true).await;
+            self.mark_orders_reconciliation_blocked().await;
             return false;
         }
         true
@@ -252,8 +250,7 @@ impl GridTradingEngine {
         found: BinanceOrderResponse,
     ) -> bool {
         if unresolved_filled_quantity(&found) {
-            self.last_orders_sync = None;
-            self.report_reconciliation_state(true).await;
+            self.mark_orders_reconciliation_blocked().await;
         }
         if !self
             .verify_found_pair_identity(&intent, conflict.as_ref(), &found)
@@ -265,7 +262,7 @@ impl GridTradingEngine {
         original.order_id = Some(found.order_id);
         original.reserve_quantity(found.orig_qty);
         if unresolved_filled_quantity(&found) {
-            self.invalidate_account_and_position_caches().await;
+            self.invalidate_account_and_position_caches();
             if let Err(error) = self.retain_uncertain_active_order(&original).await {
                 error!(
                     "Could not persist uncertain pair order {}: {}",
@@ -300,8 +297,7 @@ impl GridTradingEngine {
         conflict: Option<GridOrder>,
     ) -> bool {
         if conflict.is_some() {
-            self.last_orders_sync = None;
-            self.report_reconciliation_state(true).await;
+            self.mark_orders_reconciliation_blocked().await;
             return false;
         }
         if *self.state.status.read().await != BotStatus::Running {

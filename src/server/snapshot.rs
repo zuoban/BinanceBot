@@ -30,6 +30,7 @@ pub(crate) struct AccountSnapshot {
 struct AccountSnapshotData {
     symbol: String,
     status: BotStatus,
+    sync_interval_secs: u64,
     ticker: AccountTicker,
     position: AccountPosition,
     account: AccountInfo,
@@ -157,6 +158,15 @@ fn sort_active_orders_desc(orders: &mut [GridOrder]) {
     });
 }
 
+pub(crate) fn sort_and_truncate_recent_trades(trades: &mut Vec<TradeRecord>, limit: usize) {
+    trades.sort_unstable_by(|a, b| {
+        b.timestamp
+            .cmp(&a.timestamp)
+            .then_with(|| b.trade_id.cmp(&a.trade_id))
+    });
+    trades.truncate(limit);
+}
+
 fn recent_scoped_trades<'a>(
     trades: impl Iterator<Item = &'a TradeRecord>,
     symbol: &str,
@@ -166,12 +176,7 @@ fn recent_scoped_trades<'a>(
         .filter(|trade| trade.mode == mode && trade.symbol == symbol)
         .cloned()
         .collect();
-    recent.sort_unstable_by(|a, b| {
-        b.timestamp
-            .cmp(&a.timestamp)
-            .then_with(|| b.trade_id.cmp(&a.trade_id))
-    });
-    recent.truncate(20);
+    sort_and_truncate_recent_trades(&mut recent, 20);
     recent
 }
 
@@ -271,6 +276,7 @@ impl AppState {
             snapshot: AccountSnapshotData {
                 symbol: config.exchange.symbol.clone(),
                 status,
+                sync_interval_secs: config.exchange.sync_interval_secs,
                 ticker,
                 position,
                 account,
@@ -351,6 +357,7 @@ impl AppState {
                 symbol: config.exchange.symbol.clone(),
                 status,
                 mode,
+                sync_interval_secs: config.exchange.sync_interval_secs,
                 grid_config: config.summary(),
                 ticker,
                 position,
@@ -400,20 +407,18 @@ impl AppState {
         self.snapshot_at(Utc::now()).await
     }
 
-    pub(crate) async fn snapshot_for_hourly(&self) -> BotSnapshot {
-        let _scope = self.snapshot_scope_lock.read().await;
-        let _commit = self.trade_commit_lock.lock().await;
-        let config = self.config.read().await;
+    async fn read_base_bot_snapshot(&self, config: &AppConfig) -> BotSnapshot {
         let status = *self.status.read().await;
         let ticker = self.ticker.read().await.clone();
         let stats = self.stats.read().await.clone();
         let (position, account) = self
-            .with_position_and_account(&config, PositionInfo::clone)
+            .with_position_and_account(config, PositionInfo::clone)
             .await;
         BotSnapshot {
             status,
             mode: config.exchange.trading_mode(),
             symbol: config.exchange.symbol.clone(),
+            sync_interval_secs: config.exchange.sync_interval_secs,
             ticker,
             stats,
             position,
@@ -425,6 +430,13 @@ impl AppState {
             hourly_trade_stats: None,
             recent_logs: Vec::new(),
         }
+    }
+
+    pub(crate) async fn snapshot_for_hourly(&self) -> BotSnapshot {
+        let _scope = self.snapshot_scope_lock.read().await;
+        let _commit = self.trade_commit_lock.lock().await;
+        let config = self.config.read().await;
+        self.read_base_bot_snapshot(&config).await
     }
 
     async fn snapshot_at(&self, now: DateTime<Utc>) -> BotSnapshot {
@@ -447,24 +459,20 @@ impl AppState {
             {
                 return None;
             }
-            let status = *self.status.read().await;
-            let ticker = self.ticker.read().await.clone();
-            let stats = self.stats.read().await.clone();
-            let (position, account) = self
-                .with_position_and_account(&config, PositionInfo::clone)
-                .await;
+            let mut base = self.read_base_bot_snapshot(&config).await;
             let active_orders: Vec<GridOrder> =
                 self.active_orders.read().await.values().cloned().collect();
-            let recent_trades = self
+            base.recent_trades = self
                 .recent_trades
                 .read()
                 .await
                 .iter()
                 .rev()
+                .filter(|t| t.symbol == base.symbol && t.mode == base.mode)
                 .take(50)
                 .cloned()
                 .collect();
-            let recent_logs = self
+            base.recent_logs = self
                 .recent_logs
                 .read()
                 .await
@@ -473,24 +481,7 @@ impl AppState {
                 .take(50)
                 .cloned()
                 .collect();
-            (
-                BotSnapshot {
-                    status,
-                    mode: config.exchange.trading_mode(),
-                    symbol: config.exchange.symbol.clone(),
-                    ticker,
-                    stats,
-                    position,
-                    account,
-                    account_cny_rate: None,
-                    grid_config: config.summary(),
-                    active_orders: Vec::new(),
-                    recent_trades,
-                    hourly_trade_stats: None,
-                    recent_logs,
-                },
-                active_orders,
-            )
+            (base, active_orders)
         };
         sort_active_orders_desc(&mut active_orders);
         snapshot.account_cny_rate = self.cny_rates.get(&snapshot.account.asset).await;

@@ -143,7 +143,7 @@
 
 @media (pointer: coarse), (max-width: 600px) {
   .config-form .ant-switch, .settings-page .ant-switch { margin-block: var(--space-3); touch-action: manipulation; }
-  .config-form .ant-switch::before, .settings-page .ant-switch::before { content: ''; position: absolute; inset-inline: 0; top: 50%; height: var(--control-touch); transform: translateY(-50%); cursor: pointer; }
+  .config-form .ant-switch:not(:disabled)::before, .settings-page .ant-switch:not(:disabled)::before { content: ''; position: absolute; inset-inline: 0; top: 50%; height: var(--control-touch); transform: translateY(-50%); cursor: pointer; }
   .config-form .ant-checkbox-wrapper, .settings-page .ant-checkbox-wrapper { min-height: var(--control-touch); align-items: center; }
 }
 

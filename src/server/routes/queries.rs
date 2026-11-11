@@ -70,12 +70,7 @@ async fn collect_overview(
         pairs.push(pair);
         recent_trades.extend(trades);
     }
-    recent_trades.sort_unstable_by(|a, b| {
-        b.timestamp
-            .cmp(&a.timestamp)
-            .then_with(|| b.trade_id.cmp(&a.trade_id))
-    });
-    recent_trades.truncate(20);
+    crate::server::state::snapshot::sort_and_truncate_recent_trades(&mut recent_trades, 20);
     json_ok(OverviewSnapshot {
         generated_at,
         pairs,

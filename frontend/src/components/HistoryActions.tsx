@@ -13,7 +13,7 @@ export function HistoryActions({ symbol }: { symbol: string }) {
     await downloadDatabase(`${path}/database/export`, undefined, signal);
     return exportSnapshotSuccess(`${symbol} 全部模式的成交历史`);
   });
-  const refresh = () => invalidateStrategyQueries(client, { pairs: false, overview: true, snapshot: symbol, cancelFirst: true });
+  const refresh = () => invalidateStrategyQueries(client, { pairs: false, overview: true, snapshot: symbol, clearTrades: symbol, cancelFirst: true });
   const clear = () => run('clear', async () => {
     let started = false;
     try {

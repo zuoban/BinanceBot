@@ -1,3 +1,6 @@
+#[path = "common/auth.rs"]
+mod auth;
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use binance_grid_bot::auth::AdminAuth;
@@ -113,8 +116,7 @@ async fn revocation_scenario(multi: bool) {
         )
     } else {
         let (tx, _rx) = mpsc::channel(8);
-        let state =
-            AppState::new_with_admin_auth(AppConfig::default(), db.clone(), tx, test_auth());
+        let state = auth::auth_state(AppConfig::default(), db.clone(), tx, "test-password");
         (
             create_router(state.clone()),
             vec![state],

@@ -23,7 +23,7 @@ export interface Pair { symbol: string; scoped: boolean; status: Status; mode: M
 export interface Order {
   client_order_id: string; order_id: number | null; symbol: string; side: 'BUY' | 'SELL';
   price: Decimal; quantity: Decimal; amount_usdc: Decimal; status: string;
-  created_at: string; grid_level: number; is_take_profit: boolean; purpose: string;
+  created_at: string; grid_level: number; is_take_profit: boolean; purpose: 'GRID' | 'TAKE_PROFIT' | 'REMAINDER' | 'LEGACY' | 'UNVERIFIED' | (string & {});
   merge_sources: { client_order_id: string; price: Decimal; quantity: Decimal }[];
 }
 export interface Trade {
@@ -38,7 +38,7 @@ interface Account {
   margin_balance: Decimal; unrealized_profit: Decimal; update_time: string;
 }
 export interface Snapshot {
-  symbol: string; status: Status; mode: Mode; grid_config: GridConfig;
+  symbol: string; status: Status; mode: Mode; sync_interval_secs?: number; grid_config: GridConfig;
   ticker: { last_price: Decimal; mark_price: Decimal; change_percent_24h: Decimal; high_24h: Decimal; low_24h: Decimal; update_time: string; mark_update_time: string };
   stats: {
     total_trades: number; completed_cycles: number; total_realized_pnl: Decimal;
@@ -53,19 +53,19 @@ export interface Snapshot {
 }
 interface AccountSnapshot {
   mode: Mode;
-  snapshot: Pick<Snapshot, 'symbol' | 'status' | 'account' | 'account_cny_rate'> & {
+  snapshot: Pick<Snapshot, 'symbol' | 'status' | 'sync_interval_secs' | 'account' | 'account_cny_rate'> & {
     position: Pick<Snapshot['position'], 'size' | 'unrealized_pnl'>;
     ticker: Pick<Snapshot['ticker'], 'mark_price' | 'mark_update_time'>;
   };
 }
 export interface AccountFrame { generated_at: string; pairs: AccountSnapshot[] }
-export interface AccountObservation extends AccountSnapshot { account_observation_stale?: boolean }
+export interface AccountObservation extends AccountSnapshot { account_observation_stale?: boolean; generated_at_ms?: number; received_at_ms?: number }
 export type SocketMessage =
   | { type: 'snapshot'; data: Snapshot }
   | { type: 'accounts'; data: AccountFrame };
 interface TodayPnl { window_start: string; window_end: string; groups: { symbol: string; mode: Mode; realized_pnl: Decimal; pending_pnl_count: number }[] }
 export interface PairSummary {
-  symbol: string; status: Status; mode: Mode; grid_config: GridConfig;
+  symbol: string; status: Status; mode: Mode; sync_interval_secs?: number; grid_config: GridConfig;
   ticker: Pick<Snapshot['ticker'], 'mark_price' | 'mark_update_time'>;
   position: Pick<Snapshot['position'], 'size' | 'entry_price' | 'mark_price' | 'unrealized_pnl'>;
   stats: Pick<Snapshot['stats'], 'total_realized_pnl' | 'active_buy_orders' | 'active_sell_orders'>;

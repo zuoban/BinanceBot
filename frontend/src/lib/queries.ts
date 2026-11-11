@@ -13,11 +13,12 @@ export async function invalidateStrategyQueries(client: QueryClient, options: {
   overview?: boolean;
   accounts?: boolean;
   snapshot?: boolean | string;
+  clearTrades?: boolean | string;
   configSymbol?: string;
   history?: 'invalidate' | 'reset';
   cancelFirst?: boolean;
 } = {}) {
-  const { pairs = true, overview = true, accounts = false, snapshot = false, configSymbol, history, cancelFirst = false } = options;
+  const { pairs = true, overview = true, accounts = false, snapshot = false, clearTrades = false, configSymbol, history, cancelFirst = false } = options;
   const keys: QueryKey[] = [];
   if (pairs) keys.push(['pairs']);
   if (overview) keys.push(['overview']);
@@ -26,13 +27,18 @@ export async function invalidateStrategyQueries(client: QueryClient, options: {
   else if (typeof snapshot === 'string') keys.push(['snapshot', snapshot]);
   if (configSymbol) keys.push(['config', configSymbol]);
   if (history === 'invalidate') keys.push(['overview-history']);
-  if (cancelFirst) {
+  const tradesPredicate = clearTrades
+    ? (q: { queryKey: QueryKey }) => q.queryKey[0] === 'snapshot' && (clearTrades === true || q.queryKey[1] === clearTrades) && q.queryKey[3] === 'trades'
+    : undefined;
+  if (cancelFirst || tradesPredicate) {
     await Promise.all([
-      ...keys.map(queryKey => client.cancelQueries({ queryKey })),
-      ...(history === 'reset' ? [client.cancelQueries({ queryKey: ['overview-history'] })] : []),
+      ...(cancelFirst ? keys.map(queryKey => client.cancelQueries({ queryKey })) : []),
+      ...(cancelFirst && history === 'reset' ? [client.cancelQueries({ queryKey: ['overview-history'] })] : []),
+      ...(tradesPredicate ? [client.cancelQueries({ predicate: tradesPredicate })] : []),
     ]);
   }
   await Promise.all([
+    ...(tradesPredicate ? [client.resetQueries({ predicate: tradesPredicate })] : []),
     ...keys.map(queryKey => client.invalidateQueries({ queryKey })),
     ...(history === 'reset' ? [client.resetQueries({ queryKey: ['overview-history'] })] : []),
   ]);
@@ -126,6 +132,7 @@ export function useSocket<T extends keyof SocketDataByType>(path: string | undef
 
 function useSocketFallbackQuery<TData>(key: QueryKey, queryFn: (signal: AbortSignal) => Promise<TData>, socket: { connected: boolean; lastReceived: number }, enabled = true) {
   const lastFallback = useRef(0);
+  const serializedKey = JSON.stringify(key);
   const query: UseQueryResult<TData, Error> = useQuery({
     queryKey: key,
     queryFn: ({ signal }) => queryFn(signal),
@@ -136,6 +143,7 @@ function useSocketFallbackQuery<TData>(key: QueryKey, queryFn: (signal: AbortSig
   latestRef.current = { socket, dataUpdatedAt: query.dataUpdatedAt, isFetching: query.isFetching, refetch: query.refetch };
   // A timer restarts polling when an open socket silently stops sending, without rendering a clock tick.
   useEffect(() => {
+    lastFallback.current = 0;
     if (!enabled) return;
     let timer: number | undefined;
     const step = () => {
@@ -164,7 +172,7 @@ function useSocketFallbackQuery<TData>(key: QueryKey, queryFn: (signal: AbortSig
       window.clearTimeout(timer);
       if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisible);
     };
-  }, [enabled]);
+  }, [enabled, serializedKey]);
   return query;
 }
 
@@ -203,6 +211,12 @@ export function useLiveAccounts() {
     return current && Date.parse(data.generated_at) < Date.parse(current.generated_at) ? current : data;
   }, stream);
   const stale = useExpired(query.data ? query.dataUpdatedAt + SNAPSHOT_STALE_MS : -Infinity);
-  const accounts = useMemo<AccountObservation[]>(() => (query.data?.pairs ?? []).map(entry => ({ ...entry, account_observation_stale: stale })), [query.data?.pairs, stale]);
+  const accounts = useMemo<AccountObservation[]>(() => {
+    const generatedAtMs = query.data ? Date.parse(query.data.generated_at) : NaN;
+    const serverTiming = Number.isFinite(generatedAtMs) && query.dataUpdatedAt > 0
+      ? { generated_at_ms: generatedAtMs, received_at_ms: query.dataUpdatedAt }
+      : undefined;
+    return (query.data?.pairs ?? []).map(entry => ({ ...entry, account_observation_stale: stale, ...serverTiming }));
+  }, [query.data, query.dataUpdatedAt, stale]);
   return { accounts, stale, error: query.error };
 }

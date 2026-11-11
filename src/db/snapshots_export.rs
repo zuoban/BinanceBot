@@ -73,24 +73,20 @@ impl Database {
         let payload = serde_json::to_string(groups)?;
         let mut conn = self.lock_connection("save_hourly_account_snapshot");
         let tx = super::immediate_tx(&mut conn)?;
-        tx.execute(
+        tx.prepare_cached(
             "INSERT OR IGNORE INTO account_hourly_snapshots (hour, payload) VALUES (?1, ?2)",
-            params![hour, payload],
-        )?;
-        tx.execute(
-            "DELETE FROM account_hourly_snapshots WHERE hour < ?1",
-            params![hour - Self::HOURLY_SNAPSHOT_RETENTION_SECS],
-        )?;
+        )?
+        .execute(params![hour, payload])?;
+        tx.prepare_cached("DELETE FROM account_hourly_snapshots WHERE hour < ?1")?
+            .execute(params![hour - Self::HOURLY_SNAPSHOT_RETENTION_SECS])?;
         tx.commit()?;
         Ok(())
     }
 
     pub(crate) fn cleanup_hourly_account_snapshots(&self, now: i64) -> Result<()> {
-        self.lock_connection("cleanup_hourly_account_snapshots")
-            .execute(
-                "DELETE FROM account_hourly_snapshots WHERE hour < ?1",
-                params![now - Self::HOURLY_SNAPSHOT_RETENTION_SECS],
-            )?;
+        let conn = self.lock_connection("cleanup_hourly_account_snapshots");
+        conn.prepare_cached("DELETE FROM account_hourly_snapshots WHERE hour < ?1")?
+            .execute(params![now - Self::HOURLY_SNAPSHOT_RETENTION_SECS])?;
         Ok(())
     }
 
@@ -153,15 +149,14 @@ impl Database {
             });
         let mut conn = self.lock_connection("save_daily_snapshot");
         let tx = super::immediate_tx(&mut conn)?;
-        let inserted = tx.execute(
-            "INSERT OR IGNORE INTO daily_snapshots (date, payload) VALUES (?1, ?2)",
-            params![snapshot.date, payload],
-        )?;
+        let inserted = tx
+            .prepare_cached(
+                "INSERT OR IGNORE INTO daily_snapshots (date, payload) VALUES (?1, ?2)",
+            )?
+            .execute(params![snapshot.date, payload])?;
         if let Some(cutoff) = cutoff {
-            tx.execute(
-                "DELETE FROM daily_snapshots WHERE date < ?1",
-                params![cutoff],
-            )?;
+            tx.prepare_cached("DELETE FROM daily_snapshots WHERE date < ?1")?
+                .execute(params![cutoff])?;
         }
         tx.commit()?;
         Ok(inserted == 1)
@@ -173,10 +168,9 @@ impl Database {
             .date_naive();
         let cutoff =
             (today - ChronoDuration::days(Self::DAILY_SNAPSHOT_RETENTION_DAYS)).to_string();
-        self.lock_connection("cleanup_daily_snapshots").execute(
-            "DELETE FROM daily_snapshots WHERE date < ?1",
-            params![cutoff],
-        )?;
+        let conn = self.lock_connection("cleanup_daily_snapshots");
+        conn.prepare_cached("DELETE FROM daily_snapshots WHERE date < ?1")?
+            .execute(params![cutoff])?;
         Ok(())
     }
 
@@ -189,7 +183,7 @@ impl Database {
         super::query_json_vec(
             &conn,
             "SELECT payload FROM daily_snapshots ORDER BY date DESC LIMIT ?1",
-            params![limit as i64],
+            params![i64::try_from(limit).unwrap_or(i64::MAX)],
             "daily_snapshots",
         )
     }
@@ -202,7 +196,7 @@ impl Database {
         super::query_json_vec(
             &conn,
             "SELECT payload FROM daily_snapshots ORDER BY date DESC LIMIT ?1",
-            params![limit as i64],
+            params![i64::try_from(limit).unwrap_or(i64::MAX)],
             "daily_snapshots_raw",
         )
     }

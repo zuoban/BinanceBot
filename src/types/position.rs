@@ -198,6 +198,14 @@ pub(crate) fn quote_asset(symbol: &str) -> Option<&'static str> {
         .find(|asset| symbol.ends_with(asset))
 }
 
+pub(crate) fn resolve_quote_asset<'a>(symbol: &'a str, fallback_asset: &'a str) -> &'a str {
+    quote_asset(symbol).unwrap_or(if fallback_asset.is_empty() {
+        symbol
+    } else {
+        fallback_asset
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountInfo {
     pub asset: String,

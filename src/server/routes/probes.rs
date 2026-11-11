@@ -18,13 +18,18 @@ pub(super) struct TestExchangePayload {
 
 impl std::fmt::Debug for TestExchangePayload {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            api_key,
+            api_secret,
+            recv_window,
+        } = self;
         f.debug_struct("TestExchangePayload")
-            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("api_key", &crate::config::redact_optional_secret(api_key))
             .field(
                 "api_secret",
-                &self.api_secret.as_ref().map(|_| "[REDACTED]"),
+                &crate::config::redact_optional_secret(api_secret),
             )
-            .field("recv_window", &self.recv_window)
+            .field("recv_window", recv_window)
             .finish()
     }
 }
@@ -37,9 +42,13 @@ pub(super) struct TestTelegramPayload {
 
 impl std::fmt::Debug for TestTelegramPayload {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self { bot_token, chat_id } = self;
         f.debug_struct("TestTelegramPayload")
-            .field("bot_token", &self.bot_token.as_ref().map(|_| "[REDACTED]"))
-            .field("chat_id", &self.chat_id)
+            .field(
+                "bot_token",
+                &crate::config::redact_optional_secret(bot_token),
+            )
+            .field("chat_id", chat_id)
             .finish()
     }
 }
@@ -168,11 +177,55 @@ pub(super) async fn test_exchange_handler(
     }
 }
 
-fn sanitized_probe_error(prefix: &str, error: &anyhow::Error) -> String {
+fn summarize_probe_detail(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return "未知错误".to_string();
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.contains("<!doctype")
+        || lower.contains("<html")
+        || lower.contains("<head")
+        || lower.contains("<body")
+    {
+        return "远端服务返回异常响应，请稍后重试".to_string();
+    }
+    let collapsed: String = trimmed.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out = String::new();
+    for (idx, ch) in collapsed.chars().enumerate() {
+        if idx >= 200 {
+            out.push('…');
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+pub(super) fn sanitized_probe_error(prefix: &str, error: &anyhow::Error) -> String {
+    if let Some(exchange_err) = error.downcast_ref::<crate::exchange::ExchangeError>() {
+        return match exchange_err {
+            crate::exchange::ExchangeError::ApiError { code, msg } => {
+                format!(
+                    "{prefix}：币安返回错误 ({code}): {}",
+                    summarize_probe_detail(msg)
+                )
+            }
+            crate::exchange::ExchangeError::HttpError(_) => {
+                format!("{prefix}：网络请求失败，请检查网络后重试")
+            }
+            crate::exchange::ExchangeError::Other(msg)
+            | crate::exchange::ExchangeError::RequestRejected(msg)
+            | crate::exchange::ExchangeError::PostOnlyRejected(msg)
+            | crate::exchange::ExchangeError::ExecutionUnknown { msg, .. } => {
+                format!("{prefix}：{}", summarize_probe_detail(msg))
+            }
+        };
+    }
     if error.downcast_ref::<reqwest::Error>().is_some() {
         return format!("{prefix}：网络请求失败，请检查网络后重试");
     }
-    format!("{prefix}：{error}")
+    format!("{prefix}：{}", summarize_probe_detail(&error.to_string()))
 }
 
 /// Send one fixed probe message with the (possibly unsaved) Telegram credentials.

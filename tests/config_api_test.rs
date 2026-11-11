@@ -1,4 +1,7 @@
-use axum::body::{to_bytes, Body};
+#[path = "common/http.rs"]
+mod http;
+
+use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use binance_grid_bot::config::{AppConfig, TradingPairConfig};
 use binance_grid_bot::db::Database;
@@ -23,9 +26,7 @@ fn request(body: Option<Value>) -> Request<Body> {
         .unwrap()
 }
 
-async fn json_response(response: axum::response::Response) -> Value {
-    serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap()
-}
+use http::body_json as json_response;
 
 fn payload(version: &Value) -> Value {
     json!({

@@ -90,23 +90,24 @@ impl SymbolRules {
         Self::from_symbol_info(sym).ok_or(SymbolRulesError::MissingFilters)
     }
 
+    fn has_required_perpetual_filters(sym: &BinanceSymbolInfo) -> bool {
+        (sym.contract_type.is_empty() || sym.contract_type == "PERPETUAL")
+            && sym.filters.iter().any(|filter| {
+                matches!(filter, BinanceFilter::PriceFilter { tick_size, .. } if *tick_size > Decimal::ZERO)
+            })
+            && sym.filters.iter().any(|filter| {
+                matches!(filter, BinanceFilter::LotSize { step_size, .. } if *step_size > Decimal::ZERO)
+            })
+    }
+
     fn from_symbol_info(sym: &BinanceSymbolInfo) -> Option<Self> {
-        if !(sym.contract_type.is_empty() || sym.contract_type == "PERPETUAL")
-            || !sym.filters.iter().any(|filter| matches!(filter, BinanceFilter::PriceFilter { tick_size, .. } if *tick_size > Decimal::ZERO))
-            || !sym.filters.iter().any(|filter| matches!(filter, BinanceFilter::LotSize { step_size, .. } if *step_size > Decimal::ZERO))
-        {
+        if !Self::has_required_perpetual_filters(sym) {
             return None;
         }
-        let mut tick_size = dec!(0.01);
-        let mut min_price = dec!(0.0001);
-        let mut max_price = dec!(1000000.0);
-
-        let mut step_size = dec!(0.01);
-        let mut min_qty = dec!(0.01);
-        let mut max_qty = dec!(1000000.0);
-
+        let (mut tick_size, mut min_price, mut max_price) =
+            (dec!(0.01), dec!(0.0001), dec!(1000000.0));
+        let (mut step_size, mut min_qty, mut max_qty) = (dec!(0.01), dec!(0.01), dec!(1000000.0));
         let mut min_notional = dec!(5.0);
-
         for filter in &sym.filters {
             match filter {
                 BinanceFilter::PriceFilter {

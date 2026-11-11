@@ -12,6 +12,7 @@ const MAX_LOGIN_SOURCES: usize = 10_000;
 const MAX_SOURCE_LOGIN_ATTEMPTS: usize = 10;
 
 const MAX_COLD_SESSION_LOOKUPS: usize = 16;
+const MAX_CONCURRENT_LOGOUTS: usize = 4;
 
 pub(crate) fn sanitize_session_token(raw: &str) -> Option<&str> {
     let t = raw.trim();
@@ -46,6 +47,7 @@ pub(crate) struct AuthContext {
     pub(crate) login_failures: Mutex<LoginAttempts>,
     auth_work: Arc<Semaphore>,
     session_lookup_permits: Arc<Semaphore>,
+    logout_permits: Arc<Semaphore>,
     admin_auth: Option<Arc<crate::auth::AdminAuth>>,
 }
 
@@ -59,6 +61,7 @@ impl AuthContext {
             login_failures: Mutex::new(LoginAttempts::default()),
             auth_work: Arc::new(Semaphore::new(4)),
             session_lookup_permits: Arc::new(Semaphore::new(MAX_COLD_SESSION_LOOKUPS)),
+            logout_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_LOGOUTS)),
             admin_auth,
         })
     }
@@ -116,7 +119,7 @@ impl AuthContext {
             return Ok(());
         }
         let permit = self
-            .session_lookup_permits
+            .logout_permits
             .clone()
             .try_acquire_owned()
             .map_err(|_| SessionCheckError::Busy)?;
@@ -183,6 +186,11 @@ impl AuthContext {
     #[cfg(test)]
     pub(crate) fn try_acquire_session_lookup_permit(&self) -> Option<OwnedSemaphorePermit> {
         self.session_lookup_permits.clone().try_acquire_owned().ok()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn try_acquire_logout_permit(&self) -> Option<OwnedSemaphorePermit> {
+        self.logout_permits.clone().try_acquire_owned().ok()
     }
 }
 

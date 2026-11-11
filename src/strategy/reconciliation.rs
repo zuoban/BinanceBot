@@ -1,8 +1,8 @@
 #[cfg(test)]
 pub(super) use super::evidence_book::terminal_responses_disagree;
-use super::reconciliation_anomalies::invalid_snapshot_price;
 use super::reconciliation_settlement::LiveSyncSettlement;
 use super::snapshot_conflicts::SnapshotConflictScan;
+use super::snapshot_identities::invalid_snapshot_price;
 use super::*;
 
 struct OpenLiveOrderAdoption<'a> {
@@ -102,8 +102,7 @@ impl GridTradingEngine {
             .terminal_disagreement_blocked(account_key, symbol)
             .await
         {
-            self.last_orders_sync = None;
-            self.report_reconciliation_state(true).await;
+            self.mark_orders_reconciliation_blocked().await;
             return None;
         }
         let (restored_ids, _) = self
@@ -292,8 +291,7 @@ impl GridTradingEngine {
             Ok(orders) => Some(orders),
             Err(e) => {
                 warn!("Error during live orders sync: {}", e);
-                self.last_orders_sync = None;
-                self.report_reconciliation_state(true).await;
+                self.mark_orders_reconciliation_blocked().await;
                 None
             }
         }
@@ -411,69 +409,80 @@ impl GridTradingEngine {
         persistence_ok
     }
 
+    fn apply_open_live_order_to_active(
+        active: &mut HashMap<String, GridOrder>,
+        client_id: &str,
+        live_order: &BinanceOrderResponse,
+        trust_snapshot: bool,
+        uncertain_ids: &HashSet<String>,
+        restored_ids: &HashSet<String>,
+        sources: (&HashMap<String, GridOrder>, Option<&RemainderPlan>),
+    ) -> GridOrder {
+        let remaining = live_order.remaining_qty();
+        let quantity = if trust_snapshot {
+            remaining
+        } else {
+            active
+                .get(client_id)
+                .map_or(live_order.orig_qty, |order| order.quantity.max(remaining))
+        };
+        if !uncertain_ids.contains(client_id) && !restored_ids.contains(client_id) {
+            if let Some(plan) = sources.1 {
+                if let Some(metadata) = plan.find_order(client_id) {
+                    active.insert(client_id.to_owned(), metadata.clone());
+                }
+            }
+            if let Some(intent) = sources.0.get(client_id) {
+                active.insert(client_id.to_owned(), intent.clone());
+            }
+        }
+        if let Some(order) = active.get_mut(client_id) {
+            order.order_id = Some(live_order.order_id);
+            order.price = if trust_snapshot {
+                live_order.price
+            } else {
+                order.price.max(live_order.price)
+            };
+            order.quantity = quantity;
+            order.amount_usdc = order
+                .price
+                .checked_mul(order.quantity)
+                .unwrap_or(Decimal::MAX);
+            order.status = live_order.open_order_status();
+            order.clone()
+        } else {
+            let order = GridOrder::from_exchange_response(
+                live_order,
+                quantity,
+                OrderPurpose::Legacy,
+                Utc::now(),
+            );
+            active.insert(client_id.to_owned(), order.clone());
+            order
+        }
+    }
+
     async fn adopt_and_persist_open_live_orders(&mut self, ctx: OpenLiveOrderAdoption<'_>) -> bool {
-        let OpenLiveOrderAdoption {
-            pause_epoch,
-            position_ready,
-            live_ids,
-            uncertain_ids,
-            restored_ids,
-            pair_intents,
-            remainder_plan,
-            persisted_managed,
-        } = ctx;
         let mut orders_to_persist = Vec::new();
         {
+            let trust_snapshot = ctx.position_ready && self.state.pause_epoch() == ctx.pause_epoch;
             let mut active = self.state.active_orders.write().await;
-            for (client_id, live_order) in live_ids {
-                // On failure or interruption, retain at least the previous
-                // reservation; newly discovered orders reserve original size.
-                let remaining = live_order.remaining_qty();
-                let quantity = if position_ready && self.state.pause_epoch() == pause_epoch {
-                    remaining
-                } else {
-                    active
-                        .get(client_id)
-                        .map_or(live_order.orig_qty, |order| order.quantity.max(remaining))
-                };
-                if !uncertain_ids.contains(client_id) && !restored_ids.contains(client_id) {
-                    if let Some(plan) = remainder_plan {
-                        if let Some(metadata) = plan.find_order(client_id) {
-                            active.insert(client_id.clone(), metadata.clone());
-                        }
-                    }
-                    if let Some(intent) = pair_intents.get(client_id) {
-                        active.insert(client_id.clone(), intent.clone());
-                    }
-                }
-                if let Some(order) = active.get_mut(client_id) {
-                    order.order_id = Some(live_order.order_id);
-                    order.price = if position_ready && self.state.pause_epoch() == pause_epoch {
-                        live_order.price
-                    } else {
-                        order.price.max(live_order.price)
-                    };
-                    order.quantity = quantity;
-                    order.amount_usdc = order
-                        .price
-                        .checked_mul(order.quantity)
-                        .unwrap_or(Decimal::MAX);
-                    order.status = live_order.open_order_status();
-                    if persisted_managed
-                        .get(client_id)
-                        .is_none_or(|persisted| !persisted.matches_persisted_state(order))
-                    {
-                        orders_to_persist.push(order.clone());
-                    }
-                } else {
-                    let order = GridOrder::from_exchange_response(
-                        live_order,
-                        quantity,
-                        OrderPurpose::Legacy,
-                        Utc::now(),
-                    );
-                    orders_to_persist.push(order.clone());
-                    active.insert(client_id.clone(), order);
+            for (client_id, live_order) in ctx.live_ids {
+                let updated = Self::apply_open_live_order_to_active(
+                    &mut active,
+                    client_id,
+                    live_order,
+                    trust_snapshot,
+                    ctx.uncertain_ids,
+                    ctx.restored_ids,
+                    (ctx.pair_intents, ctx.remainder_plan),
+                );
+                if ctx
+                    .persisted_managed
+                    .get(client_id)
+                    .is_none_or(|persisted| !persisted.matches_persisted_state(&updated))
+                {
+                    orders_to_persist.push(updated);
                 }
             }
         }

@@ -60,3 +60,19 @@ fn create_session_prunes_expired_rows_best_effort() {
     db.create_session("after-trigger").unwrap();
     assert!(db.is_session_valid("after-trigger").unwrap());
 }
+
+#[test]
+fn delete_session_skips_write_when_token_is_absent() {
+    let db = Database::open(":memory:").unwrap();
+    db.create_session("present").unwrap();
+    db.conn
+        .lock()
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER fail_session_delete BEFORE DELETE ON auth_sessions
+             BEGIN SELECT RAISE(ABORT, 'delete executed'); END;",
+        )
+        .unwrap();
+    db.delete_session("absent").unwrap();
+    assert!(db.delete_session("present").is_err());
+}

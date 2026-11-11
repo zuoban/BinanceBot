@@ -87,6 +87,37 @@ impl GridTradingEngine {
         }
     }
 
+    fn apply_fresh_ticker_fields(
+        ticker: &mut TickerInfo,
+        ticker_update: &TickerInfo,
+        now: chrono::DateTime<Utc>,
+    ) -> (bool, bool) {
+        let fresh = |time| is_timestamp_fresh(time, now, MARKET_PRICE_MAX_AGE_SECS);
+        let last_updated = ticker_update.last_price > Decimal::ZERO
+            && fresh(ticker_update.update_time)
+            && ticker_update.update_time >= ticker.update_time;
+        if last_updated {
+            ticker.last_price = ticker_update.last_price;
+            ticker.high_24h = ticker_update.high_24h;
+            ticker.low_24h = ticker_update.low_24h;
+            ticker.change_24h = ticker_update.change_24h;
+            ticker.change_percent_24h = ticker_update.change_percent_24h;
+            ticker.volume_24h = ticker_update.volume_24h;
+            ticker.update_time = ticker_update.update_time;
+        }
+        let mark_updated = ticker_update.mark_price > Decimal::ZERO
+            && fresh(ticker_update.mark_update_time)
+            && ticker_update.mark_update_time >= ticker.mark_update_time;
+        if mark_updated {
+            ticker.mark_price = ticker_update.mark_price;
+            ticker.mark_update_time = ticker_update.mark_update_time;
+        }
+        if ticker.symbol != ticker_update.symbol {
+            ticker.symbol = ticker_update.symbol.clone();
+        }
+        (last_updated, mark_updated)
+    }
+
     pub(super) async fn handle_ticker_update(&mut self, ticker_update: TickerInfo) {
         let (symbol_matches, risk) = {
             let config = self.state.config.read().await;
@@ -100,31 +131,7 @@ impl GridTradingEngine {
         }
         let (last_updated, mark_updated) = {
             let mut ticker = self.state.ticker.write().await;
-            let now = Utc::now();
-            let fresh = |time| is_timestamp_fresh(time, now, MARKET_PRICE_MAX_AGE_SECS);
-            let last_updated = ticker_update.last_price > Decimal::ZERO
-                && fresh(ticker_update.update_time)
-                && ticker_update.update_time >= ticker.update_time;
-            if last_updated {
-                ticker.last_price = ticker_update.last_price;
-                ticker.high_24h = ticker_update.high_24h;
-                ticker.low_24h = ticker_update.low_24h;
-                ticker.change_24h = ticker_update.change_24h;
-                ticker.change_percent_24h = ticker_update.change_percent_24h;
-                ticker.volume_24h = ticker_update.volume_24h;
-                ticker.update_time = ticker_update.update_time;
-            }
-            let mark_updated = ticker_update.mark_price > Decimal::ZERO
-                && fresh(ticker_update.mark_update_time)
-                && ticker_update.mark_update_time >= ticker.mark_update_time;
-            if mark_updated {
-                ticker.mark_price = ticker_update.mark_price;
-                ticker.mark_update_time = ticker_update.mark_update_time;
-            }
-            if ticker.symbol != ticker_update.symbol {
-                ticker.symbol = ticker_update.symbol.clone();
-            }
-            (last_updated, mark_updated)
+            Self::apply_fresh_ticker_fields(&mut ticker, &ticker_update, Utc::now())
         };
         // Rejected market events cannot change risk inputs or trigger paper fills.
         if !last_updated && !mark_updated {

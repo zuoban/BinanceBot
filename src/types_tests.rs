@@ -25,21 +25,34 @@ fn price_freshness_checks_both_clocks_and_keeps_the_startup_fallback() {
 }
 
 #[test]
-fn global_config_payload_preserves_existing_chat_id_when_blank() {
+fn global_config_payload_allows_clearing_chat_id_while_preserving_omitted_fields() {
     let mut global = crate::config::GlobalConfig::from_app(&crate::config::AppConfig::default());
+    global.telegram.bot_token = "saved-bot-token".into();
     global.telegram.chat_id = "123456".into();
+
     UpdateGlobalConfigPayload {
-        telegram_chat_id: Some("   ".into()),
+        telegram_chat_id: None,
         ..Default::default()
     }
     .apply_to(&mut global);
     assert_eq!(global.telegram.chat_id, "123456");
 
     UpdateGlobalConfigPayload {
+        telegram_enabled: Some(false),
+        telegram_chat_id: Some("   ".into()),
+        ..Default::default()
+    }
+    .apply_to(&mut global);
+    assert!(global.telegram.chat_id.is_empty());
+    assert_eq!(global.telegram.bot_token, "saved-bot-token");
+
+    global.telegram.chat_id = "654321".into();
+    UpdateGlobalConfigPayload {
         clear_telegram_credentials: true,
         ..Default::default()
     }
     .apply_to(&mut global);
+    assert!(global.telegram.bot_token.is_empty());
     assert!(global.telegram.chat_id.is_empty());
 }
 
@@ -141,7 +154,10 @@ fn config_payload_debug_redacts_secrets() {
         cancel_opening_on_max_position: None,
         min_liquidation_distance_pct: None,
     };
-    let rendered = format!("{global:?} {pair:?}");
+    let login = AuthLoginPayload {
+        password: "login-secret-password".into(),
+    };
+    let rendered = format!("{global:?} {pair:?} {login:?}");
     for secret in [
         "payload-api-key",
         "payload-api-secret",
@@ -149,6 +165,7 @@ fn config_payload_debug_redacts_secrets() {
         "pair-payload-key",
         "pair-payload-secret",
         "pair-payload-token",
+        "login-secret-password",
     ] {
         assert!(!rendered.contains(secret), "{rendered}");
     }

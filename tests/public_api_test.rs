@@ -1,11 +1,14 @@
+#[path = "common/http.rs"]
+mod http;
+#[path = "common/trades.rs"]
+mod trades;
+
 use binance_grid_bot::config::AppConfig;
 use binance_grid_bot::db::Database;
 use binance_grid_bot::exchange::BinanceFuturesClient;
 use binance_grid_bot::server::AppState;
 use binance_grid_bot::strategy::GridTradingEngine;
-use binance_grid_bot::types::{
-    GridOrder, OrderPurpose, OrderSide, OrderStatus, TradeRecord, TradingMode,
-};
+use binance_grid_bot::types::{GridOrder, OrderPurpose, OrderSide, OrderStatus, TradingMode};
 use chrono::Utc;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -40,32 +43,7 @@ fn create_test_order(
     }
 }
 
-fn create_test_trade(
-    trade_id: &str,
-    client_order_id: &str,
-    symbol: &str,
-    mode: TradingMode,
-    side: OrderSide,
-    price: Decimal,
-    quantity: Decimal,
-) -> TradeRecord {
-    TradeRecord {
-        trade_id: trade_id.to_string(),
-        client_order_id: client_order_id.to_string(),
-        symbol: symbol.to_string(),
-        mode,
-        side,
-        price,
-        quantity,
-        amount_usdc: price * quantity,
-        realized_pnl: dec!(0),
-        commission: dec!(0),
-        pnl_verified: true,
-        is_maker: true,
-        timestamp: Utc::now(),
-        note: String::new(),
-    }
-}
+use trades::sample_trade as create_test_trade;
 
 #[tokio::test]
 async fn test_non_cfg_test_consumer_constructs_grid_trading_engine() {
@@ -83,7 +61,7 @@ async fn test_non_cfg_test_consumer_constructs_grid_trading_engine() {
 
 #[tokio::test]
 async fn overview_is_lightweight_while_status_keeps_full_detail() {
-    use axum::body::{to_bytes, Body};
+    use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use binance_grid_bot::server::create_router;
     use tower::ServiceExt;
@@ -141,9 +119,7 @@ async fn overview_is_lightweight_while_status_keeps_full_detail() {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        let body: serde_json::Value =
-            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
-                .unwrap();
+        let body = http::body_json(response).await;
         let data = &body["data"];
         match path {
             "/api/overview" => {

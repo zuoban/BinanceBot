@@ -3779,3 +3779,140 @@ async fn live_credential_rotation_cancels_old_account_pauses_and_clears_cached_s
     assert_eq!(state.account.read().await.total_wallet_balance, dec!(250));
     server.abort();
 }
+
+#[tokio::test]
+async fn live_recv_window_only_update_replaces_client_without_wiping_runtime_state() {
+    use std::sync::atomic::AtomicUsize;
+
+    let open_order_calls = Arc::new(AtomicUsize::new(0));
+    let calls_ref = Arc::clone(&open_order_calls);
+    let app = axum::Router::new()
+        .route(
+            "/fapi/v1/time",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({ "serverTime": Utc::now().timestamp_millis() }))
+            }),
+        )
+        .route(
+            "/fapi/v1/exchangeInfo",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({
+                    "symbols": [{
+                        "symbol": "SOLUSDC",
+                        "status": "TRADING",
+                        "contractType": "PERPETUAL",
+                        "filters": [
+                            {"filterType": "PRICE_FILTER", "minPrice": "0.01", "maxPrice": "100000", "tickSize": "0.01"},
+                            {"filterType": "LOT_SIZE", "minQty": "0.01", "maxQty": "100000", "stepSize": "0.01"},
+                            {"filterType": "MIN_NOTIONAL", "notional": "5"}
+                        ]
+                    }]
+                }))
+            }),
+        )
+        .route(
+            "/fapi/v1/ticker/price",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({"symbol": "SOLUSDC", "price": "100"}))
+            }),
+        )
+        .route(
+            "/fapi/v1/premiumIndex",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({"symbol": "SOLUSDC", "markPrice": "100"}))
+            }),
+        )
+        .route(
+            "/fapi/v1/ticker/24hr",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({
+                    "lastPrice": "100", "priceChange": "0", "priceChangePercent": "0",
+                    "highPrice": "101", "lowPrice": "99", "volume": "10"
+                }))
+            }),
+        )
+        .route(
+            "/fapi/v1/openOrders",
+            axum::routing::get(move || {
+                let calls = Arc::clone(&calls_ref);
+                async move {
+                    let n = calls.fetch_add(1, Ordering::SeqCst);
+                    // Startup sync (0) and pre-switch cancel_all_orders (1, 2) succeed;
+                    // post-commit sync (3) fails so pre-existing timestamps & blocked flag remain observable.
+                    if n >= 3 {
+                        (
+                            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                            axum::Json(serde_json::json!({"code": -1008, "msg": "Service Unavailable."})),
+                        )
+                    } else {
+                        (axum::http::StatusCode::OK, axum::Json(serde_json::json!([])))
+                    }
+                }
+            }),
+        )
+        .route(
+            "/fapi/v2/positionRisk",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!([{
+                    "symbol": "SOLUSDC", "positionSide": "BOTH", "positionAmt": "2",
+                    "entryPrice": "100", "markPrice": "100", "unRealizedProfit": "0",
+                    "liquidationPrice": "0", "leverage": "10"
+                }]))
+            }),
+        )
+        .route(
+            "/fapi/v2/account",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({
+                    "assets": [{
+                        "asset": "USDC", "walletBalance": "1000", "unrealizedProfit": "0",
+                        "marginBalance": "1000", "availableBalance": "1000"
+                    }]
+                }))
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let mut config = AppConfig::default();
+    config.exchange.api_key = "live-key".into();
+    config.exchange.api_secret = "live-secret".into();
+    config.exchange.recv_window = 5_000;
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    db.save_config(&config).unwrap();
+    let (action_tx, action_rx) = mpsc::channel(4);
+    let (_ticker_tx, ticker_rx) = broadcast::channel(4);
+    let state = AppState::new(config.clone(), db, action_tx);
+    let initial_client = Arc::new(BinanceFuturesClient::with_base_url(&config.exchange, url));
+    let mut engine = GridTradingEngine::new(
+        state.clone(),
+        Arc::clone(&initial_client),
+        action_rx,
+        ticker_rx,
+    );
+    engine.initialize().await.unwrap();
+
+    let pos_ts = Utc::now() - chrono::Duration::seconds(3);
+    let acc_ts = Utc::now() - chrono::Duration::seconds(2);
+    state.position.write().await.update_time = Some(pos_ts);
+    state.account.write().await.update_time = acc_ts;
+    engine.pnl_order_ids.insert("gb_s_keep_oid".into(), 98765);
+    engine.reconciliation_blocked = true;
+
+    let mut updated = config.clone();
+    updated.exchange.recv_window = 15_000;
+    // Post-commit sync fails on call 3, returning Err after reset_runtime_scope_after_config_change ran.
+    assert!(engine.apply_config(updated).await.is_err());
+
+    assert!(!Arc::ptr_eq(&initial_client, &engine.client));
+    assert_ne!(
+        initial_client.account_cache_key(),
+        engine.client.account_cache_key()
+    );
+    assert_eq!(state.position.read().await.update_time, Some(pos_ts));
+    assert_eq!(state.account.read().await.update_time, acc_ts);
+    assert_eq!(engine.pnl_order_ids.get("gb_s_keep_oid"), Some(&98765));
+    assert!(engine.reconciliation_blocked);
+    server.abort();
+}

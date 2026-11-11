@@ -1,7 +1,5 @@
-mod database_process_lock;
-
 use binance_grid_bot::config::AppConfig;
-use binance_grid_bot::db::Database;
+use binance_grid_bot::db::{Database, DatabaseProcessLock};
 use binance_grid_bot::lifecycle::ShutdownSignals;
 use binance_grid_bot::runtime::TradingRuntime;
 use binance_grid_bot::server::create_managed_router;
@@ -96,7 +94,7 @@ fn run_migrate_legacy_paper(db: PathBuf, symbol: String, confirm: String) -> any
             metadata.file_type().is_file(),
             "Migration requires an existing regular database file, not a symlink"
         );
-        let _process_lock = database_process_lock::DatabaseProcessLock::acquire(&db)?;
+        let _process_lock = DatabaseProcessLock::acquire(&db)?;
         Database::open(&db)?.initialize_legacy_paper_account(&symbol)?;
         println!("Initialized paper subledger for {} with an empty position and a 10000 accounting baseline; no funds were added to the shared paper account. Historical positions and balances were not restored. Restart the bot and manually resume the paused strategy after reviewing the baseline.", symbol);
         Ok(())
@@ -292,7 +290,7 @@ async fn main() -> anyhow::Result<()> {
     let signal = signals.wait();
     tokio::pin!(signal);
     let admin_auth = resolve_admin_auth(args.admin_password)?;
-    let _process_lock = database_process_lock::DatabaseProcessLock::acquire(&args.db)?;
+    let _process_lock = DatabaseProcessLock::acquire(&args.db)?;
     let db = Arc::new(Database::open(&args.db)?);
     db.clear_all_sessions()
         .map_err(|error| error.context("Failed to clear persisted login sessions"))?;

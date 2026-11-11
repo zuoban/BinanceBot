@@ -1,7 +1,11 @@
 use axum::body::{to_bytes, Body};
 use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
-use binance_grid_bot::auth::AdminAuth;
+#[path = "common/auth.rs"]
+mod auth;
+mod common;
+#[path = "common/http.rs"]
+mod http;
 use binance_grid_bot::config::AppConfig;
 use binance_grid_bot::db::Database;
 use binance_grid_bot::server::{create_router, AppState};
@@ -19,12 +23,7 @@ fn state_with_password(
     action_tx: mpsc::Sender<BotControlAction>,
     password: &str,
 ) -> Arc<AppState> {
-    AppState::new_with_admin_auth(
-        AppConfig::default(),
-        db,
-        action_tx,
-        Some(Arc::new(AdminAuth::from_password(password).unwrap())),
-    )
+    auth::auth_state(AppConfig::default(), db, action_tx, password)
 }
 
 #[tokio::test]
@@ -72,8 +71,7 @@ async fn test_full_auth_lifecycle() {
         .unwrap();
 
     assert_eq!(res.status(), StatusCode::OK);
-    let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
-    let json: Value = serde_json::from_slice(&body).unwrap();
+    let json = http::body_json(res).await;
     assert_eq!(json["data"]["initialized"], true);
     assert_eq!(json["data"]["authenticated"], false);
 
@@ -134,8 +132,7 @@ async fn test_full_auth_lifecycle() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
-    let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
-    let json: Value = serde_json::from_slice(&body).unwrap();
+    let json = http::body_json(res).await;
     assert!(json["success"].as_bool().unwrap());
     let token = json["data"]["token"].as_str().unwrap().to_string();
     assert!(!token.is_empty());
@@ -153,8 +150,7 @@ async fn test_full_auth_lifecycle() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
-    let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
-    let config: Value = serde_json::from_slice(&body).unwrap();
+    let config = http::body_json(res).await;
 
     // Telegram credentials are required when enabled and are never echoed by the API.
     let mut config_payload = serde_json::json!({
@@ -180,8 +176,7 @@ async fn test_full_auth_lifecycle() {
         .oneshot(post_config(&config_payload))
         .await
         .unwrap();
-    let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
-    let json: Value = serde_json::from_slice(&body).unwrap();
+    let json = http::body_json(res).await;
     assert_eq!(json["success"], false);
 
     config_payload["telegram_bot_token"] = Value::String("123:secret-token".into());
@@ -248,22 +243,13 @@ async fn test_full_auth_lifecycle() {
 struct AuthTestDatabase {
     db: Arc<Database>,
     external: rusqlite::Connection,
-    _directory: AuthTempDir,
-}
-
-struct AuthTempDir(std::path::PathBuf);
-
-impl Drop for AuthTempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
+    _directory: common::TempTestDir,
 }
 
 impl AuthTestDatabase {
     fn new() -> Self {
-        let directory = std::env::temp_dir().join(format!("auth-api-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir(&directory).unwrap();
-        let path = directory.join("auth.db");
+        let directory = common::TempTestDir::new("auth-api");
+        let path = directory.path().join("auth.db");
         let db = Arc::new(Database::open(path.to_str().unwrap()).unwrap());
         let external = rusqlite::Connection::open(&path).unwrap();
         external
@@ -276,7 +262,7 @@ impl AuthTestDatabase {
         Self {
             db,
             external,
-            _directory: AuthTempDir(directory),
+            _directory: directory,
         }
     }
 
@@ -419,8 +405,7 @@ async fn auth_status_reports_database_errors_instead_of_false_state() {
     };
     let response = app.clone().oneshot(request()).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let json: Value = serde_json::from_slice(&body).unwrap();
+    let json = http::body_json(response).await;
     assert_eq!(json["data"]["initialized"], true);
     assert_eq!(json["data"]["authenticated"], true);
 
@@ -430,8 +415,7 @@ async fn auth_status_reports_database_errors_instead_of_false_state() {
         .unwrap();
     let response = app.oneshot(request()).await.unwrap();
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let json: Value = serde_json::from_slice(&body).unwrap();
+    let json = http::body_json(response).await;
     assert_eq!(json["success"], false);
     assert!(json["data"].is_null());
     assert_eq!(json["message"], "认证服务异常，请稍后重试");
@@ -476,8 +460,7 @@ async fn protected_route_reports_session_read_failure_without_treating_it_as_exp
         .unwrap();
     let response = app.oneshot(request("cold-token")).await.unwrap();
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let json: Value = serde_json::from_slice(&body).unwrap();
+    let json = http::body_json(response).await;
     assert_eq!(json["success"], false);
     assert!(json["data"].is_null());
     assert_eq!(json["message"], "认证服务异常，请稍后重试");
@@ -512,8 +495,7 @@ async fn expired_session_cleanup_failure_still_allows_reauthentication() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let json: Value = serde_json::from_slice(&body).unwrap();
+    let json = http::body_json(response).await;
     assert_eq!(json["data"]["initialized"], true);
     assert_eq!(json["data"]["authenticated"], false);
     assert_eq!(
@@ -560,8 +542,7 @@ async fn login_session_insert_failure_returns_error_without_token() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let json: Value = serde_json::from_slice(&body).unwrap();
+    let json = http::body_json(response).await;
     assert!(json.get("token").is_none());
     assert!(json["data"].get("token").is_none());
     assert_eq!(fixture.session_count(), 0);
@@ -582,8 +563,7 @@ async fn login_rejects_when_the_process_has_no_password_configured() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let json: Value = serde_json::from_slice(&body).unwrap();
+    let json = http::body_json(response).await;
     assert_eq!(json["success"], false);
     assert!(json["message"].as_str().unwrap().contains("无需登录"));
 }
@@ -641,8 +621,7 @@ async fn missing_password_disables_http_authentication() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let json: Value = serde_json::from_slice(&body).unwrap();
+    let json = http::body_json(response).await;
     assert_eq!(json["data"]["initialized"], false);
     assert_eq!(json["data"]["authenticated"], true);
 

@@ -142,6 +142,12 @@ impl GridTradingEngine {
         if is_paper {
             return;
         }
+        if self.state.is_stats_dirty() {
+            self.state.refresh_current_scope().await;
+            if self.state.is_stats_dirty() {
+                return;
+            }
+        }
         let pending_count = self.state.stats.read().await.pending_pnl_trades;
         self.client.note_pnl_reconcile_backlog(pending_count);
         if pending_count == 0 {

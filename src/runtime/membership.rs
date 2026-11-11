@@ -114,6 +114,13 @@ impl TradingRuntime {
         strategy: AppConfig,
         mut options: PreparePairOptions,
     ) -> anyhow::Result<PairTask> {
+        #[cfg(test)]
+        if self
+            .fail_next_prepare_pair
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            anyhow::bail!("injected prepare_pair_with_state failure");
+        }
         let (action_tx, action_rx) = mpsc::channel(32);
         let (ticker_tx, ticker_rx) = broadcast::channel::<TickerInfo>(64);
         let (market_tx, market_rx) = watch::channel(strategy.exchange.symbol.clone());
@@ -264,6 +271,8 @@ impl TradingRuntime {
         let rules = SymbolRules::from_trading_exchange_info(&info, symbol)
             .map_err(|error| error.into_chinese_error(symbol))?;
         rules.validate_grid_interval(config.grid.grid_interval)?;
+        let added_symbol = config.exchange.symbol.clone();
+        let added_mode = config.exchange.trading_mode();
         let saved = config.clone();
         let previous_unclean = self
             .handle
@@ -273,7 +282,7 @@ impl TradingRuntime {
         self.global_position_limit
             .membership_ready
             .store(false, std::sync::atomic::Ordering::SeqCst);
-        let result = self
+        let pair = match self
             .prepare_pair_with_state(
                 config,
                 PreparePairOptions {
@@ -282,23 +291,57 @@ impl TradingRuntime {
                     ..Default::default()
                 },
             )
-            .await;
-        if let Ok(pair) = result {
-            *pair.state.rules.write().await = rules;
-            self.handle.register_engine(&pair);
-            self.pairs.push(pair);
-            *self.handle.states.write().await = self.states();
-        } else {
-            self.global_position_limit
-                .membership_ready
-                .store(true, std::sync::atomic::Ordering::SeqCst);
-            return result.map(|_| ());
-        }
+            .await
+        {
+            Ok(pair) => pair,
+            Err(err) => {
+                self.rollback_failed_add_pair(added_symbol, added_mode, previous_unclean)
+                    .await;
+                return Err(err);
+            }
+        };
+        *pair.state.rules.write().await = rules;
+        self.handle.register_engine(&pair);
+        self.pairs.push(pair);
+        *self.handle.states.write().await = self.states();
         self.global_position_limit
             .membership_ready
             .store(true, std::sync::atomic::Ordering::SeqCst);
         self.global_position_limit.check().await;
         Ok(())
+    }
+
+    async fn rollback_failed_add_pair(
+        &self,
+        symbol: String,
+        mode: crate::types::TradingMode,
+        previous_unclean: bool,
+    ) {
+        let rollback = self
+            .handle
+            .db
+            .run_blocking(move |db| {
+                db.remove_pair_config(&symbol)?;
+                if !previous_unclean {
+                    db.clear_execution_guard(&symbol, mode)?;
+                }
+                Ok(())
+            })
+            .await;
+        match rollback {
+            Ok(()) => {
+                self.global_position_limit
+                    .membership_ready
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            Err(rollback_err) => {
+                tracing::error!(
+                    %rollback_err,
+                    "Failed to roll back persisted pair config after add_pair failure"
+                );
+                self.global_position_limit.check().await;
+            }
+        }
     }
 
     pub(super) async fn remove_pair(&mut self, symbol: &str) -> anyhow::Result<()> {

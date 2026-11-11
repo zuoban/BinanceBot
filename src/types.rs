@@ -308,7 +308,7 @@ pub struct OrderSource {
 mod position;
 pub(crate) use position::{
     apply_fill_to_position, format_decimal_dp, format_truncated_decimal_dp, quote_asset,
-    PAPER_INITIAL_BALANCE,
+    resolve_quote_asset, PAPER_INITIAL_BALANCE,
 };
 pub use position::{AccountInfo, PositionInfo, TradeRecord};
 
@@ -463,11 +463,17 @@ impl HourlyTradeStats {
     }
 }
 
+pub(super) fn default_sync_interval_secs() -> u64 {
+    3
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BotSnapshot {
     pub status: BotStatus,
     pub mode: TradingMode,
     pub symbol: String,
+    #[serde(default = "default_sync_interval_secs")]
+    pub sync_interval_secs: u64,
     pub ticker: TickerInfo,
     pub stats: GridStats,
     pub position: PositionInfo,

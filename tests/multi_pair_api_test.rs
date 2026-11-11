@@ -1,3 +1,9 @@
+mod common;
+#[path = "common/http.rs"]
+mod http;
+#[path = "common/trades.rs"]
+mod trades;
+
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use binance_grid_bot::auth::AdminAuth;
@@ -60,27 +66,21 @@ fn request(path: &str, body: Option<Value>, authorized: bool) -> Request<Body> {
         .unwrap()
 }
 
-async fn response_json(response: axum::response::Response) -> Value {
-    serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap()
-}
+use http::body_json as response_json;
 
 fn cleanup_trade(id: &str, symbol: &str, mode: TradingMode) -> TradeRecord {
-    TradeRecord {
-        trade_id: format!("scoped-{id}"),
-        client_order_id: format!("gb_b_scoped_{id}"),
-        symbol: symbol.into(),
+    let mut record = trades::sample_trade(
+        &format!("scoped-{id}"),
+        &format!("gb_b_scoped_{id}"),
+        symbol,
         mode,
-        side: OrderSide::Buy,
-        price: dec!(100),
-        quantity: dec!(1),
-        amount_usdc: dec!(100),
-        realized_pnl: dec!(2),
-        commission: dec!(0.1),
-        pnl_verified: true,
-        is_maker: true,
-        timestamp: Utc::now(),
-        note: String::new(),
-    }
+        OrderSide::Buy,
+        dec!(100),
+        dec!(1),
+    );
+    record.realized_pnl = dec!(2);
+    record.commission = dec!(0.1);
+    record
 }
 
 #[tokio::test]
@@ -218,7 +218,8 @@ async fn pair_cleanup_and_export_cover_all_modes_without_affecting_other_pairs()
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let path = std::env::temp_dir().join(format!("pair-export-{}.db", uuid::Uuid::new_v4()));
+    let temp = common::TempTestDir::new("pair-export");
+    let path = temp.path().join("export.db");
     std::fs::write(&path, bytes).unwrap();
     let exported = rusqlite::Connection::open(&path).unwrap();
     let rows: Vec<(String, String)> = exported
@@ -234,7 +235,6 @@ async fn pair_cleanup_and_export_cover_all_modes_without_affecting_other_pairs()
         assert!(rows.iter().any(|(_, value)| value == mode));
     }
     drop(exported);
-    std::fs::remove_file(path).unwrap();
     let response = router
         .oneshot(request(
             "/api/pairs/SOLUSDC/trades/clear",
@@ -336,8 +336,8 @@ async fn global_database_targets_are_whitelisted_and_preserve_recovery_data() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let path =
-        std::env::temp_dir().join(format!("single-target-export-{}.db", uuid::Uuid::new_v4()));
+    let temp = common::TempTestDir::new("single-target-export");
+    let path = temp.path().join("export.db");
     std::fs::write(&path, bytes).unwrap();
     let exported = rusqlite::Connection::open(&path).unwrap();
     let trade_count: i64 = exported
@@ -350,7 +350,6 @@ async fn global_database_targets_are_whitelisted_and_preserve_recovery_data() {
         .unwrap();
     assert_eq!((trade_count, snapshot_count), (0, 1));
     drop(exported);
-    std::fs::remove_file(path).unwrap();
     let response = router
         .clone()
         .oneshot(request(
@@ -376,7 +375,8 @@ async fn global_database_targets_are_whitelisted_and_preserve_recovery_data() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let path = std::env::temp_dir().join(format!("target-export-{}.db", uuid::Uuid::new_v4()));
+    let temp = common::TempTestDir::new("target-export");
+    let path = temp.path().join("export.db");
     std::fs::write(&path, bytes).unwrap();
     let exported = rusqlite::Connection::open(&path).unwrap();
     for (table, expected) in [
@@ -393,7 +393,6 @@ async fn global_database_targets_are_whitelisted_and_preserve_recovery_data() {
         assert_eq!(count, expected, "{table}");
     }
     drop(exported);
-    std::fs::remove_file(path).unwrap();
     let response = router
         .oneshot(request(
             "/api/database/clear",

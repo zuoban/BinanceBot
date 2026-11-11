@@ -873,8 +873,7 @@ fn order_errors_distinguish_uncertain_execution_from_explicit_rejection() {
         (429, r#"{"code":-1003,"msg":"Too many requests"}"#, false),
     ];
     for (status, body, uncertain) in cases {
-        let error =
-            order_response_error(reqwest::StatusCode::from_u16(status).unwrap(), body.into());
+        let error = order_response_error(reqwest::StatusCode::from_u16(status).unwrap(), body);
         assert_eq!(
             error.execution_status_unknown(),
             uncertain,
@@ -1110,4 +1109,156 @@ fn reconfig_preserves_clock_offset_and_mainnet_client_seeds_shared_offset() {
     let seeded = mainnet_client.time_offset_ms.load(Ordering::SeqCst);
     MAINNET_TIME_OFFSET_MS.store(previous_mainnet, Ordering::SeqCst);
     assert_eq!(seeded, 2_500);
+}
+
+#[tokio::test]
+async fn bounded_html_502_is_summarized_and_account_api_error_downcasts_cleanly() {
+    use axum::{http::StatusCode, routing::get, Json, Router};
+    use serde_json::json;
+
+    let html_64kb = format!(
+        "<!DOCTYPE html><html><body>502 Bad Gateway {}</body></html>",
+        "X".repeat(64 * 1024)
+    );
+    let html_public = html_64kb.clone();
+    let html_open = html_64kb.clone();
+    let html_order_get = html_64kb.clone();
+    let html_order_post = html_64kb.clone();
+    let html_order_del = html_64kb.clone();
+    let html_trades = html_64kb.clone();
+
+    let app = Router::new()
+        .route(
+            "/fapi/v1/ticker/price",
+            get(move || {
+                let body = html_public.clone();
+                async move { (StatusCode::BAD_GATEWAY, body) }
+            }),
+        )
+        .route(
+            "/fapi/v1/openOrders",
+            get(move || {
+                let body = html_open.clone();
+                async move { (StatusCode::BAD_GATEWAY, body) }
+            }),
+        )
+        .route(
+            "/fapi/v1/order",
+            get(move || {
+                let body = html_order_get.clone();
+                async move { (StatusCode::BAD_GATEWAY, body) }
+            })
+            .post(move || {
+                let body = html_order_post.clone();
+                async move { (StatusCode::BAD_GATEWAY, body) }
+            })
+            .delete(move || {
+                let body = html_order_del.clone();
+                async move { (StatusCode::BAD_GATEWAY, body) }
+            }),
+        )
+        .route(
+            "/fapi/v1/userTrades",
+            get(move || {
+                let body = html_trades.clone();
+                async move { (StatusCode::BAD_GATEWAY, body) }
+            }),
+        )
+        .route(
+            "/fapi/v2/account",
+            get(|| async {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({"code": -2015, "msg": "Invalid API-key"})),
+                )
+            }),
+        );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let mut config = crate::config::AppConfig::default().exchange;
+    config.api_key = "k".into();
+    config.api_secret = "s".into();
+    let client = BinanceFuturesClient::with_base_url(&config, url);
+
+    for err in [
+        client.get_ticker_price("SOLUSDC").await.unwrap_err(),
+        client.get_open_orders("SOLUSDC").await.unwrap_err(),
+        client
+            .lookup_order_by_client_id("SOLUSDC", "gb_b_test")
+            .await
+            .unwrap_err(),
+        client
+            .cancel_order("SOLUSDC", None, Some("gb_b_test"))
+            .await
+            .unwrap_err(),
+        client
+            .get_user_trades("SOLUSDC", 42, Decimal::ONE, 0)
+            .await
+            .unwrap_err(),
+    ] {
+        let ex = err
+            .downcast_ref::<ExchangeError>()
+            .expect("must downcast to ExchangeError");
+        let rendered = format!("{ex} {err} {err:?}");
+        assert!(
+            rendered.contains("upstream HTML error response"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("<!DOCTYPE"), "{rendered}");
+        assert!(!rendered.contains("<html"), "{rendered}");
+        assert!(rendered.len() < 1024, "error too large: {}", rendered.len());
+    }
+
+    let place_err = client
+        .place_order(NewOrderRequest {
+            symbol: "SOLUSDC",
+            side: "BUY",
+            price: "100",
+            quantity: "1",
+            client_order_id: "gb_b_test",
+            post_only: true,
+            reduce_only: false,
+        })
+        .await
+        .unwrap_err();
+    assert!(place_err.execution_status_unknown());
+    let place_rendered = format!("{place_err} {place_err:?}");
+    assert!(place_rendered.contains("upstream HTML error response"));
+    assert!(!place_rendered.contains("<html"));
+
+    let account_err = client.get_account().await.unwrap_err();
+    assert!(matches!(
+        account_err.downcast_ref::<ExchangeError>(),
+        Some(ExchangeError::ApiError { code: -2015, msg }) if msg == "Invalid API-key"
+    ));
+
+    for bad_id in ["", "gb_b_bad&side=SELL", &"a".repeat(37)] {
+        assert!(client
+            .lookup_order_by_client_id("SOLUSDC", bad_id)
+            .await
+            .is_err());
+        assert!(client
+            .cancel_order("SOLUSDC", None, Some(bad_id))
+            .await
+            .is_err());
+        let rejected = client
+            .place_order(NewOrderRequest {
+                symbol: "SOLUSDC",
+                side: "BUY",
+                price: "100",
+                quantity: "1",
+                client_order_id: bad_id,
+                post_only: true,
+                reduce_only: false,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(rejected, ExchangeError::RequestRejected(_)));
+        assert!(!rejected.execution_status_unknown());
+    }
+
+    server.abort();
 }

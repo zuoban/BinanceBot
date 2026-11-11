@@ -2,10 +2,17 @@ import { useMemo, useRef, useState } from 'react';
 import { Form, Input } from 'antd';
 import type { FormInstance } from 'antd';
 import { CloseCircleOutlined, WarningOutlined } from '@ant-design/icons';
-import { capCoverage, exceeds, exposure, gridPreview, orderSizings, priceDiffPercent, priceRangeError, spacingBelowRoundTripFee, spacingPercent, sumDecimals, tickSizeError } from '../lib/gridPreview';
+import { capCoverage, exceeds, exposure, gridIntervalError, gridPreview, orderSizings, priceDiffPercent, priceRangeError, spacingBelowRoundTripFee, spacingPercent, sumDecimals } from '../lib/gridPreview';
 import { maxPositionPolicyLabel, positiveDecimalText } from '../lib/format';
 import type { GridConfig } from '../lib/types';
 import { useCenterElementScroll } from './Common';
+
+type LadderItem = { key: string; side: 'sell' | 'buy'; price: string; sizing: { quantity: string; notional: string; error: string | null } | null | undefined; diff: string | null };
+
+function GridLadderLevel({ item, quote }: { item: LadderItem; quote: string }) {
+  const { side, price, sizing: s, diff } = item;
+  return <li className={`grid-preview-${side}${s?.error ? ' grid-preview-unplaceable' : ''}`} title={s?.error ?? undefined}><span className="grid-preview-order"><span className="grid-preview-side">{side === 'sell' ? '卖' : '买'}</span>{s && <small className="grid-preview-qty"> · {s.quantity} ({s.notional} {quote})</small>}</span><span className="grid-preview-price">{diff && <small className="grid-preview-diff">{diff}</small>}<strong className="grid-preview-value">{price}</strong></span></li>;
+}
 
 /** Live ladder of the orders the engine would place, from the form values and a reference price. */
 export function GridPreview<Values extends Partial<Omit<GridConfig, 'post_only'>>>({ form, markPrice, tickSize, stepSize, minQty, minNotional, quote }: { form: FormInstance<Values>; markPrice?: string | null; tickSize?: string | null; stepSize?: string | null; minQty?: string | null; minNotional?: string | null; quote: string }) {
@@ -18,7 +25,7 @@ export function GridPreview<Values extends Partial<Omit<GridConfig, 'post_only'>
   const cleanTick = positiveDecimalText(tickSize);
   const cleanStep = positiveDecimalText(stepSize);
   const cleanMinNotional = positiveDecimalText(minNotional);
-  const tickError = values && cleanTick ? tickSizeError(values.grid_interval, cleanTick) : null;
+  const tickError = values ? gridIntervalError(values.grid_interval, cleanTick) : null;
   const rangeError = values ? priceRangeError('min', values.min_price, values.max_price) ?? priceRangeError('max', values.min_price, values.max_price) : null;
   const preview = useMemo(
     () => values && !tickError && !rangeError ? gridPreview({ reference, interval: values.grid_interval, buyWindow: values.buy_window, sellWindow: values.sell_window, min: values.min_price, max: values.max_price }) : null,
@@ -51,9 +58,6 @@ export function GridPreview<Values extends Partial<Omit<GridConfig, 'post_only'>
     const build = (side: 'sell' | 'buy', price: string) => ({ key: `${side[0]}${price}`, side, price, sizing: sizings.get(price), diff: priceDiffPercent(price, reference) });
     return { sells: [...preview.sells].reverse().map(p => build('sell', p)), buys: preview.buys.map(p => build('buy', p)) };
   }, [preview, reference, sizings]);
-  const renderLevel = ({ key, side, price, sizing: s, diff }: NonNullable<typeof ladder>['sells'][number]) => (
-    <li key={key} className={`grid-preview-${side}${s?.error ? ' grid-preview-unplaceable' : ''}`} title={s?.error ?? undefined}><span className="grid-preview-order"><span className="grid-preview-side">{side === 'sell' ? '卖' : '买'}</span>{s && <small className="grid-preview-qty"> · {s.quantity} ({s.notional} {quote})</small>}</span><span className="grid-preview-price">{diff && <small className="grid-preview-diff">{diff}</small>}<strong className="grid-preview-value">{price}</strong></span></li>
-  );
   return <section className="grid-preview" aria-label="网格预览">
     <div className="grid-preview-head">
       <h3>网格预览</h3>
@@ -68,9 +72,9 @@ export function GridPreview<Values extends Partial<Omit<GridConfig, 'post_only'>
     {tickError || rangeError ? <p className="grid-preview-notice grid-preview-error" role="alert"><CloseCircleOutlined aria-hidden="true" /><span><strong>参数错误：</strong>{tickError ?? rangeError}</span></p>
       : !preview ? <p className="muted grid-preview-empty">填写网格间距、买卖窗口{hasMark ? '' : '和参考价格'}后显示将挂出的价位。</p> : <>
       <ol ref={ladderRef} className="grid-preview-ladder" aria-label="预计挂单价位，由高到低">
-        {ladder!.sells.map(renderLevel)}
+        {ladder!.sells.map(item => <GridLadderLevel key={item.key} item={item} quote={quote} />)}
         <li className="grid-preview-mark"><span className="grid-preview-order">参考价</span><strong className="grid-preview-price grid-preview-value">{reference}</strong></li>
-        {ladder!.buys.map(renderLevel)}
+        {ladder!.buys.map(item => <GridLadderLevel key={item.key} item={item} quote={quote} />)}
       </ol>
       <p className="muted">共 {orders} 个挂单。{(preview.buyClipped || preview.sellClipped) && '价格区间限制了部分价位。'}{worstCase && worstCase !== '0' && ` ${openingLabel}全部成交时新增名义价值约 ${worstCase} ${quote}。`}</p>
       {overLimit && <p className="grid-preview-notice grid-preview-warning" role="alert"><WarningOutlined aria-hidden="true" /><span><strong>持仓超限风险：</strong>{openingLabel}全部成交的名义价值超过最大持仓名义价值 {String(values?.max_position_usdc)} {quote}，达到上限后将{maxPositionPolicyLabel({ pause_on_max_position: Boolean(values?.pause_on_max_position), cancel_opening_on_max_position: Boolean(values?.cancel_opening_on_max_position) })}。</span></p>}

@@ -21,22 +21,31 @@ export function DatabaseSettings() {
     if (action !== 'all' && targets.length === 0) return;
     if (action === 'clear') {
       const names = options.filter(option => targets.includes(option.value)).map(option => option.label).join('、');
+      const hasTrades = targets.includes('trade_history');
+      const hasHistory = targets.includes('account_hourly_snapshots');
+      const refresh = () => invalidateStrategyQueries(client, {
+        pairs: false,
+        overview: hasTrades,
+        snapshot: hasTrades,
+        clearTrades: hasTrades,
+        history: hasHistory ? 'reset' : undefined,
+        cancelFirst: true,
+      });
       void runAction('clear', async () => {
-        const result = await post<ClearResult>('/api/database/clear', { targets, confirm: true });
-        const hasTrades = targets.includes('trade_history');
-        const hasHistory = targets.includes('account_hourly_snapshots');
-        await invalidateStrategyQueries(client, {
-          pairs: false,
-          overview: hasTrades,
-          snapshot: hasTrades,
-          history: hasHistory ? 'invalidate' : undefined,
-          cancelFirst: true,
-        });
-        const counts = [
-          ...(targets.includes('trade_history') ? [`${result.deleted_trades} 笔历史成交`] : []),
-          ...(targets.includes('account_hourly_snapshots') ? [`${result.deleted_account_hourly_snapshots} 条账户小时与每日快照`] : []),
-        ];
-        return `已清空 ${counts.join('、')}`;
+        let started = false;
+        try {
+          started = true;
+          const result = await post<ClearResult>('/api/database/clear', { targets, confirm: true });
+          await refresh();
+          const counts = [
+            ...(hasTrades ? [`${result.deleted_trades} 笔历史成交`] : []),
+            ...(hasHistory ? [`${result.deleted_account_hourly_snapshots} 条账户小时与每日快照`] : []),
+          ];
+          return `已清空 ${counts.join('、')}`;
+        } catch (err) {
+          if (started) void refresh();
+          throw err;
+        }
       }, { title: '清空所选数据库数据？', content: `将永久清空：${names}。此操作无法撤销，建议先导出所选数据。持仓和挂单保留。`, okText: '确认清空', okButtonProps: { danger: true }, cancelText: '取消' });
       return;
     }

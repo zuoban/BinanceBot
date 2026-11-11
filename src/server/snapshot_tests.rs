@@ -789,6 +789,7 @@ async fn account_snapshot_matches_full_snapshot_without_chart_queries() {
                 "snapshot": {
                     "symbol": full.symbol,
                     "status": full.status,
+                    "sync_interval_secs": full.sync_interval_secs,
                     "ticker": {
                         "mark_price": full.ticker.mark_price,
                         "mark_update_time": full.ticker.mark_update_time,

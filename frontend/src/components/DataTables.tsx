@@ -13,7 +13,7 @@ import { Pnl, SideTag } from './Common';
 import { copyText, downloadCsv, toCsv } from '../lib/exportCsv';
 
 const side = (value: string) => <SideTag side={value === 'BUY' ? 'BUY' : 'SELL'} />;
-const purposeLabel: Record<string, string> = { GRID: '网格', TAKE_PROFIT: '止盈', REMAINDER: '余量合并', LEGACY: '历史订单' };
+const purposeLabel: Record<string, string> = { GRID: '网格', TAKE_PROFIT: '止盈', REMAINDER: '余量合并', LEGACY: '历史订单', UNVERIFIED: '待核实' };
 function orderPurpose(o: Order) {
   return purposeLabel[o.purpose] ?? (o.is_take_profit ? '止盈' : '历史订单');
 }

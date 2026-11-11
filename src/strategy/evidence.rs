@@ -80,8 +80,7 @@ impl GridTradingEngine {
                     && existing.identities.as_slice() == identities;
                 if !same {
                     error!("Initial order snapshot batch ID reused with different data");
-                    self.last_orders_sync = None;
-                    self.report_reconciliation_state(true).await;
+                    self.mark_orders_reconciliation_blocked().await;
                     return false;
                 }
             } else {
@@ -127,8 +126,7 @@ impl GridTradingEngine {
                 }
                 Err(error) => {
                     error!("Could not persist initial order responses: {}", error);
-                    self.last_orders_sync = None;
-                    self.report_reconciliation_state(true).await;
+                    self.mark_orders_reconciliation_blocked().await;
                     return false;
                 }
             }
@@ -157,8 +155,7 @@ impl GridTradingEngine {
             Ok(responses) => Some(responses),
             Err(error) => {
                 error!("Could not load initial order responses: {}", error);
-                self.last_orders_sync = None;
-                self.report_reconciliation_state(true).await;
+                self.mark_orders_reconciliation_blocked().await;
                 None
             }
         }
@@ -189,8 +186,7 @@ impl GridTradingEngine {
             .await
         {
             error!("Could not clear resolved order evidence: {}", error);
-            self.last_orders_sync = None;
-            self.report_reconciliation_state(true).await;
+            self.mark_orders_reconciliation_blocked().await;
             return false;
         }
         for id in client_ids {
@@ -225,8 +221,7 @@ impl GridTradingEngine {
             .entry(expected_client_id.to_owned())
             .or_default()
             .push(evidence);
-        self.last_orders_sync = None;
-        self.report_reconciliation_state(true).await;
+        self.mark_orders_reconciliation_blocked().await;
         self.flush_terminal_disagreements(account, symbol).await
     }
 
@@ -254,8 +249,7 @@ impl GridTradingEngine {
                 .await
             {
                 error!("Could not persist terminal order disagreement: {}", error);
-                self.last_orders_sync = None;
-                self.report_reconciliation_state(true).await;
+                self.mark_orders_reconciliation_blocked().await;
                 return false;
             }
             self.evidence
@@ -285,16 +279,14 @@ impl GridTradingEngine {
                     "Could not load or persist terminal order disagreements: {}",
                     error
                 );
-                self.last_orders_sync = None;
-                self.report_reconciliation_state(true).await;
+                self.mark_orders_reconciliation_blocked().await;
                 return true;
             }
         };
         let blocked = stored_blocked || self.evidence.has_terminal_disagreements(account, symbol);
         if blocked {
             warn!("Terminal order disagreement for {} requires manual investigation; automatic clearing is unavailable", symbol);
-            self.last_orders_sync = None;
-            self.report_reconciliation_state(true).await;
+            self.mark_orders_reconciliation_blocked().await;
         }
         blocked
     }

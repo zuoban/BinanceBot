@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { formatDecimalDisplay, parseSignedDecimal, parseUnsignedDecimal, subSignedDecimals } from '../lib/decimal';
-import { ageText, number, quantity, relativeTime, trimFractionZeros } from '../lib/format';
-import { accountGroups, availableRatio, comparePositionAmount, groupTradePnl, positionAmount, positionGroups, todayCount, todayPnlGroups } from '../lib/portfolio';
+import { ageText, number, positiveDecimalText, quantity, relativeTime, trimFractionZeros } from '../lib/format';
+import { accountGroups, availableRatio, comparePositionAmount, groupTradePnl, nextAccountExpiry, positionAmount, positionGroups, todayCount, todayPnlGroups } from '../lib/portfolio';
 import { snapshot } from './fixtures';
 
 it('removes only insignificant fractional zeros and normalizes negative zero after rounding', () => {
@@ -22,6 +22,14 @@ it('formats quantities and signed decimals exactly without IEEE-754 truncation o
   expect(quantity('')).toBe('--');
   expect(formatDecimalDisplay('1234.5', { minFractionDigits: 2, trimZeros: false })).toBe('1,234.50');
   expect(subSignedDecimals('0.3', '0.1')).toBe('0.2');
+});
+
+it('normalizes positiveDecimalText with exact decimal parsing without float rounding', () => {
+  expect(positiveDecimalText('00100.5000')).toBe('100.5');
+  expect(positiveDecimalText('9007199254740993.123400')).toBe('9007199254740993.1234');
+  expect(positiveDecimalText('0.000')).toBeNull();
+  expect(positiveDecimalText('-1')).toBeNull();
+  expect(positiveDecimalText('1e-5')).toBeNull();
 });
 
 it('rejects decimal strings exceeding 30 whole/fractional digits or 64 characters without throwing', () => {
@@ -144,6 +152,26 @@ describe('account and trade summaries', () => {
     expect(accountGroups(entries, now)[0].equity).toBe(200);
     current.account.update_time = new Date(now - 31_000).toISOString();
     expect(accountGroups(entries, now)[0].equity).toBeNull();
+  });
+  it('honors dynamic sync_interval_secs and tolerates client/server clock skew on live accounts', () => {
+    const now = 1_700_000_000_000;
+    const slowSync = snapshot('SOLUSDC', 'LIVE');
+    slowSync.sync_interval_secs = 60;
+    slowSync.account.margin_balance = '320';
+    slowSync.account.update_time = new Date(now - 45_000).toISOString();
+    expect(accountGroups([{ snapshot: slowSync, mode: 'LIVE' }], now)[0].equity).toBe(320);
+    expect(nextAccountExpiry([{ snapshot: slowSync, mode: 'LIVE' }], now)).toBe(now - 45_000 + 180_000 - 1);
+    slowSync.account.update_time = new Date(now - 180_000).toISOString();
+    expect(accountGroups([{ snapshot: slowSync, mode: 'LIVE' }], now)[0].equity).toBeNull();
+
+    const serverNow = now - 20_000;
+    const skewed = snapshot('BTCUSDC', 'LIVE');
+    skewed.account.margin_balance = '500';
+    skewed.account.update_time = new Date(serverNow - 15_000).toISOString();
+    const skewedEntries = [{ snapshot: skewed, mode: 'LIVE' as const, generated_at_ms: serverNow, received_at_ms: now }];
+    expect(accountGroups(skewedEntries, now)[0].equity).toBe(500);
+    expect(nextAccountExpiry(skewedEntries, now)).toBe(now + 15_000 - 1);
+    expect(accountGroups(skewedEntries, now + 15_000)[0].equity).toBeNull();
   });
   it('keeps a flat paper ledger but rejects stale open-position valuations', () => {
     const now = Date.now(), s = snapshot('SOLUSDC');

@@ -54,14 +54,14 @@ fn require_expected_mode(
 }
 
 pub(super) fn control_action(
-    payload: ControlRequest,
+    payload: &ControlRequest,
     expected_epoch: u64,
 ) -> Result<(BotControlAction, Option<ControlReply>), String> {
     match payload.action.to_lowercase().as_str() {
         "pause" => Ok((BotControlAction::Pause, None)),
         "cancel_all" => Ok((BotControlAction::CancelAll, None)),
         "resume" => {
-            let expected_mode = require_expected_mode(&payload, "恢复策略")?;
+            let expected_mode = require_expected_mode(payload, "恢复策略")?;
             let (reply, receiver) = tokio::sync::oneshot::channel();
             Ok((
                 BotControlAction::Resume {
@@ -73,7 +73,7 @@ pub(super) fn control_action(
             ))
         }
         "rebalance" => {
-            let expected_mode = require_expected_mode(&payload, "重建网格")?;
+            let expected_mode = require_expected_mode(payload, "重建网格")?;
             let (reply, receiver) = tokio::sync::oneshot::channel();
             Ok((
                 BotControlAction::Rebalance {
@@ -91,7 +91,7 @@ pub(super) async fn post_control_handler(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<ControlRequest>,
 ) -> Json<ApiResponse<String>> {
-    let action = match control_action(payload, state.pause_epoch()) {
+    let action = match control_action(&payload, state.pause_epoch()) {
         Ok(action) => action,
         Err(message) => return json_err(message),
     };

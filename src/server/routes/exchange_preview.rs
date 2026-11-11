@@ -22,6 +22,17 @@ fn is_supported_catalog_symbol(symbol: &crate::exchange::BinanceSymbolInfo) -> b
         && crate::types::quote_asset(&symbol.symbol).is_some()
 }
 
+fn extract_supported_symbols(symbols: &[crate::exchange::BinanceSymbolInfo]) -> Vec<String> {
+    let mut supported: Vec<String> = symbols
+        .iter()
+        .filter(|symbol| is_supported_catalog_symbol(symbol))
+        .map(|symbol| symbol.symbol.clone())
+        .collect();
+    supported.sort_unstable();
+    supported.dedup();
+    supported
+}
+
 struct CachedExchangeCatalog {
     fetched_at: Instant,
     info: Arc<crate::exchange::BinanceExchangeInfo>,
@@ -80,14 +91,7 @@ impl ExchangePreviewService {
             }
         };
         *last_failed_at = None;
-        let mut trading_symbols: Vec<String> = info
-            .symbols
-            .iter()
-            .filter(|symbol| is_supported_catalog_symbol(symbol))
-            .map(|symbol| symbol.symbol.clone())
-            .collect();
-        trading_symbols.sort_unstable();
-        trading_symbols.dedup();
+        let trading_symbols = extract_supported_symbols(&info.symbols);
         *self.catalog_cache.write().await = Some(CachedExchangeCatalog {
             fetched_at: Instant::now(),
             info: Arc::clone(&info),
@@ -141,17 +145,10 @@ pub(super) async fn fetch_exchange_symbols(
     client: &BinanceFuturesClient,
 ) -> (StatusCode, Json<ApiResponse<Vec<String>>>) {
     match client.get_exchange_info(None).await {
-        Ok(info) => {
-            let mut symbols: Vec<String> = info
-                .symbols
-                .into_iter()
-                .filter(is_supported_catalog_symbol)
-                .map(|symbol| symbol.symbol)
-                .collect();
-            symbols.sort_unstable();
-            symbols.dedup();
-            (StatusCode::OK, json_ok(symbols))
-        }
+        Ok(info) => (
+            StatusCode::OK,
+            json_ok(extract_supported_symbols(&info.symbols)),
+        ),
         Err(error) => {
             warn!(%error, "获取交易所交易对失败");
             status_err(StatusCode::BAD_GATEWAY, "获取交易所交易对失败，请稍后重试")

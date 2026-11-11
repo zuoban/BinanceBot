@@ -119,7 +119,7 @@ impl GridTradingEngine {
             return true;
         }
         let pause_epoch = self.state.pause_epoch();
-        self.invalidate_account_and_position_caches().await;
+        self.invalidate_account_and_position_caches();
         if self.refresh_position_then_account(false).await
             && self.state.pause_epoch() == pause_epoch
         {
@@ -151,8 +151,7 @@ impl GridTradingEngine {
             );
             self.pause_trading().await;
         }
-        self.last_orders_sync = None;
-        self.report_reconciliation_state(true).await;
+        self.mark_orders_reconciliation_blocked().await;
         false
     }
 
@@ -179,8 +178,7 @@ impl GridTradingEngine {
                 .await
                 .entry(original.client_order_id.clone())
                 .or_insert(original);
-            self.last_orders_sync = None;
-            self.report_reconciliation_state(true).await;
+            self.mark_orders_reconciliation_blocked().await;
             self.pause_trading().await;
             return false;
         }
@@ -223,7 +221,7 @@ impl GridTradingEngine {
     pub(super) async fn on_order_filled(&mut self, order: &mut GridOrder) -> bool {
         if !self.state.config.read().await.exchange.is_paper() {
             order.status = OrderStatus::Filled;
-            self.invalidate_account_and_position_caches().await;
+            self.invalidate_account_and_position_caches();
             if !self.sync_account_and_position().await {
                 let missing = {
                     let mut active = self.state.active_orders.write().await;

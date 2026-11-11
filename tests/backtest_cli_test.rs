@@ -1,19 +1,23 @@
+mod common;
+
 use serde_json::Value;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
 struct Fixture {
-    directory: PathBuf,
+    _directory: common::TempTestDir,
     csv: PathBuf,
 }
 
 impl Fixture {
     fn new() -> Self {
-        let directory = std::env::temp_dir().join(format!("backtest-cli-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir(&directory).unwrap();
-        let csv = directory.join("prices.csv");
+        let directory = common::TempTestDir::new("backtest-cli");
+        let csv = directory.path().join("prices.csv");
         std::fs::write(&csv, "time_ms,price\n0,101\n60000,100\n120000,101\n").unwrap();
-        Self { directory, csv }
+        Self {
+            _directory: directory,
+            csv,
+        }
     }
 
     fn replay(&self, extra: &[&str]) -> Output {
@@ -41,12 +45,6 @@ impl Fixture {
             .env("RUST_LOG", "binance_grid_bot=warn")
             .output()
             .unwrap()
-    }
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.directory);
     }
 }
 

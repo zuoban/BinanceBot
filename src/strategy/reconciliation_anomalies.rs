@@ -11,13 +11,6 @@ struct UncertainManagedReconciliation<'a> {
     remainder_plan: Option<&'a RemainderPlan>,
 }
 
-pub(super) fn invalid_snapshot_price(order: &BinanceOrderResponse) -> bool {
-    order.price <= Decimal::ZERO
-        && !(order.is_terminal()
-            && order.executed_qty > Decimal::ZERO
-            && order.avg_price.is_some_and(|price| price > Decimal::ZERO))
-}
-
 impl GridTradingEngine {
     fn restore_single_provisional_order(
         &mut self,
@@ -92,8 +85,7 @@ impl GridTradingEngine {
             Ok(orders) => orders,
             Err(error) => {
                 error!("Could not restore provisional order metadata: {}", error);
-                self.last_orders_sync = None;
-                self.report_reconciliation_state(true).await;
+                self.mark_orders_reconciliation_blocked().await;
                 return None;
             }
         };
@@ -117,8 +109,7 @@ impl GridTradingEngine {
             }
         }
         if conflict {
-            self.last_orders_sync = None;
-            self.report_reconciliation_state(true).await;
+            self.mark_orders_reconciliation_blocked().await;
             if !self
                 .persist_identity_observations(account_key, symbol)
                 .await
@@ -323,7 +314,7 @@ impl GridTradingEngine {
                     live_ids.insert(corrected.client_order_id.clone(), corrected);
                 }
                 _ => {
-                    self.invalidate_account_and_position_caches().await;
+                    self.invalidate_account_and_position_caches();
                     self.set_global_reconciliation_ready(false).await;
                 }
             }
@@ -354,7 +345,7 @@ impl GridTradingEngine {
         // A prior correction cannot prove that the exchange order
         // has not changed since. Block before each verification.
         self.set_global_reconciliation_ready(false).await;
-        self.invalidate_account_and_position_caches().await;
+        self.invalidate_account_and_position_caches();
         for found in &uncertain {
             self.track_provisional_observation(found);
         }
@@ -401,197 +392,5 @@ impl GridTradingEngine {
         self.query_corrected_uncertain_orders(uncertain, live_ids, corrected_terminal)
             .await;
         Some(uncertain_ids)
-    }
-
-    async fn retain_provisional_on_managed_load_error(
-        &mut self,
-        account_key: [u8; 32],
-        symbol: &str,
-        live_ids: &HashMap<String, BinanceOrderResponse>,
-        pair_intents: &HashMap<String, GridOrder>,
-        remainder_plan: Option<&RemainderPlan>,
-    ) {
-        self.report_reconciliation_state(true).await;
-        for found in live_ids.values() {
-            self.track_provisional_observation(found);
-        }
-        let state = self.state.clone();
-        let mut active = state.active_orders.write().await;
-        for found in live_ids.values() {
-            if let Some(existing) = active.get(&found.client_order_id) {
-                self.evidence
-                    .mark_provisional(account_key, &found.client_order_id);
-                if !existing.matches_exchange_identity(found) {
-                    self.track_identity_conflict(existing, found);
-                } else {
-                    let mut conservative = existing.clone();
-                    conservative.reserve_max(found.price, found.orig_qty);
-                    active.insert(found.client_order_id.clone(), conservative);
-                }
-                continue;
-            }
-            if !found.has_valid_symbol_and_side(symbol) {
-                continue;
-            }
-            if let Some(known) =
-                find_durable_order(&found.client_order_id, &[], pair_intents, remainder_plan)
-            {
-                let mut order = known.clone();
-                if !known.matches_exchange_identity(found) {
-                    self.track_identity_conflict(known, found);
-                } else {
-                    order.order_id = Some(found.order_id);
-                    order.reserve_max(found.price, found.orig_qty);
-                }
-                self.evidence
-                    .mark_provisional(account_key, &found.client_order_id);
-                active.insert(order.client_order_id.clone(), order);
-                continue;
-            }
-            let order = GridOrder::from_exchange_response(
-                found,
-                found.orig_qty,
-                OrderPurpose::Legacy,
-                Utc::now(),
-            );
-            self.evidence
-                .mark_provisional(account_key, &order.client_order_id);
-            active.insert(order.client_order_id.clone(), order);
-        }
-        drop(active);
-        self.persist_identity_observations(account_key, symbol)
-            .await;
-    }
-
-    async fn restore_verified_snapshot_orders(
-        &self,
-        live_ids: &HashMap<String, BinanceOrderResponse>,
-        managed_by_id: &HashMap<String, GridOrder>,
-        pair_intents: &HashMap<String, GridOrder>,
-        remainder_plan: Option<&RemainderPlan>,
-        restored_ids: &mut HashSet<String>,
-    ) {
-        let mut active = self.state.active_orders.write().await;
-        for found in live_ids.values() {
-            if let Some(durable) = managed_by_id
-                .get(&found.client_order_id)
-                .or_else(|| pair_intents.get(&found.client_order_id))
-                .or_else(|| remainder_plan.and_then(|plan| plan.find_order(&found.client_order_id)))
-            {
-                let mut restored = durable.clone();
-                if let Some(current) = active.get(&found.client_order_id) {
-                    if current.has_compatible_identity(durable) {
-                        restored.order_id = durable.order_id.or(current.order_id);
-                        restored.reserve_max(current.price, current.quantity);
-                    }
-                }
-                restored.reserve_max(found.price, restored.quantity);
-                active.insert(restored.client_order_id.clone(), restored);
-                restored_ids.insert(found.client_order_id.clone());
-            }
-        }
-    }
-
-    pub(super) async fn verify_live_snapshot_identities(
-        &mut self,
-        account_key: [u8; 32],
-        symbol: &str,
-        live_ids: &HashMap<String, BinanceOrderResponse>,
-        pair_intents: &HashMap<String, GridOrder>,
-        remainder_plan: Option<&RemainderPlan>,
-        restored_ids: &mut HashSet<String>,
-    ) -> Option<HashMap<String, GridOrder>> {
-        if live_ids.is_empty() {
-            return Some(HashMap::new());
-        }
-        let managed = match self.load_managed_orders(symbol).await {
-            Ok(orders) => orders,
-            Err(error) => {
-                error!("Could not verify live order identities: {}", error);
-                self.retain_provisional_on_managed_load_error(
-                    account_key,
-                    symbol,
-                    live_ids,
-                    pair_intents,
-                    remainder_plan,
-                )
-                .await;
-                return None;
-            }
-        };
-        let managed_by_id: HashMap<String, GridOrder> = managed
-            .into_iter()
-            .map(|order| (order.client_order_id.clone(), order))
-            .collect();
-        let (conflicts, invalid_live_identity) = self
-            .collect_snapshot_identity_conflicts(
-                symbol,
-                live_ids,
-                &managed_by_id,
-                pair_intents,
-                remainder_plan,
-            )
-            .await;
-        if invalid_live_identity && conflicts.is_empty() {
-            self.report_reconciliation_state(true).await;
-            return None;
-        }
-        if !conflicts.is_empty() {
-            self.report_reconciliation_state(true).await;
-            {
-                let state = self.state.clone();
-                let mut active = state.active_orders.write().await;
-                for (durable, found) in conflicts {
-                    self.track_identity_conflict(&durable, &found);
-                    active.insert(durable.client_order_id.clone(), durable);
-                }
-            }
-            self.persist_identity_observations(account_key, symbol)
-                .await;
-            return None;
-        }
-        self.restore_verified_snapshot_orders(
-            live_ids,
-            &managed_by_id,
-            pair_intents,
-            remainder_plan,
-            restored_ids,
-        )
-        .await;
-        Some(managed_by_id)
-    }
-
-    async fn collect_snapshot_identity_conflicts(
-        &mut self,
-        symbol: &str,
-        live_ids: &HashMap<String, BinanceOrderResponse>,
-        managed_by_id: &HashMap<String, GridOrder>,
-        pair_intents: &HashMap<String, GridOrder>,
-        remainder_plan: Option<&RemainderPlan>,
-    ) -> (Vec<(GridOrder, BinanceOrderResponse)>, bool) {
-        let mut conflicts = Vec::new();
-        let mut invalid_live_identity = false;
-        let state = self.state.clone();
-        let active = state.active_orders.read().await;
-        for found in live_ids.values() {
-            if !found.has_valid_symbol_and_side(symbol) {
-                invalid_live_identity = true;
-                self.track_provisional_observation(found);
-            }
-            let candidates = [
-                managed_by_id.get(&found.client_order_id),
-                active.get(&found.client_order_id),
-                pair_intents.get(&found.client_order_id),
-                remainder_plan.and_then(|plan| plan.find_order(&found.client_order_id)),
-            ];
-            if let Some(expected) = candidates
-                .into_iter()
-                .flatten()
-                .find(|order| !order.matches_exchange_identity(found))
-            {
-                conflicts.push((expected.clone(), found.clone()));
-            }
-        }
-        (conflicts, invalid_live_identity)
     }
 }

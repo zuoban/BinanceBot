@@ -1,5 +1,6 @@
 use super::*;
-use crate::config::TradingPairConfig;
+use crate::config::{GlobalConfig, TradingPairConfig};
+use crate::db::Database;
 use crate::server::create_managed_router;
 use crate::types::{BotControlAction, BotStatus, TradingMode};
 use axum::{
@@ -3861,4 +3862,101 @@ async fn shutdown_stops_all_pairs_before_waiting_and_cancels_them_concurrently()
         );
         assert!(state.resume_trading().await.is_err());
     }
+}
+
+#[tokio::test]
+async fn add_pair_rolls_back_config_and_guard_on_prepare_failure_or_fails_closed() {
+    struct TempDir(std::path::PathBuf);
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let dir = TempDir(
+        std::env::temp_dir().join(format!("runtime-add-rollback-{}", uuid::Uuid::new_v4())),
+    );
+    std::fs::create_dir(&dir.0).unwrap();
+    let path = dir.0.join("bot.db");
+    let db = Arc::new(Database::open(&path).unwrap());
+    let mut runtime = fixture_with_database(db.clone(), false, false);
+    runtime
+        .global_position_limit
+        .membership_ready
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let (url, server) =
+        mock_exchange(StatusCode::OK, exchange_info("TRADING", valid_filters())).await;
+    runtime.test_exchange_url = Some(url);
+
+    let mut added = db
+        .load_config()
+        .unwrap()
+        .unwrap()
+        .strategy_configs()
+        .unwrap()
+        .remove(0);
+    added.exchange.symbol = "ETHUSDT".into();
+
+    runtime
+        .fail_next_prepare_pair
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(runtime.add_pair(added.clone()).await.is_err());
+    assert!(runtime
+        .global_position_limit
+        .membership_ready
+        .load(std::sync::atomic::Ordering::SeqCst));
+    let symbols: Vec<_> = db
+        .load_config()
+        .unwrap()
+        .unwrap()
+        .pairs
+        .into_iter()
+        .map(|p| p.symbol)
+        .collect();
+    assert_eq!(symbols, vec!["SOLUSDC", "BTCUSDT"]);
+    let external = rusqlite::Connection::open(&path).unwrap();
+    let dirty: i64 = external
+        .query_row(
+            "SELECT dirty FROM pair_execution_guard WHERE symbol = 'ETHUSDT' AND mode = 'PAPER'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(dirty, 0);
+
+    // If rollback itself fails, membership_ready must stay false.
+    let (reached_tx, reached_rx) = oneshot::channel();
+    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+    db.set_membership_commit_hook("add_after", reached_tx, resume_rx);
+    runtime
+        .fail_next_prepare_pair
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let trigger_path = path.clone();
+    let blocker = std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(reached_rx)
+            .unwrap();
+        let conn = rusqlite::Connection::open(&trigger_path).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER fail_rollback_config BEFORE UPDATE ON app_config
+             BEGIN SELECT RAISE(ABORT, 'rollback failed'); END;",
+        )
+        .unwrap();
+        drop(conn);
+        resume_tx.send(()).unwrap();
+    });
+    assert!(runtime.add_pair(added).await.is_err());
+    blocker.join().unwrap();
+    assert!(!runtime
+        .global_position_limit
+        .membership_ready
+        .load(std::sync::atomic::Ordering::SeqCst));
+    external
+        .execute_batch("DROP TRIGGER fail_rollback_config;")
+        .unwrap();
+    drop(external);
+    runtime.shutdown(Duration::from_secs(5)).await.unwrap();
+    server.abort();
 }

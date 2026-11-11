@@ -4,6 +4,7 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
 const MAX_CONFIG_NOTIONAL_OR_PRICE: Decimal = dec!(1_000_000_000_000);
+pub(crate) const MAX_SYNC_INTERVAL_SECS: u64 = 300;
 
 impl AppConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
@@ -100,7 +101,10 @@ impl ExchangeConfig {
     }
 
     pub(super) fn validate(&self) -> anyhow::Result<()> {
-        anyhow::ensure!(self.sync_interval_secs > 0, "同步间隔必须大于 0");
+        anyhow::ensure!(
+            (1..=MAX_SYNC_INTERVAL_SECS).contains(&self.sync_interval_secs),
+            "同步间隔必须在 1-{MAX_SYNC_INTERVAL_SECS} 秒之间"
+        );
         anyhow::ensure!(
             (1..=60_000).contains(&self.recv_window),
             "请求有效窗口必须在 1-60000 毫秒之间"

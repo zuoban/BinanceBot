@@ -419,3 +419,23 @@ fn api_key_validation_rejects_whitespace_control_and_non_ascii_chars() {
     config.ensure_pair_list().unwrap();
     assert!(config.validate().is_ok());
 }
+
+#[test]
+fn sync_interval_secs_validation_accepts_bounds_and_rejects_out_of_range() {
+    for valid in [1, super::MAX_SYNC_INTERVAL_SECS] {
+        let mut config = AppConfig::default();
+        config.exchange.sync_interval_secs = valid;
+        config.ensure_pair_list().unwrap();
+        assert!(config.validate().is_ok(), "valid={valid}");
+    }
+    for invalid in [0, super::MAX_SYNC_INTERVAL_SECS + 1, u64::MAX] {
+        let mut config = AppConfig::default();
+        config.exchange.sync_interval_secs = invalid;
+        config.ensure_pair_list().unwrap();
+        let err = format!("{:#}", config.validate().unwrap_err());
+        assert!(
+            err.contains("同步间隔必须在 1-300 秒之间"),
+            "invalid={invalid}: {err}"
+        );
+    }
+}

@@ -173,72 +173,96 @@ export interface AccountGroup {
   cny: number | null;
 }
 
+const entryRefNow = (entry: Pick<AccountObservation, 'generated_at_ms' | 'received_at_ms'>, now: number) =>
+  entry.generated_at_ms !== undefined && entry.received_at_ms !== undefined
+    ? entry.generated_at_ms + Math.max(0, now - entry.received_at_ms)
+    : now;
+
+const liveAccountMaxAge = (syncIntervalSecs: number | undefined) =>
+  Math.max(30_000, (typeof syncIntervalSecs === 'number' && Number.isFinite(syncIntervalSecs) ? syncIntervalSecs : 3) * 3_000);
+
+const recentAt = (timestamp: string, maxAge: number, refNow: number) => {
+  const age = refNow - Date.parse(timestamp);
+  return age >= -5_000 && age < maxAge;
+};
+
 export function accountGroups<T extends AccountObservation>(entries: T[], now = Date.now()): AccountGroup[] {
   const groups = groupByKey(
     entries,
     ({ mode, snapshot: s }) => `${mode}:${s.account.asset || quoteAsset(s.symbol)}`,
-    ({ mode, snapshot: s }) => ({ mode, asset: s.account.asset || quoteAsset(s.symbol), snapshots: [] as AccountObservation['snapshot'][], observed: [] as AccountObservation['snapshot'][], observationStale: false }),
-    (group, { mode, snapshot: s, account_observation_stale }) => {
-      group.snapshots.push(s);
-      if (!account_observation_stale) group.observed.push(s);
-      group.observationStale ||= !!account_observation_stale || (mode === 'PAPER' && !s.account.asset);
+    ({ mode, snapshot: s }) => ({ mode, asset: s.account.asset || quoteAsset(s.symbol), items: [] as T[], observed: [] as T[], observationStale: false }),
+    (group, entry) => {
+      group.items.push(entry);
+      if (!entry.account_observation_stale) group.observed.push(entry);
+      group.observationStale ||= !!entry.account_observation_stale || (entry.mode === 'PAPER' && !entry.snapshot.account.asset);
     },
   );
-  return [...groups.values()].map(({ mode, asset, snapshots, observed, observationStale }) => {
-    // Exchange timestamps can lead the browser clock slightly.
-    const recent = (timestamp: string, maxAge: number) => {
-      const age = now - Date.parse(timestamp);
-      return age >= -5_000 && age < maxAge;
-    };
-    let latest: AccountObservation['snapshot'] | undefined;
+  return [...groups.values()].map(({ mode, asset, items, observed, observationStale }) => {
+    let latest: T | undefined;
     let latestTs = -Infinity;
-    const maxAge = mode === 'PAPER' ? Infinity : 30_000;
-    for (const s of observed) {
+    for (const entry of observed) {
+      const s = entry.snapshot;
       const ts = Date.parse(s.account.update_time);
-      const age = now - ts;
+      const maxAge = mode === 'PAPER' ? Infinity : liveAccountMaxAge(s.sync_interval_secs);
+      const age = entryRefNow(entry, now) - ts;
       if (age >= -5_000 && age < maxAge && ts > latestTs) {
         latestTs = ts;
-        latest = s;
+        latest = entry;
       }
     }
-    const account = latest ?? snapshots[0];
+    const chosen = latest ?? items[0];
+    const account = chosen.snapshot;
     const unavailable = !latest || (mode === 'PAPER' && observationStale);
     // A shared paper account can include positions outside this page's symbol.
     // Its valuation time follows the oldest open position's mark price.
-    const paperValued = snapshots.every(s => {
+    const paperValued = items.every(entry => {
+      const s = entry.snapshot;
       const size = numeric(s.position.size);
       if (size === null) return false;
       if (size === 0) return true;
-      return recent(s.account.update_time, 30_000) && recent(s.ticker.mark_update_time, 15_000) && (numeric(s.ticker.mark_price) ?? 0) > 0;
+      const refNow = entryRefNow(entry, now);
+      return recentAt(s.account.update_time, 30_000, refNow) && recentAt(s.ticker.mark_update_time, 15_000, refNow) && (numeric(s.ticker.mark_price) ?? 0) > 0;
     });
     const sharedPosition = numeric(account.account.margin_balance) !== numeric(account.account.available_balance)
       || (numeric(account.account.unrealized_profit) ?? 0) !== 0;
-    const valued = !unavailable && (mode !== 'PAPER' || (paperValued && (!sharedPosition || recent(account.account.update_time, 15_000))));
+    const valued = !unavailable && (mode !== 'PAPER' || (paperValued && (!sharedPosition || recentAt(account.account.update_time, 15_000, entryRefNow(chosen, now)))));
     const equity = valued ? numeric(account.account.margin_balance) : null;
     const available = valued ? numeric(account.account.available_balance) : null;
     const wallet = unavailable ? null : numeric(account.account.total_wallet_balance);
     const unrealized = valued ? numeric(account.account.unrealized_profit) : null;
     const rate = account.account_cny_rate?.asset === asset ? numeric(account.account_cny_rate.cny_per_unit) : null;
-    return { key: `${mode}:${asset}`, mode, asset, count: snapshots.length, equity, available, wallet, unrealized, ratio: availableRatio(available, wallet), cny: equity !== null && rate !== null && rate > 0 && Number.isFinite(equity * rate) ? equity * rate : null };
+    return { key: `${mode}:${asset}`, mode, asset, count: items.length, equity, available, wallet, unrealized, ratio: availableRatio(available, wallet), cny: equity !== null && rate !== null && rate > 0 && Number.isFinite(equity * rate) ? equity * rate : null };
   });
 }
 
-const ACCOUNT_THRESHOLDS = [-5_000, 15_000, 30_000] as const;
+const PAPER_ACCOUNT_THRESHOLDS = [-5_000, 15_000, 30_000] as const;
 const MARK_THRESHOLDS = [-5_000, 15_000] as const;
+
+const thresholdCrossingWallMs = (ts: number, offset: number, entry: AccountObservation) => {
+  if (entry.generated_at_ms !== undefined && entry.received_at_ms !== undefined) {
+    if (ts + offset - entry.generated_at_ms <= 0) return -Infinity;
+    return ts + offset + entry.received_at_ms - entry.generated_at_ms;
+  }
+  return ts + offset;
+};
 
 export function nextAccountExpiry(entries: readonly AccountObservation[], now = Date.now()): number {
   let next = Infinity;
-  for (const { snapshot: s } of entries) {
+  for (const entry of entries) {
+    const s = entry.snapshot;
     const accTs = Date.parse(s.account.update_time);
     if (Number.isFinite(accTs)) {
-      for (const offset of ACCOUNT_THRESHOLDS) {
-        if (accTs + offset > now && accTs + offset - 1 < next) next = accTs + offset - 1;
+      const offsets = entry.mode === 'PAPER' ? PAPER_ACCOUNT_THRESHOLDS : [-5_000, liveAccountMaxAge(s.sync_interval_secs)];
+      for (const offset of offsets) {
+        const crossing = thresholdCrossingWallMs(accTs, offset, entry);
+        if (crossing > now && crossing - 1 < next) next = crossing - 1;
       }
     }
     const markTs = Date.parse(s.ticker.mark_update_time);
     if (Number.isFinite(markTs)) {
       for (const offset of MARK_THRESHOLDS) {
-        if (markTs + offset > now && markTs + offset - 1 < next) next = markTs + offset - 1;
+        const crossing = thresholdCrossingWallMs(markTs, offset, entry);
+        if (crossing > now && crossing - 1 < next) next = crossing - 1;
       }
     }
   }

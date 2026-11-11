@@ -13,7 +13,7 @@ impl Database {
     }
 
     #[cfg(test)]
-    fn before_revision_publish(&self) {
+    pub(super) fn before_revision_publish(&self) {
         if let Some((reached, resume)) = self.revision_publish_hook.lock().unwrap().as_ref() {
             reached.send(()).unwrap();
             resume.recv().unwrap();
@@ -24,7 +24,7 @@ impl Database {
         self.trade_revisions.for_symbol(symbol)
     }
 
-    fn publish_trade_revision(&self, symbol: &str) {
+    pub(super) fn publish_trade_revision(&self, symbol: &str) {
         #[cfg(test)]
         self.before_revision_publish();
         self.trade_revisions.publish(symbol);
@@ -52,53 +52,6 @@ impl Database {
             self.publish_trade_revision(&trade.symbol);
         }
         Ok(inserted)
-    }
-
-    /// Delete analysis history atomically while preserving order deduplication
-    /// and the execution frontier needed by a running or restarted strategy.
-    #[cfg(test)]
-    pub(crate) fn clear_trade_history(&self) -> Result<usize> {
-        Ok(self.clear_selected_database(true, false)?.0)
-    }
-
-    pub(crate) fn clear_selected_database(
-        &self,
-        trades: bool,
-        snapshots: bool,
-    ) -> Result<(usize, usize)> {
-        let mut conn = self.lock_connection("clear_selected_database");
-        let tx = immediate_tx(&mut conn)?;
-        let deleted_trades = if trades {
-            clear_trades_on(&tx, None)?
-        } else {
-            0
-        };
-        let deleted_snapshots = if snapshots {
-            let hourly = tx.execute("DELETE FROM account_hourly_snapshots", [])?;
-            let daily = tx.execute("DELETE FROM daily_snapshots", [])?;
-            hourly + daily
-        } else {
-            0
-        };
-        tx.commit()?;
-        if trades {
-            #[cfg(test)]
-            self.before_revision_publish();
-            self.trade_revisions.clear_all();
-            self.trade_clear_revisions.clear_all();
-        }
-        Ok((deleted_trades, deleted_snapshots))
-    }
-
-    /// Clear every mode for one symbol while retaining recovery metadata.
-    pub(crate) fn clear_trade_history_for_symbol(&self, symbol: &str) -> Result<usize> {
-        let mut conn = self.lock_connection("clear_trade_history_for_symbol");
-        let tx = immediate_tx(&mut conn)?;
-        let deleted = clear_trades_on(&tx, Some(symbol))?;
-        tx.commit()?;
-        self.publish_trade_revision(symbol);
-        self.trade_clear_revisions.publish(symbol);
-        Ok(deleted)
     }
 
     pub fn insert_trade_with_stats(&self, trade: &TradeRecord, stats: &GridStats) -> Result<bool> {
@@ -132,36 +85,15 @@ impl Database {
         let tx = immediate_tx(&mut conn)?;
         let inserted = insert_trade_on(&tx, trade)?;
         if inserted {
-            save_scoped_stats_on(&tx, &trade.symbol, trade.mode, stats)?;
-            if let Some((position, account)) = paper_state {
-                tx.execute(
-                    "INSERT INTO paper_accounts (symbol, position_json, account_json) VALUES (?1, ?2, ?3) \
-                     ON CONFLICT(symbol) DO UPDATE SET position_json = excluded.position_json, account_json = excluded.account_json",
-                    params![trade.symbol, serde_json::to_string(position)?, serde_json::to_string(account)?],
-                )?;
-            }
-            if let Some(intent) = pair_intent {
-                let parent = intent
-                    .paired_client_order_id
-                    .as_deref()
-                    .context("Pair intent is missing its source order")?;
-                tx.execute(
-                    "INSERT INTO pair_intents (parent_client_order_id, symbol, mode, order_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5);",
-                    params![parent, trade.symbol, trade.mode.as_str(), serde_json::to_string(intent)?, Utc::now().to_rfc3339()],
-                )?;
-            }
+            persist_inserted_trade_recovery_on(&tx, trade, stats, pair_intent, paper_state)?;
         }
         if trade.mode != TradingMode::Paper {
-            tx.execute(
-                "DELETE FROM managed_orders WHERE client_order_id = ?1;",
-                params![trade.client_order_id],
-            )?;
+            tx.prepare_cached("DELETE FROM managed_orders WHERE client_order_id = ?1;")?
+                .execute(params![trade.client_order_id])?;
         }
         if let Some(parent) = consumed_pair_source {
-            tx.execute(
-                "DELETE FROM pair_intents WHERE parent_client_order_id = ?1;",
-                params![parent],
-            )?;
+            tx.prepare_cached("DELETE FROM pair_intents WHERE parent_client_order_id = ?1;")?
+                .execute(params![parent])?;
         }
         // `conn` remains locked until after `paper_ledger` updates, so no reader can
         // observe the committed SQLite transaction before the cached contribution lands,
@@ -194,7 +126,7 @@ impl Database {
         mode: TradingMode,
     ) -> Result<Option<TradeRecord>> {
         let conn = self.lock_connection("get_trade_by_client_id");
-        let mut stmt = conn.prepare(select_trades_sql!(
+        let mut stmt = conn.prepare_cached(select_trades_sql!(
             "WHERE client_order_id = ?1 AND mode = ?2 ORDER BY timestamp DESC LIMIT 1;"
         ))?;
         let mut rows = stmt.query(params![client_order_id, mode.as_str()])?;
@@ -353,7 +285,10 @@ impl Database {
             "ORDER BY timestamp DESC, rowid DESC LIMIT ?1;"
         ))?;
 
-        let rows = stmt.query_map(params![limit as i64], trade_from_row)?;
+        let rows = stmt.query_map(
+            params![i64::try_from(limit).unwrap_or(i64::MAX)],
+            trade_from_row,
+        )?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }
@@ -368,7 +303,14 @@ impl Database {
         let mut stmt = conn.prepare_cached(select_trades_sql!(
             "WHERE symbol = ?1 AND mode = ?2 ORDER BY timestamp DESC, rowid DESC LIMIT ?3;"
         ))?;
-        let rows = stmt.query_map(params![symbol, mode.as_str(), limit as i64], trade_from_row)?;
+        let rows = stmt.query_map(
+            params![
+                symbol,
+                mode.as_str(),
+                i64::try_from(limit).unwrap_or(i64::MAX)
+            ],
+            trade_from_row,
+        )?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }
@@ -397,7 +339,12 @@ impl Database {
             "WHERE symbol = ?1 AND mode = ?2 AND pnl_verified = 0 ORDER BY timestamp DESC LIMIT ?3 OFFSET ?4;"
         ))?;
         let rows = stmt.query_map(
-            params![symbol, mode.as_str(), limit as i64, offset as i64],
+            params![
+                symbol,
+                mode.as_str(),
+                i64::try_from(limit).unwrap_or(i64::MAX),
+                i64::try_from(offset).unwrap_or(i64::MAX),
+            ],
             trade_from_row,
         )?;
         let trades = rows.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -411,65 +358,46 @@ impl Database {
     }
 }
 
+fn persist_inserted_trade_recovery_on(
+    tx: &Connection,
+    trade: &TradeRecord,
+    stats: &GridStats,
+    pair_intent: Option<&GridOrder>,
+    paper_state: Option<&(PositionInfo, AccountInfo)>,
+) -> Result<()> {
+    save_scoped_stats_on(tx, &trade.symbol, trade.mode, stats)?;
+    if let Some((position, account)) = paper_state {
+        tx.prepare_cached(
+            "INSERT INTO paper_accounts (symbol, position_json, account_json) VALUES (?1, ?2, ?3) \
+             ON CONFLICT(symbol) DO UPDATE SET position_json = excluded.position_json, account_json = excluded.account_json",
+        )?
+        .execute(params![
+            trade.symbol,
+            serde_json::to_string(position)?,
+            serde_json::to_string(account)?
+        ])?;
+    }
+    if let Some(intent) = pair_intent {
+        let parent = intent
+            .paired_client_order_id
+            .as_deref()
+            .context("Pair intent is missing its source order")?;
+        tx.prepare_cached(
+            "INSERT INTO pair_intents (parent_client_order_id, symbol, mode, order_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5);",
+        )?
+        .execute(params![
+            parent,
+            trade.symbol,
+            trade.mode.as_str(),
+            serde_json::to_string(intent)?,
+            Utc::now().to_rfc3339()
+        ])?;
+    }
+    Ok(())
+}
+
 fn parse_order_side(side: &str) -> Result<OrderSide> {
     OrderSide::from_exchange_str(side).with_context(|| format!("Invalid order side: {}", side))
-}
-
-fn clear_trades_on(tx: &Connection, symbol: Option<&str>) -> Result<usize> {
-    tx.execute(
-        "INSERT INTO execution_frontiers (symbol, mode, side, price, timestamp)
-         SELECT symbol, mode, side, price, timestamp FROM (
-             SELECT symbol, mode, side, price, timestamp,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY symbol, mode ORDER BY timestamp DESC, rowid DESC
-                    ) AS rank
-             FROM trades WHERE (?1 IS NULL OR symbol = ?1)
-         ) WHERE rank = 1
-         ON CONFLICT(symbol, mode) DO UPDATE SET
-             side = excluded.side, price = excluded.price, timestamp = excluded.timestamp
-         WHERE excluded.timestamp >= execution_frontiers.timestamp",
-        params![symbol],
-    )?;
-    tx.execute(
-        "INSERT OR IGNORE INTO cleared_trade_ids (trade_id, client_order_id, mode)
-         SELECT trade_id, client_order_id, mode FROM trades WHERE (?1 IS NULL OR symbol = ?1)",
-        params![symbol],
-    )?;
-    preserve_pair_openings_on(tx, symbol)?;
-    let deleted = tx.execute(
-        "DELETE FROM trades WHERE (?1 IS NULL OR symbol = ?1)",
-        params![symbol],
-    )?;
-    tx.execute(
-        "DELETE FROM trade_hourly_rollups WHERE (?1 IS NULL OR symbol = ?1)",
-        params![symbol],
-    )?;
-    tx.execute(
-        "DELETE FROM trade_pnl_rollups WHERE (?1 IS NULL OR symbol = ?1)",
-        params![symbol],
-    )?;
-    tx.execute(
-        "DELETE FROM scoped_grid_stats WHERE (?1 IS NULL OR symbol = ?1)",
-        params![symbol],
-    )?;
-    if symbol.is_none() {
-        tx.execute("DELETE FROM grid_stats", [])?;
-    }
-    Ok(deleted)
-}
-
-fn preserve_pair_openings_on(conn: &Connection, symbol: Option<&str>) -> Result<()> {
-    conn.execute(
-        "INSERT OR IGNORE INTO cleared_pair_openings (symbol, mode, client_order_id, side, price, quantity)
-         SELECT symbol, mode, client_order_id, side, price, quantity FROM (
-             SELECT symbol, mode, client_order_id, side, price, quantity,
-                    ROW_NUMBER() OVER (PARTITION BY symbol, mode, client_order_id
-                                       ORDER BY timestamp DESC, rowid DESC) AS rank
-             FROM trades WHERE (?1 IS NULL OR symbol = ?1)
-         ) WHERE rank = 1",
-        params![symbol],
-    )?;
-    Ok(())
 }
 
 fn insert_trade_on(conn: &Connection, trade: &TradeRecord) -> Result<bool> {

@@ -28,22 +28,6 @@ enum ReconciliationPriority {
     Critical,
 }
 
-/// Binance Futures allows at most 36 characters for newClientOrderId.
-fn new_grid_client_order_id(side: OrderSide) -> String {
-    let mut uuid_buf = [0u8; 32];
-    let uuid = Uuid::new_v4().simple().encode_lower(&mut uuid_buf);
-    let side_code = match side {
-        OrderSide::Buy => "b",
-        OrderSide::Sell => "s",
-    };
-    let mut id = String::with_capacity(35);
-    id.push_str("gb_");
-    id.push_str(side_code);
-    id.push('_');
-    id.push_str(&uuid[..30]);
-    id
-}
-
 #[path = "account_sync.rs"]
 mod account_sync;
 #[path = "config_transition.rs"]
@@ -62,6 +46,8 @@ mod live_submission;
 mod market_feed;
 #[path = "order_cancel.rs"]
 mod order_cancel;
+#[path = "order_domain.rs"]
+mod order_domain;
 #[path = "order_ops.rs"]
 mod order_ops;
 #[path = "order_sizing.rs"]
@@ -84,14 +70,19 @@ mod remainder_settlement;
 mod risk_guards;
 #[path = "snapshot_conflicts.rs"]
 mod snapshot_conflicts;
+#[path = "snapshot_identities.rs"]
+mod snapshot_identities;
 #[path = "window.rs"]
 mod window;
+#[path = "window_prune.rs"]
+mod window_prune;
 
 #[cfg(test)]
 use account_sync::live_sync_freshness;
 use evidence_book::OrderEvidenceBook;
 use live_submission::LiveGridOrderSubmission;
 use market_feed::{market_completion, MarkPriceCompletion, MarketRetry, TickerCompletion};
+use order_domain::*;
 use order_sizing::{GridOrderSpec, WindowPlacementContext};
 #[cfg(test)]
 use pair_intents::{new_pair_intent, paired_grid_client_order_id, PairPlacementDecision};
@@ -101,133 +92,21 @@ use pnl_reconcile::exchange_fill_time;
 #[cfg(test)]
 use risk_guards::{buy_exposure_usdc, liquidation_too_close};
 use risk_guards::{opening_exposure_usdc, RiskConfigSnapshot};
-use window::{LastFillSnapshot, PaperWindowCache};
-
-const GRID_ORDER_PREFIX: &str = "gb_";
+use window::LastFillSnapshot;
+use window_prune::PaperWindowCache;
 
 const PERIODIC_TIME_SYNC_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const TIME_SYNC_RETRY_INTERVAL: Duration = Duration::from_secs(60);
-fn is_grid_order(client_order_id: &str) -> bool {
-    client_order_id.starts_with(GRID_ORDER_PREFIX)
-}
-
-fn unresolved_filled_quantity(order: &BinanceOrderResponse) -> bool {
-    order.status == "FILLED" && order.executed_qty <= Decimal::ZERO
-}
-
-/// All idle orders follow the window. Partial executions finish on their existing order.
-fn is_window_order(order: &GridOrder) -> bool {
-    is_grid_order(&order.client_order_id) && order.status == OrderStatus::New
-}
-
-// Paper accounts have no exchange-provided leverage until one is explicitly set.
-// Treat the default zero as 1x so a missing leverage never understates margin.
-fn update_paper_account(
-    position: &mut PositionInfo,
-    account: &mut AccountInfo,
-    ticker: &TickerInfo,
-) {
-    let price = ticker.grid_reference_price();
-    if price > Decimal::ZERO {
-        position.mark_price = price;
-    }
-    position.unrealized_pnl = if position.size.is_zero() || position.mark_price <= Decimal::ZERO {
-        Decimal::ZERO
-    } else {
-        let diff = position.mark_price.saturating_sub(position.entry_price);
-        diff.checked_mul(position.size).unwrap_or_else(|| {
-            if diff.is_sign_negative() == position.size.is_sign_negative() {
-                Decimal::MAX
-            } else {
-                Decimal::MIN
-            }
-        })
-    };
-    account.unrealized_profit = position.unrealized_pnl;
-    account.margin_balance = account
-        .total_wallet_balance
-        .saturating_add(position.unrealized_pnl);
-    account.available_balance = account
-        .margin_balance
-        .saturating_sub(position.position_margin());
-    account.update_time = if ticker.mark_price > Decimal::ZERO {
-        ticker.mark_update_time
-    } else {
-        ticker.update_time
-    };
-}
-
-fn has_nearby_grid_order(
-    prices: &[Decimal],
-    target: Decimal,
-    grid_interval: Decimal,
-    tick_size: Decimal,
-) -> bool {
-    let spacing = grid_interval.max(tick_size);
-    prices.iter().any(|&price| {
-        price
-            .checked_sub(target)
-            .is_some_and(|diff| diff.abs() < spacing)
-    })
-}
-
-/// Same-side active orders reserve their current price level.
-fn grid_level_occupied<'a>(
-    orders: impl IntoIterator<Item = &'a GridOrder>,
-    side: OrderSide,
-    price: Decimal,
-    interval: Decimal,
-    tick_size: Decimal,
-) -> bool {
-    let spacing = interval.max(tick_size);
-    orders.into_iter().any(|order| {
-        order.side == side
-            && order
-                .price
-                .checked_sub(price)
-                .is_some_and(|diff| diff.abs() < spacing)
-    })
-}
-
-fn reserved_closing_quantity<'a>(
-    direction: GridDirection,
-    orders: impl IntoIterator<Item = &'a GridOrder>,
-) -> Decimal {
-    orders
-        .into_iter()
-        .filter(|o| o.side == direction.closing_side())
-        .fold(Decimal::ZERO, |acc, o| {
-            acc.checked_add(o.quantity).unwrap_or(Decimal::MAX)
-        })
-}
-
-fn closing_quantity_available<'a>(
-    direction: GridDirection,
-    position_size: Decimal,
-    orders: impl IntoIterator<Item = &'a GridOrder>,
-) -> Decimal {
-    direction
-        .position_quantity(position_size)
-        .checked_sub(reserved_closing_quantity(direction, orders))
-        .unwrap_or(Decimal::ZERO)
-        .max(Decimal::ZERO)
-}
-
-#[cfg(test)]
-fn reserved_sell_quantity(orders: &[GridOrder]) -> Decimal {
-    reserved_closing_quantity(GridDirection::Long, orders)
-}
-
-#[cfg(test)]
-fn sell_quantity_available(position_size: Decimal, orders: &[GridOrder]) -> Decimal {
-    closing_quantity_available(GridDirection::Long, position_size, orders)
-}
 
 fn build_sync_timer(sync_secs: u64) -> tokio::time::Interval {
+    let sync_secs = sync_secs.clamp(1, crate::config::MAX_SYNC_INTERVAL_SECS);
     let period = Duration::from_secs(sync_secs);
     let offset =
         Duration::from_millis(rand::random::<u64>() % sync_secs.saturating_mul(1000).max(1));
-    let mut timer = interval_at(tokio::time::Instant::now() + offset, period);
+    let start = tokio::time::Instant::now()
+        .checked_add(offset)
+        .unwrap_or_else(tokio::time::Instant::now);
+    let mut timer = interval_at(start, period);
     timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     timer
 }
@@ -379,6 +258,11 @@ impl GridTradingEngine {
         self.state.add_log(level, message).await;
     }
 
+    pub(super) async fn mark_orders_reconciliation_blocked(&mut self) {
+        self.last_orders_sync = None;
+        self.report_reconciliation_state(true).await;
+    }
+
     /// Initialize exchange connection, sync server time, and load symbol rules
     pub(crate) async fn initialize(&mut self) -> Result<()> {
         let config = self.state.config.read().await.clone();
@@ -507,6 +391,43 @@ impl GridTradingEngine {
         }
     }
 
+    async fn handle_loop_action(
+        &mut self,
+        action: Option<BotControlAction>,
+        sync_secs: &mut u64,
+        sync_timer: &mut tokio::time::Interval,
+    ) -> bool {
+        let Some(action) = action else {
+            return false;
+        };
+        let stopping = matches!(action, BotControlAction::Shutdown { .. });
+        let updating_config = matches!(
+            action,
+            BotControlAction::UpdateConfig { .. } | BotControlAction::UpdateGlobalConfig { .. }
+        );
+        self.handle_control_action(action).await;
+        if stopping {
+            return false;
+        }
+        if updating_config {
+            // Use the installed config even if post-save reconciliation failed.
+            let updated_secs = self
+                .state
+                .config
+                .read()
+                .await
+                .exchange
+                .sync_interval_secs
+                .max(1);
+            self.sync_interval_secs = updated_secs;
+            if updated_secs != *sync_secs {
+                *sync_secs = updated_secs;
+                *sync_timer = build_sync_timer(*sync_secs);
+            }
+        }
+        true
+    }
+
     /// Primary execution loop
     pub(crate) async fn run(&mut self) {
         let mut sync_secs = self
@@ -522,8 +443,6 @@ impl GridTradingEngine {
         let mut pnl_timer = interval(Duration::from_secs(1));
         pnl_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-        // Preserve recovered orders. Reconciliation and the regular window
-        // maintenance will add only the missing levels.
         if *self.state.status.read().await == BotStatus::Running {
             self.maintain_grid_window().await;
         }
@@ -532,29 +451,11 @@ impl GridTradingEngine {
         loop {
             tokio::select! {
                 biased;
-                // UI control actions (Pause, Resume, CancelAll, Rebalance, UpdateConfig)
                 action = self.action_rx.recv() => {
-                    match action {
-                        Some(action) => {
-                            let stopping = matches!(action, BotControlAction::Shutdown { .. });
-                            let updating_config = matches!(action, BotControlAction::UpdateConfig { .. } | BotControlAction::UpdateGlobalConfig { .. });
-                            self.handle_control_action(action).await;
-                            if stopping { break; }
-                            if updating_config {
-                                // Use the installed config even if post-save reconciliation failed.
-                                let updated_secs = self.state.config.read().await.exchange.sync_interval_secs.max(1);
-                                self.sync_interval_secs = updated_secs;
-                                if updated_secs != sync_secs {
-                                    sync_secs = updated_secs;
-                                    sync_timer = build_sync_timer(sync_secs);
-                                }
-                            }
-                        },
-                        None => break,
+                    if !self.handle_loop_action(action, &mut sync_secs, &mut sync_timer).await {
+                        break;
                     }
                 }
-
-                // Live price updates from Binance WebSocket
                 ticker_res = self.ticker_rx.recv(), if ticker_open => {
                     match ticker_res {
                         Ok(ticker_update) => self.handle_ticker_update(ticker_update).await,
@@ -562,20 +463,16 @@ impl GridTradingEngine {
                         Err(broadcast::error::RecvError::Closed) => ticker_open = false,
                     }
                 }
-                // Regular synchronization timer
                 _ = sync_timer.tick() => {
                     self.sync_cycle(false).await;
                     self.reconcile_unverified_trades().await;
                 }
-
                 _ = pnl_timer.tick() => {
                     self.reconcile_unverified_trades().await;
                 }
-
                 completion = market_completion(&mut self.mark_price_task) => {
                     self.finish_mark_price_task(completion).await;
                 }
-
                 completion = market_completion(&mut self.ticker_task) => {
                     self.finish_ticker_task(completion).await;
                 }

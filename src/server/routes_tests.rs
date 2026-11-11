@@ -679,7 +679,7 @@ async fn account_stream_authenticates_pushes_live_balances_and_rejects_revoked_s
         assert_eq!(first["type"], "accounts");
         assert_eq!(first["data"]["pairs"].as_array().unwrap().len(), 1);
         let snapshot = &first["data"]["pairs"][0]["snapshot"];
-        assert_eq!(snapshot.as_object().unwrap().len(), 6);
+        assert_eq!(snapshot.as_object().unwrap().len(), 7);
         assert!(snapshot["ticker"]["mark_update_time"].is_string());
         assert!(snapshot["ticker"]["mark_price"].is_string());
         assert!(snapshot["position"]["size"].is_string());
@@ -716,7 +716,7 @@ async fn revoked_socket_commands_waiting_for_capacity_are_not_submitted() {
         tx.send(BotControlAction::GlobalRiskCancel).await.unwrap();
         let state = auth_state(AppConfig::default(), db.clone(), tx);
         let action = control_action(
-            ControlRequest {
+            &ControlRequest {
                 action: name.into(),
                 expected_mode: Some(TradingMode::Paper),
             },
@@ -753,7 +753,7 @@ async fn pending_persisted_pause_blocks_other_clients_until_queued() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let state = AppState::new(AppConfig::default(), db, tx);
         let pause = control_action(
-            ControlRequest {
+            &ControlRequest {
                 action: name.into(),
                 expected_mode: None,
             },
@@ -763,7 +763,7 @@ async fn pending_persisted_pause_blocks_other_clients_until_queued() {
         let pending = PendingControlPause::new(&state, &pause.0);
         prepare_control(&state, &pause.0).await.unwrap();
         let resume = control_action(
-            ControlRequest {
+            &ControlRequest {
                 action: "resume".into(),
                 expected_mode: Some(TradingMode::Paper),
             },
@@ -2227,4 +2227,141 @@ async fn exchange_catalog_filters_perpetuals_coalesces_concurrent_loads_and_cool
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 
     server.abort();
+}
+
+#[tokio::test]
+async fn websocket_upgrade_returns_503_when_lookup_permits_busy_and_logout_permits_are_isolated() {
+    use axum::body::Body;
+    use axum::http::Request;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    let (tx, _rx) = tokio::sync::mpsc::channel(4);
+    let state = AppState::new_with_admin_auth(
+        AppConfig::default(),
+        db,
+        tx,
+        Some(Arc::new(
+            crate::auth::AdminAuth::from_password("test-password").unwrap(),
+        )),
+    );
+    state.create_session("cold-ws-token-1").await.unwrap();
+    state.create_session("cold-ws-token-2").await.unwrap();
+
+    let app = create_router(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server_app = app.clone();
+    let server = tokio::spawn(async move { axum::serve(listener, server_app).await.unwrap() });
+
+    let logout_permits: Vec<_> = (0..4)
+        .map(|_| state.auth.try_acquire_logout_permit().unwrap())
+        .collect();
+    assert!(state.auth.try_acquire_logout_permit().is_none());
+
+    assert_eq!(
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/logout")
+                    .header("Authorization", "Bearer cold-ws-token-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+
+    let mut ws_ok = format!("ws://{address}/ws").into_client_request().unwrap();
+    ws_ok.headers_mut().insert(
+        "Sec-WebSocket-Protocol",
+        "auth, token.cold-ws-token-1".parse().unwrap(),
+    );
+    let (mut connected, _) = tokio_tungstenite::connect_async(ws_ok).await.unwrap();
+    let _ = connected.close(None).await;
+    drop(logout_permits);
+
+    let lookup_permits: Vec<_> = (0..16)
+        .map(|_| state.auth.try_acquire_session_lookup_permit().unwrap())
+        .collect();
+    assert!(state.auth.try_acquire_session_lookup_permit().is_none());
+
+    for path in ["/ws", "/api/accounts/ws"] {
+        let mut req = format!("ws://{address}{path}")
+            .into_client_request()
+            .unwrap();
+        req.headers_mut().insert(
+            "Sec-WebSocket-Protocol",
+            "auth, token.cold-ws-token-2".parse().unwrap(),
+        );
+        let err = tokio_tungstenite::connect_async(req).await.unwrap_err();
+        match err {
+            tokio_tungstenite::tungstenite::Error::Http(resp) => {
+                assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE, "{path}");
+            }
+            other => panic!("expected HTTP 503 response for {path}, got {other:?}"),
+        }
+    }
+
+    assert_eq!(
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/logout")
+                .header("Authorization", "Bearer cold-ws-token-2")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::OK
+    );
+
+    drop(lookup_permits);
+    server.abort();
+}
+
+#[test]
+fn probe_payload_debug_redacts_secrets_and_error_sanitizer_handles_exchange_errors() {
+    let exchange_payload: probes::TestExchangePayload = serde_json::from_value(serde_json::json!({
+        "api_key": "probe-secret-key",
+        "api_secret": "probe-secret-val",
+        "recv_window": 5000
+    }))
+    .unwrap();
+    let telegram_payload: probes::TestTelegramPayload = serde_json::from_value(serde_json::json!({
+        "bot_token": "123:probe-bot-secret",
+        "chat_id": "456"
+    }))
+    .unwrap();
+    let debug_str = format!("{exchange_payload:?} {telegram_payload:?}");
+    assert!(!debug_str.contains("probe-secret-key"));
+    assert!(!debug_str.contains("probe-secret-val"));
+    assert!(!debug_str.contains("probe-bot-secret"));
+    assert!(debug_str.contains("[REDACTED]"));
+
+    let api_err: anyhow::Error = crate::exchange::ExchangeError::ApiError {
+        code: -2015,
+        msg: "Invalid API-key, IP, or permissions for action.".into(),
+    }
+    .into();
+    assert_eq!(
+        probes::sanitized_probe_error("账户验证失败", &api_err),
+        "账户验证失败：币安返回错误 (-2015): Invalid API-key, IP, or permissions for action."
+    );
+
+    let html_err: anyhow::Error = crate::exchange::ExchangeError::Other(
+        "<!DOCTYPE html><html><body>502 Bad Gateway</body></html>".into(),
+    )
+    .into();
+    let sanitized_html = probes::sanitized_probe_error("无法连接币安", &html_err);
+    assert!(!sanitized_html.contains("<html"), "{sanitized_html}");
+    assert!(
+        sanitized_html.contains("远端服务返回异常响应"),
+        "{sanitized_html}"
+    );
 }

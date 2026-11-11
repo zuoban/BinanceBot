@@ -1,4 +1,4 @@
-use super::cache_entries::CacheEntries;
+use super::cache_entries::{CacheEntries, ENTRY_WAIT};
 use super::model::ONE_WAY_POSITION_ERROR;
 use super::{BinanceFuturesClient, BinancePositionRisk};
 use anyhow::Result;
@@ -8,12 +8,26 @@ use std::time::{Duration, Instant};
 
 const MAX_AGE: Duration = Duration::from_secs(1);
 
+#[derive(Clone)]
+enum CachedSymbolPosition {
+    OneWay(Option<BinancePositionRisk>, Instant),
+    InvalidMode,
+}
+
 struct PositionSnapshot {
-    positions: HashMap<String, Option<BinancePositionRisk>>,
+    positions: HashMap<String, CachedSymbolPosition>,
     received_instant: Instant,
 }
 
 impl PositionSnapshot {
+    fn normalized_key(symbol: &str) -> std::borrow::Cow<'_, str> {
+        if symbol.bytes().any(|b| b.is_ascii_lowercase()) {
+            std::borrow::Cow::Owned(symbol.to_ascii_uppercase())
+        } else {
+            std::borrow::Cow::Borrowed(symbol)
+        }
+    }
+
     fn from_vec(list: Vec<BinancePositionRisk>, received_instant: Instant) -> Self {
         let mut positions = HashMap::with_capacity(list.len());
         for position in list {
@@ -24,10 +38,14 @@ impl PositionSnapshot {
             let key = position.symbol.to_ascii_uppercase();
             match positions.entry(key) {
                 Entry::Vacant(entry) => {
-                    entry.insert(valid_side.then_some(position));
+                    entry.insert(if valid_side {
+                        CachedSymbolPosition::OneWay(Some(position), received_instant)
+                    } else {
+                        CachedSymbolPosition::InvalidMode
+                    });
                 }
                 Entry::Occupied(mut entry) => {
-                    entry.insert(None);
+                    entry.insert(CachedSymbolPosition::InvalidMode);
                 }
             }
         }
@@ -37,17 +55,32 @@ impl PositionSnapshot {
         }
     }
 
+    #[cfg(test)]
     fn lookup(&self, symbol: &str) -> Result<Option<BinancePositionRisk>> {
-        let key: std::borrow::Cow<'_, str> = if symbol.bytes().any(|b| b.is_ascii_lowercase()) {
-            std::borrow::Cow::Owned(symbol.to_ascii_uppercase())
-        } else {
-            std::borrow::Cow::Borrowed(symbol)
-        };
+        Ok(self.lookup_cached(symbol)?.and_then(|(pos, _)| pos))
+    }
+
+    fn lookup_cached(
+        &self,
+        symbol: &str,
+    ) -> Result<Option<(Option<BinancePositionRisk>, Instant)>> {
+        let key = Self::normalized_key(symbol);
         match self.positions.get(key.as_ref()) {
             None => Ok(None),
-            Some(Some(position)) => Ok(Some(position.clone())),
-            Some(None) => anyhow::bail!(ONE_WAY_POSITION_ERROR),
+            Some(CachedSymbolPosition::OneWay(position, at)) => Ok(Some((position.clone(), *at))),
+            Some(CachedSymbolPosition::InvalidMode) => anyhow::bail!(ONE_WAY_POSITION_ERROR),
         }
+    }
+
+    fn insert_resolved(
+        &mut self,
+        symbol: &str,
+        position: Option<BinancePositionRisk>,
+        received_instant: Instant,
+    ) {
+        self.positions
+            .entry(symbol.to_ascii_uppercase())
+            .or_insert(CachedSymbolPosition::OneWay(position, received_instant));
     }
 }
 
@@ -57,8 +90,8 @@ pub(crate) struct PositionCache {
 }
 
 impl PositionCache {
-    pub(crate) async fn invalidate(&self, client: &BinanceFuturesClient) {
-        self.entries.retire(&client.account_cache_key()).await;
+    pub(crate) fn invalidate(&self, client: &BinanceFuturesClient) {
+        self.entries.retire(&client.account_cache_key());
     }
 
     pub(crate) async fn refresh_critical(
@@ -83,7 +116,7 @@ impl PositionCache {
     ) -> Result<(Option<BinancePositionRisk>, Instant)> {
         let key = client.account_cache_key();
         loop {
-            let (epoch, entry, (position, received_instant)) = self
+            let (epoch, entry, (bulk_instant, resolved)) = self
                 .entries
                 .get_or_fetch(
                     &key,
@@ -93,21 +126,37 @@ impl PositionCache {
                         let positions = client.get_all_positions().await?;
                         Ok(PositionSnapshot::from_vec(positions, Instant::now()))
                     },
-                    |snapshot| (snapshot.lookup(symbol), snapshot.received_instant),
+                    |snapshot| (snapshot.received_instant, snapshot.lookup_cached(symbol)),
                 )
                 .await?;
-            let position = position?;
-            if position.is_some() {
+            if let Some((position, received_instant)) = resolved? {
                 return Ok((position, received_instant));
             }
 
-            // A missing symbol is unknown, not a flat position. Retry the original
-            // symbol-specific endpoint before allowing reconciliation to succeed.
-            let position = client.get_position(symbol).await;
+            // A missing symbol is unknown, not a flat position. Query the
+            // symbol-specific endpoint on Normal budget and cache the result.
+            let requested_at = Instant::now();
+            let fetched = client.get_position_for_periodic_sync(symbol).await;
             let received_instant = Instant::now();
-            if self.entries.is_current(&key, epoch, &entry).await {
-                return Ok((position?, received_instant));
+            if !self.entries.is_current(&key, epoch, &entry) {
+                continue;
             }
+            let position = fetched?;
+            if let Ok(mut cached) = tokio::time::timeout(ENTRY_WAIT, entry.lock()).await {
+                if self.entries.is_current(&key, epoch, &entry) {
+                    if let Some(snapshot) = cached.snapshot.as_mut() {
+                        if snapshot.received_instant == bulk_instant
+                            && requested_at.elapsed() < MAX_AGE
+                        {
+                            snapshot.insert_resolved(symbol, position.clone(), requested_at);
+                        }
+                    }
+                }
+            }
+            if !self.entries.is_current(&key, epoch, &entry) {
+                continue;
+            }
+            return Ok((position, received_instant));
         }
     }
 }

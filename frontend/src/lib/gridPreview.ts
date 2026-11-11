@@ -10,6 +10,7 @@ const formatPercent4 = (num: bigint, den: bigint): string => format((num * 10000
 const floorDiv = (a: bigint, b: bigint) => a / b;
 const ceilDiv = (a: bigint, b: bigint) => (a + b - 1n) / b;
 
+export const MAX_CONFIG_NOTIONAL_OR_PRICE = '1000000000000';
 interface GridPreviewInput { reference: unknown; interval: unknown; buyWindow: unknown; sellWindow: unknown; min?: unknown; max?: unknown }
 interface GridPreview { buys: string[]; sells: string[]; buyClipped: boolean; sellClipped: boolean }
 
@@ -17,6 +18,7 @@ export function gridPreview(input: GridPreviewInput): GridPreview | null {
   const reference = parse(input.reference), interval = parse(input.interval);
   const buyWindow = Number(input.buyWindow), sellWindow = Number(input.sellWindow);
   if (!reference || !interval || reference.n === 0n || interval.n === 0n) return null;
+  if (gridIntervalError(input.interval)) return null;
   if (![buyWindow, sellWindow].every(count => Number.isInteger(count) && count >= 1 && count <= 50)) return null;
   if (priceRangeError('min', input.min, input.max) || priceRangeError('max', input.min, input.max)) return null;
   const min = parse(input.min), max = parse(input.max);
@@ -51,7 +53,7 @@ export function sumDecimals(values: string[]): string | null {
   return format(total, scale);
 }
 /** Compare two decimal strings; null when either is not a plain decimal. */
-export function exceeds(value: string | null, limit: unknown): boolean {
+export function exceeds(value: unknown, limit: unknown): boolean {
   const a = parse(value), b = parse(limit);
   if (!a || !b) return false;
   const [left, right] = scalePair(a, b);
@@ -83,8 +85,10 @@ export function priceRangeError(field: 'min' | 'max', min: unknown, max: unknown
   const raw = field === 'min' ? min : max;
   const own = parse(raw);
   if (raw !== null && raw !== undefined && raw !== '' && (!own || own.n === 0n)) return field === 'min' ? '价格下限必须大于 0' : '价格上限必须大于 0';
+  if (own && exceeds(raw, MAX_CONFIG_NOTIONAL_OR_PRICE)) return field === 'min' ? '价格下限超出允许上限' : '价格上限超出允许上限';
   const lower = parse(min), upper = parse(max);
   if (lower && upper && lower.n !== 0n && upper.n !== 0n) {
+    if (exceeds(min, MAX_CONFIG_NOTIONAL_OR_PRICE) || exceeds(max, MAX_CONFIG_NOTIONAL_OR_PRICE)) return null;
     const [lowerScaled, upperScaled] = scalePair(lower, upper);
     if (lowerScaled >= upperScaled) return '价格下限必须小于上限';
   }
@@ -102,6 +106,13 @@ export function tickSizeError(interval: unknown, tickSize: unknown): string | nu
   return null;
 }
 
+export function gridIntervalError(interval: unknown, tickSize?: unknown): string | null {
+  const iv = parse(interval);
+  if (!iv || iv.n === 0n) return null;
+  if (exceeds(interval, MAX_CONFIG_NOTIONAL_OR_PRICE)) return '网格间距超出允许上限';
+  return tickSizeError(interval, tickSize);
+}
+
 /** Default `grid_interval` at 1% of `markPrice`, quantized to the nearest positive integer multiple of `tickSize` when provided. */
 export function defaultGridInterval(markPrice: unknown, tickSize?: unknown): string | null {
   const mark = parse(markPrice);
@@ -117,12 +128,33 @@ export function defaultGridInterval(markPrice: unknown, tickSize?: unknown): str
 
 interface SymbolSizingRules { stepSize?: unknown; minQty?: unknown; minNotional?: unknown }
 interface LevelOrderSizing { quantity: string; notional: string; error: string | null }
+interface PreparedSizingRules {
+  step: Fixed;
+  minQty: Fixed | null;
+  minNotional: Fixed | null;
+  stepText: string;
+  minQtyText: string | null;
+  minNotionalText: string | null;
+}
+
+function prepareSizingRules(step: Fixed, rules?: SymbolSizingRules): PreparedSizingRules {
+  const minQty = parse(rules?.minQty), minNotional = parse(rules?.minNotional);
+  return {
+    step,
+    minQty,
+    minNotional,
+    stepText: format(step.n, step.s),
+    minQtyText: minQty && minQty.n > 0n ? format(minQty.n, minQty.s) : null,
+    minNotionalText: minNotional && minNotional.n > 0n ? format(minNotional.n, minNotional.s) : null,
+  };
+}
 
 /**
  * Mirrors `SymbolRules::calculate_quantity`: truncates `amount / price` down to a multiple of `stepSize`
  * and checks `minQty` and `minNotional` on the truncated order.
  */
-function computeOrderSizing(p: Fixed, a: Fixed, step: Fixed, minQty: Fixed | null, minNotional: Fixed | null, stepText: string, minQtyText: string | null, minNotionalText: string | null): LevelOrderSizing {
+function computeOrderSizing(p: Fixed, a: Fixed, prepared: PreparedSizingRules): LevelOrderSizing {
+  const { step, minQty, minNotional, stepText, minQtyText, minNotionalText } = prepared;
   const denomScale = p.s + step.s;
   const commonScale = Math.max(a.s, denomScale);
   const numerator = a.n * 10n ** BigInt(commonScale - a.s);
@@ -146,11 +178,7 @@ function computeOrderSizing(p: Fixed, a: Fixed, step: Fixed, minQty: Fixed | nul
 export function orderSizing(price: unknown, amount: unknown, rules?: SymbolSizingRules): LevelOrderSizing | null {
   const p = parse(price), a = parse(amount), step = parse(rules?.stepSize);
   if (!p || !a || !step || p.n === 0n || a.n === 0n || step.n === 0n) return null;
-  const minQty = parse(rules?.minQty), minNotional = parse(rules?.minNotional);
-  const stepText = format(step.n, step.s);
-  const minQtyText = minQty && minQty.n > 0n ? format(minQty.n, minQty.s) : null;
-  const minNotionalText = minNotional && minNotional.n > 0n ? format(minNotional.n, minNotional.s) : null;
-  return computeOrderSizing(p, a, step, minQty, minNotional, stepText, minQtyText, minNotionalText);
+  return computeOrderSizing(p, a, prepareSizingRules(step, rules));
 }
 
 export function orderSizings(prices: readonly string[], amount: unknown, rules?: SymbolSizingRules): Map<string, LevelOrderSizing | null> {
@@ -161,13 +189,10 @@ export function orderSizings(prices: readonly string[], amount: unknown, rules?:
     for (const price of prices) result.set(price, null);
     return result;
   }
-  const minQty = parse(rules?.minQty), minNotional = parse(rules?.minNotional);
-  const stepText = format(step.n, step.s);
-  const minQtyText = minQty && minQty.n > 0n ? format(minQty.n, minQty.s) : null;
-  const minNotionalText = minNotional && minNotional.n > 0n ? format(minNotional.n, minNotional.s) : null;
+  const prepared = prepareSizingRules(step, rules);
   for (const price of prices) {
     const p = parse(price);
-    result.set(price, p && p.n > 0n ? computeOrderSizing(p, a, step, minQty, minNotional, stepText, minQtyText, minNotionalText) : null);
+    result.set(price, p && p.n > 0n ? computeOrderSizing(p, a, prepared) : null);
   }
   return result;
 }
@@ -176,6 +201,7 @@ export function orderSizings(prices: readonly string[], amount: unknown, rules?:
 export function orderAmountError(amount: unknown, referencePrice?: unknown, rules?: SymbolSizingRules): string | null {
   const a = parse(amount);
   if (!a || a.n === 0n) return null;
+  if (exceeds(amount, MAX_CONFIG_NOTIONAL_OR_PRICE)) return '每格金额超出允许上限';
   const minNotional = parse(rules?.minNotional);
   if (minNotional && minNotional.n > 0n) {
     const [amountScaled, minNotionalScaled] = scalePair(a, minNotional);
@@ -201,9 +227,10 @@ const CAP_DROP_WARN_PERCENT = 3;
 export function capCoverage(cap: unknown, amount: unknown, interval: unknown, reference: unknown): { levels: number; percent: string; tight: boolean } | null {
   const c = parse(cap), a = parse(amount), i = parse(interval), r = parse(reference);
   if (!c || !a || !i || !r || a.n === 0n || i.n === 0n || r.n === 0n) return null;
+  if (exceeds(cap, MAX_CONFIG_NOTIONAL_OR_PRICE)) return null;
   const [capScaled, amountScaled] = scalePair(c, a);
   const levels = capScaled / amountScaled;
-  if (levels === 0n) return null;
+  if (levels === 0n || levels > BigInt(Number.MAX_SAFE_INTEGER)) return null;
   const [intervalScaled, ref] = scalePair(i, r);
   const move = levels * intervalScaled;
   return {

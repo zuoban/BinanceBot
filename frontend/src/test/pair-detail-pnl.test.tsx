@@ -3,8 +3,9 @@ import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { beforeEach, expect, it, vi } from 'vitest';
-import PairDetail from '../pages/PairDetail';
+import PairDetail, { resolveLogs, resolveTrades } from '../pages/PairDetail';
 import { Pnl } from '../components/Common';
+import { invalidateStrategyQueries } from '../lib/queries';
 import { pair, snapshot } from './fixtures';
 import type * as Api from '../lib/api';
 import type * as Queries from '../lib/queries';
@@ -12,6 +13,7 @@ import type { LogItem, Pair, Snapshot, Trade } from '../lib/types';
 
 const state = vi.hoisted(() => ({
   data: undefined as Snapshot | undefined,
+  dataUpdatedAt: 0,
   pairs: [] as Pair[] | undefined,
   pairsPending: false,
   pairsFetching: false,
@@ -27,7 +29,7 @@ vi.mock('../lib/queries', async importOriginal => {
   return {
     ...actual,
     usePairs: () => ({ data: state.pairs, error: state.pairsError, isPending: state.pairsPending, isFetching: state.pairsFetching, refetch: state.refetchPairs }),
-    usePairSnapshot: () => ({ data: state.data, error: state.queryError, live: true, stale: false, isPending: false, refetch: state.refetchQuery }),
+    usePairSnapshot: () => ({ data: state.data, dataUpdatedAt: state.dataUpdatedAt, error: state.queryError, live: true, stale: false, isPending: false, refetch: state.refetchQuery }),
   };
 });
 vi.mock('../components/Controls', () => ({ PairControls: () => null, useControls: () => ({ busy: new Set<string>(), pending: {}, results: {}, clearResult: vi.fn(), run: vi.fn() }) }));
@@ -41,6 +43,7 @@ vi.mock('../components/HistoryActions', () => ({ HistoryActions: () => null }));
 
 beforeEach(() => {
   state.data = snapshot();
+  state.dataUpdatedAt = 0;
   state.pairs = [pair()];
   state.pairsPending = false;
   state.pairsFetching = false;
@@ -188,4 +191,61 @@ it('lazily fetches full buffered trades and logs on tab activation and falls bac
   render(<QueryClientProvider client={failingClient}>{view('/pairs/SOLUSDC?tab=trades')}</QueryClientProvider>);
   await waitFor(() => expect(state.api).toHaveBeenCalledWith('/api/pairs/SOLUSDC/trades', expect.anything()));
   expect(screen.getByTestId('trades-ids')).toHaveTextContent('snap-t1');
+});
+
+it('never resurrects pre-clear fetched trades after clearing trades and receiving a new fill', async () => {
+  const preClearFetched: Trade[] = [
+    { trade_id: 'old-2', symbol: 'SOLUSDC', mode: 'PAPER', side: 'SELL', price: '102', quantity: '1', amount_usdc: '102', realized_pnl: '2', commission: '0', pnl_verified: true, is_maker: true, timestamp: '2026-11-05T01:02:00Z', note: '' },
+    { trade_id: 'old-1', symbol: 'SOLUSDC', mode: 'PAPER', side: 'BUY', price: '100', quantity: '1', amount_usdc: '100', realized_pnl: '0', commission: '0', pnl_verified: true, is_maker: true, timestamp: '2026-11-05T01:00:00Z', note: '' },
+  ];
+  state.api.mockResolvedValue(preClearFetched);
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const { rerender, unmount } = render(<QueryClientProvider client={client}>{view('/pairs/SOLUSDC?tab=trades')}</QueryClientProvider>);
+  await waitFor(() => expect(screen.getByTestId('trades-ids')).toHaveTextContent('old-2,old-1'));
+
+  const postClear = snapshot('SOLUSDC', 'PAPER');
+  postClear.stats.total_trades = 1;
+  postClear.recent_trades = [
+    { trade_id: 'new-1', symbol: 'SOLUSDC', mode: 'PAPER', side: 'BUY', price: '99', quantity: '1', amount_usdc: '99', realized_pnl: '0', commission: '0', pnl_verified: true, is_maker: true, timestamp: '2026-11-05T01:05:00Z', note: '' },
+    { trade_id: 'other-sym', symbol: 'BTCUSDC', mode: 'PAPER', side: 'BUY', price: '80000', quantity: '1', amount_usdc: '80000', realized_pnl: '0', commission: '0', pnl_verified: true, is_maker: true, timestamp: '2026-11-05T01:05:01Z', note: '' },
+  ];
+  state.data = postClear;
+  state.dataUpdatedAt = Date.now() + 10_000;
+  rerender(<QueryClientProvider client={client}>{view('/pairs/SOLUSDC?tab=trades')}</QueryClientProvider>);
+  expect(screen.getByTestId('trades-ids')).toHaveTextContent(/^new-1$/);
+  expect(resolveTrades(postClear, preClearFetched, false, 1_000, 2_000).map(t => t.trade_id)).toEqual(['new-1']);
+  unmount();
+
+  const inactiveClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  inactiveClient.setQueryData(['snapshot', 'SOLUSDC', true, 'trades', 'PAPER'], preClearFetched);
+  await invalidateStrategyQueries(inactiveClient, { pairs: false, overview: false, snapshot: 'SOLUSDC', clearTrades: 'SOLUSDC', cancelFirst: true });
+  expect(inactiveClient.getQueryData(['snapshot', 'SOLUSDC', true, 'trades', 'PAPER'])).toBeUndefined();
+});
+
+it('preserves the newest 50 live logs during a >=50-log burst between /logs polls', async () => {
+  const oldFetched: LogItem[] = Array.from({ length: 60 }, (_, idx) => ({
+    timestamp: new Date(Date.parse('2026-11-05T01:00:00Z') + idx * 1000).toISOString(),
+    level: 'INFO',
+    message: `old-${idx}`,
+  }));
+  state.api.mockResolvedValue(oldFetched);
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const { rerender, unmount } = render(<QueryClientProvider client={client}>{view('/pairs/SOLUSDC?tab=logs')}</QueryClientProvider>);
+  await waitFor(() => expect(screen.getByTestId('logs-msgs')).toHaveTextContent(/^old-59,old-58/));
+
+  const burstLogs: LogItem[] = Array.from({ length: 50 }, (_, idx) => ({
+    timestamp: new Date(Date.parse('2026-11-05T01:02:50Z') - idx * 1000).toISOString(),
+    level: 'INFO',
+    message: `burst-${49 - idx}`,
+  }));
+  const updated = snapshot('SOLUSDC', 'PAPER');
+  updated.recent_logs = burstLogs;
+  state.data = updated;
+  state.dataUpdatedAt = Date.now() + 10_000;
+  rerender(<QueryClientProvider client={client}>{view('/pairs/SOLUSDC?tab=logs')}</QueryClientProvider>);
+  const text = screen.getByTestId('logs-msgs').textContent ?? '';
+  expect(text.startsWith('burst-49,burst-48,')).toBe(true);
+  expect(text.includes(',burst-0,old-59,')).toBe(true);
+  expect(resolveLogs(updated, oldFetched, false, 1_000, 2_000)).toHaveLength(110);
+  unmount();
 });

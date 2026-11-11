@@ -130,7 +130,7 @@ impl<K: Eq + Hash, T> CacheEntries<K, T> {
     }
 
     #[cfg(test)]
-    pub(super) async fn entry<Q>(&self, key: &Q) -> (u64, Entry<T>)
+    pub(super) fn entry<Q>(&self, key: &Q) -> (u64, Entry<T>)
     where
         K: Borrow<Q>,
         Q: ?Sized + Eq + Hash + ToOwned<Owned = K>,
@@ -139,7 +139,7 @@ impl<K: Eq + Hash, T> CacheEntries<K, T> {
     }
 
     // Retire the entry without waiting for an in-flight loader holding its lock.
-    pub(super) async fn retire<Q>(&self, key: &Q) -> u64
+    pub(super) fn retire<Q>(&self, key: &Q) -> u64
     where
         K: Borrow<Q>,
         Q: ?Sized + Eq + Hash + ToOwned<Owned = K>,
@@ -158,7 +158,7 @@ impl<K: Eq + Hash, T> CacheEntries<K, T> {
         next
     }
 
-    fn is_current_sync<Q>(&self, key: &Q, epoch: u64, entry: &Entry<T>) -> bool
+    pub(super) fn is_current<Q>(&self, key: &Q, epoch: u64, entry: &Entry<T>) -> bool
     where
         K: Borrow<Q>,
         Q: ?Sized + Eq + Hash,
@@ -168,14 +168,6 @@ impl<K: Eq + Hash, T> CacheEntries<K, T> {
             .unwrap_or_else(|e| e.into_inner())
             .get(key)
             .is_some_and(|(e, current)| *e == epoch && Arc::ptr_eq(current, entry))
-    }
-
-    pub(super) async fn is_current<Q>(&self, key: &Q, epoch: u64, entry: &Entry<T>) -> bool
-    where
-        K: Borrow<Q>,
-        Q: ?Sized + Eq + Hash,
-    {
-        self.is_current_sync(key, epoch, entry)
     }
 
     pub(super) async fn get_or_fetch<Q, R, Fresh, Fetch, Fut, Project>(
@@ -199,7 +191,7 @@ impl<K: Eq + Hash, T> CacheEntries<K, T> {
             let mut cached = tokio::time::timeout(ENTRY_WAIT, entry.lock())
                 .await
                 .map_err(|_| anyhow!("shared {label} request is still in flight"))?;
-            if !self.is_current_sync(key, epoch, &entry) {
+            if !self.is_current(key, epoch, &entry) {
                 continue;
             }
             if cached
@@ -212,7 +204,7 @@ impl<K: Eq + Hash, T> CacheEntries<K, T> {
                 // Do not serve an expired or invalidated snapshot after a failure.
                 cached.snapshot = None;
                 let fetched = fetch().await;
-                if !self.is_current_sync(key, epoch, &entry) {
+                if !self.is_current(key, epoch, &entry) {
                     continue;
                 }
                 let snapshot = match fetched {
@@ -230,7 +222,7 @@ impl<K: Eq + Hash, T> CacheEntries<K, T> {
             };
             let projected = project(snapshot);
             drop(cached);
-            if self.is_current_sync(key, epoch, &entry) {
+            if self.is_current(key, epoch, &entry) {
                 return Ok((epoch, entry, projected));
             }
         }
