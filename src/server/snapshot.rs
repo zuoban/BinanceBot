@@ -16,6 +16,7 @@ use tokio::sync::Mutex;
 use tracing::warn;
 
 const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(800);
+const SNAPSHOT_IDLE_HEARTBEAT: Duration = Duration::from_secs(3);
 const TRADE_CACHE_TTL: Duration = Duration::from_secs(5);
 const QUERY_RETRY_DELAY: Duration = Duration::from_secs(5);
 
@@ -117,6 +118,27 @@ impl<K: PartialEq, V> CachedQuery<K, V> {
 #[derive(Default)]
 pub(super) struct SnapshotCache {
     trades: Mutex<Option<CachedQuery<TradeKey, HourlyTradeStats>>>,
+}
+
+pub(super) struct LastSnapshotBroadcast {
+    sent_at: Instant,
+    receivers: usize,
+    frame: String,
+}
+
+fn snapshot_frame_unchanged(previous: &str, current: &str) -> bool {
+    const NEEDLE: &str = "\"uptime_secs\":";
+    let (Some(prev_pos), Some(curr_pos)) = (previous.find(NEEDLE), current.find(NEEDLE)) else {
+        return previous == current;
+    };
+    if prev_pos != curr_pos || previous[..prev_pos] != current[..curr_pos] {
+        return false;
+    }
+    let prev_rest = &previous[prev_pos + NEEDLE.len()..];
+    let curr_rest = &current[curr_pos + NEEDLE.len()..];
+    let prev_digits = prev_rest.bytes().take_while(|b| b.is_ascii_digit()).count();
+    let curr_digits = curr_rest.bytes().take_while(|b| b.is_ascii_digit()).count();
+    prev_rest[prev_digits..] == curr_rest[curr_digits..]
 }
 
 struct SnapshotCharts {
@@ -495,12 +517,30 @@ impl AppState {
     }
 
     pub(crate) async fn broadcast_snapshot(&self) -> BotSnapshot {
+        self.publish_snapshot(true).await
+    }
+
+    async fn publish_snapshot(&self, force: bool) -> BotSnapshot {
         // Cleanup uses this same path, preventing a previously generated frame
         // from being published after the cleanup response's fresh snapshot.
-        let _publish = self.snapshot_publish_lock.lock().await;
+        let mut last = self.snapshot_publish_lock.lock().await;
         let snapshot = self.snapshot().await;
+        let receivers = self.ws_broadcast_tx.receiver_count();
         if let Some(json) = crate::types::ws_frame_json("snapshot", &snapshot) {
-            let _ = self.ws_broadcast_tx.send(json);
+            let skip = !force
+                && last.as_ref().is_some_and(|prev| {
+                    receivers <= prev.receivers
+                        && prev.sent_at.elapsed() < SNAPSHOT_IDLE_HEARTBEAT
+                        && snapshot_frame_unchanged(&prev.frame, &json)
+                });
+            if !skip {
+                let _ = self.ws_broadcast_tx.send(json.clone());
+                *last = Some(LastSnapshotBroadcast {
+                    sent_at: Instant::now(),
+                    receivers,
+                    frame: json,
+                });
+            }
         }
         snapshot
     }
@@ -511,7 +551,12 @@ impl AppState {
         loop {
             timer.tick().await;
             if self.ws_broadcast_tx.receiver_count() > 0 {
-                self.broadcast_snapshot().await;
+                self.publish_snapshot(false).await;
+            } else {
+                let mut last = self.snapshot_publish_lock.lock().await;
+                if last.is_some() {
+                    *last = None;
+                }
             }
         }
     }

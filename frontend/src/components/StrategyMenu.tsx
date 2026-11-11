@@ -1,6 +1,7 @@
 import { Button, Dropdown, Tooltip } from 'antd';
 import { EditOutlined, EyeOutlined, MoreOutlined, PauseOutlined, PlayCircleOutlined, ReloadOutlined, StopOutlined } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
+import { pairRoute } from '../lib/api';
 import type { Action, Pair } from '../lib/types';
 import { useControls } from './Controls';
 
@@ -45,8 +46,8 @@ export function StrategyMenu({ pair, stale }: { pair: Pair; stale: boolean }) {
       ...strategySecondaryItems(pair, stale),
     ],
     onClick: ({ key }) => {
-      if (key === 'view') { navigate(`/pairs/${pair.symbol}`); return; }
-      if (key === 'edit') { navigate(`/pairs/${pair.symbol}/config`); return; }
+      if (key === 'view') { navigate(pairRoute(pair.symbol)); return; }
+      if (key === 'edit') { navigate(pairRoute(pair.symbol, true)); return; }
       void run(pair, key as Action);
     },
   }}>

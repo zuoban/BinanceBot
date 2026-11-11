@@ -12,13 +12,13 @@ use std::sync::Arc;
 use tracing::error;
 
 #[derive(Debug, Deserialize)]
-pub struct ClearTradeHistoryRequest {
+pub(crate) struct ClearTradeHistoryRequest {
     #[serde(default)]
     pub confirm: bool,
 }
 
 #[derive(Debug, serde::Serialize)]
-pub struct ClearTradeHistoryResponse {
+pub(super) struct ClearTradeHistoryResponse {
     pub deleted_trades: usize,
     pub snapshot: BotSnapshot,
 }

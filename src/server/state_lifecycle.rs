@@ -91,7 +91,8 @@ impl AppState {
         self.persist_status(BotStatus::Paused).await
     }
 
-    pub async fn resume_trading(self: &Arc<Self>) -> anyhow::Result<()> {
+    #[cfg(test)]
+    pub(crate) async fn resume_trading(self: &Arc<Self>) -> anyhow::Result<()> {
         self.set_trading_status(BotStatus::Running).await
     }
 

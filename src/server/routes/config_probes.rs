@@ -15,7 +15,7 @@ use axum::{Extension, Json};
 use serde::Deserialize;
 use std::future::Future;
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 pub(super) async fn add_pair_handler(
     State(handle): State<RuntimeHandle>,
@@ -100,26 +100,58 @@ pub(super) async fn get_global_config_handler(
     .await
 }
 
+fn validate_optional_baseline_version(
+    baseline_version: Option<&str>,
+    kind: &'static str,
+) -> Result<(), &'static str> {
+    match baseline_version {
+        Some(version) if version.trim().is_empty() => Err("配置版本不能为空"),
+        None => {
+            warn!("{kind} configuration update submitted without baseline_version");
+            Ok(())
+        }
+        Some(_) => Ok(()),
+    }
+}
+
+fn versioned_update_error<T>(error: anyhow::Error) -> (StatusCode, Json<ApiResponse<T>>) {
+    let message = error.to_string();
+    let status = if message.contains("已被其他请求修改") {
+        StatusCode::CONFLICT
+    } else {
+        StatusCode::OK
+    };
+    (status, json_err(message))
+}
+
 pub(super) async fn post_global_config_handler(
     State(handle): State<RuntimeHandle>,
     Json(payload): Json<UpdateGlobalConfigPayload>,
-) -> Json<ApiResponse<WebGlobalConfigView>> {
+) -> (StatusCode, Json<ApiResponse<WebGlobalConfigView>>) {
+    if let Err(message) =
+        validate_optional_baseline_version(payload.baseline_version.as_deref(), "Global")
+    {
+        return status_err(StatusCode::BAD_REQUEST, message);
+    }
     if let Err(error) = crate::config::validate_global_position_limit(
         payload.global_max_position_notional.flatten(),
     ) {
-        return json_err(error.to_string());
+        return (StatusCode::OK, json_err(error.to_string()));
     }
     if let Err(error) =
         crate::config::validate_min_available_margin_pct(payload.min_available_margin_pct.flatten())
     {
-        return json_err(error.to_string());
+        return (StatusCode::OK, json_err(error.to_string()));
     }
     match handle.update_global_config(payload).await {
         Ok(global) => {
             let view = web_global_config_view(&global);
-            json_ok_msg(view, "全局设置已保存，所有交易对立即生效")
+            (
+                StatusCode::OK,
+                json_ok_msg(view, "全局设置已保存，所有交易对立即生效"),
+            )
         }
-        Err(error) => json_err(error.to_string()),
+        Err(error) => versioned_update_error(error),
     }
 }
 
@@ -368,7 +400,12 @@ pub(super) struct UpdateServerConfigPayload {
 pub(super) async fn post_server_config_handler(
     State(handle): State<RuntimeHandle>,
     Json(payload): Json<UpdateServerConfigPayload>,
-) -> Json<ApiResponse<ServerConfigView>> {
+) -> (StatusCode, Json<ApiResponse<ServerConfigView>>) {
+    if let Err(message) =
+        validate_optional_baseline_version(payload.baseline_version.as_deref(), "Server")
+    {
+        return status_err(StatusCode::BAD_REQUEST, message);
+    }
     let server = payload.server;
     let submitted = server.clone();
     let result = handle
@@ -378,15 +415,18 @@ pub(super) async fn post_server_config_handler(
         })
         .await;
     match result {
-        Ok(()) => json_ok_msg(
-            ServerConfigView {
-                version: crate::db::config_version(&submitted),
-                saved: submitted,
-                active: handle.active_server,
-            },
-            "服务设置已保存，重启程序后生效",
+        Ok(()) => (
+            StatusCode::OK,
+            json_ok_msg(
+                ServerConfigView {
+                    version: crate::db::config_version(&submitted),
+                    saved: submitted,
+                    active: handle.active_server,
+                },
+                "服务设置已保存，重启程序后生效",
+            ),
         ),
-        Err(error) => json_err(error.to_string()),
+        Err(error) => versioned_update_error(error),
     }
 }
 

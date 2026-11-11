@@ -17,15 +17,18 @@ export function GlobalSettings() {
     form.setFieldsValue({ ...data, pause_on_zero_available_margin: data.pause_on_zero_available_margin ?? false, api_key: '', api_secret: '', telegram_bot_token: '', clear_api_credentials: false, clear_telegram_credentials: false });
   });
   const mutation = useMutation({
-    mutationFn: (v: GlobalForm) => post<GlobalConfig>('/api/global/config', {
-      baseline_version: baseline.current?.version, recv_window: v.recv_window, sync_interval_secs: v.sync_interval_secs,
-      global_max_position_notional: v.global_max_position_notional || null,
-      pause_on_zero_available_margin: v.pause_on_zero_available_margin ?? false,
-      min_available_margin_pct: v.min_available_margin_pct || null,
-      api_key: v.clear_api_credentials ? '' : v.api_key?.trim() || null, api_secret: v.clear_api_credentials ? '' : v.api_secret?.trim() || null,
-      telegram_bot_token: v.clear_telegram_credentials ? '' : v.telegram_bot_token?.trim() || null, telegram_chat_id: v.clear_telegram_credentials ? '' : v.telegram_chat_id?.trim() || '',
-      telegram_enabled: !!v.telegram_enabled, clear_api_credentials: !!v.clear_api_credentials, clear_telegram_credentials: !!v.clear_telegram_credentials,
-    }),
+    mutationFn: async (v: GlobalForm) => {
+      if (!baseline.current?.version) throw new Error('无法确认设置版本，请重新加载设置');
+      return post<GlobalConfig>('/api/global/config', {
+        baseline_version: baseline.current.version, recv_window: v.recv_window, sync_interval_secs: v.sync_interval_secs,
+        global_max_position_notional: v.global_max_position_notional || null,
+        pause_on_zero_available_margin: v.pause_on_zero_available_margin ?? false,
+        min_available_margin_pct: v.min_available_margin_pct || null,
+        api_key: v.clear_api_credentials ? '' : v.api_key?.trim() || null, api_secret: v.clear_api_credentials ? '' : v.api_secret?.trim() || null,
+        telegram_bot_token: v.clear_telegram_credentials ? '' : v.telegram_bot_token?.trim() || null, telegram_chat_id: v.clear_telegram_credentials ? '' : v.telegram_chat_id?.trim() || '',
+        telegram_enabled: !!v.telegram_enabled, clear_api_credentials: !!v.clear_api_credentials, clear_telegram_credentials: !!v.clear_telegram_credentials,
+      });
+    },
     onMutate: () => edit.setSaving(true),
     onSuccess: (data, values) => {
       client.setQueryData(['global-config'], data);
@@ -82,7 +85,7 @@ export function GlobalSettings() {
   return <>
     <ErrorNotice error={query.error} retry={() => void query.refetch()} />
     <ErrorNotice error={mutation.error} />
-    {isConfigConflict(mutation.error, '全局设置已被其他请求修改') && <ConflictReloadButton label="全局设置" activeRef={mounted} refetch={query.refetch} onReset={mutation.reset} onLoaded={fill} />}
+    {(isConfigConflict(mutation.error, '全局设置已被其他请求修改') || isConfigConflict(mutation.error, '无法确认设置版本')) && <ConflictReloadButton label="全局设置" activeRef={mounted} refetch={query.refetch} onReset={mutation.reset} onLoaded={fill} />}
     <Form form={form} layout="vertical" disabled={!ready || edit.saving} onValuesChange={() => edit.setDirty(true)} onFinish={v => void submit(v)}>
       <Card title="交易所连接" className="settings-card">
         <Alert type="info" showIcon title={`密钥不会回显，留空将保留已有值。${query.data?.has_api_key ? `当前 API Key：${query.data.api_key_preview}` : '尚未配置 API Key。'}运行模式由 API Key 决定：已配置以实盘运行，未配置以模拟盘运行。`} />

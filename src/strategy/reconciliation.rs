@@ -98,7 +98,10 @@ impl GridTradingEngine {
                     .then_some(found.order_id);
                 order.symbol = symbol.to_owned();
                 order.price = found.price.max(Decimal::ZERO);
-                order.amount_usdc = order.price * order.quantity;
+                order.amount_usdc = order
+                    .price
+                    .checked_mul(order.quantity)
+                    .unwrap_or(Decimal::MAX);
                 order.status = OrderStatus::New;
                 order
             });
@@ -284,7 +287,11 @@ impl GridTradingEngine {
                         || active.get(id).is_none_or(|previous| {
                             previous.status != OrderStatus::PartiallyFilled
                                 || previous.quantity
-                                    > (order.orig_qty - order.executed_qty).max(Decimal::ZERO)
+                                    > order
+                                        .orig_qty
+                                        .checked_sub(order.executed_qty)
+                                        .unwrap_or(Decimal::ZERO)
+                                        .max(Decimal::ZERO)
                         }))
             })
         };
@@ -1081,7 +1088,11 @@ impl GridTradingEngine {
             for (client_id, live_order) in live_ids {
                 // On failure or interruption, retain at least the previous
                 // reservation; newly discovered orders reserve original size.
-                let remaining = (live_order.orig_qty - live_order.executed_qty).max(Decimal::ZERO);
+                let remaining = live_order
+                    .orig_qty
+                    .checked_sub(live_order.executed_qty)
+                    .unwrap_or(Decimal::ZERO)
+                    .max(Decimal::ZERO);
                 let quantity = if position_ready && self.state.pause_epoch() == pause_epoch {
                     remaining
                 } else {
@@ -1107,7 +1118,10 @@ impl GridTradingEngine {
                         order.price.max(live_order.price)
                     };
                     order.quantity = quantity;
-                    order.amount_usdc = order.price * order.quantity;
+                    order.amount_usdc = order
+                        .price
+                        .checked_mul(order.quantity)
+                        .unwrap_or(Decimal::MAX);
                     order.status = live_order.open_order_status();
                     if persisted_managed
                         .get(client_id)

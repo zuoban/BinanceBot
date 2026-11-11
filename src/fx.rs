@@ -49,13 +49,7 @@ impl CnyRateCache {
     }
 
     fn shared_client() -> reqwest::Client {
-        static CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
-            reqwest::Client::builder()
-                .timeout(Duration::from_secs(5))
-                .build()
-                .expect("Failed to build exchange-rate HTTP client")
-        });
-        CLIENT.clone()
+        crate::exchange::client::shared_http_client()
     }
 
     fn with_endpoint(endpoint: String) -> Self {
@@ -105,6 +99,7 @@ impl CnyRateCache {
             .client
             .get(&self.endpoint)
             .query(&[("currency", asset)])
+            .timeout(Duration::from_secs(5))
             .send()
             .await?
             .error_for_status()?

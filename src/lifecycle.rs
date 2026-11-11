@@ -72,15 +72,9 @@ impl ShutdownSignals {
     }
 }
 
-/// Both interactive and container shutdowns use the same order-cleanup path.
-#[cfg(test)]
-pub async fn shutdown_signal() -> Result<&'static str> {
-    ShutdownSignals::register().await?.wait().await
-}
-
 /// Stop submissions immediately, then let the single engine finish any in-flight
 /// request and reconcile cancellations. Keep durable intents on failure/timeout.
-pub async fn stop_engine(
+pub(crate) async fn stop_engine(
     state: &Arc<AppState>,
     engine: &mut JoinHandle<()>,
     limit: Duration,

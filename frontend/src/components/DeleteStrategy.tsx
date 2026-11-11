@@ -1,8 +1,8 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { App, Input } from 'antd';
 import { useQueryClient, type QueryClient } from '@tanstack/react-query';
 import { api, ApiError, errorMessage } from '../lib/api';
-import { useAsyncLock } from '../lib/asyncGuard';
+import { useAsyncLock, useMountedRef } from '../lib/asyncGuard';
 import type { Pair } from '../lib/types';
 import { useControls } from './Controls';
 
@@ -18,12 +18,18 @@ export function useDeleteStrategy() {
   const controls = useControls();
   const runDelete = useAsyncLock();
   const [busy, setBusy] = useState(false);
+  const dialogRef = useRef<{ destroy?: () => void } | null>(null);
+  const mounted = useMountedRef(() => {
+    dialogRef.current?.destroy?.();
+    dialogRef.current = null;
+  });
   const remove = (pair: Pair, beforeConfirm?: () => Promise<boolean>) => runDelete(async () => {
+    if (!mounted.current) return false;
     setBusy(true);
     let deleteStarted = false;
     try {
       if (beforeConfirm && !await beforeConfirm()) return false;
-      // A live strategy may still hold a position: the delete button stays disabled until the symbol is typed back.
+      if (!mounted.current) return false;
       const live = pair.mode === 'LIVE';
       const dialog = modal.confirm({
         title: `删除 ${pair.symbol} 策略？`,
@@ -34,7 +40,10 @@ export function useDeleteStrategy() {
         </div>,
         okText: '确认删除', okButtonProps: { danger: true, disabled: live }, cancelText: '取消',
       });
-      if (!await dialog) return false;
+      dialogRef.current = dialog;
+      const accepted = await dialog;
+      if (dialogRef.current === dialog) dialogRef.current = null;
+      if (!accepted || !mounted.current) return false;
       // Engine shutdown can take 30 seconds, with additional time for failure recovery and persistence.
       deleteStarted = true;
       await api(`/api/pairs/${encodeURIComponent(pair.symbol)}`, { method: 'DELETE', body: JSON.stringify({ confirm: true }), timeoutMs: 90_000 });
@@ -52,7 +61,7 @@ export function useDeleteStrategy() {
       message.error(`${errorMessage(error)}${uncertain ? '；删除结果可能已生效，请刷新状态或查看日志后再操作' : ''}`);
       return false;
     } finally {
-      setBusy(false);
+      if (mounted.current) setBusy(false);
     }
   }, false);
   return { remove, busy };

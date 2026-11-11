@@ -29,7 +29,7 @@ const router = createBrowserRouter([{ element: <LoadErrorBoundary label="控制�
 
 function Root() {
   const [loggedIn, setLoggedIn] = useState(!!tokenStore.get());
-  const authStatus = useQuery({ queryKey: ['auth-status'], queryFn: () => api<AuthStatus>('/api/auth/status'), retry: false });
+  const authStatus = useQuery({ queryKey: ['auth-status'], queryFn: ({ signal }) => api<AuthStatus>('/api/auth/status', { signal }), retry: false });
   const authEnabled = authStatus.data?.initialized !== false;
   const logout = useCallback(async () => {
     const token = tokenStore.get();
@@ -50,7 +50,7 @@ function Root() {
   if (authStatus.isPending) return <LoadingScreen label={loggedIn ? '正在验证会话' : '正在连接控制台'} />;
   if (authStatus.error && !authStatus.data) return <div className="loading-screen" role="alert"><div className="loading-brand"><img className="brand-symbol" src="/logo.svg" alt="" /><span>Grid Console<small>Strategy Workspace</small></span></div><p>无法连接后端服务：{authStatus.error.message}</p><Button onClick={() => void authStatus.refetch()}>重试</Button></div>;
   if (!authEnabled) return <SessionContext.Provider value={session}><RouterProvider router={router} /></SessionContext.Provider>;
-  return <SessionContext.Provider value={session}>{loggedIn && authStatus.data?.authenticated ? <RouterProvider router={router} /> : page(<Login onLogin={() => { client.clear(); setLoggedIn(true); }} />, '登录页', <LoadingScreen label="正在加载登录页" />)}</SessionContext.Provider>;
+  return <SessionContext.Provider value={session}>{loggedIn && authStatus.data?.authenticated ? <RouterProvider router={router} /> : page(<Login onLogin={() => { void client.cancelQueries({ queryKey: ['auth-status'] }); client.clear(); client.setQueryData(['auth-status'], { initialized: true, authenticated: true }); setLoggedIn(true); }} />, '登录页', <LoadingScreen label="正在加载登录页" />)}</SessionContext.Provider>;
 }
 
 ReactDOM.createRoot(document.getElementById('root')!).render(

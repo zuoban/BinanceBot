@@ -99,9 +99,11 @@ impl GridTradingEngine {
             (config.grid.buy_window, config.grid.sell_window),
             (config.grid.min_price, config.grid.max_price),
             |_, price| {
-                last_fill
-                    .fill
-                    .is_none_or(|(_, fill_price)| (price - fill_price).abs() >= interval)
+                last_fill.fill.is_none_or(|(_, fill_price)| {
+                    price
+                        .checked_sub(fill_price)
+                        .is_none_or(|diff| diff.abs() >= interval)
+                })
             },
         )
     }
@@ -583,7 +585,9 @@ impl GridTradingEngine {
         let mut canceled_any = false;
         for order in closing_orders {
             if order.quantity <= remaining {
-                remaining -= order.quantity;
+                remaining = remaining
+                    .checked_sub(order.quantity)
+                    .unwrap_or(Decimal::ZERO);
             } else if self.cancel_single_order(&order).await {
                 canceled_any = true;
             } else {
@@ -604,6 +608,7 @@ impl GridTradingEngine {
     ) -> Option<Decimal> {
         let current_market_price = ticker.last_price;
         let reference_price = ticker.grid_reference_price();
+        let order_notional = price.checked_mul(full_quantity)?;
         let exposure = {
             let active_orders = self.state.active_orders.read().await;
             if grid_level_occupied(
@@ -623,7 +628,9 @@ impl GridTradingEngine {
                     position.size,
                     valuation_price,
                     active_orders.values(),
-                ) + price * full_quantity;
+                )
+                .checked_add(order_notional)
+                .unwrap_or(Decimal::MAX);
                 Some((position.clone(), exposure))
             } else {
                 None
@@ -632,15 +639,26 @@ impl GridTradingEngine {
         if let (Some(limit), Some((position, exposure))) = (config.grid.max_position_usdc, exposure)
         {
             let mark_price = self.position_valuation_price(config, &position, ticker);
-            let position_value = position.size.abs() * mark_price;
-            let projected_position_value =
-                (position.size + config.grid.direction.sign() * full_quantity).abs() * mark_price;
+            let position_value = position
+                .size
+                .abs()
+                .checked_mul(mark_price)
+                .unwrap_or(Decimal::MAX);
+            let projected_position_value = config
+                .grid
+                .direction
+                .sign()
+                .checked_mul(full_quantity)
+                .and_then(|delta| position.size.checked_add(delta))
+                .and_then(|projected_size| projected_size.abs().checked_mul(mark_price))
+                .unwrap_or(Decimal::MAX);
             // A full next opening order must fit the filled position even when the position
             // has not yet reached the cap. Pending orders alone still only reserve funds.
             if config.grid.pause_on_max_position
                 && mark_price > Decimal::ZERO
                 && projected_position_value > limit
-                && projected_position_value > position_value
+                && (projected_position_value > position_value
+                    || projected_position_value == Decimal::MAX)
             {
                 self.pause_for_position_limit(format!(
                     "持仓名义价值 {}，下一笔{}单（价格 {}，数量 {}）成交后预计持仓名义价值 {} 将超过最大持仓名义价值 {}",
@@ -654,7 +672,7 @@ impl GridTradingEngine {
                 .await;
                 return None;
             }
-            if exposure > limit {
+            if exposure > limit || exposure == Decimal::MAX {
                 debug!(
                     "Skipping {} at {}: projected exposure {} exceeds limit {}",
                     side.as_str(),
@@ -860,6 +878,9 @@ impl GridTradingEngine {
         };
 
         let symbol = config.exchange.symbol.clone();
+        let Some(amount_usdc) = price.checked_mul(quantity) else {
+            return false;
+        };
         let now = Utc::now();
         let mut order = GridOrder {
             client_order_id: client_order_id.clone(),
@@ -868,7 +889,7 @@ impl GridTradingEngine {
             side,
             price,
             quantity,
-            amount_usdc: price * quantity,
+            amount_usdc,
             status: OrderStatus::New,
             created_at: now,
             updated_at: now,

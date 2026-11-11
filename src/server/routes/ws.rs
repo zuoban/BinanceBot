@@ -18,9 +18,10 @@ use std::sync::Arc;
 const WS_MAX_FRAME_BYTES: usize = 64 * 1024;
 const WS_RESULT_QUEUE_CAPACITY: usize = 32;
 const WS_CONTROL_QUEUE_CAPACITY: usize = 16;
+const WS_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 fn websocket_token(headers: &HeaderMap) -> &str {
-    headers
+    let token = headers
         .get(axum::http::header::SEC_WEBSOCKET_PROTOCOL)
         .and_then(|value| value.to_str().ok())
         .and_then(|protocols| {
@@ -28,7 +29,12 @@ fn websocket_token(headers: &HeaderMap) -> &str {
                 .split(',')
                 .find_map(|protocol| protocol.trim().strip_prefix("token."))
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if token.len() > 128 || !token.bytes().all(|b| b.is_ascii_graphic()) {
+        ""
+    } else {
+        token
+    }
 }
 
 fn ws_origin_allowed(headers: &HeaderMap) -> bool {
@@ -197,14 +203,15 @@ async fn upgrade_accounts_socket(
     if !ws_origin_allowed(&headers) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    let token = websocket_token(&headers).to_string();
+    let token = websocket_token(&headers);
     let (Some(auth), Some(mut retired)) = (hub.source.auth(), hub.source.subscribe_retirement())
     else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    if !auth.is_token_valid(&token).await {
+    if !auth.is_token_valid(token).await {
         return StatusCode::UNAUTHORIZED.into_response();
     }
+    let token = token.to_string();
     ws.protocols(["auth"])
         .max_message_size(WS_MAX_FRAME_BYTES)
         .max_frame_size(WS_MAX_FRAME_BYTES)
@@ -221,18 +228,13 @@ async fn upgrade_accounts_socket(
                     if !auth.is_token_valid(&token).await {
                         break;
                     }
-                    if !matches!(
-                        tokio::time::timeout(
-                            std::time::Duration::from_secs(5),
-                            send_until_retired(
-                                &mut sender,
-                                Message::Text((*frame).clone()),
-                                &mut retired
-                            ),
-                        )
-                        .await,
-                        Ok(Some(Ok(())))
-                    ) {
+                    if !send_with_timeout(
+                        &mut sender,
+                        Message::Text((*frame).clone()),
+                        &mut retired,
+                    )
+                    .await
+                    {
                         break;
                     }
                 }
@@ -250,10 +252,7 @@ async fn upgrade_accounts_socket(
                         message = receiver.next() => {
                             match message {
                                 Some(Ok(Message::Ping(payload))) => {
-                                    if !matches!(tokio::time::timeout(
-                                        std::time::Duration::from_secs(5),
-                                        send_until_retired(&mut sender, Message::Pong(payload), &mut retired),
-                                    ).await, Ok(Some(Ok(())))) { return; }
+                                    if !send_with_timeout(&mut sender, Message::Pong(payload), &mut retired).await { return; }
                                 }
                                 Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return,
                                 _ => {}
@@ -311,6 +310,24 @@ where
     }
 }
 
+async fn send_with_timeout<S>(
+    sender: &mut S,
+    message: Message,
+    retired: &mut tokio::sync::watch::Receiver<bool>,
+) -> bool
+where
+    S: futures_util::Sink<Message> + Unpin,
+{
+    matches!(
+        tokio::time::timeout(
+            WS_SEND_TIMEOUT,
+            send_until_retired(sender, message, retired)
+        )
+        .await,
+        Ok(Some(Ok(())))
+    )
+}
+
 fn control_ws_message(action: Option<&str>, response: ApiResponse<String>) -> String {
     serde_json::json!({
         "type": "control",
@@ -336,10 +353,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, token: String) {
         return;
     }
     if let Some(json) = crate::types::ws_frame_json("snapshot", &initial_snapshot) {
-        if !matches!(
-            send_until_retired(&mut sender, Message::Text(json), &mut retired).await,
-            Some(Ok(()))
-        ) {
+        if !send_with_timeout(&mut sender, Message::Text(json), &mut retired).await {
             return;
         }
     }
@@ -414,16 +428,15 @@ fn spawn_socket_send_task(
                 }
                 Some(msg) = result_rx.recv() => {
                     if !send_state.is_token_valid(&send_token).await { break; }
-                    if !matches!(send_until_retired(&mut sender, Message::Text(msg), &mut retired).await, Some(Ok(()))) { break; }
+                    if !send_with_timeout(&mut sender, Message::Text(msg), &mut retired).await { break; }
                 }
                 message = rx.recv() => {
                     match message {
                         Ok(msg) => {
                             if !send_state.is_token_valid(&send_token).await { break; }
-                            if !matches!(
-                                send_until_retired(&mut sender, Message::Text(msg), &mut retired).await,
-                                Some(Ok(()))
-                            ) { break; }
+                            if !send_with_timeout(&mut sender, Message::Text(msg), &mut retired).await {
+                                break;
+                            }
                         }
                         Err(_) => break,
                     }

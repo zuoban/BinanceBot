@@ -8,5 +8,5 @@ pub mod runtime;
 pub mod server;
 pub mod snapshots;
 pub mod strategy;
-pub mod telegram;
+pub(crate) mod telegram;
 pub mod types;

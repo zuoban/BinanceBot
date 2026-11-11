@@ -11,6 +11,23 @@ const MAX_GLOBAL_LOGIN_ATTEMPTS: usize = 100;
 const MAX_LOGIN_SOURCES: usize = 10_000;
 const MAX_SOURCE_LOGIN_ATTEMPTS: usize = 10;
 
+const MAX_COLD_SESSION_LOOKUPS: usize = 16;
+
+#[derive(Debug)]
+pub(crate) enum SessionCheckError {
+    Busy,
+    Database(anyhow::Error),
+}
+
+impl std::fmt::Display for SessionCheckError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Busy => f.write_str("session validation saturated"),
+            Self::Database(error) => std::fmt::Display::fmt(error, f),
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct LoginAttempts {
     pub(super) by_source: HashMap<IpAddr, VecDeque<Instant>>,
@@ -24,6 +41,7 @@ pub(crate) struct AuthContext {
     pub(crate) db: Arc<Database>,
     pub(crate) login_failures: Mutex<LoginAttempts>,
     auth_work: Arc<Semaphore>,
+    session_lookup_permits: Arc<Semaphore>,
     admin_auth: Option<Arc<crate::auth::AdminAuth>>,
 }
 
@@ -36,6 +54,7 @@ impl AuthContext {
             db,
             login_failures: Mutex::new(LoginAttempts::default()),
             auth_work: Arc::new(Semaphore::new(4)),
+            session_lookup_permits: Arc::new(Semaphore::new(MAX_COLD_SESSION_LOOKUPS)),
             admin_auth,
         })
     }
@@ -48,20 +67,33 @@ impl AuthContext {
         self.admin_auth.is_some()
     }
 
-    pub(crate) async fn check_token_valid(&self, token: &str) -> anyhow::Result<bool> {
+    pub(crate) async fn check_session_in_db(&self, token: &str) -> Result<bool, SessionCheckError> {
+        let permit = self
+            .session_lookup_permits
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| SessionCheckError::Busy)?;
+        let token = token.to_string();
+        self.db
+            .run_blocking(move |db| {
+                let _permit = permit;
+                db.is_session_valid(&token)
+            })
+            .await
+            .map_err(SessionCheckError::Database)
+    }
+
+    pub(crate) async fn check_token_valid(&self, token: &str) -> Result<bool, SessionCheckError> {
         if !self.is_auth_configured() {
             return Ok(true);
         }
-        if token.is_empty() {
+        if token.is_empty() || token.len() > 128 || !token.bytes().all(|b| b.is_ascii_graphic()) {
             return Ok(false);
         }
         if self.db.session_recently_validated(token) {
             return Ok(true);
         }
-        let token = token.to_string();
-        self.db
-            .run_blocking(move |db| db.is_session_valid(&token))
-            .await
+        self.check_session_in_db(token).await
     }
 
     pub(crate) async fn is_token_valid(&self, token: &str) -> bool {
@@ -75,11 +107,23 @@ impl AuthContext {
             .await
     }
 
-    pub(crate) async fn delete_session(&self, token: &str) -> anyhow::Result<()> {
+    pub(crate) async fn delete_session(&self, token: &str) -> Result<(), SessionCheckError> {
+        if !self.is_auth_configured() {
+            return Ok(());
+        }
+        let permit = self
+            .session_lookup_permits
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| SessionCheckError::Busy)?;
         let token = token.to_string();
         self.db
-            .run_blocking(move |db| db.delete_session(&token))
+            .run_blocking(move |db| {
+                let _permit = permit;
+                db.delete_session(&token)
+            })
             .await
+            .map_err(SessionCheckError::Database)
     }
 
     pub(crate) async fn begin_login_attempt(&self, source: IpAddr) -> bool {
@@ -115,13 +159,14 @@ impl AuthContext {
     pub(crate) fn try_begin_auth_work(&self) -> Option<OwnedSemaphorePermit> {
         self.auth_work.clone().try_acquire_owned().ok()
     }
+
+    #[cfg(test)]
+    pub(crate) fn try_acquire_session_lookup_permit(&self) -> Option<OwnedSemaphorePermit> {
+        self.session_lookup_permits.clone().try_acquire_owned().ok()
+    }
 }
 
 impl AppState {
-    pub async fn check_token_valid(&self, token: &str) -> anyhow::Result<bool> {
-        self.auth.check_token_valid(token).await
-    }
-
     pub async fn is_token_valid(&self, token: &str) -> bool {
         self.auth.is_token_valid(token).await
     }
@@ -130,27 +175,17 @@ impl AppState {
         self.auth.create_session(token).await
     }
 
-    pub async fn delete_session(&self, token: &str) -> anyhow::Result<()> {
-        self.auth.delete_session(token).await
-    }
-
-    pub async fn begin_login_attempt(&self, source: IpAddr) -> bool {
+    #[cfg(test)]
+    pub(crate) async fn begin_login_attempt(&self, source: IpAddr) -> bool {
         self.auth.begin_login_attempt(source).await
     }
 
-    pub async fn clear_login_attempts(&self, source: IpAddr) {
+    #[cfg(test)]
+    pub(crate) async fn clear_login_attempts(&self, source: IpAddr) {
         self.auth.clear_login_attempts(source).await
     }
 
     pub fn try_begin_auth_work(&self) -> Option<OwnedSemaphorePermit> {
         self.auth.try_begin_auth_work()
-    }
-
-    pub fn admin_auth(&self) -> Option<Arc<crate::auth::AdminAuth>> {
-        self.auth.admin_auth()
-    }
-
-    pub fn is_auth_configured(&self) -> bool {
-        self.auth.is_auth_configured()
     }
 }

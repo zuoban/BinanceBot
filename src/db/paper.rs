@@ -36,7 +36,9 @@ impl Contribution {
     }
 
     fn refresh(&mut self, position: &PositionInfo, account: &AccountInfo, committed: bool) {
-        self.wallet_delta = account.total_wallet_balance - PAPER_INITIAL_BALANCE;
+        self.wallet_delta = account
+            .total_wallet_balance
+            .saturating_sub(PAPER_INITIAL_BALANCE);
         self.unrealized_pnl = position.unrealized_pnl;
         self.position_margin = position.position_margin();
         self.size = position.size;
@@ -56,7 +58,10 @@ impl Contribution {
         // A snapshot captured before a newer transaction cannot roll its wallet
         // or holdings back after that transaction has published its contribution.
         (!self.committed
-            || (self.wallet_delta == account.total_wallet_balance - PAPER_INITIAL_BALANCE
+            || (self.wallet_delta
+                == account
+                    .total_wallet_balance
+                    .saturating_sub(PAPER_INITIAL_BALANCE)
                 && self.size == position.size
                 && self.entry_price == position.entry_price))
             && account.update_time >= self.update_time
@@ -73,7 +78,10 @@ impl Contribution {
                 .min(account.update_time)
         });
         self.asset == account.asset
-            && self.wallet_delta == account.total_wallet_balance - PAPER_INITIAL_BALANCE
+            && self.wallet_delta
+                == account
+                    .total_wallet_balance
+                    .saturating_sub(PAPER_INITIAL_BALANCE)
             && self.unrealized_pnl == position.unrealized_pnl
             && self.position_margin == position.position_margin()
             && self.size == position.size
@@ -88,15 +96,28 @@ struct AssetLedger {
     wallet_delta: Decimal,
     unrealized_pnl: Decimal,
     position_margin: Decimal,
+    saturated: bool,
     open_valuation_times: BTreeMap<DateTime<Utc>, usize>,
     latest_update: DateTime<Utc>,
 }
 
 impl AssetLedger {
     fn remove(&mut self, contribution: &Contribution) {
-        self.wallet_delta -= contribution.wallet_delta;
-        self.unrealized_pnl -= contribution.unrealized_pnl;
-        self.position_margin -= contribution.position_margin;
+        match (
+            self.wallet_delta.checked_sub(contribution.wallet_delta),
+            self.unrealized_pnl.checked_sub(contribution.unrealized_pnl),
+            self.position_margin
+                .checked_sub(contribution.position_margin),
+        ) {
+            (Some(wallet), Some(pnl), Some(margin)) if !self.saturated => {
+                self.wallet_delta = wallet;
+                self.unrealized_pnl = pnl;
+                self.position_margin = margin;
+            }
+            _ => {
+                self.saturated = true;
+            }
+        }
         if let Some(time) = contribution.open_valuation_time {
             if let Some(count) = self.open_valuation_times.get_mut(&time) {
                 *count = count.saturating_sub(1);
@@ -108,22 +129,68 @@ impl AssetLedger {
     }
 
     fn add(&mut self, contribution: &Contribution) {
-        self.wallet_delta += contribution.wallet_delta;
-        self.unrealized_pnl += contribution.unrealized_pnl;
-        self.position_margin += contribution.position_margin;
+        match (
+            self.wallet_delta.checked_add(contribution.wallet_delta),
+            self.unrealized_pnl.checked_add(contribution.unrealized_pnl),
+            self.position_margin
+                .checked_add(contribution.position_margin),
+        ) {
+            (Some(wallet), Some(pnl), Some(margin)) if !self.saturated => {
+                self.wallet_delta = wallet;
+                self.unrealized_pnl = pnl;
+                self.position_margin = margin;
+            }
+            _ => {
+                self.saturated = true;
+            }
+        }
         if let Some(time) = contribution.open_valuation_time {
             *self.open_valuation_times.entry(time).or_default() += 1;
         }
         self.latest_update = self.latest_update.max(contribution.update_time);
     }
 
+    fn recompute<'a>(&mut self, contributions: impl Iterator<Item = &'a Contribution>) {
+        let mut wallet = Decimal::ZERO;
+        let mut pnl = Decimal::ZERO;
+        let mut margin = Decimal::ZERO;
+        let mut saturated = false;
+        for item in contributions {
+            match wallet.checked_add(item.wallet_delta) {
+                Some(next) => wallet = next,
+                None => {
+                    wallet = wallet.saturating_add(item.wallet_delta);
+                    saturated = true;
+                }
+            }
+            match pnl.checked_add(item.unrealized_pnl) {
+                Some(next) => pnl = next,
+                None => {
+                    pnl = pnl.saturating_add(item.unrealized_pnl);
+                    saturated = true;
+                }
+            }
+            match margin.checked_add(item.position_margin) {
+                Some(next) => margin = next,
+                None => {
+                    margin = margin.saturating_add(item.position_margin);
+                    saturated = true;
+                }
+            }
+        }
+        self.wallet_delta = wallet;
+        self.unrealized_pnl = pnl;
+        self.position_margin = margin;
+        self.saturated = saturated;
+    }
+
     fn account(&self, asset: &str) -> AccountInfo {
-        let total_wallet_balance = PAPER_INITIAL_BALANCE + self.wallet_delta;
-        let margin_balance = total_wallet_balance + self.unrealized_pnl;
+        let total_wallet_balance = PAPER_INITIAL_BALANCE.saturating_add(self.wallet_delta);
+        let margin_balance = total_wallet_balance.saturating_add(self.unrealized_pnl);
         AccountInfo {
             asset: asset.to_owned(),
             total_wallet_balance,
-            available_balance: margin_balance - self.position_margin,
+            available_balance: margin_balance.saturating_sub(self.position_margin),
             margin_balance,
             unrealized_profit: self.unrealized_pnl,
             update_time: self
@@ -257,11 +324,15 @@ impl PaperLedger {
             );
         }
         self.publish(symbol, position, account, false);
-        Ok(self
-            .assets
-            .entry(account.asset.clone())
-            .or_default()
-            .account(&account.asset))
+        let totals = self.assets.entry(account.asset.clone()).or_default();
+        if totals.saturated {
+            totals.recompute(
+                self.symbols
+                    .values()
+                    .filter(|item| item.asset == account.asset),
+            );
+        }
+        Ok(totals.account(&account.asset))
     }
 }
 

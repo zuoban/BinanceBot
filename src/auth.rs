@@ -38,7 +38,7 @@ impl AdminAuth {
     }
 }
 
-pub fn hash_password_argon2(password: &str) -> anyhow::Result<String> {
+fn hash_password_argon2(password: &str) -> anyhow::Result<String> {
     let salt = SaltString::generate(&mut OsRng);
     Argon2::default()
         .hash_password(password.as_bytes(), &salt)
@@ -46,7 +46,7 @@ pub fn hash_password_argon2(password: &str) -> anyhow::Result<String> {
         .map_err(|error| anyhow::anyhow!("Could not hash admin password: {}", error))
 }
 
-pub fn verify_password_argon2(password: &str, stored_hash: &str) -> bool {
+fn verify_password_argon2(password: &str, stored_hash: &str) -> bool {
     if password.len() > MAX_ADMIN_PASSWORD_BYTES {
         return false;
     }
@@ -58,9 +58,9 @@ pub fn verify_password_argon2(password: &str, stored_hash: &str) -> bool {
 }
 
 /// Generates a secure random 32-byte hex session token (64 hex characters).
-pub fn generate_session_token() -> String {
+pub(crate) fn generate_session_token() -> String {
     let mut bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    OsRng.fill_bytes(&mut bytes);
     hex::encode(bytes)
 }
 

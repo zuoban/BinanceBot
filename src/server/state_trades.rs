@@ -190,17 +190,24 @@ impl AppState {
         {
             let _commit = self.trade_commit_lock.lock().await;
             let mut updated = self.stats.read().await.clone();
-            updated.total_trades += 1;
-            updated.total_volume_usdc += trade.amount_usdc;
+            updated.total_trades = updated.total_trades.saturating_add(1);
+            updated.total_volume_usdc = updated
+                .total_volume_usdc
+                .checked_add(trade.amount_usdc)
+                .unwrap_or(Decimal::MAX);
             if let Some(profit) = cycle_profit {
-                updated.completed_cycles += 1;
-                updated.total_realized_profit += profit;
+                updated.completed_cycles = updated.completed_cycles.saturating_add(1);
+                updated.total_realized_profit =
+                    updated.total_realized_profit.saturating_add(profit);
             }
             if trade.pnl_verified {
-                updated.total_realized_pnl += trade.realized_pnl;
-                updated.total_commission += trade.commission;
+                updated.total_realized_pnl = updated
+                    .total_realized_pnl
+                    .saturating_add(trade.realized_pnl);
+                updated.total_commission =
+                    updated.total_commission.saturating_add(trade.commission);
             } else {
-                updated.pending_pnl_trades += 1;
+                updated.pending_pnl_trades = updated.pending_pnl_trades.saturating_add(1);
             }
             let stored_trade = trade.clone();
             let stored_stats = updated.clone();
@@ -398,8 +405,8 @@ impl AppState {
         drop(config);
         if trade.symbol == current_symbol && trade.mode == current_mode {
             let mut stats = self.stats.write().await;
-            stats.total_realized_pnl += trade.realized_pnl;
-            stats.total_commission += trade.commission;
+            stats.total_realized_pnl = stats.total_realized_pnl.saturating_add(trade.realized_pnl);
+            stats.total_commission = stats.total_commission.saturating_add(trade.commission);
             stats.pending_pnl_trades = stats.pending_pnl_trades.saturating_sub(1);
         }
         let mut recent = self.recent_trades.write().await;

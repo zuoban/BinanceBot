@@ -44,12 +44,16 @@ fn new_grid_client_order_id(side: OrderSide) -> String {
     id
 }
 
+#[path = "config_transition.rs"]
+mod config_transition;
 #[path = "conflict_resolution.rs"]
 mod conflict_resolution;
 #[path = "evidence.rs"]
 mod evidence;
 #[path = "market_feed.rs"]
 mod market_feed;
+#[path = "order_cancel.rs"]
+mod order_cancel;
 #[path = "order_ops.rs"]
 mod order_ops;
 #[path = "pair_intents.rs"]
@@ -60,22 +64,29 @@ mod pnl_reconcile;
 mod reconciliation;
 #[path = "remainder.rs"]
 mod remainder;
+#[path = "risk_guards.rs"]
+mod risk_guards;
 #[path = "window.rs"]
 mod window;
 
 use evidence::OrderEvidenceBook;
 use market_feed::{market_completion, MarkPriceCompletion, MarketRetry, TickerCompletion};
 use pnl_reconcile::exchange_fill_time;
+use risk_guards::opening_exposure_usdc;
 use window::{LastFillSnapshot, PaperWindowCache};
 
 #[cfg(test)]
 use pair_intents::{new_pair_intent, paired_grid_client_order_id, PairPlacementDecision};
 #[cfg(test)]
 use pnl_reconcile::aggregate_execution_pnl;
+#[cfg(test)]
+use risk_guards::{buy_exposure_usdc, liquidation_too_close};
 
 const GRID_ORDER_PREFIX: &str = "gb_";
 
 const LIVE_SYNC_FRESHNESS: Duration = Duration::from_secs(10);
+const PERIODIC_TIME_SYNC_INTERVAL: Duration = Duration::from_secs(30 * 60);
+const TIME_SYNC_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 fn is_grid_order(client_order_id: &str) -> bool {
     client_order_id.starts_with(GRID_ORDER_PREFIX)
 }
@@ -87,25 +98,6 @@ fn unresolved_filled_quantity(order: &BinanceOrderResponse) -> bool {
 /// All idle orders follow the window. Partial executions finish on their existing order.
 fn is_window_order(order: &GridOrder) -> bool {
     is_grid_order(&order.client_order_id) && order.status == OrderStatus::New
-}
-
-fn opening_exposure_usdc<'a>(
-    direction: GridDirection,
-    position_size: Decimal,
-    mark_price: Decimal,
-    orders: impl IntoIterator<Item = &'a GridOrder>,
-) -> Decimal {
-    direction.position_quantity(position_size) * mark_price
-        + orders
-            .into_iter()
-            .filter(|order| order.side == direction.opening_side())
-            .map(|order| order.price * order.quantity)
-            .sum::<Decimal>()
-}
-
-#[cfg(test)]
-fn buy_exposure_usdc(position_size: Decimal, mark_price: Decimal, orders: &[GridOrder]) -> Decimal {
-    opening_exposure_usdc(GridDirection::Long, position_size, mark_price, orders)
 }
 
 // Paper accounts have no exchange-provided leverage until one is explicitly set.
@@ -122,39 +114,27 @@ fn update_paper_account(
     position.unrealized_pnl = if position.size.is_zero() || position.mark_price <= Decimal::ZERO {
         Decimal::ZERO
     } else {
-        (position.mark_price - position.entry_price) * position.size
+        let diff = position.mark_price.saturating_sub(position.entry_price);
+        diff.checked_mul(position.size).unwrap_or_else(|| {
+            if diff.is_sign_negative() == position.size.is_sign_negative() {
+                Decimal::MAX
+            } else {
+                Decimal::MIN
+            }
+        })
     };
     account.unrealized_profit = position.unrealized_pnl;
-    account.margin_balance = account.total_wallet_balance + position.unrealized_pnl;
-    account.available_balance = account.margin_balance - position.position_margin();
+    account.margin_balance = account
+        .total_wallet_balance
+        .saturating_add(position.unrealized_pnl);
+    account.available_balance = account
+        .margin_balance
+        .saturating_sub(position.position_margin());
     account.update_time = if ticker.mark_price > Decimal::ZERO {
         ticker.mark_update_time
     } else {
         ticker.update_time
     };
-}
-
-/// Distance from `mark` to `liquidation` as a percentage of `mark`, only on the losing side of
-/// the position (below mark for longs, above for shorts). Binance reports 0 when no liquidation
-/// price applies, which never counts as close.
-fn liquidation_too_close(
-    size: Decimal,
-    mark: Decimal,
-    liquidation: Decimal,
-    threshold_pct: Option<Decimal>,
-) -> bool {
-    let Some(threshold) = threshold_pct else {
-        return false;
-    };
-    if size.is_zero() || mark <= Decimal::ZERO || liquidation <= Decimal::ZERO {
-        return false;
-    }
-    let gap = if size > Decimal::ZERO {
-        mark - liquidation
-    } else {
-        liquidation - mark
-    };
-    gap * Decimal::ONE_HUNDRED <= threshold * mark
 }
 
 fn has_nearby_grid_order(
@@ -164,7 +144,11 @@ fn has_nearby_grid_order(
     tick_size: Decimal,
 ) -> bool {
     let spacing = grid_interval.max(tick_size);
-    prices.iter().any(|&price| (price - target).abs() < spacing)
+    prices.iter().any(|&price| {
+        price
+            .checked_sub(target)
+            .is_some_and(|diff| diff.abs() < spacing)
+    })
 }
 
 /// Same-side active orders reserve their current price level.
@@ -176,9 +160,13 @@ fn grid_level_occupied<'a>(
     tick_size: Decimal,
 ) -> bool {
     let spacing = interval.max(tick_size);
-    orders
-        .into_iter()
-        .any(|order| order.side == side && (order.price - price).abs() < spacing)
+    orders.into_iter().any(|order| {
+        order.side == side
+            && order
+                .price
+                .checked_sub(price)
+                .is_some_and(|diff| diff.abs() < spacing)
+    })
 }
 
 fn reserved_closing_quantity<'a>(
@@ -188,8 +176,9 @@ fn reserved_closing_quantity<'a>(
     orders
         .into_iter()
         .filter(|o| o.side == direction.closing_side())
-        .map(|o| o.quantity)
-        .sum()
+        .fold(Decimal::ZERO, |acc, o| {
+            acc.checked_add(o.quantity).unwrap_or(Decimal::MAX)
+        })
 }
 
 fn closing_quantity_available<'a>(
@@ -197,7 +186,10 @@ fn closing_quantity_available<'a>(
     position_size: Decimal,
     orders: impl IntoIterator<Item = &'a GridOrder>,
 ) -> Decimal {
-    (direction.position_quantity(position_size) - reserved_closing_quantity(direction, orders))
+    direction
+        .position_quantity(position_size)
+        .checked_sub(reserved_closing_quantity(direction, orders))
+        .unwrap_or(Decimal::ZERO)
         .max(Decimal::ZERO)
 }
 
@@ -220,18 +212,6 @@ fn build_sync_timer(sync_secs: u64) -> tokio::time::Interval {
     timer
 }
 
-struct ConfigScopeReset<'a> {
-    new_config: &'a crate::config::AppConfig,
-    new_client: Arc<BinanceFuturesClient>,
-    new_rules: SymbolRules,
-    new_price: Option<Decimal>,
-    paper_state: Option<(PositionInfo, AccountInfo)>,
-    market_changed: bool,
-    mode_changed: bool,
-    client_changed: bool,
-    fetch_rules: bool,
-}
-
 pub struct GridTradingEngine {
     state: Arc<AppState>,
     client: Arc<BinanceFuturesClient>,
@@ -247,6 +227,7 @@ pub struct GridTradingEngine {
     pnl_clear_revision: u64,
     last_account_sync: Option<Instant>,
     last_orders_sync: Option<Instant>,
+    next_time_sync_at: Instant,
     mark_retry: MarketRetry,
     ticker_retry: MarketRetry,
     market_request_generation: u64,
@@ -314,6 +295,7 @@ impl GridTradingEngine {
             pnl_clear_revision: 0,
             last_account_sync: None,
             last_orders_sync: None,
+            next_time_sync_at: Instant::now() + PERIODIC_TIME_SYNC_INTERVAL,
             mark_retry: MarketRetry::default(),
             ticker_retry: MarketRetry::default(),
             market_request_generation: 0,
@@ -342,234 +324,24 @@ impl GridTradingEngine {
         self.last_account_sync.is_some()
     }
 
-    fn mark_price_is_fresh(ticker: &TickerInfo) -> bool {
-        ticker.mark_price_is_fresh(Utc::now())
-    }
-
-    fn position_mark_is_fresh(
-        &self,
-        config: &crate::config::AppConfig,
-        position: &PositionInfo,
-    ) -> bool {
-        let max_age = max_reconciliation_age_secs(config.exchange.sync_interval_secs);
-        position.mark_price > Decimal::ZERO
-            && position
-                .update_time
-                .is_some_and(|time| is_timestamp_fresh(time, Utc::now(), max_age))
-    }
-
-    fn position_valuation_price(
-        &self,
-        config: &crate::config::AppConfig,
-        position: &PositionInfo,
-        ticker: &TickerInfo,
-    ) -> Decimal {
-        position.valuation_price_with_freshness(
-            ticker,
-            Self::mark_price_is_fresh(ticker),
-            self.position_mark_is_fresh(config, position),
-        )
-    }
-
-    pub fn set_market_stream_tx(&mut self, tx: watch::Sender<String>) {
+    pub(crate) fn set_market_stream_tx(&mut self, tx: watch::Sender<String>) {
         self.market_stream_tx = Some(tx);
     }
 
-    async fn pause_trading(&self) {
+    pub(super) async fn pause_trading(&self) {
         if let Err(error) = self.state.pause_trading().await {
             error!("Could not persist paused bot status: {}", error);
         }
     }
 
-    /// Check filled position value independently of opening-order reservations.
-    async fn pause_if_position_limit_reached(&mut self) -> bool {
-        if let Some(global) = self.state.global_limit() {
-            if self
-                .state
-                .config
-                .read()
-                .await
-                .global_max_position_notional
-                .is_some()
-                && !global
-                    .membership_ready
-                    .load(std::sync::atomic::Ordering::SeqCst)
-            {
-                return true;
-            }
-            if global.check().await {
-                return true;
-            }
-        }
-        if *self.state.status.read().await != BotStatus::Running {
-            return false;
-        }
-        let config = self.state.config.read().await;
-        if !config.grid.pause_on_max_position {
-            return false;
-        }
-        let Some(limit) = config
-            .grid
-            .max_position_usdc
-            .filter(|limit| *limit > Decimal::ZERO)
-        else {
-            return false;
-        };
-        let position = self.state.position.read().await;
-        let ticker = self.state.ticker.read().await;
-        let valuation_price = self.position_valuation_price(&config, &position, &ticker);
-        let position_value = position.size.abs() * valuation_price;
-        drop(ticker);
-        drop(position);
-        drop(config);
-        if valuation_price <= Decimal::ZERO || position_value < limit {
-            return false;
-        }
-
-        self.pause_for_position_limit(format!(
-            "持仓名义价值 {} 已达到最大持仓名义价值 {}",
-            position_value, limit
-        ))
-        .await;
-        true
-    }
-
-    /// True while opening must be suspended without pausing the strategy: the filled position
-    /// value is at the cap in cancel-opening mode, or the mark price is within the configured
-    /// distance of the liquidation price.
-    async fn opening_suspended_at_limit(&self, config: &crate::config::AppConfig) -> bool {
-        let cap = config.grid.max_position_usdc.filter(|limit| {
-            *limit > Decimal::ZERO
-                && config.grid.cancel_opening_on_max_position
-                && !config.grid.pause_on_max_position
-        });
-        if cap.is_none() && config.grid.min_liquidation_distance_pct.is_none() {
-            return false;
-        }
-        let position = self.state.position.read().await;
-        let size = position.size;
-        let liquidation_price = position.liquidation_price;
-        let liquidation_guard =
-            config.grid.min_liquidation_distance_pct.is_some() && liquidation_price > Decimal::ZERO;
-        if size.is_zero() || (cap.is_none() && !liquidation_guard) {
-            return false;
-        }
-        let ticker = self.state.ticker.read().await;
-        // Market marks follow the existing 15-second market-data freshness limit.
-        // Position marks follow the account reconciliation freshness allowance.
-        let price = if Self::mark_price_is_fresh(&ticker) {
-            ticker.mark_price
-        } else if self.position_mark_is_fresh(config, &position) {
-            position.mark_price
-        } else {
-            // Last trades cannot establish liquidation distance. Keep openings
-            // suspended until a fresh mark can establish that protection is safe.
-            return true;
-        };
-        drop(ticker);
-        drop(position);
-        if cap.is_some_and(|limit| size.abs() * price >= limit) {
-            return true;
-        }
-        liquidation_too_close(
-            size,
-            price,
-            liquidation_price,
-            config.grid.min_liquidation_distance_pct,
-        )
-    }
-
-    /// Cancel only idle opening orders; partial executions retain their existing protection.
-    /// Keep this outside fill recording so cancellation cannot recurse through another fill.
-    async fn cancel_suspended_opening_orders(&mut self, config: &crate::config::AppConfig) -> bool {
-        if self.state.is_shutting_down() || *self.state.status.read().await != BotStatus::Running {
-            return true;
-        }
-        if !self.opening_suspended_at_limit(config).await {
-            return true;
-        }
-        let mut openings: Vec<_> = self
-            .state
-            .active_orders
-            .read()
-            .await
-            .values()
-            .filter(|order| {
-                order.side == config.grid.direction.opening_side() && is_window_order(order)
-            })
-            .cloned()
-            .collect();
-        openings.sort_by(|a, b| a.client_order_id.cmp(&b.client_order_id));
-        let mut canceled = true;
-        for order in openings {
-            if *self.state.status.read().await != BotStatus::Running {
-                return false;
-            }
-            canceled &= self.cancel_single_order(&order).await;
-        }
-        canceled
-    }
-
-    async fn protect_openings_and_check_limits(
-        &mut self,
-        config: &crate::config::AppConfig,
-    ) -> bool {
-        let protected = self.cancel_suspended_opening_orders(config).await;
-        let paused = self.pause_if_position_limit_reached().await;
-        protected && !paused
-    }
-
-    async fn pause_for_position_limit(&mut self, reason: String) {
-        // Pause before canceling so cancellation cannot restore Running or replenish orders.
-        self.pause_trading().await;
-        self.state
-            .add_log("WARN", format!("{}，策略已暂停，需手动恢复", reason))
-            .await;
-        if !self.cancel_all_orders().await {
-            self.state
-                .add_log(
-                    "ERROR",
-                    "策略已暂停，但部分策略挂单可能尚未撤销，请检查交易所挂单",
-                )
-                .await;
-        }
-    }
-
-    async fn position_direction_ready(&mut self) -> bool {
-        let direction = self.state.config.read().await.grid.direction;
-        if self.state.position.read().await.size * direction.sign() >= Decimal::ZERO {
-            return true;
-        }
-        self.pause_trading().await;
-        self.state
-            .add_log("ERROR", "持仓方向与策略方向不一致，策略已暂停")
-            .await;
-        self.cancel_all_orders().await;
-        false
-    }
-
-    async fn ensure_flat_for_direction_change(&mut self, direction: GridDirection) -> Result<()> {
-        if !self.state.config.read().await.exchange.is_paper() {
-            anyhow::ensure!(
-                self.sync_account_and_position().await,
-                "无法确认当前持仓，交易方向未切换"
-            );
-        }
-        anyhow::ensure!(
-            self.state.position.read().await.size * direction.sign() >= Decimal::ZERO,
-            "切换做多 / 做空方向前，请先平掉当前持仓"
-        );
-        Ok(())
-    }
-
-    async fn set_global_reconciliation_ready(&self, ready: bool) {
+    pub(super) async fn set_global_reconciliation_ready(&self, ready: bool) {
         self.state
             .global_position_ready
             .store(ready, std::sync::atomic::Ordering::SeqCst);
         self.state.check_global_position_limit().await;
     }
 
-    async fn report_reconciliation_state(&mut self, blocked: bool) {
+    pub(super) async fn report_reconciliation_state(&mut self, blocked: bool) {
         if blocked {
             self.set_global_reconciliation_ready(false).await;
         }
@@ -592,7 +364,7 @@ impl GridTradingEngine {
     }
 
     /// Initialize exchange connection, sync server time, and load symbol rules
-    pub async fn initialize(&mut self) -> Result<()> {
+    pub(crate) async fn initialize(&mut self) -> Result<()> {
         let config = self.state.config.read().await.clone();
         let symbol = config.exchange.symbol.clone();
 
@@ -621,8 +393,12 @@ impl GridTradingEngine {
         }
 
         // Synchronize server time
-        if let Err(e) = self.client.sync_server_time().await {
-            warn!("Failed to synchronize Binance server time: {}", e);
+        match self.client.sync_server_time().await {
+            Ok(_) => self.next_time_sync_at = Instant::now() + PERIODIC_TIME_SYNC_INTERVAL,
+            Err(e) => {
+                warn!("Failed to synchronize Binance server time: {}", e);
+                self.next_time_sync_at = Instant::now() + TIME_SYNC_RETRY_INTERVAL;
+            }
         }
 
         // Fetch symbol rules from exchangeInfo
@@ -706,37 +482,8 @@ impl GridTradingEngine {
         Ok(())
     }
 
-    async fn fetch_symbol_rules_with_client(
-        client: &BinanceFuturesClient,
-        symbol: &str,
-    ) -> Result<SymbolRules> {
-        let info = client.get_exchange_info(Some(symbol)).await?;
-        SymbolRules::from_trading_exchange_info(&info, symbol)
-            .map_err(|error| error.into_chinese_error(symbol))
-    }
-
-    async fn load_exchange_rules(&mut self, symbol: &str) -> Result<()> {
-        let rules = Self::fetch_symbol_rules_with_client(&self.client, symbol).await?;
-        info!(
-            "Loaded Binance exchange rules for {}: tick_size={}, step_size={}, min_notional={}",
-            symbol, rules.tick_size, rules.step_size, rules.min_notional
-        );
-        self.state
-            .add_log(
-                "INFO",
-                format!(
-                    "Loaded Binance exchange rules for {}: tick_size={}, step_size={}",
-                    symbol, rules.tick_size, rules.step_size
-                ),
-            )
-            .await;
-        *self.state.rules.write().await = rules;
-        self.exchange_rules_loaded = true;
-        Ok(())
-    }
-
     /// Clear recovered live orders before processing controls queued during initialization.
-    pub async fn reconcile_initial_pause(&mut self) {
+    pub(crate) async fn reconcile_initial_pause(&mut self) {
         let live = !self.state.config.read().await.exchange.is_paper();
         let paused = *self.state.status.read().await == BotStatus::Paused;
         if live && paused && !self.state.is_shutting_down() && !self.cancel_all_orders().await {
@@ -750,7 +497,7 @@ impl GridTradingEngine {
     }
 
     /// Primary execution loop
-    pub async fn run(&mut self) {
+    pub(crate) async fn run(&mut self) {
         let mut sync_secs = self
             .state
             .config
@@ -993,22 +740,8 @@ impl GridTradingEngine {
         self.sync_cycle(false).await;
     }
 
-    async fn apply_and_reply_config(
-        &mut self,
-        config: crate::config::AppConfig,
-        log_prefix: &str,
-        reply: tokio::sync::oneshot::Sender<std::result::Result<(), String>>,
-    ) {
-        let result = self.apply_config(config).await;
-        if let Err(error) = &result {
-            self.state
-                .add_log("ERROR", format!("{}: {}", log_prefix, error))
-                .await;
-        }
-        let _ = reply.send(result.map_err(|error| error.to_string()));
-    }
-
-    pub async fn shutdown(&mut self) -> Result<()> {
+    #[cfg(test)]
+    pub(crate) async fn shutdown(&mut self) -> Result<()> {
         self.shutdown_inner(false).await
     }
 
@@ -1082,294 +815,6 @@ impl GridTradingEngine {
         Ok(())
     }
 
-    async fn load_target_paper_state(
-        &self,
-        new_config: &crate::config::AppConfig,
-        direction_changed: bool,
-    ) -> Result<Option<(PositionInfo, AccountInfo)>> {
-        let symbol = new_config.exchange.symbol.clone();
-        let state = self
-            .state
-            .db
-            .run_blocking(move |db| db.load_paper_state(&symbol))
-            .await?;
-        anyhow::ensure!(
-            !direction_changed
-                || state.as_ref().is_none_or(|(position, _)| {
-                    position.size * new_config.grid.direction.sign() >= Decimal::ZERO
-                }),
-            "切换做多 / 做空方向前，请先平掉目标账户的持仓"
-        );
-        Ok(state)
-    }
-
-    async fn apply_config(&mut self, new_config: crate::config::AppConfig) -> Result<()> {
-        new_config.validate()?;
-        self.retire_market_requests();
-        if let Some(symbol) = self.state.pair_scope() {
-            anyhow::ensure!(
-                symbol == new_config.exchange.symbol,
-                "交易对不能直接重命名，请在页面中添加新交易对"
-            );
-        }
-        let old_config = self.state.config.read().await.clone();
-        let direction_changed = old_config.grid.direction != new_config.grid.direction;
-        if direction_changed {
-            self.ensure_flat_for_direction_change(new_config.grid.direction)
-                .await?;
-        }
-        let strategy_changed =
-            old_config.exchange != new_config.exchange || old_config.grid != new_config.grid;
-        let mut resized_grid = old_config.grid.clone();
-        resized_grid.buy_window = new_config.grid.buy_window;
-        resized_grid.sell_window = new_config.grid.sell_window;
-        let only_window_changed =
-            old_config.exchange == new_config.exchange && resized_grid == new_config.grid;
-        let market_changed = old_config.exchange.symbol != new_config.exchange.symbol;
-        let mode_changed = old_config.exchange.trading_mode() != new_config.exchange.trading_mode();
-        let client_changed = old_config.exchange.api_key != new_config.exchange.api_key
-            || old_config.exchange.api_secret != new_config.exchange.api_secret
-            || old_config.exchange.recv_window != new_config.exchange.recv_window;
-
-        if !strategy_changed {
-            let saved = new_config.clone();
-            self.state.save_runtime_config(saved).await?;
-            self.state
-                .add_log("SUCCESS", "Notification configuration updated")
-                .await;
-            return Ok(());
-        }
-        let mut paper_state = if new_config.exchange.is_paper() && (market_changed || mode_changed)
-        {
-            self.load_target_paper_state(&new_config, direction_changed)
-                .await?
-        } else {
-            None
-        };
-
-        let new_client = if client_changed {
-            Arc::new(self.client.reconfig(&new_config.exchange))
-        } else {
-            Arc::clone(&self.client)
-        };
-        if !new_config.exchange.is_paper() {
-            Self::validate_live_config_target(&new_client, &new_config, direction_changed).await?;
-        }
-
-        let fetch_rules = market_changed
-            || mode_changed
-            || (!new_config.exchange.is_paper() && !self.exchange_rules_loaded);
-        let new_rules = if fetch_rules {
-            Self::fetch_symbol_rules_with_client(&new_client, &new_config.exchange.symbol).await?
-        } else {
-            self.state.rules.read().await.clone()
-        };
-        new_rules.validate_grid_interval(new_config.grid.grid_interval)?;
-        let new_price = if market_changed || mode_changed {
-            let price = new_client
-                .get_ticker_price(&new_config.exchange.symbol)
-                .await?;
-            if price <= Decimal::ZERO {
-                return Err(anyhow!(
-                    "Invalid market price for {}",
-                    new_config.exchange.symbol
-                ));
-            }
-            Some(price)
-        } else {
-            None
-        };
-
-        // Resizing uses ordinary window pruning so existing exits keep their
-        // prices and queue priority. Other changes still cancel in the old scope.
-        if !only_window_changed && !self.cancel_all_orders().await {
-            return Err(anyhow!(
-                "Could not cancel old managed orders; configuration unchanged"
-            ));
-        }
-        // Cancellation may reveal a racing fill. Recheck the old account before
-        // committing the new direction so an exit cannot become an opening order.
-        if direction_changed {
-            if let Err(error) = self
-                .ensure_flat_for_direction_change(new_config.grid.direction)
-                .await
-            {
-                self.pause_trading().await;
-                return Err(error);
-            }
-        }
-        if new_config.exchange.is_paper() && (market_changed || mode_changed) {
-            paper_state = self
-                .load_target_paper_state(&new_config, direction_changed)
-                .await?;
-        }
-        // Snapshot readers must see the new config together with its matching runtime data.
-        let transition_state = Arc::clone(&self.state);
-        let scope_transition = transition_state.snapshot_scope_lock.write().await;
-        let saved = new_config.clone();
-        if let Err(error) = self.state.save_runtime_config(saved).await {
-            self.pause_trading().await;
-            return Err(error);
-        }
-
-        self.reset_runtime_scope_after_config_change(ConfigScopeReset {
-            new_config: &new_config,
-            new_client,
-            new_rules,
-            new_price,
-            paper_state,
-            market_changed,
-            mode_changed,
-            client_changed,
-            fetch_rules,
-        })
-        .await;
-        drop(scope_transition);
-
-        let ready = if new_config.exchange.is_paper() {
-            self.update_paper_valuation().await;
-            !self
-                .state
-                .paper_restore_failed
-                .load(std::sync::atomic::Ordering::SeqCst)
-        } else {
-            self.sync_live_orders().await && self.sync_account_and_position().await
-        };
-        // A dirty target scope is installed paused, but reconciliation can have
-        // recovered its live orders. Apply the same cancellation as startup.
-        let cancellation_complete = if (market_changed || mode_changed)
-            && !new_config.exchange.is_paper()
-            && *self.state.status.read().await == BotStatus::Paused
-        {
-            self.cancel_all_orders().await
-        } else {
-            true
-        };
-        if !cancellation_complete {
-            self.set_global_reconciliation_ready(false).await;
-            return Err(anyhow!(
-                "Configuration saved, but paused target order cancellation failed; bot paused"
-            ));
-        }
-        self.set_global_reconciliation_ready(ready).await;
-        if !ready {
-            self.pause_trading().await;
-            return Err(anyhow!(
-                "Configuration saved, but exchange reconciliation failed; bot paused"
-            ));
-        }
-        if *self.state.status.read().await == BotStatus::Running {
-            self.maintain_grid_window().await;
-        }
-        self.state
-            .add_log(
-                "SUCCESS",
-                format!(
-                    "Strategy configuration updated for {}",
-                    new_config.exchange.symbol
-                ),
-            )
-            .await;
-        Ok(())
-    }
-
-    async fn validate_live_config_target(
-        new_client: &BinanceFuturesClient,
-        new_config: &crate::config::AppConfig,
-        direction_changed: bool,
-    ) -> Result<()> {
-        new_client.sync_server_time().await?;
-        let new_position = new_client
-            .get_position(&new_config.exchange.symbol)
-            .await?
-            .ok_or_else(|| anyhow!("New symbol has no position information"))?;
-        anyhow::ensure!(
-            !direction_changed
-                || new_position.position_amt * new_config.grid.direction.sign() >= Decimal::ZERO,
-            "切换做多 / 做空方向前，请先平掉目标账户的持仓"
-        );
-        let account = new_client.get_account().await?;
-        if account
-            .margin_asset_for_symbol(&new_config.exchange.symbol)
-            .is_none()
-        {
-            return Err(anyhow!("New symbol has no matching margin asset"));
-        }
-        Ok(())
-    }
-
-    async fn reset_runtime_scope_after_config_change(&mut self, reset: ConfigScopeReset<'_>) {
-        let ConfigScopeReset {
-            new_config,
-            new_client,
-            new_rules,
-            new_price,
-            paper_state,
-            market_changed,
-            mode_changed,
-            client_changed,
-            fetch_rules,
-        } = reset;
-        self.client = new_client;
-        if market_changed || mode_changed || client_changed {
-            if let Some(task) = self.pnl_reconcile_task.take() {
-                task.abort();
-            }
-            self.pnl_order_ids.clear();
-            self.pnl_clear_revision = 0;
-            self.pnl_reconcile_offset = 0;
-            self.pnl_retry_at = None;
-            self.reconciliation_blocked = false;
-            self.market_data_blocked = false;
-            self.paper_window_cache = None;
-        }
-        if client_changed {
-            self.state.position.write().await.update_time = None;
-            self.state.account.write().await.update_time = chrono::DateTime::<Utc>::default();
-        }
-        if fetch_rules {
-            *self.state.rules.write().await = new_rules;
-            self.exchange_rules_loaded = true;
-        }
-        if market_changed || mode_changed {
-            self.mark_retry.reset();
-            self.ticker_retry.reset();
-            let mut ticker = TickerInfo {
-                symbol: new_config.exchange.symbol.clone(),
-                ..Default::default()
-            };
-            if let Some(price) = new_price {
-                ticker.last_price = price;
-                ticker.update_time = Utc::now();
-            }
-            *self.state.ticker.write().await = ticker;
-            *self.state.position.write().await = PositionInfo::default();
-            self.last_account_sync = None;
-            self.last_orders_sync = None;
-            if new_config.exchange.is_paper() {
-                if let Some((position, account)) = paper_state {
-                    *self.state.position.write().await = position;
-                    *self.state.account.write().await = account;
-                } else {
-                    *self.state.account.write().await =
-                        AccountInfo::initial_paper(&new_config.exchange.symbol, Some(Utc::now()));
-                }
-            } else {
-                *self.state.account.write().await = AccountInfo::default();
-            }
-            self.state
-                .paper_restore_failed
-                .store(false, std::sync::atomic::Ordering::SeqCst);
-            if let Some(tx) = &self.market_stream_tx {
-                let _ = tx.send(new_config.exchange.symbol.clone());
-            }
-            while let Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_)) =
-                self.ticker_rx.try_recv()
-            {}
-            self.state.refresh_current_scope().await;
-        }
-    }
-
     /// Periodic sync cycle
     async fn sync_cycle(&mut self, wait_for_market: bool) {
         let started = tracing::enabled!(tracing::Level::DEBUG).then(Instant::now);
@@ -1387,6 +832,16 @@ impl GridTradingEngine {
         let pause_epoch = self.state.pause_epoch();
         let config = self.state.config.read().await.clone();
         let paper = config.exchange.is_paper();
+
+        if Instant::now() >= self.next_time_sync_at {
+            match self.client.sync_server_time().await {
+                Ok(_) => self.next_time_sync_at = Instant::now() + PERIODIC_TIME_SYNC_INTERVAL,
+                Err(error) => {
+                    warn!("Periodic Binance server time sync failed: {}", error);
+                    self.next_time_sync_at = Instant::now() + TIME_SYNC_RETRY_INTERVAL;
+                }
+            }
+        }
 
         if wait_for_market {
             self.refresh_mark_price(&config.exchange.symbol).await;
@@ -1507,7 +962,7 @@ impl GridTradingEngine {
     }
 
     /// Fetch position and account balances from Binance in Live mode
-    async fn sync_account_and_position(&mut self) -> bool {
+    pub(super) async fn sync_account_and_position(&mut self) -> bool {
         self.sync_account_and_position_inner(false).await
     }
 

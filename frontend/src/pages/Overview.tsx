@@ -7,7 +7,8 @@ import { useUrlParams } from '../lib/urlState';
 import { AccountsContext } from '../lib/session';
 import { errorMessage } from '../lib/api';
 import { useAsyncLock, useMountedRef } from '../lib/asyncGuard';
-import { beijingDay, comparePositionAmount, groupTradePnl, modeLabel, positionGroups, SNAPSHOT_STALE_MS, todayPnlGroups, todayTradeCounts } from '../lib/format';
+import { beijingDay, modeLabel } from '../lib/format';
+import { comparePositionAmount, groupTradePnl, positionGroups, SNAPSHOT_STALE_MS, todayPnlGroups, todayTradeCounts } from '../lib/portfolio';
 import { ErrorNotice, FreshnessText, PageTitle, Pnl, SignalButton, SignalChip, type Signal } from '../components/Common';
 import { runBatchControls, useControls } from '../components/Controls';
 import type { Overview, Pair, Trade } from '../lib/types';
@@ -55,6 +56,7 @@ export default function OverviewPage() {
   const setStatusFilter = (value: typeof statusFilter) => updateFilters({ status: value });
   const [batchBusy, setBatchBusy] = useState(false);
   const [report, setReport] = useState<BatchReport | null>(null);
+  const batchId = useRef(0);
   const [tradesExpanded, setTradesExpanded] = useState(false);
   const compactFinance = Grid.useBreakpoint().md === false;
   const [financesExpanded, setFinancesExpanded] = useState(false);
@@ -112,7 +114,8 @@ export default function OverviewPage() {
       }
       const outcomes = await runBatchControls(selected, action, controls.run);
       if (!mounted.current) return;
-      if (outcomes.length) setReport({ action, total: selected.length, outcomes });
+      const id = ++batchId.current;
+      if (outcomes.length) setReport({ id, action, total: selected.length, outcomes });
       else { setReport(null); message.success(`已${action === 'pause' ? '暂停' : '恢复'} ${selected.length} 个策略`); }
     } catch (error) {
       if (mounted.current) message.error(`批量操作失败：${errorMessage(error)}`);
@@ -210,17 +213,23 @@ export default function OverviewPage() {
       {recentTrades.length > 5 && <div className="overview-trades-toggle"><Button type="text" aria-expanded={tradesExpanded} aria-controls="recent-trades-list" onClick={() => setTradesExpanded(value => !value)}>{tradesExpanded ? '收起' : '展开最近 20 条'}</Button></div>}
     </Card>
     <OverviewHistory />
-    <BatchResultDrawer report={report} busy={controls.busy} onClose={() => setReport(null)} onRetry={(pair, action) => void (async () => {
-      const result = await controls.run(pair, action);
-      if (!mounted.current || !result || result === 'not_submitted') return;
-      setReport(current => {
-        if (!current) return null;
-        const outcomes = result === 'confirmed'
-          ? current.outcomes.filter(item => item.pair.symbol !== pair.symbol)
-          : current.outcomes.map(item => item.pair.symbol === pair.symbol ? { ...item, result } : item);
-        return outcomes.length ? { ...current, outcomes } : null;
-      });
-    })()} />
+    <BatchResultDrawer report={report} busy={controls.busy} onClose={() => setReport(null)} onRetry={(pair, action) => {
+      if (!report) return;
+      const activeReportId = report.id;
+      const currentPair = pairs.find(p => p.symbol === pair.symbol);
+      if (!currentPair) return;
+      void (async () => {
+        const result = await controls.run(currentPair, action);
+        if (!mounted.current || !result || result === 'not_submitted') return;
+        setReport(current => {
+          if (!current || current.id !== activeReportId) return current;
+          const outcomes = result === 'confirmed'
+            ? current.outcomes.filter(item => item.pair.symbol !== currentPair.symbol)
+            : current.outcomes.map(item => item.pair.symbol === currentPair.symbol ? { ...item, pair: currentPair, result } : item);
+          return outcomes.length ? { ...current, outcomes } : null;
+        });
+      })();
+    }} />
     </>}
   </>;
 }

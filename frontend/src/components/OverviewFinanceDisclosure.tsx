@@ -1,6 +1,7 @@
 import { Card, Col, Row, Statistic } from 'antd';
 import { ArrowRightOutlined } from '@ant-design/icons';
-import { cnyText, compactNumber as number, ratioText, type AccountGroup, type PositionGroup } from '../lib/format';
+import { cnyText, compactNumber as number, ratioText } from '../lib/format';
+import type { AccountGroup, PositionGroup } from '../lib/portfolio';
 import { Pnl } from './Common';
 
 export function OverviewFinanceDisclosure({

@@ -1,4 +1,5 @@
-import { render, screen } from '@testing-library/react';
+/// <reference lib="es2024.promise" />
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeEach, expect, it, vi } from 'vitest';
@@ -38,4 +39,20 @@ it('enters the console without a password when none is configured', async () => 
   await userEvent.setup().click(screen.getByRole('button', { name: '进入控制台' }));
   expect(onLogin).toHaveBeenCalledOnce();
   expect(mocks.post).not.toHaveBeenCalled();
+});
+
+it('prevents duplicate login submissions while a request is already in flight', async () => {
+  const { promise, resolve } = Promise.withResolvers<{ token: string }>();
+  mocks.post.mockReturnValue(promise);
+  const onLogin = setup(true);
+  const user = userEvent.setup();
+  const input = await screen.findByLabelText('管理员密码');
+  await user.type(input, 'secret-password');
+  const form = input.closest('form')!;
+  fireEvent.submit(form);
+  fireEvent.submit(form);
+  await screen.findByRole('button', { name: /进入控制台/ });
+  await act(async () => { resolve({ token: 'new-token' }); });
+  expect(mocks.post).toHaveBeenCalledTimes(1);
+  expect(onLogin).toHaveBeenCalledTimes(1);
 });

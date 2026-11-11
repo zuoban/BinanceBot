@@ -190,7 +190,7 @@ impl GridOrder {
             side: OrderSide::from_exchange_str(&found.side).unwrap_or(OrderSide::Sell),
             price: found.price,
             quantity,
-            amount_usdc: found.price * quantity,
+            amount_usdc: found.price.checked_mul(quantity).unwrap_or(Decimal::MAX),
             status: found.open_order_status(),
             created_at: timestamp,
             updated_at: timestamp,
@@ -216,7 +216,10 @@ impl GridOrder {
         {
             self.price = price;
         }
-        self.amount_usdc = self.price * self.quantity;
+        self.amount_usdc = self
+            .price
+            .checked_mul(self.quantity)
+            .unwrap_or(Decimal::MAX);
     }
 
     pub(crate) fn matches_exchange_identity(
@@ -247,7 +250,10 @@ impl GridOrder {
 
     pub(crate) fn reserve_quantity(&mut self, min_quantity: Decimal) {
         self.quantity = self.quantity.max(min_quantity);
-        self.amount_usdc = self.price * self.quantity;
+        self.amount_usdc = self
+            .price
+            .checked_mul(self.quantity)
+            .unwrap_or(Decimal::MAX);
     }
 
     pub(crate) fn reserve_max(&mut self, min_price: Decimal, min_quantity: Decimal) {
@@ -357,7 +363,16 @@ impl PositionInfo {
         } else {
             self.entry_price
         };
-        self.size.abs() * valuation_price / Decimal::from(self.leverage.max(1))
+        let leverage = Decimal::from(self.leverage.max(1));
+        self.size
+            .abs()
+            .checked_mul(valuation_price)
+            .and_then(|notional| notional.checked_div(leverage))
+            .unwrap_or_else(|| {
+                (self.size.abs() / leverage)
+                    .checked_mul(valuation_price)
+                    .unwrap_or(Decimal::MAX)
+            })
     }
 
     /// Best-effort market valuation price using an optional ticker (`mark_price`,
@@ -667,91 +682,6 @@ pub struct BotSnapshot {
     pub recent_logs: Vec<LogEntry>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TradingPairView {
-    pub symbol: String,
-    /// True when this pair has a stable /api/pairs/{symbol} route.
-    pub scoped: bool,
-    pub status: BotStatus,
-    pub mode: TradingMode,
-    pub grid_config: crate::config::GridConfigSummary,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OverviewPairView {
-    pub scoped: bool,
-    pub mode: TradingMode,
-    pub snapshot: PairSummary,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PairSummary {
-    pub symbol: String,
-    pub status: BotStatus,
-    pub mode: TradingMode,
-    pub grid_config: crate::config::GridConfigSummary,
-    pub ticker: SummaryTicker,
-    pub position: SummaryPosition,
-    pub stats: SummaryStats,
-    pub today_trade_counts: Option<TodayTradeCounts>,
-    pub account: AccountInfo,
-    pub account_cny_rate: Option<crate::fx::CnyRate>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SummaryTicker {
-    pub mark_price: Decimal,
-    pub mark_update_time: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SummaryPosition {
-    pub size: Decimal,
-    pub entry_price: Decimal,
-    pub mark_price: Decimal,
-    pub unrealized_pnl: Decimal,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SummaryStats {
-    pub total_realized_pnl: Decimal,
-    pub active_buy_orders: usize,
-    pub active_sell_orders: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TodayTradeCounts {
-    pub window_start: DateTime<Utc>,
-    pub window_end: DateTime<Utc>,
-    pub buy: u64,
-    pub sell: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OverviewSnapshot {
-    pub generated_at: DateTime<Utc>,
-    /// Each account belongs to its pair snapshot and may represent the same wallet.
-    /// Consumers must not sum account balances across pairs.
-    pub pairs: Vec<OverviewPairView>,
-    pub today_pnl: Option<TodayPnl>,
-    pub recent_trades: Vec<TradeRecord>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TodayPnlGroup {
-    pub symbol: String,
-    pub mode: TradingMode,
-    pub realized_pnl: Decimal,
-    pub pending_pnl_count: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TodayPnl {
-    pub window_start: DateTime<Utc>,
-    pub window_end: DateTime<Utc>,
-    pub groups: Vec<TodayPnlGroup>,
-}
-
 #[derive(Debug)]
 pub enum BotControlAction {
     Pause,
@@ -784,362 +714,9 @@ pub enum BotControlAction {
     },
 }
 
-#[derive(Clone, Default, Deserialize, Serialize)]
-pub struct UpdateGlobalConfigPayload {
-    pub baseline_version: Option<String>,
-    pub recv_window: Option<u64>,
-    pub sync_interval_secs: Option<u64>,
-    pub api_key: Option<String>,
-    pub api_secret: Option<String>,
-    #[serde(default)]
-    pub clear_api_credentials: bool,
-    #[serde(default)]
-    pub clear_telegram_credentials: bool,
-    pub telegram_enabled: Option<bool>,
-    pub telegram_bot_token: Option<String>,
-    pub telegram_chat_id: Option<String>,
-    #[serde(
-        default,
-        deserialize_with = "deserialize_optional_decimal_update",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub global_max_position_notional: Option<Option<Decimal>>,
-    pub pause_on_zero_available_margin: Option<bool>,
-    #[serde(
-        default,
-        deserialize_with = "deserialize_optional_decimal_update",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub min_available_margin_pct: Option<Option<Decimal>>,
-}
-
-impl std::fmt::Debug for UpdateGlobalConfigPayload {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Self {
-            baseline_version,
-            recv_window,
-            sync_interval_secs,
-            api_key,
-            api_secret,
-            clear_api_credentials,
-            clear_telegram_credentials,
-            telegram_enabled,
-            telegram_bot_token,
-            telegram_chat_id,
-            global_max_position_notional,
-            pause_on_zero_available_margin,
-            min_available_margin_pct,
-        } = self;
-        f.debug_struct("UpdateGlobalConfigPayload")
-            .field("baseline_version", baseline_version)
-            .field("recv_window", recv_window)
-            .field("sync_interval_secs", sync_interval_secs)
-            .field("api_key", &crate::config::redact_optional_secret(api_key))
-            .field(
-                "api_secret",
-                &crate::config::redact_optional_secret(api_secret),
-            )
-            .field("clear_api_credentials", clear_api_credentials)
-            .field("clear_telegram_credentials", clear_telegram_credentials)
-            .field("telegram_enabled", telegram_enabled)
-            .field(
-                "telegram_bot_token",
-                &crate::config::redact_optional_secret(telegram_bot_token),
-            )
-            .field("telegram_chat_id", telegram_chat_id)
-            .field("global_max_position_notional", global_max_position_notional)
-            .field(
-                "pause_on_zero_available_margin",
-                pause_on_zero_available_margin,
-            )
-            .field("min_available_margin_pct", min_available_margin_pct)
-            .finish()
-    }
-}
-
-fn deserialize_optional_decimal_update<'de, D>(
-    deserializer: D,
-) -> Result<Option<Option<Decimal>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Option::<Decimal>::deserialize(deserializer).map(Some)
-}
-
-impl UpdateGlobalConfigPayload {
-    pub fn apply_to(self, config: &mut crate::config::GlobalConfig) {
-        if let Some(value) = self.pause_on_zero_available_margin {
-            config.pause_on_zero_available_margin = value;
-        }
-        if let Some(value) = self.min_available_margin_pct {
-            config.min_available_margin_pct = value;
-        }
-        if let Some(value) = self.global_max_position_notional {
-            config.global_max_position_notional = value;
-        }
-        if let Some(value) = self.recv_window {
-            config.recv_window = value;
-        }
-        if let Some(value) = self.sync_interval_secs {
-            config.sync_interval_secs = value;
-        }
-        if self.clear_api_credentials {
-            config.api_key.clear();
-            config.api_secret.clear();
-        } else {
-            for (target, value) in [
-                (&mut config.api_key, self.api_key),
-                (&mut config.api_secret, self.api_secret),
-            ] {
-                if let Some(value) = non_blank(value) {
-                    *target = value;
-                }
-            }
-        }
-        if let Some(enabled) = self.telegram_enabled {
-            config.telegram.enabled = enabled;
-        }
-        if self.clear_telegram_credentials {
-            config.telegram.bot_token.clear();
-            config.telegram.chat_id.clear();
-        } else {
-            for (target, value) in [
-                (&mut config.telegram.bot_token, self.telegram_bot_token),
-                (&mut config.telegram.chat_id, self.telegram_chat_id),
-            ] {
-                if let Some(value) = non_blank(value) {
-                    *target = value;
-                }
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct WebGlobalConfigView {
-    pub version: String,
-    pub pause_on_zero_available_margin: bool,
-    pub min_available_margin_pct: Option<Decimal>,
-    pub global_max_position_notional: Option<Decimal>,
-    pub recv_window: u64,
-    pub sync_interval_secs: u64,
-    pub has_api_key: bool,
-    pub has_api_secret: bool,
-    pub api_key_preview: String,
-    pub telegram_enabled: bool,
-    pub has_telegram_bot_token: bool,
-    pub telegram_chat_id: String,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct UpdateConfigPayload {
-    #[serde(default)]
-    pub baseline_version: Option<String>,
-    pub symbol: String,
-    #[serde(default)]
-    pub direction: Option<GridDirection>,
-    pub grid_interval: Decimal,
-    pub order_amount_usdc: Decimal,
-    pub buy_window: usize,
-    pub sell_window: usize,
-    #[serde(default)]
-    pub post_only: Option<bool>,
-    /// Retired: the run mode now derives from API credentials. Rejected so a
-    /// stale client cannot believe it is still switching modes.
-    #[serde(default)]
-    pub dry_run: Option<bool>,
-    /// Retired: testnet mode was removed. Only rejected so a stale client
-    /// cannot silently turn its testnet configuration into live trading.
-    #[serde(default)]
-    pub is_testnet: Option<bool>,
-    #[serde(default)]
-    pub recv_window: Option<u64>,
-    pub sync_interval_secs: Option<u64>,
-    pub api_key: Option<String>,
-    pub api_secret: Option<String>,
-    #[serde(default)]
-    pub clear_api_credentials: bool,
-    #[serde(default)]
-    pub clear_telegram_credentials: bool,
-    #[serde(default)]
-    pub telegram_enabled: Option<bool>,
-    pub telegram_bot_token: Option<String>,
-    pub telegram_chat_id: Option<String>,
-    pub min_price: Option<Decimal>,
-    pub max_price: Option<Decimal>,
-    pub max_position_usdc: Option<Decimal>,
-    #[serde(default)]
-    pub pause_on_max_position: Option<bool>,
-    #[serde(default)]
-    pub cancel_opening_on_max_position: Option<bool>,
-    /// Replaces the saved value; omitted or null clears it.
-    #[serde(default)]
-    pub min_liquidation_distance_pct: Option<Decimal>,
-}
-
-impl std::fmt::Debug for UpdateConfigPayload {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Self {
-            baseline_version,
-            symbol,
-            direction,
-            grid_interval,
-            order_amount_usdc,
-            buy_window,
-            sell_window,
-            post_only,
-            dry_run,
-            is_testnet,
-            recv_window,
-            sync_interval_secs,
-            api_key,
-            api_secret,
-            clear_api_credentials,
-            clear_telegram_credentials,
-            telegram_enabled,
-            telegram_bot_token,
-            telegram_chat_id,
-            min_price,
-            max_price,
-            max_position_usdc,
-            pause_on_max_position,
-            cancel_opening_on_max_position,
-            min_liquidation_distance_pct,
-        } = self;
-        f.debug_struct("UpdateConfigPayload")
-            .field("baseline_version", baseline_version)
-            .field("symbol", symbol)
-            .field("direction", direction)
-            .field("grid_interval", grid_interval)
-            .field("order_amount_usdc", order_amount_usdc)
-            .field("buy_window", buy_window)
-            .field("sell_window", sell_window)
-            .field("post_only", post_only)
-            .field("dry_run", dry_run)
-            .field("is_testnet", is_testnet)
-            .field("recv_window", recv_window)
-            .field("sync_interval_secs", sync_interval_secs)
-            .field("api_key", &crate::config::redact_optional_secret(api_key))
-            .field(
-                "api_secret",
-                &crate::config::redact_optional_secret(api_secret),
-            )
-            .field("clear_api_credentials", clear_api_credentials)
-            .field("clear_telegram_credentials", clear_telegram_credentials)
-            .field("telegram_enabled", telegram_enabled)
-            .field(
-                "telegram_bot_token",
-                &crate::config::redact_optional_secret(telegram_bot_token),
-            )
-            .field("telegram_chat_id", telegram_chat_id)
-            .field("min_price", min_price)
-            .field("max_price", max_price)
-            .field("max_position_usdc", max_position_usdc)
-            .field("pause_on_max_position", pause_on_max_position)
-            .field(
-                "cancel_opening_on_max_position",
-                cancel_opening_on_max_position,
-            )
-            .field("min_liquidation_distance_pct", min_liquidation_distance_pct)
-            .finish()
-    }
-}
-
-impl UpdateConfigPayload {
-    pub fn has_global_updates(&self) -> bool {
-        self.recv_window.is_some()
-            || self.sync_interval_secs.is_some()
-            || self.api_key.is_some()
-            || self.api_secret.is_some()
-            || self.clear_api_credentials
-            || self.clear_telegram_credentials
-            || self.telegram_enabled.is_some()
-            || self.telegram_bot_token.is_some()
-            || self.telegram_chat_id.is_some()
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WebConfigView {
-    pub config_version: String,
-    pub symbol: String,
-    pub direction: GridDirection,
-    pub grid_interval: Decimal,
-    pub order_amount_usdc: Decimal,
-    pub buy_window: usize,
-    pub sell_window: usize,
-    pub post_only: bool,
-    pub recv_window: u64,
-    pub sync_interval_secs: u64,
-    pub has_api_key: bool,
-    pub has_api_secret: bool,
-    pub api_key_preview: String,
-    pub telegram_enabled: bool,
-    pub has_telegram_bot_token: bool,
-    pub telegram_chat_id: String,
-    pub min_price: Option<Decimal>,
-    pub max_price: Option<Decimal>,
-    pub max_position_usdc: Option<Decimal>,
-    pub pause_on_max_position: bool,
-    pub cancel_opening_on_max_position: bool,
-    pub min_liquidation_distance_pct: Option<Decimal>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tick_size: Option<Decimal>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub step_size: Option<Decimal>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub min_qty: Option<Decimal>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub min_notional: Option<Decimal>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuthStatusResponse {
-    pub initialized: bool,
-    pub authenticated: bool,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct AuthLoginPayload {
-    pub password: String,
-}
-#[derive(Debug, Serialize)]
-pub struct AuthTokenResponse {
-    pub token: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ApiResponse<T> {
-    pub success: bool,
-    pub data: Option<T>,
-    pub message: Option<String>,
-}
-
-impl<T> ApiResponse<T> {
-    pub fn ok(data: T) -> Self {
-        Self {
-            success: true,
-            data: Some(data),
-            message: None,
-        }
-    }
-
-    pub fn ok_with_message(data: T, message: impl Into<String>) -> Self {
-        Self {
-            success: true,
-            data: Some(data),
-            message: Some(message.into()),
-        }
-    }
-
-    pub fn err(message: impl Into<String>) -> Self {
-        Self {
-            success: false,
-            data: None,
-            message: Some(message.into()),
-        }
-    }
-}
+#[path = "types/api.rs"]
+mod api;
+pub use api::*;
 
 pub(crate) fn ws_frame_json<T: Serialize + ?Sized>(kind: &'static str, data: &T) -> Option<String> {
     #[derive(Serialize)]
@@ -1152,163 +729,5 @@ pub(crate) fn ws_frame_json<T: Serialize + ?Sized>(kind: &'static str, data: &T)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use rust_decimal_macros::dec;
-
-    #[test]
-    fn price_freshness_checks_both_clocks_and_keeps_the_startup_fallback() {
-        let now = Utc::now();
-        let mut ticker = TickerInfo {
-            last_price: dec!(100),
-            update_time: now,
-            ..Default::default()
-        };
-        assert!(ticker.prices_are_fresh(now));
-        ticker.mark_price = dec!(101);
-        assert!(!ticker.prices_are_fresh(now));
-        ticker.mark_update_time = now - chrono::Duration::milliseconds(14_999);
-        assert!(ticker.prices_are_fresh(now));
-        ticker.mark_update_time = now - chrono::Duration::seconds(15);
-        assert!(!ticker.prices_are_fresh(now));
-        ticker.mark_update_time = now;
-        ticker.update_time = now + chrono::Duration::milliseconds(1);
-        assert!(!ticker.prices_are_fresh(now));
-        ticker.update_time = now;
-        ticker.last_price = Decimal::ZERO;
-        assert!(!ticker.prices_are_fresh(now));
-    }
-
-    #[test]
-    fn global_config_payload_preserves_existing_chat_id_when_blank() {
-        let mut global =
-            crate::config::GlobalConfig::from_app(&crate::config::AppConfig::default());
-        global.telegram.chat_id = "123456".into();
-        UpdateGlobalConfigPayload {
-            telegram_chat_id: Some("   ".into()),
-            ..Default::default()
-        }
-        .apply_to(&mut global);
-        assert_eq!(global.telegram.chat_id, "123456");
-
-        UpdateGlobalConfigPayload {
-            clear_telegram_credentials: true,
-            ..Default::default()
-        }
-        .apply_to(&mut global);
-        assert!(global.telegram.chat_id.is_empty());
-    }
-
-    #[test]
-    fn initial_paper_account_falls_back_to_symbol_when_quote_suffix_is_unknown() {
-        assert_eq!(AccountInfo::initial_paper("SOLUSDC", None).asset, "USDC");
-        assert_eq!(AccountInfo::initial_paper("BTCETH", None).asset, "BTCETH");
-    }
-
-    #[test]
-    fn terminal_fill_prefers_positive_avg_price_falls_back_to_response_price_and_updates_notional()
-    {
-        let created_at = Utc::now() - chrono::Duration::seconds(10);
-        let updated_at = Utc::now();
-        let base_order = GridOrder {
-            client_order_id: "gb_fill_1".into(),
-            order_id: Some(42),
-            symbol: "SOLUSDC".into(),
-            side: OrderSide::Buy,
-            price: dec!(100),
-            quantity: dec!(2),
-            amount_usdc: dec!(200),
-            status: OrderStatus::New,
-            created_at,
-            updated_at: created_at,
-            grid_level: 1000,
-            paired_client_order_id: None,
-            is_take_profit: false,
-            purpose: OrderPurpose::Grid,
-            merge_sources: Vec::new(),
-        };
-        let mut response = crate::exchange::model::BinanceOrderResponse {
-            order_id: 42,
-            client_order_id: "gb_fill_1".into(),
-            symbol: "SOLUSDC".into(),
-            status: "FILLED".into(),
-            price: dec!(101),
-            avg_price: Some(dec!(99.5)),
-            orig_qty: dec!(2),
-            executed_qty: dec!(1.5),
-            side: "BUY".into(),
-            order_type: "LIMIT".into(),
-            time_in_force: "GTX".into(),
-            update_time: None,
-        };
-
-        let mut order = base_order.clone();
-        order.apply_terminal_fill(&response, updated_at);
-        assert_eq!(order.updated_at, updated_at);
-        assert_eq!(order.quantity, dec!(1.5));
-        assert_eq!(order.price, dec!(99.5));
-        assert_eq!(order.amount_usdc, dec!(149.25));
-
-        response.avg_price = Some(Decimal::ZERO);
-        let mut fallback_order = base_order.clone();
-        fallback_order.apply_terminal_fill(&response, updated_at);
-        assert_eq!(fallback_order.price, dec!(101));
-        assert_eq!(fallback_order.amount_usdc, dec!(151.5));
-
-        response.price = Decimal::ZERO;
-        let mut keep_order = base_order;
-        keep_order.apply_terminal_fill(&response, updated_at);
-        assert_eq!(keep_order.price, dec!(100));
-        assert_eq!(keep_order.amount_usdc, dec!(150));
-    }
-
-    #[test]
-    fn config_payload_debug_redacts_secrets() {
-        let global = UpdateGlobalConfigPayload {
-            api_key: Some("payload-api-key".into()),
-            api_secret: Some("payload-api-secret".into()),
-            telegram_bot_token: Some("payload-bot-token".into()),
-            telegram_chat_id: Some("12345".into()),
-            ..Default::default()
-        };
-        let pair = UpdateConfigPayload {
-            baseline_version: None,
-            symbol: "SOLUSDC".into(),
-            direction: None,
-            grid_interval: dec!(0.1),
-            order_amount_usdc: dec!(100),
-            buy_window: 5,
-            sell_window: 5,
-            post_only: Some(true),
-            dry_run: None,
-            is_testnet: None,
-            recv_window: None,
-            sync_interval_secs: None,
-            api_key: Some("pair-payload-key".into()),
-            api_secret: Some("pair-payload-secret".into()),
-            clear_api_credentials: false,
-            clear_telegram_credentials: false,
-            telegram_enabled: None,
-            telegram_bot_token: Some("pair-payload-token".into()),
-            telegram_chat_id: None,
-            min_price: None,
-            max_price: None,
-            max_position_usdc: None,
-            pause_on_max_position: None,
-            cancel_opening_on_max_position: None,
-            min_liquidation_distance_pct: None,
-        };
-        let rendered = format!("{global:?} {pair:?}");
-        for secret in [
-            "payload-api-key",
-            "payload-api-secret",
-            "payload-bot-token",
-            "pair-payload-key",
-            "pair-payload-secret",
-            "pair-payload-token",
-        ] {
-            assert!(!rendered.contains(secret), "{rendered}");
-        }
-        assert!(rendered.contains("[REDACTED]"));
-    }
-}
+#[path = "types_tests.rs"]
+mod tests;

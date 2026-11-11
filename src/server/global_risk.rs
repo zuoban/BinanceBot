@@ -255,14 +255,22 @@ impl GlobalPositionLimit {
             let account = state.current_account().await;
             if account.asset.is_empty() || (!is_paper && !fresh(account.update_time)) {
                 member_incomplete = true;
-            } else if account.available_balance <= Decimal::ZERO
-                || margin_pct.is_some_and(|pct| {
-                    account.margin_balance > Decimal::ZERO
-                        && account.available_balance * Decimal::ONE_HUNDRED
-                            <= pct * account.margin_balance
-                })
-            {
+            } else if account.available_balance <= Decimal::ZERO {
                 zero_margin = true;
+            } else if let Some(pct) = margin_pct {
+                if account.margin_balance > Decimal::ZERO {
+                    match (
+                        account.available_balance.checked_mul(Decimal::ONE_HUNDRED),
+                        pct.checked_mul(account.margin_balance),
+                    ) {
+                        (Some(lhs), Some(rhs)) => {
+                            if lhs <= rhs {
+                                zero_margin = true;
+                            }
+                        }
+                        _ => member_incomplete = true,
+                    }
+                }
             }
         }
         if limit.is_none() {

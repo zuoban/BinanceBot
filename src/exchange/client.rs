@@ -11,8 +11,23 @@ use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
+static MAINNET_TIME_OFFSET_MS: AtomicI64 = AtomicI64::new(0);
+static MONOTONIC_EPOCH: std::sync::LazyLock<Instant> = std::sync::LazyLock::new(Instant::now);
+const REACTIVE_TIME_SYNC_THROTTLE_MS: u64 = 10_000;
+
+fn monotonic_now_ms() -> u64 {
+    (MONOTONIC_EPOCH.elapsed().as_millis() as u64).saturating_add(1)
+}
+
+pub(super) fn mainnet_time_offset_ms() -> i64 {
+    MAINNET_TIME_OFFSET_MS.load(Ordering::SeqCst)
+}
+
+fn is_invalid_timestamp_body(body: &str) -> bool {
+    serde_json::from_str::<BinanceApiError>(body).is_ok_and(|error| error.code == -1021)
+}
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 pub(crate) struct LocalRateLimitError(String);
@@ -98,20 +113,16 @@ async fn checked_response(response: reqwest::Response) -> Result<reqwest::Respon
     }
 }
 
-async fn ensure_success(
-    resp: reqwest::Response,
+fn format_http_error(
     context: &str,
+    status: reqwest::StatusCode,
+    body: &str,
     include_status: bool,
-) -> Result<reqwest::Response> {
-    if resp.status().is_success() {
-        return Ok(resp);
-    }
-    let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
+) -> anyhow::Error {
     if include_status {
-        Err(anyhow!("{}: {} - {}", context, status, body))
+        anyhow!("{}: {} - {}", context, status, body)
     } else {
-        Err(anyhow!("{}: {}", context, body))
+        anyhow!("{}: {}", context, body)
     }
 }
 
@@ -152,6 +163,7 @@ pub struct BinanceFuturesClient {
     account_identity_key: [u8; 32],
     rate_account_key: [u8; 32],
     time_offset_ms: AtomicI64,
+    last_time_sync_ms: AtomicU64,
     limiter: Arc<RateLimiter>,
     fill_progress: std::sync::Mutex<std::collections::HashMap<(String, i64), FillCacheEntry>>,
     fill_waiters: std::sync::Mutex<std::collections::VecDeque<((String, i64), Instant)>>,
@@ -217,6 +229,7 @@ impl BinanceFuturesClient {
             account_identity_key,
             rate_account_key,
             time_offset_ms: AtomicI64::new(0),
+            last_time_sync_ms: AtomicU64::new(0),
             limiter,
             fill_progress: std::sync::Mutex::new(Default::default()),
             fill_waiters: std::sync::Mutex::new(Default::default()),
@@ -236,13 +249,19 @@ impl BinanceFuturesClient {
 
     /// Synchronize local timestamp with Binance Futures server time
     pub async fn sync_server_time(&self) -> Result<i64> {
+        let before_ms = Utc::now().timestamp_millis();
         let server_time: BinanceServerTime = self
             .get_public_json(1, RequestClass::Normal, "/fapi/v1/time", &[])
             .await?;
-
-        let local_now = Utc::now().timestamp_millis();
-        let offset = server_time.server_time - local_now;
+        let after_ms = Utc::now().timestamp_millis();
+        let midpoint = before_ms / 2 + after_ms / 2 + (before_ms & after_ms & 1);
+        let offset = server_time.server_time.saturating_sub(midpoint);
         self.time_offset_ms.store(offset, Ordering::SeqCst);
+        self.last_time_sync_ms
+            .store(monotonic_now_ms(), Ordering::SeqCst);
+        if self.base_url == "https://fapi.binance.com" {
+            MAINNET_TIME_OFFSET_MS.store(offset, Ordering::SeqCst);
+        }
 
         info!(
             "Synchronized time with Binance Futures: server_time={}, offset={}ms",
@@ -251,8 +270,69 @@ impl BinanceFuturesClient {
         Ok(offset)
     }
 
+    pub(super) async fn maybe_resync_on_invalid_timestamp(&self, body: &str) {
+        if !is_invalid_timestamp_body(body) {
+            return;
+        }
+        let now_ms = monotonic_now_ms();
+        let prev_ms = self.last_time_sync_ms.load(Ordering::SeqCst);
+        if prev_ms > 0 && now_ms.saturating_sub(prev_ms) < REACTIVE_TIME_SYNC_THROTTLE_MS {
+            return;
+        }
+        if self
+            .last_time_sync_ms
+            .compare_exchange(prev_ms, now_ms, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return;
+        }
+        if let Err(error) = self.sync_server_time().await {
+            warn!(
+                "Reactive Binance server time resync after -1021 failed: {}",
+                error
+            );
+        }
+    }
+
+    async fn checked_signed_response(
+        &self,
+        response: reqwest::Response,
+    ) -> Result<reqwest::Response> {
+        if response.status().is_success() {
+            return Ok(response);
+        }
+        let status = response.status();
+        let body = response.text().await.map_err(reqwest::Error::without_url)?;
+        self.maybe_resync_on_invalid_timestamp(&body).await;
+        match serde_json::from_str::<BinanceApiError>(&body) {
+            Ok(error) => Err(ExchangeError::ApiError {
+                code: error.code,
+                msg: error.msg,
+            }
+            .into()),
+            Err(_) => Err(ExchangeError::Other(format!("HTTP error {}: {}", status, body)).into()),
+        }
+    }
+
+    async fn ensure_signed_success(
+        &self,
+        resp: reqwest::Response,
+        context: &str,
+        include_status: bool,
+    ) -> Result<reqwest::Response> {
+        if resp.status().is_success() {
+            return Ok(resp);
+        }
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        self.maybe_resync_on_invalid_timestamp(&body).await;
+        Err(format_http_error(context, status, &body, include_status))
+    }
+
     fn current_timestamp(&self) -> i64 {
-        Utc::now().timestamp_millis() + self.time_offset_ms.load(Ordering::SeqCst)
+        Utc::now()
+            .timestamp_millis()
+            .saturating_add(self.time_offset_ms.load(Ordering::SeqCst))
     }
 
     fn signed_url(&self, path: &str, params: &str) -> String {
@@ -416,12 +496,13 @@ impl BinanceFuturesClient {
     ) -> Result<T> {
         self.reserve(weight, class)?;
         let url = self.signed_url(path, query);
-        let resp = ensure_success(
-            self.send(self.client.get(&url)).await?,
-            context,
-            include_status,
-        )
-        .await?;
+        let resp = self
+            .ensure_signed_success(
+                self.send(self.client.get(&url)).await?,
+                context,
+                include_status,
+            )
+            .await?;
         Ok(resp.json().await.map_err(reqwest::Error::without_url)?)
     }
 
@@ -528,7 +609,9 @@ impl BinanceFuturesClient {
         self.reserve(1, class)?;
         let url = self.signed_url("/fapi/v1/openOrders", &format!("symbol={}", symbol));
 
-        let resp = checked_response(self.send(self.client.get(&url)).await?).await?;
+        let resp = self
+            .checked_signed_response(self.send(self.client.get(&url)).await?)
+            .await?;
 
         let orders: Vec<BinanceOrderResponse> =
             resp.json().await.map_err(reqwest::Error::without_url)?;
@@ -605,6 +688,7 @@ impl BinanceFuturesClient {
             {
                 return Ok(None);
             }
+            self.maybe_resync_on_invalid_timestamp(&body).await;
             return Err(anyhow!(
                 "Failed to resolve order {}: {} - {}",
                 client_order_id,
@@ -662,6 +746,7 @@ impl BinanceFuturesClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
+            self.maybe_resync_on_invalid_timestamp(&body).await;
             return Err(order_response_error(status, body));
         }
 
@@ -690,7 +775,7 @@ impl BinanceFuturesClient {
 
         let url = self.signed_url("/fapi/v1/order", &params);
 
-        ensure_success(
+        self.ensure_signed_success(
             self.send(self.client.delete(&url)).await?,
             "Failed to cancel order",
             false,

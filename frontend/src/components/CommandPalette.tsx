@@ -3,6 +3,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { Input, Modal } from 'antd';
 import type { InputRef } from 'antd';
 import { AppstoreOutlined, BulbOutlined, EditOutlined, LineChartOutlined, LogoutOutlined, PauseOutlined, PlayCircleOutlined, PlusOutlined, QuestionCircleOutlined, ReloadOutlined, SearchOutlined, SettingOutlined, StopOutlined } from '@ant-design/icons';
+import { pairRoute } from '../lib/api';
 import { directionLabel, statusLabel } from '../lib/format';
 import { useTheme, type ThemePreference } from '../lib/theme';
 import type { Pair } from '../lib/types';
@@ -74,7 +75,13 @@ function CommandPalette({ open, onClose, commands }: { open: boolean; onClose: (
 
 export function routeSymbol(pathname: string) {
   const symbol = pathname.match(/^\/pairs\/([^/]+)/)?.[1];
-  return symbol && symbol !== 'new' ? symbol : undefined;
+  if (!symbol) return undefined;
+  try {
+    const decoded = decodeURIComponent(symbol);
+    return decoded && decoded !== 'new' ? decoded : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 const recentKey = 'binance_bot_recent_commands';
@@ -110,18 +117,21 @@ export function PaletteHost({ open, setOpen, pairs, stale, authEnabled, saving, 
   const lead = useRef(0);
   const shortcutState = useRef({ symbols, current, pathname, saving });
   shortcutState.current = { symbols, current, pathname, saving };
+  useEffect(() => { if (saving) setOpen(false); }, [saving, setOpen]);
   useEffect(() => {
     const typing = (target: EventTarget | null) => target instanceof HTMLElement && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName));
     const onKey = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey && event.key?.toLowerCase() === 'k') {
         event.preventDefault();
-        if (shortcutState.current.saving) return;
-        setOpen(value => value ? false : !document.querySelector('.ant-modal-root, .ant-drawer-open'));
+        setOpen(value => value ? false : (!shortcutState.current.saving && !document.querySelector('.ant-modal-root, .ant-drawer-open')));
         return;
       }
-      if (event.metaKey || event.ctrlKey || event.altKey || typing(event.target) || document.querySelector('.ant-modal-root, .ant-drawer-open')) return;
+      if (event.metaKey || event.ctrlKey || event.altKey || typing(event.target) || document.querySelector('.ant-modal-root, .ant-drawer-open')) {
+        lead.current = 0;
+        return;
+      }
       if (event.key === '?') { lead.current = 0; event.preventDefault(); setHelp(true); return; }
-      if (shortcutState.current.saving) return;
+      if (shortcutState.current.saving) { lead.current = 0; return; }
       if (event.key === 'g') { lead.current = Date.now(); return; }
       if (lead.current && Date.now() - lead.current < 1200) {
         lead.current = 0;
@@ -134,7 +144,7 @@ export function PaletteHost({ open, setOpen, pairs, stale, authEnabled, saving, 
         const index = currentSymbols.indexOf(activeSymbol);
         if (index < 0) return;
         const next = currentSymbols[(index + (event.key === ']' ? 1 : -1) + currentSymbols.length) % currentSymbols.length];
-        navigate(`/pairs/${next}${currentPathname.endsWith('/config') ? '/config' : ''}`);
+        navigate(pairRoute(next, currentPathname.endsWith('/config')));
       }
     };
     window.addEventListener('keydown', onKey);
@@ -149,8 +159,8 @@ export function PaletteHost({ open, setOpen, pairs, stale, authEnabled, saving, 
       ...(pairs ?? []).flatMap(pair => {
         const guard = strategyActionGuard(pair, stale, Boolean(busy?.has(pair.symbol)));
         return [
-          { key: `pair-${pair.symbol}`, group: '交易对', label: pair.symbol, hint: `${statusLabel[pair.status]} · ${directionLabel(pair.grid_config.direction)}`, keywords: '策略 查看', icon: <LineChartOutlined />, run: () => navigate(`/pairs/${pair.symbol}`) },
-          { key: `config-${pair.symbol}`, group: '交易对', label: `${pair.symbol} 策略参数`, hint: '编辑', keywords: 'config 配置 参数', icon: <EditOutlined />, run: () => navigate(`/pairs/${pair.symbol}/config`) },
+          { key: `pair-${pair.symbol}`, group: '交易对', label: pair.symbol, hint: `${statusLabel[pair.status]} · ${directionLabel(pair.grid_config.direction)}`, keywords: '策略 查看', icon: <LineChartOutlined />, run: () => navigate(pairRoute(pair.symbol)) },
+          { key: `config-${pair.symbol}`, group: '交易对', label: `${pair.symbol} 策略参数`, hint: '编辑', keywords: 'config 配置 参数', icon: <EditOutlined />, run: () => navigate(pairRoute(pair.symbol, true)) },
           { key: `toggle-${pair.symbol}`, group: '操作', label: `${guard.toggleLabel} ${pair.symbol}`, hint: pair.mode === 'LIVE' && !guard.running ? '实盘 · 需确认' : undefined, keywords: guard.running ? 'pause 暂停 停止' : 'resume 恢复 启动', icon: guard.running ? <PauseOutlined /> : <PlayCircleOutlined />, disabled: guard.toggleDisabled, run: () => void run(pair, guard.toggleAction) },
           { key: `rebalance-${pair.symbol}`, group: '操作', label: `重建 ${pair.symbol} 网格`, hint: '需确认', keywords: 'rebalance 重建 网格', icon: <ReloadOutlined />, disabled: guard.rebalanceDisabled, run: () => void run(pair, 'rebalance') },
           { key: `cancel-${pair.symbol}`, group: '操作', label: `撤单并暂停 ${pair.symbol}`, hint: '需确认', keywords: 'cancel 撤单', icon: <StopOutlined />, disabled: guard.cancelDisabled, run: () => void run(pair, 'cancel_all') },

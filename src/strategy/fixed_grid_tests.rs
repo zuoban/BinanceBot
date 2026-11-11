@@ -33,7 +33,7 @@ fn order(id: &str, side: OrderSide, price: Decimal, quantity: Decimal) -> GridOr
         side,
         price,
         quantity,
-        amount_usdc: price * quantity,
+        amount_usdc: price.saturating_mul(quantity),
         status: OrderStatus::New,
         created_at: Utc::now(),
         updated_at: Utc::now(),
@@ -309,6 +309,72 @@ fn liquidation_distance_is_measured_on_the_losing_side_only() {
         Some(dec!(8))
     ));
     assert!(!liquidation_too_close(dec!(1), dec!(100), dec!(99), None));
+    // Extreme values fail closed instead of panicking.
+    assert!(liquidation_too_close(
+        dec!(1),
+        Decimal::MAX,
+        dec!(1),
+        Some(dec!(8))
+    ));
+    assert_eq!(buy_exposure_usdc(dec!(2), Decimal::MAX, &[]), Decimal::MAX);
+    let huge_order = order("gb_b_max", OrderSide::Buy, Decimal::MAX, dec!(2));
+    assert_eq!(
+        buy_exposure_usdc(Decimal::ZERO, dec!(100), &[huge_order]),
+        Decimal::MAX
+    );
+
+    // Paper valuation and shared ledger survive extreme WS ticks for both long and short
+    // positions and recover exact balances once normal prices return.
+    let db = crate::db::Database::open(":memory:").unwrap();
+    let now = Utc::now();
+    let mut short_pos = PositionInfo {
+        symbol: "SOLUSDC".into(),
+        size: dec!(-2),
+        entry_price: dec!(100),
+        mark_price: dec!(100),
+        leverage: 10,
+        update_time: Some(now),
+        ..Default::default()
+    };
+    let mut account = AccountInfo {
+        asset: "USDC".into(),
+        total_wallet_balance: PAPER_INITIAL_BALANCE,
+        available_balance: PAPER_INITIAL_BALANCE,
+        margin_balance: PAPER_INITIAL_BALANCE,
+        update_time: now,
+        ..Default::default()
+    };
+    let extreme_ticker = TickerInfo {
+        symbol: "SOLUSDC".into(),
+        mark_price: Decimal::MAX,
+        mark_update_time: now,
+        update_time: now,
+        ..Default::default()
+    };
+    update_paper_account(&mut short_pos, &mut account, &extreme_ticker);
+    assert_eq!(short_pos.unrealized_pnl, Decimal::MIN);
+    assert!(account.available_balance < Decimal::ZERO);
+    let shared_extreme = db
+        .shared_paper_account("SOLUSDC", &short_pos, &account)
+        .unwrap();
+    assert!(shared_extreme.available_balance < Decimal::ZERO);
+    let normal_ticker = TickerInfo {
+        symbol: "SOLUSDC".into(),
+        mark_price: dec!(110),
+        mark_update_time: now + chrono::Duration::seconds(1),
+        update_time: now + chrono::Duration::seconds(1),
+        ..Default::default()
+    };
+    update_paper_account(&mut short_pos, &mut account, &normal_ticker);
+    let shared_recovered = db
+        .shared_paper_account("SOLUSDC", &short_pos, &account)
+        .unwrap();
+    assert_eq!(short_pos.unrealized_pnl, dec!(-20));
+    assert_eq!(shared_recovered.unrealized_profit, dec!(-20));
+    assert_eq!(
+        shared_recovered.margin_balance,
+        PAPER_INITIAL_BALANCE - dec!(20)
+    );
 }
 
 #[tokio::test]

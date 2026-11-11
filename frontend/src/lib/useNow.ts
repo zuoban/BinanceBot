@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { accountGroups, nextAccountExpiry } from './format';
+import { accountGroups, nextAccountExpiry } from './portfolio';
 import type { AccountObservation } from './types';
 
 /** A wall clock that re-renders its caller every `intervalMs`. */

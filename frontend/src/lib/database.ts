@@ -1,4 +1,4 @@
-import { useContext, useState } from 'react';
+import { useContext, useRef, useState } from 'react';
 import { App, type ModalFuncProps } from 'antd';
 import type { QueryClient, QueryKey } from '@tanstack/react-query';
 import { ApiError, authenticatedFetch, errorMessage } from './api';
@@ -27,7 +27,8 @@ export async function downloadDatabase(path: string, targets?: DatabaseTarget[])
     const result = await response.json().catch(() => null) as { message?: string } | null;
     throw new ApiError(result?.message || '数据库导出失败，请重试', response.status);
   }
-  const filename = response.headers.get('Content-Disposition')?.match(/filename="?([^";]+)"?/)?.[1] ?? 'binancebot-analysis.db';
+  const rawFilename = response.headers.get('Content-Disposition')?.match(/filename="?([^";]+)"?/)?.[1]?.trim() || 'binancebot-analysis.db';
+  const filename = rawFilename.replace(/[/\\]/g, '_');
   let blob: Blob;
   try {
     blob = await response.blob();
@@ -42,12 +43,23 @@ export function useDatabaseAction<T extends string>() {
   const edit = useContext(EditContext);
   const [busy, setBusy] = useState<T | null>(null);
   const runLocked = useAsyncLock();
-  const mounted = useMountedRef(() => edit.setSaving(false));
+  const dialogRef = useRef<{ destroy?: () => void } | null>(null);
+  const mounted = useMountedRef(() => {
+    dialogRef.current?.destroy?.();
+    dialogRef.current = null;
+    edit.setSaving(false);
+  });
   const run = (action: T, task: () => Promise<string | void>, confirm?: ModalFuncProps) => {
     if (!mounted.current) return Promise.resolve();
     return runLocked(async () => {
       try {
-        if (confirm && !await modal.confirm(confirm)) return;
+        if (confirm) {
+          const dialog = modal.confirm(confirm);
+          dialogRef.current = dialog;
+          const accepted = await dialog;
+          if (dialogRef.current === dialog) dialogRef.current = null;
+          if (!accepted) return;
+        }
         if (!mounted.current) return;
         setBusy(action);
         edit.setSaving(true);

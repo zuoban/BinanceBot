@@ -2806,3 +2806,25 @@ fn trade_from_row_surfaces_corrupted_decimal_and_side_values() {
     }
     assert!(db2.get_recent_trades(10).is_err());
 }
+
+#[cfg(unix)]
+#[test]
+fn database_rejects_hard_links_and_canonicalizes_stored_path() {
+    let root = std::env::temp_dir().join(format!("db-hardlink-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(root.join("sub")).unwrap();
+    let nested = root.join("sub").join("..").join("bot.db");
+    let db = Database::open(&nested).unwrap();
+    let canonical = root.join("bot.db").canonicalize().unwrap();
+    assert_eq!(db.path(), canonical.to_str().unwrap());
+
+    let extra_link = root.join("bot-hardlink.db");
+    std::fs::hard_link(&canonical, &extra_link).unwrap();
+    assert!(db.export_analysis_snapshot().is_err());
+    drop(db);
+    assert!(Database::open(&canonical).is_err());
+    std::fs::remove_file(&extra_link).unwrap();
+    let reopened = Database::open(&canonical).unwrap();
+    assert!(reopened.export_analysis_snapshot().is_ok());
+    drop(reopened);
+    std::fs::remove_dir_all(root).unwrap();
+}

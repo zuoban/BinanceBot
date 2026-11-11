@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { addSignedDecimals, formatDecimalDisplay, subSignedDecimals, sumSignedDecimals } from '../lib/decimal';
-import { accountGroups, ageText, availableRatio, comparePositionAmount, groupTradePnl, number, positionAmount, positionGroups, quantity, relativeTime, todayCount, todayPnlGroups, trimFractionZeros } from '../lib/format';
+import { formatDecimalDisplay, parseSignedDecimal, parseUnsignedDecimal, subSignedDecimals } from '../lib/decimal';
+import { ageText, number, quantity, relativeTime, trimFractionZeros } from '../lib/format';
+import { accountGroups, availableRatio, comparePositionAmount, groupTradePnl, positionAmount, positionGroups, todayCount, todayPnlGroups } from '../lib/portfolio';
 import { snapshot } from './fixtures';
 
 it('removes only insignificant fractional zeros and normalizes negative zero after rounding', () => {
@@ -20,9 +21,26 @@ it('formats quantities and signed decimals exactly without IEEE-754 truncation o
   expect(quantity('invalid')).toBe('--');
   expect(quantity('')).toBe('--');
   expect(formatDecimalDisplay('1234.5', { minFractionDigits: 2, trimZeros: false })).toBe('1,234.50');
-  expect(addSignedDecimals('0.1', '0.2')).toBe('0.3');
   expect(subSignedDecimals('0.3', '0.1')).toBe('0.2');
-  expect(sumSignedDecimals(['0.1', '0.2', '-0.3'])).toBe('0');
+});
+
+it('rejects decimal strings exceeding 30 whole/fractional digits or 64 characters without throwing', () => {
+  const valid30 = `${'9'.repeat(30)}.${'9'.repeat(30)}`;
+  expect(parseUnsignedDecimal(valid30)).not.toBeNull();
+  expect(parseSignedDecimal(`-${valid30}`)).not.toBeNull();
+  expect(parseUnsignedDecimal(`${'0'.repeat(35)}1`)).toEqual({ n: 1n, s: 0 });
+  for (const oversized of [
+    '1'.repeat(31),
+    `0.${'1'.repeat(31)}`,
+    '9'.repeat(65),
+    `-${'1'.repeat(31)}`,
+    `-0.${'1'.repeat(31)}`,
+    '1'.repeat(100_000),
+  ]) {
+    expect(parseUnsignedDecimal(oversized)).toBeNull();
+    expect(parseSignedDecimal(oversized)).toBeNull();
+    expect(quantity(oversized)).toBe('--');
+  }
 });
 
 it('formats relative trade times across units and handles invalid or future dates', () => {

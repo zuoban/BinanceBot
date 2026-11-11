@@ -1743,3 +1743,190 @@ async fn managed_accounts_ws_survives_removing_initial_pair() {
     let _ = server.await;
     let _ = runtime.shutdown(std::time::Duration::from_secs(2)).await;
 }
+
+#[tokio::test]
+async fn cold_token_lookups_are_bounded_and_malformed_tokens_skip_sqlite() {
+    use axum::body::{to_bytes, Body};
+    use axum::http::Request;
+
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    db.create_session("hot-valid-token").unwrap();
+    db.create_session("cold-valid-token").unwrap();
+    let (tx, _rx) = tokio::sync::mpsc::channel(1);
+    let state = auth_state(AppConfig::default(), db.clone(), tx);
+    let app = create_router(state.clone());
+
+    // Warm "hot-valid-token" into the in-memory session cache.
+    assert_eq!(
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/status")
+                    .header("Authorization", "Bearer hot-valid-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
+    let permits: Vec<_> = (0..16)
+        .map(|_| state.auth.try_acquire_session_lookup_permit().unwrap())
+        .collect();
+    assert!(state.auth.try_acquire_session_lookup_permit().is_none());
+
+    // Hot cached tokens still succeed without acquiring a cold lookup permit.
+    assert_eq!(
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/status")
+                    .header("Authorization", "Bearer hot-valid-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
+    // Cold tokens return 503 when all 16 cold lookup permits are busy.
+    assert_eq!(
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/status")
+                    .header("Authorization", "Bearer cold-valid-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/status")
+                    .header("Authorization", "Bearer cold-valid-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+
+    // Oversized (>128) or non-ASCII-graphic tokens are rejected before touching AuthContext.
+    let oversized = "a".repeat(129);
+    for bad in [oversized.as_str(), "bad token with space"] {
+        assert_eq!(
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/status")
+                        .header("Authorization", format!("Bearer {bad}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let status_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/status")
+                    .header("Authorization", format!("Bearer {bad}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(status_res.status(), StatusCode::OK);
+        let bytes = to_bytes(status_res.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["data"]["authenticated"], false);
+    }
+
+    drop(permits);
+    assert_eq!(
+        app.oneshot(
+            Request::builder()
+                .uri("/api/status")
+                .header("Authorization", "Bearer cold-valid-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn routers_attach_security_headers_without_touching_websocket_upgrades() {
+    use axum::body::Body;
+    use axum::http::Request;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    let mut config = AppConfig::default();
+    config.ensure_pair_list().unwrap();
+    db.save_config(&config).unwrap();
+    let (tx, _rx) = tokio::sync::mpsc::channel(1);
+    let state = AppState::new(config.clone(), db.clone(), tx);
+    let mut runtime = crate::runtime::TradingRuntime::start_with_test_exchange(
+        &config,
+        db,
+        "http://127.0.0.1:1".into(),
+    )
+    .await
+    .unwrap();
+    let managed = create_managed_router(runtime.handle()).await;
+    for router in [
+        create_router(state.clone()),
+        create_multi_router(vec![state.clone()]),
+        create_multi_router(Vec::new()),
+        managed,
+    ] {
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let headers = response.headers();
+        assert_eq!(headers["Cache-Control"], "no-store");
+        assert_eq!(headers["X-Content-Type-Options"], "nosniff");
+        assert_eq!(headers["X-Frame-Options"], "DENY");
+        assert_eq!(headers["Referrer-Policy"], "same-origin");
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, create_router(state)).await.unwrap();
+    });
+    let mut ws_req = format!("ws://{address}/ws").into_client_request().unwrap();
+    ws_req
+        .headers_mut()
+        .insert("Sec-WebSocket-Protocol", "auth".parse().unwrap());
+    let (_socket, upgrade_res) = tokio_tungstenite::connect_async(ws_req).await.unwrap();
+    assert_eq!(upgrade_res.status(), StatusCode::SWITCHING_PROTOCOLS);
+    assert!(!upgrade_res.headers().contains_key("X-Frame-Options"));
+    server.abort();
+    let _ = runtime.shutdown(std::time::Duration::from_secs(2)).await;
+}

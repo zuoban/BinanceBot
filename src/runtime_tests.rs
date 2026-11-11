@@ -2499,14 +2499,27 @@ async fn configuration_versions_reject_concurrent_stale_forms() {
             request(&router, path, "POST", a, true),
             request(&router, path, "POST", b, true)
         );
-        let (success, conflict) = if a.1["success"] == true {
-            (a.1, b.1)
+        let ((ok_status, success), (conflict_status, conflict)) = if a.1["success"] == true {
+            (a, b)
         } else {
-            (b.1, a.1)
+            (b, a)
         };
+        assert_eq!(ok_status, StatusCode::OK);
+        assert_eq!(conflict_status, StatusCode::CONFLICT);
         assert_eq!(success["success"], true);
         assert_eq!(conflict["success"], false);
         assert!(conflict["message"].as_str().unwrap().contains("刷新"));
+        for blank in ["", "   "] {
+            let mut bad = if field == "port" {
+                json!({"host":"127.0.0.1","port":9003})
+            } else {
+                json!({"sync_interval_secs":13})
+            };
+            bad["baseline_version"] = json!(blank);
+            let (bad_status, bad_body) = request(&router, path, "POST", bad, true).await;
+            assert_eq!(bad_status, StatusCode::BAD_REQUEST);
+            assert_eq!(bad_body["message"], "配置版本不能为空");
+        }
         let (_, current) = request(&router, path, "GET", json!({}), true).await;
         assert_eq!(success["data"]["version"], current["data"]["version"]);
         assert_ne!(success["data"]["version"], version);
@@ -3780,4 +3793,72 @@ async fn credential_probes_are_throttled_per_kind_and_independently() {
         .as_str()
         .unwrap()
         .contains("请填写 Bot Token"));
+}
+
+#[tokio::test]
+async fn shutdown_stops_all_pairs_before_waiting_and_cancels_them_concurrently() {
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    let config = AppConfig {
+        pairs: ["SOLUSDC", "BTCUSDT"]
+            .map(|s| TradingPairConfig::new(s.into()))
+            .to_vec(),
+        ..Default::default()
+    };
+    db.save_config(&config).unwrap();
+    let commit = Arc::new(Mutex::new(()));
+    let mut receivers = Vec::new();
+    let states: Vec<_> = config
+        .strategy_configs()
+        .unwrap()
+        .into_iter()
+        .map(|config| {
+            let (tx, rx) = mpsc::channel(8);
+            receivers.push(rx);
+            AppState::new_for_pair(config, db.clone(), tx, commit.clone())
+        })
+        .collect();
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let pairs = states
+        .iter()
+        .zip(receivers)
+        .map(|(state, mut rx)| {
+            let (shutdown_tx, _) = watch::channel(false);
+            let all_states = states.clone();
+            let barrier = barrier.clone();
+            let engine = tokio::spawn(async move {
+                let BotControlAction::Shutdown { reply, .. } = rx.recv().await.unwrap() else {
+                    panic!("Expected shutdown");
+                };
+                assert!(all_states.iter().all(|state| state.is_shutting_down()));
+                // Serial cleanup would time out here because neither engine can finish alone.
+                barrier.wait().await;
+                reply.send(Ok(())).unwrap();
+            });
+            PairTask {
+                state: state.clone(),
+                engine,
+                engine_joined: false,
+                recovery_failed: false,
+                shutdown_tx,
+                background: vec![],
+            }
+        })
+        .collect();
+    let mut runtime = TradingRuntime::from_pairs(
+        pairs,
+        db.clone(),
+        commit,
+        config.server.clone(),
+        GlobalConfig::from_app(&config),
+        None,
+    );
+    runtime.shutdown(Duration::from_secs(2)).await.unwrap();
+    for state in states {
+        let symbol = state.config.read().await.exchange.symbol.clone();
+        assert_eq!(
+            db.load_pair_status(&symbol, TradingMode::Paper).unwrap(),
+            Some(BotStatus::Paused)
+        );
+        assert!(state.resume_trading().await.is_err());
+    }
 }

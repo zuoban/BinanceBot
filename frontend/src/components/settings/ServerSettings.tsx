@@ -14,7 +14,10 @@ export function ServerSettings() {
     form.setFieldsValue(data.saved);
   });
   const mutation = useMutation({
-    mutationFn: (values: ServerConfig['saved']) => post<ServerConfig>('/api/server/config', { ...values, host: values.host.trim(), baseline_version: baseline.current?.version ?? null }),
+    mutationFn: async (values: ServerConfig['saved']) => {
+      if (!baseline.current?.version) throw new Error('无法确认设置版本，请重新加载设置');
+      return post<ServerConfig>('/api/server/config', { ...values, host: values.host.trim(), baseline_version: baseline.current.version });
+    },
     onMutate: () => edit.setSaving(true),
     onSuccess: data => {
       client.setQueryData(['server-config'], data);
@@ -31,7 +34,7 @@ export function ServerSettings() {
     },
   });
   return <><ErrorNotice error={query.error} retry={() => void query.refetch()} /><ErrorNotice error={mutation.error} />
-    {isConfigConflict(mutation.error, '服务设置已被其他请求修改') && <ConflictReloadButton label="服务设置" activeRef={mounted} refetch={query.refetch} onReset={mutation.reset} onLoaded={fill} />}
+    {(isConfigConflict(mutation.error, '服务设置已被其他请求修改') || isConfigConflict(mutation.error, '无法确认设置版本')) && <ConflictReloadButton label="服务设置" activeRef={mounted} refetch={query.refetch} onReset={mutation.reset} onLoaded={fill} />}
     <Card title="监听设置" className="settings-card"><Alert type="info" showIcon title={`当前监听：${query.data?.active.host ?? '--'}:${query.data?.active.port ?? '--'}。修改后重启生效；使用 Docker 时请同时调整代理配置。`} />
       <Form form={form} layout="vertical" className="settings-fields" disabled={!ready || edit.saving} onValuesChange={() => edit.setDirty(true)} onFinish={v => { if (submitting.current) return; submitting.current = true; mutation.mutate(v); }}>
         <Row gutter={[20, 16]}><Col xs={24} md={12}><Form.Item name="host" label="监听地址" rules={[{ required: true, whitespace: true }]}><Input className="numeric" /></Form.Item></Col>

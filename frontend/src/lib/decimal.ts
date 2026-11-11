@@ -6,11 +6,15 @@ export interface Fixed {
 const UNSIGNED_DECIMAL_PATTERN = /^\d+(\.\d+)?$/;
 const SIGNED_DECIMAL_PATTERN = /^([+-])?(\d+)(?:\.(\d+))?$/;
 
+const MAX_DECIMAL_INPUT_LENGTH = 64;
+const MAX_DECIMAL_PART_DIGITS = 30;
+
 export function parseUnsignedDecimal(value: unknown): Fixed | null {
   if (value === null || value === undefined) return null;
   const text = String(value).trim();
-  if (!UNSIGNED_DECIMAL_PATTERN.test(text)) return null;
+  if (text.length > MAX_DECIMAL_INPUT_LENGTH || !UNSIGNED_DECIMAL_PATTERN.test(text)) return null;
   const [whole, fraction = ''] = text.split('.');
+  if (whole.replace(/^0+/, '').length > MAX_DECIMAL_PART_DIGITS || fraction.length > MAX_DECIMAL_PART_DIGITS) return null;
   return { n: BigInt(whole + fraction), s: fraction.length };
 }
 
@@ -27,9 +31,11 @@ export function parseSignedDecimal(value: unknown): Fixed | null {
   } else {
     return null;
   }
+  if (text.length > MAX_DECIMAL_INPUT_LENGTH) return null;
   const match = SIGNED_DECIMAL_PATTERN.exec(text);
   if (!match) return null;
   const [, sign, whole, fraction = ''] = match;
+  if (whole.replace(/^0+/, '').length > MAX_DECIMAL_PART_DIGITS || fraction.length > MAX_DECIMAL_PART_DIGITS) return null;
   const magnitude = BigInt(whole + fraction);
   return { n: sign === '-' && magnitude !== 0n ? -magnitude : magnitude, s: fraction.length };
 }
@@ -53,35 +59,12 @@ export function formatDecimal(n: bigint, scale: number): string {
   const unsigned = fraction ? `${whole}.${fraction}` : whole;
   return negative ? `-${unsigned}` : unsigned;
 }
-
-export function addSignedDecimals(a: unknown, b: unknown): string | null {
-  const left = parseSignedDecimal(a), right = parseSignedDecimal(b);
-  if (!left || !right) return null;
-  const [l, r, scale] = scaleDecimalPair(left, right);
-  return formatDecimal(l + r, scale);
-}
-
 export function subSignedDecimals(a: unknown, b: unknown): string | null {
   const left = parseSignedDecimal(a), right = parseSignedDecimal(b);
   if (!left || !right) return null;
   const [l, r, scale] = scaleDecimalPair(left, right);
   return formatDecimal(l - r, scale);
 }
-
-export function sumSignedDecimals(values: Iterable<unknown>): string | null {
-  const parsed: Fixed[] = [];
-  let scale = 0;
-  for (const value of values) {
-    const item = parseSignedDecimal(value);
-    if (!item) return null;
-    if (item.s > scale) scale = item.s;
-    parsed.push(item);
-  }
-  if (!parsed.length) return '0';
-  const total = parsed.reduce((acc, item) => acc + rescaleDecimal(item, scale), 0n);
-  return formatDecimal(total, scale);
-}
-
 export function signedDecimalToNumber(value: string | null): number | null {
   if (value === null) return null;
   if (value === '0') return 0;

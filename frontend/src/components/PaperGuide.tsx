@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Button } from 'antd';
 import { ArrowRightOutlined, CloseOutlined } from '@ant-design/icons';
 import { Link } from 'react-router-dom';
+import { pairRoute } from '../lib/api';
 
 const key = 'binance_bot_paper_guide_dismissed';
 const read = () => { try { return localStorage.getItem(key) === '1'; } catch { return false; } };
@@ -15,7 +16,7 @@ export function PaperGuide({ firstSymbol }: { firstSymbol: string | undefined })
     <details className="paper-guide-details">
       <summary className="paper-guide-summary"><h2>先在模拟盘验证，再决定是否使用实盘</h2><ArrowRightOutlined aria-hidden="true" /></summary>
     <ol>
-      <li><strong>检查参数</strong>：{firstSymbol ? <Link to={`/pairs/${firstSymbol}/config`}>打开 {firstSymbol} 的策略参数</Link> : '打开策略参数'}，用右侧的网格预览确认价位和占用资金。</li>
+      <li><strong>检查参数</strong>：{firstSymbol ? <Link to={pairRoute(firstSymbol, true)}>打开 {firstSymbol} 的策略参数</Link> : '打开策略参数'}，用右侧的网格预览确认价位和占用资金。</li>
       <li><strong>观察运行</strong>：模拟盘使用真实行情在本地撮合，不会产生真实订单；在详情页查看挂单、成交和日志。</li>
       <li><strong>再接入实盘</strong>：在<Link to="/settings">全局设置</Link>填写 API Key 并先“测试连接”；实盘默认暂停，需要逐个确认后手动恢复。</li>
     </ol>

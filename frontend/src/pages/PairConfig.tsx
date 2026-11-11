@@ -3,7 +3,7 @@ import { flushSync } from 'react-dom';
 import { UNSAFE_DataRouterContext, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { Alert, App, Button, Card, Col, Form, Input, InputNumber, Row, Select, Space } from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { api, pairPath, post } from '../lib/api';
+import { api, pairPath, pairRoute, post } from '../lib/api';
 import { usePairs } from '../lib/queries';
 import { EditContext } from '../lib/session';
 import type { GlobalConfig, GridConfig } from '../lib/types';
@@ -12,7 +12,8 @@ import { useDeleteStrategy } from '../components/DeleteStrategy';
 import { GridPreview } from '../components/GridPreview';
 import { AccountMarkBridge, defaults, directionOptions, LiveConfigConfirmContent, PairRiskAndRangeSection, SaveBarStatus, type FormValues } from '../components/PairConfigSections';
 import { defaultGridInterval, isPositiveDecimal, orderAmountError, tickSizeError } from '../lib/gridPreview';
-import { positiveDecimalText, quoteAsset } from '../lib/format';
+import { positiveDecimalText } from '../lib/format';
+import { quoteAsset } from '../lib/portfolio';
 import { diffGridConfig } from '../lib/configDiff';
 export default function PairConfig() {
   const { symbol } = useParams();
@@ -80,10 +81,10 @@ export default function PairConfig() {
       flushSync(() => { edit.setDirty(false); edit.setSaving(false); });
       if (!adding && typeof data !== 'string') form.setFieldsValue(data);
       message.success(adding ? '交易对已添加，策略保持暂停，请检查配置后手动恢复' : '策略配置已保存并生效');
-      const targetSymbol = adding ? (typeof data === 'string' ? data : values.symbol.trim().toUpperCase()) : symbol;
+      const targetSymbol = adding ? (typeof data === 'string' ? data : values.symbol.trim().toUpperCase()) : symbol!;
       void client.invalidateQueries({ queryKey: ['pairs'] });
       void client.invalidateQueries({ queryKey: ['snapshot', targetSymbol] });
-      navigate(`/pairs/${targetSymbol}`, { replace: true });
+      navigate(pairRoute(targetSymbol), { replace: true });
       void client.invalidateQueries({ queryKey: ['overview'] });
       if (adding) void client.resetQueries({ queryKey: ['overview-history'] });
       if (!adding) void client.invalidateQueries({ queryKey: ['config', symbol] });
@@ -163,9 +164,9 @@ export default function PairConfig() {
   useEffect(() => { if ((tickSize || stepSize || minQty || minNotional) && ready) void form.validateFields(['grid_interval', 'order_amount_usdc']).catch(() => {}); }, [tickSize, stepSize, minQty, minNotional, effectiveMark, ready, form]);
   return <div className="config-page">
     {!adding && symbol && <AccountMarkBridge symbol={symbol} mode={pair?.mode} onMark={setLiveMark} />}
-    <PageBreadcrumb disabled={edit.saving} items={adding
+    <PageBreadcrumb disabled={edit.saving} items={!symbol
       ? [{ label: '策略总览', to: '/' }, { label: '新增交易对' }]
-      : [{ label: '策略总览', to: '/' }, { label: symbol, to: `/pairs/${symbol}` }, { label: '策略参数' }]} />
+      : [{ label: '策略总览', to: '/' }, { label: symbol, to: pairRoute(symbol) }, { label: '策略参数' }]} />
     <PageTitle title={adding ? '新增交易对' : `${symbol} 策略参数`} description={adding ? '新策略创建后保持暂停，检查参数后手动恢复' : '参数保存后立即生效，请先核对策略设置'} />
     <ErrorNotice error={pairs.error || config.error} retry={() => { if (pairs.error) void pairs.refetch(); if (!adding && pair) void config.refetch(); }} />
     <ErrorNotice error={mutation.error} />

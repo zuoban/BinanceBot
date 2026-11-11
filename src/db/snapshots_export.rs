@@ -142,7 +142,10 @@ impl Database {
 
     const DAILY_SNAPSHOT_RETENTION_DAYS: i64 = 90;
 
-    pub fn save_daily_snapshot(&self, snapshot: &crate::snapshots::DailySnapshot) -> Result<bool> {
+    pub(crate) fn save_daily_snapshot(
+        &self,
+        snapshot: &crate::snapshots::DailySnapshot,
+    ) -> Result<bool> {
         let payload = serde_json::to_string(snapshot)?;
         let cutoff = chrono::NaiveDate::parse_from_str(&snapshot.date, "%Y-%m-%d")
             .ok()
@@ -211,7 +214,7 @@ impl Database {
             .collect()
     }
 
-    pub fn daily_trade_summaries(
+    pub(crate) fn daily_trade_summaries(
         &self,
         window_start: DateTime<Utc>,
         window_end: DateTime<Utc>,
@@ -277,10 +280,10 @@ impl Database {
                     realized_pnl: Decimal::ZERO,
                     pending_pnl_count: 0,
                 });
-            entry.buy_count += buys;
-            entry.sell_count += sells;
-            entry.realized_pnl += value.pnl;
-            entry.pending_pnl_count += pending;
+            entry.buy_count = entry.buy_count.saturating_add(buys);
+            entry.sell_count = entry.sell_count.saturating_add(sells);
+            entry.realized_pnl = entry.realized_pnl.saturating_add(value.pnl);
+            entry.pending_pnl_count = entry.pending_pnl_count.saturating_add(pending);
         }
         Ok(groups.into_values().collect())
     }
@@ -348,20 +351,25 @@ impl Database {
             .map_err(|_| anyhow::anyhow!("Database analysis export is busy; retry the export"))
     }
 
+    #[cfg(unix)]
+    fn verify_on_disk_identity(&self) -> Result<()> {
+        if let Some(expected_id) = self.file_identity {
+            use std::os::unix::fs::MetadataExt;
+            super::validate_database_and_sidecars(Path::new(&self.path))?;
+            let meta = std::fs::symlink_metadata(&self.path)?;
+            anyhow::ensure!(
+                (meta.dev(), meta.ino()) == expected_id,
+                "SQLite database file changed on disk; retry the export"
+            );
+        }
+        Ok(())
+    }
+
     fn backup_to_memory(&self) -> Result<Connection> {
         let mut snapshot = Connection::open_in_memory()?;
         if self.path != ":memory:" {
             #[cfg(unix)]
-            if let Some(expected_id) = self.file_identity {
-                use std::os::unix::fs::MetadataExt;
-                let effective_uid = unsafe { libc::geteuid() } as u32;
-                super::validate_database_file(Path::new(&self.path), effective_uid)?;
-                let meta = std::fs::symlink_metadata(&self.path)?;
-                anyhow::ensure!(
-                    (meta.dev(), meta.ino()) == expected_id,
-                    "SQLite database file changed on disk; retry the export"
-                );
-            }
+            self.verify_on_disk_identity()?;
             let reader = Connection::open_with_flags(
                 &self.path,
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
@@ -375,6 +383,8 @@ impl Database {
                     "Database is busy; retry the export"
                 );
             }
+            #[cfg(unix)]
+            self.verify_on_disk_identity()?;
             return Ok(snapshot);
         }
         {

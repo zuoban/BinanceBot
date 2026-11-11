@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useQueryClient, type QueryClient, type QueryKey, type UseQueryResult } from '@tanstack/react-query';
 import { api, pairPath, socketUrl, tokenStore } from './api';
-import { SNAPSHOT_STALE_MS } from './format';
+import { SNAPSHOT_STALE_MS } from './portfolio';
 import type { AccountFrame, AccountObservation, OverviewHistoryData, Overview, Pair, Snapshot, SocketMessage } from './types';
 import { useExpired } from './useNow';
 const SOCKET_LIVE_MS = 5000;

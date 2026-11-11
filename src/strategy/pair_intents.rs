@@ -364,9 +364,12 @@ impl GridTradingEngine {
                 if let Some((_, price, quantity)) =
                     opening.filter(|(side, _, _)| *side == config.grid.direction.opening_side())
                 {
-                    cycle_profit = (order.price - price)
-                        * config.grid.direction.sign()
-                        * order.quantity.min(quantity);
+                    cycle_profit = order
+                        .price
+                        .checked_sub(price)
+                        .and_then(|diff| diff.checked_mul(config.grid.direction.sign()))
+                        .and_then(|signed| signed.checked_mul(order.quantity.min(quantity)))
+                        .unwrap_or(Decimal::ZERO);
                     is_completed_cycle = true;
                     note = format!(
                         "Completed Grid Cycle! {} at {} (Paired Entry: {}, Spread Estimate: {} USDC)",

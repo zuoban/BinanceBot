@@ -30,7 +30,7 @@ mod state_trades;
 #[path = "state_tests.rs"]
 mod tests;
 
-pub(crate) use auth_context::AuthContext;
+pub(crate) use auth_context::{AuthContext, SessionCheckError};
 pub(crate) use global_risk::{
     ExchangeSubmissionGuard, GlobalPositionLimit, PendingFillReconciliation,
 };
@@ -78,7 +78,7 @@ pub struct AppState {
     pub(crate) order_submission_lock: Arc<RwLock<()>>,
     pair_scope: Option<String>,
     pub(crate) snapshot_scope_lock: RwLock<()>,
-    snapshot_publish_lock: Mutex<()>,
+    snapshot_publish_lock: Mutex<Option<snapshot::LastSnapshotBroadcast>>,
     snapshot_cache: snapshot::SnapshotCache,
     pub(crate) auth: Arc<AuthContext>,
 
@@ -302,7 +302,7 @@ impl AppState {
             order_submission_lock: Arc::new(RwLock::new(())),
             pair_scope,
             snapshot_scope_lock: RwLock::new(()),
-            snapshot_publish_lock: Mutex::new(()),
+            snapshot_publish_lock: Mutex::new(None),
             snapshot_cache: snapshot::SnapshotCache::default(),
             auth,
             action_tx,

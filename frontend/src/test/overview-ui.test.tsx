@@ -8,10 +8,11 @@ import { runBatchControls } from '../components/Controls';
 import { summarySnapshot } from './fixtures';
 import type { Overview } from '../lib/types';
 import { AccountsContext } from '../lib/session';
-import { entryChange } from '../lib/format';
+import { entryChange } from '../lib/portfolio';
+import type * as Portfolio from '../lib/portfolio';
 
-vi.mock('../lib/format', async importOriginal => {
-  const actual = await importOriginal<typeof import('../lib/format')>();
+vi.mock('../lib/portfolio', async importOriginal => {
+  const actual = await importOriginal<typeof Portfolio>();
   return { ...actual, entryChange: vi.fn(actual.entryChange) };
 });
 
@@ -461,7 +462,7 @@ it('lists each batch outcome per strategy and only offers a retry when nothing w
   await user.click(screen.getByText('全部暂停'));
   await user.click(await screen.findByRole('button', { name: '确认执行' }));
   const drawer = await screen.findByLabelText('批量操作结果', { selector: '[role="dialog"]' });
-  expect(within(drawer).getByText('全部暂停：1/6 已确认')).toBeInTheDocument();
+  expect(within(drawer).getByText('全部暂停：2/6 已暂停')).toBeInTheDocument();
   const rows = within(drawer).getAllByRole('listitem');
   expect(rows.map(row => within(row).getByRole('link').textContent)).toEqual(['SOLUSDC', 'BNBUSDC', 'XRPUSDC', 'BTCUSDC', 'ETHUSDC']);
   expect(within(rows[0]).getByText('提交前出错，未提交')).toBeInTheDocument();

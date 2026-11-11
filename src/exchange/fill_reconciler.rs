@@ -367,6 +367,7 @@ impl BinanceFuturesClient {
                 cleanup.failed_query = true;
                 let status = resp.status();
                 let body = resp.text().await.unwrap_or_default();
+                self.maybe_resync_on_invalid_timestamp(&body).await;
                 return Err(anyhow!(
                     "Failed to fetch trades for order {}: {} - {}",
                     order_id,

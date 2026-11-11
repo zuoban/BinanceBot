@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tracing::error;
 
 #[derive(Debug, Deserialize)]
-pub struct ControlRequest {
+pub(crate) struct ControlRequest {
     pub action: String,
     pub expected_mode: Option<TradingMode>,
 }

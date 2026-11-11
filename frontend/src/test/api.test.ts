@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { api, errorMessage, pairPath, tokenStore } from '../lib/api';
+import { api, errorMessage, pairPath, pairRoute, tokenStore } from '../lib/api';
+import { routeSymbol } from '../components/CommandPalette';
 import { pair } from './fixtures';
 
 afterEach(() => vi.unstubAllGlobals());
@@ -75,5 +76,14 @@ describe('API client', () => {
     expect(errorMessage(new Error('明确错误'))).toBe('明确错误');
     expect(errorMessage('字符串错误')).toBe('字符串错误');
     expect(errorMessage(404)).toBe('404');
+  });
+  it('encodes pair route symbols and safely decodes route pathnames', () => {
+    expect(pairRoute('SOLUSDC')).toBe('/pairs/SOLUSDC');
+    expect(pairRoute('SOLUSDC', true)).toBe('/pairs/SOLUSDC/config');
+    expect(pairRoute('BTC/USDC', true)).toBe('/pairs/BTC%2FUSDC/config');
+    expect(routeSymbol('/pairs/BTC%2FUSDC/config')).toBe('BTC/USDC');
+    expect(routeSymbol('/pairs/new')).toBeUndefined();
+    expect(routeSymbol('/pairs/%6Eew')).toBeUndefined();
+    expect(routeSymbol('/pairs/%E0%A4%A')).toBeUndefined();
   });
 });

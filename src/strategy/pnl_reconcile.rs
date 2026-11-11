@@ -20,9 +20,17 @@ pub(super) fn aggregate_execution_pnl(
             quote
         ));
     }
+    let realized_pnl = fills.iter().try_fold(Decimal::ZERO, |acc, fill| {
+        acc.checked_add(fill.realized_pnl)
+            .ok_or_else(|| anyhow!("Realized PnL overflow for {}", symbol))
+    })?;
+    let commission = fills.iter().try_fold(Decimal::ZERO, |acc, fill| {
+        acc.checked_add(fill.commission)
+            .ok_or_else(|| anyhow!("Commission overflow for {}", symbol))
+    })?;
     Ok((
-        fills.iter().map(|fill| fill.realized_pnl).sum(),
-        fills.iter().map(|fill| fill.commission).sum(),
+        realized_pnl,
+        commission,
         fills.iter().all(|fill| fill.maker),
     ))
 }

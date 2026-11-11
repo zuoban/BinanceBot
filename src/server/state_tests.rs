@@ -1818,3 +1818,56 @@ async fn retired_verification_is_left_for_the_replacement_state() {
         (dec!(3.25), dec!(0.02), 0)
     );
 }
+
+#[tokio::test]
+async fn global_margin_guard_fails_closed_on_decimal_overflow_without_panicking() {
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    let mut config = AppConfig::default();
+    config.exchange.api_key = "live-key".into();
+    config.exchange.api_secret = "live-secret".into();
+    config.pause_on_zero_available_margin = true;
+    config.min_available_margin_pct = Some(dec!(50));
+    let (tx, _rx) = mpsc::channel(4);
+    let state = AppState::new(config.clone(), db, tx);
+    state
+        .global_position_initialized
+        .store(true, Ordering::SeqCst);
+    state.global_position_ready.store(true, Ordering::SeqCst);
+    {
+        let mut account = state.account.write().await;
+        account.asset = "USDC".into();
+        account.available_balance = Decimal::MAX;
+        account.margin_balance = Decimal::MAX;
+        account.update_time = Utc::now();
+    }
+    let global = GlobalPositionLimit::new(Arc::new(RwLock::new(vec![state.clone()])));
+    let _ = state.global_position_limit.set(Arc::downgrade(&global));
+    global.initialize_config(crate::config::GlobalConfig::from_app(&config));
+    global.membership_ready.store(true, Ordering::SeqCst);
+    assert!(global.check().await);
+}
+
+#[tokio::test]
+async fn record_trade_saturates_counters_and_volume_on_extreme_stats() {
+    let config = AppConfig::default();
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    db.save_config(&config).unwrap();
+    let (tx, _rx) = mpsc::channel(1);
+    let state = AppState::new(config, db, tx);
+    {
+        let mut stats = state.stats.write().await;
+        stats.total_trades = usize::MAX;
+        stats.completed_cycles = usize::MAX;
+        stats.pending_pnl_trades = usize::MAX;
+        stats.total_volume_usdc = Decimal::MAX;
+    }
+    let mut trade = cache_test_trade("saturating-trade", 1, TradingMode::Paper);
+    trade.amount_usdc = dec!(100);
+    trade.pnl_verified = false;
+    assert!(state.record_trade(trade, Some(dec!(1)), None, None).await);
+    let stats = state.stats.read().await;
+    assert_eq!(stats.total_trades, usize::MAX);
+    assert_eq!(stats.completed_cycles, usize::MAX);
+    assert_eq!(stats.pending_pnl_trades, usize::MAX);
+    assert_eq!(stats.total_volume_usdc, Decimal::MAX);
+}

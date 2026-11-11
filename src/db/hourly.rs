@@ -366,11 +366,17 @@ pub(super) fn stats_on(
         } else {
             load_boundary_rollup_on(conn, symbol, mode.as_str(), bucket, window_start, now, true)?
         };
-        let index = ((bucket - first_hour) / 3600) as usize;
-        result.buckets[index].buy_count = value.buys as u64;
-        result.buckets[index].sell_count = value.sells as u64;
-        result.realized_pnl += value.pnl;
-        result.pending_pnl_count += value.pending as u64;
+        if let Some(slot) = usize::try_from((bucket - first_hour) / 3600)
+            .ok()
+            .and_then(|i| result.buckets.get_mut(i))
+        {
+            slot.buy_count = value.buys.max(0) as u64;
+            slot.sell_count = value.sells.max(0) as u64;
+        }
+        result.realized_pnl = result.realized_pnl.saturating_add(value.pnl);
+        result.pending_pnl_count = result
+            .pending_pnl_count
+            .saturating_add(value.pending.max(0) as u64);
     }
     Ok(result)
 }
@@ -410,8 +416,10 @@ pub(super) fn today_pnl_on(
                 realized_pnl: Decimal::ZERO,
                 pending_pnl_count: 0,
             });
-        group.realized_pnl += value.pnl;
-        group.pending_pnl_count += value.pending as u64;
+        group.realized_pnl = group.realized_pnl.saturating_add(value.pnl);
+        group.pending_pnl_count = group
+            .pending_pnl_count
+            .saturating_add(value.pending.max(0) as u64);
     }
     Ok(crate::types::TodayPnl {
         window_start,

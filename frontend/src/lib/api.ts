@@ -65,6 +65,7 @@ export async function api<T>(path: string, init?: ApiRequestInit): Promise<T> {
 export const post = <T,>(path: string, data: unknown) => api<T>(path, { method: 'POST', body: JSON.stringify(data) });
 export const pairPath = (pair: Pick<Pair, 'symbol' | 'scoped'>, resource: string) =>
   pair.scoped ? `/api/pairs/${encodeURIComponent(pair.symbol)}/${resource}` : resource === 'ws' ? '/ws' : `/api/${resource}`;
+export const pairRoute = (symbol: string, config = false) => `/pairs/${encodeURIComponent(symbol)}${config ? '/config' : ''}`;
 export function socketUrl(path: string) {
   const url = new URL(path, window.location.origin);
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';

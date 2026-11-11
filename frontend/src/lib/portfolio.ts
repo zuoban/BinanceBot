@@ -1,0 +1,246 @@
+import { formatDecimal, parseSignedDecimal, rescaleDecimal, type Fixed } from './decimal';
+import { compactNumber, numeric, positivePrice } from './format';
+import type { AccountObservation, Mode, Overview, PairSummary, Snapshot, Trade } from './types';
+
+export const SNAPSHOT_STALE_MS = 10_000;
+export const quoteAsset = (symbol: string) => ['USDC', 'USDT', 'FDUSD', 'BUSD'].find(a => symbol.endsWith(a)) ?? '';
+
+const modeAsset = (mode: Mode, symbol: string) => {
+  const asset = quoteAsset(symbol) || symbol;
+  return { asset, key: `${mode}:${asset}` };
+};
+
+function groupByKey<T, G>(items: Iterable<T>, getKey: (item: T) => string, init: (item: T, key: string) => G, accumulate: (group: G, item: T) => void): Map<string, G> {
+  const groups = new Map<string, G>();
+  for (const item of items) {
+    const key = getKey(item);
+    let group = groups.get(key);
+    if (!group) {
+      group = init(item, key);
+      groups.set(key, group);
+    }
+    accumulate(group, item);
+  }
+  return groups;
+}
+
+type ValuedPosition = { symbol: string; position: Pick<Snapshot['position'], 'size' | 'mark_price'>; ticker: Pick<Snapshot['ticker'], 'mark_price'> };
+
+export function positionAmount(s: ValuedPosition): number | null {
+  const size = numeric(s.position.size), tickerMark = numeric(s.ticker.mark_price);
+  const mark = tickerMark !== null && tickerMark > 0 ? tickerMark : numeric(s.position.mark_price);
+  if (size === null || mark === null || mark <= 0) return null;
+  const amount = Math.abs(size * mark);
+  return Number.isFinite(amount) ? amount : null;
+}
+
+export function comparePositionAmount(a: ValuedPosition, b: ValuedPosition) {
+  const left = positionAmount(a), right = positionAmount(b);
+  return (right ?? -1) - (left ?? -1) || a.symbol.localeCompare(b.symbol);
+}
+
+export interface PositionGroup {
+  key: string;
+  mode: Mode;
+  asset: string;
+  count: number;
+  long: number | null;
+  short: number | null;
+  total: number | null;
+}
+
+export function positionGroups<T extends { mode: Mode; snapshot: ValuedPosition }>(entries: T[]): PositionGroup[] {
+  const groups = groupByKey(
+    entries,
+    ({ mode, snapshot }) => modeAsset(mode, snapshot.symbol).key,
+    ({ mode, snapshot }) => ({ mode, asset: modeAsset(mode, snapshot.symbol).asset, snapshots: [] as ValuedPosition[] }),
+    (group, { snapshot }) => { group.snapshots.push(snapshot); },
+  );
+  return [...groups.entries()].map(([key, group]) => {
+    let long = 0, short = 0, complete = true;
+    for (const s of group.snapshots) {
+      const size = numeric(s.position.size);
+      const amount = size === 0 ? 0 : positionAmount(s);
+      if (size === null || amount === null) { complete = false; continue; }
+      if (size > 0) long += amount;
+      if (size < 0) short += amount;
+    }
+    return { key, mode: group.mode, asset: group.asset, count: group.snapshots.length, long: complete ? long : null, short: complete ? short : null, total: complete ? long + short : null };
+  });
+}
+
+export function entryPriceText(position: { size: string; entry_price: string }, compact = false) {
+  const size = numeric(position.size), entry = numeric(position.entry_price);
+  return size !== null && size !== 0 && entry !== null && entry > 0 ? positivePrice(entry, compact) : '--';
+}
+
+export function entryChange(position: { size: string; entry_price: string }, markPrice: unknown): { text: string; className?: 'positive' | 'negative' } {
+  const size = numeric(position.size), entry = numeric(position.entry_price), mark = numeric(markPrice);
+  const raw = size !== null && size !== 0 && entry !== null && entry > 0 && mark !== null && mark > 0 ? (mark / entry - 1) * 100 : null;
+  const formatted = raw !== null && Number.isFinite(raw) ? compactNumber(raw, 2) : null;
+  const rounded = formatted === null ? null : Number(formatted.replaceAll(',', ''));
+  if (rounded === null) return { text: '--' };
+  if (rounded === 0) return { text: '0%' };
+  return { text: `${rounded > 0 ? '+' : ''}${formatted}%`, className: rounded > 0 ? 'positive' : 'negative' };
+}
+
+const isSameBeijingDay = (windowEnd: string | undefined, now: number) => {
+  if (!windowEnd) return false;
+  const endTs = Date.parse(windowEnd);
+  return Number.isFinite(endTs) && Math.floor((endTs + 8 * 3600_000) / 86_400_000) === Math.floor((now + 8 * 3600_000) / 86_400_000);
+};
+
+export function todayTradeCounts(s: Snapshot | PairSummary, now = Date.now()) {
+  if ('today_trade_counts' in s) {
+    const counts = s.today_trade_counts;
+    return counts && isSameBeijingDay(counts.window_end, now) ? { buy: counts.buy, sell: counts.sell } : null;
+  }
+  const stats = s.hourly_trade_stats;
+  if (!stats || !isSameBeijingDay(stats.window_end, now)) return null;
+  return stats.buckets.reduce((counts, b) => ({ buy: counts.buy + b.buy_count, sell: counts.sell + b.sell_count }), { buy: 0, sell: 0 });
+}
+
+export function todayCount(s: Snapshot | PairSummary, now = Date.now()) {
+  const counts = todayTradeCounts(s, now);
+  return counts ? counts.buy + counts.sell : null;
+}
+
+export interface ModeAssetPnlGroup {
+  key: string;
+  mode: Mode;
+  asset: string;
+  sum: number;
+  pending: number;
+  available: boolean;
+}
+
+export function groupModeAssetPnl<T extends { mode: Mode; symbol: string }>(
+  items: Iterable<T>,
+  extract: (item: T) => { pnl: unknown; pending?: number; valid?: boolean },
+): Map<string, ModeAssetPnlGroup> {
+  const raw = groupByKey(
+    items,
+    item => modeAsset(item.mode, item.symbol).key,
+    (item, key) => ({ key, mode: item.mode, asset: modeAsset(item.mode, item.symbol).asset, values: [] as Fixed[], pending: 0, available: true }),
+    (group, item) => {
+      const { pnl, pending = 0, valid = true } = extract(item);
+      const parsed = parseSignedDecimal(pnl);
+      if (!valid || !parsed || !Number.isInteger(pending) || pending < 0) {
+        group.available = false;
+        if (Number.isInteger(pending) && pending > 0) group.pending += pending;
+        if (parsed) group.values.push(parsed);
+      } else {
+        group.values.push(parsed);
+        group.pending += pending;
+      }
+    },
+  );
+  const result = new Map<string, ModeAssetPnlGroup>();
+  for (const [key, group] of raw) {
+    const scale = group.values.reduce((max, item) => Math.max(max, item.s), 0);
+    const totalScaled = group.values.reduce((acc, item) => acc + rescaleDecimal(item, scale), 0n);
+    const sum = totalScaled === 0n ? 0 : Number(formatDecimal(totalScaled, scale));
+    result.set(key, { key, mode: group.mode, asset: group.asset, sum, pending: group.pending, available: group.available && Number.isFinite(sum) });
+  }
+  return result;
+}
+
+export function todayPnlGroups(stats: Overview['today_pnl'], now = Date.now()) {
+  if (!stats || !isSameBeijingDay(stats.window_end, now)) return null;
+  return [...groupModeAssetPnl(stats.groups, row => ({ pnl: row.realized_pnl, pending: row.pending_pnl_count })).values()]
+    .map(group => ({ ...group, total: group.available && !group.pending ? group.sum : null }));
+}
+
+export function groupTradePnl(trades: Trade[]) {
+  const groups = groupModeAssetPnl(trades, trade => ({ pnl: trade.realized_pnl, valid: trade.pnl_verified }));
+  return new Map([...groups.entries()].map(([key, group]) => [key, { mode: group.mode, asset: group.asset, total: group.sum, available: group.available }]));
+}
+
+export function availableRatio(available: number | null, wallet: number | null): number | null {
+  return available !== null && wallet !== null && wallet > 0 ? available / wallet * 100 : null;
+}
+
+export interface AccountGroup {
+  key: string;
+  mode: Mode;
+  asset: string;
+  count: number;
+  equity: number | null;
+  available: number | null;
+  wallet: number | null;
+  unrealized: number | null;
+  ratio: number | null;
+  cny: number | null;
+}
+
+export function accountGroups<T extends AccountObservation>(entries: T[], now = Date.now()): AccountGroup[] {
+  const groups = groupByKey(
+    entries,
+    ({ mode, snapshot: s }) => `${mode}:${s.account.asset || quoteAsset(s.symbol)}`,
+    ({ mode, snapshot: s }) => ({ mode, asset: s.account.asset || quoteAsset(s.symbol), snapshots: [] as AccountObservation['snapshot'][], observed: [] as AccountObservation['snapshot'][], observationStale: false }),
+    (group, { mode, snapshot: s, account_observation_stale }) => {
+      group.snapshots.push(s);
+      if (!account_observation_stale) group.observed.push(s);
+      group.observationStale ||= !!account_observation_stale || (mode === 'PAPER' && !s.account.asset);
+    },
+  );
+  return [...groups.values()].map(({ mode, asset, snapshots, observed, observationStale }) => {
+    // Exchange timestamps can lead the browser clock slightly.
+    const recent = (timestamp: string, maxAge: number) => {
+      const age = now - Date.parse(timestamp);
+      return age >= -5_000 && age < maxAge;
+    };
+    let latest: AccountObservation['snapshot'] | undefined;
+    let latestTs = -Infinity;
+    const maxAge = mode === 'PAPER' ? Infinity : 30_000;
+    for (const s of observed) {
+      const ts = Date.parse(s.account.update_time);
+      const age = now - ts;
+      if (age >= -5_000 && age < maxAge && ts > latestTs) {
+        latestTs = ts;
+        latest = s;
+      }
+    }
+    const account = latest ?? snapshots[0];
+    const unavailable = !latest || (mode === 'PAPER' && observationStale);
+    // A shared paper account can include positions outside this page's symbol.
+    // Its valuation time follows the oldest open position's mark price.
+    const paperValued = snapshots.every(s => {
+      const size = numeric(s.position.size);
+      if (size === null) return false;
+      if (size === 0) return true;
+      return recent(s.account.update_time, 30_000) && recent(s.ticker.mark_update_time, 15_000) && (numeric(s.ticker.mark_price) ?? 0) > 0;
+    });
+    const sharedPosition = numeric(account.account.margin_balance) !== numeric(account.account.available_balance)
+      || (numeric(account.account.unrealized_profit) ?? 0) !== 0;
+    const valued = !unavailable && (mode !== 'PAPER' || (paperValued && (!sharedPosition || recent(account.account.update_time, 15_000))));
+    const equity = valued ? numeric(account.account.margin_balance) : null;
+    const available = valued ? numeric(account.account.available_balance) : null;
+    const wallet = unavailable ? null : numeric(account.account.total_wallet_balance);
+    const unrealized = valued ? numeric(account.account.unrealized_profit) : null;
+    const rate = account.account_cny_rate?.asset === asset ? numeric(account.account_cny_rate.cny_per_unit) : null;
+    return { key: `${mode}:${asset}`, mode, asset, count: snapshots.length, equity, available, wallet, unrealized, ratio: availableRatio(available, wallet), cny: equity !== null && rate !== null && rate > 0 && Number.isFinite(equity * rate) ? equity * rate : null };
+  });
+}
+
+const ACCOUNT_THRESHOLDS = [-5_000, 15_000, 30_000] as const;
+const MARK_THRESHOLDS = [-5_000, 15_000] as const;
+
+export function nextAccountExpiry(entries: readonly AccountObservation[], now = Date.now()): number {
+  let next = Infinity;
+  for (const { snapshot: s } of entries) {
+    const accTs = Date.parse(s.account.update_time);
+    if (Number.isFinite(accTs)) {
+      for (const offset of ACCOUNT_THRESHOLDS) {
+        if (accTs + offset > now && accTs + offset - 1 < next) next = accTs + offset - 1;
+      }
+    }
+    const markTs = Date.parse(s.ticker.mark_update_time);
+    if (Number.isFinite(markTs)) {
+      for (const offset of MARK_THRESHOLDS) {
+        if (markTs + offset > now && markTs + offset - 1 < next) next = markTs + offset - 1;
+      }
+    }
+  }
+  return next;
+}

@@ -33,9 +33,9 @@ pub use crate::types::ApiResponse;
 #[cfg(test)]
 pub(crate) use config_probes::ProbeGate;
 pub(crate) use config_probes::ProbeGates;
-pub use control::ControlRequest;
-pub use database::{ClearTradeHistoryRequest, ClearTradeHistoryResponse};
-pub use exchange_preview::ExchangeSymbolPreview;
+#[cfg(test)]
+pub(crate) use control::ControlRequest;
+pub(crate) use database::ClearTradeHistoryRequest;
 
 use auth::{
     get_auth_status_handler, post_auth_login_handler, post_auth_logout_handler,
@@ -54,7 +54,9 @@ use database::{
     scoped_export_handler, single_database_clear_handler, single_pair_clear_handler,
     single_pair_export_handler,
 };
-use exchange_preview::{exchange_symbol_preview_handler, exchange_symbols_handler};
+use exchange_preview::{
+    exchange_symbol_preview_handler, exchange_symbols_handler, ExchangePreviewService,
+};
 use queries::{
     get_logs_handler, get_managed_overview_handler, get_managed_pairs_handler, get_orders_handler,
     get_overview_handler, get_overview_history_handler, get_pairs_handler,
@@ -79,6 +81,25 @@ fn status_err<T>(
     message: impl Into<String>,
 ) -> (StatusCode, Json<ApiResponse<T>>) {
     (status, json_err(message))
+}
+
+async fn apply_security_headers(mut response: Response) -> Response {
+    if response.status() != StatusCode::SWITCHING_PROTOCOLS {
+        let headers = response.headers_mut();
+        headers
+            .entry(axum::http::header::CACHE_CONTROL)
+            .or_insert(axum::http::HeaderValue::from_static("no-store"));
+        headers
+            .entry(axum::http::header::X_CONTENT_TYPE_OPTIONS)
+            .or_insert(axum::http::HeaderValue::from_static("nosniff"));
+        headers
+            .entry(axum::http::header::X_FRAME_OPTIONS)
+            .or_insert(axum::http::HeaderValue::from_static("DENY"));
+        headers
+            .entry(axum::http::header::REFERRER_POLICY)
+            .or_insert(axum::http::HeaderValue::from_static("same-origin"));
+    }
+    response
 }
 
 pub fn create_router(state: Arc<AppState>) -> Router {
@@ -106,6 +127,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     create_base_router(state, true)
         .merge(pairs)
         .layer(DefaultBodyLimit::max(64 * 1024))
+        .layer(middleware::map_response(apply_security_headers))
 }
 
 fn pair_routes() -> Router<Arc<AppState>> {
@@ -124,14 +146,15 @@ fn pair_resource_routes() -> Router<Arc<AppState>> {
 }
 
 fn exchange_routes<S: Clone + Send + Sync + 'static>(limiter: Arc<RateLimiter>) -> Router<S> {
+    let service = ExchangePreviewService::new(limiter);
     Router::new()
         .route(
             "/api/exchange/symbols",
-            get(exchange_symbols_handler).layer(Extension(limiter.clone())),
+            get(exchange_symbols_handler).layer(Extension(service.clone())),
         )
         .route(
             "/api/exchange/symbol-preview",
-            get(exchange_symbol_preview_handler).layer(Extension(limiter)),
+            get(exchange_symbol_preview_handler).layer(Extension(service)),
         )
 }
 
@@ -190,7 +213,9 @@ fn public_routes() -> Router<Arc<AuthContext>> {
 /// Existing unscoped APIs address the first pair; scoped APIs never change another pair.
 pub fn create_multi_router(states: Vec<Arc<AppState>>) -> Router {
     let Some(primary) = states.first().cloned() else {
-        return Router::new().layer(DefaultBodyLimit::max(64 * 1024));
+        return Router::new()
+            .layer(DefaultBodyLimit::max(64 * 1024))
+            .layer(middleware::map_response(apply_security_headers));
     };
     let mut router = create_base_router(primary.clone(), false);
     let states = Arc::new(states);
@@ -221,7 +246,10 @@ pub fn create_multi_router(states: Vec<Arc<AppState>>) -> Router {
         .route("/api/accounts/ws", get(accounts_ws_handler))
         .layer(Extension(accounts))
         .with_state(states);
-    router.merge(global).layer(DefaultBodyLimit::max(64 * 1024))
+    router
+        .merge(global)
+        .layer(DefaultBodyLimit::max(64 * 1024))
+        .layer(middleware::map_response(apply_security_headers))
 }
 
 /// Dispatch through the current registry so newly added pairs are immediately addressable.
@@ -283,6 +311,7 @@ pub async fn create_managed_router(handle: RuntimeHandle) -> Router {
         .merge(account)
         .merge(protected)
         .layer(DefaultBodyLimit::max(64 * 1024))
+        .layer(middleware::map_response(apply_security_headers))
 }
 
 async fn dispatch_pair(

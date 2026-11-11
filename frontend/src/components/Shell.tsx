@@ -2,9 +2,12 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, Outlet, useBlocker, useLocation } from 'react-router-dom';
 import { App, Button, Drawer } from 'antd';
 import { AppstoreOutlined, ArrowDownOutlined, ArrowUpOutlined, LineChartOutlined, LogoutOutlined, MenuOutlined, PlusOutlined, SearchOutlined, SettingOutlined } from '@ant-design/icons';
+import { pairRoute } from '../lib/api';
+import { useAsyncLock } from '../lib/asyncGuard';
 import { useLiveAccounts, usePairs } from '../lib/queries';
 import { AccountsContext, EditContext, useSession } from '../lib/session';
-import { compactNumber, directionLabel, ratioText, SNAPSHOT_STALE_MS, statusLabel } from '../lib/format';
+import { compactNumber, directionLabel, ratioText, statusLabel } from '../lib/format';
+import { SNAPSHOT_STALE_MS } from '../lib/portfolio';
 import type { AccountObservation, Mode, Pair } from '../lib/types';
 import { useAccountGroups, useExpired } from '../lib/useNow';
 import { ControlProvider } from './Controls';
@@ -52,6 +55,13 @@ export default function Shell() {
     return observation && observation.mode !== pair.mode;
   }), [pairs.data, accountPairs]);
   const [dirty, setDirty] = useState(false), [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
+  savingRef.current = saving;
+  const updateSaving = useCallback((value: boolean) => {
+    savingRef.current = value;
+    setSaving(value);
+  }, []);
+  const runLogout = useAsyncLock();
   const { modal, message } = App.useApp();
   const { logout, authEnabled } = useSession();
   const pairsStale = useExpired(pairs.dataUpdatedAt + SNAPSHOT_STALE_MS);
@@ -62,12 +72,16 @@ export default function Shell() {
     if (blocker.state !== 'blocked') return;
     if (saving) { blocker.reset(); return; }
     let active = true;
+    const dialog = modal.confirm({ title: '放弃未保存的修改？', content: '当前表单的修改尚未保存。', okText: '放弃修改', cancelText: '继续编辑' });
     void (async () => {
-      const confirmed = await modal.confirm({ title: '放弃未保存的修改？', content: '当前表单的修改尚未保存。', okText: '放弃修改', cancelText: '继续编辑' });
+      const confirmed = await dialog;
       if (!active) return;
       if (confirmed) { setDirty(false); blocker.proceed(); } else blocker.reset();
     })();
-    return () => { active = false; };
+    return () => {
+      active = false;
+      dialog.destroy?.();
+    };
   }, [blocker, saving, modal]);
   useEffect(() => {
     if (!dirty && !saving) return;
@@ -75,15 +89,16 @@ export default function Shell() {
     window.addEventListener('beforeunload', beforeUnload);
     return () => window.removeEventListener('beforeunload', beforeUnload);
   }, [dirty, saving]);
-  const context = useMemo(() => ({ dirty, setDirty, saving, setSaving }), [dirty, saving]);
-  const logOut = useCallback(async () => {
-    if (saving) return;
+  const context = useMemo(() => ({ dirty, setDirty, saving, setSaving: updateSaving }), [dirty, saving, updateSaving]);
+  const logOut = useCallback(() => runLogout(async () => {
+    if (savingRef.current) return;
     if (dirty && !await modal.confirm({ title: '放弃未保存的修改并退出？', okText: '退出', cancelText: '继续编辑' })) return;
+    if (savingRef.current) return;
     try { await logout(); } catch { message.error('退出失败，会话可能仍然有效，请重试'); }
-  }, [dirty, saving, logout, modal, message]);
+  }), [dirty, logout, modal, message, runLogout]);
   const [drawer, setDrawer] = useState(false), [palette, setPalette] = useState(false);
   useEffect(() => { setDrawer(false); }, [location.pathname]);
-  const mode = pairs.data?.[0]?.mode;
+  const mode = accounts[0]?.mode ?? currentPairs?.[0]?.mode;
   const page: SidebarProps['page'] = location.pathname.startsWith('/settings') ? 'settings' : location.pathname.startsWith('/pairs/') ? 'pair' : 'overview';
   const closeDrawer = useCallback(() => setDrawer(false), []);
   const openPalette = useCallback(() => { if (saving) return; setDrawer(false); setPalette(true); }, [saving]);
@@ -138,7 +153,7 @@ const SidebarBody = memo(function SidebarBody({ idPrefix, pairs, pending, symbol
       {pairs?.map(pair => {
         const short = pair.grid_config.direction === 'SHORT';
         const active = pair.symbol === symbol;
-        return <Link key={pair.symbol} to={`/pairs/${pair.symbol}${pathname.endsWith('/config') ? '/config' : ''}`} onClick={onNavigate} className={`sidebar-pair${active ? ' sidebar-pair-active' : ''}`} aria-current={active ? 'page' : undefined} title={`${pair.symbol} · ${statusLabel[pair.status]} · ${directionLabel(pair.grid_config.direction)}`}>
+        return <Link key={pair.symbol} to={pairRoute(pair.symbol, pathname.endsWith('/config'))} onClick={onNavigate} className={`sidebar-pair${active ? ' sidebar-pair-active' : ''}`} aria-current={active ? 'page' : undefined} title={`${pair.symbol} · ${statusLabel[pair.status]} · ${directionLabel(pair.grid_config.direction)}`}>
           <span className="sidebar-icon-slot" aria-hidden="true"><span className={`status-dot status-dot-${pair.status.toLowerCase()}`} /></span>
           <span className="sidebar-pair-symbol">{pair.symbol}</span>
           <span className={`sidebar-pair-side ${short ? 'short' : 'long'}`} aria-hidden="true">{short ? <ArrowDownOutlined /> : <ArrowUpOutlined />}</span>

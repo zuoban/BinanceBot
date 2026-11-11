@@ -3,6 +3,7 @@ import { App, Button, Segmented, Table, Tag } from 'antd';
 import { CheckOutlined, CopyOutlined, DownloadOutlined } from '@ant-design/icons';
 import { Link, useInRouterContext } from 'react-router-dom';
 import type { ColumnsType } from 'antd/es/table';
+import { pairRoute } from '../lib/api';
 import { beijingDay, number, price, quantity, relativeTime, time } from '../lib/format';
 import { priceDiffPercent } from '../lib/gridPreview';
 import { useNow } from '../lib/useNow';
@@ -64,7 +65,7 @@ function Copyable({ value, children }: { value: string; children: React.ReactNod
 }
 function SymbolCell({ symbol }: { symbol: string }) {
   const inRouter = useInRouterContext();
-  return inRouter ? <Link className="trade-symbol-link" to={`/pairs/${symbol}`}>{symbol}</Link> : <span>{symbol}</span>;
+  return inRouter ? <Link className="trade-symbol-link" to={pairRoute(symbol)}>{symbol}</Link> : <span>{symbol}</span>;
 }
 type SideFilter = 'ALL' | 'BUY' | 'SELL';
 const sideOptions: { value: SideFilter; label: string }[] = [{ value: 'ALL', label: '全部' }, { value: 'BUY', label: '买入' }, { value: 'SELL', label: '卖出' }];

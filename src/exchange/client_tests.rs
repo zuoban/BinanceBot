@@ -1013,3 +1013,62 @@ async fn signed_and_public_http_errors_strip_request_urls() {
 
     server.abort();
 }
+
+#[tokio::test]
+async fn reactive_invalid_timestamp_resyncs_and_throttles_repeat_requests() {
+    use axum::{extract::Query, http::StatusCode, routing::get, Json, Router};
+    use serde_json::json;
+    use std::collections::HashMap;
+    use std::sync::atomic::AtomicUsize;
+
+    let time_hits = Arc::new(AtomicUsize::new(0));
+    let hits_for_route = Arc::clone(&time_hits);
+    let skew_ms = 60_000_i64;
+    let app = Router::new()
+        .route(
+            "/fapi/v1/time",
+            get(move || {
+                let hits = Arc::clone(&hits_for_route);
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    Json(json!({ "serverTime": Utc::now().timestamp_millis() + skew_ms }))
+                }
+            }),
+        )
+        .route(
+            "/fapi/v1/openOrders",
+            get(move |Query(query): Query<HashMap<String, String>>| async move {
+                let ts: i64 = query["timestamp"].parse().unwrap();
+                let expected = Utc::now().timestamp_millis() + skew_ms;
+                if (ts - expected).abs() > 5_000 {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({ "code": -1021, "msg": "Timestamp for this request is outside of the recvWindow." })),
+                    )
+                } else {
+                    (StatusCode::OK, Json(json!([])))
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let mut config = crate::config::AppConfig::default().exchange;
+    config.api_key = "k".into();
+    config.api_secret = "s".into();
+    let client = BinanceFuturesClient::with_base_url(&config, url);
+
+    // First signed call observes -1021 and triggers reactive sync_server_time().
+    assert!(client.get_open_orders("SOLUSDC").await.is_err());
+    assert_eq!(time_hits.load(Ordering::SeqCst), 1);
+    // Next signed call succeeds using the updated offset.
+    assert!(client.get_open_orders("SOLUSDC").await.unwrap().is_empty());
+    // Another -1021 within 10s is throttled and does not hit /fapi/v1/time again.
+    client
+        .maybe_resync_on_invalid_timestamp(r#"{"code":-1021,"msg":"skew"}"#)
+        .await;
+    assert_eq!(time_hits.load(Ordering::SeqCst), 1);
+
+    server.abort();
+}

@@ -175,7 +175,11 @@ impl SymbolRules {
         anyhow::ensure!(
             self.tick_size > Decimal::ZERO
                 && interval >= self.tick_size
-                && interval % self.tick_size == Decimal::ZERO,
+                && interval
+                    .checked_div(self.tick_size)
+                    .filter(|ticks| ticks.fract().is_zero())
+                    .and_then(|ticks| ticks.checked_mul(self.tick_size))
+                    == Some(interval),
             "网格间距 {} 必须是价格步长 {} 的正整数倍",
             interval,
             self.tick_size
@@ -185,7 +189,13 @@ impl SymbolRules {
 
     /// Both directions share the same zero-anchored price lattice.
     pub fn is_grid_price(&self, price: Decimal, interval: Decimal) -> bool {
-        interval > Decimal::ZERO && price > Decimal::ZERO && price % interval == Decimal::ZERO
+        interval > Decimal::ZERO
+            && price > Decimal::ZERO
+            && price
+                .checked_div(interval)
+                .filter(|steps| steps.fract().is_zero())
+                .and_then(|steps| steps.checked_mul(interval))
+                == Some(price)
     }
 
     pub fn is_valid_maker_grid_price(
@@ -212,7 +222,7 @@ impl SymbolRules {
         maker_ok
             && price >= min_price
             && price <= max_price
-            && self.round_price(price) == price
+            && self.checked_round_price(price) == Some(price)
             && self.is_grid_price(price, grid.grid_interval)
     }
 
@@ -257,8 +267,8 @@ impl SymbolRules {
         ) else {
             return (Vec::new(), Vec::new());
         };
-        let collect = |side, mut price, count, step| {
-            let mut prices = Vec::with_capacity(count);
+        let collect = |side, mut price, count: usize, step| {
+            let mut prices = Vec::with_capacity(count.min(1024));
             while prices.len() < count && price >= min && price <= max {
                 if self.is_grid_price(price, interval) && eligible(side, price) {
                     prices.push(price);
@@ -276,24 +286,38 @@ impl SymbolRules {
         )
     }
 
+    fn checked_round_price(&self, price: Decimal) -> Option<Decimal> {
+        if self.tick_size.is_zero() {
+            return Some(price);
+        }
+        if self.tick_size < Decimal::ZERO {
+            return None;
+        }
+        let ticks = price.checked_div(self.tick_size)?.round();
+        let rounded = ticks.checked_mul(self.tick_size)?;
+        Some(rounded.trunc_with_scale(self.price_scale))
+    }
+
     /// Round price to the nearest tick size
     pub fn round_price(&self, price: Decimal) -> Decimal {
-        if self.tick_size.is_zero() {
-            return price;
+        self.checked_round_price(price).unwrap_or(Decimal::ZERO)
+    }
+
+    fn checked_round_quantity(&self, qty: Decimal) -> Option<Decimal> {
+        if self.step_size.is_zero() {
+            return Some(qty);
         }
-        let ticks = (price / self.tick_size).round();
-        let rounded = ticks * self.tick_size;
-        rounded.trunc_with_scale(self.price_scale)
+        if self.step_size < Decimal::ZERO {
+            return None;
+        }
+        let steps = qty.checked_div(self.step_size)?.floor();
+        let rounded = steps.checked_mul(self.step_size)?;
+        Some(rounded.trunc_with_scale(self.quantity_scale))
     }
 
     /// Truncate quantity down to the nearest lot step size
     pub fn round_quantity(&self, qty: Decimal) -> Decimal {
-        if self.step_size.is_zero() {
-            return qty;
-        }
-        let steps = (qty / self.step_size).floor();
-        let rounded = steps * self.step_size;
-        rounded.trunc_with_scale(self.quantity_scale)
+        self.checked_round_quantity(qty).unwrap_or(Decimal::ZERO)
     }
 
     /// Calculate compliant order quantity given target USDC notional amount and price
@@ -301,10 +325,10 @@ impl SymbolRules {
         if price <= Decimal::ZERO || amount_usdc <= Decimal::ZERO {
             return None;
         }
-        let raw_qty = amount_usdc / price;
-        let qty = self.round_quantity(raw_qty);
+        let raw_qty = amount_usdc.checked_div(price)?;
+        let qty = self.checked_round_quantity(raw_qty)?;
 
-        let notional = qty * price;
+        let notional = qty.checked_mul(price)?;
         if qty < self.min_qty {
             warn!(
                 "Calculated quantity {} is below min_qty {}",
@@ -339,12 +363,13 @@ impl SymbolRules {
         order_amount_usdc: Decimal,
         available: Decimal,
     ) -> Option<(Decimal, crate::types::OrderPurpose)> {
+        if available <= Decimal::ZERO {
+            return None;
+        }
         let full_quantity = self.calculate_quantity(price, order_amount_usdc)?;
-        let quantity = self.round_quantity(available).min(full_quantity);
-        if quantity <= Decimal::ZERO
-            || quantity < self.min_qty
-            || quantity * price < self.min_notional
-        {
+        let quantity = self.checked_round_quantity(available)?.min(full_quantity);
+        let notional = quantity.checked_mul(price)?;
+        if quantity <= Decimal::ZERO || quantity < self.min_qty || notional < self.min_notional {
             return None;
         }
         let purpose = if quantity == full_quantity {
@@ -556,5 +581,14 @@ mod tests {
             dec!(110.1)
         ));
         assert!(!rules.is_valid_maker_grid_price(&grid, OrderSide::Buy, dec!(99.9), dec!(110.1)));
+        assert!(rules.validate_grid_interval(Decimal::MAX).is_err());
+        assert!(!rules.is_grid_price(Decimal::MAX, tiny));
+        assert_eq!(rules.round_price(Decimal::MAX), Decimal::ZERO);
+        assert_eq!(rules.round_quantity(Decimal::MAX), Decimal::ZERO);
+        assert_eq!(rules.calculate_quantity(tiny, Decimal::MAX), None);
+        assert_eq!(
+            rules.plan_remainder_quantity(dec!(100), dec!(100), Decimal::MAX),
+            None
+        );
     }
 }

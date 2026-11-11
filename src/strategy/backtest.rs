@@ -14,31 +14,42 @@
 //! * No leverage, margin or liquidation is modelled, so the liquidation guard and the margin
 //!   ratio guard are not exercised.
 
-use crate::config::{AppConfig, GridConfig};
-use crate::exchange::client::BinanceFuturesClient;
+use crate::config::GridConfig;
 use crate::strategy::precision::SymbolRules;
 use crate::types::{GridDirection, OrderSide};
 use anyhow::{bail, ensure, Context, Result};
 use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
 use serde::Serialize;
-use std::path::PathBuf;
-use std::str::FromStr;
-use std::time::Duration;
+
+#[path = "backtest/cli.rs"]
+mod cli;
+#[path = "backtest/data.rs"]
+mod data;
+
+#[cfg(test)]
+#[path = "backtest_tests.rs"]
+mod tests;
+
+pub use cli::{run_cli, BacktestArgs, DirectionArg};
+
+#[cfg(test)]
+use cli::load_rules;
+#[cfg(test)]
+use data::{fetch_klines, parse_csv, MAX_BACKTEST_DAYS};
 
 const FUNDING_PERIOD_MS: i64 = 8 * 60 * 60 * 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Candle {
-    pub time_ms: i64,
-    pub open: Decimal,
-    pub high: Decimal,
-    pub low: Decimal,
-    pub close: Decimal,
+pub(crate) struct Candle {
+    pub(crate) time_ms: i64,
+    pub(crate) open: Decimal,
+    pub(crate) high: Decimal,
+    pub(crate) low: Decimal,
+    pub(crate) close: Decimal,
 }
 
 impl Candle {
-    pub fn tick(time_ms: i64, price: Decimal) -> Self {
+    pub(crate) fn tick(time_ms: i64, price: Decimal) -> Self {
         Self {
             time_ms,
             open: price,
@@ -58,43 +69,43 @@ impl Candle {
 }
 
 #[derive(Debug, Clone)]
-pub struct BacktestParams {
-    pub grid: GridConfig,
-    pub rules: SymbolRules,
+pub(crate) struct BacktestParams {
+    pub(crate) grid: GridConfig,
+    pub(crate) rules: SymbolRules,
     /// Fraction of notional charged per fill, e.g. 0.0002.
-    pub maker_fee_rate: Decimal,
+    pub(crate) maker_fee_rate: Decimal,
     /// Fraction of position notional paid by longs (received by shorts) every 8 hours.
-    pub funding_rate_8h: Decimal,
+    pub(crate) funding_rate_8h: Decimal,
     /// Reference capital for percentage figures only; it does not limit trading.
-    pub capital: Decimal,
+    pub(crate) capital: Decimal,
     /// Experimental: only place exits at least this many grid spacings in profit versus the
     /// average entry (long: above, short: below). Replay-only, the live engine does not do this.
-    pub exit_floor_spacings: Option<Decimal>,
+    pub(crate) exit_floor_spacings: Option<Decimal>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct BacktestReport {
-    pub candles: usize,
-    pub fills: u64,
-    pub buys: u64,
-    pub sells: u64,
-    pub realized_pnl: Decimal,
-    pub fees: Decimal,
-    pub funding: Decimal,
+pub(crate) struct BacktestReport {
+    pub(crate) candles: usize,
+    pub(crate) fills: u64,
+    pub(crate) buys: u64,
+    pub(crate) sells: u64,
+    pub(crate) realized_pnl: Decimal,
+    pub(crate) fees: Decimal,
+    pub(crate) funding: Decimal,
     /// realized - fees - funding
-    pub net_realized: Decimal,
-    pub unrealized_pnl: Decimal,
-    pub net_total: Decimal,
-    pub return_pct: Decimal,
-    pub max_drawdown: Decimal,
-    pub max_drawdown_pct: Decimal,
-    pub peak_position_notional: Decimal,
-    pub avg_position_notional: Decimal,
-    pub final_position: Decimal,
-    pub final_entry_price: Decimal,
-    pub final_price: Decimal,
-    pub paused_at_ms: Option<i64>,
-    pub pause_reason: Option<String>,
+    pub(crate) net_realized: Decimal,
+    pub(crate) unrealized_pnl: Decimal,
+    pub(crate) net_total: Decimal,
+    pub(crate) return_pct: Decimal,
+    pub(crate) max_drawdown: Decimal,
+    pub(crate) max_drawdown_pct: Decimal,
+    pub(crate) peak_position_notional: Decimal,
+    pub(crate) avg_position_notional: Decimal,
+    pub(crate) final_position: Decimal,
+    pub(crate) final_entry_price: Decimal,
+    pub(crate) final_price: Decimal,
+    pub(crate) paused_at_ms: Option<i64>,
+    pub(crate) pause_reason: Option<String>,
 }
 
 struct BtOrder {
@@ -161,19 +172,33 @@ impl<'a> Sim<'a> {
         if self.size.is_zero() {
             Decimal::ZERO
         } else {
-            (self.market - self.entry) * self.size
+            self.market
+                .checked_sub(self.entry)
+                .and_then(|diff| diff.checked_mul(self.size))
+                .unwrap_or(Decimal::ZERO)
         }
     }
 
     fn equity(&self) -> Decimal {
-        self.realized - self.fees - self.funding + self.unrealized()
+        self.realized
+            .checked_sub(self.fees)
+            .and_then(|v| v.checked_sub(self.funding))
+            .and_then(|v| v.checked_add(self.unrealized()))
+            .unwrap_or(Decimal::ZERO)
     }
 
     fn record(&mut self) {
         let equity = self.equity();
         self.peak_equity = self.peak_equity.max(equity);
-        self.max_drawdown = self.max_drawdown.max(self.peak_equity - equity);
-        self.peak_notional = self.peak_notional.max(self.size.abs() * self.market);
+        self.max_drawdown = self
+            .max_drawdown
+            .max(self.peak_equity.checked_sub(equity).unwrap_or(Decimal::MAX));
+        self.peak_notional = self.peak_notional.max(
+            self.size
+                .abs()
+                .checked_mul(self.market)
+                .unwrap_or(Decimal::MAX),
+        );
     }
 
     fn pause(&mut self, reason: &str) {
@@ -195,9 +220,12 @@ impl<'a> Sim<'a> {
 
     fn pause_at_position_limit(&mut self) -> bool {
         if self.p.grid.pause_on_max_position
-            && self
-                .limit()
-                .is_some_and(|limit| self.size.abs() * self.market >= limit)
+            && self.limit().is_some_and(|limit| {
+                self.size
+                    .abs()
+                    .checked_mul(self.market)
+                    .is_none_or(|notional| notional >= limit)
+            })
         {
             self.pause("持仓名义价值达到最大持仓名义价值");
             return true;
@@ -328,7 +356,7 @@ impl<'a> Sim<'a> {
         let direction = grid.direction;
         let opening = direction.opening_side();
         let market = self.market;
-        let position_value = self.size.abs() * market;
+        let position_value = self.size.abs().checked_mul(market).unwrap_or(Decimal::MAX);
         let interval = grid.grid_interval;
         let last_fill = self.last_fill;
         let (mut buys, mut sells) = self.p.rules.grid_window_prices(
@@ -336,18 +364,27 @@ impl<'a> Sim<'a> {
             interval,
             (grid.buy_window, grid.sell_window),
             (grid.min_price, grid.max_price),
-            |_, price| last_fill.is_none_or(|fill| (price - fill).abs() >= interval),
+            |_, price| {
+                last_fill.is_none_or(|fill| {
+                    price
+                        .checked_sub(fill)
+                        .is_none_or(|diff| diff.abs() >= interval)
+                })
+            },
         );
-        if let Some(spacings) = self.p.exit_floor_spacings {
-            if !self.size.is_zero() {
-                let offset = spacings * interval;
+        if let Some(spacings) = self.p.exit_floor_spacings.filter(|_| !self.size.is_zero()) {
+            if let Some(offset) = spacings.checked_mul(interval) {
                 if direction == GridDirection::Long {
-                    let floor = self.entry + offset;
+                    let floor = self.entry.checked_add(offset).unwrap_or(Decimal::MAX);
                     sells.retain(|price| *price >= floor);
                 } else {
-                    let ceiling = self.entry - offset;
+                    let ceiling = self.entry.checked_sub(offset).unwrap_or(Decimal::MIN);
                     buys.retain(|price| *price <= ceiling);
                 }
+            } else if direction == GridDirection::Long {
+                sells.clear();
+            } else {
+                buys.clear();
             }
         }
         let suspended = grid.cancel_opening_on_max_position
@@ -406,13 +443,17 @@ impl<'a> Sim<'a> {
         let opening = direction.opening_side();
         let market = self.market;
         let limit = self.limit();
-        let position_value = self.size.abs() * market;
+        let position_value = self.size.abs().checked_mul(market).unwrap_or(Decimal::MAX);
         let mut opening_notional: Decimal = limit.map_or(Decimal::ZERO, |_| {
             self.orders
                 .iter()
                 .filter(|o| o.side == opening)
-                .map(|o| o.price * o.qty)
-                .sum()
+                .fold(Decimal::ZERO, |acc, o| {
+                    o.price
+                        .checked_mul(o.qty)
+                        .and_then(|n| acc.checked_add(n))
+                        .unwrap_or(Decimal::MAX)
+                })
         });
         for &price in opening_prices {
             if self
@@ -430,24 +471,38 @@ impl<'a> Sim<'a> {
             let Some(qty) = self.qty_at(price).filter(|_| maker_ok) else {
                 continue;
             };
-            let order_notional = price * qty;
+            let Some(order_notional) = price.checked_mul(qty) else {
+                continue;
+            };
             if let Some(limit) = limit {
                 if self.p.grid.pause_on_max_position {
-                    let projected = (self.size + direction.sign() * qty).abs() * market;
-                    if projected > limit && projected > position_value {
+                    let projected = direction
+                        .sign()
+                        .checked_mul(qty)
+                        .and_then(|delta| self.size.checked_add(delta))
+                        .and_then(|s| s.abs().checked_mul(market))
+                        .unwrap_or(Decimal::MAX);
+                    if projected > limit
+                        && (projected > position_value || projected == Decimal::MAX)
+                    {
                         self.pause("下一笔开仓单成交后预计持仓名义价值超过上限");
                         return false;
                     }
                 }
                 let valuation = market.max(price);
-                let exposure = direction.position_quantity(self.size) * valuation
-                    + opening_notional
-                    + order_notional;
-                if exposure > limit {
+                let exposure = direction
+                    .position_quantity(self.size)
+                    .checked_mul(valuation)
+                    .and_then(|pos| pos.checked_add(opening_notional))
+                    .and_then(|sum| sum.checked_add(order_notional))
+                    .unwrap_or(Decimal::MAX);
+                if exposure > limit || exposure == Decimal::MAX {
                     continue;
                 }
             }
-            opening_notional += order_notional;
+            opening_notional = opening_notional
+                .checked_add(order_notional)
+                .unwrap_or(Decimal::MAX);
             self.orders.push(BtOrder {
                 side: opening,
                 price,
@@ -470,8 +525,9 @@ impl<'a> Sim<'a> {
             .orders
             .iter()
             .filter(|o| o.side == closing)
-            .map(|o| o.qty)
-            .sum();
+            .fold(Decimal::ZERO, |acc, o| {
+                acc.checked_add(o.qty).unwrap_or(Decimal::MAX)
+            });
         for &price in closing_prices {
             if self
                 .orders
@@ -488,9 +544,12 @@ impl<'a> Sim<'a> {
             let Some(qty) = self.qty_at(price).filter(|_| maker_ok) else {
                 continue;
             };
-            let available = (position_qty - reserved_qty).max(Decimal::ZERO);
+            let available = position_qty
+                .checked_sub(reserved_qty)
+                .unwrap_or(Decimal::ZERO)
+                .max(Decimal::ZERO);
             if available >= qty {
-                reserved_qty += qty;
+                reserved_qty = reserved_qty.checked_add(qty).unwrap_or(Decimal::MAX);
                 self.orders.push(BtOrder {
                     side: closing,
                     price,
@@ -506,9 +565,14 @@ impl<'a> Sim<'a> {
             .orders
             .iter()
             .filter(|o| o.side == closing && o.remainder)
-            .map(|o| o.qty)
-            .sum();
-        let available = (position_qty - reserved_qty + remainder_qty).max(Decimal::ZERO);
+            .fold(Decimal::ZERO, |acc, o| {
+                acc.checked_add(o.qty).unwrap_or(Decimal::MAX)
+            });
+        let available = position_qty
+            .checked_sub(reserved_qty)
+            .and_then(|v| v.checked_add(remainder_qty))
+            .unwrap_or(Decimal::ZERO)
+            .max(Decimal::ZERO);
         if let Some(&price) = closing_prices.iter().find(|&&price| {
             !self
                 .orders
@@ -589,7 +653,7 @@ fn validate_backtest_inputs(params: &BacktestParams, candles: &[Candle]) -> Resu
     Ok(())
 }
 
-pub fn run(params: &BacktestParams, candles: &[Candle]) -> Result<BacktestReport> {
+pub(crate) fn run(params: &BacktestParams, candles: &[Candle]) -> Result<BacktestReport> {
     validate_backtest_inputs(params, candles)?;
     let first = candles[0];
     let mut sim = Sim::new(params, first.open, first.time_ms);
@@ -600,11 +664,20 @@ pub fn run(params: &BacktestParams, candles: &[Candle]) -> Result<BacktestReport
     for candle in candles {
         sim.now_ms = candle.time_ms;
         if let Some(previous) = previous_time {
-            let periods = candle.time_ms.div_euclid(FUNDING_PERIOD_MS)
-                - previous.div_euclid(FUNDING_PERIOD_MS);
-            if periods > 0 {
-                sim.funding +=
-                    sim.size * candle.open * params.funding_rate_8h * Decimal::from(periods);
+            let periods = candle
+                .time_ms
+                .div_euclid(FUNDING_PERIOD_MS)
+                .saturating_sub(previous.div_euclid(FUNDING_PERIOD_MS));
+            let delta = (periods > 0)
+                .then(|| {
+                    sim.size
+                        .checked_mul(candle.open)
+                        .and_then(|notional| notional.checked_mul(params.funding_rate_8h))
+                        .and_then(|fee| fee.checked_mul(Decimal::from(periods)))
+                })
+                .flatten();
+            if let Some(delta) = delta {
+                sim.funding = sim.funding.checked_add(delta).unwrap_or(Decimal::MAX);
             }
         }
         previous_time = Some(candle.time_ms);
@@ -612,13 +685,36 @@ pub fn run(params: &BacktestParams, candles: &[Candle]) -> Result<BacktestReport
             sim.move_to(price);
         }
         sim.record();
-        notional_sum += sim.size.abs() * sim.market;
+        if let Some(notional) = sim.size.abs().checked_mul(sim.market) {
+            notional_sum = notional_sum.checked_add(notional).unwrap_or(Decimal::MAX);
+        }
     }
 
-    let net_realized = sim.realized - sim.fees - sim.funding;
+    let net_realized = sim
+        .realized
+        .checked_sub(sim.fees)
+        .and_then(|v| v.checked_sub(sim.funding))
+        .unwrap_or(Decimal::ZERO);
     let unrealized = sim.unrealized();
-    let net_total = net_realized + unrealized;
+    let net_total = net_realized
+        .checked_add(unrealized)
+        .unwrap_or(Decimal::ZERO);
     let hundred = Decimal::ONE_HUNDRED;
+    let return_pct = net_total
+        .checked_div(params.capital)
+        .and_then(|v| v.checked_mul(hundred))
+        .unwrap_or(Decimal::ZERO)
+        .round_dp(2);
+    let max_drawdown_pct = sim
+        .max_drawdown
+        .checked_div(params.capital)
+        .and_then(|v| v.checked_mul(hundred))
+        .unwrap_or(Decimal::MAX)
+        .round_dp(2);
+    let avg_position_notional = notional_sum
+        .checked_div(Decimal::from(candles.len()))
+        .unwrap_or(Decimal::MAX)
+        .round_dp(2);
     Ok(BacktestReport {
         candles: candles.len(),
         fills: sim.fills,
@@ -630,11 +726,11 @@ pub fn run(params: &BacktestParams, candles: &[Candle]) -> Result<BacktestReport
         net_realized: net_realized.round_dp(4),
         unrealized_pnl: unrealized.round_dp(4),
         net_total: net_total.round_dp(4),
-        return_pct: (net_total / params.capital * hundred).round_dp(2),
+        return_pct,
         max_drawdown: sim.max_drawdown.round_dp(4),
-        max_drawdown_pct: (sim.max_drawdown / params.capital * hundred).round_dp(2),
+        max_drawdown_pct,
         peak_position_notional: sim.peak_notional.round_dp(2),
-        avg_position_notional: (notional_sum / Decimal::from(candles.len())).round_dp(2),
+        avg_position_notional,
         final_position: sim.size,
         final_entry_price: sim.entry.round_dp(4),
         final_price: sim.market,
@@ -643,282 +739,43 @@ pub fn run(params: &BacktestParams, candles: &[Candle]) -> Result<BacktestReport
     })
 }
 
-/// `time_ms,price` rows are ticks; `time_ms,open,high,low,close[,...]` rows are candles
-/// (Binance kline CSV exports work as-is). A leading non-numeric row is treated as a header.
-pub fn parse_csv(text: &str) -> Result<Vec<Candle>> {
-    let mut candles = Vec::new();
-    for (index, line) in text.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let mut cols = line.split(',').map(str::trim);
-        let first = cols.next().unwrap_or_default();
-        if candles.is_empty() && first.parse::<i64>().is_err() {
-            continue;
-        }
-        let time_ms: i64 = first
-            .parse()
-            .with_context(|| format!("第 {} 行：时间必须是毫秒时间戳", index + 1))?;
-        let parse_price = |raw: &str| -> Result<Decimal> {
-            Decimal::from_str(raw)
-                .with_context(|| format!("第 {} 行：无法解析价格 {:?}", index + 1, raw))
-        };
-        let Some(c1) = cols.next() else {
-            bail!(
-                "第 {} 行：需要 2 列（时间,价格）或至少 5 列（时间,开,高,低,收），实际 1 列",
-                index + 1
-            );
-        };
-        match cols.next() {
-            None => candles.push(Candle::tick(time_ms, parse_price(c1)?)),
-            Some(c2) => {
-                let c3 = cols.next();
-                let c4 = cols.next();
-                match (c3, c4) {
-                    (Some(c3), Some(c4)) => candles.push(Candle {
-                        time_ms,
-                        open: parse_price(c1)?,
-                        high: parse_price(c2)?,
-                        low: parse_price(c3)?,
-                        close: parse_price(c4)?,
-                    }),
-                    (Some(_), None) => bail!(
-                        "第 {} 行：需要 2 列（时间,价格）或至少 5 列（时间,开,高,低,收），实际 4 列",
-                        index + 1
-                    ),
-                    (None, _) => bail!(
-                        "第 {} 行：需要 2 列（时间,价格）或至少 5 列（时间,开,高,低,收），实际 3 列",
-                        index + 1
-                    ),
-                }
-            }
-        }
-    }
-    Ok(candles)
-}
-
-const SUPPORTED_KLINE_INTERVALS: &[&str] = &[
-    "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M",
-];
-const MAX_BACKTEST_DAYS: u32 = 3650;
-const MAX_KLINE_SPAN_MS: i64 = MAX_BACKTEST_DAYS as i64 * 24 * 60 * 60 * 1000;
-
-fn validate_kline_interval(interval: &str) -> Result<()> {
-    ensure!(
-        SUPPORTED_KLINE_INTERVALS.contains(&interval),
-        "不支持的 K 线周期: {interval}（支持: {}）",
-        SUPPORTED_KLINE_INTERVALS.join(", ")
-    );
-    Ok(())
-}
-
-fn kline_http_client() -> &'static reqwest::Client {
-    static CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
-        reqwest::Client::builder()
-            .timeout(Duration::from_secs(15))
-            .build()
-            .expect("Failed to build kline HTTP client")
-    });
-    &CLIENT
-}
-
-pub async fn fetch_klines(
-    symbol: &str,
-    interval: &str,
-    start_ms: i64,
-    end_ms: i64,
-) -> Result<Vec<Candle>> {
-    crate::config::validate_symbol(symbol)?;
-    validate_kline_interval(interval)?;
-    ensure!(
-        end_ms > start_ms && end_ms.saturating_sub(start_ms) <= MAX_KLINE_SPAN_MS,
-        "K 线时间范围必须在 1..={MAX_BACKTEST_DAYS} 天之间"
-    );
-    let client = kline_http_client();
-    let end_str = end_ms.to_string();
-    let mut start = start_ms;
-    let mut candles: Vec<Candle> = Vec::new();
-    loop {
-        let start_str = start.to_string();
-        let rows: Vec<Vec<serde_json::Value>> = client
-            .get("https://fapi.binance.com/fapi/v1/klines")
-            .query(&[
-                ("symbol", symbol),
-                ("interval", interval),
-                ("startTime", start_str.as_str()),
-                ("endTime", end_str.as_str()),
-                ("limit", "1500"),
-            ])
-            .send()
-            .await
-            .map_err(reqwest::Error::without_url)?
-            .error_for_status()
-            .map_err(reqwest::Error::without_url)
-            .context("K 线请求失败，请检查交易对和周期")?
-            .json()
-            .await
-            .map_err(reqwest::Error::without_url)?;
-        let received = rows.len();
-        for row in rows {
-            let price = |position: usize| -> Result<Decimal> {
-                Decimal::from_str(
-                    row.get(position)
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default(),
-                )
-                .context("无法解析 K 线价格")
-            };
-            candles.push(Candle {
-                time_ms: row
-                    .first()
-                    .and_then(|v| v.as_i64())
-                    .context("无法解析 K 线时间")?,
-                open: price(1)?,
-                high: price(2)?,
-                low: price(3)?,
-                close: price(4)?,
-            });
-        }
-        match candles.last() {
-            Some(last) if received >= 1500 => start = last.time_ms + 1,
-            _ => break,
-        }
-        tokio::time::sleep(Duration::from_millis(150)).await;
-    }
-    Ok(candles)
-}
-
-#[derive(Debug, Clone, Copy, clap::ValueEnum)]
-pub enum DirectionArg {
-    Long,
-    Short,
-}
-
-#[derive(Debug, Clone, clap::Args)]
-#[command(
-    about = "Replay a grid configuration over historical prices",
-    long_about = "Replay a grid configuration over historical candles. Provide --csv (time_ms,price or time_ms,open,high,low,close) or --symbol to download Binance USDⓈ-M klines for the last --days. With --symbol the price tick, quantity step and minimum notional come from exchangeInfo; the --tick-size/--step-size/--min-qty/--min-notional flags override them. Results are optimistic: orders fill when touched, with no queue position and no partial fills."
-)]
-pub struct BacktestArgs {
-    /// Trading pair, e.g. BTCUSDC. Downloads klines unless --csv is given; also loads exchange rules.
-    #[arg(long)]
-    pub symbol: Option<String>,
-    /// CSV file: `time_ms,price` ticks or `time_ms,open,high,low,close[,...]` candles.
-    #[arg(long)]
-    pub csv: Option<PathBuf>,
-    /// Kline interval when downloading (1m, 5m, 1h ...).
-    #[arg(long, default_value = "1m")]
-    pub interval: String,
-    /// How many days back to download.
-    #[arg(long, default_value_t = 7)]
-    pub days: u32,
-    #[arg(long, value_enum, default_value_t = DirectionArg::Long)]
-    pub direction: DirectionArg,
-    /// Grid spacing. Comma-separated values run a sweep, e.g. `0.5,1,2`.
-    #[arg(long, value_delimiter = ',', required = true)]
-    pub grid_interval: Vec<Decimal>,
-    /// Order amount per grid; comma-separated values run a sweep.
-    #[arg(long, value_delimiter = ',', default_value = "100")]
-    pub amount: Vec<Decimal>,
-    /// Buy window depth; comma-separated values run a sweep.
-    #[arg(long, value_delimiter = ',', default_value = "5")]
-    pub buy_window: Vec<usize>,
-    /// Sell window depth; comma-separated values run a sweep.
-    #[arg(long, value_delimiter = ',', default_value = "5")]
-    pub sell_window: Vec<usize>,
-    #[arg(long)]
-    pub min_price: Option<Decimal>,
-    #[arg(long)]
-    pub max_price: Option<Decimal>,
-    #[arg(long)]
-    pub max_position: Option<Decimal>,
-    /// Pause and cancel everything at the position cap.
-    #[arg(long)]
-    pub pause_on_max_position: bool,
-    /// At the cap, cancel only opening orders and keep exits.
-    #[arg(long)]
-    pub cancel_opening_on_max_position: bool,
-    /// Maker fee as a fraction of notional.
-    #[arg(long, default_value = "0.0002")]
-    pub maker_fee: Decimal,
-    /// Funding rate per 8 hours as a fraction of notional (positive: longs pay).
-    #[arg(long, default_value = "0")]
-    pub funding_rate: Decimal,
-    /// Reference capital for percentage figures.
-    #[arg(long, default_value = "1000")]
-    pub capital: Decimal,
-    #[arg(long)]
-    pub tick_size: Option<Decimal>,
-    #[arg(long)]
-    pub step_size: Option<Decimal>,
-    #[arg(long)]
-    pub min_qty: Option<Decimal>,
-    #[arg(long)]
-    pub min_notional: Option<Decimal>,
-    /// Experimental: only exit at least this many spacings in profit versus the average entry.
-    #[arg(long)]
-    pub exit_floor: Option<Decimal>,
-    /// Print the report as JSON.
-    #[arg(long)]
-    pub json: bool,
-}
-
-async fn load_rules(args: &BacktestArgs) -> Result<SymbolRules> {
-    ensure!(args.maker_fee >= Decimal::ZERO, "--maker-fee 不能为负数");
-    let mut rules = match &args.symbol {
-        Some(symbol) => {
-            crate::config::validate_symbol(symbol)?;
-            let client = BinanceFuturesClient::new(&AppConfig::default().exchange);
-            let info = client
-                .get_exchange_info(Some(symbol))
-                .await
-                .context("无法获取交易所规则")?;
-            SymbolRules::from_exchange_info(&info, symbol)
-                .with_context(|| format!("交易所没有可用的 {symbol} 规则"))?
-        }
-        // Offline defaults: the built-in price cap is meant for a single small-cap symbol and
-        // would silently block every level on high-priced pairs, so use the exchange-info
-        // fallback cap instead.
-        None => SymbolRules {
-            max_price: dec!(1000000),
-            ..SymbolRules::default()
-        },
-    };
-    if let Some(tick) = args.tick_size {
-        ensure!(tick > Decimal::ZERO, "--tick-size 必须大于 0");
-        rules.set_tick_size(tick);
-    }
-    if let Some(step) = args.step_size {
-        ensure!(step > Decimal::ZERO, "--step-size 必须大于 0");
-        rules.set_step_size(step);
-    }
-    if let Some(min_qty) = args.min_qty {
-        ensure!(min_qty > Decimal::ZERO, "--min-qty 必须大于 0");
-        rules.min_qty = min_qty;
-    }
-    if let Some(min_notional) = args.min_notional {
-        ensure!(min_notional > Decimal::ZERO, "--min-notional 必须大于 0");
-        rules.min_notional = min_notional;
-    }
-    Ok(rules)
-}
-
 /// Upper bound on sweep size, so a typo cannot start thousands of replays.
-pub const MAX_SWEEP_COMBINATIONS: usize = 200;
+pub(crate) const MAX_SWEEP_COMBINATIONS: usize = 200;
 
 #[derive(Debug, Clone, Serialize)]
-pub struct SweepRow {
-    pub grid_interval: Decimal,
-    pub order_amount_usdc: Decimal,
-    pub buy_window: usize,
-    pub sell_window: usize,
-    pub report: BacktestReport,
+pub(crate) struct SweepRow {
+    pub(crate) grid_interval: Decimal,
+    pub(crate) order_amount_usdc: Decimal,
+    pub(crate) buy_window: usize,
+    pub(crate) sell_window: usize,
+    pub(crate) report: BacktestReport,
+}
+
+fn checked_sweep_combinations(
+    intervals: usize,
+    amounts: usize,
+    buy_windows: usize,
+    sell_windows: usize,
+) -> Result<usize> {
+    ensure!(
+        intervals > 0 && amounts > 0 && buy_windows > 0 && sell_windows > 0,
+        "至少需要一组参数"
+    );
+    let total = intervals
+        .checked_mul(amounts)
+        .and_then(|n| n.checked_mul(buy_windows))
+        .and_then(|n| n.checked_mul(sell_windows))
+        .ok_or_else(|| anyhow::anyhow!("参数组合数量溢出，超过上限 {MAX_SWEEP_COMBINATIONS}"))?;
+    ensure!(
+        total <= MAX_SWEEP_COMBINATIONS,
+        "参数组合共 {total} 组，超过上限 {MAX_SWEEP_COMBINATIONS}"
+    );
+    Ok(total)
 }
 
 /// Replay every combination over the same candles, best net profit first. Any invalid
 /// combination fails the whole sweep rather than being silently skipped.
-pub fn sweep(
+pub(crate) fn sweep(
     base: &BacktestParams,
     grid_intervals: &[Decimal],
     amounts: &[Decimal],
@@ -926,12 +783,12 @@ pub fn sweep(
     sell_windows: &[usize],
     candles: &[Candle],
 ) -> Result<Vec<SweepRow>> {
-    let total = grid_intervals.len() * amounts.len() * buy_windows.len() * sell_windows.len();
-    ensure!(total > 0, "至少需要一组参数");
-    ensure!(
-        total <= MAX_SWEEP_COMBINATIONS,
-        "参数组合共 {total} 组，超过上限 {MAX_SWEEP_COMBINATIONS}"
-    );
+    let total = checked_sweep_combinations(
+        grid_intervals.len(),
+        amounts.len(),
+        buy_windows.len(),
+        sell_windows.len(),
+    )?;
     let mut rows = Vec::with_capacity(total);
     for &grid_interval in grid_intervals {
         for &order_amount_usdc in amounts {
@@ -960,731 +817,4 @@ pub fn sweep(
     }
     rows.sort_by_key(|row| std::cmp::Reverse(row.report.net_total));
     Ok(rows)
-}
-
-fn when(ms: i64) -> String {
-    chrono::DateTime::from_timestamp_millis(ms)
-        .map(|time| time.to_rfc3339())
-        .unwrap_or_else(|| ms.to_string())
-}
-
-const OPTIMISM_NOTE: &str =
-    "注意：挂单一经触价即成交，不计排队与部分成交，结果偏乐观；未模拟杠杆、保证金与强平。";
-
-fn print_report(report: &BacktestReport, candles: &[Candle], capital: Decimal) {
-    println!(
-        "回放 {} 根行情，{} 至 {}",
-        report.candles,
-        when(candles[0].time_ms),
-        when(candles[candles.len() - 1].time_ms)
-    );
-    println!(
-        "成交 {} 笔（买 {} / 卖 {}）",
-        report.fills, report.buys, report.sells
-    );
-    println!("已实现盈亏      {}", report.realized_pnl);
-    println!("手续费          -{}", report.fees);
-    println!("资金费          -{}", report.funding);
-    println!("净已实现        {}", report.net_realized);
-    println!(
-        "未实现盈亏      {}（期末价 {}，持仓 {}，均价 {}）",
-        report.unrealized_pnl, report.final_price, report.final_position, report.final_entry_price
-    );
-    println!(
-        "净收益合计      {}（{}% / 参考资金 {}）",
-        report.net_total, report.return_pct, capital
-    );
-    println!(
-        "最大回撤        {}（{}%）",
-        report.max_drawdown, report.max_drawdown_pct
-    );
-    println!(
-        "持仓名义价值    峰值 {} / 平均 {}",
-        report.peak_position_notional, report.avg_position_notional
-    );
-    if let (Some(at), Some(reason)) = (report.paused_at_ms, &report.pause_reason) {
-        println!("策略在 {} 暂停：{}", when(at), reason);
-    }
-    println!("{OPTIMISM_NOTE}");
-}
-
-fn print_sweep(rows: &[SweepRow], candles: &[Candle], capital: Decimal) {
-    println!(
-        "回放 {} 根行情，{} 至 {}；{} 组参数，按净收益从高到低排列（参考资金 {}）",
-        candles.len(),
-        when(candles[0].time_ms),
-        when(candles[candles.len() - 1].time_ms),
-        rows.len(),
-        capital
-    );
-    println!(
-        "{:>10} {:>9} {:>7} {:>7} {:>11} {:>8} {:>9} {:>11}  paused",
-        "interval", "amount", "buy/sell", "fills", "net", "ret%", "maxdd%", "peak_pos"
-    );
-    for row in rows {
-        let report = &row.report;
-        println!(
-            "{:>10} {:>9} {:>7} {:>7} {:>11} {:>8} {:>9} {:>11}  {}",
-            row.grid_interval,
-            row.order_amount_usdc,
-            format!("{}/{}", row.buy_window, row.sell_window),
-            report.fills,
-            report.net_total,
-            report.return_pct,
-            report.max_drawdown_pct,
-            report.peak_position_notional,
-            if report.paused_at_ms.is_some() {
-                "yes"
-            } else {
-                "-"
-            }
-        );
-    }
-    println!(
-        "排序只按净收益，不含风险调整；请同时查看 maxdd% 与 peak_pos，并留意样本区间是否足够长。"
-    );
-    println!("{OPTIMISM_NOTE}");
-}
-
-pub async fn run_cli(args: &BacktestArgs) -> Result<()> {
-    if args.csv.is_none() && args.symbol.is_some() {
-        validate_kline_interval(&args.interval)?;
-        ensure!(
-            (1..=MAX_BACKTEST_DAYS).contains(&args.days),
-            "--days 必须在 1..={MAX_BACKTEST_DAYS} 之间"
-        );
-    }
-    let rules = load_rules(args).await?;
-    let candles = match (&args.csv, &args.symbol) {
-        (Some(path), _) => parse_csv(
-            &std::fs::read_to_string(path).with_context(|| format!("无法读取 {path:?}"))?,
-        )?,
-        (None, Some(symbol)) => {
-            let end = chrono::Utc::now().timestamp_millis();
-            let start = end - i64::from(args.days) * 24 * 60 * 60 * 1000;
-            fetch_klines(symbol, &args.interval, start, end).await?
-        }
-        (None, None) => bail!("请提供 --csv 或 --symbol"),
-    };
-    let base = BacktestParams {
-        grid: GridConfig {
-            direction: match args.direction {
-                DirectionArg::Long => GridDirection::Long,
-                DirectionArg::Short => GridDirection::Short,
-            },
-            grid_interval: args.grid_interval[0],
-            order_amount_usdc: args.amount[0],
-            buy_window: args.buy_window[0],
-            sell_window: args.sell_window[0],
-            post_only: true,
-            min_price: args.min_price,
-            max_price: args.max_price,
-            max_position_usdc: args.max_position,
-            pause_on_max_position: args.pause_on_max_position,
-            cancel_opening_on_max_position: args.cancel_opening_on_max_position,
-            min_liquidation_distance_pct: None,
-        },
-        rules,
-        maker_fee_rate: args.maker_fee,
-        funding_rate_8h: args.funding_rate,
-        capital: args.capital,
-        exit_floor_spacings: args.exit_floor,
-    };
-    let rows = sweep(
-        &base,
-        &args.grid_interval,
-        &args.amount,
-        &args.buy_window,
-        &args.sell_window,
-        &candles,
-    )?;
-    let idle = rows.iter().filter(|row| row.report.fills == 0).count();
-    if idle > 0 {
-        eprintln!(
-            "警告：{idle}/{} 组参数没有任何成交。可能原因：每格数量按数量步长取整后低于最小数量或最小名义金额（可用 --step-size/--min-qty/--min-notional 覆盖），或 --min-price/--max-price 与网格间距把挂单挡在了行情之外，或行情区间内价格从未触及任何档位。",
-            rows.len()
-        );
-    }
-    match (rows.as_slice(), args.json) {
-        ([row], true) => println!("{}", serde_json::to_string_pretty(&row.report)?),
-        (_, true) => println!("{}", serde_json::to_string_pretty(&rows)?),
-        ([row], false) => print_report(&row.report, &candles, args.capital),
-        (_, false) => print_sweep(&rows, &candles, args.capital),
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn params(grid: impl FnOnce(&mut GridConfig)) -> BacktestParams {
-        let mut config = GridConfig {
-            grid_interval: dec!(1),
-            order_amount_usdc: dec!(100),
-            buy_window: 3,
-            sell_window: 3,
-            max_position_usdc: None,
-            ..GridConfig::default()
-        };
-        grid(&mut config);
-        BacktestParams {
-            grid: config,
-            rules: SymbolRules::default(),
-            maker_fee_rate: dec!(0.0002),
-            funding_rate_8h: Decimal::ZERO,
-            capital: dec!(1000),
-            exit_floor_spacings: None,
-        }
-    }
-
-    fn ticks(prices: &[Decimal]) -> Vec<Candle> {
-        prices
-            .iter()
-            .enumerate()
-            .map(|(i, price)| Candle::tick(i as i64 * 60_000, *price))
-            .collect()
-    }
-
-    #[test]
-    fn reaching_the_cap_pauses_before_a_closing_fill() {
-        let mut p = params(|g| {
-            g.buy_window = 1;
-            g.sell_window = 1;
-            g.min_price = Some(dec!(99));
-            g.max_position_usdc = Some(dec!(100));
-            g.pause_on_max_position = true;
-        });
-        p.rules.step_size = Decimal::ONE;
-        p.rules.min_qty = Decimal::ONE;
-        let report = run(&p, &ticks(&[dec!(99.5), dec!(99), dec!(100)])).unwrap();
-
-        assert_eq!((report.buys, report.sells), (1, 0));
-        assert_eq!(report.final_position, Decimal::ONE);
-        assert_eq!(report.realized_pnl, Decimal::ZERO);
-        assert_eq!(report.paused_at_ms, Some(120_000));
-        assert_eq!(report.peak_position_notional, dec!(100));
-    }
-
-    #[test]
-    fn regular_closing_allocation_preserves_the_remainder_queue() {
-        let p = params(|g| g.grid_interval = dec!(10));
-        let mut sim = Sim::new(&p, dec!(20), 0);
-        sim.maintain();
-        sim.move_to(dec!(10));
-        assert!(sim.orders.iter().any(|o| {
-            o.side == OrderSide::Sell && o.price == dec!(40) && o.qty == dec!(1.67) && o.remainder
-        }));
-
-        sim.move_to(dec!(30));
-        for _ in 0..3 {
-            sim.maintain();
-            let exits: Vec<_> = sim
-                .orders
-                .iter()
-                .filter(|o| o.side == OrderSide::Sell)
-                .collect();
-            assert_eq!(exits.len(), 1);
-            assert_eq!((exits[0].price, exits[0].qty), (dec!(40), dec!(1.67)));
-            assert!(exits[0].remainder);
-        }
-
-        let report = run(&p, &ticks(&[dec!(20), dec!(10), dec!(30), dec!(40)])).unwrap();
-        assert_eq!((report.buys, report.sells), (1, 3));
-        assert_eq!(report.final_position, Decimal::ZERO);
-        assert_eq!(report.realized_pnl, dec!(166.7));
-    }
-
-    #[test]
-    fn remainder_requires_a_valid_ordinary_quantity_at_its_price() {
-        let mut p = params(|g| {
-            g.buy_window = 1;
-            g.sell_window = 1;
-        });
-        p.rules.step_size = Decimal::ONE;
-        p.rules.min_qty = Decimal::ONE;
-        let report = run(&p, &ticks(&[dec!(101), dec!(100), dec!(101)])).unwrap();
-
-        assert_eq!((report.buys, report.sells), (1, 0));
-        assert_eq!(report.final_position, Decimal::ONE);
-        assert_eq!(report.realized_pnl, Decimal::ZERO);
-    }
-
-    #[test]
-    fn remainder_top_up_is_capped_and_promoted_to_an_ordinary_order() {
-        let p = params(|g| {
-            g.grid_interval = dec!(10);
-            g.buy_window = 1;
-            g.sell_window = 1;
-        });
-        let mut sim = Sim::new(&p, dec!(30), 0);
-        sim.size = dec!(3);
-        sim.entry = dec!(10);
-        sim.orders.push(BtOrder {
-            side: OrderSide::Sell,
-            price: dec!(40),
-            qty: dec!(1.67),
-            remainder: true,
-        });
-        sim.maintain();
-
-        let exits: Vec<_> = sim
-            .orders
-            .iter()
-            .filter(|o| o.side == OrderSide::Sell)
-            .collect();
-        assert_eq!(exits.len(), 1);
-        assert_eq!((exits[0].price, exits[0].qty), (dec!(40), dec!(2.5)));
-        assert!(!exits[0].remainder);
-        sim.move_to(dec!(40));
-        assert_eq!(sim.size, dec!(0.5));
-        assert_eq!(sim.sells, 1);
-    }
-
-    #[test]
-    fn replay_rejects_invalid_caps_and_price_bounds_in_restrict_only_mode() {
-        let candles = ticks(&[dec!(100)]);
-        for cap in [Decimal::ZERO, -Decimal::ONE] {
-            let p = params(|g| g.max_position_usdc = Some(cap));
-            assert!(run(&p, &candles).is_err());
-        }
-        for (minimum, maximum) in [
-            (Some(dec!(110)), Some(dec!(90))),
-            (Some(Decimal::ZERO), None),
-            (Some(-Decimal::ONE), None),
-            (None, Some(Decimal::ZERO)),
-            (None, Some(-Decimal::ONE)),
-        ] {
-            let p = params(|g| {
-                g.min_price = minimum;
-                g.max_price = maximum;
-            });
-            assert!(run(&p, &candles).is_err());
-        }
-    }
-
-    #[test]
-    fn permissive_custom_filters_cannot_create_zero_quantity_fills() {
-        let mut p = params(|g| {
-            g.buy_window = 1;
-            g.sell_window = 1;
-        });
-        p.rules.step_size = Decimal::ONE;
-        p.rules.min_qty = Decimal::ZERO;
-        p.rules.min_notional = Decimal::ZERO;
-        let report = run(&p, &ticks(&[dec!(102), dec!(101), dec!(102)])).unwrap();
-
-        assert_eq!(report.fills, 0);
-        assert_eq!(report.final_position, Decimal::ZERO);
-        assert_eq!(report.fees, Decimal::ZERO);
-    }
-
-    #[test]
-    fn closing_fills_preserve_pre_fill_peak_notional_and_equity() {
-        let mut p = params(|g| {
-            g.buy_window = 1;
-            g.sell_window = 1;
-        });
-        p.rules.step_size = Decimal::ONE;
-        p.rules.min_qty = Decimal::ONE;
-        p.maker_fee_rate = Decimal::ZERO;
-        let candles = ticks(&[dec!(100), dec!(99), dec!(100)]);
-        let report = run(&p, &candles).unwrap();
-
-        assert_eq!(report.final_position, Decimal::ZERO);
-        assert_eq!(report.peak_position_notional, dec!(100));
-        assert_eq!(report.net_total, Decimal::ONE);
-
-        // Before paying the closing fee, marked equity peaks at 0.01. The next
-        // fee lowers it to -0.99, a drawdown of 1 rather than 0.99.
-        p.maker_fee_rate = dec!(0.01);
-        let with_fees = run(&p, &candles).unwrap();
-        assert_eq!(with_fees.max_drawdown, Decimal::ONE);
-        assert_eq!(with_fees.net_total, dec!(-0.99));
-
-        p.maker_fee_rate = dec!(-0.0002);
-        assert!(run(&p, &candles).is_err());
-    }
-
-    #[test]
-    fn one_round_trip_earns_one_spacing_minus_fees() {
-        let report = run(
-            &params(|_| {}),
-            &ticks(&[dec!(100), dec!(98.5), dec!(100.5)]),
-        )
-        .unwrap();
-        // Buy 1.01 @ 99, sell 1.00 @ 100 (quantity rounds per price).
-        assert_eq!((report.buys, report.sells), (1, 1));
-        assert_eq!(report.realized_pnl, dec!(1));
-        // 1.01 * 99 + 1.00 * 100 = 199.99 notional at 0.02%.
-        assert_eq!(report.fees, dec!(0.0400));
-        assert_eq!(report.final_position, dec!(0.01));
-    }
-
-    #[test]
-    fn a_fast_move_keeps_filling_through_new_levels() {
-        // Window is 3 levels deep, yet a drop of 6 levels must fill more than 3 buys because
-        // the window is re-maintained after every fill.
-        let report = run(&params(|_| {}), &ticks(&[dec!(100), dec!(93.5)])).unwrap();
-        assert_eq!(report.buys, 6);
-        assert_eq!(report.sells, 0);
-    }
-
-    #[test]
-    fn pause_at_the_cap_cancels_everything() {
-        let report = run(
-            &params(|g| {
-                g.max_position_usdc = Some(dec!(150));
-                g.pause_on_max_position = true;
-            }),
-            &ticks(&[dec!(100), dec!(95)]),
-        )
-        .unwrap();
-        assert_eq!(report.buys, 1);
-        assert!(report.paused_at_ms.is_some());
-    }
-
-    #[test]
-    fn cancel_opening_at_the_cap_keeps_exits_and_resumes() {
-        let p = params(|g| {
-            g.max_position_usdc = Some(dec!(150));
-            g.cancel_opening_on_max_position = true;
-        });
-        let mut sim = Sim::new(&p, dec!(100), 0);
-        sim.maintain();
-        assert!(sim.orders.iter().any(|o| o.side == OrderSide::Buy));
-
-        // Position value 200 is above the 150 cap: openings are cancelled, exits stay.
-        sim.size = dec!(2);
-        sim.entry = dec!(100);
-        sim.maintain();
-        assert!(sim.paused.is_none());
-        assert!(sim.orders.iter().all(|o| o.side == OrderSide::Sell));
-        assert!(!sim.orders.is_empty());
-
-        // Back under the cap with room for another order: openings return.
-        sim.size = dec!(0.5);
-        sim.maintain();
-        assert!(sim.orders.iter().any(|o| o.side == OrderSide::Buy));
-    }
-
-    #[test]
-    fn short_grid_profits_when_price_falls_back() {
-        let report = run(
-            &params(|g| g.direction = GridDirection::Short),
-            &ticks(&[dec!(100), dec!(101.5), dec!(99.5)]),
-        )
-        .unwrap();
-        assert_eq!((report.sells, report.buys), (1, 1));
-        assert!(report.realized_pnl > Decimal::ZERO);
-    }
-
-    #[test]
-    fn funding_is_charged_to_longs_each_eight_hours() {
-        let mut p = params(|_| {});
-        p.funding_rate_8h = dec!(0.001);
-        let eight_hours = FUNDING_PERIOD_MS;
-        let candles = vec![
-            Candle::tick(eight_hours - 60_000, dec!(100)),
-            Candle::tick(eight_hours - 30_000, dec!(98.5)),
-            Candle::tick(eight_hours + 60_000, dec!(98.5)),
-        ];
-        let report = run(&p, &candles).unwrap();
-        // Long 1.01 @ 99 held across one boundary: 1.01 * 98.5 * 0.001.
-        assert_eq!(report.funding, dec!(0.0995));
-    }
-
-    #[test]
-    fn csv_accepts_ticks_candles_and_a_header() {
-        let ticks = parse_csv("time,price\n1000,100.5\n2000,101\n").unwrap();
-        assert_eq!(
-            ticks,
-            vec![
-                Candle::tick(1000, dec!(100.5)),
-                Candle::tick(2000, dec!(101))
-            ]
-        );
-        let candles = parse_csv("1000,100,102,99,101,12.5,x\n").unwrap();
-        assert_eq!(
-            candles,
-            vec![Candle {
-                time_ms: 1000,
-                open: dec!(100),
-                high: dec!(102),
-                low: dec!(99),
-                close: dec!(101)
-            }]
-        );
-        assert!(parse_csv("1000,100,101\n").is_err());
-    }
-
-    #[test]
-    fn average_cost_accounting_matches_cash_flow_on_a_noisy_path() {
-        for direction in [GridDirection::Long, GridDirection::Short] {
-            let p = params(|g| {
-                g.direction = direction;
-                g.grid_interval = dec!(0.5);
-            });
-            let mut sim = Sim::new(&p, dec!(100), 0);
-            sim.maintain();
-            let mut seed: u64 = 12345;
-            let mut price = dec!(100);
-            for _ in 0..3000 {
-                seed = seed
-                    .wrapping_mul(6364136223846793005)
-                    .wrapping_add(1442695040888963407);
-                let step = Decimal::from((seed >> 33) % 21) / dec!(10) - dec!(1);
-                price = (price + step).max(dec!(60));
-                sim.move_to(price);
-            }
-            assert!(sim.fills > 100);
-            let gross = sim.realized + sim.unrealized();
-            // The weighted-average entry divides, so allow Decimal rounding dust.
-            let expected = sim.cash_flow + sim.size * sim.market;
-            assert!(
-                (gross - expected).abs() < dec!(0.000000001),
-                "{gross} vs {expected}"
-            );
-        }
-    }
-
-    #[test]
-    fn sweep_runs_every_combination_over_the_same_candles_best_first() {
-        let candles = ticks(&[dec!(100), dec!(97), dec!(103), dec!(97), dec!(103)]);
-        let base = params(|_| {});
-        let intervals = [dec!(1), dec!(2), dec!(0.5)];
-        let rows = sweep(
-            &base,
-            &intervals,
-            &[dec!(100), dec!(200)],
-            &[3],
-            &[3, 5],
-            &candles,
-        )
-        .unwrap();
-        assert_eq!(rows.len(), 3 * 2 * 2);
-        assert!(rows
-            .windows(2)
-            .all(|w| w[0].report.net_total >= w[1].report.net_total));
-        // Each row matches a standalone replay of the same parameters.
-        for row in &rows {
-            let mut single = base.clone();
-            single.grid.grid_interval = row.grid_interval;
-            single.grid.order_amount_usdc = row.order_amount_usdc;
-            single.grid.buy_window = row.buy_window;
-            single.grid.sell_window = row.sell_window;
-            let alone = run(&single, &candles).unwrap();
-            assert_eq!(alone.net_total, row.report.net_total);
-            assert_eq!(alone.fills, row.report.fills);
-        }
-        // Spacing changes the result, so the sweep is not just repeating one run.
-        assert!(rows.iter().any(|r| r.report.fills != rows[0].report.fills));
-    }
-
-    #[test]
-    fn sweep_fails_on_any_invalid_combination_and_caps_its_size() {
-        let candles = ticks(&[dec!(100), dec!(98)]);
-        let base = params(|_| {});
-        // 0.005 is below the 0.01 tick: the whole sweep must fail, not skip it.
-        assert!(sweep(
-            &base,
-            &[dec!(1), dec!(0.005)],
-            &[dec!(100)],
-            &[3],
-            &[3],
-            &candles
-        )
-        .is_err());
-        assert!(sweep(&base, &[], &[dec!(100)], &[3], &[3], &candles).is_err());
-        let many: Vec<usize> = (1..=21).collect();
-        assert!(sweep(&base, &[dec!(1)], &[dec!(100)], &many, &many, &candles).is_err());
-    }
-
-    #[test]
-    fn exit_floor_blocks_exits_below_average_entry_plus_the_margin() {
-        let sells = |floor: Option<Decimal>, direction: GridDirection| {
-            let mut p = params(|g| g.direction = direction);
-            p.exit_floor_spacings = floor;
-            let mut sim = Sim::new(&p, dec!(100), 0);
-            // Long 2 at 103 or short 2 at 97, market back at 100.
-            sim.size = if direction == GridDirection::Long {
-                dec!(2)
-            } else {
-                dec!(-2)
-            };
-            sim.entry = if direction == GridDirection::Long {
-                dec!(103)
-            } else {
-                dec!(97)
-            };
-            sim.maintain();
-            let side = direction.closing_side();
-            let mut exits: Vec<Decimal> = sim
-                .orders
-                .iter()
-                .filter(|o| o.side == side)
-                .map(|o| o.price)
-                .collect();
-            exits.sort();
-            exits
-        };
-        // Without a floor the long exits sit at 101..103 although entry was 103.
-        assert!(sells(None, GridDirection::Long)
-            .iter()
-            .any(|p| *p < dec!(103)));
-        // Floor of 1 spacing: nothing below 104 survives, and the market is below it.
-        assert!(sells(Some(dec!(1)), GridDirection::Long)
-            .iter()
-            .all(|p| *p >= dec!(104)));
-        assert!(sells(Some(dec!(0)), GridDirection::Long)
-            .iter()
-            .all(|p| *p >= dec!(103)));
-        // Short mirror: entry 97, floor 1 spacing means exits at or below 96.
-        assert!(sells(None, GridDirection::Short)
-            .iter()
-            .any(|p| *p > dec!(97)));
-        assert!(sells(Some(dec!(1)), GridDirection::Short)
-            .iter()
-            .all(|p| *p <= dec!(96)));
-    }
-
-    #[test]
-    fn exit_floor_never_realizes_a_loss_on_a_whipsaw() {
-        // Long-only grid over a down-then-up path: with a zero floor every exit is at or above
-        // the average entry, so realized PnL cannot be negative.
-        let mut path = Vec::new();
-        for i in 0..40 {
-            path.push(dec!(100) - Decimal::from(i) / dec!(4));
-        }
-        for i in 0..40 {
-            path.push(dec!(90) + Decimal::from(i) / dec!(8));
-        }
-        let mut p = params(|g| g.max_position_usdc = Some(dec!(800)));
-        p.maker_fee_rate = Decimal::ZERO;
-        let plain = run(&p, &ticks(&path)).unwrap();
-        p.exit_floor_spacings = Some(Decimal::ZERO);
-        let floored = run(&p, &ticks(&path)).unwrap();
-        assert!(
-            plain.realized_pnl < Decimal::ZERO,
-            "setup should lose without a floor"
-        );
-        assert!(floored.realized_pnl >= Decimal::ZERO);
-    }
-
-    #[test]
-    fn prices_outside_the_rules_price_range_fail_loudly_instead_of_trading_nothing() {
-        let mut p = params(|_| {});
-        p.rules.max_price = dec!(100000);
-        let error = run(&p, &ticks(&[dec!(118000), dec!(118100)])).unwrap_err();
-        assert!(error.to_string().contains("价格范围"));
-        p.rules.max_price = dec!(1000000);
-        assert!(run(&p, &ticks(&[dec!(118000), dec!(118100)])).is_ok());
-    }
-
-    #[test]
-    fn invalid_input_is_rejected() {
-        let good = ticks(&[dec!(100)]);
-        assert!(run(&params(|_| {}), &[]).is_err());
-        assert!(run(&params(|g| g.grid_interval = dec!(0.005)), &good).is_err());
-        assert!(run(&params(|g| g.pause_on_max_position = true), &good).is_err());
-        let mut negative_fee = params(|_| {});
-        negative_fee.maker_fee_rate = dec!(-0.0001);
-        assert!(run(&negative_fee, &good).is_err());
-        let backwards = vec![Candle::tick(2, dec!(100)), Candle::tick(1, dec!(100))];
-        assert!(run(&params(|_| {}), &backwards).is_err());
-
-        // When a fill in the opposite direction crosses zero, entry resets to fill price.
-        let p = params(|g| g.direction = GridDirection::Short);
-        let mut sim = Sim::new(&p, dec!(100), 0);
-        sim.size = dec!(1);
-        sim.entry = dec!(95);
-        sim.orders.push(BtOrder {
-            side: OrderSide::Sell,
-            price: dec!(105),
-            qty: dec!(2),
-            remainder: false,
-        });
-        sim.fill_at(OrderSide::Sell, dec!(105));
-        assert_eq!(sim.size, dec!(-1));
-        assert_eq!(sim.entry, dec!(105));
-    }
-
-    #[tokio::test]
-    async fn cli_rules_reject_invalid_fee_and_filter_overrides() {
-        let base = BacktestArgs {
-            symbol: None,
-            csv: None,
-            interval: "1m".into(),
-            days: 7,
-            direction: DirectionArg::Long,
-            grid_interval: vec![dec!(1)],
-            amount: vec![dec!(100)],
-            buy_window: vec![3],
-            sell_window: vec![3],
-            min_price: None,
-            max_price: None,
-            max_position: None,
-            pause_on_max_position: false,
-            cancel_opening_on_max_position: false,
-            maker_fee: dec!(0.0002),
-            funding_rate: Decimal::ZERO,
-            capital: dec!(1000),
-            tick_size: None,
-            step_size: None,
-            min_qty: None,
-            min_notional: None,
-            exit_floor: None,
-            json: false,
-        };
-        assert!(load_rules(&BacktestArgs {
-            maker_fee: dec!(-0.0001),
-            ..base.clone()
-        })
-        .await
-        .is_err());
-        assert!(load_rules(&BacktestArgs {
-            min_qty: Some(Decimal::ZERO),
-            ..base.clone()
-        })
-        .await
-        .is_err());
-        assert!(load_rules(&BacktestArgs {
-            min_notional: Some(Decimal::ZERO),
-            ..base.clone()
-        })
-        .await
-        .is_err());
-        assert!(load_rules(&BacktestArgs {
-            symbol: Some("solusdc".into()),
-            ..base.clone()
-        })
-        .await
-        .is_err());
-        assert!(fetch_klines("SOLUSDC&limit=1", "1m", 0, 60_000)
-            .await
-            .is_err());
-        assert!(fetch_klines("SOLUSDC", "2m", 0, 60_000).await.is_err());
-        assert!(fetch_klines("SOLUSDC", "1m", 60_000, 60_000).await.is_err());
-        assert!(run_cli(&BacktestArgs {
-            symbol: Some("SOLUSDC".into()),
-            days: 0,
-            ..base.clone()
-        })
-        .await
-        .is_err());
-        assert!(run_cli(&BacktestArgs {
-            symbol: Some("SOLUSDC".into()),
-            days: MAX_BACKTEST_DAYS + 1,
-            ..base.clone()
-        })
-        .await
-        .is_err());
-        assert!(run_cli(&BacktestArgs {
-            symbol: Some("SOLUSDC".into()),
-            interval: "invalid".into(),
-            ..base
-        })
-        .await
-        .is_err());
-    }
 }

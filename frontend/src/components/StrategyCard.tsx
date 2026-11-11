@@ -2,8 +2,10 @@ import { memo, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { Button, Card, Popover, Space } from 'antd';
 import { ArrowRightOutlined, EyeOutlined } from '@ant-design/icons';
+import { pairRoute } from '../lib/api';
 import { sameGridConfig } from '../lib/configDiff';
-import { compactNumber as number, entryChange, entryPriceText, maxPositionPolicyLabel, positivePrice, positionAmount, quantity, quoteAsset, trimFractionZeros } from '../lib/format';
+import { compactNumber as number, maxPositionPolicyLabel, positivePrice, quantity, trimFractionZeros } from '../lib/format';
+import { entryChange, entryPriceText, positionAmount, quoteAsset } from '../lib/portfolio';
 import type { GridConfig, Overview, Pair } from '../lib/types';
 import { ControlResultBanner, DirectionTag, DirectionText, Pnl, StatusTag } from './Common';
 import { StrategyMenu, StrategyToggle } from './StrategyMenu';
@@ -30,7 +32,7 @@ const StrategyConfigPopover = memo(function StrategyConfigPopover({ symbol, conf
       <div><dt>强平距离阈值</dt><dd>{config.min_liquidation_distance_pct == null ? '未设置' : `${trimFractionZeros(config.min_liquidation_distance_pct)}%`}</dd></div>
       <div><dt>仅挂单</dt><dd>{config.post_only ? '开启' : '关闭'}</dd></div>
     </dl>
-    <Link to={`/pairs/${symbol}/config`}>查看完整配置 <ArrowRightOutlined /></Link>
+    <Link to={pairRoute(symbol, true)}>查看完整配置 <ArrowRightOutlined /></Link>
   </div>;
 });
 
@@ -53,9 +55,9 @@ export const StrategyCard = memo(function StrategyCard({
   const pair = useMemo(() => toPair(entry), [entry]);
   const quote = quoteAsset(s.symbol), quoteSuffix = quote ? ` / ${quote}` : '', quoteUnit = quote ? ` ${quote}` : '';
   const change = entryChange(s.position, s.ticker.mark_price);
-  return <Card className={`strategy-card ${s.grid_config.direction === 'SHORT' ? 'strategy-short' : 'strategy-long'}`}>
+  return <Card className="strategy-card">
     <div className="section-line strategy-card-heading">
-      <div className="strategy-identity"><Link className="pair-name" to={`/pairs/${s.symbol}`}>{s.symbol}</Link></div>
+      <div className="strategy-identity"><Link className="pair-name" to={pairRoute(s.symbol)}>{s.symbol}</Link></div>
       <Space className="strategy-card-actions" size={6}><Popover trigger="click" placement="bottom" title={`${s.symbol} 策略配置`} content={<StrategyConfigPopover symbol={s.symbol} config={s.grid_config} quoteUnit={quoteUnit} />}><Button size="small" icon={<EyeOutlined />} aria-label={`查看 ${s.symbol} 策略配置`} /></Popover><StrategyToggle pair={pair} stale={stale} /><StrategyMenu pair={pair} stale={stale} /></Space>
     </div>
     <div className="strategy-main">

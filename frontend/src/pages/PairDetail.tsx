@@ -2,9 +2,11 @@ import { useMemo } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { Alert, Button, Card, Col, Descriptions, Row, Statistic, Tabs } from 'antd';
 import { SettingOutlined } from '@ant-design/icons';
+import { pairRoute } from '../lib/api';
 import { usePairSnapshot, usePairs } from '../lib/queries';
 import { signedDecimalToNumber, subSignedDecimals } from '../lib/decimal';
-import { beijingClockFormat, cnyText, entryPriceText, number, positivePrice, quantity, quoteAsset, ratioText, todayTradeCounts, trimFractionZeros } from '../lib/format';
+import { beijingClockFormat, cnyText, number, positivePrice, quantity, ratioText, trimFractionZeros } from '../lib/format';
+import { entryPriceText, quoteAsset, todayTradeCounts } from '../lib/portfolio';
 import { ControlResultBanner, DirectionTag, DirectionText, ErrorNotice, FreshnessText, ModeTag, PageBreadcrumb, PageTitle, Pnl, SignalChip, StatusTag } from '../components/Common';
 import { PairControls, useControls } from '../components/Controls';
 import { DepthChart, HourlyChart } from '../components/Charts';
@@ -35,7 +37,7 @@ export default function PairDetail() {
   return <div>
     <PageBreadcrumb items={[{ label: '策略总览', to: '/' }, { label: symbol ?? '策略详情' }]} />
     <PageTitle title={symbol ?? '策略详情'} description="行情、网格与成交，随策略实时更新"
-      extra={<div className="detail-actions">{currentPair && <PairControls pair={currentPair} stale={query.stale || !!query.error} />}<Button icon={<SettingOutlined />} onClick={() => navigate(`/pairs/${symbol}/config`)}>策略参数</Button></div>} />
+      extra={<div className="detail-actions">{currentPair && <PairControls pair={currentPair} stale={query.stale || !!query.error} />}<Button icon={<SettingOutlined />} disabled={!symbol} onClick={() => { if (symbol) navigate(pairRoute(symbol, true)); }}>策略参数</Button></div>} />
     <ErrorNotice error={pairs.error || query.error} retry={() => { void pairs.refetch(); void query.refetch(); }} />
     {pairs.data && !pair && !pairs.isFetching && <Alert type="warning" title="该交易对不存在或已移除" />}
     {symbol && <ControlResultBanner symbol={symbol} results={controls.results} clearResult={controls.clearResult} variant="alert" />}

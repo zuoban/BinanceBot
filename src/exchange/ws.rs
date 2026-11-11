@@ -10,7 +10,7 @@ use tokio::time::sleep;
 use tokio_tungstenite::connect_async;
 use tracing::{error, info, warn};
 
-pub struct BinanceWsStream {
+pub(crate) struct BinanceWsStream {
     config_rx: watch::Receiver<String>,
     ticker_tx: broadcast::Sender<TickerInfo>,
 }
@@ -134,11 +134,14 @@ fn parse_market_update(
                 return None;
             }
             times.ticker = Some(fields.event_time);
-            let change = close_price - open_price;
+            let change = close_price.checked_sub(open_price).unwrap_or(Decimal::ZERO);
             let change_pct = if open_price.is_zero() {
                 Decimal::ZERO
             } else {
-                change / open_price * rust_decimal_macros::dec!(100)
+                change
+                    .checked_div(open_price)
+                    .and_then(|ratio| ratio.checked_mul(rust_decimal_macros::dec!(100)))
+                    .unwrap_or(Decimal::ZERO)
             };
             Some(TickerInfo {
                 symbol: symbol.to_string(),
@@ -169,6 +172,15 @@ fn parse_market_update(
         }
         _ => None,
     }
+}
+
+fn local_observed_time(
+    local_now: DateTime<Utc>,
+    exchange_now: DateTime<Utc>,
+    exchange_time: DateTime<Utc>,
+) -> DateTime<Utc> {
+    let age = exchange_now.signed_duration_since(exchange_time);
+    local_now.checked_sub_signed(age).unwrap_or(local_now)
 }
 
 impl BinanceWsStream {
@@ -229,12 +241,32 @@ impl BinanceWsStream {
                                     continue 'connect;
                                 }
                                 if let Ok(text) = msg.to_text() {
-                                    if let Some(update) = parse_market_update(
+                                    let local_now = Utc::now();
+                                    let exchange_now = local_now
+                                        .checked_add_signed(chrono::Duration::milliseconds(
+                                            super::client::mainnet_time_offset_ms(),
+                                        ))
+                                        .unwrap_or(local_now);
+                                    if let Some(mut update) = parse_market_update(
                                         text,
                                         &symbol,
-                                        Utc::now(),
+                                        exchange_now,
                                         &mut event_times,
                                     ) {
+                                        if update.last_price > Decimal::ZERO {
+                                            update.update_time = local_observed_time(
+                                                local_now,
+                                                exchange_now,
+                                                update.update_time,
+                                            );
+                                        }
+                                        if update.mark_price > Decimal::ZERO {
+                                            update.mark_update_time = local_observed_time(
+                                                local_now,
+                                                exchange_now,
+                                                update.mark_update_time,
+                                            );
+                                        }
                                         let _ = self.ticker_tx.send(update);
                                     }
                                 }
@@ -396,5 +428,34 @@ mod tests {
         assert!(ticker_rx.try_recv().is_err());
         client.abort();
         server.abort();
+    }
+
+    #[test]
+    fn ticker_extreme_decimal_values_do_not_overflow() {
+        let now = Utc::now();
+        let mut times = EventTimes::default();
+        let frame = format!(
+            r#"{{"stream":"btcusdt@ticker","data":{{"e":"24hrTicker","E":{},"s":"BTCUSDT","c":"{}","o":"0.0000000000000000000000000001","h":"{}","l":"1","v":"1","q":"1"}}}}"#,
+            now.timestamp_millis(),
+            Decimal::MAX,
+            Decimal::MAX,
+        );
+        let update = parse_market_update(&frame, "BTCUSDT", now, &mut times).unwrap();
+        assert_eq!(update.last_price, Decimal::MAX);
+        assert_eq!(update.change_percent_24h, Decimal::ZERO);
+    }
+
+    #[test]
+    fn local_observed_time_preserves_event_age_across_clock_skew() {
+        let local_now = DateTime::from_timestamp_millis(1_700_000_000_000).unwrap();
+        let exchange_now = local_now + chrono::Duration::seconds(5);
+        let event_ms = (exchange_now - chrono::Duration::seconds(12)).timestamp_millis();
+        let mut times = EventTimes::default();
+        let frame = format!(
+            r#"{{"stream":"btcusdt@markPrice@1s","data":{{"e":"markPriceUpdate","E":{event_ms},"s":"BTCUSDT","p":"100"}}}}"#
+        );
+        let update = parse_market_update(&frame, "BTCUSDT", exchange_now, &mut times).unwrap();
+        let translated = local_observed_time(local_now, exchange_now, update.mark_update_time);
+        assert_eq!(translated, local_now - chrono::Duration::seconds(12));
     }
 }

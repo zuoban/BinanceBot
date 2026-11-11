@@ -120,6 +120,9 @@ impl GridTradingEngine {
                 return Ok(());
             }
         }
+        let Some(amount_usdc) = price.checked_mul(quantity) else {
+            return Ok(());
+        };
         let now = Utc::now();
         let target = GridOrder {
             client_order_id: new_grid_client_order_id(closing_side),
@@ -128,7 +131,7 @@ impl GridTradingEngine {
             side: closing_side,
             price,
             quantity,
-            amount_usdc: price * quantity,
+            amount_usdc,
             status: OrderStatus::New,
             created_at: now,
             updated_at: now,
@@ -260,7 +263,11 @@ impl GridTradingEngine {
         let quantity = rules
             .round_quantity(available.min(plan.target.quantity))
             .min(rules.max_qty);
-        if quantity < rules.min_qty || quantity * price < rules.min_notional {
+        if quantity < rules.min_qty
+            || quantity
+                .checked_mul(price)
+                .is_none_or(|notional| notional < rules.min_notional)
+        {
             plan.phase = RemainderPhase::Complete;
             return self.persist_remainder_plan(plan).await;
         }
@@ -331,8 +338,11 @@ impl GridTradingEngine {
         let Some(_submission) = self.state.try_order_submission() else {
             return Ok(());
         };
+        let Some(amount_usdc) = quantity.checked_mul(price) else {
+            return Ok(());
+        };
         plan.target.quantity = quantity;
-        plan.target.amount_usdc = quantity * price;
+        plan.target.amount_usdc = amount_usdc;
         if rules.calculate_quantity(price, config.grid.order_amount_usdc) != Some(quantity) {
             plan.target.purpose = OrderPurpose::Remainder;
         }

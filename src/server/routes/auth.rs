@@ -1,5 +1,5 @@
 use super::{json_ok, json_ok_msg, status_err, ApiResponse};
-use crate::server::state::AuthContext;
+use crate::server::state::{AuthContext, SessionCheckError};
 use crate::types::{AuthLoginPayload, AuthStatusResponse, AuthTokenResponse};
 use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -10,6 +10,15 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
+fn sanitize_token(token: &str) -> Option<&str> {
+    let t = token.trim();
+    if t.is_empty() || t.len() > 128 || !t.bytes().all(|b| b.is_ascii_graphic()) {
+        None
+    } else {
+        Some(t)
+    }
+}
+
 fn extract_token(headers: &HeaderMap) -> Option<&str> {
     if let Some(auth_val) = headers.get(axum::http::header::AUTHORIZATION) {
         if let Ok(auth_str) = auth_val.to_str() {
@@ -17,9 +26,8 @@ fn extract_token(headers: &HeaderMap) -> Option<&str> {
                 .strip_prefix("Bearer ")
                 .or_else(|| auth_str.strip_prefix("bearer "))
             {
-                let t = token.trim();
-                if !t.is_empty() {
-                    return Some(t);
+                if !token.trim().is_empty() {
+                    return sanitize_token(token);
                 }
             }
         }
@@ -27,9 +35,8 @@ fn extract_token(headers: &HeaderMap) -> Option<&str> {
 
     if let Some(token_val) = headers.get("X-Auth-Token") {
         if let Ok(token_str) = token_val.to_str() {
-            let t = token_str.trim();
-            if !t.is_empty() {
-                return Some(t);
+            if !token_str.trim().is_empty() {
+                return sanitize_token(token_str);
             }
         }
     }
@@ -55,7 +62,8 @@ pub(super) async fn require_auth_middleware(
     let is_valid = match extract_token(req.headers()) {
         Some(token) => match auth.check_token_valid(token).await {
             Ok(valid) => valid,
-            Err(error) => {
+            Err(SessionCheckError::Busy) => return Err(auth_busy()),
+            Err(SessionCheckError::Database(error)) => {
                 error!("Failed to check session: {}", error);
                 return Err(auth_service_error());
             }
@@ -81,10 +89,7 @@ pub(super) async fn get_auth_status_handler(
     let result = if !initialized {
         Ok(true)
     } else if let Some(token) = extract_token(&headers) {
-        let token = token.to_owned();
-        auth.db
-            .run_blocking(move |db| db.is_session_valid(&token))
-            .await
+        auth.check_session_in_db(token).await
     } else {
         Ok(false)
     };
@@ -96,7 +101,8 @@ pub(super) async fn get_auth_status_handler(
                 authenticated,
             }),
         ),
-        Err(error) => {
+        Err(SessionCheckError::Busy) => auth_busy(),
+        Err(SessionCheckError::Database(error)) => {
             error!("Failed to check authentication status: {}", error);
             auth_service_error()
         }
@@ -175,13 +181,20 @@ pub(super) async fn post_auth_logout_handler(
     State(auth): State<Arc<AuthContext>>,
     headers: HeaderMap,
 ) -> (StatusCode, Json<ApiResponse<()>>) {
+    if !auth.is_auth_configured() {
+        return (StatusCode::OK, json_ok_msg((), "已安全退出登录"));
+    }
     if let Some(token) = extract_token(&headers) {
-        if let Err(error) = auth.delete_session(token).await {
-            error!("Failed to delete session during logout: {}", error);
-            return status_err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "退出登录失败，请重试或查看服务器日志",
-            );
+        match auth.delete_session(token).await {
+            Ok(()) => {}
+            Err(SessionCheckError::Busy) => return auth_busy(),
+            Err(SessionCheckError::Database(error)) => {
+                error!("Failed to delete session during logout: {}", error);
+                return status_err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "退出登录失败，请重试或查看服务器日志",
+                );
+            }
         }
     }
     (StatusCode::OK, json_ok_msg((), "已安全退出登录"))

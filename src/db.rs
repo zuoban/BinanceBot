@@ -124,6 +124,12 @@ fn validate_database_file(path: &Path, expected_uid: u32) -> std::io::Result<()>
             "SQLite database and sidecar paths must not be symbolic links",
         ));
     }
+    if metadata.is_file() && metadata.nlink() != 1 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "SQLite database and sidecar files must not have multiple hard links",
+        ));
+    }
     if metadata.uid() != expected_uid {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
@@ -139,6 +145,40 @@ fn validate_database_file(path: &Path, expected_uid: u32) -> std::io::Result<()>
             std::io::ErrorKind::PermissionDenied,
             "remove group and other permissions before starting",
         ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+pub(super) fn validate_database_and_sidecars(path: &Path) -> Result<()> {
+    let effective_uid = unsafe { libc::geteuid() } as u32;
+    let validate = |target: &Path| validate_database_file(target, effective_uid);
+    validate(path).with_context(|| {
+        format!(
+            "Insecure SQLite database path {:?}; ensure it is owned by the service user, remove group and other permissions and avoid symbolic links",
+            path
+        )
+    })?;
+    // SQLite resolves parent symlinks before choosing sidecar names.
+    let canonical = path
+        .canonicalize()
+        .context("Failed to resolve database path")?;
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let mut name = canonical.as_os_str().to_os_string();
+        name.push(suffix);
+        let sidecar = Path::new(&name);
+        match validate(sidecar) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "Insecure SQLite sidecar {:?}; ensure it is owned by the service user, remove group and other permissions and avoid symbolic links",
+                        sidecar
+                    )
+                })
+            }
+        }
     }
     Ok(())
 }
@@ -187,24 +227,7 @@ fn prepare_database_path(path: &Path) -> Result<()> {
         }
         // Inspect without opening existing files: closing a descriptor can
         // release another SQLite connection's process-wide POSIX locks.
-        let effective_uid = unsafe { libc::geteuid() } as u32;
-        let validate = |path: &Path| validate_database_file(path, effective_uid);
-        validate(path).with_context(|| format!("Insecure SQLite database path {:?}; ensure it is owned by the service user, remove group and other permissions and avoid symbolic links", path))?;
-
-        // SQLite resolves parent symlinks before choosing sidecar names.
-        let canonical = path
-            .canonicalize()
-            .context("Failed to resolve database path")?;
-        for suffix in ["-wal", "-shm", "-journal"] {
-            let mut name = canonical.as_os_str().to_os_string();
-            name.push(suffix);
-            let sidecar = Path::new(&name);
-            match validate(sidecar) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error).with_context(|| format!("Insecure SQLite sidecar {:?}; ensure it is owned by the service user, remove group and other permissions and avoid symbolic links", sidecar)),
-            }
-        }
+        validate_database_and_sidecars(path)?;
     }
     Ok(())
 }
@@ -276,29 +299,35 @@ impl Database {
 
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path_ref = path.as_ref();
-        let path_str = path_ref.to_string_lossy().to_string();
-
-        if path_str != ":memory:" {
+        let raw_path_str = path_ref.to_string_lossy().to_string();
+        let (open_path, path_str) = if raw_path_str != ":memory:" {
             // URI filenames can redirect SQLite to a different path or VFS;
             // they cannot be secured by preparing this filesystem path.
             anyhow::ensure!(
-                !path_str.starts_with("file:"),
+                !raw_path_str.starts_with("file:"),
                 "SQLite URI database paths are not supported; use a filesystem path"
             );
             prepare_database_path(path_ref)?;
-        }
+            let canonical = path_ref
+                .canonicalize()
+                .with_context(|| format!("Failed to resolve database path {:?}", path_ref))?;
+            let canonical_str = canonical.to_string_lossy().into_owned();
+            (canonical, canonical_str)
+        } else {
+            (std::path::PathBuf::from(":memory:"), raw_path_str)
+        };
         #[cfg(unix)]
         let file_identity = if path_str != ":memory:" {
             use std::os::unix::fs::MetadataExt;
-            let meta = std::fs::symlink_metadata(path_ref)
-                .with_context(|| format!("Failed to inspect {:?}", path_ref))?;
+            let meta = std::fs::symlink_metadata(&open_path)
+                .with_context(|| format!("Failed to inspect {:?}", open_path))?;
             Some((meta.dev(), meta.ino()))
         } else {
             None
         };
 
-        let conn = Connection::open(path_ref)
-            .with_context(|| format!("Failed to open SQLite database at {:?}", path_ref))?;
+        let conn = Connection::open(&open_path)
+            .with_context(|| format!("Failed to open SQLite database at {:?}", open_path))?;
 
         // Persist committed order intents across power loss before sending orders.
         let journal_mode: String = conn

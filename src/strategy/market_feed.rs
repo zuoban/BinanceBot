@@ -215,7 +215,10 @@ impl GridTradingEngine {
                         .remove(&order.client_order_id);
                     continue;
                 }
-                order.amount_usdc = order.price * order.quantity;
+                order.amount_usdc = order
+                    .price
+                    .checked_mul(order.quantity)
+                    .unwrap_or(Decimal::MAX);
             }
             self.on_order_filled(&mut order).await;
             if self.pause_if_position_limit_reached().await {

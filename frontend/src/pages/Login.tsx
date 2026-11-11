@@ -1,3 +1,4 @@
+import { useRef } from 'react';
 import { Alert, Button, Form, Input, Typography } from 'antd';
 import { LockOutlined } from '@ant-design/icons';
 import { useMutation, useQuery } from '@tanstack/react-query';
@@ -22,8 +23,9 @@ const buyLevels = [
 ] as const;
 
 export default function Login({ onLogin }: { onLogin: () => void }) {
-  const status = useQuery({ queryKey: ['auth-status'], queryFn: () => api<AuthStatus>('/api/auth/status'), retry: false });
+  const status = useQuery({ queryKey: ['auth-status'], queryFn: ({ signal }) => api<AuthStatus>('/api/auth/status', { signal }), retry: false });
   const configured = status.data?.initialized !== false;
+  const submitting = useRef(false);
   const mutation = useMutation({
     mutationFn: (values: { password: string }) => post<{ token: string }>('/api/auth/login', values),
     onSuccess: data => { tokenStore.set(data.token); onLogin(); },
@@ -68,7 +70,15 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
       </div>
       <ErrorNotice error={status.error} retry={() => void status.refetch()} /><ErrorNotice error={mutation.error} />
       {!configured && <div className="login-unconfigured"><Alert type="info" showIcon title="未启用管理员密码认证，所有能访问该端口的人都可以操作。" /><Button type="primary" size="large" block autoFocus onClick={onLogin}>进入控制台</Button></div>}
-      {configured && <Form layout="vertical" requiredMark={false} onFinish={values => mutation.mutate(values)} disabled={mutation.isPending || !status.data}>
+      {configured && <Form layout="vertical" requiredMark={false} onFinish={async values => {
+        if (submitting.current) return;
+        submitting.current = true;
+        try {
+          await mutation.mutateAsync(values).catch(() => {});
+        } finally {
+          submitting.current = false;
+        }
+      }} disabled={mutation.isPending || !status.data}>
         <Form.Item name="password" label="管理员密码" rules={[{ required: true, message: '请输入密码' }]}>
           <Input.Password prefix={<LockOutlined />} size="large" autoComplete="current-password" autoFocus />
         </Form.Item>
