@@ -1,3 +1,5 @@
+export type Numeric = string | number;
+
 export interface Fixed {
   n: bigint;
   s: number;
@@ -65,11 +67,16 @@ export function subSignedDecimals(a: unknown, b: unknown): string | null {
   const [l, r, scale] = scaleDecimalPair(left, right);
   return formatDecimal(l - r, scale);
 }
-export function signedDecimalToNumber(value: string | null): number | null {
-  if (value === null) return null;
-  if (value === '0') return 0;
-  const n = Number(value);
-  return Number.isFinite(n) ? n : null;
+export function compareSignedDecimals(a: Numeric, b: Numeric): number {
+  const left = parseSignedDecimal(a), right = parseSignedDecimal(b);
+  if (left && right) {
+    const [l, r] = scaleDecimalPair(left, right);
+    return l < r ? -1 : l > r ? 1 : 0;
+  }
+  const na = typeof a === 'string' && a.trim() === '' ? NaN : Number(a);
+  const nb = typeof b === 'string' && b.trim() === '' ? NaN : Number(b);
+  if (Number.isFinite(na) && Number.isFinite(nb)) return na - nb;
+  return Number.isFinite(na) ? 1 : Number.isFinite(nb) ? -1 : 0;
 }
 
 interface DecimalDisplayOptions {

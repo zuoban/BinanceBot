@@ -164,8 +164,9 @@
 .paper-guide .muted { margin: 0; }
 
 @media (pointer: coarse), (max-width: 600px) {
+  .strategy-card-actions { gap: 8px !important; }
   .strategy-card-actions .ant-btn { position: relative; min-width: 36px; min-height: 36px; touch-action: manipulation; }
-  .strategy-card-actions .ant-btn::before { content: ''; position: absolute; inset-inline: -2px; top: 50%; min-width: var(--control-touch); height: var(--control-touch); transform: translateY(-50%); }
+  .strategy-card-actions .ant-btn::before { content: ''; position: absolute; left: 50%; right: auto; top: 50%; width: 100%; min-width: var(--control-touch); height: var(--control-touch); transform: translate(-50%, -50%); }
   .strategy-toggle.ant-btn { min-width: 72px; padding-inline: 8px; }
   .strategy-card-actions .ant-btn-icon-only { width: 36px; }
   .batch-results .ant-btn { min-height: var(--control-touch); }

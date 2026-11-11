@@ -738,3 +738,85 @@ async fn crossed_target_with_uncertain_lookup_stays_reserved_until_adopted() {
     assert_eq!(fake.posts.lock().unwrap().len(), 1);
     server.abort();
 }
+
+#[tokio::test]
+async fn remainder_submitting_identity_mismatch_blocks_reconciliation_and_persists_observation() {
+    for mismatch in ["side", "symbol", "zero_price"] {
+        let (mut engine, fake, _, server) = live_fixture().await;
+        fake.lose_post.store(1, Ordering::SeqCst);
+        engine.maintain_grid_window().await;
+        let mut plan = engine.load_remainder_plan().await.unwrap().unwrap();
+        assert_eq!(plan.phase, RemainderPhase::Submitting);
+        assert_eq!(plan.target.order_id, None);
+        {
+            let mut orders = fake.orders.lock().unwrap();
+            let found = orders.get_mut(&plan.target.client_order_id).unwrap();
+            match mismatch {
+                "side" => found.side = "BUY".into(),
+                "symbol" => found.symbol = "BTCUSDC".into(),
+                _ => found.price = Decimal::ZERO,
+            }
+        }
+        engine
+            .state
+            .active_orders
+            .write()
+            .await
+            .remove(&plan.target.client_order_id);
+        engine
+            .state
+            .global_position_ready
+            .store(true, Ordering::SeqCst);
+
+        assert!(
+            engine.adopt_remainder_target(&mut plan).await.is_err(),
+            "mismatch={mismatch}"
+        );
+        assert_eq!(plan.phase, RemainderPhase::Submitting);
+        assert_eq!(plan.target.order_id, None);
+        assert!(engine.reconciliation_blocked);
+        assert!(engine.last_orders_sync.is_none());
+        assert!(engine.last_account_sync.is_none());
+        assert!(!engine.state.global_position_ready.load(Ordering::SeqCst));
+
+        let active = engine.state.active_orders.read().await;
+        let staged = &active[&plan.target.client_order_id];
+        assert_eq!(staged.order_id, None);
+        assert_eq!(staged.symbol, "SOLUSDC");
+        assert_eq!(staged.side, OrderSide::Sell);
+        assert!(staged.price > Decimal::ZERO);
+        assert_eq!(staged.purpose, OrderPurpose::Remainder);
+        assert_eq!(staged.merge_sources.len(), 2);
+        drop(active);
+
+        let observations = engine
+            .state
+            .db
+            .load_identity_observations(engine.client.account_identity_key(), "SOLUSDC")
+            .unwrap();
+        if mismatch == "zero_price" {
+            assert!(observations.is_empty());
+        } else {
+            assert_eq!(observations.len(), 1);
+            assert_eq!(
+                observations[0].0.client_order_id,
+                plan.target.client_order_id
+            );
+            assert_eq!(observations[0].0.order_id, None);
+            assert_eq!(observations[0].1.order_id, 999);
+            assert_eq!(
+                observations[0].1.side,
+                if mismatch == "side" { "BUY" } else { "SELL" }
+            );
+            assert_eq!(
+                observations[0].1.symbol,
+                if mismatch == "symbol" {
+                    "BTCUSDC"
+                } else {
+                    "SOLUSDC"
+                }
+            );
+        }
+        server.abort();
+    }
+}

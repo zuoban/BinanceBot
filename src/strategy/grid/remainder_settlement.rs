@@ -1,3 +1,4 @@
+use super::snapshot_identities::invalid_snapshot_price;
 use super::*;
 
 impl GridTradingEngine {
@@ -77,25 +78,25 @@ impl GridTradingEngine {
             .cloned();
         let account = self.client.account_identity_key();
         let trusted = self.select_trusted_remainder_order(account, order, active, found.order_id);
-        if trusted.order_id.is_some_and(|id| id != found.order_id) {
+        if !trusted.matches_exchange_identity(found) || invalid_snapshot_price(found) {
             self.block_reconciliation_and_invalidate_caches().await;
-            self.track_identity_conflict(&trusted, found);
+            if !trusted.matches_exchange_identity(found) {
+                self.track_identity_conflict(&trusted, found);
+            }
             self.state
                 .active_orders
                 .write()
                 .await
                 .insert(trusted.client_order_id.clone(), trusted.clone());
-            self.persist_identity_observations(account, &trusted.symbol)
-                .await;
+            if !self
+                .persist_identity_observations(account, &trusted.symbol)
+                .await
+            {
+                self.pause_trading().await;
+            }
             return Err(anyhow!(
-                "Remainder exchange order ID conflicts with recovery metadata"
+                "Remainder exchange identity or price validation failed"
             ));
-        }
-        if found.client_order_id != order.client_order_id
-            || found.symbol != order.symbol
-            || found.side != order.side.as_str()
-        {
-            return Err(anyhow!("Remainder exchange identity mismatch"));
         }
         if self
             .evidence

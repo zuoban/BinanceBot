@@ -406,3 +406,171 @@ fn adding_pair_rolls_back_config_and_status_when_guard_write_fails() {
         None
     );
 }
+
+#[test]
+fn analysis_export_clears_sqlite_stat_and_sequence_tables() {
+    let db = Database::open(":memory:").unwrap();
+    db.save_config(&AppConfig::default()).unwrap();
+    db.create_session("stat1-secret-session-marker").unwrap();
+    db.conn
+        .lock()
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE seq_probe (id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT);
+             INSERT INTO seq_probe (label) VALUES ('probe');
+             ANALYZE;",
+        )
+        .unwrap();
+
+    let dir = crate::test_support::TempTestDir::new("stat-export");
+    for (name, exported) in [
+        ("full.db", db.export_analysis_snapshot().unwrap()),
+        (
+            "selected.db",
+            db.export_selected_analysis_snapshot(true, false).unwrap(),
+        ),
+    ] {
+        assert!(!String::from_utf8_lossy(&exported).contains("stat1-secret-session-marker"));
+        let path = dir.join(name);
+        std::fs::write(&path, exported).unwrap();
+        let conn = Connection::open(&path).unwrap();
+        for meta_table in ["sqlite_stat1", "sqlite_sequence"] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {meta_table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap_or(0);
+            assert_eq!(count, 0, "{meta_table} not cleared in {name}");
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_sidecar_shared_probe_ignores_concurrent_stale_readers() {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = crate::test_support::TempTestDir::new("listen-shared-probe");
+    let dbf = dir.join("bot.db");
+    let stale = dir.path().canonicalize().unwrap().join("bot.db-listen");
+    std::fs::write(&stale, b"127.0.0.1:7777").unwrap();
+    std::fs::set_permissions(&stale, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    let concurrent_reader = std::fs::File::open(&stale).unwrap();
+    assert_eq!(
+        unsafe { libc::flock(concurrent_reader.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) },
+        0
+    );
+    assert_eq!(read_active_listen_addr(&dbf), None);
+    drop(concurrent_reader);
+
+    let live_addr: std::net::SocketAddr = "127.0.0.1:8888".parse().unwrap();
+    let guard = ActiveListenGuard::record(&dbf, live_addr).unwrap();
+    assert_eq!(read_active_listen_addr(&dbf), Some(live_addr));
+    drop(guard);
+    assert_eq!(read_active_listen_addr(&dbf), None);
+}
+
+#[test]
+fn paper_ledger_accepts_first_mark_valuation_with_earlier_mark_timestamp() {
+    use crate::types::{AccountInfo, GridStats, PositionInfo, TradeRecord};
+    use rust_decimal::Decimal;
+
+    let db = Database::open(":memory:").unwrap();
+    let initial_now = Utc::now();
+    let initial_pos = PositionInfo {
+        symbol: "SOLUSDC".into(),
+        size: dec!(2),
+        entry_price: dec!(100),
+        mark_price: Decimal::ZERO,
+        unrealized_pnl: Decimal::ZERO,
+        leverage: 1,
+        update_time: None,
+        ..PositionInfo::default()
+    };
+    let initial_acc = AccountInfo::initial_paper("SOLUSDC", Some(initial_now));
+    let fill = TradeRecord {
+        trade_id: "paper-open".into(),
+        client_order_id: "cid-paper-open".into(),
+        symbol: "SOLUSDC".into(),
+        mode: TradingMode::Paper,
+        side: OrderSide::Buy,
+        price: dec!(100),
+        quantity: dec!(2),
+        amount_usdc: dec!(200),
+        realized_pnl: Decimal::ZERO,
+        commission: Decimal::ZERO,
+        pnl_verified: true,
+        is_maker: true,
+        timestamp: initial_now,
+        note: String::new(),
+    };
+    assert!(db
+        .insert_trade_with_paper_recovery(
+            &fill,
+            &GridStats::default(),
+            None,
+            None,
+            Some(&(initial_pos.clone(), initial_acc.clone())),
+        )
+        .unwrap());
+    let before_mark = db
+        .shared_paper_account("SOLUSDC", &initial_pos, &initial_acc)
+        .unwrap();
+    assert_eq!(before_mark.unrealized_profit, Decimal::ZERO);
+
+    let mark_time = initial_now - ChronoDuration::seconds(1);
+    let marked_pos = PositionInfo {
+        mark_price: dec!(107.5),
+        unrealized_pnl: dec!(15),
+        update_time: Some(mark_time),
+        ..initial_pos.clone()
+    };
+    let marked_acc = AccountInfo {
+        unrealized_profit: dec!(15),
+        margin_balance: dec!(10015),
+        available_balance: dec!(9800),
+        update_time: mark_time,
+        ..initial_acc.clone()
+    };
+    let shared = db
+        .shared_paper_account("SOLUSDC", &marked_pos, &marked_acc)
+        .unwrap();
+    assert_eq!(shared.unrealized_profit, dec!(15));
+    assert_eq!(shared.margin_balance, dec!(10015));
+    assert_eq!(shared.update_time, mark_time);
+
+    // Once mark-backed, an even older mark update cannot roll back unrealized PnL.
+    let older_time = mark_time - ChronoDuration::seconds(1);
+    let stale_pos = PositionInfo {
+        mark_price: dec!(95),
+        unrealized_pnl: dec!(-10),
+        update_time: Some(older_time),
+        ..initial_pos
+    };
+    let stale_acc = AccountInfo {
+        unrealized_profit: dec!(-10),
+        margin_balance: dec!(9990),
+        update_time: older_time,
+        ..initial_acc
+    };
+    let after_stale = db
+        .shared_paper_account("SOLUSDC", &stale_pos, &stale_acc)
+        .unwrap();
+    assert_eq!(after_stale.unrealized_profit, dec!(15));
+
+    // Unresolved legacy symbols report deterministically in lexicographical order.
+    for sym in ["ZECUSDC", "ADAUSDC", "MATICUSDC"] {
+        let mut legacy = fill.clone();
+        legacy.trade_id = format!("legacy-{sym}");
+        legacy.client_order_id = format!("cid-{sym}");
+        legacy.symbol = sym.into();
+        assert!(db.insert_trade(&legacy).unwrap());
+    }
+    let err = db
+        .shared_paper_account("SOLUSDC", &marked_pos, &marked_acc)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("ADAUSDC"), "unexpected error: {err}");
+}

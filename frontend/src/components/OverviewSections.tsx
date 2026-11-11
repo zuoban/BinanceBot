@@ -1,7 +1,7 @@
 import { memo, useMemo, useState } from 'react';
 import { Button, Card } from 'antd';
 import { modeLabel } from '../lib/format';
-import { comparePositionAmount, groupTradePnl } from '../lib/portfolio';
+import { groupTradePnl, positionAmount } from '../lib/portfolio';
 import type { Mode, Overview, Status, Trade } from '../lib/types';
 import { FreshnessText, Pnl, SignalButton, SignalChip, type Signal } from './Common';
 import { TradesTable } from './DataTables';
@@ -20,7 +20,10 @@ export function filterAndSortOverviewEntries(
   const matchesStatus = (e: Overview['pairs'][number]) => statusFilter === 'all' || (statusFilter === 'LIVE' ? e.mode === 'LIVE' : e.snapshot.status === statusFilter);
   const filtered = entries.filter(e => e.snapshot.symbol.includes(query) && matchesStatus(e));
   if (sort === 'position') {
-    return filtered.sort((a, b) => (Number(b.snapshot.status === 'RUNNING') - Number(a.snapshot.status === 'RUNNING')) || comparePositionAmount(a.snapshot, b.snapshot));
+    return filtered
+      .map(entry => ({ entry, running: Number(entry.snapshot.status === 'RUNNING'), amount: positionAmount(entry.snapshot) ?? -1 }))
+      .sort((a, b) => (b.running - a.running) || (b.amount - a.amount) || a.entry.snapshot.symbol.localeCompare(b.entry.snapshot.symbol))
+      .map(item => item.entry);
   }
   if (sort === 'today') {
     const totalToday = (symbol: string) => { const c = tradeCountsBySymbol.get(symbol); return c ? c.buy + c.sell : -1; };
@@ -53,7 +56,7 @@ export function OverviewBanner({
   onToggleStatus: (value: Exclude<StatusFilter, 'all'>) => void;
   counts: { total: number; running: number; paused: number; stopped: number; error: number; live: number };
   today: { buy: number; sell: number } | null;
-  pnlGroups: { key: string; mode: Mode; asset: string; pending: number; total: number | null }[] | null;
+  pnlGroups: { key: string; mode: Mode; asset: string; pending: number; total: number | null; totalText?: string | null }[] | null;
 }) {
   const dupPnlAssets = new Set<string>();
   if (pnlGroups && pnlGroups.length > 1) {
@@ -79,7 +82,7 @@ export function OverviewBanner({
       <div className="overview-stat" aria-label="今日已实现盈亏">
         <span>今日已实现盈亏</span>
         {!pnlGroups ? <strong>--</strong> : !pnlGroups.length ? <strong>0</strong> : pnlGroups.map(group => <div className="overview-pnl-group" key={group.key}>
-          <strong><Pnl value={group.total} compact /><small>{dupPnlAssets.has(group.asset) ? `${modeLabel[group.mode]} ${group.asset}` : group.asset}</small></strong>
+          <strong><Pnl value={group.totalText ?? group.total} compact /><small>{dupPnlAssets.has(group.asset) ? `${modeLabel[group.mode]} ${group.asset}` : group.asset}</small></strong>
           {group.pending > 0 && <span>盈亏待同步</span>}
         </div>)}
       </div>
@@ -104,7 +107,7 @@ export const OverviewTradesCard = memo(function OverviewTradesCard({ recentTrade
       <span>当前显示 <strong>{displayedTrades.length}</strong> 笔</span>
       <span>买入 <strong>{buyTrades}</strong> 笔</span>
       <span>卖出 <strong>{sellTrades}</strong> 笔</span>
-      <span>合计盈亏 {tradePnlGroups.size === 0 ? <strong>--</strong> : [...tradePnlGroups.entries()].map(([key, group]) => <span key={key}> {modeLabel[group.mode]} <strong>{group.available && Number.isFinite(group.total) ? <Pnl value={group.total} compact /> : <span className="pending-pnl-warn">待核实</span>}</strong> {group.asset}</span>)}</span>
+      <span>合计盈亏 {tradePnlGroups.size === 0 ? <strong>--</strong> : [...tradePnlGroups.entries()].map(([key, group]) => <span key={key}> {modeLabel[group.mode]} <strong>{group.available && group.totalText !== null ? <Pnl value={group.totalText} compact /> : <span className="pending-pnl-warn">待核实</span>}</strong> {group.asset}</span>)}</span>
     </div>
     <div id="recent-trades-list"><TradesTable overview trades={displayedTrades} /></div>
     {recentTrades.length > 5 && <div className="overview-trades-toggle"><Button type="text" aria-expanded={tradesExpanded} aria-controls="recent-trades-list" onClick={() => setTradesExpanded(value => !value)}>{tradesExpanded ? '收起' : '展开最近 20 条'}</Button></div>}

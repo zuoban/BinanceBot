@@ -45,7 +45,7 @@ code {
 
 a { color: inherit; text-underline-offset: 3px; transition: color 150ms var(--ease-out); }
 
-.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; border: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }
 .muted { color: var(--text-secondary); font-size: var(--text-xs); line-height: 18px; }
 .numeric, .ant-statistic-content, .table-numeric, .ant-input-number-input, .symbol-field, .symbol-field .ant-select-content { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .positive { color: var(--positive) !important; }

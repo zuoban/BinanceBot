@@ -330,11 +330,12 @@ impl GridTradingEngine {
         remainder_plan: Option<&RemainderPlan>,
         corrected_terminal: &mut HashMap<String, BinanceOrderResponse>,
     ) -> Option<HashSet<String>> {
-        let uncertain: Vec<_> = live_ids
+        let mut uncertain: Vec<_> = live_ids
             .values()
             .filter(|order| unresolved_filled_quantity(order))
             .cloned()
             .collect();
+        uncertain.sort_by(|a, b| a.client_order_id.cmp(&b.client_order_id));
         let uncertain_ids: HashSet<_> = uncertain
             .iter()
             .map(|order| order.client_order_id.clone())

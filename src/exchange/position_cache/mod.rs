@@ -103,9 +103,9 @@ impl PositionCache {
         let key = client.account_cache_key();
         self.entries
             .refresh_critical(&key, || async {
-                let position = client.get_position(symbol).await;
-                let received_at = Instant::now();
-                Ok((position?, received_at))
+                let requested_instant = Instant::now();
+                let position = client.get_position(symbol).await?;
+                Ok((position, requested_instant))
             })
             .await
     }
@@ -124,8 +124,9 @@ impl PositionCache {
                     "position",
                     |snapshot| snapshot.received_instant.elapsed() < MAX_AGE,
                     || async {
+                        let requested_instant = Instant::now();
                         let positions = client.get_all_positions().await?;
-                        Ok(PositionSnapshot::from_vec(positions, Instant::now()))
+                        Ok(PositionSnapshot::from_vec(positions, requested_instant))
                     },
                     |snapshot| (snapshot.received_instant, snapshot.lookup_cached(symbol)),
                 )
@@ -136,14 +137,16 @@ impl PositionCache {
 
             // A missing symbol is unknown, not a flat position. Query the
             // symbol-specific endpoint on Normal budget and cache the result.
-            let requested_at = Instant::now();
+            let requested_instant = Instant::now();
             let fetched = client.get_position_for_periodic_sync(symbol).await;
-            let received_instant = Instant::now();
             if !self.entries.is_current(&key, epoch, &entry) {
                 continue;
             }
             let cached_value = match &fetched {
-                Ok(position) => Some(CachedSymbolPosition::OneWay(position.clone(), requested_at)),
+                Ok(position) => Some(CachedSymbolPosition::OneWay(
+                    position.clone(),
+                    requested_instant,
+                )),
                 Err(err) if err.to_string() == ONE_WAY_POSITION_ERROR => {
                     Some(CachedSymbolPosition::InvalidMode)
                 }
@@ -154,7 +157,7 @@ impl PositionCache {
                     if self.entries.is_current(&key, epoch, &entry) {
                         if let Some(snapshot) = cached.snapshot.as_mut() {
                             if snapshot.received_instant == bulk_instant
-                                && requested_at.elapsed() < MAX_AGE
+                                && requested_instant.elapsed() < MAX_AGE
                             {
                                 snapshot.insert_cached(symbol, value);
                             }
@@ -166,7 +169,7 @@ impl PositionCache {
             if !self.entries.is_current(&key, epoch, &entry) {
                 continue;
             }
-            return Ok((position, received_instant));
+            return Ok((position, requested_instant));
         }
     }
 }

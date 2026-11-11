@@ -374,3 +374,32 @@ it('returns a stable Beijing-day start timestamp across renders until Beijing mi
     vi.useRealTimers();
   }
 });
+
+it('retains a valid live accounts frame when an HTTP fallback response has an invalid generated_at', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-01-01T00:00:01Z'));
+  tokenStore.set('test-token');
+  vi.stubGlobal('WebSocket', FakeSocket);
+  const valid = { generated_at: '2026-01-01T00:00:01Z', pairs: [{ mode: 'LIVE', snapshot: snapshot('SOLUSDC', 'LIVE') }] };
+  const malformed = { generated_at: 'not-a-timestamp', pairs: [{ mode: 'PAPER', snapshot: snapshot() }] };
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({ success: true, data: valid }), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ success: true, data: malformed }), { status: 200 }));
+  vi.stubGlobal('fetch', fetchMock);
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const wrapper = ({ children }: { children: React.ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+  const { result, unmount } = renderHook(() => useLiveAccounts(), { wrapper });
+  try {
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(result.current.accounts[0]?.mode).toBe('LIVE');
+    expect(result.current.accounts[0]?.generated_at_ms).toBe(Date.parse('2026-01-01T00:00:01Z'));
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.current.accounts[0]?.mode).toBe('LIVE');
+    expect(result.current.accounts[0]?.generated_at_ms).toBe(Date.parse('2026-01-01T00:00:01Z'));
+  } finally {
+    unmount();
+    client.clear();
+    vi.useRealTimers();
+  }
+});

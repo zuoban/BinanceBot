@@ -39,6 +39,33 @@ pub(super) fn websocket_token(headers: &HeaderMap) -> &str {
         .unwrap_or_default()
 }
 
+fn forwarded_proto_scheme(headers: &HeaderMap) -> Result<Option<&'static str>, ()> {
+    let mut scheme: Option<&'static str> = None;
+    for val in headers.get_all("x-forwarded-proto") {
+        let Ok(raw) = val.to_str() else {
+            return Err(());
+        };
+        if raw.trim().is_empty() {
+            return Err(());
+        }
+        for token in raw.split(',') {
+            let hop = match token.trim() {
+                s if s.eq_ignore_ascii_case("https") => "https",
+                s if s.eq_ignore_ascii_case("http") => "http",
+                _ => return Err(()),
+            };
+            if let Some(prev) = scheme {
+                if prev != hop {
+                    return Err(());
+                }
+            } else {
+                scheme = Some(hop);
+            }
+        }
+    }
+    Ok(scheme)
+}
+
 pub(super) fn ws_origin_allowed(headers: &HeaderMap) -> bool {
     let mut origins = headers.get_all(axum::http::header::ORIGIN).iter();
     let Some(origin_header) = origins.next() else {
@@ -47,9 +74,7 @@ pub(super) fn ws_origin_allowed(headers: &HeaderMap) -> bool {
     if origins.next().is_some() {
         return false;
     }
-    if headers.get_all(axum::http::header::HOST).iter().count() != 1
-        || headers.get_all("x-forwarded-proto").iter().count() > 1
-    {
+    if headers.get_all(axum::http::header::HOST).iter().count() != 1 {
         return false;
     }
     let Ok(origin_str) = origin_header.to_str() else {
@@ -86,27 +111,14 @@ pub(super) fn ws_origin_allowed(headers: &HeaderMap) -> bool {
     {
         return false;
     }
-    let effective_scheme = if let Some(proto_header) = headers.get("x-forwarded-proto") {
-        let Ok(raw_proto) = proto_header.to_str() else {
-            return false;
-        };
-        if raw_proto.contains(',') {
-            return false;
-        }
-        let proto = raw_proto.trim();
-        if proto.eq_ignore_ascii_case("https") {
-            if origin.scheme() != "https" {
-                return false;
-            }
-            "https"
-        } else if proto.eq_ignore_ascii_case("http") {
-            if origin.scheme() != "http" {
-                return false;
-            }
-            "http"
-        } else {
+    let Ok(forwarded_scheme) = forwarded_proto_scheme(headers) else {
+        return false;
+    };
+    let effective_scheme = if let Some(scheme) = forwarded_scheme {
+        if origin.scheme() != scheme {
             return false;
         }
+        scheme
     } else {
         origin.scheme()
     };

@@ -16,6 +16,10 @@ it('neutralises formula-looking text so spreadsheets do not execute it', () => {
   expect(csvCell('-2+3')).toBe("'-2+3");
   expect(csvCell('  =1+1')).toBe("'  =1+1");
   expect(csvCell('\n@SUM(A1)')).toBe('"\'\n@SUM(A1)"');
+  expect(csvCell('\t=1+1')).toBe('"\'\t=1+1"');
+  expect(csvCell(' \t=1+1')).toBe('"\' \t=1+1"');
+  expect(csvCell('|=cmd')).toBe("'|=cmd");
+  expect(csvCell('err;=HYPERLINK("http://x")')).toBe('"err;=HYPERLINK(""http://x"")"');
   expect(csvCell('safe-text')).toBe('safe-text');
 });
 

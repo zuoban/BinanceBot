@@ -43,7 +43,7 @@ export const OverviewFinanceDisclosure = memo(function OverviewFinanceDisclosure
       <span className="finance-disclosure-label">账户与持仓明细<ArrowRightOutlined aria-hidden="true" /></span>
       <span className={`finance-summary-values${stale ? ' is-stale' : ''}`}>
         {accountList.map((group, idx) => <span key={`account-${group.key}:${group.account_scope ?? ''}`}><small>账户权益 / {accountTags[idx] ? `${accountTags[idx]} ${group.asset}` : group.asset}</small><strong>{number(group.equity)}</strong></span>)}
-        {positionList.map((group, idx) => <span key={`position-${group.key}`}><small>总持仓 / {positionTags[idx] ? `${positionTags[idx]} ${group.asset}` : group.asset}</small><strong>{number(group.total)}</strong></span>)}
+        {positionList.map((group, idx) => <span key={`position-${group.key}`}><small>总持仓 / {positionTags[idx] ? `${positionTags[idx]} ${group.asset}` : group.asset}</small><strong>{number(group.totalText ?? group.total)}</strong></span>)}
       </span>
     </summary>
     <div className={`overview-finances${stale ? ' is-stale' : ''}`}>
@@ -76,12 +76,12 @@ export const OverviewFinanceDisclosure = memo(function OverviewFinanceDisclosure
             <Card className="position-summary finance-card" size="small">
               <div className="section-line finance-card-heading"><span>总持仓金额 / {positionTags[idx] ? `${positionTags[idx]} ${group.asset}` : group.asset}</span></div>
               <div className="finance-card-primary">
-                <Statistic value={group.total ?? '--'} formatter={() => number(group.total)} suffix={group.asset} />
+                <Statistic value={group.totalText ?? group.total ?? '--'} formatter={() => number(group.totalText ?? group.total)} suffix={group.asset} />
                 <span className="finance-card-note muted">按标记价格估值</span>
               </div>
               <div className="finance-metrics">
-                <div><span>做多持仓金额</span><strong className="position-long">{number(group.long)}</strong></div>
-                <div><span>做空持仓金额</span><strong className="position-short">{number(group.short)}</strong></div>
+                <div><span>做多持仓金额</span><strong className="position-long">{number(group.longText ?? group.long)}</strong></div>
+                <div><span>做空持仓金额</span><strong className="position-short">{number(group.shortText ?? group.short)}</strong></div>
               </div>
               <div className="finance-metrics">
                 <div><span>多空比（金额占比）</span><strong>{group.total !== null && group.total > 0 && group.long !== null && group.short !== null ? `${number(group.long / group.total * 100, 1)}% / ${number(group.short / group.total * 100, 1)}%` : '--'}</strong></div>

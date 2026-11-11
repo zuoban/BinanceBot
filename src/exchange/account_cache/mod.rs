@@ -37,11 +37,13 @@ impl AccountCache {
         let key = client.account_cache_key();
         self.entries
             .refresh_critical(&key, || async {
+                let requested_at = Utc::now();
+                let requested_instant = Instant::now();
                 let account = client.get_account_critical().await?;
                 Ok(AccountSnapshot {
                     account: Arc::new(account),
-                    received_at: Utc::now(),
-                    received_instant: Instant::now(),
+                    received_at: requested_at,
+                    received_instant: requested_instant,
                 })
             })
             .await
@@ -64,11 +66,13 @@ impl AccountCache {
                 "account",
                 |snapshot| !force && snapshot.received_instant.elapsed() < MAX_AGE,
                 || async {
+                    let requested_at = Utc::now();
+                    let requested_instant = Instant::now();
                     let account = client.get_account().await?;
                     Ok(AccountSnapshot {
                         account: Arc::new(account),
-                        received_at: Utc::now(),
-                        received_instant: Instant::now(),
+                        received_at: requested_at,
+                        received_instant: requested_instant,
                     })
                 },
                 Clone::clone,

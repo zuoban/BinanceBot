@@ -1,14 +1,16 @@
 use binance_grid_bot::{
     auth::AdminAuth,
     config::{AppConfig, ServerConfig},
-    db::{read_active_listen_addr, ActiveListenGuard, Database, DatabaseProcessLock},
+    db::{
+        read_active_listen_addr, read_saved_server_config, ActiveListenGuard, Database,
+        DatabaseProcessLock,
+    },
     lifecycle::ShutdownSignals,
     runtime::TradingRuntime,
     server::create_managed_router,
     snapshots::run_hourly_snapshots,
 };
 use clap::{Parser, Subcommand};
-use rusqlite::{Connection, OpenFlags};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -76,21 +78,6 @@ fn load_saved_config(db: &Database) -> anyhow::Result<AppConfig> {
     Ok(config)
 }
 
-fn load_saved_server_config(db_path: &Path) -> Option<ServerConfig> {
-    if db_path == Path::new(":memory:")
-        || !std::fs::symlink_metadata(db_path).is_ok_and(|m| m.file_type().is_file())
-    {
-        return None;
-    }
-    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-    let conn = Connection::open_with_flags(db_path, flags).ok()?;
-    let _ = conn.busy_timeout(Duration::from_millis(500));
-    let sql = "SELECT config_json FROM app_config WHERE id = 1";
-    let raw: String = conn.query_row(sql, [], |r| r.get(0)).ok()?;
-    let mut val: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    serde_json::from_value(val.get_mut("server")?.take()).ok()
-}
-
 fn resolve_healthcheck_url(args: &CliArgs, url: Option<&str>) -> anyhow::Result<String> {
     if let Some(url) = url {
         return Ok(url.to_owned());
@@ -100,7 +87,7 @@ fn resolve_healthcheck_url(args: &CliArgs, url: Option<&str>) -> anyhow::Result<
             host: addr.ip().to_string(),
             port: addr.port(),
         })
-        .or_else(|| load_saved_server_config(&args.db))
+        .or_else(|| read_saved_server_config(&args.db))
         .unwrap_or_default();
     if let Some(host) = &args.host {
         server.host.clone_from(host);
@@ -369,7 +356,7 @@ async fn main() -> anyhow::Result<()> {
     let addr = config.server.socket_addr()?;
     // Bind before starting any engine, including initialization-time reconciliation.
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    let _listen_guard = ActiveListenGuard::record(&args.db, listener.local_addr()?)?;
+    let _listen_guard = ActiveListenGuard::record(Path::new(db.path()), listener.local_addr()?)?;
     let runtime = start_runtime_until_ready(&config, db, admin_auth, signal.as_mut()).await?;
     let snapshot_task = tokio::spawn(run_hourly_snapshots(runtime.handle()));
     let app = create_managed_router(runtime.handle());
@@ -470,6 +457,11 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
+            assert_eq!(read_saved_server_config(&dbf).unwrap().port, 9123);
+            std::fs::set_permissions(&dbf, std::fs::Permissions::from_mode(0o644)).unwrap();
+            assert_eq!(read_saved_server_config(&dbf), None);
+            check(db_str, "", "127.0.0.1:8080");
+            std::fs::set_permissions(&dbf, std::fs::Permissions::from_mode(0o600)).unwrap();
             let stale = dir.0.canonicalize().unwrap().join("bot.db-listen");
             std::fs::write(&stale, b"127.0.0.1:7777").unwrap();
             std::fs::set_permissions(&stale, std::fs::Permissions::from_mode(0o600)).unwrap();

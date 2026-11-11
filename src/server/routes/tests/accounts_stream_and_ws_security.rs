@@ -323,43 +323,65 @@ fn ws_origin_allowed_enforces_forwarded_proto_and_host_syntax() {
         headers
     };
 
-    assert!(ws_origin_allowed(&build_headers(
-        "bot.example.com",
-        Some("https://bot.example.com"),
-        Some("https"),
-    )));
-    assert!(ws_origin_allowed(&build_headers(
-        "bot.example.com",
-        Some("https://bot.example.com"),
-        Some("HTTPS"),
-    )));
-    for multi_hop in ["http, https", "https, http", "HTTPS, http"] {
+    for https_proto in ["https", "HTTPS", "https, https", " HTTPS , https "] {
+        assert!(
+            ws_origin_allowed(&build_headers(
+                "bot.example.com",
+                Some("https://bot.example.com"),
+                Some(https_proto),
+            )),
+            "uniform https proto {https_proto:?} must succeed for https origin"
+        );
+        assert!(
+            !ws_origin_allowed(&build_headers(
+                "bot.example.com",
+                Some("http://bot.example.com"),
+                Some(https_proto),
+            )),
+            "uniform https proto {https_proto:?} must fail for http origin"
+        );
+    }
+    for http_proto in ["http", "HTTP", "http, http", " http , HTTP "] {
+        assert!(
+            ws_origin_allowed(&build_headers(
+                "bot.example.com",
+                Some("http://bot.example.com"),
+                Some(http_proto),
+            )),
+            "uniform http proto {http_proto:?} must succeed for http origin"
+        );
+        assert!(
+            !ws_origin_allowed(&build_headers(
+                "bot.example.com",
+                Some("https://bot.example.com"),
+                Some(http_proto),
+            )),
+            "uniform http proto {http_proto:?} must fail for https origin"
+        );
+    }
+    for bad_proto in [
+        "http, https",
+        "https, http",
+        "HTTPS, http",
+        "https, ",
+        ", https",
+        "https,,https",
+        "invalid",
+        "ws",
+        "",
+        "   ",
+    ] {
         for origin in ["http://bot.example.com", "https://bot.example.com"] {
             assert!(
                 !ws_origin_allowed(&build_headers(
                     "bot.example.com",
                     Some(origin),
-                    Some(multi_hop),
+                    Some(bad_proto),
                 )),
-                "multi-hop proto {multi_hop:?} must be rejected"
+                "proto {bad_proto:?} must be rejected for {origin}"
             );
         }
     }
-    assert!(!ws_origin_allowed(&build_headers(
-        "bot.example.com",
-        Some("http://bot.example.com"),
-        Some("https"),
-    )));
-    assert!(!ws_origin_allowed(&build_headers(
-        "bot.example.com",
-        Some("https://bot.example.com"),
-        Some("http"),
-    )));
-    assert!(!ws_origin_allowed(&build_headers(
-        "bot.example.com",
-        Some("https://bot.example.com"),
-        Some("ws"),
-    )));
     assert!(!ws_origin_allowed(&build_headers(
         "bot.example.com:80",
         Some("https://bot.example.com"),
@@ -410,14 +432,37 @@ fn ws_origin_allowed_enforces_forwarded_proto_and_host_syntax() {
     );
     assert!(!ws_origin_allowed(&dup_origin));
 
-    let mut dup_proto = build_headers(
+    let mut dup_https = build_headers(
         "bot.example.com",
         Some("https://bot.example.com"),
         Some("https"),
     );
-    dup_proto.append("x-forwarded-proto", HeaderValue::from_static("https"));
-    assert!(!ws_origin_allowed(&dup_proto));
+    dup_https.append("x-forwarded-proto", HeaderValue::from_static("https"));
+    assert!(ws_origin_allowed(&dup_https));
 
+    let mut dup_https_wrong_origin = build_headers(
+        "bot.example.com",
+        Some("http://bot.example.com"),
+        Some("https"),
+    );
+    dup_https_wrong_origin.append("x-forwarded-proto", HeaderValue::from_static("https"));
+    assert!(!ws_origin_allowed(&dup_https_wrong_origin));
+
+    let mut dup_http = build_headers(
+        "bot.example.com",
+        Some("http://bot.example.com"),
+        Some("http"),
+    );
+    dup_http.append("x-forwarded-proto", HeaderValue::from_static("HTTP"));
+    assert!(ws_origin_allowed(&dup_http));
+
+    let mut mixed_headers = build_headers(
+        "bot.example.com",
+        Some("https://bot.example.com"),
+        Some("https"),
+    );
+    mixed_headers.append("x-forwarded-proto", HeaderValue::from_static("http"));
+    assert!(!ws_origin_allowed(&mixed_headers));
     let mut split_proto = HeaderMap::new();
     split_proto.append(
         axum::http::header::SEC_WEBSOCKET_PROTOCOL,

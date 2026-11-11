@@ -65,8 +65,11 @@ impl AppState {
                     .db
                     .run_blocking(move |db| db.clear_trade_history_for_symbol(&db_symbol))
                     .await?;
-                let config = state.config.read().await;
-                if config.exchange.symbol == symbol {
+                let current_symbol = {
+                    let config = state.config.read().await;
+                    config.exchange.symbol.clone()
+                };
+                if current_symbol == symbol {
                     state.reset_trade_history_cache().await;
                 }
                 deleted
@@ -106,8 +109,17 @@ impl AppState {
         tokio::spawn(async move {
             let _guard = membership_guard;
             let deleted = {
+                let mut locks: Vec<Arc<tokio::sync::Mutex<()>>> = states
+                    .iter()
+                    .map(|state| Arc::clone(&state.trade_commit_lock))
+                    .collect();
+                locks.sort_by_key(|lock| Arc::as_ptr(lock) as usize);
+                locks.dedup_by_key(|lock| Arc::as_ptr(lock) as usize);
+                let mut commit_guards = Vec::with_capacity(locks.len());
+                for lock in locks {
+                    commit_guards.push(lock.lock_owned().await);
+                }
                 let first = &states[0];
-                let _commit = first.trade_commit_lock.lock().await;
                 let deleted = first
                     .db
                     .run_blocking(move |db| db.clear_selected_database(trades, snapshots))
@@ -117,6 +129,7 @@ impl AppState {
                         state.reset_trade_history_cache().await;
                     }
                 }
+                drop(commit_guards);
                 deleted
             };
             if trades && broadcast {

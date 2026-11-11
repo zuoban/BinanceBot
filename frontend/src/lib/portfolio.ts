@@ -1,5 +1,5 @@
-import { formatDecimal, parseSignedDecimal, rescaleDecimal, type Fixed } from './decimal';
-import { compactNumber, numeric, positivePrice } from './format';
+import { formatDecimal, formatDecimalDisplay, parseSignedDecimal, parseUnsignedDecimal, rescaleDecimal, scaleDecimalPair, type Fixed } from './decimal';
+import { compactNumber, isValidEpochMs, numeric, positivePrice } from './format';
 import type { AccountObservation, Mode, Overview, PairSummary, Snapshot, Trade } from './types';
 
 export const SNAPSHOT_STALE_MS = 10_000;
@@ -27,15 +27,47 @@ function groupByKey<T, G>(items: Iterable<T>, getKey: (item: T) => string, init:
 
 type ValuedPosition = { symbol: string; position: Pick<Snapshot['position'], 'size' | 'mark_price'>; ticker: Pick<Snapshot['ticker'], 'mark_price'> };
 
+function selectMarkRaw(s: ValuedPosition): unknown {
+  const tickerFixed = parseSignedDecimal(s.ticker.mark_price);
+  if (tickerFixed) return tickerFixed.n > 0n ? s.ticker.mark_price : s.position.mark_price;
+  const tickerNum = numeric(s.ticker.mark_price);
+  return tickerNum !== null && tickerNum > 0 ? s.ticker.mark_price : s.position.mark_price;
+}
+
+function positionNotionalFixed(s: ValuedPosition): { signedSize: Fixed; notional: Fixed } | null {
+  const size = parseSignedDecimal(s.position.size);
+  const mark = parseSignedDecimal(selectMarkRaw(s));
+  if (!size || !mark || mark.n <= 0n) return null;
+  const absSize = size.n < 0n ? -size.n : size.n;
+  return { signedSize: size, notional: { n: absSize * mark.n, s: size.s + mark.s } };
+}
+
+export function positionAmountText(s: ValuedPosition): string | null {
+  const exact = positionNotionalFixed(s);
+  if (exact) return formatDecimal(exact.notional.n, exact.notional.s);
+  const fallback = positionAmount(s);
+  return fallback !== null ? String(fallback) : null;
+}
+
 export function positionAmount(s: ValuedPosition): number | null {
-  const size = numeric(s.position.size), tickerMark = numeric(s.ticker.mark_price);
-  const mark = tickerMark !== null && tickerMark > 0 ? tickerMark : numeric(s.position.mark_price);
+  const exact = positionNotionalFixed(s);
+  if (exact) {
+    if (exact.notional.n === 0n) return 0;
+    const n = Number(formatDecimal(exact.notional.n, exact.notional.s));
+    return Number.isFinite(n) ? n : null;
+  }
+  const size = numeric(s.position.size), mark = numeric(selectMarkRaw(s));
   if (size === null || mark === null || mark <= 0) return null;
   const amount = Math.abs(size * mark);
   return Number.isFinite(amount) ? amount : null;
 }
 
 export function comparePositionAmount(a: ValuedPosition, b: ValuedPosition) {
+  const exactA = positionNotionalFixed(a), exactB = positionNotionalFixed(b);
+  if (exactA && exactB) {
+    const [la, lb] = scaleDecimalPair(exactA.notional, exactB.notional);
+    return lb < la ? -1 : lb > la ? 1 : a.symbol.localeCompare(b.symbol);
+  }
   const left = positionAmount(a), right = positionAmount(b);
   return (right ?? -1) - (left ?? -1) || a.symbol.localeCompare(b.symbol);
 }
@@ -48,6 +80,9 @@ export interface PositionGroup {
   long: number | null;
   short: number | null;
   total: number | null;
+  longText: string | null;
+  shortText: string | null;
+  totalText: string | null;
 }
 
 export function positionGroups<T extends { mode: Mode; snapshot: ValuedPosition }>(entries: T[]): PositionGroup[] {
@@ -58,24 +93,83 @@ export function positionGroups<T extends { mode: Mode; snapshot: ValuedPosition 
     (group, { snapshot }) => { group.snapshots.push(snapshot); },
   );
   return [...groups.entries()].map(([key, group]) => {
-    let long = 0, short = 0, complete = true;
+    const longFixed: Fixed[] = [], shortFixed: Fixed[] = [];
+    let longFloat = 0, shortFloat = 0, hasFloat = false, complete = true;
     for (const s of group.snapshots) {
+      const parsedSize = parseSignedDecimal(s.position.size);
+      if (parsedSize && parsedSize.n === 0n) continue;
+      const exact = positionNotionalFixed(s);
+      if (exact) {
+        if (exact.signedSize.n > 0n) longFixed.push(exact.notional);
+        else if (exact.signedSize.n < 0n) shortFixed.push(exact.notional);
+        continue;
+      }
       const size = numeric(s.position.size);
-      const amount = size === 0 ? 0 : positionAmount(s);
+      if (size === 0) continue;
+      const amount = positionAmount(s);
       if (size === null || amount === null) { complete = false; continue; }
-      if (size > 0) long += amount;
-      if (size < 0) short += amount;
+      hasFloat = true;
+      if (size > 0) longFloat += amount;
+      if (size < 0) shortFloat += amount;
     }
-    return { key, mode: group.mode, asset: group.asset, count: group.snapshots.length, long: complete ? long : null, short: complete ? short : null, total: complete ? long + short : null };
+    if (!complete) {
+      return { key, mode: group.mode, asset: group.asset, count: group.snapshots.length, long: null, short: null, total: null, longText: null, shortText: null, totalText: null };
+    }
+    const scale = [...longFixed, ...shortFixed].reduce((max, item) => Math.max(max, item.s), 0);
+    const longScaled = longFixed.reduce((acc, item) => acc + rescaleDecimal(item, scale), 0n);
+    const shortScaled = shortFixed.reduce((acc, item) => acc + rescaleDecimal(item, scale), 0n);
+    const totalScaled = longScaled + shortScaled;
+    if (!hasFloat) {
+      const longText = formatDecimal(longScaled, scale);
+      const shortText = formatDecimal(shortScaled, scale);
+      const totalText = formatDecimal(totalScaled, scale);
+      const long = longScaled === 0n ? 0 : Number(longText);
+      const short = shortScaled === 0n ? 0 : Number(shortText);
+      const total = totalScaled === 0n ? 0 : Number(totalText);
+      return {
+        key, mode: group.mode, asset: group.asset, count: group.snapshots.length,
+        long: Number.isFinite(long) ? long : null,
+        short: Number.isFinite(short) ? short : null,
+        total: Number.isFinite(total) ? total : null,
+        longText, shortText, totalText,
+      };
+    }
+    const long = (longScaled === 0n ? 0 : Number(formatDecimal(longScaled, scale))) + longFloat;
+    const short = (shortScaled === 0n ? 0 : Number(formatDecimal(shortScaled, scale))) + shortFloat;
+    const total = long + short;
+    return {
+      key, mode: group.mode, asset: group.asset, count: group.snapshots.length,
+      long: Number.isFinite(long) ? long : null,
+      short: Number.isFinite(short) ? short : null,
+      total: Number.isFinite(total) ? total : null,
+      longText: Number.isFinite(long) ? String(long) : null,
+      shortText: Number.isFinite(short) ? String(short) : null,
+      totalText: Number.isFinite(total) ? String(total) : null,
+    };
   });
 }
 
 export function entryPriceText(position: { size: string; entry_price: string }, compact = false) {
-  const size = numeric(position.size), entry = numeric(position.entry_price);
-  return size !== null && size !== 0 && entry !== null && entry > 0 ? positivePrice(entry, compact) : '--';
+  const parsedSize = parseSignedDecimal(position.size);
+  const hasPosition = parsedSize ? parsedSize.n !== 0n : (numeric(position.size) ?? 0) !== 0;
+  return hasPosition ? positivePrice(position.entry_price, compact) : '--';
 }
 
 export function entryChange(position: { size: string; entry_price: string }, markPrice: unknown): { text: string; className?: 'positive' | 'negative' } {
+  const parsedSize = parseSignedDecimal(position.size);
+  const parsedEntry = parseUnsignedDecimal(position.entry_price);
+  const parsedMark = parseUnsignedDecimal(markPrice);
+  if (parsedSize && parsedEntry && parsedMark) {
+    if (parsedSize.n === 0n || parsedEntry.n <= 0n || parsedMark.n <= 0n) return { text: '--' };
+    const [m, e] = scaleDecimalPair(parsedMark, parsedEntry);
+    const diff = m - e;
+    const absDiff = diff < 0n ? -diff : diff;
+    const roundedBp = (absDiff * 10000n + e / 2n) / e;
+    if (roundedBp === 0n) return { text: '0%' };
+    const formatted = formatDecimalDisplay(formatDecimal(roundedBp, 2), { maxFractionDigits: 2, trimZeros: true });
+    if (!formatted) return { text: '--' };
+    return { text: `${diff > 0n ? '+' : '-'}${formatted}%`, className: diff > 0n ? 'positive' : 'negative' };
+  }
   const size = numeric(position.size), entry = numeric(position.entry_price), mark = numeric(markPrice);
   const raw = size !== null && size !== 0 && entry !== null && entry > 0 && mark !== null && mark > 0 ? (mark / entry - 1) * 100 : null;
   const formatted = raw !== null && Number.isFinite(raw) ? compactNumber(raw, 2) : null;
@@ -86,9 +180,9 @@ export function entryChange(position: { size: string; entry_price: string }, mar
 }
 
 const isSameBeijingDay = (windowEnd: string | undefined, now: number) => {
-  if (!windowEnd) return false;
+  if (!windowEnd || !isValidEpochMs(now)) return false;
   const endTs = Date.parse(windowEnd);
-  return Number.isFinite(endTs) && Math.floor((endTs + 8 * 3600_000) / 86_400_000) === Math.floor((now + 8 * 3600_000) / 86_400_000);
+  return isValidEpochMs(endTs) && Math.floor((endTs + 8 * 3600_000) / 86_400_000) === Math.floor((now + 8 * 3600_000) / 86_400_000);
 };
 
 export function todayTradeCounts(s: Snapshot | PairSummary, now = Date.now()) {
@@ -97,7 +191,7 @@ export function todayTradeCounts(s: Snapshot | PairSummary, now = Date.now()) {
     return counts && isSameBeijingDay(counts.window_end, now) ? { buy: counts.buy, sell: counts.sell } : null;
   }
   const stats = s.hourly_trade_stats;
-  if (!stats || !isSameBeijingDay(stats.window_end, now)) return null;
+  if (!stats || !isValidEpochMs(Date.parse(stats.window_start)) || !isSameBeijingDay(stats.window_end, now)) return null;
   return stats.buckets.reduce((counts, b) => ({ buy: counts.buy + b.buy_count, sell: counts.sell + b.sell_count }), { buy: 0, sell: 0 });
 }
 
@@ -111,6 +205,7 @@ export interface ModeAssetPnlGroup {
   mode: Mode;
   asset: string;
   sum: number;
+  sumText: string;
   pending: number;
   available: boolean;
 }
@@ -140,8 +235,9 @@ export function groupModeAssetPnl<T extends { mode: Mode; symbol: string }>(
   for (const [key, group] of raw) {
     const scale = group.values.reduce((max, item) => Math.max(max, item.s), 0);
     const totalScaled = group.values.reduce((acc, item) => acc + rescaleDecimal(item, scale), 0n);
-    const sum = totalScaled === 0n ? 0 : Number(formatDecimal(totalScaled, scale));
-    result.set(key, { key, mode: group.mode, asset: group.asset, sum, pending: group.pending, available: group.available && Number.isFinite(sum) });
+    const sumText = formatDecimal(totalScaled, scale);
+    const sum = totalScaled === 0n ? 0 : Number(sumText);
+    result.set(key, { key, mode: group.mode, asset: group.asset, sum, sumText, pending: group.pending, available: group.available && Number.isFinite(sum) });
   }
   return result;
 }
@@ -149,12 +245,18 @@ export function groupModeAssetPnl<T extends { mode: Mode; symbol: string }>(
 export function todayPnlGroups(stats: Overview['today_pnl'], now = Date.now()) {
   if (!stats || !isSameBeijingDay(stats.window_end, now)) return null;
   return [...groupModeAssetPnl(stats.groups, row => ({ pnl: row.realized_pnl, pending: row.pending_pnl_count })).values()]
-    .map(group => ({ ...group, total: group.available && !group.pending ? group.sum : null }));
+    .map(group => {
+      const ready = group.available && !group.pending;
+      return { ...group, total: ready ? group.sum : null, totalText: ready ? group.sumText : null };
+    });
 }
 
 export function groupTradePnl(trades: Trade[]) {
   const groups = groupModeAssetPnl(trades, trade => ({ pnl: trade.realized_pnl, valid: trade.pnl_verified }));
-  return new Map([...groups.entries()].map(([key, group]) => [key, { mode: group.mode, asset: group.asset, total: group.sum, available: group.available }]));
+  return new Map([...groups.entries()].map(([key, group]) => [
+    key,
+    { mode: group.mode, asset: group.asset, total: group.sum, totalText: group.available ? group.sumText : null, available: group.available },
+  ]));
 }
 
 export function availableRatio(available: number | null, wallet: number | null): number | null {
@@ -225,8 +327,9 @@ export function accountGroups<T extends AccountObservation>(entries: T[], now = 
       const refNow = entryRefNow(entry, now);
       return recentAt(s.account.update_time, 30_000, refNow) && recentAt(s.ticker.mark_update_time, 15_000, refNow) && (numeric(s.ticker.mark_price) ?? 0) > 0;
     });
-    const sharedPosition = numeric(account.account.margin_balance) !== numeric(account.account.available_balance)
-      || (numeric(account.account.unrealized_profit) ?? 0) !== 0;
+    const marginDec = parseSignedDecimal(account.account.margin_balance), availDec = parseSignedDecimal(account.account.available_balance), unrealDec = parseSignedDecimal(account.account.unrealized_profit);
+    const balanceDiff = marginDec && availDec ? scaleDecimalPair(marginDec, availDec)[0] !== scaleDecimalPair(marginDec, availDec)[1] : numeric(account.account.margin_balance) !== numeric(account.account.available_balance);
+    const sharedPosition = balanceDiff || (unrealDec ? unrealDec.n !== 0n : (numeric(account.account.unrealized_profit) ?? 0) !== 0);
     const valued = !unavailable && (mode !== 'PAPER' || (paperValued && (!sharedPosition || recentAt(account.account.update_time, 15_000, entryRefNow(chosen, now)))));
     const equity = valued ? numeric(account.account.margin_balance) : null;
     const available = valued ? numeric(account.account.available_balance) : null;

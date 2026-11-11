@@ -41,25 +41,6 @@ fn database_mode() -> bool {
     }
 }
 
-// Nearest-rank quantiles are descriptive only; small samples cannot resolve
-// tail percentiles (p99 needs at least 100 observations).
-fn print_percentiles(label: &str, samples: &mut [f64]) {
-    if samples.is_empty() {
-        println!("{label}: n=0 (no samples)");
-        return;
-    }
-    samples.sort_by(f64::total_cmp);
-    let quantile = |percent: usize| samples[(samples.len() * percent).div_ceil(100) - 1];
-    println!(
-        "{label}: n={} p50={:.3} p95={:.3} p99={:.3} max={:.3}",
-        samples.len(),
-        quantile(50),
-        quantile(95),
-        quantile(99),
-        samples[samples.len() - 1]
-    );
-}
-
 #[test]
 fn benchmark_disk_database_is_isolated_and_cleaned_up() {
     let directory;
@@ -182,12 +163,12 @@ async fn simulated_pair_burst() {
     println!(
         "nearest-rank percentiles; p95/p99 are coarse for fewer than 20/100 samples; times in ms"
     );
-    print_percentiles("pair_total_ms", &mut samples);
-    print_percentiles("ticker_ms", &mut ticker_ms);
-    print_percentiles("maintenance_ms", &mut maintenance_ms);
-    print_percentiles("batch_ms", &mut batch_ms);
-    print_percentiles("full_snapshot_ms", &mut full_snapshot_ms);
-    print_percentiles("account_snapshot_ms", &mut account_snapshot_ms);
+    crate::test_support::print_latency_percentiles("pair_total_ms", &mut samples);
+    crate::test_support::print_latency_percentiles("ticker_ms", &mut ticker_ms);
+    crate::test_support::print_latency_percentiles("maintenance_ms", &mut maintenance_ms);
+    crate::test_support::print_latency_percentiles("batch_ms", &mut batch_ms);
+    crate::test_support::print_latency_percentiles("full_snapshot_ms", &mut full_snapshot_ms);
+    crate::test_support::print_latency_percentiles("account_snapshot_ms", &mut account_snapshot_ms);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -536,7 +517,7 @@ async fn simulated_live_reconciliation() {
     );
     println!("planned cycles have scheduled times in [start, deadline); skipped cycles are planned cycles not started before deadline, including ticks skipped during an overrun or remaining at deadline");
     println!("nearest-rank percentiles; p95/p99 are coarse for fewer than 20/100 samples; times in ms; not_ok means sync did not report success, not necessarily a rate-limit rejection");
-    print_percentiles("schedule_delay_ms", &mut schedule_ms);
-    print_percentiles("ticker_ms", &mut ticker_ms);
-    print_percentiles("sync_cycle_ms", &mut samples);
+    crate::test_support::print_latency_percentiles("schedule_delay_ms", &mut schedule_ms);
+    crate::test_support::print_latency_percentiles("ticker_ms", &mut ticker_ms);
+    crate::test_support::print_latency_percentiles("sync_cycle_ms", &mut samples);
 }

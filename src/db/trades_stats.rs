@@ -381,7 +381,7 @@ fn persist_inserted_trade_recovery_on(
             trade.symbol,
             trade.mode.as_str(),
             serde_json::to_string(intent)?,
-            Utc::now().to_rfc3339()
+            super::format_sqlite_timestamp(Utc::now())
         ])?;
     }
     Ok(())
@@ -427,7 +427,7 @@ fn insert_trade_on(conn: &Connection, trade: &TradeRecord) -> Result<bool> {
             trade.commission.to_string(),
             if trade.pnl_verified { 1 } else { 0 },
             if trade.is_maker { 1 } else { 0 },
-            trade.timestamp,
+            super::format_sqlite_timestamp(trade.timestamp),
             trade.note,
             hourly::hour(trade.timestamp),
         ])

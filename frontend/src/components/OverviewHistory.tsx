@@ -1,7 +1,7 @@
 import { Suspense, lazy, useMemo, useState } from 'react';
 import { Card, Select } from 'antd';
 import { useOverviewHistory } from '../lib/queries';
-import { compactNumber, modeLabel, numeric } from '../lib/format';
+import { compactNumber, isValidEpochMs, modeLabel, numeric } from '../lib/format';
 import { useUtcHour } from '../lib/useNow';
 import type { HistoryAccount, OverviewHistoryData } from '../lib/types';
 import { ErrorNotice } from './Common';
@@ -10,7 +10,7 @@ import { LoadErrorBoundary } from './LoadErrorBoundary';
 
 const OverviewHistoryChart = lazy(() => import('./OverviewHistoryChart'));
 const historyDateFormat = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
-const formatDate = (hour: number) => historyDateFormat.format(hour * 1000);
+const formatDate = (hour: number) => isValidEpochMs(hour * 1000) ? historyDateFormat.format(hour * 1000) : '--';
 const accountKey = (account: HistoryAccount) => account.account_id === null ? `${account.mode}\0${account.asset}` : `${account.mode}\0${account.asset}\0${account.account_id}`;
 const isUnidentified = (account: HistoryAccount) => account.mode !== 'PAPER' && account.account_id === null;
 
@@ -50,17 +50,18 @@ function buildHistorySeries(
   const byHour = new Map<number, OverviewHistoryData['snapshots'][number]['groups']>();
   for (const point of snapshots ?? []) byHour.set(point.hour, point.groups);
   const pointAt = (hour: number) => {
-    if (!account) return { hour, equity: null };
+    if (!account) return { hour, equity: null, equityText: null as string | null };
     const list = byHour.get(hour);
     if (list) {
       for (let i = 0; i < list.length; i++) {
         const g = list[i];
         if (g.mode === account.mode && g.asset === account.asset && g.account_id === account.account_id) {
-          return { hour, equity: numeric(g.equity) };
+          const equity = numeric(g.equity);
+          return { hour, equity, equityText: equity !== null ? g.equity : null };
         }
       }
     }
-    return { hour, equity: null };
+    return { hour, equity: null, equityText: null as string | null };
   };
   const data = Array.from({ length: 24 }, (_, i) => pointAt(lastHour - (23 - i) * 3600));
   const midnight = Math.floor((lastHour + 8 * 3600) / (24 * 3600)) * 24 * 3600 - 8 * 3600;
@@ -108,7 +109,7 @@ export function OverviewHistory() {
       {options.length > 0 && !history.isPending && !!history.data && (
         <div className="history-metric" aria-label="最近一次快照">
           <span>最近账户权益 · {asset}</span>
-          <strong>{compactNumber((latest ?? latestDay)?.equity)}</strong>
+          <strong>{compactNumber((latest ?? latestDay)?.equityText)}</strong>
         </div>
       )}
     </div>
@@ -133,14 +134,14 @@ export function OverviewHistory() {
                 <div className="history-caption-main"><h3>近 24 小时</h3><span>单位 {asset} · 北京时间</span></div>
                 <span className="numeric">最近记录 {latest ? formatDate(latest.hour) : '--'}</span>
               </div>
-              {renderPlot(data, ticks, '24 小时权益图', `近24小时${asset ?? ''}账户权益折线图，最近记录 ${latest ? `${formatDate(latest.hour)}，权益 ${compactNumber(latest.equity)}` : '暂无'}`, '近 24 小时暂无可用的权益快照')}
+              {renderPlot(data, ticks, '24 小时权益图', `近24小时${asset ?? ''}账户权益折线图，最近记录 ${latest ? `${formatDate(latest.hour)}，权益 ${compactNumber(latest.equityText)}` : '暂无'}`, '近 24 小时暂无可用的权益快照')}
             </div>
             <div className="history-chart-secondary">
               <div className="history-caption">
                 <div className="history-caption-main"><h3>近 7 天</h3><span>每日 00:00 · 北京时间</span></div>
                 <span className="numeric">最近零点记录 {latestDay ? formatDate(latestDay.hour) : '--'}</span>
               </div>
-              {renderPlot(dailyData, dailyTicks, '7 天权益图', `近7天${asset ?? ''}账户权益折线图，每日北京时间零点，最近记录 ${latestDay ? `${formatDate(latestDay.hour)}，权益 ${compactNumber(latestDay.equity)}` : '暂无'}`, '近 7 天暂无可用的零点权益快照', true)}
+              {renderPlot(dailyData, dailyTicks, '7 天权益图', `近7天${asset ?? ''}账户权益折线图，每日北京时间零点，最近记录 ${latestDay ? `${formatDate(latestDay.hour)}，权益 ${compactNumber(latestDay.equityText)}` : '暂无'}`, '近 7 天暂无可用的零点权益快照', true)}
             </div>
           </div>
         )}

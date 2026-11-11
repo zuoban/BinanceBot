@@ -17,15 +17,15 @@ impl GridTradingEngine {
     }
 
     pub(super) async fn update_paper_valuation(&self) {
-        let config = self.state.config.read().await;
-        let ticker = self.state.ticker.read().await;
+        let symbol = self.state.config.read().await.exchange.symbol.clone();
+        let ticker = self.state.ticker.read().await.clone();
         let mut position = self.state.position.write().await;
         let mut account = self.state.account.write().await;
         update_paper_account(&mut position, &mut account, &ticker);
-        if let Err(error) =
-            self.state
-                .db
-                .shared_paper_account(&config.exchange.symbol, &position, &account)
+        if let Err(error) = self
+            .state
+            .db
+            .shared_paper_account(&symbol, &position, &account)
         {
             error!(%error, "Could not value shared paper account");
             self.state

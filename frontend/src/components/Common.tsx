@@ -6,6 +6,7 @@ import { EditContext } from '../lib/session';
 import { errorMessage } from '../lib/api';
 import { useAsyncLock } from '../lib/asyncGuard';
 import { useConfirmDialog } from '../lib/confirmDialog';
+import { parseSignedDecimal } from '../lib/decimal';
 import type { GridConfig, Mode, Status } from '../lib/types';
 type Direction = GridConfig['direction'];
 import { ageText, compactNumber, directionLabel, modeLabel, number, numeric, sig3Format, statusLabel } from '../lib/format';
@@ -63,6 +64,21 @@ export function DirectionText({ direction }: { direction: Direction }) {
   return <SideTag side={direction === 'SHORT' ? 'SELL' : 'BUY'} label={directionLabel(direction)} />;
 }
 export function Pnl({ value, compact = false }: { value: unknown; compact?: boolean }) {
+  if (typeof value === 'string') {
+    const parsed = parseSignedDecimal(value);
+    if (parsed) {
+      const absN = parsed.n < 0n ? -parsed.n : parsed.n;
+      const scale10 = 10n ** BigInt(parsed.s);
+      if (absN * 1_000_000_000_000n < scale10) {
+        return <span className="positive numeric">{compact ? '0' : '0.00'}</span>;
+      }
+      if (compact && absN > 0n && absN * 100n < scale10) {
+        return <span className={parsed.n < 0n ? 'negative numeric' : 'positive numeric'}>{sig3Format.format(Number(value))}</span>;
+      }
+      const text = compact ? compactNumber(value) : number(value);
+      return <span className={text === '--' ? 'numeric' : text.startsWith('-') ? 'negative numeric' : 'positive numeric'}>{text}</span>;
+    }
+  }
   const raw = numeric(value);
   const n = raw !== null && Math.abs(raw) < 1e-12 ? 0 : raw;
   if (compact && n !== null && Math.abs(n) > 0 && Math.abs(n) < 0.01) {

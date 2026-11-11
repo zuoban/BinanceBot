@@ -89,23 +89,6 @@ impl BenchmarkDatabase {
     }
 }
 
-fn percentiles(label: &str, samples: &mut [f64]) {
-    if samples.is_empty() {
-        println!("{label}: n=0");
-        return;
-    }
-    samples.sort_by(f64::total_cmp);
-    let q = |p: usize| samples[(samples.len() * p).div_ceil(100) - 1];
-    println!(
-        "{label}: n={} p50={:.3} p95={:.3} p99={:.3} max={:.3}",
-        samples.len(),
-        q(50),
-        q(95),
-        q(99),
-        samples[samples.len() - 1]
-    );
-}
-
 #[derive(Clone)]
 struct Exchange {
     pairs: usize,
@@ -413,23 +396,23 @@ async fn simulated_live_orders_and_fills() {
     );
     println!("mock_server_delay_ms open={} lookup={} trade={} position={} account={}; delay starts in each local handler before response generation and is not network RTT", exchange.delays.open.as_millis(), exchange.delays.lookup.as_millis(), exchange.delays.trade.as_millis(), exchange.delays.position.as_millis(), exchange.delays.account.as_millis());
     println!("SQLite timings cover benchmark rounds only: queue is submit-to-start for Tokio spawn_blocking; connection is mutex acquisition for instrumented methods, excluding SQL, SQLite file locks, and the outer trade lock. Sample recording itself adds overhead.");
-    percentiles(
+    crate::test_support::print_latency_percentiles(
         "sqlite_blocking_queue_wait_ms",
         &mut db_wait_samples.queue.lock().unwrap(),
     );
-    percentiles(
+    crate::test_support::print_latency_percentiles(
         "sqlite_instrumented_connection_lock_wait_ms",
         &mut db_wait_samples.connection.lock().unwrap(),
     );
     println!("Rejections count client reservation warnings, not failed stages or server responses; shared caches and multiple requests per stage prevent one-to-one attribution. Ordinary cache waits can fail after 100ms while a loader continues; slow-handler runs therefore report account stage failures. Round 0 is adoption; latency includes diagnostics and failed stages may finish early. Batch timing ends when all pair tasks finish, before result processing. Order reconciliation includes one critical risk refresh per pair with terminal fills and durable pending-PnL commits. PnL compensation is measured separately below. Local synthetic burst is not an exchange capacity estimate. Nearest-rank p95/p99 need 20/100 samples for useful tail resolution.");
-    percentiles("order_success_ms", &mut order_success_ms);
-    percentiles("order_failure_ms", &mut order_failed_ms);
-    percentiles("account_success_ms", &mut account_success_ms);
-    percentiles("account_failure_ms", &mut account_failed_ms);
-    percentiles("order_reconciliation_ms", &mut order_ms);
-    percentiles("account_position_ms", &mut account_ms);
-    percentiles("pair_total_ms", &mut pair_ms);
-    percentiles("batch_ms", &mut batch_ms);
+    crate::test_support::print_latency_percentiles("order_success_ms", &mut order_success_ms);
+    crate::test_support::print_latency_percentiles("order_failure_ms", &mut order_failed_ms);
+    crate::test_support::print_latency_percentiles("account_success_ms", &mut account_success_ms);
+    crate::test_support::print_latency_percentiles("account_failure_ms", &mut account_failed_ms);
+    crate::test_support::print_latency_percentiles("order_reconciliation_ms", &mut order_ms);
+    crate::test_support::print_latency_percentiles("account_position_ms", &mut account_ms);
+    crate::test_support::print_latency_percentiles("pair_total_ms", &mut pair_ms);
+    crate::test_support::print_latency_percentiles("batch_ms", &mut batch_ms);
     let pending_fills: usize = futures_util::future::join_all(
         engines
             .iter()

@@ -15,8 +15,8 @@ const DatabaseSettings = lazy(() => import('../components/DatabaseSettings').the
 const settingsTabs = ['global', 'server', 'database', 'security'] as const;
 export default function Settings() {
   const edit = useContext(EditContext);
-  const { confirm } = useConfirmDialog();
   const [active, setActive] = useUrlParam('tab', 'global', settingsTabs);
+  const { confirm } = useConfirmDialog(active);
   const runSwitch = useAsyncLock();
   const savingRef = useRef(edit.saving);
   savingRef.current = edit.saving;

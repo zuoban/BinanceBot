@@ -1,3 +1,4 @@
+use super::snapshot_identities::invalid_snapshot_price;
 use super::*;
 
 pub(super) struct LiveGridOrderSubmission<'a> {
@@ -19,9 +20,17 @@ impl GridTradingEngine {
         std::result::Result<BinanceOrderResponse, ExchangeError>,
         Option<crate::server::state::PendingFillReconciliation>,
     ) {
+        let expected_client_id = request.client_order_id;
+        let expected_symbol = request.symbol;
+        let expected_side = request.side;
         let result = self.client.place_order(request).await;
         let mut fill_guard = if result.as_ref().is_ok_and(|response| {
-            response.executed_qty > Decimal::ZERO || unresolved_filled_quantity(response)
+            response.executed_qty > Decimal::ZERO
+                || unresolved_filled_quantity(response)
+                || invalid_snapshot_price(response)
+                || response.client_order_id != expected_client_id
+                || response.symbol != expected_symbol
+                || response.side != expected_side
         }) || result
             .as_ref()
             .is_err_and(|error| error.execution_status_unknown())
@@ -42,13 +51,32 @@ impl GridTradingEngine {
         order: &mut GridOrder,
         resp: &BinanceOrderResponse,
     ) -> bool {
+        if !order.matches_exchange_identity(resp) || invalid_snapshot_price(resp) {
+            error!(
+                "Accepted order {} failed identity or price validation (orderId={}, symbol={}, side={}, price={})",
+                order.client_order_id, resp.order_id, resp.symbol, resp.side, resp.price
+            );
+            self.block_reconciliation_and_invalidate_caches().await;
+            if !order.matches_exchange_identity(resp) {
+                self.track_identity_conflict(order, resp);
+            }
+            self.state
+                .active_orders
+                .write()
+                .await
+                .insert(order.client_order_id.clone(), order.clone());
+            if !self
+                .persist_identity_observations(self.client.account_identity_key(), &order.symbol)
+                .await
+            {
+                self.pause_trading().await;
+            }
+            return false;
+        }
         if unresolved_filled_quantity(resp) {
             self.block_reconciliation_and_invalidate_caches().await;
         }
         order.order_id = Some(resp.order_id);
-        order.symbol = resp.symbol.clone();
-        order.client_order_id = resp.client_order_id.clone();
-
         let persisted = if let Err(e) = self.save_managed_order(order).await {
             error!(
                 "Order {} was accepted but could not be persisted: {}",
@@ -171,17 +199,48 @@ impl GridTradingEngine {
             .await
         {
             Ok(found) => {
-                if found.executed_qty > Decimal::ZERO || unresolved_filled_quantity(&found) {
-                    self.report_reconciliation_state(true).await;
-                    self.invalidate_account_and_position_caches();
+                if !order.matches_exchange_identity(&found) || invalid_snapshot_price(&found) {
+                    error!(
+                        "Recovered order {} failed identity or price validation (orderId={}, symbol={}, side={}, price={})",
+                        client_order_id, found.order_id, found.symbol, found.side, found.price
+                    );
+                    self.block_reconciliation_and_invalidate_caches().await;
+                    if !order.matches_exchange_identity(&found) {
+                        self.track_identity_conflict(&order, &found);
+                    }
+                    let order_symbol = order.symbol.clone();
+                    self.state
+                        .active_orders
+                        .write()
+                        .await
+                        .insert(client_order_id, order);
+                    if !self
+                        .persist_identity_observations(
+                            self.client.account_identity_key(),
+                            &order_symbol,
+                        )
+                        .await
+                    {
+                        self.pause_trading().await;
+                    }
+                    return;
+                }
+                if found.is_terminal()
+                    || found.executed_qty > Decimal::ZERO
+                    || unresolved_filled_quantity(&found)
+                {
+                    self.block_reconciliation_and_invalidate_caches().await;
                 }
                 order.order_id = Some(found.order_id);
-                order.status = found.open_order_status();
+                if !found.is_terminal() {
+                    order.status = found.open_order_status();
+                }
                 if let Err(save_error) = self.save_managed_order(&order).await {
                     error!(
                         "Could not persist accepted order {}: {}",
                         client_order_id, save_error
                     );
+                    self.mark_orders_reconciliation_blocked().await;
                     self.pause_trading().await;
                 }
             }

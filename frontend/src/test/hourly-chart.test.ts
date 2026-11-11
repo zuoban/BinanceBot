@@ -2,7 +2,8 @@ import { createElement } from 'react';
 import { render, screen } from '@testing-library/react';
 import { expect, it, vi } from 'vitest';
 import { DepthChart, HourlyChart, todayHourlyData } from '../components/Charts';
-import { snapshot } from './fixtures';
+import { resolveTrades } from '../pages/PairDetail';
+import { snapshot, trade } from './fixtures';
 
 const chartRender = vi.hoisted(() => vi.fn());
 vi.mock('recharts', async importOriginal => ({
@@ -74,4 +75,17 @@ it('renders live grid depth levels with percentage distance from mark price', ()
   rerender(createElement(DepthChart, { snapshot: { ...s, ticker: { ...s.ticker, mark_price: '0' } } }));
   expect(levels()).toHaveLength(2);
   expect(s.active_orders.map(order => order.client_order_id)).toEqual(['s1', 'b1']);
+});
+
+it('guards todayHourlyData against invalid timestamps and sorts resolveTrades transitively across NaN timestamps', () => {
+  expect(todayHourlyData({ window_start: 'invalid', window_end: 'invalid', realized_pnl: '0', pending_pnl_count: 0, buckets: [] }, Date.now())).toEqual([]);
+  expect(todayHourlyData({ window_start: '2026-10-30T16:00:00Z', window_end: '2026-10-30T17:00:00Z', realized_pnl: '0', pending_pnl_count: 0, buckets: [] }, NaN)).toEqual([]);
+  const s = snapshot('SOLUSDC');
+  s.stats.total_trades = 3;
+  const fetched = [
+    trade({ trade_id: 'b', symbol: 'SOLUSDC', timestamp: 'not-a-date' }),
+    trade({ trade_id: 'a', symbol: 'SOLUSDC', timestamp: '2026-11-05T01:00:00Z' }),
+    trade({ trade_id: 'c', symbol: 'SOLUSDC', timestamp: '2026-11-05T02:00:00Z' }),
+  ];
+  expect(resolveTrades(s, fetched, false, 200, 100).map(t => t.trade_id)).toEqual(['c', 'a', 'b']);
 });

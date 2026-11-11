@@ -5,7 +5,8 @@ import { Link, useInRouterContext } from 'react-router-dom';
 import type { ColumnsType } from 'antd/es/table';
 import { pairRoute } from '../lib/api';
 import { useMountedRef } from '../lib/asyncGuard';
-import { ageText, beijingDay, number, numeric, price, quantity, time } from '../lib/format';
+import { compareSignedDecimals } from '../lib/decimal';
+import { ageText, beijingDay, number, price, quantity, time } from '../lib/format';
 import { priceDiffPercent } from '../lib/gridPreview';
 import { useNow } from '../lib/useNow';
 import type { Log, Order, Trade } from '../lib/types';
@@ -100,7 +101,7 @@ function ResponsiveTableSection({ hint, desktop, hasRows, totalCount, emptyFilte
 }
 const orderColumns: ColumnsType<Order> = [
   { title: '方向', dataIndex: 'side', render: side, width: 90, fixed: 'left' },
-  { title: '价格', align: 'right', className: 'table-numeric', dataIndex: 'price', render: (v: string) => <Copyable value={v}>{price(v)}</Copyable>, sorter: (a, b) => (numeric(a.price) ?? -Infinity) - (numeric(b.price) ?? -Infinity) },
+  { title: '价格', align: 'right', className: 'table-numeric', dataIndex: 'price', render: (v: string) => <Copyable value={v}>{price(v)}</Copyable>, sorter: (a, b) => compareSignedDecimals(a.price, b.price) },
   { title: '距标记价格', align: 'right', className: 'table-numeric', render: (_, o) => <OrderMarkDiff orderPrice={o.price} /> },
   { title: '数量', align: 'right', className: 'table-numeric', dataIndex: 'quantity', render: quantity },
   { title: '金额', align: 'right', className: 'table-numeric', dataIndex: 'amount_usdc', render: (v: string) => number(v) },

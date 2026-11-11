@@ -1,12 +1,12 @@
 /** A cell that a spreadsheet would execute as a formula must be neutralised before export. */
-const risky = /^[\t\r]|^\s*[=+\-@]/;
+const risky = /^\s*[=+\-@|\t\r]/;
 /** A plain signed decimal is data, not a formula, and must stay numeric (negative PnL). */
 const plainNumber = /^[+-]?\d+(\.\d+)?$/;
 
 export function csvCell(value: unknown): string {
   let text = value === null || value === undefined ? '' : String(value);
   if (risky.test(text) && !plainNumber.test(text)) text = `'${text}`;
-  return /[",\n\r]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+  return /[",;\t\n\r]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
 }
 
 export function toCsv(header: string[], rows: unknown[][]): string {

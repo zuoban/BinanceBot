@@ -5,8 +5,8 @@ import { SettingOutlined } from '@ant-design/icons';
 import { QueryClient, QueryClientContext, useQuery } from '@tanstack/react-query';
 import { api, pairPath, pairRoute } from '../lib/api';
 import { usePairSnapshot, usePairs } from '../lib/queries';
-import { signedDecimalToNumber, subSignedDecimals } from '../lib/decimal';
-import { beijingClockFormat, cnyText, number, positivePrice, quantity, ratioText, trimFractionZeros } from '../lib/format';
+import { subSignedDecimals } from '../lib/decimal';
+import { beijingClockFormat, cnyText, isValidEpochMs, number, positivePrice, quantity, ratioText, trimFractionZeros } from '../lib/format';
 import { entryPriceText, quoteAsset, todayTradeCounts } from '../lib/portfolio';
 import { AccountsContext } from '../lib/session';
 import type { AccountObservation, Log, Pair, Snapshot, Trade } from '../lib/types';
@@ -44,7 +44,11 @@ export function resolveTrades(snapshot: Snapshot | undefined, fetched: Trade[] |
     const existing = merged.get(trade.trade_id);
     merged.set(trade.trade_id, existing ? (existing.pnl_verified !== trade.pnl_verified ? (existing.pnl_verified ? existing : trade) : existing) : trade);
   }
-  const sorted = [...merged.values()].sort((a, b) => (Date.parse(b.timestamp) - Date.parse(a.timestamp)) || b.trade_id.localeCompare(a.trade_id));
+  const sorted = [...merged.values()].sort((a, b) => {
+    const ta = Date.parse(a.timestamp), tb = Date.parse(b.timestamp);
+    const va = Number.isFinite(ta), vb = Number.isFinite(tb);
+    return (va !== vb ? (vb ? 1 : -1) : va ? tb - ta : 0) || b.trade_id.localeCompare(a.trade_id);
+  });
   return fetchedAt >= snapshotAt ? sorted : sorted.slice(0, Math.max(snapshot.stats.total_trades, scopedRecent.length));
 }
 
@@ -128,7 +132,7 @@ export default function PairDetail() {
   const today = useMemo(() => s ? todayTradeCounts(s, dayNow) : null, [s, dayNow]);
   useDocumentTitle(`${positivePrice(s?.ticker.mark_price)} | ${today?.buy ?? '--'}B | ${today?.sell ?? '--'}S`);
   const todayPnl = today && s?.hourly_trade_stats && s.hourly_trade_stats.pending_pnl_count === 0 ? s.hourly_trade_stats.realized_pnl : null;
-  const netPnl = s?.stats.pending_pnl_trades === 0 ? signedDecimalToNumber(subSignedDecimals(s.stats.total_realized_pnl, s.stats.total_commission)) : null;
+  const netPnl = s?.stats.pending_pnl_trades === 0 ? subSignedDecimals(s.stats.total_realized_pnl, s.stats.total_commission) : null;
   const currentPair = pair && s ? { ...pair, status: s.status, grid_config: s.grid_config, mode: s.mode, ...(s.account_scope !== undefined && { account_scope: s.account_scope }) } : pair;
   return <div>
     <PageBreadcrumb items={[{ label: '策略总览', to: '/' }, { label: symbol ?? '策略详情' }]} />
@@ -137,7 +141,7 @@ export default function PairDetail() {
     <ErrorNotice error={pairs.error || query.error} retry={() => { if (pairs.error) void pairs.refetch(); if (pair) void query.refetch(); }} />
     {pairs.data && !pair && !pairs.isFetching && <Alert type="warning" title="该交易对不存在或已移除" />}
     {symbol && <ControlResultBanner symbol={symbol} results={controls.results} clearResult={controls.clearResult} variant="alert" />}
-    {pair && <div className="detail-status signal-strip"><StatusTag status={currentPair!.status} /><DirectionTag direction={currentPair!.grid_config.direction} /><ModeTag mode={currentPair!.mode} /><SignalChip tier={query.live ? 'calm' : 'yellow'}>{query.live ? '实时连接' : 'HTTP 自动刷新'}</SignalChip><span className="muted freshness" title={query.dataUpdatedAt ? `最近同步 ${beijingClockFormat.format(query.dataUpdatedAt)}` : undefined}>{query.dataUpdatedAt ? <FreshnessText updatedAt={query.dataUpdatedAt} prefix="更新于 " /> : '等待首次快照'}</span></div>}
+    {pair && <div className="detail-status signal-strip"><StatusTag status={currentPair!.status} /><DirectionTag direction={currentPair!.grid_config.direction} /><ModeTag mode={currentPair!.mode} /><SignalChip tier={query.live ? 'calm' : 'yellow'}>{query.live ? '实时连接' : 'HTTP 自动刷新'}</SignalChip><span className="muted freshness" title={query.dataUpdatedAt > 0 && isValidEpochMs(query.dataUpdatedAt) ? `最近同步 ${beijingClockFormat.format(query.dataUpdatedAt)}` : undefined}>{query.dataUpdatedAt ? <FreshnessText updatedAt={query.dataUpdatedAt} prefix="更新于 " /> : '等待首次快照'}</span></div>}
     {stale && !query.error && s && <Alert type="warning" showIcon title="快照暂未更新，数值可能已过期；仍可撤单并暂停。" />}
     {!s && (pairs.isPending || (!pair && pairs.isFetching) || (pair && query.isPending)) && <DetailLoading />}
     {s && <>

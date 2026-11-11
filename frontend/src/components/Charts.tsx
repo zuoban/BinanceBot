@@ -2,15 +2,21 @@ import { memo, useMemo, useRef } from 'react';
 import { theme } from 'antd';
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import type { Snapshot } from '../lib/types';
-import { numeric, price, quantity } from '../lib/format';
+import { compareSignedDecimals, parseSignedDecimal } from '../lib/decimal';
+import { isValidEpochMs, numeric, price, quantity } from '../lib/format';
 import { todayCount } from '../lib/portfolio';
 import { priceDiffPercent } from '../lib/gridPreview';
 import { serverAlignedNow, useUtcHour } from '../lib/useNow';
 import { NoData, useCenterElementScroll } from './Common';
 export function todayHourlyData(stats: NonNullable<Snapshot['hourly_trade_stats']>, now = Date.now()) {
   const start = Date.parse(stats.window_start);
+  if (!isValidEpochMs(start) || !isValidEpochMs(now)) return [];
   const currentHour = Math.min(23, Math.max(0, Math.floor((now - start) / 3600_000)));
-  const buckets = new Map(stats.buckets.map(bucket => [Date.parse(bucket.hour_start), bucket]));
+  const buckets = new Map<number, (typeof stats.buckets)[number]>();
+  for (const bucket of stats.buckets) {
+    const ts = Date.parse(bucket.hour_start);
+    if (isValidEpochMs(ts)) buckets.set(ts, bucket);
+  }
   return Array.from({ length: 24 }, (_, index) => {
     const hour = (currentHour - index + 24) % 24;
     const bucket = buckets.get(start + hour * 3600_000);
@@ -66,8 +72,10 @@ const HourlyChartContent = memo(function HourlyChartContent({ stats, hourBucket,
 export const DepthChart = memo(function DepthChart({ snapshot }: { snapshot: Snapshot }) {
   const orders = snapshot.active_orders;
   const containerRef = useRef<HTMLDivElement>(null);
-  const mark = numeric(snapshot.ticker.mark_price);
-  const hasMark = mark !== null && mark > 0;
+  const markPrice = snapshot.ticker.mark_price;
+  const parsedMark = parseSignedDecimal(markPrice);
+  const mark = numeric(markPrice);
+  const hasMark = parsedMark ? parsedMark.n > 0n : mark !== null && mark > 0;
   useCenterElementScroll(containerRef, '.grid-level-mark', [snapshot.symbol, orders.length, hasMark]);
   const { buyCount, sellCount, orderRows } = useMemo(() => {
     let buy = 0, sell = 0;
@@ -76,25 +84,26 @@ export const DepthChart = memo(function DepthChart({ snapshot }: { snapshot: Sna
       else sell++;
     }
     const sorted = orders
-      .map(order => ({ kind: 'order' as const, value: numeric(order.price) ?? -Infinity, order, priceText: price(order.price), qtyText: quantity(order.quantity) }))
-      .sort((a, b) => b.value - a.value);
+      .map(order => ({ kind: 'order' as const, order, priceText: price(order.price), qtyText: quantity(order.quantity) }))
+      .sort((a, b) => compareSignedDecimals(b.order.price, a.order.price));
     return { buyCount: buy, sellCount: sell, orderRows: sorted };
   }, [orders]);
   const rows = useMemo(() => {
     if (!hasMark) return orderRows;
-    const result: (typeof orderRows[number] | { kind: 'mark'; value: number })[] = [...orderRows];
-    const insertIdx = result.findIndex(r => r.value < mark);
-    if (insertIdx === -1) result.push({ kind: 'mark', value: mark });
-    else result.splice(insertIdx, 0, { kind: 'mark', value: mark });
+    const result: (typeof orderRows[number] | { kind: 'mark'; priceText: string })[] = [...orderRows];
+    const insertIdx = orderRows.findIndex(r => compareSignedDecimals(r.order.price, markPrice) < 0);
+    const markRow = { kind: 'mark' as const, priceText: price(markPrice) };
+    if (insertIdx === -1) result.push(markRow);
+    else result.splice(insertIdx, 0, markRow);
     return result;
-  }, [orderRows, hasMark, mark]);
+  }, [orderRows, hasMark, markPrice]);
   if (!orders.length) return <NoData />;
   return <>
     <div className="muted chart-caption">买单 {buyCount} 笔 · 卖单 {sellCount} 笔</div>
     <div ref={containerRef} className="grid-levels" role="region" aria-label="按价格从高到低排列的实时网格挂单" tabIndex={0}>
       {rows.map(row => {
-        if (row.kind === 'mark') return <div className="grid-level grid-level-mark" key="mark"><span>标记价</span><span className="grid-level-line" /><strong>{price(row.value)}</strong></div>;
-        const diff = hasMark ? priceDiffPercent(row.order.price, snapshot.ticker.mark_price) : null;
+        if (row.kind === 'mark') return <div className="grid-level grid-level-mark" key="mark"><span>标记价</span><span className="grid-level-line" /><strong>{row.priceText}</strong></div>;
+        const diff = hasMark ? priceDiffPercent(row.order.price, markPrice) : null;
         return <div className={`grid-level grid-level-${row.order.side.toLowerCase()}`} key={row.order.client_order_id}>
           <span>{row.order.side === 'BUY' ? '买单' : '卖单'} <span className="grid-level-quantity">{row.qtyText}</span></span><span className="grid-level-line" />{diff && <span className="grid-level-diff">{diff}</span>}<strong>{row.priceText}</strong>
         </div>;

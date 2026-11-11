@@ -11,19 +11,19 @@ pub(super) struct InitialOrderResponseBatch {
 }
 
 pub(super) type DisagreementPair = (BinanceOrderResponse, BinanceOrderResponse);
-pub(super) type SymbolDisagreements = HashMap<String, Vec<DisagreementPair>>;
+pub(super) type SymbolDisagreements = BTreeMap<String, Vec<DisagreementPair>>;
 
 #[derive(Default)]
 pub(crate) struct OrderEvidenceBook {
-    pub(super) provisional_order_ids: HashMap<[u8; 32], HashSet<String>>,
-    pub(super) order_identity_conflicts: HashMap<[u8; 32], HashMap<String, GridOrder>>,
+    pub(super) provisional_order_ids: HashMap<[u8; 32], BTreeSet<String>>,
+    pub(super) order_identity_conflicts: HashMap<[u8; 32], BTreeMap<String, GridOrder>>,
     pub(super) order_identity_observations:
-        HashMap<[u8; 32], HashMap<String, Vec<ObservedOrderIdentity>>>,
+        HashMap<[u8; 32], BTreeMap<String, Vec<ObservedOrderIdentity>>>,
     pub(super) provisional_order_observations:
-        HashMap<[u8; 32], HashMap<String, Vec<ObservedOrderIdentity>>>,
+        HashMap<[u8; 32], BTreeMap<String, Vec<ObservedOrderIdentity>>>,
     pub(super) loaded_identity_scopes: HashMap<[u8; 32], HashSet<String>>,
     pub(super) terminal_order_disagreements:
-        HashMap<[u8; 32], HashMap<String, SymbolDisagreements>>,
+        HashMap<[u8; 32], BTreeMap<String, SymbolDisagreements>>,
     pub(super) initial_order_responses:
         HashMap<[u8; 32], HashMap<String, Vec<InitialOrderResponseBatch>>>,
 }

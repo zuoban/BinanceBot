@@ -58,12 +58,22 @@ impl PositionInfo {
     }
 
     /// Best-effort market valuation price using an optional ticker (`mark_price`,
-    /// then `self.mark_price`, then `ticker.last_price`), without falling back to `entry_price`.
+    /// then `self.mark_price`, then `ticker.last_price`), preferring `self.mark_price`
+    /// when `self.update_time` is newer than `ticker.mark_update_time`, without falling
+    /// back to `entry_price`.
     #[must_use]
     #[inline]
     pub fn market_valuation_price(&self, ticker: Option<&TickerInfo>) -> Decimal {
-        if let Some(price) = ticker.map(|t| t.mark_price).filter(|p| *p > Decimal::ZERO) {
-            price
+        if let Some(t) = ticker.filter(|t| t.mark_price > Decimal::ZERO) {
+            if self.mark_price > Decimal::ZERO
+                && self
+                    .update_time
+                    .is_some_and(|pos_ts| pos_ts > t.mark_update_time)
+            {
+                self.mark_price
+            } else {
+                t.mark_price
+            }
         } else if self.mark_price > Decimal::ZERO {
             self.mark_price
         } else if let Some(price) = ticker.map(|t| t.last_price).filter(|p| *p > Decimal::ZERO) {

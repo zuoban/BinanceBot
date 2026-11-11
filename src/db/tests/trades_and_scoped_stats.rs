@@ -546,3 +546,178 @@ fn test_db_stats_lifecycle() {
     assert_eq!(profit, dec!(15.75));
     assert_eq!(volume, dec!(4200.0));
 }
+
+#[test]
+fn schema_migration_normalizes_legacy_timestamps_in_trades_and_frontiers() {
+    let dir = crate::test_support::TempTestDir::new("legacy-timestamps");
+    let path = dir.join("bot.db");
+    {
+        let db = Database::open(&path).unwrap();
+        let conn = db.conn.lock().unwrap();
+        conn.execute_batch(
+            "INSERT INTO trades (trade_id, client_order_id, symbol, mode, side, price, quantity,
+                 amount_usdc, realized_pnl, commission, pnl_verified, is_maker, timestamp, note)
+             VALUES
+                 ('t-whole-z', 'cid-1', 'SOLUSDC', 'PAPER', 'BUY', '101', '1', '101', '0', '0', 1, 1,
+                  '2026-10-10T08:00:00Z', ''),
+                 ('t-space-tz', 'cid-2', 'SOLUSDC', 'PAPER', 'SELL', '102', '1', '102', '0', '0', 1, 1,
+                  '2026-10-10 08:00:00.125+00:00', ''),
+                 ('t-space-naive', 'cid-3', 'SOLUSDC', 'PAPER', 'BUY', '103', '1', '103', '0', '0', 1, 1,
+                  '2026-10-10 08:00:00.25', ''),
+                 ('t-offset', 'cid-4', 'SOLUSDC', 'PAPER', 'SELL', '104', '1', '104', '0', '0', 1, 1,
+                  '2026-10-10T16:00:00.5+08:00', '');
+             INSERT INTO execution_frontiers (symbol, mode, side, price, timestamp)
+             VALUES
+                 ('SOLUSDC', 'LIVE', 'BUY', '110', '2026-10-10 08:00:00.05+00:00'),
+                 ('BTCUSDC', 'PAPER', 'SELL', '60000', '2026-10-10T08:00:00Z');",
+        )
+        .unwrap();
+    }
+
+    let db = Database::open(&path).unwrap();
+    {
+        let conn = db.conn.lock().unwrap();
+        let trade_timestamps: Vec<(String, String)> = conn
+            .prepare("SELECT trade_id, timestamp FROM trades ORDER BY timestamp ASC")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            trade_timestamps,
+            vec![
+                ("t-whole-z".into(), "2026-10-10T08:00:00.000000000Z".into()),
+                ("t-space-tz".into(), "2026-10-10T08:00:00.125000000Z".into()),
+                (
+                    "t-space-naive".into(),
+                    "2026-10-10T08:00:00.250000000Z".into()
+                ),
+                ("t-offset".into(), "2026-10-10T08:00:00.500000000Z".into()),
+            ]
+        );
+        let frontier_timestamps: Vec<(String, String, String)> = conn
+            .prepare("SELECT symbol, mode, timestamp FROM execution_frontiers ORDER BY symbol")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            frontier_timestamps,
+            vec![
+                (
+                    "BTCUSDC".into(),
+                    "PAPER".into(),
+                    "2026-10-10T08:00:00.000000000Z".into()
+                ),
+                (
+                    "SOLUSDC".into(),
+                    "LIVE".into(),
+                    "2026-10-10T08:00:00.050000000Z".into()
+                ),
+            ]
+        );
+    }
+    assert_eq!(
+        db.last_fill_for("SOLUSDC", TradingMode::Paper).unwrap(),
+        Some((OrderSide::Sell, dec!(104)))
+    );
+}
+
+#[test]
+fn subsecond_fills_sort_chronologically_for_last_fill_and_cleared_frontiers() {
+    let db = Database::open(":memory:").unwrap();
+    let parse_ts = |s: &str| DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc);
+    let make_trade = |id: &str, side: OrderSide, price: Decimal, ts: &str| TradeRecord {
+        trade_id: id.into(),
+        client_order_id: format!("cid-{id}"),
+        symbol: "SOLUSDC".into(),
+        mode: TradingMode::Live,
+        side,
+        price,
+        quantity: dec!(1),
+        amount_usdc: price,
+        realized_pnl: Decimal::ZERO,
+        commission: Decimal::ZERO,
+        pnl_verified: true,
+        is_maker: true,
+        timestamp: parse_ts(ts),
+        note: String::new(),
+    };
+
+    // Insert latest sub-second fill FIRST (lower rowid), then whole-second fill SECOND
+    // (higher rowid, where unpadded "...00Z" would falsely sort after "...00.900000000Z").
+    assert!(db
+        .insert_trade(&make_trade(
+            "fill-900ms",
+            OrderSide::Buy,
+            dec!(105),
+            "2026-10-10T12:00:00.900000000Z",
+        ))
+        .unwrap());
+    assert!(db
+        .insert_trade(&make_trade(
+            "fill-0ms",
+            OrderSide::Sell,
+            dec!(101),
+            "2026-10-10T12:00:00Z",
+        ))
+        .unwrap());
+    assert!(db
+        .insert_trade(&make_trade(
+            "fill-50ms",
+            OrderSide::Sell,
+            dec!(102),
+            "2026-10-10T12:00:00.050000000Z",
+        ))
+        .unwrap());
+
+    assert_eq!(
+        db.last_fill_for("SOLUSDC", TradingMode::Live).unwrap(),
+        Some((OrderSide::Buy, dec!(105)))
+    );
+    assert_eq!(db.clear_trade_history().unwrap(), 3);
+    assert_eq!(
+        db.last_fill_for("SOLUSDC", TradingMode::Live).unwrap(),
+        Some((OrderSide::Buy, dec!(105)))
+    );
+
+    // An earlier sub-second fill arriving and clearing later must not regress the frontier.
+    assert!(db
+        .insert_trade(&make_trade(
+            "fill-899ms",
+            OrderSide::Sell,
+            dec!(99),
+            "2026-10-10T12:00:00.899999999Z",
+        ))
+        .unwrap());
+    assert_eq!(
+        db.last_fill_for("SOLUSDC", TradingMode::Live).unwrap(),
+        Some((OrderSide::Buy, dec!(105)))
+    );
+    assert_eq!(db.clear_trade_history().unwrap(), 1);
+    assert_eq!(
+        db.last_fill_for("SOLUSDC", TradingMode::Live).unwrap(),
+        Some((OrderSide::Buy, dec!(105)))
+    );
+
+    // A strictly newer nanosecond fill advances both live query and cleared frontier.
+    assert!(db
+        .insert_trade(&make_trade(
+            "fill-900ms-plus-1ns",
+            OrderSide::Sell,
+            dec!(106),
+            "2026-10-10T12:00:00.900000001Z",
+        ))
+        .unwrap());
+    assert_eq!(
+        db.last_fill_for("SOLUSDC", TradingMode::Live).unwrap(),
+        Some((OrderSide::Sell, dec!(106)))
+    );
+    assert_eq!(db.clear_trade_history().unwrap(), 1);
+    assert_eq!(
+        db.last_fill_for("SOLUSDC", TradingMode::Live).unwrap(),
+        Some((OrderSide::Sell, dec!(106)))
+    );
+}

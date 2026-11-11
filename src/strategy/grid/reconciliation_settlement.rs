@@ -258,7 +258,7 @@ impl GridTradingEngine {
         live_ids: &HashMap<String, BinanceOrderResponse>,
         corrected_terminal: &mut HashMap<String, BinanceOrderResponse>,
     ) -> Option<Vec<(GridOrder, BinanceOrderResponse)>> {
-        let filled_or_closed: Vec<_> = self
+        let mut filled_or_closed: Vec<_> = self
             .state
             .active_orders
             .read()
@@ -267,6 +267,7 @@ impl GridTradingEngine {
             .filter(|(client_id, _)| !live_ids.contains_key(*client_id))
             .map(|(_, order)| order.clone())
             .collect();
+        filled_or_closed.sort_by(|a, b| a.client_order_id.cmp(&b.client_order_id));
         let mut terminal_orders = Vec::new();
         let mut unresolved_orders = false;
         let mut persistence_ok = true;

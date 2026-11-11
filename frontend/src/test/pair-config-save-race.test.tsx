@@ -234,3 +234,34 @@ it('disables the form while preflight refetchGlobal is pending and aborts an ope
   await act(async () => { saveConfirm.resolve(true); });
   expect(mocks.post).not.toHaveBeenCalled();
 });
+
+it('requires live confirmation on submit when initial global is PAPER and refetchGlobal fails', async () => {
+  pairsState.set([{ ...pair('BTCUSDC'), mode: 'PAPER' }]);
+  let globalCalls = 0;
+  mocks.api.mockImplementation((path: string) => {
+    if (path === '/api/global/config') {
+      globalCalls++;
+      return globalCalls === 1
+        ? Promise.resolve({ version: 'global-version', has_api_key: false, has_api_secret: false })
+        : Promise.reject(new Error('全局配置刷新失败'));
+    }
+    return Promise.resolve({ ...pair('BTCUSDC').grid_config, config_version: 'version-1' });
+  });
+  mocks.confirm.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+  mocks.post.mockResolvedValueOnce(pair('BTCUSDC').grid_config);
+
+  setup();
+  const user = userEvent.setup();
+  const interval = await screen.findByLabelText('网格间距');
+  await waitFor(() => expect(interval).toBeEnabled());
+  expect(screen.queryByText('实盘使用真实资金，请核对交易方向和风险限制。')).not.toBeInTheDocument();
+  const saveButton = screen.getByRole('button', { name: '保存并立即生效' });
+  await user.click(saveButton);
+  await waitFor(() => expect(mocks.confirm).toHaveBeenCalledTimes(1));
+  expect(mocks.confirm).toHaveBeenCalledWith(expect.objectContaining({ title: '保存实盘配置？', okText: '确认保存' }));
+  expect(mocks.post).not.toHaveBeenCalled();
+
+  await user.click(saveButton);
+  await waitFor(() => expect(mocks.confirm).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(mocks.post).toHaveBeenCalledTimes(1));
+});

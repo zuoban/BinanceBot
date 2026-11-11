@@ -75,36 +75,43 @@ impl AppState {
         // Match the full snapshot's lock order so a scope transition or trade
         // commit cannot expose a partially updated account view.
         let _scope = self.snapshot_scope_lock.read().await;
-        let _commit = self.trade_commit_lock.lock().await;
-        let config = self.config.read().await;
-        let status = *self.status.read().await;
-        let ticker = {
-            let ticker = self.ticker.read().await;
-            AccountTicker {
-                mark_price: ticker.mark_price,
-                mark_update_time: ticker.mark_update_time,
-            }
+        let (mode, mut snapshot) = {
+            let _commit = self.trade_commit_lock.lock().await;
+            let config = self.config.read().await;
+            let status = *self.status.read().await;
+            let symbol = config.exchange.symbol.clone();
+            let account_scope = config.exchange.account_scope();
+            let sync_interval_secs = config.exchange.sync_interval_secs;
+            let mode = config.exchange.trading_mode();
+            let ticker = {
+                let ticker = self.ticker.read().await;
+                AccountTicker {
+                    mark_price: ticker.mark_price,
+                    mark_update_time: ticker.mark_update_time,
+                }
+            };
+            let (position, account) = self
+                .with_position_and_account(&config, |position| AccountPosition {
+                    size: position.size,
+                    unrealized_pnl: position.unrealized_pnl,
+                })
+                .await;
+            (
+                mode,
+                AccountSnapshotData {
+                    symbol,
+                    status,
+                    account_scope,
+                    sync_interval_secs,
+                    ticker,
+                    position,
+                    account,
+                    account_cny_rate: None,
+                },
+            )
         };
-        let (position, account) = self
-            .with_position_and_account(&config, |position| AccountPosition {
-                size: position.size,
-                unrealized_pnl: position.unrealized_pnl,
-            })
-            .await;
-        let account_cny_rate = self.cny_rates.get(&account.asset).await;
-        AccountSnapshot {
-            mode: config.exchange.trading_mode(),
-            snapshot: AccountSnapshotData {
-                symbol: config.exchange.symbol.clone(),
-                status,
-                account_scope: config.exchange.account_scope(),
-                sync_interval_secs: config.exchange.sync_interval_secs,
-                ticker,
-                position,
-                account,
-                account_cny_rate,
-            },
-        }
+        snapshot.account_cny_rate = self.cny_rates.get(&snapshot.account.asset).await;
+        AccountSnapshot { mode, snapshot }
     }
 
     async fn collect_with_charts<T, F, Fut>(&self, now: DateTime<Utc>, mut collect: F) -> T

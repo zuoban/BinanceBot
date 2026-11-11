@@ -38,19 +38,6 @@ fn parameter(name: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-fn report(label: &str, samples: &mut [f64]) {
-    samples.sort_by(f64::total_cmp);
-    let percentile = |p: usize| samples[(samples.len() * p).div_ceil(100) - 1];
-    println!(
-        "{label}: n={} p50={:.3} p95={:.3} p99={:.3} max={:.3} ms",
-        samples.len(),
-        percentile(50),
-        percentile(95),
-        percentile(99),
-        samples[samples.len() - 1]
-    );
-}
-
 // Run explicitly with --ignored --nocapture. This measures paper controls while
 // market fallback is pending, including synchronization after resume acknowledgement.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -256,7 +243,10 @@ async fn market_request_samples(rounds: u64, delay_ms: u64, timeout_ms: u64) {
     println!("rounds={rounds} delay_ms={delay_ms} timeout_ms={timeout_ms} db=memory mode=paper workers=4");
     println!("UpdateConfig acknowledgement is configuration completion, not order cancellation; no market-update loss is measured.");
     println!("Control acknowledgement must finish while local HTTP is held. Configuration retires that request; fallback observation waits for a valid new-generation request. Mark push latency runs from broadcast send to observing engine state; mock service time includes the release handshake. Small samples give coarse percentiles.");
-    report("control_enqueue_to_ack", &mut control_samples);
-    report("mark_update_send_to_observation", &mut update_samples);
-    report("mock_handler_service", &mut service_samples);
+    crate::test_support::print_latency_percentiles("control_enqueue_to_ack", &mut control_samples);
+    crate::test_support::print_latency_percentiles(
+        "mark_update_send_to_observation",
+        &mut update_samples,
+    );
+    crate::test_support::print_latency_percentiles("mock_handler_service", &mut service_samples);
 }

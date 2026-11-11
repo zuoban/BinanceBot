@@ -1,12 +1,13 @@
 import { memo, useId } from 'react';
 import { Area, ComposedChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+import { isValidEpochMs } from '../lib/format';
 
 type HistoryPoint = { hour: number; equity: number | null };
 const hourFormat = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hour12: false });
 const dayFormat = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit' });
 const wanFormat = new Intl.NumberFormat('en-US', { maximumFractionDigits: 6 });
-const formatHour = (hour: number) => hourFormat.format(hour * 1000);
-const formatDay = (hour: number) => dayFormat.format(hour * 1000);
+const formatHour = (hour: number) => isValidEpochMs(hour * 1000) ? hourFormat.format(hour * 1000) : '--';
+const formatDay = (hour: number) => isValidEpochMs(hour * 1000) ? dayFormat.format(hour * 1000) : '--';
 const axisTick = { fontSize: 11, fontFamily: 'var(--font-mono)', fill: 'var(--text-muted)' };
 const tooltipCursor = { stroke: 'var(--border-strong)', strokeDasharray: '3 4' };
 const tooltipContentStyle = { background: 'var(--bg-raised)', borderColor: 'var(--border-strong)', borderRadius: 8, boxShadow: 'var(--overlay-shadow)', color: 'var(--text-primary)', fontSize: 12 };
@@ -34,7 +35,7 @@ export default memo(function OverviewHistoryChart({ data, ticks, asset, formatVa
   const rawId = useId().replace(/[^a-zA-Z0-9_-]/g, '');
   const fillId = `equityAreaFill-${rawId}`;
   const useWan = data.some(point => point.equity !== null && Math.abs(point.equity) >= 100_000);
-  const axisValue = (value: number) => useWan ? `${wanFormat.format(value / 10000)}万` : formatValue(value);
+  const axisValue = (value: number) => !Number.isFinite(value) ? '--' : useWan ? `${wanFormat.format(value / 10000)}万` : formatValue(value);
   const lineColor = daily ? 'var(--text-secondary)' : 'var(--history-equity)';
   const chartHeight = daily ? 196 : 236;
   return <ResponsiveContainer width="100%" height={chartHeight}>

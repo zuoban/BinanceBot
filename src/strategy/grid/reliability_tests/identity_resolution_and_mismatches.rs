@@ -587,3 +587,159 @@ async fn partial_snapshot_cannot_be_overwritten_by_older_single_order_queries() 
         .is_empty());
     server.abort();
 }
+
+#[tokio::test]
+async fn live_submission_response_rejects_mismatched_identity_and_invalid_price() {
+    for mismatch in ["client", "symbol", "side", "price"] {
+        let db = database();
+        let app = Router::new().route(
+            "/fapi/v1/order",
+            axum::routing::post(move || async move {
+                Json(json!({
+                    "orderId": 777,
+                    "clientOrderId": if mismatch == "client" { "gb_other" } else { "gb_b_reliability" },
+                    "symbol": if mismatch == "symbol" { "BTCUSDC" } else { "SOLUSDC" },
+                    "side": if mismatch == "side" { "SELL" } else { "BUY" },
+                    "status": "NEW",
+                    "price": if mismatch == "price" { "0" } else { "100" },
+                    "origQty": "0.1",
+                    "executedQty": "0",
+                    "type": "LIMIT",
+                    "timeInForce": "GTX"
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut engine = engine(db.clone(), &url).await;
+        engine
+            .state
+            .global_position_ready
+            .store(true, Ordering::SeqCst);
+        let account = engine.client.account_identity_key();
+
+        assert!(!submit(&mut engine).await, "mismatch={mismatch}");
+        assert!(engine.reconciliation_blocked);
+        assert!(engine.last_orders_sync.is_none());
+        assert!(engine.last_account_sync.is_none());
+        assert!(!engine.state.global_position_ready.load(Ordering::SeqCst));
+
+        let active = engine.state.active_orders.read().await;
+        assert_eq!(active.len(), 1);
+        let retained = &active["gb_b_reliability"];
+        assert_eq!(retained.order_id, None);
+        assert_eq!(retained.symbol, "SOLUSDC");
+        assert_eq!(retained.side, OrderSide::Buy);
+        assert_eq!(retained.price, dec!(100));
+        drop(active);
+
+        let saved = db.load_managed_orders("SOLUSDC").unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].client_order_id, "gb_b_reliability");
+        assert_eq!(saved[0].order_id, None);
+        assert_eq!(saved[0].symbol, "SOLUSDC");
+        assert_eq!(saved[0].side, OrderSide::Buy);
+        assert_eq!(saved[0].price, dec!(100));
+        assert!(db.load_managed_orders("BTCUSDC").unwrap().is_empty());
+
+        let observations = db.load_identity_observations(account, "SOLUSDC").unwrap();
+        if mismatch == "price" {
+            assert!(observations.is_empty());
+        } else {
+            assert_eq!(observations.len(), 1);
+            assert_eq!(observations[0].0.client_order_id, "gb_b_reliability");
+            assert_eq!(observations[0].0.order_id, None);
+            assert_eq!(observations[0].1.order_id, 777);
+        }
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn timeout_recovery_lookup_rejects_mismatched_identity_and_blocks_terminal_fill() {
+    for case in ["client", "symbol", "side", "price", "terminal_filled"] {
+        let db = database();
+        let lookups = Arc::new(AtomicU8::new(0));
+        let app = Router::new().route(
+            "/fapi/v1/order",
+            get({
+                let lookups = lookups.clone();
+                move |Query(query): Query<HashMap<String, String>>| {
+                    let lookups = lookups.clone();
+                    async move {
+                        assert_eq!(
+                            query.get("origClientOrderId").map(String::as_str),
+                            Some("gb_b_reliability")
+                        );
+                        lookups.fetch_add(1, Ordering::SeqCst);
+                        let filled = case == "terminal_filled";
+                        Json(json!({
+                            "orderId": 888,
+                            "clientOrderId": if case == "client" { "gb_other" } else { "gb_b_reliability" },
+                            "symbol": if case == "symbol" { "BTCUSDC" } else { "SOLUSDC" },
+                            "side": if case == "side" { "SELL" } else { "BUY" },
+                            "status": if filled { "FILLED" } else { "NEW" },
+                            "price": if case == "price" { "0" } else { "100" },
+                            "avgPrice": if filled { "100" } else { "0" },
+                            "origQty": "0.1",
+                            "executedQty": if filled { "0.1" } else { "0" },
+                            "type": "LIMIT",
+                            "timeInForce": "GTX"
+                        }))
+                    }
+                }
+            })
+            .post(|| async {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({"code": -1007, "msg": "Timeout waiting for response from backend server."})),
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut engine = engine(db.clone(), &url).await;
+        engine
+            .state
+            .global_position_ready
+            .store(true, Ordering::SeqCst);
+        let account = engine.client.account_identity_key();
+
+        assert!(!submit(&mut engine).await, "case={case}");
+        assert_eq!(lookups.load(Ordering::SeqCst), 1);
+        assert!(engine.reconciliation_blocked);
+        assert!(engine.last_orders_sync.is_none());
+        assert!(engine.last_account_sync.is_none());
+        assert!(!engine.state.global_position_ready.load(Ordering::SeqCst));
+
+        let expected_id = (case == "terminal_filled").then_some(888);
+        let active = engine.state.active_orders.read().await;
+        let retained = &active["gb_b_reliability"];
+        assert_eq!(retained.order_id, expected_id);
+        assert_eq!(retained.symbol, "SOLUSDC");
+        assert_eq!(retained.side, OrderSide::Buy);
+        assert_eq!(retained.price, dec!(100));
+        assert_eq!(retained.status, OrderStatus::New);
+        drop(active);
+
+        let saved = db.load_managed_orders("SOLUSDC").unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].order_id, expected_id);
+        assert_eq!(saved[0].symbol, "SOLUSDC");
+        assert_eq!(saved[0].side, OrderSide::Buy);
+        assert_eq!(saved[0].status, OrderStatus::New);
+        assert!(db.load_managed_orders("BTCUSDC").unwrap().is_empty());
+
+        let observations = db.load_identity_observations(account, "SOLUSDC").unwrap();
+        if matches!(case, "client" | "symbol" | "side") {
+            assert_eq!(observations.len(), 1);
+            assert_eq!(observations[0].0.order_id, None);
+            assert_eq!(observations[0].1.order_id, 888);
+        } else {
+            assert!(observations.is_empty());
+        }
+        server.abort();
+    }
+}

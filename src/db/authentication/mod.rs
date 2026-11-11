@@ -57,17 +57,18 @@ impl Database {
     }
 
     pub fn create_session(&self, token: &str) -> Result<()> {
-        let conn = self.lock_connection("create_session");
+        let mut conn = self.lock_connection("create_session");
         self.session_cache.remove(token);
         let now = Utc::now();
-        conn.prepare_cached(
+        let tx = super::immediate_tx(&mut conn)?;
+        tx.prepare_cached(
             "INSERT OR REPLACE INTO auth_sessions (token, created_at) VALUES (?1, ?2);",
         )?
-        .execute(params![token, now.to_rfc3339()])
+        .execute(params![token, super::format_sqlite_timestamp(now)])
         .context("Failed to insert session token into SQLite database")?;
-        let cutoff = (now - ChronoDuration::hours(24)).to_rfc3339();
+        let cutoff = super::format_sqlite_timestamp(now - ChronoDuration::hours(24));
         if let Ok(mut stmt) =
-            conn.prepare_cached("DELETE FROM auth_sessions WHERE created_at <= ?1 RETURNING token;")
+            tx.prepare_cached("DELETE FROM auth_sessions WHERE created_at <= ?1 RETURNING token;")
         {
             if let Ok(rows) = stmt.query_map(params![cutoff], |row| row.get::<_, String>(0)) {
                 for evicted in rows.flatten() {
@@ -75,7 +76,7 @@ impl Database {
                 }
             }
         }
-        if let Ok(mut stmt) = conn.prepare_cached(
+        if let Ok(mut stmt) = tx.prepare_cached(
             "DELETE FROM auth_sessions WHERE token NOT IN (SELECT token FROM auth_sessions ORDER BY created_at DESC, rowid DESC LIMIT 128) RETURNING token;",
         ) {
             if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
@@ -84,6 +85,8 @@ impl Database {
                 }
             }
         }
+        tx.commit()
+            .context("Failed to commit session token to SQLite database")?;
         Ok(())
     }
 

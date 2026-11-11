@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { formatDecimalDisplay, parseSignedDecimal, parseUnsignedDecimal, subSignedDecimals } from '../lib/decimal';
-import { ageText, number, positiveDecimalText, quantity, trimFractionZeros } from '../lib/format';
-import { accountGroups, availableRatio, comparePositionAmount, entryMarkExpiry, groupTradePnl, isEntryMarkFresh, nextAccountExpiry, positionAmount, positionGroups, todayCount, todayPnlGroups } from '../lib/portfolio';
+import { compareSignedDecimals, formatDecimalDisplay, parseSignedDecimal, parseUnsignedDecimal, subSignedDecimals } from '../lib/decimal';
+import { ageText, beijingDay, isValidEpochMs, number, positiveDecimalText, positivePrice, price, quantity, time, trimFractionZeros } from '../lib/format';
+import { accountGroups, availableRatio, comparePositionAmount, entryChange, entryMarkExpiry, groupTradePnl, isEntryMarkFresh, nextAccountExpiry, positionAmount, positionGroups, todayCount, todayPnlGroups } from '../lib/portfolio';
 import { snapshot } from './fixtures';
 
 it('removes only insignificant fractional zeros and normalizes negative zero after rounding', () => {
@@ -22,6 +22,28 @@ it('formats quantities and signed decimals exactly without IEEE-754 truncation o
   expect(quantity('')).toBe('--');
   expect(formatDecimalDisplay('1234.5', { minFractionDigits: 2, trimZeros: false })).toBe('1,234.50');
   expect(subSignedDecimals('0.3', '0.1')).toBe('0.2');
+});
+
+it('preserves midpoint rounding, >2^53 precision, magnitude-based price digits, and exact notional/basis-point math', () => {
+  expect(number('1.005', 2)).toBe('1.01');
+  expect(number('1.00005', 4)).toBe('1.0001');
+  expect(positivePrice('100.00005', true)).toBe('100.0001');
+  expect(positivePrice('0.00001235', true)).toBe('0.0000124');
+  expect(number('9007199254740993.12', 2)).toBe('9,007,199,254,740,993.12');
+  expect(price('123.456789')).toBe('123.4568');
+  expect(price('67420.50000000')).toBe('67,420.5000');
+  expect(positivePrice('67420.50000000', true)).toBe('67,420.5');
+  expect(entryChange({ size: '1', entry_price: '100' }, '100.005')).toEqual({ text: '+0.01%', className: 'positive' });
+  const pos = snapshot('SOLUSDC');
+  pos.position.size = '0.7';
+  pos.ticker.mark_price = '1.45';
+  expect(number(positionAmount(pos), 2)).toBe('1.02');
+  expect(positionGroups([{ snapshot: pos, mode: 'PAPER', scoped: true }])[0].totalText).toBe('1.015');
+  expect(compareSignedDecimals('9007199254740993', '9007199254740992')).toBe(1);
+  expect(isValidEpochMs(NaN)).toBe(false);
+  expect(isValidEpochMs(9e15)).toBe(false);
+  expect(time(9e15)).toBe('--');
+  expect(beijingDay(NaN)).toMatch(/^\d{4}-\d{2}-\d{2}$/);
 });
 
 it('normalizes positiveDecimalText with exact decimal parsing without float rounding', () => {

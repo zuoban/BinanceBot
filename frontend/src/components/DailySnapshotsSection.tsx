@@ -10,18 +10,17 @@ function DailyAccountsBlock({ accounts }: { accounts: DailySnapshot['accounts'] 
   return <div className="daily-snapshot-block">
     <h4>账户概览</h4>
     {!accounts.length ? <div className="muted">暂无账户记录</div> : accounts.map((acc, idx) => {
-      const equity = numeric(acc.equity), available = numeric(acc.available), wallet = numeric(acc.wallet), unrealized = numeric(acc.unrealized);
-      const ratio = availableRatio(available, wallet);
+      const ratio = availableRatio(numeric(acc.available), numeric(acc.wallet));
       return <div className="daily-snapshot-item" key={`${acc.mode}-${acc.asset}-${acc.account_id ?? idx}`}>
         <div className="daily-snapshot-item-head">
           <strong>{modeLabel[acc.mode]} · {acc.asset}</strong>
           <span className="muted">{acc.count} 个策略</span>
         </div>
         <div className="daily-snapshot-metrics">
-          <div><span>账户权益</span><strong>{compactNumber(equity)} <small>{acc.asset}</small></strong></div>
-          <div><span>可用余额</span><strong>{compactNumber(available)} <small>({ratioText(ratio, true)})</small></strong></div>
-          <div><span>钱包余额</span><strong>{compactNumber(wallet)} <small>{acc.asset}</small></strong></div>
-          <div><span>未实现盈亏</span><strong><Pnl value={unrealized} compact /> <small>{acc.asset}</small></strong></div>
+          <div><span>账户权益</span><strong>{compactNumber(acc.equity)} <small>{acc.asset}</small></strong></div>
+          <div><span>可用余额</span><strong>{compactNumber(acc.available)} <small>({ratioText(ratio, true)})</small></strong></div>
+          <div><span>钱包余额</span><strong>{compactNumber(acc.wallet)} <small>{acc.asset}</small></strong></div>
+          <div><span>未实现盈亏</span><strong><Pnl value={acc.unrealized} compact /> <small>{acc.asset}</small></strong></div>
         </div>
       </div>;
     })}
@@ -49,7 +48,7 @@ function DailyTradesBlock({ date, trades }: { date: string; trades: DailySnapsho
           {!tradeSummary.pnlGroups.length ? <strong>0</strong> : tradeSummary.pnlGroups.map(group => (
             <div className="daily-snapshot-pnl-row" key={group.key}>
               <span>{modeLabel[group.mode]} {group.asset}</span>
-              <strong><Pnl value={group.available && group.pending === 0 ? group.sum : null} compact /> <small>{group.asset}</small>{group.pending > 0 && <em className="pending-pnl-warn">（{group.pending} 笔待同步）</em>}</strong>
+              <strong><Pnl value={group.available && group.pending === 0 ? group.sumText : null} compact /> <small>{group.asset}</small>{group.pending > 0 && <em className="pending-pnl-warn">（{group.pending} 笔待同步）</em>}</strong>
             </div>
           ))}
         </div>
@@ -80,19 +79,18 @@ function DailyPositionsBlock({ positions, pairPositions }: { positions: DailySna
   }), [pairPositions]);
   return <div className="daily-snapshot-block">
     <h4>持仓概览</h4>
-    {!positions.length ? <div className="muted">暂无持仓记录</div> : positions.map(pos => {
-      const total = numeric(pos.total), long = numeric(pos.long), short = numeric(pos.short);
-      return <div className="daily-snapshot-item" key={`${pos.mode}:${pos.asset}`}>
+    {!positions.length ? <div className="muted">暂无持仓记录</div> : positions.map(pos => (
+      <div className="daily-snapshot-item" key={`${pos.mode}:${pos.asset}`}>
         <div className="daily-snapshot-item-head">
           <strong>{modeLabel[pos.mode]} · {pos.asset}</strong>
           <span className="muted">覆盖 {pos.count} 个策略</span>
         </div>
         <div className="daily-snapshot-metrics">
-          <div><span>总持仓金额</span><strong>{compactNumber(total)} <small>{pos.asset}</small></strong></div>
-          <div><span>做多 / 做空</span><strong><span className="position-long">{compactNumber(long)}</span> <small>/</small> <span className="position-short">{compactNumber(short)}</span></strong></div>
+          <div><span>总持仓金额</span><strong>{compactNumber(pos.total)} <small>{pos.asset}</small></strong></div>
+          <div><span>做多 / 做空</span><strong><span className="position-long">{compactNumber(pos.long)}</span> <small>/</small> <span className="position-short">{compactNumber(pos.short)}</span></strong></div>
         </div>
-      </div>;
-    })}
+      </div>
+    ))}
     {openPositions.length > 0 && (
       <div className="daily-snapshot-sublist" aria-label="持仓明细">
         {openPositions.map(({ item, long, absSize }) => {

@@ -5,7 +5,7 @@ import { ArrowRightOutlined, EyeOutlined } from '@ant-design/icons';
 import { pairRoute } from '../lib/api';
 import { sameGridConfig } from '../lib/configDiff';
 import { compactNumber as number, maxPositionPolicyLabel, positivePrice, quantity, trimFractionZeros } from '../lib/format';
-import { entryChange, entryPriceText, positionAmount, quoteAsset } from '../lib/portfolio';
+import { entryChange, entryPriceText, positionAmountText, quoteAsset } from '../lib/portfolio';
 import type { GridConfig, Overview, Pair } from '../lib/types';
 import { ControlResultBanner, DirectionTag, DirectionText, Pnl, StatusTag } from './Common';
 import { StrategyMenu, StrategyToggle } from './StrategyMenu';
@@ -66,7 +66,7 @@ export const StrategyCard = memo(function StrategyCard({
       <div className="strategy-tags"><DirectionTag direction={s.grid_config.direction} /><StatusTag status={s.status} /></div>
     </div>
     <div className="strategy-metrics" aria-label={`${s.symbol} 策略指标`}>
-      <div><span>持仓金额{quoteSuffix}</span><strong>{number(positionAmount(s))}</strong></div>
+      <div><span>持仓金额{quoteSuffix}</span><strong>{number(positionAmountText(s))}</strong></div>
       <div><span>持仓数量</span><strong>{quantity(s.position.size)}</strong></div>
       <div><span>开仓价格</span><strong>{entryPriceText(s.position, true)}</strong></div>
       <div><span>涨跌幅</span><strong className={change.className}>{change.text}</strong></div>

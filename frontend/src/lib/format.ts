@@ -1,4 +1,4 @@
-import { formatDecimal, formatDecimalDisplay, parseUnsignedDecimal } from './decimal';
+import { formatDecimal, formatDecimalDisplay, parseSignedDecimal, parseUnsignedDecimal, type Fixed } from './decimal';
 import type { GridConfig, Mode, Status } from './types';
 
 export const modeLabel: Record<Mode, string> = { PAPER: '模拟盘', LIVE: '实盘', UNKNOWN: '未知模式' };
@@ -11,6 +11,8 @@ const numberFormatters = new Map<number, Intl.NumberFormat>();
 export const sig3Format = new Intl.NumberFormat('en-US', { maximumSignificantDigits: 3 });
 export const beijingClockFormat = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
 export function number(value: unknown, digits = 2) {
+  const exact = formatDecimalDisplay(value, { minFractionDigits: digits, maxFractionDigits: digits, trimZeros: false });
+  if (exact !== null) return exact;
   const n = numeric(value);
   if (n === null) return '--';
   const rounded = (Math.abs(n) < 0.5 * 10 ** -digits ? 0 : n) || 0;
@@ -21,12 +23,32 @@ export function number(value: unknown, digits = 2) {
   }
   return formatter.format(rounded);
 }
-export const price = (value: unknown) => number(value, Math.min(10, Math.max(4, 2 - Math.floor(Math.log10(Math.abs(Number(value)) || 1)))));
+function priceDigitsFromFixed(parsed: Fixed): number {
+  if (parsed.n === 0n) return 4;
+  const absDigits = (parsed.n < 0n ? -parsed.n : parsed.n).toString();
+  const magnitude = absDigits.length - 1 - parsed.s;
+  return Math.min(10, Math.max(4, 2 - magnitude));
+}
+export function price(value: unknown) {
+  if (typeof value === 'string') {
+    const parsed = parseSignedDecimal(value);
+    if (parsed) return number(value, priceDigitsFromFixed(parsed));
+  }
+  return number(value, Math.min(10, Math.max(4, 2 - Math.floor(Math.log10(Math.abs(Number(value)) || 1)))));
+}
 export const trimFractionZeros = (value: string) => value.replace(/(\.\d*?[1-9])0+$|\.0+$/, '$1');
 export const compactNumber = (value: unknown, digits = 2) => trimFractionZeros(number(value, digits));
 const compactPrice = (value: unknown) => trimFractionZeros(price(value));
 export const quantity = (value: unknown) => formatDecimalDisplay(value, { trimZeros: true }) ?? '--';
 export function positivePrice(value: unknown, compact = false) {
+  if (typeof value === 'string') {
+    const parsed = parseUnsignedDecimal(value);
+    if (parsed) {
+      if (parsed.n <= 0n) return '--';
+      const formatted = number(value, priceDigitsFromFixed(parsed));
+      return compact ? trimFractionZeros(formatted) : formatted;
+    }
+  }
   const n = numeric(value);
   return n !== null && n > 0 ? (compact ? compactPrice(n) : price(n)) : '--';
 }
@@ -50,9 +72,10 @@ const beijingTimeFormat = new Intl.DateTimeFormat('zh-CN', {
   second: '2-digit',
   hour12: false,
 });
+export const isValidEpochMs = (ms: number) => Number.isFinite(ms) && Math.abs(ms) <= 8.64e15;
 export const time = (value: string | number) => {
   const ts = typeof value === 'number' ? value : Date.parse(value);
-  return Number.isFinite(ts) ? beijingTimeFormat.format(ts) : '--';
+  return isValidEpochMs(ts) ? beijingTimeFormat.format(ts) : '--';
 };
 function formatSeconds(seconds: number) {
   const [amount, unit] = seconds < 60 ? [seconds, '秒'] : seconds < 3600 ? [Math.floor(seconds / 60), '分钟'] : seconds < 86400 ? [Math.floor(seconds / 3600), '小时'] : [Math.floor(seconds / 86400), '天'];
@@ -65,4 +88,7 @@ export function ageText(updatedAt: number, now = Date.now()) {
   if (seconds < 2) return '刚刚';
   return `${formatSeconds(seconds)}前`;
 }
-export const beijingDay = (value = Date.now()) => new Date(value + 8 * 3600_000).toISOString().slice(0, 10);
+export function beijingDay(value = Date.now()) {
+  const shifted = (isValidEpochMs(value) ? value : Date.now()) + 8 * 3600_000;
+  return new Date(isValidEpochMs(shifted) ? shifted : Date.now() + 8 * 3600_000).toISOString().slice(0, 10);
+}

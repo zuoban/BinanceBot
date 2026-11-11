@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use rust_decimal::Decimal;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 struct Contribution {
     asset: String,
@@ -17,6 +17,7 @@ struct Contribution {
     position_margin: Decimal,
     size: Decimal,
     entry_price: Decimal,
+    mark_backed: bool,
     open_valuation_time: Option<DateTime<Utc>>,
     update_time: DateTime<Utc>,
     committed: bool,
@@ -49,6 +50,7 @@ impl Contribution {
             unrealized_pnl: Decimal::ZERO,
             position_margin: Decimal::ZERO,
             size: Decimal::ZERO,
+            mark_backed: false,
             entry_price: Decimal::ZERO,
             open_valuation_time: None,
             update_time: account.update_time,
@@ -66,23 +68,33 @@ impl Contribution {
         self.position_margin = position.position_margin();
         self.size = position.size;
         self.entry_price = position.entry_price;
+        self.mark_backed = position.mark_price > Decimal::ZERO;
         // Paper valuation timestamps live on the local account in older states.
         self.open_valuation_time = open_valuation_time(position, account);
         self.update_time = account.update_time;
         self.committed |= committed;
     }
 
+    fn holdings_match(&self, position: &PositionInfo, account: &AccountInfo) -> bool {
+        self.wallet_delta
+            == account
+                .total_wallet_balance
+                .saturating_sub(PAPER_INITIAL_BALANCE)
+            && self.size == position.size
+            && self.entry_price == position.entry_price
+    }
+
     fn accepts_valuation(&self, position: &PositionInfo, account: &AccountInfo) -> bool {
+        let matching_holdings = self.holdings_match(position, account);
         // A snapshot captured before a newer transaction cannot roll its wallet
         // or holdings back after that transaction has published its contribution.
-        (!self.committed
-            || (self.wallet_delta
-                == account
-                    .total_wallet_balance
-                    .saturating_sub(PAPER_INITIAL_BALANCE)
-                && self.size == position.size
-                && self.entry_price == position.entry_price))
-            && account.update_time >= self.update_time
+        if self.committed && !matching_holdings {
+            return false;
+        }
+        if !self.mark_backed && position.mark_price > Decimal::ZERO && matching_holdings {
+            return true;
+        }
+        account.update_time >= self.update_time
             && self.open_valuation_time.is_none_or(|previous| {
                 position.update_time.unwrap_or(account.update_time) >= previous
             })
@@ -91,14 +103,10 @@ impl Contribution {
     fn is_unchanged(&self, position: &PositionInfo, account: &AccountInfo) -> bool {
         let open_time = open_valuation_time(position, account);
         self.asset == account.asset
-            && self.wallet_delta
-                == account
-                    .total_wallet_balance
-                    .saturating_sub(PAPER_INITIAL_BALANCE)
+            && self.holdings_match(position, account)
+            && self.mark_backed == (position.mark_price > Decimal::ZERO)
             && self.unrealized_pnl == position.unrealized_pnl
             && self.position_margin == position.position_margin()
-            && self.size == position.size
-            && self.entry_price == position.entry_price
             && self.open_valuation_time == open_time
             && self.update_time == account.update_time
     }
@@ -200,9 +208,9 @@ impl AssetLedger {
 /// Compact process-local contributions; trade history is never the balance source.
 #[derive(Default)]
 pub(super) struct PaperLedger {
-    symbols: HashMap<String, Contribution>,
+    symbols: BTreeMap<String, Contribution>,
     assets: HashMap<String, AssetLedger>,
-    unresolved_legacy: HashMap<String, HashSet<String>>,
+    unresolved_legacy: HashMap<String, BTreeSet<String>>,
 }
 
 impl PaperLedger {

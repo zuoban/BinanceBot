@@ -42,10 +42,10 @@ function usePageSubmissionGuard(pathname: string) {
   return { page, removing, submission, activePreflight, preflightPending, setPreflightPending };
 }
 
-function usePairConfigActions({ adding, symbol, pair, live, baseline, form, refetchGlobal, pathname, navigate }: {
-  adding: boolean; symbol: string | undefined; pair: Pair | undefined; live: boolean;
+function usePairConfigActions({ adding, symbol, pair, baseline, form, refetchGlobal, pathname, navigate }: {
+  adding: boolean; symbol: string | undefined; pair: Pair | undefined;
   baseline: React.RefObject<BaselineState | null>; form: FormInstance<FormValues>;
-  refetchGlobal: () => Promise<{ data?: GlobalConfig }>; pathname: string; navigate: NavigateFunction;
+  refetchGlobal: () => Promise<{ data?: GlobalConfig; isError?: boolean; error?: unknown }>; pathname: string; navigate: NavigateFunction;
 }) {
   const { page, removing, submission, activePreflight, preflightPending, setPreflightPending } = usePageSubmissionGuard(pathname);
   const edit = useContext(EditContext), client = useQueryClient(), { message } = App.useApp();
@@ -66,8 +66,9 @@ function usePairConfigActions({ adding, symbol, pair, live, baseline, form, refe
         min_price: values.min_price || null, max_price: values.max_price || null, max_position_usdc: values.max_position_usdc || null, min_liquidation_distance_pct: values.min_liquidation_distance_pct || null,
       });
     },
-    onMutate: () => edit.setSaving(true),
-    onSuccess: (data, values) => {
+    onMutate: () => { edit.setSaving(true); return { submitPage: page.current }; },
+    onSuccess: (data, values, context) => {
+      if (!page.current || context?.submitPage !== page.current) return;
       flushSync(() => { edit.setDirty(false); edit.setSaving(false); });
       if (!adding && typeof data !== 'string') form.setFieldsValue(data);
       message.success(adding ? '交易对已添加，策略保持暂停，请检查配置后手动恢复' : '策略配置已保存并生效');
@@ -75,8 +76,12 @@ function usePairConfigActions({ adding, symbol, pair, live, baseline, form, refe
       navigate(pairRoute(targetSymbol), { replace: true });
       void invalidateStrategyQueries(client, { accounts: adding, snapshot: targetSymbol, configSymbol: adding ? undefined : symbol, history: adding ? 'reset' : undefined });
     },
-    onError: error => message.error(error.message),
-    onSettled: () => edit.setSaving(false),
+    onError: (error, _values, context) => {
+      if (page.current && context?.submitPage === page.current) message.error(error.message);
+    },
+    onSettled: (_data, _error, _values, context) => {
+      if (page.current && context?.submitPage === page.current) edit.setSaving(false);
+    },
   });
   const remove = async () => {
     if (removing.current || submission.current || !symbol || !pair || !page.current) return;
@@ -84,9 +89,12 @@ function usePairConfigActions({ adding, symbol, pair, live, baseline, form, refe
     removing.current = true; edit.setSaving(true);
     let removed = false;
     try {
+      if (edit.dirty && (!await confirm({ title: '放弃未保存的修改？', content: '删除策略会放弃当前表单修改。', okText: '继续', cancelText: '取消' }) || page.current !== currentPage)) return;
+      const latest = await refetchGlobal();
+      if (page.current !== currentPage) return;
       removed = await deletion.remove(
-        { ...pair, mode: live ? 'LIVE' : pair.mode },
-        async () => (!edit.dirty || await confirm({ title: '放弃未保存的修改？', content: '删除策略会放弃当前表单修改。', okText: '继续', cancelText: '取消' })) && page.current === currentPage,
+        { ...pair, mode: (!latest.isError && latest.data ? Boolean(latest.data.has_api_key && latest.data.has_api_secret) : true) ? 'LIVE' : pair.mode },
+        async () => page.current === currentPage,
       );
     } finally {
       removing.current = false;
@@ -101,7 +109,7 @@ function usePairConfigActions({ adding, symbol, pair, live, baseline, form, refe
     activePreflight.current = preflightToken;
     setPreflightPending(true);
     try {
-      let latest: { data?: GlobalConfig };
+      let latest: { data?: GlobalConfig; isError?: boolean; error?: unknown };
       try {
         latest = await refetchGlobal();
       } finally {
@@ -111,7 +119,7 @@ function usePairConfigActions({ adding, symbol, pair, live, baseline, form, refe
         }
       }
       if (page.current !== currentPage || submission.current !== currentSubmission) return;
-      const currentLive = latest.data ? latest.data.has_api_key && latest.data.has_api_secret : pair ? pair.mode === 'LIVE' : true;
+      const currentLive = !latest.isError && latest.data ? Boolean(latest.data.has_api_key && latest.data.has_api_secret) : true;
       const changes = adding || !baseline.current ? null : diffGridConfig(baseline.current.config, values);
       if (currentLive && !await confirm({ title: adding ? '添加实盘交易对？' : '保存实盘配置？', content: <LiveConfigConfirmContent changes={changes} values={values} />, okText: '确认保存', cancelText: '取消' })) return;
       if (page.current !== currentPage || submission.current !== currentSubmission) return;
@@ -160,7 +168,7 @@ export default function PairConfig() {
   const live = global.data ? global.data.has_api_key && global.data.has_api_secret : pair ? pair.mode === 'LIVE' : true;
   const symbols = useQuery({ queryKey: ['exchange-symbols'], queryFn: ({ signal }) => api<string[]>('/api/exchange/symbols?environment=mainnet', { signal }), enabled: adding, retry: false, refetchOnWindowFocus: false });
   const config = useQuery({ queryKey: ['config', symbol, pair?.scoped], queryFn: ({ signal }) => { if (!pair) throw new Error('该交易对不存在或已移除'); return api<LoadedGridConfig>(pairPath(pair, 'config'), { signal }); }, enabled: !!pair, refetchOnWindowFocus: false });
-  const { page, submission, preflightPending, edit, mutation, deletionBusy, remove, submit } = usePairConfigActions({ adding, symbol, pair, live, baseline, form, refetchGlobal: global.refetch, pathname, navigate });
+  const { page, submission, preflightPending, edit, mutation, deletionBusy, remove, submit } = usePairConfigActions({ adding, symbol, pair, baseline, form, refetchGlobal: global.refetch, pathname, navigate });
   resetMutation.current = mutation.reset;
   useEffect(() => {
     setReady(adding); setLiveMark(undefined); baseline.current = null; customInterval.current = false; appliedSymbol.current = undefined; editedFields.current.clear();

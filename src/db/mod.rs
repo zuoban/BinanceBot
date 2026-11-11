@@ -1,7 +1,7 @@
 use crate::sync_ext::MutexUnpoisonedExt;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -33,7 +33,9 @@ mod trades_cleanup;
 mod trades_stats;
 
 pub(crate) use config_runtime::config_version;
-pub use process_lock::{read_active_listen_addr, ActiveListenGuard, DatabaseProcessLock};
+pub use process_lock::{
+    read_active_listen_addr, read_saved_server_config, ActiveListenGuard, DatabaseProcessLock,
+};
 
 pub(crate) fn beijing_midnight(now: DateTime<Utc>) -> DateTime<Utc> {
     let beijing = crate::types::beijing_offset();
@@ -43,6 +45,10 @@ pub(crate) fn beijing_midnight(now: DateTime<Utc>) -> DateTime<Utc> {
         .and_hms_opt(0, 0, 0)
         .and_then(|midnight| midnight.and_local_timezone(beijing).single())
         .map_or(now, |midnight| midnight.with_timezone(&Utc))
+}
+
+pub(super) fn format_sqlite_timestamp(ts: DateTime<Utc>) -> String {
+    ts.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
 }
 
 pub(super) fn immediate_tx(conn: &mut Connection) -> rusqlite::Result<rusqlite::Transaction<'_>> {
@@ -87,8 +93,16 @@ where
 }
 
 fn open_configured_connection(open_path: &Path, is_memory: bool) -> Result<Connection> {
-    let conn = Connection::open(open_path)
-        .with_context(|| format!("Failed to open SQLite database at {:?}", open_path))?;
+    let conn = if is_memory {
+        Connection::open_in_memory().context("Failed to open in-memory SQLite database")?
+    } else {
+        let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_CREATE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+        Connection::open_with_flags(open_path, flags)
+            .with_context(|| format!("Failed to open SQLite database at {:?}", open_path))?
+    };
     // Persist committed order intents across power loss before sending orders.
     let journal_mode: String = conn
         .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
@@ -264,6 +278,8 @@ impl Database {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path_ref = path.as_ref();
         let raw_path_str = path_ref.to_string_lossy().to_string();
+        #[cfg(unix)]
+        let mut expected_identity = None;
         let (open_path, path_str) = if raw_path_str != ":memory:" {
             // URI filenames can redirect SQLite to a different path or VFS;
             // they cannot be secured by preparing this filesystem path.
@@ -271,26 +287,62 @@ impl Database {
                 !raw_path_str.starts_with("file:"),
                 "SQLite URI database paths are not supported; use a filesystem path"
             );
+            #[cfg(unix)]
+            let pre_existing_id = std::fs::symlink_metadata(path_ref).ok().and_then(|meta| {
+                use std::os::unix::fs::MetadataExt;
+                (!meta.file_type().is_symlink()).then(|| (meta.dev(), meta.ino()))
+            });
+            #[cfg(unix)]
+            let prepared_id = prepare_database_path(path_ref)?;
+            #[cfg(not(unix))]
             prepare_database_path(path_ref)?;
             let canonical = path_ref
                 .canonicalize()
                 .with_context(|| format!("Failed to resolve database path {:?}", path_ref))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                let canonical_meta = std::fs::symlink_metadata(&canonical)
+                    .with_context(|| format!("Failed to inspect {:?}", canonical))?;
+                let canonical_id = (canonical_meta.dev(), canonical_meta.ino());
+                if let Some(existing_id) = pre_existing_id {
+                    anyhow::ensure!(
+                        existing_id == prepared_id && canonical_id == existing_id,
+                        "SQLite database path {:?} changed during preparation",
+                        path_ref
+                    );
+                } else {
+                    anyhow::ensure!(
+                        canonical_id == prepared_id,
+                        "SQLite database path {:?} changed during resolution",
+                        path_ref
+                    );
+                }
+                expected_identity = Some(canonical_id);
+            }
             let canonical_str = canonical.to_string_lossy().into_owned();
             (canonical, canonical_str)
         } else {
             (std::path::PathBuf::from(":memory:"), raw_path_str)
         };
+
+        let is_memory = path_str == ":memory:";
+        let conn = open_configured_connection(&open_path, is_memory)?;
         #[cfg(unix)]
-        let file_identity = if path_str != ":memory:" {
+        let file_identity = if let Some(expected_id) = expected_identity {
             use std::os::unix::fs::MetadataExt;
+            validate_database_and_sidecars(&open_path)?;
             let meta = std::fs::symlink_metadata(&open_path)
                 .with_context(|| format!("Failed to inspect {:?}", open_path))?;
-            Some((meta.dev(), meta.ino()))
+            anyhow::ensure!(
+                (meta.dev(), meta.ino()) == expected_id,
+                "SQLite database file changed during open at {:?}",
+                open_path
+            );
+            Some(expected_id)
         } else {
             None
         };
-
-        let conn = open_configured_connection(&open_path, path_str == ":memory:")?;
         let db = Self {
             conn: Mutex::new(conn),
             path: path_str,
@@ -317,7 +369,7 @@ impl Database {
         Ok(db)
     }
 
-    pub(crate) fn path(&self) -> &str {
+    pub fn path(&self) -> &str {
         &self.path
     }
 

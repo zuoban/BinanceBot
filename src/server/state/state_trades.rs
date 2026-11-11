@@ -417,9 +417,9 @@ impl AppState {
             {
                 return Ok(());
             }
-            let notification = state.closing_trade_notification_target(&trade).await;
             // Account capture takes the same lock; finish publication before preparing it.
             drop(commit);
+            let notification = state.closing_trade_notification_target(&trade).await;
             if let Some(target) = notification {
                 state.notify_verified_closing_trade(trade, target).await;
             }

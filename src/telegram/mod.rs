@@ -10,6 +10,9 @@ use reqwest::Client;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
+mod daily_snapshot;
+pub(crate) use daily_snapshot::format_daily_snapshot_message;
+
 const MAX_TELEGRAM_RESPONSE_BYTES: usize = 8 * 1024;
 const MAX_TELEGRAM_UTF16_UNITS: usize = 4096;
 const TRUNCATION_SUFFIX: &str = "\n…（已截断）";
@@ -147,6 +150,8 @@ pub(crate) struct TradeNotificationContext {
     pub(crate) available_balance: Option<Decimal>,
     pub(crate) position_amount: Option<Decimal>,
     pub(crate) cny_per_unit: Option<Decimal>,
+    reference_time: Option<DateTime<Utc>>,
+    max_age_secs: i64,
 }
 
 impl TradeNotificationContext {
@@ -201,6 +206,8 @@ impl TradeNotificationContext {
             available_balance,
             position_amount: None,
             cny_per_unit,
+            reference_time: Some(now),
+            max_age_secs: max_age,
         }
     }
 
@@ -221,8 +228,60 @@ impl TradeNotificationContext {
         if !matching_position {
             return self;
         }
-        let matching_ticker = (ticker.symbol == trade.symbol).then_some(ticker);
-        let valuation_price = position.market_valuation_price(matching_ticker);
+        let ref_time = self.reference_time.unwrap_or(trade.timestamp);
+        let pos_max_age = if self.max_age_secs > 0 {
+            self.max_age_secs
+        } else if trade.mode == TradingMode::Paper {
+            crate::types::MARKET_PRICE_MAX_AGE_SECS
+        } else {
+            crate::types::max_reconciliation_age_secs(3)
+        };
+        let valuation_price = if ticker.symbol == trade.symbol {
+            let ticker_mark_fresh = ticker.mark_price > Decimal::ZERO
+                && crate::types::is_timestamp_fresh(
+                    ticker.mark_update_time,
+                    ref_time,
+                    crate::types::MARKET_PRICE_MAX_AGE_SECS,
+                );
+            let pos_mark_fresh = position.mark_price > Decimal::ZERO
+                && position
+                    .update_time
+                    .is_some_and(|ts| crate::types::is_timestamp_fresh(ts, ref_time, pos_max_age));
+            let ticker_last_fresh = ticker.last_price > Decimal::ZERO
+                && crate::types::is_timestamp_fresh(
+                    ticker.update_time,
+                    ref_time,
+                    crate::types::MARKET_PRICE_MAX_AGE_SECS,
+                );
+            if ticker_mark_fresh || pos_mark_fresh {
+                position.valuation_price_with_freshness(ticker, ticker_mark_fresh, pos_mark_fresh)
+            } else if ticker_last_fresh {
+                ticker.last_price
+            } else if ticker.mark_price > Decimal::ZERO
+                && ticker.mark_update_time != DateTime::<Utc>::default()
+                && (position.mark_price > Decimal::ZERO
+                    || (ticker.last_price > Decimal::ZERO
+                        && (ticker.update_time > ticker.mark_update_time
+                            || ticker.update_time == DateTime::<Utc>::default())))
+            {
+                if position.mark_price > Decimal::ZERO
+                    && position
+                        .update_time
+                        .is_none_or(|pos_ts| pos_ts >= ticker.mark_update_time)
+                {
+                    position.mark_price
+                } else if ticker.last_price > Decimal::ZERO && position.mark_price <= Decimal::ZERO
+                {
+                    ticker.last_price
+                } else {
+                    position.market_valuation_price(Some(ticker))
+                }
+            } else {
+                position.market_valuation_price(Some(ticker))
+            }
+        } else {
+            position.market_valuation_price(None)
+        };
         self.position_amount = if position.size.is_zero() {
             Some(Decimal::ZERO)
         } else if valuation_price > Decimal::ZERO {
@@ -234,7 +293,10 @@ impl TradeNotificationContext {
     }
 }
 
-fn format_available_ratio(available: Option<Decimal>, wallet: Option<Decimal>) -> String {
+pub(super) fn format_available_ratio(
+    available: Option<Decimal>,
+    wallet: Option<Decimal>,
+) -> String {
     available
         .zip(wallet)
         .filter(|(_, wallet)| *wallet > Decimal::ZERO)
@@ -291,7 +353,7 @@ pub(crate) fn format_trade_message(
     )
 }
 
-fn format_beijing_time(now: DateTime<Utc>) -> String {
+pub(super) fn format_beijing_time(now: DateTime<Utc>) -> String {
     now.with_timezone(&crate::types::beijing_offset())
         .format("%Y-%m-%d %H:%M:%S")
         .to_string()
@@ -305,7 +367,7 @@ fn format_global_risk_message(reason: &str, now: DateTime<Utc>) -> String {
     )
 }
 
-fn mode_label(mode: TradingMode) -> &'static str {
+pub(super) fn mode_label(mode: TradingMode) -> &'static str {
     match mode {
         TradingMode::Paper => "模拟盘",
         TradingMode::Live => "实盘",
@@ -313,120 +375,14 @@ fn mode_label(mode: TradingMode) -> &'static str {
     }
 }
 
-fn format_optional_money(value: Option<Decimal>, asset: &str, force_sign: bool) -> String {
+pub(super) fn format_optional_money(
+    value: Option<Decimal>,
+    asset: &str,
+    force_sign: bool,
+) -> String {
     value.map_or_else(
         || format!("-- {asset}"),
         |n| format!("{} {asset}", format_decimal_dp(n, 2, force_sign)),
-    )
-}
-
-fn format_daily_account_lines(accounts: &[crate::snapshots::DailyAccountGroup]) -> String {
-    if accounts.is_empty() {
-        return "暂无账户数据".to_string();
-    }
-    accounts
-        .iter()
-        .map(|acc| {
-            let asset = escape_html(&acc.asset);
-            let ratio = format_available_ratio(acc.available, acc.wallet);
-            format!(
-                "· {mode} {asset}：权益 {equity}｜可用 {available}（{ratio}）｜浮盈 {unrealized}",
-                mode = mode_label(acc.mode),
-                equity = format_optional_money(acc.equity, &asset, false),
-                available = format_optional_money(acc.available, &asset, false),
-                unrealized = format_optional_money(acc.unrealized, &asset, true),
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn format_daily_pnl_lines(trades: &[crate::snapshots::DailyTradeGroup]) -> String {
-    let mut pnl_groups = std::collections::BTreeMap::new();
-    for trade in trades {
-        let asset = crate::types::quote_asset(&trade.symbol).unwrap_or(&trade.symbol);
-        let entry = pnl_groups.entry((trade.mode.as_str(), asset)).or_insert((
-            trade.mode,
-            Decimal::ZERO,
-            0u64,
-        ));
-        entry.1 = entry.1.saturating_add(trade.realized_pnl);
-        entry.2 = entry.2.saturating_add(trade.pending_pnl_count);
-    }
-    if pnl_groups.is_empty() {
-        return "· 0.00".to_string();
-    }
-    pnl_groups
-        .into_iter()
-        .map(|((_, asset), (mode, pnl, pending))| {
-            let asset = escape_html(asset);
-            let formatted_pnl = format_decimal_dp(pnl, 4, true);
-            let mode = mode_label(mode);
-            if pending > 0 {
-                format!("· {mode} {asset}：{formatted_pnl} {asset}（{pending} 笔待同步）")
-            } else {
-                format!("· {mode} {asset}：{formatted_pnl} {asset}")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn format_daily_position_lines(
-    positions: &[crate::snapshots::DailyPositionGroup],
-    pair_positions: &[crate::snapshots::DailyPositionItem],
-) -> String {
-    if positions.is_empty() {
-        return "暂无持仓数据".to_string();
-    }
-    let mut lines: Vec<String> = positions
-        .iter()
-        .map(|pos| {
-            let asset = escape_html(&pos.asset);
-            format!(
-                "· {mode} {asset}：总持仓 {total}（多 {long} / 空 {short}）",
-                mode = mode_label(pos.mode),
-                total = format_optional_money(pos.total, &asset, false),
-                long = format_optional_money(pos.long, &asset, false),
-                short = format_optional_money(pos.short, &asset, false),
-            )
-        })
-        .collect();
-    for item in pair_positions.iter().filter(|p| !p.size.is_zero()) {
-        let asset = escape_html(crate::types::quote_asset(&item.symbol).unwrap_or(&item.symbol));
-        let side = if item.size > Decimal::ZERO {
-            "多"
-        } else {
-            "空"
-        };
-        lines.push(format!(
-            "  - {symbol}（{side} {qty}）：{amount}｜浮盈 {unrealized}",
-            symbol = escape_html(&item.symbol),
-            qty = item.size.abs().normalize(),
-            amount = format_optional_money(item.position_amount, &asset, false),
-            unrealized = format_optional_money(item.unrealized_pnl, &asset, true),
-        ));
-    }
-    lines.join("\n")
-}
-
-pub(crate) fn format_daily_snapshot_message(snapshot: &crate::snapshots::DailySnapshot) -> String {
-    let account_lines = format_daily_account_lines(&snapshot.accounts);
-    let total_buys = snapshot
-        .trades
-        .iter()
-        .fold(0u64, |acc, t| acc.saturating_add(t.buy_count));
-    let total_sells = snapshot
-        .trades
-        .iter()
-        .fold(0u64, |acc, t| acc.saturating_add(t.sell_count));
-    let total_trades = total_buys.saturating_add(total_sells);
-    let pnl_lines = format_daily_pnl_lines(&snapshot.trades);
-    let position_lines = format_daily_position_lines(&snapshot.positions, &snapshot.pair_positions);
-    let time = format_beijing_time(snapshot.generated_at);
-    format!(
-        "<b>📊 每日运行数据快照（{date}）</b>\n\n<b>【账户概览】</b>\n{account_lines}\n\n<b>【昨日成交与盈亏】</b>\n· 成交笔数：{total_trades} 笔（买 {total_buys} / 卖 {total_sells}）\n· 已实现盈亏：\n{pnl_lines}\n\n<b>【持仓概览】</b>\n{position_lines}\n\n生成时间：{time}（北京时间）",
-        date = escape_html(&snapshot.date),
     )
 }
 
@@ -435,7 +391,7 @@ fn format_test_message(now: DateTime<Utc>) -> String {
     format!("<b>✅ Grid Console 测试消息</b>\n通知渠道可用。\n时间：{time}（北京时间）")
 }
 
-fn escape_html(value: &str) -> String {
+pub(super) fn escape_html(value: &str) -> String {
     value
         .replace('&', "&amp;")
         .replace('<', "&lt;")

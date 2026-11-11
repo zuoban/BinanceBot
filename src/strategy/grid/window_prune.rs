@@ -29,8 +29,20 @@ impl GridTradingEngine {
         {
             return None;
         }
-        let ticker = self.state.ticker.read().await;
-        let position = self.state.position.read().await;
+        let (reference_price, last_price) = {
+            let ticker = self.state.ticker.read().await;
+            (ticker.grid_reference_price(), ticker.last_price)
+        };
+        let position = {
+            let position = self.state.position.read().await;
+            (
+                position.size,
+                position.entry_price,
+                position.liquidation_price,
+                position.leverage,
+            )
+        };
+        let rules = self.state.rules.read().await.clone();
         let price_band = |price: Decimal| {
             // Exposure and liquidation thresholds can move inside a grid cell.
             if config.grid.max_position_usdc.is_some()
@@ -47,15 +59,10 @@ impl GridTradingEngine {
         Some(PaperWindowInputs {
             symbol: config.exchange.symbol.clone(),
             grid: config.grid,
-            rules: self.state.rules.read().await.clone(),
-            reference_band: price_band(ticker.grid_reference_price()),
-            maker_band: price_band(ticker.last_price),
-            position: (
-                position.size,
-                position.entry_price,
-                position.liquidation_price,
-                position.leverage,
-            ),
+            rules,
+            reference_band: price_band(reference_price),
+            maker_band: price_band(last_price),
+            position,
             trade_revision: self.state.db.symbol_trade_revision(&config.exchange.symbol),
             pause_epoch: self.state.pause_epoch(),
         })
@@ -235,7 +242,7 @@ impl GridTradingEngine {
         rules: &SymbolRules,
         grid_interval: Decimal,
     ) -> bool {
-        let misaligned: Vec<_> = self
+        let mut misaligned: Vec<_> = self
             .state
             .active_orders
             .read()
@@ -247,6 +254,7 @@ impl GridTradingEngine {
         if misaligned.is_empty() {
             return false;
         }
+        misaligned.sort_by(|a, b| a.client_order_id.cmp(&b.client_order_id));
         for order in misaligned {
             if *self.state.status.read().await != BotStatus::Running
                 || !self.cancel_single_order(&order).await

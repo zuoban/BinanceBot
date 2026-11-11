@@ -288,8 +288,10 @@ impl Database {
             )?;
         }
         snapshot.execute_batch(
-            "DELETE FROM app_config WHERE id != 1; DELETE FROM auth_sessions; DELETE FROM history_account_ids; VACUUM;",
+            "DELETE FROM app_config WHERE id != 1; DELETE FROM auth_sessions; DELETE FROM history_account_ids;",
         )?;
+        clear_sqlite_metadata_tables(&snapshot);
+        snapshot.execute_batch("VACUUM;")?;
         Ok(snapshot.serialize(rusqlite::DatabaseName::Main)?.to_vec())
     }
 
@@ -366,7 +368,8 @@ impl Database {
             let reader = Connection::open_with_flags(
                 &self.path,
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
-                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
             )?;
             reader.busy_timeout(std::time::Duration::from_secs(5))?;
             ensure_logical_export_size_within_limit(&reader)?;
@@ -377,6 +380,7 @@ impl Database {
                     "Database is busy; retry the export"
                 );
             }
+            ensure_logical_export_size_within_limit(&snapshot)?;
             #[cfg(unix)]
             self.verify_on_disk_identity()?;
             return Ok(snapshot);
@@ -390,6 +394,7 @@ impl Database {
                 "Database is busy; retry the export"
             );
         }
+        ensure_logical_export_size_within_limit(&snapshot)?;
         Ok(snapshot)
     }
 
@@ -411,6 +416,7 @@ impl Database {
                 snapshot.execute_batch(&format!("DELETE FROM \"{}\";", quoted))?;
             }
         }
+        clear_sqlite_metadata_tables(&snapshot);
         Ok(snapshot)
     }
 }
@@ -426,6 +432,17 @@ fn ensure_logical_export_size_within_limit(conn: &Connection) -> Result<()> {
         "SQLite database exceeds 256 MiB analysis export limit"
     );
     Ok(())
+}
+
+fn clear_sqlite_metadata_tables(conn: &Connection) {
+    for table in [
+        "sqlite_stat1",
+        "sqlite_stat3",
+        "sqlite_stat4",
+        "sqlite_sequence",
+    ] {
+        let _ = conn.execute(&format!("DELETE FROM {table}"), []);
+    }
 }
 
 fn drop_views_and_triggers(conn: &Connection) -> Result<()> {

@@ -53,7 +53,7 @@ beforeEach(() => {
   pairsState.setAccounts([]);
 });
 function setup(request: Promise<unknown>, initialPath = '/pairs/BTCUSDC/config', configError?: Error, symbols = (_path: string): Promise<string[]> => Promise.resolve(['BTCUSDC', 'SOLUSDC']), postOnly = true) {
-  mocks.api.mockImplementation((path: string, init?: RequestInit) => path.startsWith('/api/exchange/symbols?') ? symbols(path) : init?.method === 'DELETE' ? request : configError ? Promise.reject(configError) : Promise.resolve({ ...pair('BTCUSDC').grid_config, post_only: postOnly, config_version: 'version-1' }));
+  mocks.api.mockImplementation((path: string, init?: RequestInit) => path === '/api/global/config' ? Promise.resolve({ version: 'global-version', has_api_key: false, has_api_secret: false }) : path.startsWith('/api/exchange/symbols?') ? symbols(path) : init?.method === 'DELETE' ? request : configError ? Promise.reject(configError) : Promise.resolve({ ...pair('BTCUSDC').grid_config, post_only: postOnly, config_version: 'version-1' }));
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const router = createMemoryRouter([{ element: <Shell />, children: [
     { path: '/', element: <div>总览页面</div> },

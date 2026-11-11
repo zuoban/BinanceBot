@@ -5,6 +5,7 @@ use super::{
 use crate::config::AppConfig;
 use crate::types::{BotStatus, TradingMode};
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 use std::collections::HashMap;
 use tracing::warn;
@@ -272,17 +273,11 @@ fn migrate_identity_observations_on(tx: &Connection) -> Result<()> {
     )?;
     if has_observed_client_id == 0 {
         tx.execute_batch(
-            r#"
-            CREATE TABLE order_identity_observations_new (
-                account_key BLOB NOT NULL,
-                client_order_id TEXT NOT NULL,
-                expected_symbol TEXT NOT NULL,
-                observed_client_order_id TEXT NOT NULL,
-                observed_symbol TEXT NOT NULL,
-                observed_side TEXT NOT NULL,
-                observed_order_id INTEGER NOT NULL,
-                expected_json TEXT NOT NULL,
-                observed_json TEXT NOT NULL,
+            "CREATE TABLE order_identity_observations_new (
+                account_key BLOB NOT NULL, client_order_id TEXT NOT NULL, expected_symbol TEXT NOT NULL,
+                observed_client_order_id TEXT NOT NULL, observed_symbol TEXT NOT NULL,
+                observed_side TEXT NOT NULL, observed_order_id INTEGER NOT NULL,
+                expected_json TEXT NOT NULL, observed_json TEXT NOT NULL,
                 PRIMARY KEY (account_key, client_order_id, expected_symbol, observed_client_order_id, observed_symbol, observed_side, observed_order_id)
             );
             INSERT INTO order_identity_observations_new
@@ -292,8 +287,7 @@ fn migrate_identity_observations_on(tx: &Connection) -> Result<()> {
                 json_extract(observed_json, '$.side'), observed_order_id, expected_json, observed_json
             FROM order_identity_observations;
             DROP TABLE order_identity_observations;
-            ALTER TABLE order_identity_observations_new RENAME TO order_identity_observations;
-            "#,
+            ALTER TABLE order_identity_observations_new RENAME TO order_identity_observations;",
         )?;
     }
     Ok(())
@@ -314,28 +308,20 @@ fn migrate_initial_order_responses_on(tx: &Connection) -> Result<()> {
     )?;
     if has_observation_id == 0 {
         tx.execute_batch(
-            r#"
-            CREATE TABLE initial_order_responses_new (
-                account_key BLOB NOT NULL,
-                expected_symbol TEXT NOT NULL,
-                client_order_id TEXT NOT NULL,
-                observed_client_order_id TEXT NOT NULL,
-                observed_symbol TEXT NOT NULL,
-                observed_side TEXT NOT NULL,
-                observed_order_id INTEGER NOT NULL,
-                response_json TEXT NOT NULL,
-                observation_id TEXT NOT NULL UNIQUE
+            "CREATE TABLE initial_order_responses_new (
+                account_key BLOB NOT NULL, expected_symbol TEXT NOT NULL, client_order_id TEXT NOT NULL,
+                observed_client_order_id TEXT NOT NULL, observed_symbol TEXT NOT NULL,
+                observed_side TEXT NOT NULL, observed_order_id INTEGER NOT NULL,
+                response_json TEXT NOT NULL, observation_id TEXT NOT NULL UNIQUE
             );
             INSERT INTO initial_order_responses_new
                 (account_key, expected_symbol, client_order_id, observed_client_order_id,
                  observed_symbol, observed_side, observed_order_id, response_json, observation_id)
             SELECT account_key, expected_symbol, client_order_id, observed_client_order_id,
-                observed_symbol, observed_side, observed_order_id, response_json,
-                'legacy:' || rowid
+                observed_symbol, observed_side, observed_order_id, response_json, 'legacy:' || rowid
             FROM initial_order_responses ORDER BY rowid;
             DROP TABLE initial_order_responses;
-            ALTER TABLE initial_order_responses_new RENAME TO initial_order_responses;
-            "#,
+            ALTER TABLE initial_order_responses_new RENAME TO initial_order_responses;",
         )?;
     }
     let has_batch_id: i64 = tx.query_row(
@@ -359,13 +345,9 @@ fn migrate_terminal_disagreements_on(tx: &Connection) -> Result<()> {
     )?;
     if terminal_key_columns == 3 {
         tx.execute_batch(
-            r#"
-            CREATE TABLE terminal_order_disagreements_new (
-                account_key BLOB NOT NULL,
-                expected_symbol TEXT NOT NULL,
-                client_order_id TEXT NOT NULL,
-                first_json TEXT NOT NULL,
-                conflicting_json TEXT NOT NULL,
+            "CREATE TABLE terminal_order_disagreements_new (
+                account_key BLOB NOT NULL, expected_symbol TEXT NOT NULL, client_order_id TEXT NOT NULL,
+                first_json TEXT NOT NULL, conflicting_json TEXT NOT NULL,
                 PRIMARY KEY (account_key, expected_symbol, client_order_id, first_json, conflicting_json)
             );
             INSERT INTO terminal_order_disagreements_new
@@ -373,8 +355,7 @@ fn migrate_terminal_disagreements_on(tx: &Connection) -> Result<()> {
             SELECT account_key, expected_symbol, client_order_id, first_json, conflicting_json
             FROM terminal_order_disagreements;
             DROP TABLE terminal_order_disagreements;
-            ALTER TABLE terminal_order_disagreements_new RENAME TO terminal_order_disagreements;
-            "#,
+            ALTER TABLE terminal_order_disagreements_new RENAME TO terminal_order_disagreements;",
         )?;
     }
     Ok(())
@@ -410,38 +391,88 @@ fn migrate_trades_columns_and_scope_index(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn parse_legacy_timestamp(row: &rusqlite::Row<'_>, index: usize) -> Result<DateTime<Utc>> {
+    if let Ok(dt) = row.get::<_, DateTime<Utc>>(index) {
+        return Ok(dt);
+    }
+    let mut raw: String = row.get(index)?;
+    if raw.as_bytes().get(10) == Some(&b' ') {
+        raw.replace_range(10..11, "T");
+    }
+    DateTime::parse_from_rfc3339(&raw)
+        .map(|dt| dt.with_timezone(&Utc))
+        .with_context(|| format!("Invalid SQLite timestamp {raw:?}"))
+}
+
+fn normalize_legacy_timestamps_on(tx: &Connection) -> Result<()> {
+    const FILTER: &str =
+        "length(timestamp) != 30 OR substr(timestamp, 30, 1) != 'Z' OR substr(timestamp, 11, 1) != 'T'";
+    let trade_updates = {
+        let mut stmt = tx.prepare(&format!(
+            "SELECT rowid, timestamp FROM trades WHERE {FILTER}"
+        ))?;
+        let mut rows = stmt.query([])?;
+        let mut updates = Vec::new();
+        while let Some(row) = rows.next()? {
+            let canonical = super::format_sqlite_timestamp(parse_legacy_timestamp(row, 1)?);
+            updates.push((row.get::<_, i64>(0)?, canonical));
+        }
+        updates
+    };
+    if !trade_updates.is_empty() {
+        let mut update = tx.prepare("UPDATE trades SET timestamp = ?1 WHERE rowid = ?2")?;
+        for (rowid, ts) in trade_updates {
+            update.execute(params![ts, rowid])?;
+        }
+    }
+    let frontier_updates = {
+        let sql = format!("SELECT symbol, mode, timestamp FROM execution_frontiers WHERE {FILTER}");
+        let mut stmt = tx.prepare(&sql)?;
+        let mut rows = stmt.query([])?;
+        let mut updates = Vec::new();
+        while let Some(row) = rows.next()? {
+            let canonical = super::format_sqlite_timestamp(parse_legacy_timestamp(row, 2)?);
+            updates.push((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                canonical,
+            ));
+        }
+        updates
+    };
+    if !frontier_updates.is_empty() {
+        let sql = "UPDATE execution_frontiers SET timestamp = ?1 WHERE symbol = ?2 AND mode = ?3";
+        let mut update = tx.prepare(sql)?;
+        for (symbol, mode, ts) in frontier_updates {
+            update.execute(params![ts, symbol, mode])?;
+        }
+    }
+    Ok(())
+}
+
 fn finalize_legacy_retirements_and_rollups(conn: &mut Connection) -> Result<()> {
     let tx = super::immediate_tx(conn)?;
     retire_legacy_testnet_config(&tx)?;
     retire_legacy_dry_run_intent(&tx)?;
     retire_legacy_testnet_rows(&tx)?;
+    normalize_legacy_timestamps_on(&tx)?;
     tx.execute_batch(
         "DROP INDEX IF EXISTS idx_trades_symbol;
          DROP INDEX IF EXISTS idx_trades_client_order_id;
          DROP INDEX IF EXISTS idx_pair_intents_scope;
-         CREATE INDEX IF NOT EXISTS idx_trades_unverified_scope
-         ON trades (symbol, mode, timestamp DESC) WHERE pnl_verified = 0;
-         CREATE INDEX IF NOT EXISTS idx_trades_client_order_mode
-         ON trades (client_order_id, mode, timestamp DESC);
-         CREATE INDEX IF NOT EXISTS idx_pair_intents_scope_created
-         ON pair_intents (symbol, mode, created_at);
-         CREATE INDEX IF NOT EXISTS idx_remainder_plans_inactive_scope
-         ON remainder_plans (symbol, mode) WHERE active = 0;
-         CREATE INDEX IF NOT EXISTS idx_auth_sessions_created_at
-         ON auth_sessions (created_at);
-         CREATE INDEX IF NOT EXISTS idx_order_identity_observations_scope
-         ON order_identity_observations (account_key, expected_symbol, client_order_id);
-         CREATE INDEX IF NOT EXISTS idx_initial_order_responses_order
-         ON initial_order_responses (account_key, expected_symbol, client_order_id);
-         CREATE INDEX IF NOT EXISTS idx_initial_order_responses_batch
-         ON initial_order_responses (account_key, expected_symbol, batch_id);
-         CREATE INDEX IF NOT EXISTS idx_initial_order_responses_snapshot_scope
-         ON initial_order_responses (account_key, expected_symbol) WHERE batch_id GLOB 'snapshot:*';",
+         CREATE INDEX IF NOT EXISTS idx_trades_unverified_scope ON trades (symbol, mode, timestamp DESC) WHERE pnl_verified = 0;
+         CREATE INDEX IF NOT EXISTS idx_trades_client_order_mode ON trades (client_order_id, mode, timestamp DESC);
+         CREATE INDEX IF NOT EXISTS idx_pair_intents_scope_created ON pair_intents (symbol, mode, created_at);
+         CREATE INDEX IF NOT EXISTS idx_remainder_plans_inactive_scope ON remainder_plans (symbol, mode) WHERE active = 0;
+         CREATE INDEX IF NOT EXISTS idx_auth_sessions_created_at ON auth_sessions (created_at);
+         CREATE INDEX IF NOT EXISTS idx_order_identity_observations_scope ON order_identity_observations (account_key, expected_symbol, client_order_id);
+         CREATE INDEX IF NOT EXISTS idx_initial_order_responses_order ON initial_order_responses (account_key, expected_symbol, client_order_id);
+         CREATE INDEX IF NOT EXISTS idx_initial_order_responses_batch ON initial_order_responses (account_key, expected_symbol, batch_id);
+         CREATE INDEX IF NOT EXISTS idx_initial_order_responses_snapshot_scope ON initial_order_responses (account_key, expected_symbol) WHERE batch_id GLOB 'snapshot:*';",
     )?;
     hourly::migrate_on(&tx)?;
     tx.execute_batch(
-        "CREATE INDEX IF NOT EXISTS idx_trade_hourly_rollups_hour
-         ON trade_hourly_rollups (hour);",
+        "CREATE INDEX IF NOT EXISTS idx_trade_hourly_rollups_hour ON trade_hourly_rollups (hour);",
     )?;
     tx.commit()?;
     Ok(())

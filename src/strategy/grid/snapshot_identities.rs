@@ -281,13 +281,22 @@ impl GridTradingEngine {
         intents: &HashMap<String, GridOrder>,
         remainder: Option<&RemainderPlan>,
     ) -> (Vec<(String, BinanceOrderResponse)>, Vec<GridOrder>) {
-        let state = self.state.clone();
-        let mut active = state.active_orders.write().await;
-        let mut responses = Vec::new();
-        for found in orders
+        let mut matching: Vec<&BinanceOrderResponse> = orders
             .iter()
             .filter(|order| is_grid_order(&order.client_order_id))
-        {
+            .collect();
+        matching.sort_by(|a, b| {
+            (&a.client_order_id, &a.symbol, &a.side, a.order_id).cmp(&(
+                &b.client_order_id,
+                &b.symbol,
+                &b.side,
+                b.order_id,
+            ))
+        });
+        let state = self.state.clone();
+        let mut active = state.active_orders.write().await;
+        let mut responses = Vec::with_capacity(matching.len());
+        for found in matching {
             let mut expected =
                 find_durable_order(&found.client_order_id, managed, intents, remainder)
                     .or_else(|| active.get(&found.client_order_id))

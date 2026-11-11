@@ -286,7 +286,7 @@ fn legacy_first_live_second_testnet_pauses_paper_and_preserves_recovery_across_r
             .unwrap();
             conn.execute_batch(
                 "INSERT INTO execution_frontiers VALUES (
-                         'SOLUSDC', 'LIVE', 'BUY', '100', '2026-01-01T00:00:00Z'
+                         'SOLUSDC', 'LIVE', 'BUY', '100', '2026-01-01T00:00:00.000000000Z'
                      );
                      INSERT INTO account_hourly_snapshots VALUES (1, '[]');",
             )

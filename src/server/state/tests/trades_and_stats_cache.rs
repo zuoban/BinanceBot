@@ -676,3 +676,42 @@ async fn post_commit_recent_trades_reload_failure_keeps_paper_state_and_stats_co
     assert!(!state.is_stats_dirty());
     assert_eq!(state.recent_trades.read().await.len(), 1);
 }
+
+#[tokio::test]
+async fn clear_selected_database_waits_for_distinct_state_commit_locks() {
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    let (tx1, _rx1) = mpsc::channel(1);
+    let (tx2, _rx2) = mpsc::channel(1);
+    let first = AppState::new(AppConfig::default(), db.clone(), tx1);
+    let mut second_cfg = AppConfig::default();
+    second_cfg.exchange.symbol = "BTCUSDC".into();
+    let second = AppState::new(second_cfg, db.clone(), tx2);
+    assert!(!Arc::ptr_eq(
+        &first.trade_commit_lock,
+        &second.trade_commit_lock
+    ));
+    assert!(db
+        .insert_trade(&cache_test_trade("distinct-lock-1", 1, TradingMode::Paper))
+        .unwrap());
+    second.stats.write().await.total_trades = 3;
+
+    let second_guard = second.trade_commit_lock.lock().await;
+    let states = vec![first.clone(), second.clone()];
+    let mut cleanup = tokio::spawn(async move {
+        AppState::clear_selected_database_for(&states, true, false, None)
+            .await
+            .unwrap()
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut cleanup)
+            .await
+            .is_err()
+    );
+    drop(second_guard);
+    let (deleted_trades, _) = tokio::time::timeout(Duration::from_secs(3), cleanup)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(deleted_trades, 1);
+    assert_eq!(second.stats.read().await.total_trades, 0);
+}

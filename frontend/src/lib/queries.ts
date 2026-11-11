@@ -219,7 +219,9 @@ export function useLiveAccounts() {
   const query = useSocketFallbackQuery(key, async signal => {
     const data = await api<AccountFrame>('/api/accounts', { signal });
     const current = client.getQueryData<AccountFrame>(key);
-    return current && Date.parse(data.generated_at) < Date.parse(current.generated_at) ? current : data;
+    const nextAt = Date.parse(data.generated_at);
+    if (current && (!Number.isFinite(nextAt) || nextAt < Date.parse(current.generated_at))) return current;
+    return data;
   }, stream);
   const stale = useExpired(query.data ? query.dataUpdatedAt + SNAPSHOT_STALE_MS : -Infinity);
   const accounts = useMemo<AccountObservation[]>(() => {
