@@ -1,12 +1,10 @@
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
-#[path = "common/auth.rs"]
-mod auth;
-#[path = "common/http.rs"]
-mod http;
+mod common;
 use binance_grid_bot::config::AppConfig;
 use binance_grid_bot::db::Database;
 use binance_grid_bot::server::create_router;
+use common::{auth, http};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tower::ServiceExt;

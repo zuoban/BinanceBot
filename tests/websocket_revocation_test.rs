@@ -1,5 +1,5 @@
-#[path = "common/auth.rs"]
-mod auth;
+mod common;
+use common::auth;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};

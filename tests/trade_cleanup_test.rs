@@ -1,16 +1,11 @@
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
-#[path = "common/auth.rs"]
-mod auth;
 mod common;
-#[path = "common/http.rs"]
-mod http;
-#[path = "common/trades.rs"]
-mod trades;
 use binance_grid_bot::config::AppConfig;
 use binance_grid_bot::db::Database;
 use binance_grid_bot::server::{create_router, AppState};
 use binance_grid_bot::types::{GridStats, OrderSide, TradeRecord, TradingMode};
+use common::{auth, http, trades};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde_json::{json, Value};

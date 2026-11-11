@@ -5,7 +5,7 @@ import { Link, useInRouterContext } from 'react-router-dom';
 import type { ColumnsType } from 'antd/es/table';
 import { pairRoute } from '../lib/api';
 import { useMountedRef } from '../lib/asyncGuard';
-import { beijingDay, number, numeric, price, quantity, relativeTime, time } from '../lib/format';
+import { ageText, beijingDay, number, numeric, price, quantity, time } from '../lib/format';
 import { priceDiffPercent } from '../lib/gridPreview';
 import { useNow } from '../lib/useNow';
 import type { Log, Order, Trade } from '../lib/types';
@@ -38,7 +38,7 @@ function useNarrowViewport(skip = false) {
 function RelativeTime({ value, className }: { value: string; className?: string }) {
   const now = useContext(NowContext);
   const timestamp = Date.parse(value);
-  return <span className={className} title={Number.isFinite(timestamp) ? `${time(timestamp)}（北京时间）` : undefined}>{relativeTime(timestamp, now)}</span>;
+  return <span className={className} title={Number.isFinite(timestamp) ? `${time(timestamp)}（北京时间）` : undefined}>{ageText(timestamp, now)}</span>;
 }
 const MarkPriceContext = createContext<string | undefined>(undefined);
 function OrderMarkDiff({ orderPrice }: { orderPrice: string }) {

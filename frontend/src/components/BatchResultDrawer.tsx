@@ -25,7 +25,7 @@ export function BatchResultDrawer({ report, busy, onClose, onRetry }: { report: 
   const title = !report ? '' : report.action === 'pause'
     ? `全部暂停：${report.total - report.outcomes.filter(o => o.result !== 'cancellation_unconfirmed').length}/${report.total} 已暂停`
     : `全部恢复：${report.total - rows.length}/${report.total} 已确认`;
-  return <Drawer open={!!report} onClose={onClose} size={420} title={title} aria-label="批量操作结果">
+  return <Drawer open={!!report} onClose={onClose} destroyOnHidden size={420} title={title} aria-label="批量操作结果">
     {report && labels && <>
       <p className="muted">以下 {rows.length} 个交易对需要检查。请核对状态、交易所挂单和日志后再继续操作。</p>
       <ul className="batch-results">

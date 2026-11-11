@@ -1,3 +1,4 @@
+use crate::sync_ext::RwLockUnpoisonedExt;
 use anyhow::{anyhow, Result};
 use std::borrow::Borrow;
 use std::collections::HashMap;
@@ -52,7 +53,7 @@ impl<K: Eq + Hash, T> CacheEntries<K, T> {
         K: Borrow<Q>,
         Q: ?Sized + Eq + Hash + ToOwned<Owned = K>,
     {
-        let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
+        let mut entries = self.entries.write_unpoisoned();
         let current_epoch = if let Some((epoch, entry)) = entries.get_mut(key) {
             *entry = Default::default();
             *epoch
@@ -72,7 +73,7 @@ impl<K: Eq + Hash, T> CacheEntries<K, T> {
         K: Borrow<Q>,
         Q: ?Sized + Eq + Hash,
     {
-        let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
+        let mut entries = self.entries.write_unpoisoned();
         let Some((epoch, entry)) = entries.get_mut(key) else {
             return false;
         };
@@ -106,15 +107,10 @@ impl<K: Eq + Hash, T> CacheEntries<K, T> {
         K: Borrow<Q>,
         Q: ?Sized + Eq + Hash + ToOwned<Owned = K>,
     {
-        if let Some((epoch, entry)) = self
-            .entries
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(key)
-        {
+        if let Some((epoch, entry)) = self.entries.read_unpoisoned().get(key) {
             return (*epoch, entry.clone());
         }
-        let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
+        let mut entries = self.entries.write_unpoisoned();
         let result = if let Some((epoch, entry)) = entries.get(key) {
             (*epoch, entry.clone())
         } else {
@@ -144,7 +140,7 @@ impl<K: Eq + Hash, T> CacheEntries<K, T> {
         K: Borrow<Q>,
         Q: ?Sized + Eq + Hash + ToOwned<Owned = K>,
     {
-        let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
+        let mut entries = self.entries.write_unpoisoned();
         let next = self.next_epoch.fetch_add(1, Ordering::Relaxed);
         if let Some((epoch, entry)) = entries.get_mut(key) {
             *epoch = next;
@@ -164,8 +160,7 @@ impl<K: Eq + Hash, T> CacheEntries<K, T> {
         Q: ?Sized + Eq + Hash,
     {
         self.entries
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
+            .read_unpoisoned()
             .get(key)
             .is_some_and(|(e, current)| *e == epoch && Arc::ptr_eq(current, entry))
     }

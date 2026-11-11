@@ -1,6 +1,4 @@
-use super::{
-    non_blank, AccountInfo, BotStatus, GridDirection, GridOrder, TradeRecord, TradingMode,
-};
+use super::{non_blank, AccountInfo, BotStatus, GridDirection, TradeRecord, TradingMode};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -454,32 +452,6 @@ impl<T> ApiResponse<T> {
             data: None,
             message: Some(message.into()),
         }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum RemainderPhase {
-    Canceling,
-    Submitting,
-    Complete,
-    Abandoned,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct RemainderPlan {
-    pub(crate) symbol: String,
-    pub(crate) mode: TradingMode,
-    pub(crate) sources: Vec<GridOrder>,
-    pub(crate) target: GridOrder,
-    pub(crate) phase: RemainderPhase,
-}
-
-impl RemainderPlan {
-    pub(crate) fn find_order(&self, client_order_id: &str) -> Option<&GridOrder> {
-        self.sources
-            .iter()
-            .chain(std::iter::once(&self.target))
-            .find(|order| order.client_order_id == client_order_id)
     }
 }
 

@@ -5,7 +5,7 @@
 This repository contains a Rust Binance Futures grid-trading backend and a
 React/TypeScript console. Backend code lives in `src/`: `strategy/` implements
 grid behavior, `exchange/` handles Binance connectivity, `server/` exposes
-HTTP and WebSocket APIs, and `db.rs` manages SQLite persistence. Integration
+HTTP and WebSocket APIs, and `db/` manages SQLite persistence. Integration
 tests live in `tests/`; module-specific Rust tests also live alongside source.
 The frontend lives in `frontend/src/`, organized into `pages/`, `components/`,
 `lib/`, and `test/`. Supporting design documents are in `docs/`, `DESIGN.md`,

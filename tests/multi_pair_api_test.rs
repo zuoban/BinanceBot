@@ -1,8 +1,5 @@
 mod common;
-#[path = "common/http.rs"]
-mod http;
-#[path = "common/trades.rs"]
-mod trades;
+use common::{http, trades};
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};

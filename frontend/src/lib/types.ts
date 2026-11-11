@@ -32,13 +32,12 @@ export interface Trade {
   pnl_verified: boolean; is_maker: boolean; timestamp: string; note: string;
 }
 export interface Log { timestamp: string; level: string; message: string }
-export type LogItem = Log;
 interface Account {
   asset: string; total_wallet_balance: Decimal; available_balance: Decimal;
   margin_balance: Decimal; unrealized_profit: Decimal; update_time: string;
 }
 export interface Snapshot {
-  symbol: string; status: Status; mode: Mode; sync_interval_secs?: number; grid_config: GridConfig;
+  generated_at?: string; symbol: string; status: Status; mode: Mode; sync_interval_secs?: number; grid_config: GridConfig;
   ticker: { last_price: Decimal; mark_price: Decimal; change_percent_24h: Decimal; high_24h: Decimal; low_24h: Decimal; update_time: string; mark_update_time: string };
   stats: {
     total_trades: number; completed_cycles: number; total_realized_pnl: Decimal;

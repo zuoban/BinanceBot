@@ -1,4 +1,5 @@
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { useSyncExternalStore } from 'react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { UserEvent } from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -11,12 +12,12 @@ import type * as Antd from 'antd';
 import { ApiError } from '../lib/api';
 import type * as Api from '../lib/api';
 import type * as Queries from '../lib/queries';
-import type { GridConfig } from '../lib/types';
-import { pair } from './fixtures';
+import type { AccountObservation, GridConfig } from '../lib/types';
+import { pair, snapshot } from './fixtures';
 
 const mocks = vi.hoisted(() => {
   const confirm = vi.fn(), success = vi.fn(), error = vi.fn();
-  return { confirm, success, error, run: vi.fn(), api: vi.fn(), post: vi.fn(), app: { modal: { confirm }, message: { success, error } } };
+  return { confirm, success, error, api: vi.fn(), post: vi.fn(), app: { modal: { confirm }, message: { success, error } } };
 });
 vi.mock('antd', async importOriginal => {
   const antd = await importOriginal<typeof Antd>();
@@ -26,22 +27,31 @@ vi.mock('../lib/api', async importOriginal => {
   const actual = await importOriginal<typeof Api>();
   return { ...actual, api: mocks.api, post: mocks.post };
 });
-const pairsState = vi.hoisted(() => ({ isFetching: false }));
+const pairsState = vi.hoisted(() => {
+  const listeners = new Set<() => void>();
+  return {
+    isFetching: false,
+    accounts: [] as AccountObservation[],
+    setAccounts(next: AccountObservation[]) { this.accounts = next; for (const listener of listeners) listener(); },
+    subscribe: (listener: () => void) => { listeners.add(listener); return () => listeners.delete(listener); },
+  };
+});
 vi.mock('../lib/queries', async importOriginal => {
   const actual = await importOriginal<typeof Queries>();
   return {
     ...actual,
     usePairs: () => ({ data: [pair('BTCUSDC'), pair('ETHUSDC')], isFetching: pairsState.isFetching, dataUpdatedAt: Date.now() }),
-    useLiveAccounts: () => ({ accounts: [], stale: false, error: null }),
+    useLiveAccounts: () => ({ accounts: useSyncExternalStore(pairsState.subscribe, () => pairsState.accounts), stale: false, error: null }),
     usePairSnapshot: () => ({ data: undefined, isPending: false, refetch: vi.fn() }),
   };
 });
-vi.mock('../components/Controls', () => ({ ControlProvider: ({ children }: { children: React.ReactNode }) => children, PairControls: () => null, useControls: () => ({ busy: new Set<string>(), pending: {}, results: {}, clearResult: vi.fn(), run: mocks.run }) }));
+vi.mock('../components/Controls', () => ({ ControlProvider: ({ children }: { children: React.ReactNode }) => children, PairControls: () => null, useControls: () => ({ busy: new Set<string>(), pending: {}, results: {}, clearResult: vi.fn(), run: vi.fn() }) }));
 vi.mock('../components/ThemeSwitch', () => ({ ThemeSwitch: () => null, ThemeSegmented: () => null, themeLabels: { system: '跟随系统', light: '浅色', dark: '深色' } }));
 
 beforeEach(() => {
   vi.clearAllMocks();
   pairsState.isFetching = false;
+  pairsState.setAccounts([]);
 });
 function setup(request: Promise<unknown>, initialPath = '/pairs/BTCUSDC/config', configError?: Error, symbols = (_path: string): Promise<string[]> => Promise.resolve(['BTCUSDC', 'SOLUSDC']), postOnly = true) {
   mocks.api.mockImplementation((path: string, init?: RequestInit) => path.startsWith('/api/exchange/symbols?') ? symbols(path) : init?.method === 'DELETE' ? request : configError ? Promise.reject(configError) : Promise.resolve({ ...pair('BTCUSDC').grid_config, post_only: postOnly, config_version: 'version-1' }));
@@ -126,19 +136,6 @@ function breadcrumb() {
   return within(screen.getByRole('navigation', { name: '面包屑' }));
 }
 
-function expectBreadcrumb(items: { label: string; href?: string }[]) {
-  const nav = breadcrumb();
-  const entries = nav.getAllByRole('listitem');
-  expect(entries.map(entry => entry.textContent?.replace(/^\//, ''))).toEqual(items.map(item => item.label));
-  items.forEach(({ label, href }, index) => {
-    if (href) expect(within(entries[index]).getByRole('link', { name: label })).toHaveAttribute('href', href);
-    else {
-      expect(within(entries[index]).queryByRole('link')).not.toBeInTheDocument();
-      expect(within(entries[index]).getByText(label)).toHaveAttribute('aria-current', 'page');
-    }
-  });
-}
-
 function expectDisabledAncestors(labels: string[]) {
   const nav = breadcrumb();
   for (const label of labels) {
@@ -207,47 +204,6 @@ it('suppresses the missing-pair warning while pairs are refetching', () => {
   expect(screen.queryByText('该交易对不存在或已移除')).not.toBeInTheDocument();
 });
 
-it.each([
-  ['/pairs/new', [{ label: '策略总览', href: '/' }, { label: '新增交易对' }]],
-  ['/pairs/BTCUSDC', [{ label: '策略总览', href: '/' }, { label: 'BTCUSDC' }]],
-  ['/pairs/BTCUSDC/config', [{ label: '策略总览', href: '/' }, { label: 'BTCUSDC', href: '/pairs/BTCUSDC' }, { label: '策略参数' }]],
-])('shows the breadcrumb hierarchy for %s', (path, items) => {
-  setup(Promise.resolve(), path);
-  expectBreadcrumb(items);
-});
-
-it.each(['/pairs/UNKNOWN', '/pairs/UNKNOWN/config'])('keeps the breadcrumb available for a missing pair at %s', path => {
-  setup(Promise.resolve(), path);
-  expect(screen.getByText('该交易对不存在或已移除')).toBeInTheDocument();
-  expectBreadcrumb(path.endsWith('/config')
-    ? [{ label: '策略总览', href: '/' }, { label: 'UNKNOWN', href: '/pairs/UNKNOWN' }, { label: '策略参数' }]
-    : [{ label: '策略总览', href: '/' }, { label: 'UNKNOWN' }]);
-});
-
-it('keeps the breadcrumb available when configuration loading fails', async () => {
-  setup(Promise.resolve(), '/pairs/BTCUSDC/config', new Error('配置加载失败'));
-  await screen.findByText('配置加载失败');
-  expectBreadcrumb([{ label: '策略总览', href: '/' }, { label: 'BTCUSDC', href: '/pairs/BTCUSDC' }, { label: '策略参数' }]);
-});
-
-it.each(['/pairs/BTCUSDC/config', '/pairs/new'])('confirms before leaving a dirty form for the overview at %s', async path => {
-  mocks.confirm.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
-  const router = setup(Promise.resolve(), path);
-  const user = userEvent.setup();
-  const input = await screen.findByLabelText('网格间距');
-  await waitFor(() => expect(input).toBeEnabled());
-  await user.clear(input);
-  await user.type(input, '0.2');
-  await user.click(breadcrumb().getByRole('link', { name: '策略总览' }));
-  await waitFor(() => expect(mocks.confirm).toHaveBeenCalledTimes(1));
-  expect(router.state.location.pathname).toBe(path);
-  expect(input).toHaveValue('0.2');
-  await user.click(breadcrumb().getByRole('link', { name: '策略总览' }));
-  await screen.findByText('总览页面');
-  expect(router.state.location.pathname).toBe('/');
-  expect(mocks.confirm).toHaveBeenCalledTimes(2);
-});
-
 it.each(['/pairs/BTCUSDC/config', '/pairs/new'])('disables breadcrumb ancestors during save at %s', async path => {
   let finish!: (value: string | GridConfig) => void;
   mocks.post.mockReturnValue(new Promise<string | GridConfig>(resolve => { finish = resolve; }));
@@ -268,22 +224,6 @@ it.each(['/pairs/BTCUSDC/config', '/pairs/new'])('disables breadcrumb ancestors 
   expect(await screen.findByRole('heading', { name: 'BTCUSDC' })).toBeInTheDocument();
   expect(router.state.location.pathname).toBe('/pairs/BTCUSDC');
 }, 40000);
-
-it('lists the pairs in the sidebar and marks the current strategy', () => {
-  setup(Promise.resolve());
-  const sidebar = within(screen.getByRole('complementary'));
-  expect(sidebar.getByRole('link', { name: '策略总览' })).toHaveAttribute('href', '/');
-  expect(sidebar.getByRole('link', { name: '全局设置' })).toHaveAttribute('href', '/settings');
-  const pairs = sidebar.getByRole('navigation', { name: '交易对' });
-  expect(within(pairs).getByRole('link', { name: /BTCUSDC/ })).toHaveAttribute('aria-current', 'page');
-  expect(within(pairs).getByRole('link', { name: /ETHUSDC/ })).not.toHaveAttribute('aria-current');
-});
-
-it('keeps the config page when switching pairs from the sidebar', () => {
-  setup(Promise.resolve());
-  const pairs = within(screen.getByRole('complementary')).getByRole('navigation', { name: '交易对' });
-  expect(within(pairs).getByRole('link', { name: /ETHUSDC/ })).toHaveAttribute('href', '/pairs/ETHUSDC/config');
-});
 
 it('counts the modified fields in the save bar and lists them on demand', async () => {
   setup(Promise.resolve());
@@ -309,81 +249,6 @@ it('counts the modified fields in the save bar and lists them on demand', async 
   await user.type(buy, '5');
   expect(await screen.findByText('有未保存的修改')).toBeInTheDocument();
 }, 40000);
-
-it('runs a pair action from the palette through the guarded control flow', async () => {
-  setup(Promise.resolve());
-  const user = userEvent.setup();
-  await user.keyboard('{Control>}k{/Control}');
-  const search = await screen.findByRole('combobox', { name: '搜索命令' });
-  await user.type(search, '恢复 ETHUSDC');
-  await user.keyboard('{Enter}');
-  expect(mocks.run).toHaveBeenCalledWith(expect.objectContaining({ symbol: 'ETHUSDC' }), 'resume');
-});
-
-it('jumps between pages and pairs with keyboard shortcuts but not while typing', async () => {
-  const router = setup(Promise.resolve());
-  const user = userEvent.setup();
-  await user.keyboard('gs');
-  await waitFor(() => expect(router.state.location.pathname).toBe('/settings'));
-  await act(async () => { await router.navigate('/pairs/BTCUSDC'); });
-  await user.keyboard('{]}');
-  await waitFor(() => expect(router.state.location.pathname).toBe('/pairs/ETHUSDC'));
-  await user.keyboard('{[}');
-  await waitFor(() => expect(router.state.location.pathname).toBe('/pairs/BTCUSDC'));
-  await act(async () => { await router.navigate('/pairs/BTCUSDC/config'); });
-  const input = await screen.findByLabelText('网格间距');
-  await user.click(input);
-  await user.keyboard('{]}');
-  expect(router.state.location.pathname).toBe('/pairs/BTCUSDC/config');
-});
-
-it('does not run a palette command when Enter commits an IME candidate', async () => {
-  const router = setup(Promise.resolve());
-  const user = userEvent.setup();
-  await user.keyboard('{Control>}k{/Control}');
-  const search = await screen.findByRole('combobox', { name: '搜索命令' });
-  await user.type(search, 'ETHUSDC');
-  fireEvent.keyDown(search, { key: 'Enter', keyCode: 229 });
-  expect(router.state.location.pathname).toBe('/pairs/BTCUSDC/config');
-  await user.keyboard('{Enter}');
-  await waitFor(() => expect(router.state.location.pathname).toBe('/pairs/ETHUSDC'));
-});
-
-it('switches pairs from the command palette with the keyboard', async () => {
-  const router = setup(Promise.resolve());
-  const user = userEvent.setup();
-  await user.keyboard('{Control>}k{/Control}');
-  const search = await screen.findByRole('combobox', { name: '搜索命令' });
-  await user.type(search, 'ETHUSDC');
-  const options = screen.getAllByRole('option');
-  expect(options[0]).toHaveTextContent('ETHUSDC');
-  expect(options[0]).toHaveAttribute('aria-selected', 'true');
-  await user.keyboard('{Enter}');
-  await waitFor(() => expect(router.state.location.pathname).toBe('/pairs/ETHUSDC'));
-});
-
-it('returns to the strategy detail page', async () => {
-  const router = setup(Promise.resolve());
-  await userEvent.setup().click(within(screen.getByRole('navigation', { name: '面包屑' })).getByRole('link', { name: 'BTCUSDC' }));
-  expect(await screen.findByRole('heading', { name: 'BTCUSDC' })).toBeInTheDocument();
-  expect(router.state.location.pathname).toBe('/pairs/BTCUSDC');
-});
-
-it('confirms before returning with unsaved changes', async () => {
-  mocks.confirm.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
-  const router = setup(Promise.resolve());
-  const user = userEvent.setup();
-  const input = await screen.findByLabelText('网格间距');
-  await waitFor(() => expect(input).toBeEnabled());
-  await user.clear(input);
-  await user.type(input, '0.2');
-  await user.click(within(screen.getByRole('navigation', { name: '面包屑' })).getByRole('link', { name: 'BTCUSDC' }));
-  await waitFor(() => expect(mocks.confirm).toHaveBeenCalledTimes(1));
-  expect(router.state.location.pathname).toBe('/pairs/BTCUSDC/config');
-  await user.click(within(screen.getByRole('navigation', { name: '面包屑' })).getByRole('link', { name: 'BTCUSDC' }));
-  expect(await screen.findByRole('heading', { name: 'BTCUSDC' })).toBeInTheDocument();
-  expect(router.state.location.pathname).toBe('/pairs/BTCUSDC');
-});
 
 it('returns to detail after saving changed parameters', async () => {
   const router = setup(Promise.resolve());
@@ -460,15 +325,6 @@ it('does not redirect again after the user navigates while queries refresh', asy
   }
 }, 40000);
 
-it('opens the mobile navigation drawer and navigates to settings', async () => {
-  setup(Promise.resolve());
-  const user = userEvent.setup();
-  await user.click(screen.getByRole('button', { name: '打开主导航' }));
-  const drawer = await screen.findByRole('dialog');
-  await user.click(within(drawer).getByRole('link', { name: '全局设置' }));
-  expect(await screen.findByText('设置页面')).toBeInTheDocument();
-});
-
 it('blocks navigation while deleting and redirects a dirty form without another confirmation', async () => {
   let finish!: () => void;
   const request = new Promise<void>(resolve => { finish = resolve; });
@@ -540,16 +396,34 @@ it('fetches symbol preview on /pairs/new, shows latest price, auto-fills mark pr
   expect(await screen.findAllByText('网格间距 0.15 必须是价格步长 0.1 的正整数倍')).not.toHaveLength(0);
 }, 40000);
 
+it('suppresses stale AccountMarkBridge prices, unlocks GridPreview on expiry, and skips 1 Hz validateFields churn on untouched fields', async () => {
+  const staleSnap = snapshot('BTCUSDC', 'PAPER');
+  staleSnap.ticker = { ...staleSnap.ticker, mark_price: '70000', mark_update_time: new Date(Date.now() - 20_000).toISOString() };
+  pairsState.setAccounts([{ mode: 'PAPER', snapshot: staleSnap }]);
+  mocks.api.mockImplementation((path: string) => path === '/api/global/config'
+    ? Promise.resolve({ version: 'v1', has_api_key: false, has_api_secret: false })
+    : Promise.resolve({ ...pair('BTCUSDC').grid_config, order_amount_usdc: '4', step_size: '0.01', min_qty: '0.01', min_notional: '5', config_version: 'version-1' }));
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const router = createMemoryRouter([{ element: <Shell />, children: [{ path: '/pairs/:symbol/config', element: <PairConfig /> }] }], { initialEntries: ['/pairs/BTCUSDC/config'] });
+  render(<QueryClientProvider client={client}><RouterProvider router={router} /></QueryClientProvider>);
+  const amount = await screen.findByLabelText('每格金额（报价资产）');
+  await waitFor(() => expect(amount).toBeEnabled());
+  // Stale mark_update_time emits undefined so GridPreview keeps manual reference input unlocked and order_amount_usdc is unpoisoned.
+  expect(screen.getByLabelText('预览参考价格')).toBeInTheDocument();
+  expect(amount).not.toHaveAttribute('aria-invalid', 'true');
 
-it('opens the keyboard shortcut help with ? and navigates from the bottom bar', async () => {
-  const router = setup(Promise.resolve());
+  // Fresh 1 Hz mark ticks update GridPreview reference without validating untouched order_amount_usdc on initial setFieldsValue.
+  for (const markPrice of ['100', '101']) {
+    const freshSnap = snapshot('BTCUSDC', 'PAPER');
+    freshSnap.ticker = { ...freshSnap.ticker, mark_price: markPrice, mark_update_time: new Date().toISOString() };
+    act(() => { pairsState.setAccounts([{ mode: 'PAPER', snapshot: freshSnap }]); });
+  }
+  expect(await screen.findByText('以当前标记价 101 为参考')).toBeInTheDocument();
+  expect(amount).not.toHaveAttribute('aria-invalid', 'true');
+
+  // Editing order_amount_usdc marks it edited so validation runs against the live mark.
   const user = userEvent.setup();
-  await user.keyboard('?');
-  const modal = await screen.findByRole('dialog', { name: '键盘快捷键' });
-  expect(within(modal).getByText('打开命令面板')).toBeInTheDocument();
-  await user.keyboard('{Escape}');
-  const bottom = screen.getByRole('navigation', { name: '底部导航' });
-  await user.click(within(bottom).getByRole('link', { name: '设置' }));
-  expect(await screen.findByText('设置页面')).toBeInTheDocument();
-  expect(router.state.location.pathname).toBe('/settings');
+  await user.clear(amount);
+  await user.type(amount, '3');
+  await waitFor(() => expect(amount).toHaveAttribute('aria-invalid', 'true'));
 });

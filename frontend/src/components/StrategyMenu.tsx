@@ -9,11 +9,13 @@ const pendingLabel: Record<Action, string> = { pause: '暂停中…', resume: '�
 
 export function strategyActionGuard(pair: Pair, stale = false, busy = false) {
   const running = pair.status === 'RUNNING';
+  const staleResumeBlocked = !busy && stale && !running;
   return {
     running,
+    staleResumeBlocked,
     toggleAction: (running ? 'pause' : 'resume') as 'pause' | 'resume',
     toggleLabel: running ? '暂停' : '恢复',
-    toggleDisabled: busy || (stale && !running),
+    toggleDisabled: busy || staleResumeBlocked,
     rebalanceDisabled: busy || stale || !running,
     cancelDisabled: busy,
   };
@@ -27,13 +29,15 @@ export function strategySecondaryItems(pair: Pair, stale = false) {
 }
 export function StrategyToggle({ pair, stale = false, size = 'small', className = 'strategy-toggle', withSymbolAriaLabel = true }: { pair: Pair; stale?: boolean; size?: 'small' | 'middle'; className?: string; withSymbolAriaLabel?: boolean }) {
   const { busy, pending, run } = useControls();
-  const guard = strategyActionGuard(pair, stale);
+  const isBusy = busy.has(pair.symbol);
+  const guard = strategyActionGuard(pair, stale, isBusy);
   const active = pending[pair.symbol];
-  return <Tooltip title={guard.toggleDisabled ? '状态过期，恢复前请刷新' : undefined}>
-    <Button className={className} size={size} loading={busy.has(pair.symbol)} disabled={guard.toggleDisabled}
-      icon={guard.running ? <PauseOutlined /> : <PlayCircleOutlined />} aria-label={withSymbolAriaLabel ? `${guard.toggleLabel} ${pair.symbol}` : undefined}
-      onClick={() => void run(pair, guard.toggleAction)}>{active ? pendingLabel[active] : guard.toggleLabel}</Button>
-  </Tooltip>;
+  const button = <Button className={className} size={size} loading={isBusy} disabled={guard.toggleDisabled}
+    icon={guard.running ? <PauseOutlined /> : <PlayCircleOutlined />} aria-label={withSymbolAriaLabel ? `${guard.toggleLabel} ${pair.symbol}` : undefined}
+    onClick={() => void run(pair, guard.toggleAction)}>{active ? pendingLabel[active] : guard.toggleLabel}</Button>;
+  return guard.staleResumeBlocked
+    ? <Tooltip title="状态过期，恢复前请刷新"><span className="strategy-toggle-tip">{button}</span></Tooltip>
+    : button;
 }
 export function StrategyMenu({ pair, stale }: { pair: Pair; stale: boolean }) {
   const navigate = useNavigate();

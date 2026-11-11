@@ -32,18 +32,33 @@ export function useExpired(deadline: number) {
 const BEIJING_OFFSET_MS = 8 * 3_600_000;
 const DAY_MS = 86_400_000;
 
+export function serverAlignedNow(generatedAt?: string, receivedAt?: number): number | undefined {
+  const genMs = generatedAt ? Date.parse(generatedAt) : NaN;
+  if (!Number.isFinite(genMs)) return undefined;
+  return genMs + (typeof receivedAt === 'number' && receivedAt > 0 ? Math.max(0, Date.now() - receivedAt) : 0);
+}
+
 /** Re-render only when Beijing midnight (00:00 UTC+8) passes, returning that day's start timestamp. */
-export function useBeijingDay() {
-  const day = Math.floor((Date.now() + BEIJING_OFFSET_MS) / DAY_MS);
+export function useBeijingDay(generatedAt?: string, receivedAt?: number) {
+  const genMs = generatedAt ? Date.parse(generatedAt) : NaN;
+  const hasServer = Number.isFinite(genMs);
+  const hasReceived = typeof receivedAt === 'number' && receivedAt > 0;
+  const now = hasServer ? genMs + (hasReceived ? Math.max(0, Date.now() - receivedAt) : 0) : Date.now();
+  const day = Math.floor((now + BEIJING_OFFSET_MS) / DAY_MS);
   const startMs = day * DAY_MS - BEIJING_OFFSET_MS;
-  useExpired(startMs + DAY_MS - 1);
+  useExpired(!hasServer ? startMs + DAY_MS - 1 : hasReceived ? receivedAt + (startMs + DAY_MS - genMs) - 1 : Infinity);
   return startMs;
 }
 
 /** Return the current UTC hour index, re-rendering only when the hour turns over. */
-export function useUtcHour(enabled = true) {
-  const hour = Math.floor(Date.now() / 3_600_000);
-  useExpired(enabled ? (hour + 1) * 3_600_000 - 1 : Infinity);
+export function useUtcHour(enabled = true, generatedAt?: string, receivedAt?: number) {
+  const genMs = generatedAt ? Date.parse(generatedAt) : NaN;
+  const hasServer = Number.isFinite(genMs);
+  const hasReceived = typeof receivedAt === 'number' && receivedAt > 0;
+  const now = hasServer ? genMs + (hasReceived ? Math.max(0, Date.now() - receivedAt) : 0) : Date.now();
+  const hour = Math.floor(now / 3_600_000);
+  const nextHourMs = (hour + 1) * 3_600_000;
+  useExpired(!enabled ? Infinity : !hasServer ? nextHourMs - 1 : hasReceived ? receivedAt + (nextHourMs - genMs) - 1 : Infinity);
   return hour;
 }
 

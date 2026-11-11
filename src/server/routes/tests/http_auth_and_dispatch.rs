@@ -1,0 +1,808 @@
+use super::super::*;
+use super::{auth_pair_state, auth_state};
+use crate::config::AppConfig;
+use crate::db::Database;
+use crate::types::{BotControlAction, BotStatus, OverviewSnapshot, TradingMode};
+
+#[tokio::test]
+async fn dispatch_pair_preserves_query_strings_for_unscoped_and_scoped_routes() {
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    let mut config = AppConfig::default();
+    config.pairs = vec![crate::config::TradingPairConfig::new("SOLUSDC".into())];
+    db.save_config(&config).unwrap();
+    db.save_pair_status("SOLUSDC", TradingMode::Paper, BotStatus::Paused)
+        .unwrap();
+    let mut runtime = crate::runtime::TradingRuntime::start_with_test_exchange(
+        &config,
+        db,
+        "http://127.0.0.1:1".into(),
+    )
+    .await
+    .unwrap();
+    let handle = runtime.handle();
+    assert!(
+        handle.states.read().await[0]
+            .managed_router
+            .set(Router::new().route(
+                "/trades",
+                get(|uri: axum::http::Uri| async move { uri.to_string() }),
+            ))
+            .is_ok(),
+        "managed_router should be unset before first dispatch"
+    );
+    let router = create_managed_router(handle).await;
+
+    for (request_uri, expected_dispatched_uri) in [
+        (
+            "/api/trades?limit=25&symbol=SOLUSDC",
+            "/trades?limit=25&symbol=SOLUSDC",
+        ),
+        (
+            "/api/pairs/SOLUSDC/trades?limit=10&mode=PAPER",
+            "/trades?limit=10&mode=PAPER",
+        ),
+        ("/api/trades", "/trades"),
+        ("/api/pairs/SOLUSDC/trades", "/trades"),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(request_uri)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{request_uri}");
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::str::from_utf8(&body).unwrap(),
+            expected_dispatched_uri,
+            "{request_uri}"
+        );
+    }
+
+    let _ = runtime.shutdown(std::time::Duration::from_secs(2)).await;
+}
+
+#[tokio::test]
+async fn body_limits_reject_oversized_login_and_protected_payloads() {
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    db.create_session("body-limit-token").unwrap();
+    let (tx, _rx) = tokio::sync::mpsc::channel(4);
+    let state = auth_state(AppConfig::default(), db, tx);
+    let connect_info =
+        axum::extract::ConnectInfo(std::net::SocketAddr::from(([127, 0, 0, 1], 12345)));
+    let router = create_router(state).layer(Extension(connect_info));
+
+    let oversized_login = serde_json::json!({
+        "password": "x".repeat(5 * 1024),
+    })
+    .to_string();
+    let login_res = router
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/auth/login")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(oversized_login))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(login_res.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+    // Authenticated API routes allow >4 KiB up to 64 KiB, then reject >64 KiB.
+    let medium_control = serde_json::json!({
+        "action": format!("unknown_{}", "a".repeat(8 * 1024)),
+    })
+    .to_string();
+    let medium_res = router
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/control")
+                .header("authorization", "Bearer body-limit-token")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(medium_control))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(medium_res.status(), StatusCode::OK);
+
+    let oversized_control = serde_json::json!({
+        "action": format!("unknown_{}", "a".repeat(70 * 1024)),
+    })
+    .to_string();
+    let oversized_res = router
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/control")
+                .header("authorization", "Bearer body-limit-token")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(oversized_control))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(oversized_res.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+async fn control_requires_confirmation_mode_and_propagates_engine_rejections() {
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    let (action_tx, mut action_rx) = tokio::sync::mpsc::channel(1);
+    let state = AppState::new(AppConfig::default(), db, action_tx);
+    for action in ["resume", "rebalance"] {
+        for expected_mode in [None, Some(TradingMode::Unknown)] {
+            let response = post_control_handler(
+                State(state.clone()),
+                Json(ControlRequest {
+                    action: action.into(),
+                    expected_mode,
+                }),
+            )
+            .await;
+            assert!(!response.0.success);
+            assert!(action_rx.try_recv().is_err());
+        }
+    }
+    for action in ["resume", "rebalance"] {
+        let request_state = state.clone();
+        let request = tokio::spawn(async move {
+            post_control_handler(
+                State(request_state),
+                Json(ControlRequest {
+                    action: action.into(),
+                    expected_mode: Some(TradingMode::Paper),
+                }),
+            )
+            .await
+        });
+        let reply = match action_rx.recv().await.unwrap() {
+            BotControlAction::Resume {
+                expected_mode,
+                reply,
+                ..
+            } => {
+                assert_eq!(expected_mode, TradingMode::Paper);
+                reply
+            }
+            BotControlAction::Rebalance {
+                expected_mode,
+                reply,
+            } => {
+                assert_eq!(expected_mode, TradingMode::Paper);
+                reply
+            }
+            other => panic!("unexpected action: {:?}", other),
+        };
+        reply.send(Err("操作被拒绝".into())).unwrap();
+        let response = request.await.unwrap().0;
+        assert!(!response.success);
+        assert_eq!(response.message.as_deref(), Some("操作被拒绝"));
+    }
+}
+
+async fn overview_response(
+    router: &Router,
+    authenticated: bool,
+) -> (StatusCode, serde_json::Value) {
+    let mut request = axum::http::Request::builder().uri("/api/overview");
+    if authenticated {
+        request = request.header("Authorization", "Bearer overview-test-token");
+    }
+    let response = router
+        .clone()
+        .oneshot(request.body(axum::body::Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1_000_000)
+        .await
+        .unwrap();
+    (status, serde_json::from_slice(&bytes).unwrap())
+}
+
+#[tokio::test]
+async fn overview_authenticates_single_and_multi_pair_routes() {
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    db.create_session("overview-test-token").unwrap();
+    let (tx, _) = tokio::sync::mpsc::channel(1);
+    let mut config = AppConfig::default();
+    config.exchange.api_key = "overview-private-api-key".into();
+    config.exchange.api_secret = "overview-private-api-secret".into();
+    config.telegram.bot_token = "overview-private-telegram-token".into();
+    config.telegram.chat_id = "overview-private-chat-id".into();
+    let state = auth_state(config, db, tx);
+    let router = create_router(state);
+    assert_eq!(
+        overview_response(&router, false).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    let (status, response) = overview_response(&router, true).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["success"], true);
+    assert_eq!(response["data"]["pairs"].as_array().unwrap().len(), 1);
+    assert!(response["data"]["today_pnl"]["window_start"].is_string());
+    assert!(response["data"]["today_pnl"]["window_end"].is_string());
+    assert!(response["data"]["today_pnl"]["groups"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(response["data"]["pairs"][0]["scoped"], false);
+    assert_eq!(
+        response["data"]["pairs"][0]["snapshot"]["symbol"],
+        "SOLUSDC"
+    );
+    let summary = &response["data"]["pairs"][0]["snapshot"];
+    for field in [
+        "active_orders",
+        "recent_trades",
+        "recent_logs",
+        "hourly_trade_stats",
+    ] {
+        assert!(
+            summary.get(field).is_none(),
+            "overview retained heavy field {field}"
+        );
+    }
+    assert!(summary["today_trade_counts"]["buy"].is_u64());
+    assert!(response["data"]["recent_trades"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    let serialized = response.to_string();
+    for private_value in [
+        "overview-private-api-key",
+        "overview-private-api-secret",
+        "overview-private-telegram-token",
+        "overview-private-chat-id",
+    ] {
+        assert!(!serialized.contains(private_value));
+    }
+    let summary = &response["data"]["pairs"][0]["snapshot"]["grid_config"];
+    for private_field in ["api_key", "api_secret", "telegram", "bot_token", "chat_id"] {
+        assert!(summary.get(private_field).is_none());
+    }
+
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    db.create_session("overview-test-token").unwrap();
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    let mut states = Vec::new();
+    for (symbol, paper) in [("SOLUSDC", true), ("BTCUSDT", false)] {
+        let mut config = AppConfig::default();
+        config.exchange.symbol = symbol.into();
+        if !paper {
+            config.exchange.api_key = "live-key".into();
+            config.exchange.api_secret = "live-secret".into();
+        }
+        let (tx, _) = tokio::sync::mpsc::channel(1);
+        states.push(auth_pair_state(config, db.clone(), tx, lock.clone()));
+    }
+    let account_time = chrono::Utc::now() - chrono::Duration::minutes(2);
+    states[0].ticker.write().await.mark_price = rust_decimal_macros::dec!(123);
+    states[1].ticker.write().await.mark_price = rust_decimal_macros::dec!(67890);
+    states[1].account.write().await.update_time = account_time;
+    states[0].add_log("INFO", "SOL scoped log").await;
+    states[1].add_log("WARN", "BTC scoped log").await;
+    let router = create_multi_router(states.clone());
+    assert_eq!(
+        overview_response(&router, false).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    let (status, response) = overview_response(&router, true).await;
+    assert_eq!(status, StatusCode::OK);
+    let overview: OverviewSnapshot = serde_json::from_value(response["data"].clone()).unwrap();
+    assert_eq!(overview.pairs.len(), 2);
+    assert!(overview.pairs.iter().all(|pair| pair.scoped));
+    assert_eq!(overview.pairs[0].mode, TradingMode::Paper);
+    assert_eq!(overview.pairs[1].mode, TradingMode::Live);
+    assert_eq!(overview.pairs[0].snapshot.symbol, "SOLUSDC");
+    assert_eq!(overview.pairs[1].snapshot.symbol, "BTCUSDT");
+    assert_eq!(
+        overview.pairs[0].snapshot.ticker.mark_price,
+        rust_decimal_macros::dec!(123)
+    );
+    assert_eq!(
+        overview.pairs[1].snapshot.ticker.mark_price,
+        rust_decimal_macros::dec!(67890)
+    );
+    assert_eq!(overview.pairs[1].snapshot.account.update_time, account_time);
+    for pair in response["data"]["pairs"].as_array().unwrap() {
+        assert!(pair["snapshot"].get("recent_logs").is_none());
+        assert!(pair["snapshot"].get("active_orders").is_none());
+    }
+
+    // No WebSocket subscribers are required for live fields to refresh.
+    // Only chart queries are cached between overview polls.
+    assert_eq!(db.hourly_stats_query_count(), 2);
+    states[1].ticker.write().await.mark_price = rust_decimal_macros::dec!(67900);
+    states[1].account.write().await.update_time = chrono::Utc::now();
+    let (_, response) = overview_response(&router, true).await;
+    let refreshed: OverviewSnapshot = serde_json::from_value(response["data"].clone()).unwrap();
+    assert_eq!(
+        refreshed.pairs[1].snapshot.ticker.mark_price,
+        rust_decimal_macros::dec!(67900)
+    );
+    assert!(refreshed.pairs[1].snapshot.account.update_time > account_time);
+    assert_eq!(db.hourly_stats_query_count(), 2);
+}
+
+#[tokio::test]
+async fn retired_control_cannot_change_recreated_pair() {
+    for action in ["pause", "cancel_all"] {
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let config = AppConfig::default();
+        let trade_lock = Arc::new(tokio::sync::Mutex::new(()));
+        let (old_tx, mut old_rx) = tokio::sync::mpsc::channel(1);
+        let old = AppState::new_for_pair(config.clone(), db.clone(), old_tx, trade_lock.clone());
+        let retirement = old.socket_control_lock.write().await;
+        let request_state = old.clone();
+        let request = tokio::spawn(async move {
+            post_control_handler(
+                State(request_state),
+                Json(ControlRequest {
+                    action: action.into(),
+                    expected_mode: None,
+                }),
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        old.retire();
+        drop(retirement);
+
+        let (new_tx, _new_rx) = tokio::sync::mpsc::channel(1);
+        let new = AppState::new_for_pair(config.clone(), db.clone(), new_tx, trade_lock);
+        new.resume_trading().await.unwrap();
+        assert!(!request.await.unwrap().0.success);
+        assert!(old_rx.try_recv().is_err());
+        assert_eq!(*new.status.read().await, BotStatus::Running);
+        assert_eq!(
+            db.load_pair_status(&config.exchange.symbol, TradingMode::Paper)
+                .unwrap(),
+            Some(BotStatus::Running)
+        );
+
+        let response = post_control_handler(
+            State(old),
+            Json(ControlRequest {
+                action: action.into(),
+                expected_mode: None,
+            }),
+        )
+        .await;
+        assert!(!response.0.success);
+        assert!(old_rx.try_recv().is_err());
+        assert_eq!(
+            db.load_pair_status(&config.exchange.symbol, TradingMode::Paper)
+                .unwrap(),
+            Some(BotStatus::Running)
+        );
+    }
+}
+
+#[tokio::test]
+async fn cancelled_control_finishes_before_retirement_and_recreation() {
+    for action in ["pause", "cancel_all"] {
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let config = AppConfig::default();
+        let trade_lock = Arc::new(tokio::sync::Mutex::new(()));
+        let (old_tx, mut old_rx) = tokio::sync::mpsc::channel(1);
+        let old = AppState::new_for_pair(config.clone(), db.clone(), old_tx, trade_lock.clone());
+        let status = old.status.write().await;
+        let request_state = old.clone();
+        let request = tokio::spawn(async move {
+            post_control_handler(
+                State(request_state),
+                Json(ControlRequest {
+                    action: action.into(),
+                    expected_mode: None,
+                }),
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while old.socket_control_lock.try_write().is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        request.abort();
+        assert!(matches!(request.await, Err(error) if error.is_cancelled()));
+        let retiring = old.clone();
+        let retirement = tokio::spawn(async move {
+            let _guard = retiring.socket_control_lock.write().await;
+            retiring.retire();
+        });
+        tokio::task::yield_now().await;
+        assert!(!retirement.is_finished());
+        drop(status);
+        retirement.await.unwrap();
+        assert!(matches!(
+            old_rx.try_recv(),
+            Ok(BotControlAction::PauseAlreadyPersisted
+                | BotControlAction::CancelAllAlreadyPersisted)
+                | Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+
+        let (new_tx, _new_rx) = tokio::sync::mpsc::channel(1);
+        let new = AppState::new_for_pair(config.clone(), db.clone(), new_tx, trade_lock);
+        new.resume_trading().await.unwrap();
+        assert_eq!(*new.status.read().await, BotStatus::Running);
+        assert_eq!(
+            db.load_pair_status(&config.exchange.symbol, TradingMode::Paper)
+                .unwrap(),
+            Some(BotStatus::Running)
+        );
+    }
+}
+
+#[tokio::test]
+async fn pause_updates_status_before_engine_accepts_action() {
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    let (action_tx, action_rx) = tokio::sync::mpsc::channel(1);
+    action_tx
+        .send(BotControlAction::GlobalRiskCancel)
+        .await
+        .unwrap();
+    let state = AppState::new(AppConfig::default(), db.clone(), action_tx);
+    let request_state = state.clone();
+    let request = tokio::spawn(async move {
+        post_control_handler(
+            State(request_state),
+            Json(ControlRequest {
+                action: "pause".into(),
+                expected_mode: None,
+            }),
+        )
+        .await
+    });
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while *state.status.read().await != BotStatus::Paused {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while db.load_bot_status().unwrap() != Some(BotStatus::Paused) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!request.is_finished());
+    drop(action_rx);
+    assert!(!request.await.unwrap().0.success);
+}
+
+#[tokio::test]
+async fn get_orders_handler_returns_orders_sorted_by_price_desc() {
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    let (action_tx, _action_rx) = tokio::sync::mpsc::channel(1);
+    let state = AppState::new(AppConfig::default(), db, action_tx);
+    {
+        let mut orders = state.active_orders.write().await;
+        for (id, price) in [
+            ("b", rust_decimal_macros::dec!(100)),
+            ("a", rust_decimal_macros::dec!(200)),
+            ("c", rust_decimal_macros::dec!(100)),
+        ] {
+            orders.insert(
+                id.into(),
+                crate::types::GridOrder {
+                    client_order_id: id.into(),
+                    order_id: None,
+                    symbol: "SOLUSDC".into(),
+                    side: crate::types::OrderSide::Buy,
+                    price,
+                    quantity: rust_decimal_macros::dec!(1),
+                    amount_usdc: price,
+                    status: crate::types::OrderStatus::New,
+                    created_at: chrono::Utc::now(),
+                    updated_at: chrono::Utc::now(),
+                    grid_level: 0,
+                    paired_client_order_id: None,
+                    is_take_profit: false,
+                    purpose: crate::types::OrderPurpose::Grid,
+                    merge_sources: Vec::new(),
+                },
+            );
+        }
+    }
+    let response = get_orders_handler(State(state)).await.0;
+    let ids: Vec<_> = response
+        .data
+        .unwrap()
+        .into_iter()
+        .map(|o| o.client_order_id)
+        .collect();
+    assert_eq!(ids, vec!["a", "b", "c"]);
+}
+
+#[tokio::test]
+async fn cold_token_lookups_are_bounded_and_malformed_tokens_skip_sqlite() {
+    use axum::body::{to_bytes, Body};
+    use axum::http::Request;
+
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    db.create_session("hot-valid-token").unwrap();
+    db.create_session("cold-valid-token").unwrap();
+    let (tx, _rx) = tokio::sync::mpsc::channel(1);
+    let state = auth_state(AppConfig::default(), db.clone(), tx);
+    let app = create_router(state.clone());
+
+    // Warm "hot-valid-token" into the in-memory session cache.
+    assert_eq!(
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/status")
+                    .header("Authorization", "Bearer hot-valid-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
+    let permits: Vec<_> = (0..16)
+        .map(|_| state.auth.try_acquire_session_lookup_permit().unwrap())
+        .collect();
+    assert!(state.auth.try_acquire_session_lookup_permit().is_none());
+
+    // Hot cached tokens still succeed without acquiring a cold lookup permit.
+    assert_eq!(
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/status")
+                    .header("Authorization", "Bearer hot-valid-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
+    // Cold tokens return 503 when all 16 cold lookup permits are busy.
+    assert_eq!(
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/status")
+                    .header("Authorization", "Bearer cold-valid-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/status")
+                    .header("Authorization", "Bearer cold-valid-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+
+    // Oversized (>128) or non-ASCII-graphic tokens are rejected before touching AuthContext.
+    let oversized = "a".repeat(129);
+    for bad in [oversized.as_str(), "bad token with space"] {
+        assert_eq!(
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/status")
+                        .header("Authorization", format!("Bearer {bad}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let status_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/status")
+                    .header("Authorization", format!("Bearer {bad}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(status_res.status(), StatusCode::OK);
+        let bytes = to_bytes(status_res.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["data"]["authenticated"], false);
+    }
+
+    drop(permits);
+    assert_eq!(
+        app.oneshot(
+            Request::builder()
+                .uri("/api/status")
+                .header("Authorization", "Bearer cold-valid-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn routers_attach_security_headers_without_touching_websocket_upgrades() {
+    use axum::body::Body;
+    use axum::http::Request;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    let mut config = AppConfig::default();
+    config.ensure_pair_list().unwrap();
+    db.save_config(&config).unwrap();
+    let (tx, _rx) = tokio::sync::mpsc::channel(1);
+    let state = AppState::new(config.clone(), db.clone(), tx);
+    let mut runtime = crate::runtime::TradingRuntime::start_with_test_exchange(
+        &config,
+        db,
+        "http://127.0.0.1:1".into(),
+    )
+    .await
+    .unwrap();
+    let managed = create_managed_router(runtime.handle()).await;
+    for router in [
+        create_router(state.clone()),
+        create_multi_router(vec![state.clone()]),
+        create_multi_router(Vec::new()),
+        managed,
+    ] {
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let headers = response.headers();
+        assert_eq!(headers["Cache-Control"], "no-store");
+        assert_eq!(headers["X-Content-Type-Options"], "nosniff");
+        assert_eq!(headers["X-Frame-Options"], "DENY");
+        assert_eq!(headers["Referrer-Policy"], "same-origin");
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, create_router(state)).await.unwrap();
+    });
+    let mut ws_req = format!("ws://{address}/ws").into_client_request().unwrap();
+    ws_req
+        .headers_mut()
+        .insert("Sec-WebSocket-Protocol", "auth".parse().unwrap());
+    let (_socket, upgrade_res) = tokio_tungstenite::connect_async(ws_req).await.unwrap();
+    assert_eq!(upgrade_res.status(), StatusCode::SWITCHING_PROTOCOLS);
+    assert!(!upgrade_res.headers().contains_key("X-Frame-Options"));
+    server.abort();
+    let _ = runtime.shutdown(std::time::Duration::from_secs(2)).await;
+}
+
+#[tokio::test]
+async fn shared_proxy_ip_successful_login_preserves_prior_failed_attempts_and_disabled_auth_is_isolated(
+) {
+    use axum::{body::Body, http::Request};
+    let unconfigured_db = Arc::new(Database::open(":memory:").unwrap());
+    let (unconfigured_tx, _unconfigured_rx) = tokio::sync::mpsc::channel(1);
+    let unconfigured_state = AppState::new(AppConfig::default(), unconfigured_db, unconfigured_tx);
+    let unconfigured_app = create_router(unconfigured_state.clone()).layer(axum::Extension(
+        axum::extract::ConnectInfo(
+            "198.51.100.10:4000"
+                .parse::<std::net::SocketAddr>()
+                .unwrap(),
+        ),
+    ));
+    let disabled_probe = Request::builder()
+        .method("POST")
+        .uri("/api/auth/login")
+        .header("Content-Type", "application/json")
+        .body(Body::from(r#"{"password":"probe"}"#))
+        .unwrap();
+    assert_eq!(
+        unconfigured_app
+            .oneshot(disabled_probe)
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    {
+        let failures = unconfigured_state.auth.login_failures.lock().await;
+        assert!(failures.by_source.is_empty());
+        assert!(failures.global.is_empty());
+    }
+
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    let (tx, _rx) = tokio::sync::mpsc::channel(1);
+    let state = AppState::new_with_admin_auth(
+        AppConfig::default(),
+        db,
+        tx,
+        Some(Arc::new(
+            crate::auth::AdminAuth::from_password("admin-secret-pw").unwrap(),
+        )),
+    );
+    let proxy_addr: std::net::SocketAddr = "198.51.100.20:5000".parse().unwrap();
+    let proxy_ip = proxy_addr.ip();
+    let app =
+        create_router(state.clone()).layer(axum::Extension(axum::extract::ConnectInfo(proxy_addr)));
+    let login_req = |pw: &str| {
+        Request::builder()
+            .method("POST")
+            .uri("/api/auth/login")
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::json!({"password": pw}).to_string()))
+            .unwrap()
+    };
+
+    // 5 failed attempts behind shared proxy IP
+    for _ in 0..5 {
+        let res = app.clone().oneshot(login_req("wrong-pw")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+    assert_eq!(
+        state.auth.login_failures.lock().await.by_source[&proxy_ip].len(),
+        5
+    );
+
+    // 1 valid login behind the same shared proxy IP rolls back ONLY its own attempt
+    let ok_res = app
+        .clone()
+        .oneshot(login_req("admin-secret-pw"))
+        .await
+        .unwrap();
+    assert_eq!(ok_res.status(), StatusCode::OK);
+    {
+        let failures = state.auth.login_failures.lock().await;
+        assert_eq!(failures.by_source[&proxy_ip].len(), 5);
+        assert_eq!(failures.global.len(), 5);
+    }
+
+    // 5 more failed attempts hit the 10-attempt source cap (proving prior 5 were not wiped)
+    for _ in 0..5 {
+        let res = app.clone().oneshot(login_req("wrong-pw")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+    let blocked_res = app.oneshot(login_req("wrong-pw")).await.unwrap();
+    assert_eq!(blocked_res.status(), StatusCode::TOO_MANY_REQUESTS);
+}

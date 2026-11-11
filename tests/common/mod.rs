@@ -1,3 +1,9 @@
+#![allow(dead_code)]
+
+pub mod auth;
+pub mod http;
+pub mod trades;
+
 use std::path::{Path, PathBuf};
 
 pub struct TempTestDir(PathBuf);

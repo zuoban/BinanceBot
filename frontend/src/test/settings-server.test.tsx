@@ -8,6 +8,7 @@ import type * as Api from '../lib/api';
 import { beforeEach, expect, it, vi } from 'vitest';
 import { EditContext } from '../lib/session';
 import type { ServerConfig } from '../lib/types';
+import { globalConfig as makeGlobalConfig, serverConfig } from './fixtures';
 import { MemoryRouter } from 'react-router-dom';
 import Settings from '../pages/Settings';
 
@@ -21,12 +22,8 @@ vi.mock('../lib/api', async importOriginal => {
   return { ...actual, api: mocks.api, post: mocks.post };
 });
 
-const initial: ServerConfig = {
-  version: 'v1',
-  saved: { host: '127.0.0.1', port: 8080 },
-  active: { host: '127.0.0.1', port: 8080 },
-};
-const globalConfig = { version: 'g1', recv_window: 5000, sync_interval_secs: 30, global_max_position_notional: null, pause_on_zero_available_margin: false, min_available_margin_pct: null };
+const initial = serverConfig();
+const baseGlobalConfig = makeGlobalConfig({ version: 'g1' });
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -48,7 +45,7 @@ function setup() {
 it('restores the saved server settings without a redundant post-save refetch', async () => {
   const saved: ServerConfig = { ...initial, version: 'v2', saved: { ...initial.saved, host: '127.0.0.2' } };
   const serverQuery = vi.fn().mockResolvedValueOnce(initial);
-  mocks.api.mockImplementation((path: string) => path === '/api/server/config' ? serverQuery() : Promise.resolve(globalConfig));
+  mocks.api.mockImplementation((path: string) => path === '/api/server/config' ? serverQuery() : Promise.resolve(baseGlobalConfig));
   mocks.post.mockResolvedValueOnce(saved).mockResolvedValueOnce({ ...saved, version: 'v3', saved: { ...saved.saved, port: 8081 } });
   setup();
   const user = userEvent.setup();
@@ -73,7 +70,7 @@ it('restores the saved server settings without a redundant post-save refetch', a
 it('keeps the original values and version together when a background refresh returns newer settings', async () => {
   const newer: ServerConfig = { ...initial, version: 'v2', saved: { host: '127.0.0.2', port: 8082 } };
   const serverQuery = vi.fn().mockResolvedValueOnce(initial).mockResolvedValue(newer);
-  mocks.api.mockImplementation((path: string) => path === '/api/server/config' ? serverQuery() : Promise.resolve(globalConfig));
+  mocks.api.mockImplementation((path: string) => path === '/api/server/config' ? serverQuery() : Promise.resolve(baseGlobalConfig));
   mocks.post.mockRejectedValue(new Error('服务设置已被其他请求修改，请刷新后重试'));
   const { client } = setup();
   const user = userEvent.setup();
@@ -96,7 +93,7 @@ it('keeps the original values and version together when a background refresh ret
 }, 40000);
 
 it('clears validation errors when reverting dirty server settings', async () => {
-  mocks.api.mockImplementation((path: string) => path === '/api/server/config' ? Promise.resolve(initial) : Promise.resolve(globalConfig));
+  mocks.api.mockImplementation((path: string) => path === '/api/server/config' ? Promise.resolve(initial) : Promise.resolve(baseGlobalConfig));
   setup();
   const user = userEvent.setup();
   await user.click(screen.getByRole('tab', { name: '服务设置' }));

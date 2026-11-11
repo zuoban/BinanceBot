@@ -1,7 +1,5 @@
-#[path = "common/http.rs"]
-mod http;
-#[path = "common/trades.rs"]
-mod trades;
+mod common;
+use common::{http, trades};
 
 use binance_grid_bot::config::AppConfig;
 use binance_grid_bot::db::Database;

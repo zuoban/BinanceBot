@@ -2,6 +2,7 @@ use super::{
     config_runtime::save_pair_status_on, immediate_tx, migrations::has_legacy_paper_history_on,
     Database,
 };
+use crate::sync_ext::MutexUnpoisonedExt;
 use crate::types::{AccountInfo, BotStatus, PositionInfo, TradingMode, PAPER_INITIAL_BALANCE};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -349,7 +350,7 @@ impl Database {
         account: &AccountInfo,
     ) -> Result<AccountInfo> {
         {
-            let mut ledger = self.paper_ledger.lock().unwrap_or_else(|e| e.into_inner());
+            let mut ledger = self.paper_ledger.lock_unpoisoned();
             if let Some(ledger) = ledger.as_mut() {
                 return ledger.shared(symbol, position, account);
             }
@@ -357,7 +358,7 @@ impl Database {
         // Writers hold `conn` until after updating `paper_ledger`, so loading all
         // committed rows under `conn` -> `paper_ledger` is atomic with their commits.
         let conn = self.lock_connection("shared_paper_account");
-        let mut ledger = self.paper_ledger.lock().unwrap_or_else(|e| e.into_inner());
+        let mut ledger = self.paper_ledger.lock_unpoisoned();
         let ledger = match ledger.as_mut() {
             Some(existing) => existing,
             None => ledger.insert(PaperLedger::load(&conn)?),
@@ -368,16 +369,11 @@ impl Database {
     /// Pre-load the shared paper ledger on a blocking thread so later runtime
     /// transitions from Live to Paper never touch SQLite on Tokio worker threads.
     pub(crate) fn warm_paper_ledger(&self) {
-        if self
-            .paper_ledger
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_some()
-        {
+        if self.paper_ledger.lock_unpoisoned().is_some() {
             return;
         }
         let conn = self.lock_connection("warm_paper_ledger");
-        let mut ledger = self.paper_ledger.lock().unwrap_or_else(|e| e.into_inner());
+        let mut ledger = self.paper_ledger.lock_unpoisoned();
         if ledger.is_none() {
             if let Ok(loaded) = PaperLedger::load(&conn) {
                 *ledger = Some(loaded);
@@ -442,12 +438,7 @@ impl Database {
         )?;
         save_pair_status_on(&tx, symbol, TradingMode::Paper, BotStatus::Paused)?;
         tx.commit()?;
-        if let Some(ledger) = self
-            .paper_ledger
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_mut()
-        {
+        if let Some(ledger) = self.paper_ledger.lock_unpoisoned().as_mut() {
             ledger.commit(symbol, &position, &account);
         }
         Ok(())

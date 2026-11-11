@@ -5,6 +5,7 @@ import { beforeEach, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import type * as Api from '../lib/api';
 import Settings from '../pages/Settings';
+import { globalConfig } from './fixtures';
 
 const mocks = vi.hoisted(() => ({ api: vi.fn(), post: vi.fn(), success: vi.fn(), error: vi.fn(), confirm: vi.fn() }));
 vi.mock('antd', async importOriginal => {
@@ -16,11 +17,7 @@ vi.mock('../lib/api', async importOriginal => {
   return { ...actual, api: mocks.api, post: mocks.post };
 });
 
-const config = {
-  version: 'version-1', recv_window: 5000, sync_interval_secs: 30, global_max_position_notional: '123.45',
-  has_api_key: false, has_api_secret: false, api_key_preview: '', telegram_enabled: false,
-  has_telegram_bot_token: false, telegram_chat_id: '',
-};
+const config = globalConfig({ global_max_position_notional: '123.45' });
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -208,5 +205,67 @@ it('启用 Telegram 通知时校验凭证完整性与清除冲突，并在超限
   await user.click(screen.getByRole('button', { name: '保存全局设置' }));
   expect(await screen.findByText('请先关闭通知后再清除 Telegram 凭证')).toBeInTheDocument();
   expect(mocks.confirm).not.toHaveBeenCalled();
+  expect(mocks.post).not.toHaveBeenCalled();
+}, 40000);
+
+it('输入 API Key 或开启通知开关时不提前标红未编辑字段，修正后立即消除错误', async () => {
+  setup();
+  const user = userEvent.setup();
+  const key = await screen.findByLabelText('API Key');
+  await waitFor(() => expect(key).toBeEnabled());
+  await user.type(key, 'first-key');
+  expect(screen.queryByText('请同时填写 API Key 和 API Secret')).not.toBeInTheDocument();
+
+  await user.click(screen.getByRole('switch', { name: '通知开关' }));
+  expect(screen.queryByText('请填写 Bot Token')).not.toBeInTheDocument();
+  expect(screen.queryByText('请填写 Chat ID')).not.toBeInTheDocument();
+
+  await user.click(screen.getByRole('button', { name: '保存全局设置' }));
+  expect(await screen.findByText('请同时填写 API Key 和 API Secret')).toBeInTheDocument();
+  expect(await screen.findByText('请填写 Bot Token')).toBeInTheDocument();
+  expect(await screen.findByText('请填写 Chat ID')).toBeInTheDocument();
+
+  await user.clear(key);
+  await user.click(screen.getByRole('switch', { name: '通知开关' }));
+  await waitFor(() => expect(screen.queryByText('请同时填写 API Key 和 API Secret')).not.toBeInTheDocument());
+  await waitFor(() => expect(screen.queryByText('请填写 Bot Token')).not.toBeInTheDocument());
+  await waitFor(() => expect(screen.queryByText('请填写 Chat ID')).not.toBeInTheDocument());
+}, 40000);
+
+it('已保存 API 凭证时阻止单边轮换，并拦截半残缺的已保存凭证状态', async () => {
+  mocks.api.mockResolvedValueOnce(globalConfig({ has_api_key: true, has_api_secret: true, api_key_preview: 'abcd...wxyz' }));
+  const user = userEvent.setup();
+  const firstClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const { unmount } = render(<QueryClientProvider client={firstClient}><MemoryRouter><Settings /></MemoryRouter></QueryClientProvider>);
+  const key = await screen.findByLabelText('API Key');
+  await waitFor(() => expect(key).toBeEnabled());
+  await user.type(key, 'rotated-only-key');
+  await user.click(screen.getByRole('button', { name: '保存全局设置' }));
+  expect(await screen.findByText('更换或配置 API 凭证时请同时填写 API Key 和 API Secret')).toBeInTheDocument();
+  expect(mocks.post).not.toHaveBeenCalled();
+  unmount();
+
+  mocks.api.mockResolvedValueOnce(globalConfig({ has_api_key: true, has_api_secret: false, api_key_preview: 'abcd...wxyz' }));
+  const secondClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={secondClient}><MemoryRouter><Settings /></MemoryRouter></QueryClientProvider>);
+  const syncInput = await screen.findByLabelText('同步间隔（秒）');
+  await waitFor(() => expect(syncInput).toBeEnabled());
+  await user.click(screen.getByRole('button', { name: '保存全局设置' }));
+  expect(await screen.findByText('更换或配置 API 凭证时请同时填写 API Key 和 API Secret')).toBeInTheDocument();
+  expect(mocks.post).not.toHaveBeenCalled();
+}, 40000);
+
+it('校验 API Key 与 Telegram Bot Token 格式，拒绝空白、控制字符与路径注入字符', async () => {
+  setup();
+  const user = userEvent.setup();
+  const key = await screen.findByLabelText('API Key');
+  await waitFor(() => expect(key).toBeEnabled());
+  await user.type(key, 'bad key');
+  expect(await screen.findByText('API Key 格式无效')).toBeInTheDocument();
+
+  const token = screen.getByLabelText('Bot Token');
+  await user.type(token, '123/evil?x=1');
+  expect(await screen.findByText('Telegram Bot Token 格式无效')).toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: '保存全局设置' }));
   expect(mocks.post).not.toHaveBeenCalled();
 }, 40000);

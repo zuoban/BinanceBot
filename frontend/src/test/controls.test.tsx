@@ -5,6 +5,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { ControlProvider, runBatchControls, useControls } from '../components/Controls';
 import type { ControlResult } from '../components/Controls';
 import { api, ApiError, post } from '../lib/api';
+import type * as Api from '../lib/api';
 import { pair, snapshot } from './fixtures';
 
 const messages = vi.hoisted(() => ({ warning: vi.fn(), error: vi.fn() }));
@@ -15,14 +16,10 @@ vi.mock('antd', () => ({
 }));
 vi.mock('@ant-design/icons', () => ({}));
 
-vi.mock('../lib/api', () => ({
-  ApiError: class extends Error {
-    constructor(message: string, public status: number, public kind: 'rejection' | 'invalid-response' = 'rejection') { super(message); }
-  },
+vi.mock('../lib/api', async importOriginal => ({
+  ...await importOriginal<typeof Api>(),
   api: vi.fn(),
   post: vi.fn(),
-  errorMessage: (error: unknown) => error instanceof Error ? error.message : String(error),
-  pairPath: (value: { symbol: string }, path: string) => `/api/pairs/${value.symbol}/${path}`,
 }));
 
 afterEach(() => { vi.useRealTimers(); vi.clearAllMocks(); });

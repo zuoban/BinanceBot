@@ -8,5 +8,8 @@ pub mod runtime;
 pub mod server;
 pub mod snapshots;
 pub mod strategy;
+pub(crate) mod sync_ext;
 pub(crate) mod telegram;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod types;

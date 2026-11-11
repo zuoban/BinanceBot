@@ -1,5 +1,6 @@
 use super::{beijing_midnight, config_runtime::load_config_on, hourly, Database};
 use crate::config::AppConfig;
+use crate::sync_ext::MutexUnpoisonedExt;
 use crate::types::TradingMode;
 use anyhow::Result;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
@@ -10,19 +11,13 @@ use std::path::Path;
 impl Database {
     pub(crate) fn cached_history_account_id(&self, identity: &[u8; 32]) -> Option<String> {
         self.history_account_ids
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .lock_unpoisoned()
             .get(identity)
             .cloned()
     }
 
     pub(crate) fn history_account_id(&self, identity: [u8; 32]) -> Result<String> {
-        if let Some(cached) = self
-            .history_account_ids
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&identity)
-        {
+        if let Some(cached) = self.history_account_ids.lock_unpoisoned().get(&identity) {
             return Ok(cached.clone());
         }
         let id: String = {
@@ -52,10 +47,7 @@ impl Database {
                 stmt.query_row(params![identity.as_slice()], |row| row.get(0))?
             }
         };
-        let mut cache = self
-            .history_account_ids
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut cache = self.history_account_ids.lock_unpoisoned();
         if cache.len() >= 256 {
             cache.clear();
         }

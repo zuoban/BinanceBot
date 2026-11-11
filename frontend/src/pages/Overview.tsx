@@ -116,7 +116,7 @@ export default function OverviewPage() {
     status: { fallback: 'all', allowed: ['all', 'RUNNING', 'PAUSED', 'ERROR', 'STOPPED', 'LIVE'] },
   });
   const compactFinance = Grid.useBreakpoint().md === false, [financesExpanded, setFinancesExpanded] = useState(false);
-  const dayNow = useBeijingDay(), dataExpired = useExpired(overview.data ? overview.dataUpdatedAt + SNAPSHOT_STALE_MS : Infinity);
+  const dayNow = useBeijingDay(overview.data?.generated_at, overview.dataUpdatedAt), dataExpired = useExpired(overview.data ? overview.dataUpdatedAt + SNAPSHOT_STALE_MS : Infinity);
   const entries = overview.data?.pairs ?? emptyPairs, recentTrades = overview.data?.recent_trades ?? emptyTrades;
   const stale = !!overview.error || (!!overview.data && dataExpired);
   const pairs = useMemo(() => entries.map(toPair), [entries]);

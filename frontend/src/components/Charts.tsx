@@ -5,7 +5,7 @@ import type { Snapshot } from '../lib/types';
 import { numeric, price, quantity } from '../lib/format';
 import { todayCount } from '../lib/portfolio';
 import { priceDiffPercent } from '../lib/gridPreview';
-import { useUtcHour } from '../lib/useNow';
+import { serverAlignedNow, useUtcHour } from '../lib/useNow';
 import { NoData, useCenterElementScroll } from './Common';
 export function todayHourlyData(stats: NonNullable<Snapshot['hourly_trade_stats']>, now = Date.now()) {
   const start = Date.parse(stats.window_start);
@@ -31,9 +31,9 @@ function sameHourlyStats(a: Snapshot['hourly_trade_stats'], b: Snapshot['hourly_
   return true;
 }
 
-export const HourlyChart = memo(function HourlyChart({ snapshot, now: currentNow }: { snapshot: Snapshot; now?: number }) {
-  const liveHour = useUtcHour(currentNow === undefined);
-  const now = currentNow ?? Date.now();
+export const HourlyChart = memo(function HourlyChart({ snapshot, receivedAt, now: currentNow }: { snapshot: Snapshot; receivedAt?: number; now?: number }) {
+  const liveHour = useUtcHour(currentNow === undefined, snapshot.generated_at, receivedAt);
+  const now = currentNow ?? serverAlignedNow(snapshot.generated_at, receivedAt) ?? Date.now();
   const hourBucket = currentNow === undefined ? liveHour : Math.floor(currentNow / 3_600_000);
   return <HourlyChartContent stats={snapshot.hourly_trade_stats} hourBucket={hourBucket} available={todayCount(snapshot, now) !== null} />;
 });

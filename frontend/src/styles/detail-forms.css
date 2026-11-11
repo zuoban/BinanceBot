@@ -160,6 +160,7 @@
   .config-form .ant-input-number, .settings-page .ant-input-number { max-width: 100%; }
   .detail-actions { display: grid; grid-template-columns: minmax(0, 1fr); width: 100%; }
   .detail-actions .ant-btn { width: 100%; min-height: 44px; }
+  .detail-actions .strategy-toggle-tip { display: flex; width: 100%; }
   .detail-actions > .ant-space { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
   .detail-status { padding: 10px 12px; }
   .detail-status .muted { margin-left: 0; width: 100%; }

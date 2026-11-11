@@ -1,5 +1,5 @@
-#[path = "common/http.rs"]
-mod http;
+mod common;
+use common::http;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};

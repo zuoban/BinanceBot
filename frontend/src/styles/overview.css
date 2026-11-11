@@ -98,6 +98,7 @@
 .strategy-card-actions .ant-btn { min-height: 32px; border-radius: var(--radius-control); }
 .strategy-card-actions .ant-btn-icon-only { width: 32px; }
 .strategy-toggle.ant-btn { min-width: 76px; padding-inline: 10px; }
+.strategy-toggle-tip { display: inline-flex; }
 .strategy-price { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .strategy-price > span { font-size: 12px; line-height: 16px; }
 .strategy-price strong { font: 500 28px/32px var(--font-mono); font-variant-numeric: tabular-nums; letter-spacing: -0.02em; overflow-wrap: anywhere; }

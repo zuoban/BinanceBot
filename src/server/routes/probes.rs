@@ -3,6 +3,7 @@ use crate::config::AppConfig;
 use crate::exchange::rate_limit::RateLimiter;
 use crate::exchange::BinanceFuturesClient;
 use crate::runtime::RuntimeHandle;
+use crate::sync_ext::MutexUnpoisonedExt;
 use crate::types::non_blank;
 use axum::extract::State;
 use axum::Json;
@@ -110,7 +111,7 @@ impl ProbeGate {
 
     /// Err carries the whole seconds left to wait (at least one).
     pub(super) fn enter(&self, now: std::time::Instant) -> Result<(), u64> {
-        let mut last = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut last = self.0.lock_unpoisoned();
         if let Some(wait) = last
             .and_then(|at| PROBE_COOLDOWN.checked_sub(now.saturating_duration_since(at)))
             .filter(|wait| !wait.is_zero())
@@ -177,29 +178,14 @@ pub(super) async fn test_exchange_handler(
     }
 }
 
-fn summarize_probe_detail(raw: &str) -> String {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return "未知错误".to_string();
-    }
-    let lower = trimmed.to_ascii_lowercase();
-    if lower.contains("<!doctype")
-        || lower.contains("<html")
-        || lower.contains("<head")
-        || lower.contains("<body")
-    {
-        return "远端服务返回异常响应，请稍后重试".to_string();
-    }
-    let collapsed: String = trimmed.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut out = String::new();
-    for (idx, ch) in collapsed.chars().enumerate() {
-        if idx >= 200 {
-            out.push('…');
-            break;
+fn format_probe_detail(raw: &str) -> String {
+    match crate::exchange::client::summarize_non_json_body(raw).as_str() {
+        "empty response body" => "未知错误".to_string(),
+        summary if summary.contains("upstream HTML error response") => {
+            "远端服务返回异常响应，请稍后重试".to_string()
         }
-        out.push(ch);
+        summary => summary.to_string(),
     }
-    out
 }
 
 pub(super) fn sanitized_probe_error(prefix: &str, error: &anyhow::Error) -> String {
@@ -208,7 +194,7 @@ pub(super) fn sanitized_probe_error(prefix: &str, error: &anyhow::Error) -> Stri
             crate::exchange::ExchangeError::ApiError { code, msg } => {
                 format!(
                     "{prefix}：币安返回错误 ({code}): {}",
-                    summarize_probe_detail(msg)
+                    format_probe_detail(msg)
                 )
             }
             crate::exchange::ExchangeError::HttpError(_) => {
@@ -218,14 +204,14 @@ pub(super) fn sanitized_probe_error(prefix: &str, error: &anyhow::Error) -> Stri
             | crate::exchange::ExchangeError::RequestRejected(msg)
             | crate::exchange::ExchangeError::PostOnlyRejected(msg)
             | crate::exchange::ExchangeError::ExecutionUnknown { msg, .. } => {
-                format!("{prefix}：{}", summarize_probe_detail(msg))
+                format!("{prefix}：{}", format_probe_detail(msg))
             }
         };
     }
     if error.downcast_ref::<reqwest::Error>().is_some() {
         return format!("{prefix}：网络请求失败，请检查网络后重试");
     }
-    format!("{prefix}：{}", summarize_probe_detail(&error.to_string()))
+    format!("{prefix}：{}", format_probe_detail(&error.to_string()))
 }
 
 /// Send one fixed probe message with the (possibly unsaved) Telegram credentials.

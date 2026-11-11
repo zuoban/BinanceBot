@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { App } from 'antd';
 import { beforeEach, expect, it, vi } from 'vitest';
 import { LogsTable, OrdersTable, TradesTable } from '../components/DataTables';
-import type { Log, Order, Trade } from '../lib/types';
+import { log as makeLog, order as makeOrder, trade as makeTrade } from './fixtures';
 
 const exported = vi.hoisted(() => ({ download: vi.fn(), copy: vi.fn() }));
 vi.mock('../lib/exportCsv', async importOriginal => ({ ...await importOriginal<typeof import('../lib/exportCsv')>(), downloadCsv: exported.download, copyText: exported.copy }));
@@ -13,9 +13,9 @@ beforeEach(() => {
   exported.copy.mockResolvedValue(true);
 });
 
-const trade = (id: string, side: 'BUY' | 'SELL', pnl: string): Trade => ({ trade_id: id, symbol: 'BTCUSDC', mode: 'PAPER', side, price: '67420.5', quantity: '0.002', amount_usdc: '134.84', realized_pnl: pnl, commission: '0.02', pnl_verified: true, is_maker: true, timestamp: '2026-11-05T01:00:00Z', note: '=cmd' });
-const order = (id: string, side: 'BUY' | 'SELL', price: string): Order => ({ client_order_id: id, order_id: 1, symbol: 'BTCUSDC', side, price, quantity: '0.002', amount_usdc: '100', status: 'NEW', created_at: '2026-11-05T01:00:00Z', grid_level: 1, is_take_profit: false, purpose: 'GRID', merge_sources: [] });
-const log = (level: string, message: string): Log => ({ timestamp: '2026-11-05T01:00:00Z', level, message });
+const trade = (id: string, side: 'BUY' | 'SELL', pnl: string) => makeTrade({ trade_id: id, symbol: 'BTCUSDC', side, price: '67420.5', quantity: '0.002', amount_usdc: '134.84', realized_pnl: pnl, commission: '0.02', note: '=cmd' });
+const order = (id: string, side: 'BUY' | 'SELL', price: string) => makeOrder({ client_order_id: id, symbol: 'BTCUSDC', side, price, quantity: '0.002' });
+const log = (level: string, message: string) => makeLog({ level, message });
 const view = (node: React.ReactNode) => render(<App>{node}</App>);
 
 it('filters trades by side and exports exactly the rows shown, with spreadsheet-safe cells', async () => {
@@ -128,4 +128,11 @@ it('exposes SUCCESS instead of DEBUG in the log level filter and styles success 
   const badges = screen.getAllByText('SUCCESS').filter(el => el.classList.contains('log-level'));
   expect(badges.length).toBeGreaterThan(0);
   for (const badge of badges) expect(badge).toHaveClass('log-level-success');
+});
+
+it('renders recent trade times with ageText so slight browser clock lag never reads as 0秒后 or 3秒后', () => {
+  const fillTime = Date.parse('2026-11-05T01:00:03Z');
+  view(<TradesTable overview now={fillTime - 3_000} trades={[makeTrade({ trade_id: 'lag-1', timestamp: new Date(fillTime).toISOString() })]} />);
+  expect(screen.queryByText(/后/)).not.toBeInTheDocument();
+  expect(screen.getAllByText('刚刚').length).toBeGreaterThan(0);
 });

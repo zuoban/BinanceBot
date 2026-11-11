@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { formatDecimalDisplay, parseSignedDecimal, parseUnsignedDecimal, subSignedDecimals } from '../lib/decimal';
 import { ageText, number, positiveDecimalText, quantity, relativeTime, trimFractionZeros } from '../lib/format';
-import { accountGroups, availableRatio, comparePositionAmount, groupTradePnl, nextAccountExpiry, positionAmount, positionGroups, todayCount, todayPnlGroups } from '../lib/portfolio';
+import { accountGroups, availableRatio, comparePositionAmount, entryMarkExpiry, groupTradePnl, isEntryMarkFresh, nextAccountExpiry, positionAmount, positionGroups, todayCount, todayPnlGroups } from '../lib/portfolio';
 import { snapshot } from './fixtures';
 
 it('removes only insignificant fractional zeros and normalizes negative zero after rounding', () => {
@@ -56,6 +56,8 @@ it('formats relative trade times across units and handles invalid or future date
   const at = (seconds: number) => new Date(now - seconds * 1000).toISOString();
   expect([1, 59, 60, 3600, 86400].map(seconds => relativeTime(at(seconds), now)))
     .toEqual(['1秒前', '59秒前', '1分钟前', '1小时前', '1天前']);
+  expect(relativeTime(now, now)).toBe('0秒前');
+  expect(relativeTime(now + 400, now)).toBe('0秒前');
   expect(relativeTime(at(-2), now)).toBe('2秒后');
   expect(relativeTime('invalid', now)).toBe('--');
 });
@@ -305,4 +307,26 @@ it('describes data age without ever reading as the future', () => {
   expect(ageText(now - 1500, now)).toBe('刚刚');
   expect(ageText(now - 42_000, now)).toBe('42秒前');
   expect(ageText(now - 125_000, now)).toBe('2分钟前');
+});
+
+it('evaluates mark freshness and exact expiry boundaries across clock skew', () => {
+  const now = 1_700_000_000_000;
+  const s = snapshot('SOLUSDC');
+  s.ticker.mark_update_time = new Date(now - 14_999).toISOString();
+  expect(isEntryMarkFresh({ snapshot: s, mode: 'PAPER' }, now)).toBe(true);
+  expect(entryMarkExpiry({ snapshot: s, mode: 'PAPER' }, now)).toBe(now);
+  expect(isEntryMarkFresh({ snapshot: s, mode: 'PAPER' }, now + 1)).toBe(false);
+  expect(isEntryMarkFresh({ snapshot: s, mode: 'PAPER', account_observation_stale: true }, now)).toBe(false);
+
+  s.ticker.mark_update_time = new Date(now + 6_000).toISOString();
+  expect(isEntryMarkFresh({ snapshot: s, mode: 'PAPER' }, now)).toBe(false);
+  expect(entryMarkExpiry({ snapshot: s, mode: 'PAPER' }, now)).toBe(now + 1_000 - 1);
+  expect(isEntryMarkFresh({ snapshot: s, mode: 'PAPER' }, now + 1_000)).toBe(true);
+
+  const serverNow = now - 20_000;
+  s.ticker.mark_update_time = new Date(serverNow - 5_000).toISOString();
+  const skewed = { snapshot: s, mode: 'LIVE' as const, generated_at_ms: serverNow, received_at_ms: now };
+  expect(isEntryMarkFresh(skewed, now)).toBe(true);
+  expect(entryMarkExpiry(skewed, now)).toBe(now + 10_000 - 1);
+  expect(isEntryMarkFresh(skewed, now + 10_000)).toBe(false);
 });

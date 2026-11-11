@@ -8,7 +8,7 @@ import { useConfirmDialog } from '../lib/confirmDialog';
 import { useLiveAccounts, usePairs } from '../lib/queries';
 import { AccountsContext, EditContext, useSession } from '../lib/session';
 import { compactNumber, directionLabel, ratioText, statusLabel } from '../lib/format';
-import { SNAPSHOT_STALE_MS } from '../lib/portfolio';
+import { PAIRS_STALE_MS } from '../lib/portfolio';
 import type { AccountObservation, Mode, Pair } from '../lib/types';
 import { useAccountGroups, useExpired } from '../lib/useNow';
 import { ControlProvider } from './Controls';
@@ -101,7 +101,7 @@ export default function Shell() {
     if (savingRef.current) return;
     try { await logout(); } catch { message.error('退出失败，会话可能仍然有效，请重试'); }
   }), [dirty, logout, logoutDialog.confirm, message, runLogout]);
-  const pairsStale = useExpired(pairs.dataUpdatedAt + SNAPSHOT_STALE_MS);
+  const pairsStale = useExpired(pairs.data ? pairs.dataUpdatedAt + PAIRS_STALE_MS : -Infinity);
   const alert = !!liveAccounts.error || liveAccounts.stale || accounts.some(entry => entry.account_observation_stale || entry.snapshot.status === 'ERROR');
   const symbol = routeSymbol(location.pathname);
   const [drawer, setDrawer] = useState(false), [palette, setPalette] = useState(false);
@@ -123,7 +123,7 @@ export default function Shell() {
         <Button type="text" icon={<MenuOutlined />} aria-label="打开主导航" aria-expanded={drawer} onClick={() => setDrawer(true)} />
       </div>
     </header>
-    <Drawer open={drawer} onClose={closeDrawer} placement="left" size={280} closable={false} className="sidebar-drawer" title={null} styles={{ body: { padding: 0 } }} aria-label="主导航"><SidebarBody idPrefix="drawer" {...sidebarProps} /></Drawer>
+    <Drawer open={drawer} onClose={closeDrawer} destroyOnHidden placement="left" size={280} closable={false} className="sidebar-drawer" title={null} styles={{ body: { padding: 0 } }} aria-label="主导航"><SidebarBody idPrefix="drawer" {...sidebarProps} /></Drawer>
     <main className="content" id="main"><Outlet /></main>
     <nav className="bottombar" aria-label="底部导航">
       <Link to="/" className={`bottombar-item${page === 'overview' ? ' bottombar-item-active' : ''}`} aria-current={page === 'overview' ? 'page' : undefined}><AppstoreOutlined aria-hidden="true" /><span>总览</span></Link>

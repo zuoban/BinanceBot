@@ -8,7 +8,8 @@ import { usePairSnapshot, usePairs } from '../lib/queries';
 import { signedDecimalToNumber, subSignedDecimals } from '../lib/decimal';
 import { beijingClockFormat, cnyText, number, positivePrice, quantity, ratioText, trimFractionZeros } from '../lib/format';
 import { entryPriceText, quoteAsset, todayTradeCounts } from '../lib/portfolio';
-import type { LogItem, Pair, Snapshot, Trade } from '../lib/types';
+import { AccountsContext } from '../lib/session';
+import type { AccountObservation, Log, Pair, Snapshot, Trade } from '../lib/types';
 import { ControlResultBanner, DirectionTag, DirectionText, ErrorNotice, FreshnessText, ModeTag, PageBreadcrumb, PageTitle, Pnl, SignalChip, StatusTag } from '../components/Common';
 import { PairControls, useControls } from '../components/Controls';
 import { DepthChart, HourlyChart } from '../components/Charts';
@@ -28,31 +29,41 @@ export function resolveTrades(snapshot: Snapshot | undefined, fetched: Trade[] |
   const scopedRecent = recent.filter(trade => trade.symbol === snapshot.symbol && trade.mode === snapshot.mode);
   if (isError || !Array.isArray(fetched) || !fetchedAt) return scopedRecent;
   const scoped = fetched.filter(trade => trade.symbol === snapshot.symbol && trade.mode === snapshot.mode);
-  if (fetchedAt >= snapshotAt) return scoped;
-  if (snapshot.stats.total_trades <= scopedRecent.length) return scopedRecent.slice(0, snapshot.stats.total_trades);
-  const byId = new Map(scopedRecent.map(trade => [trade.trade_id, trade]));
-  const seen = new Set(scoped.map(trade => trade.trade_id));
-  return [...scopedRecent.filter(trade => !seen.has(trade.trade_id)), ...scoped.map(trade => byId.get(trade.trade_id) ?? trade)]
-    .sort((a, b) => (Date.parse(b.timestamp) - Date.parse(a.timestamp)) || b.trade_id.localeCompare(a.trade_id))
-    .slice(0, Math.max(snapshot.stats.total_trades, scopedRecent.length));
+  if ((fetchedAt > snapshotAt && scoped.length === 0) || (snapshotAt >= fetchedAt && snapshot.stats.total_trades === 0)) return [];
+  if (snapshotAt > fetchedAt && snapshot.stats.total_trades <= scopedRecent.length) {
+    const fetchedById = new Map(scoped.map(trade => [trade.trade_id, trade]));
+    return scopedRecent.slice(0, snapshot.stats.total_trades).map(trade => {
+      const other = fetchedById.get(trade.trade_id);
+      return other && trade.pnl_verified !== other.pnl_verified ? (trade.pnl_verified ? trade : other) : trade;
+    });
+  }
+  const merged = new Map<string, Trade>();
+  const [primary, secondary] = fetchedAt >= snapshotAt ? [scoped, scopedRecent] : [scopedRecent, scoped];
+  for (const trade of primary) merged.set(trade.trade_id, trade);
+  for (const trade of secondary) {
+    const existing = merged.get(trade.trade_id);
+    merged.set(trade.trade_id, existing ? (existing.pnl_verified !== trade.pnl_verified ? (existing.pnl_verified ? existing : trade) : existing) : trade);
+  }
+  const sorted = [...merged.values()].sort((a, b) => (Date.parse(b.timestamp) - Date.parse(a.timestamp)) || b.trade_id.localeCompare(a.trade_id));
+  return fetchedAt >= snapshotAt ? sorted : sorted.slice(0, Math.max(snapshot.stats.total_trades, scopedRecent.length));
 }
 
-export function resolveLogs(snapshot: Snapshot | undefined, fetched: LogItem[] | undefined, isError: boolean, fetchedAt: number, snapshotAt: number): LogItem[] {
+export function resolveLogs(snapshot: Snapshot | undefined, fetched: Log[] | undefined, isError: boolean, fetchedAt: number, snapshotAt: number): Log[] {
   const recent = snapshot?.recent_logs ?? [];
   if (!snapshot || isError || !Array.isArray(fetched) || !fetchedAt) return recent;
   if (!fetched.length) return snapshotAt > fetchedAt ? recent : fetched;
   const firstTs = Date.parse(fetched[0].timestamp), lastTs = Date.parse(fetched[fetched.length - 1].timestamp);
   const chronological = fetched.length > 1 && !(firstTs > lastTs);
   const ordered = chronological ? [...fetched].reverse() : fetched;
-  if (fetchedAt >= snapshotAt || !recent.length) return ordered;
+  if (!recent.length) return ordered;
   const head = ordered[0];
   const overlap = recent.findIndex(item => item.timestamp === head.timestamp && item.level === head.level && item.message === head.message);
   if (overlap > 0) return [...recent.slice(0, overlap), ...ordered].slice(0, 250);
   if (overlap === 0) return ordered;
-  if (Date.parse(recent[recent.length - 1].timestamp) >= Date.parse(head.timestamp)) return [...recent, ...ordered].slice(0, 250);
-  return ordered.length >= recent.length ? ordered : recent;
+  const tailTs = Date.parse(recent[recent.length - 1].timestamp), headTs = Date.parse(head.timestamp);
+  if (fetchedAt >= snapshotAt ? tailTs > headTs : tailTs >= headTs) return [...recent, ...ordered].slice(0, 250);
+  return fetchedAt >= snapshotAt || ordered.length >= recent.length ? ordered : recent;
 }
-
 function usePairTabHistory(pair: Pair | undefined, tab: (typeof detailTabs)[number], snapshot: Snapshot | undefined, snapshotUpdatedAt = 0) {
   const client = useContext(QueryClientContext) ?? fallbackClient;
   const activeMode = snapshot?.mode ?? pair?.mode;
@@ -64,7 +75,7 @@ function usePairTabHistory(pair: Pair | undefined, tab: (typeof detailTabs)[numb
   }, client);
   const logsQuery = useQuery({
     queryKey: ['snapshot', pair?.symbol, pair?.scoped, 'logs', activeMode],
-    queryFn: ({ signal }) => { if (!pair) throw new Error('该交易对不存在或已移除'); return api<LogItem[]>(pairPath(pair, 'logs'), { signal }); },
+    queryFn: ({ signal }) => { if (!pair) throw new Error('该交易对不存在或已移除'); return api<Log[]>(pairPath(pair, 'logs'), { signal }); },
     enabled: !!pair && tab === 'logs',
     refetchInterval: 5_000,
   }, client);
@@ -73,15 +84,31 @@ function usePairTabHistory(pair: Pair | undefined, tab: (typeof detailTabs)[numb
   return { trades, logs };
 }
 
+function buildDetailAccountEntries(s: Snapshot | undefined, pair: Pair | undefined, liveAccounts: AccountObservation[], dataUpdatedAt: number, stale: boolean): AccountObservation[] {
+  if (!s || !pair) return [];
+  const siblings = liveAccounts.filter(entry => entry.snapshot.symbol !== pair.symbol);
+  const receivedAtMs = dataUpdatedAt > 0 ? dataUpdatedAt : undefined;
+  const parsedGeneratedAt = s.generated_at ? Date.parse(s.generated_at) : NaN;
+  const skewRef = liveAccounts.find(entry => entry.generated_at_ms !== undefined && entry.received_at_ms !== undefined);
+  const generatedAtMs = Number.isFinite(parsedGeneratedAt)
+    ? parsedGeneratedAt
+    : receivedAtMs !== undefined && skewRef
+      ? receivedAtMs + (skewRef.generated_at_ms! - skewRef.received_at_ms!)
+      : undefined;
+  return [...siblings, { snapshot: s, mode: s.mode, account_observation_stale: stale, generated_at_ms: generatedAtMs, received_at_ms: receivedAtMs }];
+}
+
 export default function PairDetail() {
-  const { symbol } = useParams(), navigate = useNavigate();
+  const { symbol } = useParams(), navigate = useNavigate(), liveAccounts = useContext(AccountsContext);
   const pairs = usePairs(), pair = pairs.data?.find(p => p.symbol === symbol);
-  const query = usePairSnapshot(pair), controls = useControls(), dayNow = useBeijingDay();
+  const query = usePairSnapshot(pair), controls = useControls();
+  const s = query.data, asset = quoteAsset(symbol ?? ''), stale = query.stale || !!query.error;
+  const dayNow = useBeijingDay(s?.generated_at, query.dataUpdatedAt);
   const [tab, setTab] = useUrlParam('tab', 'monitor', detailTabs);
-  const s = query.data, asset = quoteAsset(symbol ?? '');
   const { trades, logs } = usePairTabHistory(pair, tab, s, query.dataUpdatedAt);
-  const accountEntries = useMemo(() => s && pair ? [{ snapshot: s, mode: s.mode, account_observation_stale: query.stale }] : [], [s, pair, query.stale]);
-  const account = useAccountGroups(accountEntries, !!s && !!pair)[0];
+  const accountEntries = useMemo(() => buildDetailAccountEntries(s, pair, liveAccounts, query.dataUpdatedAt, stale), [s, pair, liveAccounts, query.dataUpdatedAt, stale]);
+  const groups = useAccountGroups(accountEntries, !!s && !!pair);
+  const account = s ? groups.find(group => group.key === `${s.mode}:${s.account.asset || asset}`) : undefined;
   const today = useMemo(() => s ? todayTradeCounts(s, dayNow) : null, [s, dayNow]);
   useDocumentTitle(`${positivePrice(s?.ticker.mark_price)} | ${today?.buy ?? '--'}B | ${today?.sell ?? '--'}S`);
   const todayPnl = today && s?.hourly_trade_stats && s.hourly_trade_stats.pending_pnl_count === 0 ? s.hourly_trade_stats.realized_pnl : null;
@@ -90,15 +117,15 @@ export default function PairDetail() {
   return <div>
     <PageBreadcrumb items={[{ label: '策略总览', to: '/' }, { label: symbol ?? '策略详情' }]} />
     <PageTitle title={symbol ?? '策略详情'} description="行情、网格与成交，随策略实时更新"
-      extra={<div className="detail-actions">{currentPair && <PairControls pair={currentPair} stale={query.stale || !!query.error} />}<Button icon={<SettingOutlined />} disabled={!symbol} onClick={() => { if (symbol) navigate(pairRoute(symbol, true)); }}>策略参数</Button></div>} />
+      extra={<div className="detail-actions">{currentPair && <PairControls pair={currentPair} stale={stale} />}<Button icon={<SettingOutlined />} disabled={!symbol} onClick={() => { if (symbol) navigate(pairRoute(symbol, true)); }}>策略参数</Button></div>} />
     <ErrorNotice error={pairs.error || query.error} retry={() => { if (pairs.error) void pairs.refetch(); if (pair) void query.refetch(); }} />
     {pairs.data && !pair && !pairs.isFetching && <Alert type="warning" title="该交易对不存在或已移除" />}
     {symbol && <ControlResultBanner symbol={symbol} results={controls.results} clearResult={controls.clearResult} variant="alert" />}
     {pair && <div className="detail-status signal-strip"><StatusTag status={currentPair!.status} /><DirectionTag direction={currentPair!.grid_config.direction} /><ModeTag mode={currentPair!.mode} /><SignalChip tier={query.live ? 'calm' : 'yellow'}>{query.live ? '实时连接' : 'HTTP 自动刷新'}</SignalChip><span className="muted freshness" title={query.dataUpdatedAt ? `最近同步 ${beijingClockFormat.format(query.dataUpdatedAt)}` : undefined}>{query.dataUpdatedAt ? <FreshnessText updatedAt={query.dataUpdatedAt} prefix="更新于 " /> : '等待首次快照'}</span></div>}
-    {query.stale && s && <Alert type="warning" showIcon title="快照暂未更新，数值可能已过期；仍可撤单并暂停。" />}
+    {stale && !query.error && s && <Alert type="warning" showIcon title="快照暂未更新，数值可能已过期；仍可撤单并暂停。" />}
     {!s && (pairs.isPending || (!pair && pairs.isFetching) || (pair && query.isPending)) && <DetailLoading />}
     {s && <>
-      <Row gutter={[16, 16]} className={`metric-row${query.stale ? ' is-stale' : ''}`}>
+      <Row gutter={[16, 16]} className={`metric-row${stale ? ' is-stale' : ''}`}>
         <Col xs={12} xl={6} className="metric-col"><Card><Statistic title={`标记价格 / ${asset}`} value={positivePrice(s.ticker.mark_price)} /><div className="muted">最新成交 {positivePrice(s.ticker.last_price)}</div></Card></Col>
         <Col xs={12} xl={6} className="metric-col"><Card><Statistic title={`已实现盈亏 / ${asset}`} value={s.stats.total_realized_pnl} formatter={() => <Pnl value={s.stats.total_realized_pnl} />} /><div className="muted">扣费后 {number(netPnl)}</div></Card></Col>
         <Col xs={12} xl={6} className="metric-col"><Card><Statistic title={`持仓未实现 / ${asset}`} value={s.position.unrealized_pnl} formatter={() => <Pnl value={s.position.unrealized_pnl} />} /><div className="muted">持仓数量 {quantity(s.position.size)}</div></Card></Col>
@@ -111,7 +138,7 @@ export default function PairDetail() {
             <div><span>买入</span><strong>{today?.buy ?? '--'} <small>笔</small></strong></div>
             <div><span>卖出</span><strong>{today?.sell ?? '--'} <small>笔</small></strong></div>
             <div><span>已实现盈亏 / {asset}</span><strong><Pnl value={todayPnl} compact /></strong>{today && s.hourly_trade_stats!.pending_pnl_count > 0 && <small className="pending-pnl-warn">盈亏待同步</small>}</div>
-          </div><HourlyChart snapshot={s} /></Card></Col>
+          </div><HourlyChart snapshot={s} receivedAt={query.dataUpdatedAt} /></Card></Col>
             <Col xs={24} xl={10}><Card title="实时网格深度" extra={<span className="muted">价格 / {asset} · 数量</span>}><DepthChart snapshot={s} /></Card></Col></Row>
           <Card title="仓位与策略明细" className="detail-card"><Descriptions column={{ xs: 1, sm: 2, lg: 3 }} items={[
             { key: 'direction', label: '方向', children: <DirectionText direction={s.grid_config.direction} /> },

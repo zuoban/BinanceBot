@@ -1,15 +1,12 @@
 use axum::body::{to_bytes, Body};
 use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
-#[path = "common/auth.rs"]
-mod auth;
 mod common;
-#[path = "common/http.rs"]
-mod http;
 use binance_grid_bot::config::AppConfig;
 use binance_grid_bot::db::Database;
 use binance_grid_bot::server::{create_router, AppState};
 use binance_grid_bot::types::BotControlAction;
+use common::{auth, http};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use std::net::SocketAddr;

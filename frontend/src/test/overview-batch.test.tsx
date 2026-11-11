@@ -11,7 +11,7 @@ import { AccountsContext } from '../lib/session';
 import type * as Queries from '../lib/queries';
 
 const overview = vi.hoisted(() => ({ data: undefined as Overview | undefined, error: null as Error | null, dataUpdatedAt: Date.now(), isPending: false, refetch: vi.fn() }));
-const actions = vi.hoisted(() => ({ run: vi.fn(), clearResult: vi.fn(), results: {} as Record<string, string>, remove: vi.fn(), busy: new Set<string>(), pending: {} as Record<string, string>, deleting: false }));
+const actions = vi.hoisted(() => ({ run: vi.fn(), clearResult: vi.fn(), results: {} as Record<string, string>, busy: new Set<string>(), pending: {} as Record<string, string> }));
 
 beforeEach(() => {
   overview.data = undefined;
@@ -28,11 +28,9 @@ vi.mock('../lib/queries', async importOriginal => {
   const actual = await importOriginal<typeof Queries>();
   return { ...actual, useOverview: () => overview, useOverviewHistory: () => ({ data: { snapshots: [], current_accounts: [] }, isPending: false, error: null }) };
 });
-vi.mock('../components/DeleteStrategy', () => ({ useDeleteStrategy: () => ({ remove: actions.remove, busy: actions.deleting }) }));
 vi.mock('../components/Controls', () => ({
   useControls: () => ({ busy: actions.busy, pending: actions.pending, results: actions.results, clearResult: actions.clearResult, run: actions.run }),
   runBatchControls: vi.fn(),
-  pendingLabel: { pause: '暂停中…', resume: '恢复中…', cancel_all: '撤单中…', rebalance: '重建中…' },
 }));
 
 it('confirms and resumes the freshly refreshed targets including newly paused live strategies', async () => {
@@ -276,7 +274,7 @@ it('shows five newest trades and expands to twenty across strategies', async () 
   expect(within(firstTrade).queryByText('成交方式')).not.toBeInTheDocument();
   expect(within(firstTrade).queryByText('成交时间（北京）')).not.toBeInTheDocument();
   expect(within(firstTrade).queryByText('备注')).not.toBeInTheDocument();
-  expect(firstTrade.querySelector('.trade-list-time')).toHaveTextContent(/前|后/);
+  expect(firstTrade.querySelector('.trade-list-time')).toHaveTextContent(/刚刚|前/);
   expect(card.getAllByRole('row')[1]).not.toHaveTextContent('Maker');
   const user = userEvent.setup();
   await user.click(card.getByRole('button', { name: '展开最近 20 条' }));
@@ -395,4 +393,28 @@ it('links recent trade symbols to their strategy detail pages', async () => {
   expect(links[0]).toHaveAttribute('href', '/pairs/BTCUSDC');
   await userEvent.setup().click(links[0]);
   expect(screen.getByTestId('location')).toHaveTextContent('/pairs/BTCUSDC');
+});
+
+it('aligns today trade counts and today pnl to server generated_at across Beijing midnight clock skew', () => {
+  vi.useFakeTimers();
+  try {
+    // Browser clock is 23:59:45 Beijing (2026-11-10T15:59:45Z), 20s behind server at 00:00:05 Beijing (2026-11-10T16:00:05Z).
+    vi.setSystemTime(new Date('2026-11-10T15:59:45Z'));
+    const serverNow = '2026-11-10T16:00:05Z';
+    const s = summarySnapshot('BTCUSDC');
+    s.today_trade_counts = { window_start: '2026-11-10T16:00:00Z', window_end: serverNow, buy: 3, sell: 4 };
+    overview.dataUpdatedAt = Date.now();
+    overview.data = {
+      generated_at: serverNow,
+      pairs: [{ snapshot: s, mode: 'PAPER', scoped: true }],
+      recent_trades: [],
+      today_pnl: { window_start: '2026-11-10T16:00:00Z', window_end: serverNow, groups: [{ symbol: 'BTCUSDC', mode: 'PAPER', realized_pnl: '6.5', pending_pnl_count: 0 }] },
+    };
+    render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+    const summary = screen.getByLabelText('策略运行概览');
+    expect(within(summary).getByText('今日成交').parentElement).toHaveTextContent('7 笔');
+    expect(within(summary).getByLabelText('今日已实现盈亏')).toHaveTextContent('6.5');
+  } finally {
+    vi.useRealTimers();
+  }
 });

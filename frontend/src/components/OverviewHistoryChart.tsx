@@ -36,7 +36,7 @@ export default memo(function OverviewHistoryChart({ data, ticks, asset, formatVa
   const lineColor = daily ? 'var(--text-secondary)' : 'var(--history-equity)';
   const chartHeight = daily ? 196 : 236;
   return <ResponsiveContainer width="100%" height={chartHeight}>
-    <ComposedChart data={data} margin={daily ? dailyMargin : hourlyMargin}>
+    <ComposedChart accessibilityLayer data={data} margin={daily ? dailyMargin : hourlyMargin}>
       {!daily && !discrete && <defs>
         <linearGradient id="equityAreaFill" x1="0" y1="0" x2="0" y2="1">
           <stop offset="0%" stopColor="var(--history-equity)" stopOpacity={0.18} />

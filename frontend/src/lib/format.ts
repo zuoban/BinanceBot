@@ -62,7 +62,7 @@ export function relativeTime(value: string | number, now = Date.now()) {
   const timestamp = typeof value === 'number' ? value : Date.parse(value);
   if (!Number.isFinite(timestamp)) return '--';
   const seconds = Math.floor(Math.abs(now - timestamp) / 1000);
-  return `${formatSeconds(seconds)}${timestamp > now ? '后' : '前'}`;
+  return `${formatSeconds(seconds)}${seconds > 0 && timestamp > now ? '后' : '前'}`;
 }
 /** How long ago a past moment was; a clock a hair ahead of `now` still reads as just now. */
 export function ageText(updatedAt: number, now = Date.now()) {

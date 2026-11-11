@@ -3,6 +3,7 @@ use crate::config::{AppConfig, GlobalConfig};
 use crate::db::Database;
 use crate::exchange::rate_limit::RateLimiter;
 use crate::server::AppState;
+use crate::sync_ext::MutexUnpoisonedExt;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch, Mutex, RwLock};
@@ -27,10 +28,7 @@ pub struct RuntimeHandle {
 impl RuntimeHandle {
     /// Stop order admission immediately; the running membership command is allowed to finish.
     pub fn request_shutdown(&self) {
-        let _admission = self
-            .active_removal
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _admission = self.active_removal.lock_unpoisoned();
         self.global_position_limit
             .shutdown_requested
             .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -48,7 +46,7 @@ impl RuntimeHandle {
     }
 
     pub(super) fn register_engine(&self, pair: &PairTask) {
-        let mut engines = self.engine_aborts.lock().unwrap_or_else(|e| e.into_inner());
+        let mut engines = self.engine_aborts.lock_unpoisoned();
         engines.retain(|(state, _)| {
             state
                 .upgrade()
@@ -59,11 +57,7 @@ impl RuntimeHandle {
 
     /// Begin stopping existing engines while an admitted membership change finishes.
     pub async fn start_early_shutdown(&self, limit: Duration) {
-        let removing = self
-            .active_removal
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
+        let removing = self.active_removal.lock_unpoisoned().clone();
         let states = self.states.read().await.clone();
         let mut stops = self.early_stops.lock().await;
         for state in states {
@@ -77,17 +71,16 @@ impl RuntimeHandle {
             {
                 continue;
             }
-            let abort = self
-                .engine_aborts
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .iter()
-                .find_map(|(registered, abort)| {
-                    registered
-                        .upgrade()
-                        .filter(|registered| Arc::ptr_eq(registered, &state))
-                        .map(|_| abort.clone())
-                });
+            let abort =
+                self.engine_aborts
+                    .lock_unpoisoned()
+                    .iter()
+                    .find_map(|(registered, abort)| {
+                        registered
+                            .upgrade()
+                            .filter(|registered| Arc::ptr_eq(registered, &state))
+                            .map(|_| abort.clone())
+                    });
             let Some(abort) = abort else {
                 continue;
             };

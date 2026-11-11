@@ -1,4 +1,5 @@
 use super::{decimal_col, grid_stats::save_scoped_stats_on, hourly, immediate_tx, Database};
+use crate::sync_ext::MutexUnpoisonedExt;
 use crate::types::{
     AccountInfo, GridOrder, GridStats, OrderSide, PositionInfo, TradeRecord, TradingMode,
 };
@@ -40,12 +41,7 @@ impl Database {
         tx.commit()?;
         if inserted {
             if matches!(trade.mode, TradingMode::Paper | TradingMode::Unknown) {
-                if let Some(ledger) = self
-                    .paper_ledger
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .as_mut()
-                {
+                if let Some(ledger) = self.paper_ledger.lock_unpoisoned().as_mut() {
                     ledger.record_legacy(&trade.symbol);
                 }
             }
@@ -101,12 +97,7 @@ impl Database {
         tx.commit()?;
         if inserted {
             if matches!(trade.mode, TradingMode::Paper | TradingMode::Unknown) {
-                if let Some(ledger) = self
-                    .paper_ledger
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .as_mut()
-                {
+                if let Some(ledger) = self.paper_ledger.lock_unpoisoned().as_mut() {
                     if let Some((position, account)) = paper_state {
                         ledger.commit(&trade.symbol, position, account);
                     } else {

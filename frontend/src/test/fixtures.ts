@@ -1,4 +1,4 @@
-import type { Pair, PairSummary, Snapshot } from '../lib/types';
+import type { GlobalConfig, Log, Order, Pair, PairSummary, ServerConfig, Snapshot, Trade } from '../lib/types';
 
 export function snapshot(symbol = 'SOLUSDC', mode: 'PAPER' | 'LIVE' = 'PAPER'): Snapshot {
   const now = new Date().toISOString();
@@ -27,5 +27,79 @@ export function summarySnapshot(symbol = 'SOLUSDC', mode: 'PAPER' | 'LIVE' = 'PA
     stats: { total_realized_pnl: s.stats.total_realized_pnl, active_buy_orders: s.stats.active_buy_orders, active_sell_orders: s.stats.active_sell_orders },
     today_trade_counts: { window_start: s.hourly_trade_stats!.window_start, window_end: s.hourly_trade_stats!.window_end, buy: 2, sell: 3 },
     account: s.account, account_cny_rate: s.account_cny_rate,
+  };
+}
+
+export function globalConfig(overrides: Partial<GlobalConfig> = {}): GlobalConfig {
+  return {
+    version: 'version-1',
+    recv_window: 5000,
+    sync_interval_secs: 30,
+    global_max_position_notional: null,
+    pause_on_zero_available_margin: false,
+    min_available_margin_pct: null,
+    has_api_key: false,
+    has_api_secret: false,
+    api_key_preview: '',
+    telegram_enabled: false,
+    has_telegram_bot_token: false,
+    telegram_chat_id: '',
+    ...overrides,
+  };
+}
+
+export function serverConfig(overrides: Partial<ServerConfig> = {}): ServerConfig {
+  return {
+    version: 'v1',
+    saved: { host: '127.0.0.1', port: 8080 },
+    active: { host: '127.0.0.1', port: 8080 },
+    ...overrides,
+  };
+}
+
+export function trade(overrides: Partial<Trade> = {}): Trade {
+  return {
+    trade_id: 't1',
+    symbol: 'SOLUSDC',
+    mode: 'PAPER',
+    side: 'BUY',
+    price: '100',
+    quantity: '1',
+    amount_usdc: '100',
+    realized_pnl: '0',
+    commission: '0',
+    pnl_verified: true,
+    is_maker: true,
+    timestamp: '2026-11-05T01:00:00Z',
+    note: '',
+    ...overrides,
+  };
+}
+
+export function order(overrides: Partial<Order> = {}): Order {
+  return {
+    client_order_id: 'o1',
+    order_id: 1,
+    symbol: 'SOLUSDC',
+    side: 'BUY',
+    price: '100',
+    quantity: '1',
+    amount_usdc: '100',
+    status: 'NEW',
+    created_at: '2026-11-05T01:00:00Z',
+    grid_level: 1,
+    is_take_profit: false,
+    purpose: 'GRID',
+    merge_sources: [],
+    ...overrides,
+  };
+}
+
+export function log(overrides: Partial<Log> = {}): Log {
+  return {
+    timestamp: '2026-11-05T01:00:00Z',
+    level: 'INFO',
+    message: 'ok',
+    ...overrides,
   };
 }

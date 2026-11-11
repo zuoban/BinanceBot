@@ -6,10 +6,11 @@ import { beforeEach, expect, it, vi } from 'vitest';
 import PairDetail, { resolveLogs, resolveTrades } from '../pages/PairDetail';
 import { Pnl } from '../components/Common';
 import { invalidateStrategyQueries } from '../lib/queries';
-import { pair, snapshot } from './fixtures';
+import { AccountsContext } from '../lib/session';
+import { log, pair, snapshot, trade } from './fixtures';
 import type * as Api from '../lib/api';
 import type * as Queries from '../lib/queries';
-import type { LogItem, Pair, Snapshot, Trade } from '../lib/types';
+import type { Log, Pair, Snapshot, Trade } from '../lib/types';
 
 const state = vi.hoisted(() => ({
   data: undefined as Snapshot | undefined,
@@ -37,7 +38,7 @@ vi.mock('../components/Charts', () => ({ DepthChart: () => null, HourlyChart: ()
 vi.mock('../components/DataTables', () => ({
   OrdersTable: () => null,
   TradesTable: ({ trades }: { trades: Trade[] }) => <div data-testid="trades-ids">{trades.map(t => t.trade_id).join(',')}</div>,
-  LogsTable: ({ logs }: { logs: LogItem[] }) => <div data-testid="logs-msgs">{logs.map(l => l.message).join(',')}</div>,
+  LogsTable: ({ logs }: { logs: Log[] }) => <div data-testid="logs-msgs">{logs.map(l => l.message).join(',')}</div>,
 }));
 vi.mock('../components/HistoryActions', () => ({ HistoryActions: () => null }));
 
@@ -223,7 +224,7 @@ it('never resurrects pre-clear fetched trades after clearing trades and receivin
 });
 
 it('preserves the newest 50 live logs during a >=50-log burst between /logs polls', async () => {
-  const oldFetched: LogItem[] = Array.from({ length: 60 }, (_, idx) => ({
+  const oldFetched: Log[] = Array.from({ length: 60 }, (_, idx) => ({
     timestamp: new Date(Date.parse('2026-11-05T01:00:00Z') + idx * 1000).toISOString(),
     level: 'INFO',
     message: `old-${idx}`,
@@ -233,7 +234,7 @@ it('preserves the newest 50 live logs during a >=50-log burst between /logs poll
   const { rerender, unmount } = render(<QueryClientProvider client={client}>{view('/pairs/SOLUSDC?tab=logs')}</QueryClientProvider>);
   await waitFor(() => expect(screen.getByTestId('logs-msgs')).toHaveTextContent(/^old-59,old-58/));
 
-  const burstLogs: LogItem[] = Array.from({ length: 50 }, (_, idx) => ({
+  const burstLogs: Log[] = Array.from({ length: 50 }, (_, idx) => ({
     timestamp: new Date(Date.parse('2026-11-05T01:02:50Z') - idx * 1000).toISOString(),
     level: 'INFO',
     message: `burst-${49 - idx}`,
@@ -248,4 +249,71 @@ it('preserves the newest 50 live logs during a >=50-log burst between /logs poll
   expect(text.includes(',burst-0,old-59,')).toBe(true);
   expect(resolveLogs(updated, oldFetched, false, 1_000, 2_000)).toHaveLength(110);
   unmount();
+});
+
+it('renders valid account equity when s.generated_at and dataUpdatedAt have a 20s browser clock skew or sibling offset', () => {
+  const clientNow = Date.now();
+  for (const serverNow of [clientNow - 20_000, clientNow + 20_000]) {
+    const skewed = snapshot('SOLUSDC', 'PAPER');
+    skewed.generated_at = new Date(serverNow).toISOString();
+    skewed.position.size = '1';
+    skewed.account = { ...skewed.account, margin_balance: '105', available_balance: '80', unrealized_profit: '5', update_time: new Date(serverNow).toISOString() };
+    skewed.ticker.mark_update_time = new Date(serverNow).toISOString();
+    state.data = skewed;
+    state.dataUpdatedAt = clientNow;
+    const { unmount } = render(view());
+    const card = screen.getByText('账户权益 / USDC').closest('.ant-card')!;
+    expect(card.querySelector('.ant-statistic-content-value')).toHaveTextContent('105.00');
+    unmount();
+  }
+
+  // Fallback to sibling liveAccounts clock offset when s.generated_at is omitted in unit-test fixtures, while respecting sibling PAPER valuation.
+  const serverNow = clientNow - 20_000;
+  const withoutGen = snapshot('SOLUSDC', 'PAPER');
+  withoutGen.position.size = '1';
+  withoutGen.account = { ...withoutGen.account, margin_balance: '210', available_balance: '150', unrealized_profit: '10', update_time: new Date(serverNow).toISOString() };
+  withoutGen.ticker.mark_update_time = new Date(serverNow).toISOString();
+  const sibling = snapshot('BTCUSDC', 'PAPER');
+  sibling.position.size = '1';
+  sibling.account = { ...withoutGen.account };
+  sibling.ticker.mark_update_time = new Date(serverNow).toISOString();
+  const otherMode = snapshot('ETHUSDC', 'LIVE');
+  otherMode.account = { ...otherMode.account, margin_balance: '999', update_time: new Date(serverNow).toISOString() };
+  state.data = withoutGen;
+  state.dataUpdatedAt = clientNow;
+  render(<AccountsContext.Provider value={[
+    { mode: 'LIVE', snapshot: otherMode, generated_at_ms: serverNow, received_at_ms: clientNow },
+    { mode: 'PAPER', snapshot: sibling, generated_at_ms: serverNow, received_at_ms: clientNow },
+  ]}>{view()}</AccountsContext.Provider>);
+  const card = screen.getByText('账户权益 / USDC').closest('.ant-card')!;
+  expect(card.querySelector('.ant-statistic-content-value')).toHaveTextContent('210.00');
+});
+
+it('merges newer WS trades, pnl_verified upgrades, and WS logs when an overlapping HTTP poll resolves late', () => {
+  const wsSnap = snapshot('SOLUSDC', 'PAPER');
+  wsSnap.stats.total_trades = 3;
+  wsSnap.recent_trades = [
+    trade({ trade_id: 't3', timestamp: '2026-11-05T01:03:00Z', pnl_verified: false }),
+    trade({ trade_id: 't2', timestamp: '2026-11-05T01:02:00Z', pnl_verified: true, realized_pnl: '1.5' }),
+  ];
+  const slowHttpTrades: Trade[] = [
+    trade({ trade_id: 't2', timestamp: '2026-11-05T01:02:00Z', pnl_verified: false, realized_pnl: '0' }),
+    trade({ trade_id: 't1', timestamp: '2026-11-05T01:01:00Z', pnl_verified: true, realized_pnl: '0.5' }),
+  ];
+  const merged = resolveTrades(wsSnap, slowHttpTrades, false, 2_020, 2_000);
+  expect(merged.map(t => [t.trade_id, t.pnl_verified])).toEqual([['t3', false], ['t2', true], ['t1', true]]);
+  expect(resolveTrades(wsSnap, [], false, 2_050, 2_000)).toEqual([]);
+  const clearedSnap = snapshot('SOLUSDC', 'PAPER');
+  clearedSnap.stats.total_trades = 0;
+  expect(resolveTrades(clearedSnap, slowHttpTrades, false, 2_000, 2_050)).toEqual([]);
+
+  wsSnap.recent_logs = [
+    log({ timestamp: '2026-11-05T01:03:00Z', message: 'ws-newest' }),
+    log({ timestamp: '2026-11-05T01:02:00Z', message: 'shared-head' }),
+  ];
+  const slowHttpLogs: Log[] = [
+    log({ timestamp: '2026-11-05T01:01:00Z', message: 'older-tail' }),
+    log({ timestamp: '2026-11-05T01:02:00Z', message: 'shared-head' }),
+  ];
+  expect(resolveLogs(wsSnap, slowHttpLogs, false, 2_020, 2_000).map(l => l.message)).toEqual(['ws-newest', 'shared-head', 'older-tail']);
 });

@@ -3,6 +3,7 @@ import { compactNumber, numeric, positivePrice } from './format';
 import type { AccountObservation, Mode, Overview, PairSummary, Snapshot, Trade } from './types';
 
 export const SNAPSHOT_STALE_MS = 10_000;
+export const PAIRS_STALE_MS = 25_000;
 export const quoteAsset = (symbol: string) => ['USDC', 'USDT', 'FDUSD', 'BUSD'].find(a => symbol.endsWith(a)) ?? '';
 
 const modeAsset = (mode: Mode, symbol: string) => {
@@ -246,6 +247,22 @@ const thresholdCrossingWallMs = (ts: number, offset: number, entry: AccountObser
   return ts + offset;
 };
 
+export function isEntryMarkFresh(entry: AccountObservation, now = Date.now()): boolean {
+  return !entry.account_observation_stale && recentAt(entry.snapshot.ticker.mark_update_time, 15_000, entryRefNow(entry, now));
+}
+
+export function entryMarkExpiry(entry: AccountObservation, now = Date.now()): number {
+  if (entry.account_observation_stale) return Infinity;
+  const markTs = Date.parse(entry.snapshot.ticker.mark_update_time);
+  if (!Number.isFinite(markTs)) return Infinity;
+  let next = Infinity;
+  for (const offset of MARK_THRESHOLDS) {
+    const crossing = thresholdCrossingWallMs(markTs, offset, entry);
+    if (crossing > now && crossing - 1 < next) next = crossing - 1;
+  }
+  return next;
+}
+
 export function nextAccountExpiry(entries: readonly AccountObservation[], now = Date.now()): number {
   let next = Infinity;
   for (const entry of entries) {
@@ -258,13 +275,8 @@ export function nextAccountExpiry(entries: readonly AccountObservation[], now = 
         if (crossing > now && crossing - 1 < next) next = crossing - 1;
       }
     }
-    const markTs = Date.parse(s.ticker.mark_update_time);
-    if (Number.isFinite(markTs)) {
-      for (const offset of MARK_THRESHOLDS) {
-        const crossing = thresholdCrossingWallMs(markTs, offset, entry);
-        if (crossing > now && crossing - 1 < next) next = crossing - 1;
-      }
-    }
+    const markExpiry = entryMarkExpiry(entry, now);
+    if (markExpiry < next) next = markExpiry;
   }
   return next;
 }

@@ -3,6 +3,8 @@ import { Alert, Button, Card, Col, Form, Input, InputNumber, Row, Select, Switch
 import { describeNewGridConfig, diffGridConfig, type FieldChange } from '../lib/configDiff';
 import { positiveDecimalText } from '../lib/format';
 import { exceeds, gridIntervalError, isPercentDecimal, isPositiveDecimal, MAX_CONFIG_NOTIONAL_OR_PRICE, orderAmountError, priceRangeError } from '../lib/gridPreview';
+import { entryMarkExpiry, isEntryMarkFresh } from '../lib/portfolio';
+import { useExpired } from '../lib/useNow';
 import { AccountsContext } from '../lib/session';
 import type { GridConfig, Mode } from '../lib/types';
 
@@ -12,7 +14,9 @@ const directionOptions = [{ value: 'LONG', label: '做多 · 买入开仓 / 卖�
 
 export function AccountMarkBridge({ symbol, mode, onMark }: { symbol: string; mode: Mode | undefined; onMark: (mark: string | undefined) => void }) {
   const accounts = useContext(AccountsContext);
-  const next = positiveDecimalText(accounts.find(entry => entry.snapshot.symbol === symbol && entry.mode === mode && !entry.account_observation_stale)?.snapshot.ticker.mark_price) ?? undefined;
+  const entry = accounts.find(item => item.snapshot.symbol === symbol && item.mode === mode && !item.account_observation_stale);
+  useExpired(entry ? entryMarkExpiry(entry, Date.now()) : Infinity);
+  const next = entry && isEntryMarkFresh(entry, Date.now()) ? positiveDecimalText(entry.snapshot.ticker.mark_price) ?? undefined : undefined;
   useLayoutEffect(() => { onMark(next); }, [next, onMark]);
   return null;
 }

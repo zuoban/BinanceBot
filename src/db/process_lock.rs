@@ -74,8 +74,7 @@ fn open_and_verify_lock_file(lock_path: &Path) -> Result<std::fs::File> {
         .context("Failed to inspect database process lock")?;
     anyhow::ensure!(
         metadata.is_file()
-            && super::validate_regular_file_ownership_and_mode(&metadata, super::effective_uid())
-                .is_ok(),
+            && validate_regular_file_ownership_and_mode(&metadata, effective_uid()).is_ok(),
         "Database process lock must be a private, owned regular file with one link"
     );
     Ok(file)
@@ -125,4 +124,137 @@ impl DatabaseProcessLock {
         }
         Ok(None)
     }
+}
+
+#[cfg(unix)]
+pub(super) fn effective_uid() -> u32 {
+    let uid = unsafe { libc::geteuid() };
+    uid as u32
+}
+
+#[cfg(unix)]
+pub(super) fn validate_regular_file_ownership_and_mode(
+    metadata: &std::fs::Metadata,
+    expected_uid: u32,
+) -> std::io::Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    if metadata.is_file() && metadata.nlink() != 1 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "SQLite database and sidecar files must not have multiple hard links",
+        ));
+    }
+    if metadata.uid() != expected_uid {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "file owner {} differs from service effective user {}",
+                metadata.uid(),
+                expected_uid
+            ),
+        ));
+    }
+    if metadata.permissions().mode() & 0o077 != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "remove group and other permissions before starting",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+pub(super) fn validate_database_file(path: &Path, expected_uid: u32) -> std::io::Result<()> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "SQLite database and sidecar paths must not be symbolic links",
+        ));
+    }
+    validate_regular_file_ownership_and_mode(&metadata, expected_uid)
+}
+
+#[cfg(unix)]
+pub(super) fn validate_database_and_sidecars(path: &Path) -> Result<()> {
+    let expected_uid = effective_uid();
+    let validate = |target: &Path| validate_database_file(target, expected_uid);
+    validate(path).with_context(|| {
+        format!(
+            "Insecure SQLite database path {:?}; ensure it is owned by the service user, remove group and other permissions and avoid symbolic links",
+            path
+        )
+    })?;
+    // SQLite resolves parent symlinks before choosing sidecar names.
+    let canonical = path
+        .canonicalize()
+        .context("Failed to resolve database path")?;
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let mut name = canonical.as_os_str().to_os_string();
+        name.push(suffix);
+        let sidecar = Path::new(&name);
+        match validate(sidecar) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "Insecure SQLite sidecar {:?}; ensure it is owned by the service user, remove group and other permissions and avoid symbolic links",
+                        sidecar
+                    )
+                })
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn prepare_database_path(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder
+            .create(parent)
+            .with_context(|| format!("Failed to create database directory: {:?}", parent))?;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        // Pre-create the database privately so SQLite also creates its WAL and
+        // shared-memory files with private permissions, without changing umask.
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(path)
+                {
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(error) => {
+                        return Err(error).with_context(|| {
+                            format!("Failed to prepare SQLite database at {:?}", path)
+                        })
+                    }
+                }
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("Failed to inspect {:?}", path))
+            }
+        }
+        // Inspect without opening existing files: closing a descriptor can
+        // release another SQLite connection's process-wide POSIX locks.
+        validate_database_and_sidecars(path)?;
+    }
+    Ok(())
 }

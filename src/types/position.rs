@@ -206,7 +206,7 @@ pub(crate) fn resolve_quote_asset<'a>(symbol: &'a str, fallback_asset: &'a str) 
     })
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AccountInfo {
     pub asset: String,
     pub total_wallet_balance: Decimal,
