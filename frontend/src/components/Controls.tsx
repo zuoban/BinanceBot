@@ -3,6 +3,7 @@ import { App, Button, Dropdown, Space } from 'antd';
 import { MoreOutlined } from '@ant-design/icons';
 import { useQueryClient } from '@tanstack/react-query';
 import { api, errorMessage, pairPath, post } from '../lib/api';
+import { useMountedRef } from '../lib/asyncGuard';
 import type { Action, Pair, Snapshot } from '../lib/types';
 import { StrategyToggle, strategySecondaryItems } from './StrategyMenu';
 async function confirmControlState(pair: Pair, action: Action, sleep: (ms: number) => Promise<boolean>, isMounted: () => boolean): Promise<boolean> {
@@ -19,7 +20,6 @@ async function confirmControlState(pair: Pair, action: Action, sleep: (ms: numbe
 
 const BATCH_PAUSE_CONCURRENCY = 6;
 export type ControlResult = 'confirmed' | 'cancellation_unconfirmed' | 'state_unconfirmed' | 'request_unconfirmed' | 'failed' | 'not_submitted';
-export const pendingLabel: Record<Action, string> = { pause: '暂停中…', resume: '恢复中…', cancel_all: '撤单中…', rebalance: '重建中…' };
 interface ControlState { busy: Set<string>; pending: Record<string, Action>; results: Record<string, string>; clearResult: (symbol: string) => void; run: (pair: Pair, action: Action, confirmed?: boolean) => Promise<ControlResult> }
 export async function runBatchControls(pairs: Pair[], action: 'pause' | 'resume', run: ControlState['run']): Promise<{ pair: Pair; result: Exclude<ControlResult, 'confirmed'> }[]> {
   const outcomes: { pair: Pair; result: Exclude<ControlResult, 'confirmed'> }[] = [];
@@ -82,19 +82,14 @@ export function ControlProvider({ pairs, children }: { pairs?: Pair[]; children:
   const { modal, message } = App.useApp();
   const client = useQueryClient();
   const locked = useRef(new Set<string>());
-  const mounted = useRef(true);
   const wakeups = useRef(new Set<() => void>());
+  const mounted = useMountedRef(() => {
+    for (const wake of wakeups.current) wake();
+    wakeups.current.clear();
+  });
   const [busy, setBusy] = useState(new Set<string>());
   const [pending, setPending] = useState<Record<string, Action>>({});
   const [results, setResults] = useState<Record<string, string>>({});
-  useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-      for (const wake of wakeups.current) wake();
-      wakeups.current.clear();
-    };
-  }, []);
   const sleep = useCallback((ms: number) => new Promise<boolean>(resolve => {
     if (!mounted.current) { resolve(false); return; }
     const wake = () => {

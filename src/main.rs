@@ -61,9 +61,15 @@ enum Command {
 }
 
 fn load_saved_config(db: &Database) -> anyhow::Result<AppConfig> {
-    let mut config = db.load_config()?.unwrap_or_default();
+    let loaded = db.load_config()?;
+    let mut config = loaded.clone().unwrap_or_default();
     config.ensure_pair_list()?;
-    db.save_config(&config)?;
+    if loaded
+        .as_ref()
+        .is_none_or(|saved| serde_json::to_value(saved).ok() != serde_json::to_value(&config).ok())
+    {
+        db.save_config(&config)?;
+    }
     Ok(config)
 }
 
@@ -95,13 +101,18 @@ fn run_migrate_legacy_paper(db: PathBuf, symbol: String, confirm: String) -> any
 fn resolve_admin_auth(
     cli_password: Option<String>,
 ) -> anyhow::Result<Option<Arc<binance_grid_bot::auth::AdminAuth>>> {
-    let admin_password = cli_password
-        .filter(|password| !password.is_empty())
-        .or_else(|| {
-            std::env::var("ADMIN_PASSWORD")
-                .ok()
-                .filter(|password| !password.is_empty())
-        });
+    let cli_supplied = cli_password.filter(|password| !password.is_empty());
+    if cli_supplied.is_some() {
+        warn!(
+            "--admin-password was supplied on the command line and may be visible in process listings; \
+             prefer the ADMIN_PASSWORD environment variable"
+        );
+    }
+    let admin_password = cli_supplied.or_else(|| {
+        std::env::var("ADMIN_PASSWORD")
+            .ok()
+            .filter(|password| !password.is_empty())
+    });
     match admin_password {
         Some(password) => Ok(Some(Arc::new(
             binance_grid_bot::auth::AdminAuth::from_password(&password)?,

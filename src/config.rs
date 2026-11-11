@@ -532,6 +532,16 @@ impl ExchangeConfig {
         self.trading_mode() == crate::types::TradingMode::Paper
     }
 
+    pub(crate) fn validate_api_key(api_key: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !api_key.is_empty()
+                && api_key.chars().all(|ch| ch.is_ascii_graphic())
+                && reqwest::header::HeaderValue::from_str(api_key).is_ok(),
+            "API Key 格式无效（仅允许可见 ASCII 字符，不能包含空白或控制字符）"
+        );
+        Ok(())
+    }
+
     fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(self.sync_interval_secs > 0, "同步间隔必须大于 0");
         anyhow::ensure!(
@@ -542,6 +552,9 @@ impl ExchangeConfig {
             self.api_key.trim().is_empty() == self.api_secret.trim().is_empty(),
             "API Key 和 Secret 必须同时配置：配置后以实盘运行，全部清空后以模拟盘运行"
         );
+        if !self.api_key.trim().is_empty() {
+            Self::validate_api_key(&self.api_key)?;
+        }
         Ok(())
     }
 }
@@ -959,5 +972,26 @@ mod tests {
             );
             config.telegram.enabled = true;
         }
+    }
+
+    #[test]
+    fn api_key_validation_rejects_whitespace_control_and_non_ascii_chars() {
+        let mut config = AppConfig::default();
+        config.exchange.api_secret = "valid-secret".into();
+        for invalid in [
+            "key with space",
+            "key\nnewline",
+            "key\x00null",
+            "key\u{200B}zero-width",
+            "中文key",
+        ] {
+            config.exchange.api_key = invalid.into();
+            config.ensure_pair_list().unwrap();
+            let err = format!("{:#}", config.validate().unwrap_err());
+            assert!(err.contains("API Key 格式无效"), "{invalid:?}: {err}");
+        }
+        config.exchange.api_key = "valid-ascii-api-key-123".into();
+        config.ensure_pair_list().unwrap();
+        assert!(config.validate().is_ok());
     }
 }

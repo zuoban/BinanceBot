@@ -99,21 +99,31 @@ function useSocketFallbackQuery<TData>(key: QueryKey, queryFn: (signal: AbortSig
   // A timer restarts polling when an open socket silently stops sending, without rendering a clock tick.
   useEffect(() => {
     if (!enabled) return;
-    const check = () => {
-      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+    let timer: number | undefined;
+    const step = () => {
+      window.clearTimeout(timer);
+      const hidden = typeof document !== 'undefined' && document.visibilityState === 'hidden';
       const { socket: currentSocket, dataUpdatedAt, isFetching, refetch } = latestRef.current;
       const now = Date.now();
-      if (now - currentSocket.lastReceived >= SOCKET_LIVE_MS && now - dataUpdatedAt >= HTTP_FALLBACK_MS && now - lastFallback.current >= HTTP_FALLBACK_MS && !isFetching) {
+      const socketAge = now - currentSocket.lastReceived;
+      let startedRefetch = false;
+      if (!hidden && socketAge >= SOCKET_LIVE_MS && now - dataUpdatedAt >= HTTP_FALLBACK_MS && now - lastFallback.current >= HTTP_FALLBACK_MS && !isFetching) {
         lastFallback.current = now;
+        startedRefetch = true;
         void refetch();
       }
+      const delay = socketAge < SOCKET_LIVE_MS
+        ? Math.min(SOCKET_LIVE_MS, Math.max(1, SOCKET_LIVE_MS - socketAge))
+        : hidden || isFetching || startedRefetch
+          ? HTTP_FALLBACK_MS
+          : Math.min(HTTP_FALLBACK_MS, Math.max(250, HTTP_FALLBACK_MS - (now - dataUpdatedAt), HTTP_FALLBACK_MS - (now - lastFallback.current)));
+      timer = window.setTimeout(step, delay);
     };
-    check();
-    const timer = window.setInterval(check, 1000);
-    const onVisible = () => { if (document.visibilityState === 'visible') check(); };
+    step();
+    const onVisible = () => { if (document.visibilityState === 'visible') step(); };
     if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisible);
     return () => {
-      window.clearInterval(timer);
+      window.clearTimeout(timer);
       if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisible);
     };
   }, [enabled]);

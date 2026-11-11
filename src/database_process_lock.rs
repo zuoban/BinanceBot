@@ -25,15 +25,27 @@ impl DatabaseProcessLock {
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or(Path::new("."));
-        match std::fs::symlink_metadata(path) {
-            Ok(metadata) if metadata.is_file() => anyhow::ensure!(
-                metadata.nlink() == 1,
-                "Database files with multiple hard links are not supported; use a single database path"
-            ),
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error).context("Failed to inspect database path"),
-        }
+        let validate_target = |p: &Path| -> Result<()> {
+            match std::fs::symlink_metadata(p) {
+                Ok(metadata) => {
+                    anyhow::ensure!(
+                        !metadata.file_type().is_symlink(),
+                        "Database path {:?} must not be a symbolic link",
+                        p
+                    );
+                    if metadata.is_file() {
+                        anyhow::ensure!(
+                            metadata.nlink() == 1,
+                            "Database files with multiple hard links are not supported; use a single database path"
+                        );
+                    }
+                    Ok(())
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error).context("Failed to inspect database path"),
+            }
+        };
+        validate_target(path)?;
         std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
@@ -70,6 +82,8 @@ impl DatabaseProcessLock {
             let error = std::io::Error::last_os_error();
             anyhow::bail!("Cannot acquire database process lock {:?}: {}. Stop the running bot or migration first", lock_path, error);
         }
+        // Re-verify target after acquiring the process lock to close pre-lock TOCTOU races.
+        validate_target(path)?;
         Ok(Some(Self { _file: file }))
     }
 }
@@ -79,7 +93,13 @@ pub struct DatabaseProcessLock;
 
 #[cfg(not(unix))]
 impl DatabaseProcessLock {
-    pub fn acquire(_path: &Path) -> Result<Option<Self>> {
+    pub fn acquire(path: &Path) -> Result<Option<Self>> {
+        if path != Path::new(":memory:") {
+            tracing::warn!(
+                "Database process locking is only enforced on Unix; ensure no other bot instance shares {:?}",
+                path
+            );
+        }
         Ok(None)
     }
 }

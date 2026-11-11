@@ -445,6 +445,7 @@ impl GridTradingEngine {
             order.client_order_id.clone(),
         );
         let trusted = self
+            .evidence
             .order_identity_conflicts
             .get(&key)
             .filter(|item| item.order_id.is_some_and(|id| id != found.order_id))
@@ -462,7 +463,8 @@ impl GridTradingEngine {
                     .cloned()
             })
             .or_else(|| {
-                self.order_identity_conflicts
+                self.evidence
+                    .order_identity_conflicts
                     .get(&key)
                     .filter(|item| item.order_id.is_some())
                     .cloned()
@@ -490,7 +492,7 @@ impl GridTradingEngine {
         {
             return Err(anyhow!("Remainder exchange identity mismatch"));
         }
-        if self.order_identity_observations.contains_key(&key)
+        if self.evidence.order_identity_observations.contains_key(&key)
             && !self
                 .persist_identity_observations(key.0, &order.symbol)
                 .await

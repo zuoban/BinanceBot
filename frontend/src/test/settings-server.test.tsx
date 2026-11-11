@@ -45,10 +45,9 @@ function setup() {
   return { client, ...render(<Wrapper />) };
 }
 
-it('restores the saved server settings while the post-save refresh is still pending', async () => {
-  const { promise: pendingRefresh, resolve: releaseRefresh } = Promise.withResolvers<ServerConfig>();
+it('restores the saved server settings without a redundant post-save refetch', async () => {
   const saved: ServerConfig = { ...initial, version: 'v2', saved: { ...initial.saved, host: '127.0.0.2' } };
-  const serverQuery = vi.fn().mockResolvedValueOnce(initial).mockReturnValue(pendingRefresh);
+  const serverQuery = vi.fn().mockResolvedValueOnce(initial);
   mocks.api.mockImplementation((path: string) => path === '/api/server/config' ? serverQuery() : Promise.resolve(globalConfig));
   mocks.post.mockResolvedValueOnce(saved).mockResolvedValueOnce({ ...saved, version: 'v3', saved: { ...saved.saved, port: 8081 } });
   setup();
@@ -60,7 +59,7 @@ it('restores the saved server settings while the post-save refresh is still pend
   await user.type(host, '127.0.0.2');
   await user.click(screen.getByRole('button', { name: '保存监听设置' }));
   await waitFor(() => expect(mocks.success).toHaveBeenCalledWith('服务设置已保存，重启后生效'));
-  await waitFor(() => expect(serverQuery).toHaveBeenCalledTimes(2));
+  expect(serverQuery).toHaveBeenCalledTimes(1);
 
   await user.click(screen.getByRole('button', { name: /还\s*原/ }));
   expect(host).toHaveValue('127.0.0.2');
@@ -69,7 +68,6 @@ it('restores the saved server settings while the post-save refresh is still pend
   await user.type(port, '8081');
   await user.click(screen.getByRole('button', { name: '保存监听设置' }));
   await waitFor(() => expect(mocks.post).toHaveBeenLastCalledWith('/api/server/config', { host: '127.0.0.2', port: 8081, baseline_version: 'v2' }));
-  await act(async () => { releaseRefresh(saved); });
 }, 40000);
 
 it('keeps the original values and version together when a background refresh returns newer settings', async () => {

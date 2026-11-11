@@ -53,6 +53,11 @@ impl Database {
     pub fn create_session(&self, token: &str) -> Result<()> {
         let conn = self.lock_connection("create_session");
         self.session_cache.remove(token);
+        let cutoff = (Utc::now() - ChronoDuration::hours(24)).to_rfc3339();
+        let _ = conn.execute(
+            "DELETE FROM auth_sessions WHERE created_at <= ?1;",
+            params![cutoff],
+        );
         conn.prepare_cached(
             "INSERT OR REPLACE INTO auth_sessions (token, created_at) VALUES (?1, ?2);",
         )?
@@ -132,5 +137,42 @@ mod tests {
         assert!(db.is_session_valid("a").unwrap());
         db.create_session("a").unwrap();
         assert!(!db.session_recently_validated("a"));
+    }
+
+    #[test]
+    fn create_session_prunes_expired_rows_best_effort() {
+        let db = Database::open(":memory:").unwrap();
+        db.create_session("expired").unwrap();
+        db.create_session("active").unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE auth_sessions SET created_at = ?1 WHERE token = 'expired';",
+                params![(Utc::now() - ChronoDuration::hours(25)).to_rfc3339()],
+            )
+            .unwrap();
+        db.create_session("fresh").unwrap();
+        let remaining: i64 = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM auth_sessions", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(remaining, 2);
+        assert!(db.is_session_valid("active").unwrap());
+        assert!(db.is_session_valid("fresh").unwrap());
+
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "UPDATE auth_sessions SET created_at = '2000-01-01T00:00:00Z' WHERE token = 'active';
+                 CREATE TRIGGER reject_session_delete BEFORE DELETE ON auth_sessions
+                 BEGIN SELECT RAISE(ABORT, 'cleanup blocked'); END;",
+            )
+            .unwrap();
+        db.create_session("after-trigger").unwrap();
+        assert!(db.is_session_valid("after-trigger").unwrap());
     }
 }

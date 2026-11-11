@@ -449,7 +449,7 @@ async fn provisional_remainder_uses_recovery_plan_metadata_without_managed_row()
         .write()
         .await
         .insert(placeholder.client_order_id.clone(), placeholder);
-    engine.provisional_order_ids.insert((
+    engine.evidence.provisional_order_ids.insert((
         engine.client.account_identity_key(),
         plan.target.client_order_id.clone(),
     ));
@@ -524,7 +524,7 @@ async fn cancel_retry_restores_provisional_remainder_from_plan() {
         .write()
         .await
         .insert(placeholder.client_order_id.clone(), placeholder);
-    engine.provisional_order_ids.insert((
+    engine.evidence.provisional_order_ids.insert((
         engine.client.account_identity_key(),
         plan.target.client_order_id.clone(),
     ));

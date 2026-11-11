@@ -1,9 +1,10 @@
-import { useContext, useLayoutEffect, useRef, type DependencyList, type RefObject } from 'react';
+import { useContext, useLayoutEffect, type DependencyList, type RefObject } from 'react';
 import { Alert, App, Button, Empty, Space } from 'antd';
 import { ArrowDownOutlined, ArrowUpOutlined, CheckCircleOutlined, CloseCircleOutlined, CloseOutlined, ExclamationCircleOutlined, InfoCircleOutlined, ReloadOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { Link } from 'react-router-dom';
 import { EditContext } from '../lib/session';
 import { errorMessage } from '../lib/api';
+import { useAsyncLock } from '../lib/asyncGuard';
 import type { GridConfig, Mode, Status } from '../lib/types';
 type Direction = GridConfig['direction'];
 import { ageText, compactNumber, directionLabel, modeLabel, number, numeric, sig3Format, statusLabel } from '../lib/format';
@@ -13,8 +14,8 @@ export function ErrorNotice({ error, retry }: { error: Error | null; retry?: () 
   return <Alert type="error" showIcon title={error.message} action={retry && <Button size="small" onClick={retry} icon={<ReloadOutlined />}>重试</Button>} />;
 }
 export type Signal = 'calm' | 'blue' | 'yellow' | 'orange' | 'red';
-export const signalIcon: Record<Signal, React.ReactNode> = { calm: <CheckCircleOutlined />, blue: <InfoCircleOutlined />, yellow: <ExclamationCircleOutlined />, orange: <ThunderboltOutlined />, red: <CloseCircleOutlined /> };
-export function controlResultMeta(result: string): { tier: Signal; alertType: 'error' | 'warning' | 'success' | 'info'; pending: boolean } {
+const signalIcon: Record<Signal, React.ReactNode> = { calm: <CheckCircleOutlined />, blue: <InfoCircleOutlined />, yellow: <ExclamationCircleOutlined />, orange: <ThunderboltOutlined />, red: <CloseCircleOutlined /> };
+function controlResultMeta(result: string): { tier: Signal; alertType: 'error' | 'warning' | 'success' | 'info'; pending: boolean } {
   if (result.startsWith('未提交')) return { tier: 'red', alertType: 'error', pending: false };
   if (result.includes('尚未确认') || result.includes('结果不明')) return { tier: 'yellow', alertType: 'warning', pending: false };
   if (result === '已确认') return { tier: 'calm', alertType: 'success', pending: false };
@@ -100,12 +101,11 @@ export function ConflictReloadButton<T>({ label, activeRef, refetch, onLoaded, o
 }) {
   const { modal, message } = App.useApp();
   const edit = useContext(EditContext);
-  const running = useRef(false);
-  return <Button className="conflict-reload-btn" disabled={edit.saving} onClick={async () => {
+  const runReload = useAsyncLock();
+  return <Button className="conflict-reload-btn" disabled={edit.saving} onClick={() => {
     const current = activeRef.current;
-    if (running.current || edit.saving || !current) return;
-    running.current = true;
-    try {
+    if (edit.saving || !current) return;
+    void runReload(async () => {
       if (!await modal.confirm({ title: `重新加载${label}？`, content: '重新加载会放弃当前未保存的修改，请先记录需要保留的内容。', okText: '重新加载', cancelText: '继续编辑' })) return;
       if (activeRef.current !== current) return;
       const result = await refetch();
@@ -114,9 +114,7 @@ export function ConflictReloadButton<T>({ label, activeRef, refetch, onLoaded, o
       if (!result.data || onLoaded(result.data) === false) return;
       edit.setDirty(false);
       onReset();
-    } finally {
-      running.current = false;
-    }
+    });
   }}>重新加载{label}</Button>;
 }
 export function FormRevertButton({ activeRef, onRevert, onReset }: {
@@ -126,20 +124,17 @@ export function FormRevertButton({ activeRef, onRevert, onReset }: {
 }) {
   const { modal } = App.useApp();
   const edit = useContext(EditContext);
-  const running = useRef(false);
-  return <Button onClick={async () => {
+  const runRevert = useAsyncLock();
+  return <Button onClick={() => {
     const current = activeRef.current;
-    if (running.current || !current) return;
-    running.current = true;
-    try {
+    if (!current) return;
+    void runRevert(async () => {
       if (edit.dirty && !await modal.confirm({ title: '放弃未保存的修改？', okText: '还原', cancelText: '继续编辑' })) return;
       if (activeRef.current !== current) return;
       onRevert();
       edit.setDirty(false);
       onReset();
-    } finally {
-      running.current = false;
-    }
+    });
   }}>还原</Button>;
 }
 

@@ -10,7 +10,7 @@ const formatPercent4 = (num: bigint, den: bigint): string => format((num * 10000
 const floorDiv = (a: bigint, b: bigint) => a / b;
 const ceilDiv = (a: bigint, b: bigint) => (a + b - 1n) / b;
 
-export interface GridPreviewInput { reference: unknown; interval: unknown; buyWindow: unknown; sellWindow: unknown; min?: unknown; max?: unknown }
+interface GridPreviewInput { reference: unknown; interval: unknown; buyWindow: unknown; sellWindow: unknown; min?: unknown; max?: unknown }
 export interface GridPreview { buys: string[]; sells: string[]; buyClipped: boolean; sellClipped: boolean }
 
 export function gridPreview(input: GridPreviewInput): GridPreview | null {
@@ -115,8 +115,8 @@ export function defaultGridInterval(markPrice: unknown, tickSize?: unknown): str
   return format(clamped * tick.n, tick.s);
 }
 
-export interface SymbolSizingRules { stepSize?: unknown; minQty?: unknown; minNotional?: unknown }
-export interface LevelOrderSizing { quantity: string; notional: string; error: string | null }
+interface SymbolSizingRules { stepSize?: unknown; minQty?: unknown; minNotional?: unknown }
+interface LevelOrderSizing { quantity: string; notional: string; error: string | null }
 
 /**
  * Mirrors `SymbolRules::calculate_quantity`: truncates `amount / price` down to a multiple of `stepSize`

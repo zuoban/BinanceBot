@@ -1,7 +1,8 @@
-import { useRef, useState } from 'react';
+import { useState } from 'react';
 import { App, Input } from 'antd';
 import { useQueryClient, type QueryClient } from '@tanstack/react-query';
 import { api, ApiError, errorMessage } from '../lib/api';
+import { useAsyncLock } from '../lib/asyncGuard';
 import type { Pair } from '../lib/types';
 import { useControls } from './Controls';
 
@@ -15,11 +16,9 @@ export function useDeleteStrategy() {
   const { modal, message } = App.useApp();
   const client = useQueryClient();
   const controls = useControls();
-  const locked = useRef(false);
+  const runDelete = useAsyncLock();
   const [busy, setBusy] = useState(false);
-  const remove = async (pair: Pair, beforeConfirm?: () => Promise<boolean>) => {
-    if (locked.current) return false;
-    locked.current = true;
+  const remove = (pair: Pair, beforeConfirm?: () => Promise<boolean>) => runDelete(async () => {
     setBusy(true);
     let deleteStarted = false;
     try {
@@ -53,9 +52,8 @@ export function useDeleteStrategy() {
       message.error(`${errorMessage(error)}${uncertain ? '；删除结果可能已生效，请刷新状态或查看日志后再操作' : ''}`);
       return false;
     } finally {
-      locked.current = false;
       setBusy(false);
     }
-  };
+  }, false);
   return { remove, busy };
 }

@@ -8,12 +8,12 @@ use std::collections::HashMap;
 use std::str::FromStr;
 
 #[derive(Default)]
-struct Rollup {
-    buys: i64,
-    sells: i64,
-    pnl: Decimal,
-    pending: i64,
-    latest: Option<DateTime<Utc>>,
+pub(super) struct Rollup {
+    pub(super) buys: i64,
+    pub(super) sells: i64,
+    pub(super) pnl: Decimal,
+    pub(super) pending: i64,
+    pub(super) latest: Option<DateTime<Utc>>,
 }
 
 impl Rollup {
@@ -31,7 +31,7 @@ impl Rollup {
         );
     }
 
-    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, Self)> {
+    pub(super) fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, Self)> {
         let pnl: String = row.get(3)?;
         let pnl = Decimal::from_str(&pnl).map_err(|err| {
             rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(err))
@@ -364,7 +364,7 @@ pub(super) fn stats_on(
         let value = if stored.latest.is_some_and(|latest| latest <= now) {
             stored
         } else {
-            load_boundary_rollup_on(conn, symbol, mode.as_str(), bucket, window_start, now)?
+            load_boundary_rollup_on(conn, symbol, mode.as_str(), bucket, window_start, now, true)?
         };
         let index = ((bucket - first_hour) / 3600) as usize;
         result.buckets[index].buy_count = value.buys as u64;
@@ -397,7 +397,7 @@ pub(super) fn today_pnl_on(
         let value = if stored.latest.is_some_and(|latest| latest <= now) {
             stored
         } else {
-            load_boundary_rollup_on(conn, &symbol, &mode, bucket, window_start, now)?
+            load_boundary_rollup_on(conn, &symbol, &mode, bucket, window_start, now, true)?
         };
         if value.buys == 0 && value.sells == 0 && value.pending == 0 && value.pnl.is_zero() {
             continue;
@@ -420,15 +420,16 @@ pub(super) fn today_pnl_on(
     })
 }
 
-/// Only the boundary hour can contain entries after the upper bound.
+/// Only boundary hours can contain entries outside the requested bounds.
 /// Parse timestamps before comparing so nanoseconds remain exact.
-fn load_boundary_rollup_on(
+pub(super) fn load_boundary_rollup_on(
     conn: &Connection,
     symbol: &str,
     mode: &str,
     bucket: i64,
     window_start: DateTime<Utc>,
-    now: DateTime<Utc>,
+    window_end: DateTime<Utc>,
+    inclusive_end: bool,
 ) -> Result<Rollup> {
     let mut boundary = conn.prepare_cached(
         "SELECT timestamp, side, realized_pnl, pnl_verified FROM trades
@@ -438,7 +439,12 @@ fn load_boundary_rollup_on(
     let mut value = Rollup::default();
     while let Some(entry) = entries.next()? {
         let timestamp: DateTime<Utc> = entry.get(0)?;
-        if timestamp >= window_start && timestamp <= now {
+        let before_end = if inclusive_end {
+            timestamp <= window_end
+        } else {
+            timestamp < window_end
+        };
+        if timestamp >= window_start && before_end {
             value.add_row(timestamp, entry)?;
         }
     }

@@ -44,7 +44,7 @@ function OrderMarkDiff({ orderPrice }: { orderPrice: string }) {
   return <>{priceDiffPercent(orderPrice, mark) ?? '--'}</>;
 }
 /** Click-to-copy for a price or quantity. The visible text stays the formatted value; the raw value is what gets copied. */
-export function Copyable({ value, children }: { value: string; children: React.ReactNode }) {
+function Copyable({ value, children }: { value: string; children: React.ReactNode }) {
   const { message } = App.useApp();
   const [copied, setCopied] = useState(false);
   const timer = useRef<number | null>(null);

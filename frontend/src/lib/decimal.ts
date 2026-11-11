@@ -89,7 +89,7 @@ export function signedDecimalToNumber(value: string | null): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-export interface DecimalDisplayOptions {
+interface DecimalDisplayOptions {
   minFractionDigits?: number;
   maxFractionDigits?: number;
   trimZeros?: boolean;

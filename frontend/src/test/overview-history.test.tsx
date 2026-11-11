@@ -4,7 +4,7 @@ import { beforeEach, expect, it, vi } from 'vitest';
 import { OverviewHistory } from '../components/OverviewHistory';
 import type { HistoryAccount, OverviewHistoryData } from '../lib/types';
 
-const history = vi.hoisted(() => ({ data: { snapshots: [], current_accounts: [] } as OverviewHistoryData, isPending: false, error: null }));
+const history = vi.hoisted(() => ({ data: { snapshots: [], current_accounts: [] } as OverviewHistoryData | undefined, isPending: false, error: null as Error | null, refetch: vi.fn() }));
 vi.mock('../lib/queries', () => ({ useOverviewHistory: () => history }));
 vi.mock('../components/OverviewHistoryChart', () => ({ default: ({ data }: { data: { equity: number | null }[] }) => <div data-testid="history-chart" data-equities={JSON.stringify(data.map(point => point.equity))}>权益图</div> }));
 
@@ -17,6 +17,9 @@ const group = (account: HistoryAccount, equity: string) => ({ ...account, equity
 
 beforeEach(() => {
   history.data = { snapshots: [], current_accounts: [] };
+  history.isPending = false;
+  history.error = null;
+  history.refetch.mockReset();
 });
 
 it('shows a meaningful empty state before accounts or snapshots exist', () => {
@@ -177,4 +180,68 @@ it('renders daily snapshots with account overview, trade counts, realized pnl, a
   expect(within(section).getByText('成交与实现盈亏（2026-11-08）')).toBeInTheDocument();
   expect(within(section).getAllByText(/9,980/).length).toBeGreaterThan(0);
   expect(within(section).getByText('（1 笔待同步）')).toBeInTheDocument();
+});
+
+it('surfaces a background poll error and retry action without unmounting existing snapshot data', async () => {
+  const hour = Math.floor(Date.now() / 3600000) * 3600;
+  history.data = {
+    snapshots: [{ hour, groups: [group(paper, '10050')] }],
+    current_accounts: [paper],
+    daily_snapshots: [{
+      date: '2026-11-09',
+      window_start: '2026-11-08T16:00:00Z',
+      window_end: '2026-11-09T16:00:00Z',
+      generated_at: '2026-11-09T16:00:05Z',
+      accounts: [{
+        mode: 'PAPER',
+        asset: 'USDC',
+        account_id: 'paper-shared-v1',
+        count: 1,
+        equity: '10050.00',
+        available: '9000.00',
+        wallet: '10000.00',
+        unrealized: '50.00',
+      }],
+      positions: [],
+      pair_positions: [],
+      trades: [],
+    }],
+  };
+  const user = userEvent.setup();
+  const view = render(<OverviewHistory />);
+  const initialCharts = await screen.findAllByTestId('history-chart');
+  const initialDaily = screen.getByLabelText('每日运行快照');
+  expect(within(screen.getByLabelText('最近一次快照')).getByText('10,050')).toBeInTheDocument();
+
+  history.error = new Error('网络波动，快照刷新失败');
+  view.rerender(<OverviewHistory />);
+
+  const alert = screen.getByRole('alert');
+  expect(alert).toHaveTextContent('网络波动，快照刷新失败');
+  expect(within(screen.getByLabelText('最近一次快照')).getByText('10,050')).toBeInTheDocument();
+  expect(screen.getAllByTestId('history-chart')[0]).toBe(initialCharts[0]);
+  expect(screen.getByLabelText('每日运行快照')).toBe(initialDaily);
+
+  await user.click(within(alert).getByRole('button', { name: /重\s*试/ }));
+  expect(history.refetch).toHaveBeenCalledOnce();
+});
+
+it('skips empty hourly charts when only daily snapshots exist', () => {
+  history.data = {
+    snapshots: [],
+    current_accounts: [],
+    daily_snapshots: [{
+      date: '2026-11-09',
+      window_start: '2026-11-08T16:00:00Z',
+      window_end: '2026-11-09T16:00:00Z',
+      generated_at: '2026-11-09T16:00:05Z',
+      accounts: [],
+      positions: [],
+      pair_positions: [],
+      trades: [],
+    }],
+  };
+  render(<OverviewHistory />);
+  expect(screen.queryByText('近 24 小时')).not.toBeInTheDocument();
+  expect(screen.getByLabelText('每日运行快照')).toBeInTheDocument();
 });

@@ -6,7 +6,7 @@ import { downloadDatabase, exportSnapshotNotice, exportSnapshotSuccess, refreshC
 
 const options: { label: string; value: DatabaseTarget }[] = [
   { label: '成交历史及统计（全部币种、全部模式）', value: 'trade_history' },
-  { label: '账户小时快照', value: 'account_hourly_snapshots' },
+  { label: '账户小时与每日快照', value: 'account_hourly_snapshots' },
 ];
 
 type ClearResult = { deleted_trades: number; deleted_account_hourly_snapshots: number };
@@ -29,7 +29,7 @@ export function DatabaseSettings() {
         await refreshClearedQueries(client, keys);
         const counts = [
           ...(targets.includes('trade_history') ? [`${result.deleted_trades} 笔历史成交`] : []),
-          ...(targets.includes('account_hourly_snapshots') ? [`${result.deleted_account_hourly_snapshots} 条账户小时快照`] : []),
+          ...(targets.includes('account_hourly_snapshots') ? [`${result.deleted_account_hourly_snapshots} 条账户小时与每日快照`] : []),
         ];
         return `已清空 ${counts.join('、')}`;
       }, { title: '清空所选数据库数据？', content: `将永久清空：${names}。此操作无法撤销，建议先导出所选数据。持仓和挂单保留。`, okText: '确认清空', okButtonProps: { danger: true }, cancelText: '取消' });

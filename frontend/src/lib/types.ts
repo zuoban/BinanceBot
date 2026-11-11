@@ -1,4 +1,4 @@
-export type Decimal = string;
+type Decimal = string;
 export type Mode = 'PAPER' | 'LIVE' | 'UNKNOWN';
 export type Status = 'RUNNING' | 'PAUSED' | 'STOPPED' | 'ERROR';
 export type Action = 'pause' | 'resume' | 'cancel_all' | 'rebalance';
@@ -32,7 +32,7 @@ export interface Trade {
   pnl_verified: boolean; is_maker: boolean; timestamp: string; note: string;
 }
 export interface Log { timestamp: string; level: string; message: string }
-export interface Account {
+interface Account {
   asset: string; total_wallet_balance: Decimal; available_balance: Decimal;
   margin_balance: Decimal; unrealized_profit: Decimal; update_time: string;
 }
@@ -50,7 +50,7 @@ export interface Snapshot {
   active_orders: Order[]; recent_trades: Trade[]; recent_logs: Log[];
   hourly_trade_stats: { window_start: string; window_end: string; realized_pnl: Decimal; pending_pnl_count: number; buckets: { hour_start: string; buy_count: number; sell_count: number }[] } | null;
 }
-export interface AccountSnapshot {
+interface AccountSnapshot {
   mode: Mode;
   snapshot: Pick<Snapshot, 'symbol' | 'status' | 'account' | 'account_cny_rate'> & {
     position: Pick<Snapshot['position'], 'size' | 'unrealized_pnl'>;
@@ -62,7 +62,7 @@ export interface AccountObservation extends AccountSnapshot { account_observatio
 export type SocketMessage =
   | { type: 'snapshot'; data: Snapshot }
   | { type: 'accounts'; data: AccountFrame };
-export interface TodayPnl { window_start: string; window_end: string; groups: { symbol: string; mode: Mode; realized_pnl: Decimal; pending_pnl_count: number }[] }
+interface TodayPnl { window_start: string; window_end: string; groups: { symbol: string; mode: Mode; realized_pnl: Decimal; pending_pnl_count: number }[] }
 export interface PairSummary {
   symbol: string; status: Status; mode: Mode; grid_config: GridConfig;
   ticker: Pick<Snapshot['ticker'], 'mark_price' | 'mark_update_time'>;
@@ -74,11 +74,11 @@ export interface PairSummary {
 }
 export interface Overview { generated_at: string; pairs: { scoped: boolean; mode: Mode; snapshot: PairSummary }[]; recent_trades: Trade[]; today_pnl?: TodayPnl | null }
 export interface HistoryAccount { mode: Mode; asset: string; account_id: string | null }
-export interface HourlySnapshot {
+interface HourlySnapshot {
   hour: number;
   groups: (HistoryAccount & { equity: Decimal | null })[];
 }
-export interface DailyAccountGroup {
+interface DailyAccountGroup {
   mode: Mode;
   asset: string;
   account_id: string | null;
@@ -88,7 +88,7 @@ export interface DailyAccountGroup {
   wallet: Decimal | null;
   unrealized: Decimal | null;
 }
-export interface DailyPositionGroup {
+interface DailyPositionGroup {
   mode: Mode;
   asset: string;
   count: number;
@@ -96,7 +96,7 @@ export interface DailyPositionGroup {
   short: Decimal | null;
   total: Decimal | null;
 }
-export interface DailyPositionItem {
+interface DailyPositionItem {
   symbol: string;
   mode: Mode;
   direction: GridConfig['direction'];
@@ -107,7 +107,7 @@ export interface DailyPositionItem {
   position_amount: Decimal | null;
   unrealized_pnl: Decimal | null;
 }
-export interface DailyTradeGroup {
+interface DailyTradeGroup {
   symbol: string;
   mode: Mode;
   buy_count: number;

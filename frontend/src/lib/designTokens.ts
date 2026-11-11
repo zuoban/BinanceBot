@@ -1,4 +1,4 @@
-export type ColorMode = 'light' | 'dark';
+type ColorMode = 'light' | 'dark';
 
 const lightPalette = {
   '--bg-page': '#f7f7f8',
@@ -65,7 +65,7 @@ export const dimensions = {
   controlHeight: 36, controlHeightSM: 28, controlTouch: 44,
 } as const;
 
-export const sharedCssTokens = {
+const sharedCssTokens = {
   '--font-sans': fonts.sans, '--font-mono': fonts.mono,
   '--radius-control': `${dimensions.radiusControl}px`, '--radius-panel': `${dimensions.radiusPanel}px`, '--radius-chip': `${dimensions.radiusChip}px`,
   '--space-1': `${dimensions.space1}px`, '--space-2': `${dimensions.space2}px`, '--space-3': `${dimensions.space3}px`,

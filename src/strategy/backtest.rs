@@ -698,29 +698,67 @@ pub fn parse_csv(text: &str) -> Result<Vec<Candle>> {
     Ok(candles)
 }
 
+const SUPPORTED_KLINE_INTERVALS: &[&str] = &[
+    "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M",
+];
+const MAX_BACKTEST_DAYS: u32 = 3650;
+const MAX_KLINE_SPAN_MS: i64 = MAX_BACKTEST_DAYS as i64 * 24 * 60 * 60 * 1000;
+
+fn validate_kline_interval(interval: &str) -> Result<()> {
+    ensure!(
+        SUPPORTED_KLINE_INTERVALS.contains(&interval),
+        "不支持的 K 线周期: {interval}（支持: {}）",
+        SUPPORTED_KLINE_INTERVALS.join(", ")
+    );
+    Ok(())
+}
+
+fn kline_http_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .expect("Failed to build kline HTTP client")
+    });
+    &CLIENT
+}
+
 pub async fn fetch_klines(
     symbol: &str,
     interval: &str,
     start_ms: i64,
     end_ms: i64,
 ) -> Result<Vec<Candle>> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()?;
+    crate::config::validate_symbol(symbol)?;
+    validate_kline_interval(interval)?;
+    ensure!(
+        end_ms > start_ms && end_ms.saturating_sub(start_ms) <= MAX_KLINE_SPAN_MS,
+        "K 线时间范围必须在 1..={MAX_BACKTEST_DAYS} 天之间"
+    );
+    let client = kline_http_client();
+    let end_str = end_ms.to_string();
     let mut start = start_ms;
     let mut candles: Vec<Candle> = Vec::new();
     loop {
-        let url = format!(
-            "https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval={interval}&startTime={start}&endTime={end_ms}&limit=1500"
-        );
+        let start_str = start.to_string();
         let rows: Vec<Vec<serde_json::Value>> = client
-            .get(&url)
+            .get("https://fapi.binance.com/fapi/v1/klines")
+            .query(&[
+                ("symbol", symbol),
+                ("interval", interval),
+                ("startTime", start_str.as_str()),
+                ("endTime", end_str.as_str()),
+                ("limit", "1500"),
+            ])
             .send()
-            .await?
+            .await
+            .map_err(reqwest::Error::without_url)?
             .error_for_status()
+            .map_err(reqwest::Error::without_url)
             .context("K 线请求失败，请检查交易对和周期")?
             .json()
-            .await?;
+            .await
+            .map_err(reqwest::Error::without_url)?;
         let received = rows.len();
         for row in rows {
             let price = |position: usize| -> Result<Decimal> {
@@ -830,6 +868,7 @@ async fn load_rules(args: &BacktestArgs) -> Result<SymbolRules> {
     ensure!(args.maker_fee >= Decimal::ZERO, "--maker-fee 不能为负数");
     let mut rules = match &args.symbol {
         Some(symbol) => {
+            crate::config::validate_symbol(symbol)?;
             let client = BinanceFuturesClient::new(&AppConfig::default().exchange);
             let info = client
                 .get_exchange_info(Some(symbol))
@@ -1008,13 +1047,19 @@ fn print_sweep(rows: &[SweepRow], candles: &[Candle], capital: Decimal) {
 }
 
 pub async fn run_cli(args: &BacktestArgs) -> Result<()> {
+    if args.csv.is_none() && args.symbol.is_some() {
+        validate_kline_interval(&args.interval)?;
+        ensure!(
+            (1..=MAX_BACKTEST_DAYS).contains(&args.days),
+            "--days 必须在 1..={MAX_BACKTEST_DAYS} 之间"
+        );
+    }
     let rules = load_rules(args).await?;
     let candles = match (&args.csv, &args.symbol) {
         (Some(path), _) => parse_csv(
             &std::fs::read_to_string(path).with_context(|| format!("无法读取 {path:?}"))?,
         )?,
         (None, Some(symbol)) => {
-            ensure!(args.days > 0, "--days 必须大于 0");
             let end = chrono::Utc::now().timestamp_millis();
             let start = end - i64::from(args.days) * 24 * 60 * 60 * 1000;
             fetch_klines(symbol, &args.interval, start, end).await?
@@ -1605,6 +1650,38 @@ mod tests {
         .is_err());
         assert!(load_rules(&BacktestArgs {
             min_notional: Some(Decimal::ZERO),
+            ..base.clone()
+        })
+        .await
+        .is_err());
+        assert!(load_rules(&BacktestArgs {
+            symbol: Some("solusdc".into()),
+            ..base.clone()
+        })
+        .await
+        .is_err());
+        assert!(fetch_klines("SOLUSDC&limit=1", "1m", 0, 60_000)
+            .await
+            .is_err());
+        assert!(fetch_klines("SOLUSDC", "2m", 0, 60_000).await.is_err());
+        assert!(fetch_klines("SOLUSDC", "1m", 60_000, 60_000).await.is_err());
+        assert!(run_cli(&BacktestArgs {
+            symbol: Some("SOLUSDC".into()),
+            days: 0,
+            ..base.clone()
+        })
+        .await
+        .is_err());
+        assert!(run_cli(&BacktestArgs {
+            symbol: Some("SOLUSDC".into()),
+            days: MAX_BACKTEST_DAYS + 1,
+            ..base.clone()
+        })
+        .await
+        .is_err());
+        assert!(run_cli(&BacktestArgs {
+            symbol: Some("SOLUSDC".into()),
+            interval: "invalid".into(),
             ..base
         })
         .await

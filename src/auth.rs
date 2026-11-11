@@ -12,11 +12,18 @@ pub struct AdminAuth {
     password_hash: String,
 }
 
+const MAX_ADMIN_PASSWORD_BYTES: usize = 1024;
+
 impl AdminAuth {
     pub fn from_password(password: &str) -> anyhow::Result<Self> {
         anyhow::ensure!(
             password.len() >= 6,
             "管理员密码长度至少为 6 个字符（--admin-password 或 ADMIN_PASSWORD）"
+        );
+        anyhow::ensure!(
+            password.len() <= MAX_ADMIN_PASSWORD_BYTES,
+            "管理员密码长度不能超过 {} 字节",
+            MAX_ADMIN_PASSWORD_BYTES
         );
         Ok(Self {
             password_hash: hash_password_argon2(password)?,
@@ -24,6 +31,9 @@ impl AdminAuth {
     }
 
     pub fn verify(&self, password: &str) -> bool {
+        if password.len() > MAX_ADMIN_PASSWORD_BYTES {
+            return false;
+        }
         verify_password_argon2(password, &self.password_hash)
     }
 }
@@ -37,6 +47,9 @@ pub fn hash_password_argon2(password: &str) -> anyhow::Result<String> {
 }
 
 pub fn verify_password_argon2(password: &str, stored_hash: &str) -> bool {
+    if password.len() > MAX_ADMIN_PASSWORD_BYTES {
+        return false;
+    }
     PasswordHash::new(stored_hash).ok().is_some_and(|parsed| {
         Argon2::default()
             .verify_password(password.as_bytes(), &parsed)
@@ -67,6 +80,12 @@ mod tests {
     fn admin_password_requires_six_characters() {
         assert!(AdminAuth::from_password("short").is_err());
         assert!(AdminAuth::from_password("sixchr").is_ok());
+        let max = "a".repeat(MAX_ADMIN_PASSWORD_BYTES);
+        let over = "a".repeat(MAX_ADMIN_PASSWORD_BYTES + 1);
+        let auth = AdminAuth::from_password(&max).unwrap();
+        assert!(auth.verify(&max));
+        assert!(!auth.verify(&over));
+        assert!(AdminAuth::from_password(&over).is_err());
     }
 
     #[test]

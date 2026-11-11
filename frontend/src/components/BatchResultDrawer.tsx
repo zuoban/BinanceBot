@@ -4,7 +4,7 @@ import type { Action, Pair } from '../lib/types';
 import type { ControlResult } from './Controls';
 import { DirectionText, SignalChip, type Signal } from './Common';
 
-export type BatchOutcome = { pair: Pair; result: Exclude<ControlResult, 'confirmed'> };
+type BatchOutcome = { pair: Pair; result: Exclude<ControlResult, 'confirmed'> };
 export interface BatchReport { action: 'pause' | 'resume'; total: number; outcomes: BatchOutcome[] }
 
 const meta = (action: 'pause' | 'resume'): Record<BatchOutcome['result'], { label: string; tier: Signal; retry: boolean }> => ({

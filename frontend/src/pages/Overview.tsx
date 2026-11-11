@@ -1,166 +1,26 @@
-import { memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
-import { App, Button, Card, Col, Dropdown, Empty, Grid, Input, Popover, Row, Select, Space, Statistic } from 'antd';
-import { ArrowRightOutlined, EyeOutlined, PlusOutlined, SearchOutlined, ThunderboltOutlined } from '@ant-design/icons';
+import { useCallback, useContext, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { App, Button, Card, Dropdown, Empty, Grid, Input, Select } from 'antd';
+import { PlusOutlined, SearchOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { useOverview } from '../lib/queries';
 import { useUrlParams } from '../lib/urlState';
 import { AccountsContext } from '../lib/session';
 import { errorMessage } from '../lib/api';
-import { sameGridConfig } from '../lib/configDiff';
-import { beijingDay, cnyText, compactNumber as number, comparePositionAmount, entryChange, entryPriceText, groupTradePnl, maxPositionPolicyLabel, modeLabel, positivePrice, positionAmount, positionGroups, quantity, quoteAsset, ratioText, SNAPSHOT_STALE_MS, todayPnlGroups, todayTradeCounts, trimFractionZeros, type AccountGroup, type PositionGroup } from '../lib/format';
-import { ControlResultBanner, DirectionTag, DirectionText, ErrorNotice, FreshnessText, PageTitle, Pnl, SignalButton, SignalChip, StatusTag, type Signal } from '../components/Common';
+import { useAsyncLock, useMountedRef } from '../lib/asyncGuard';
+import { beijingDay, comparePositionAmount, groupTradePnl, modeLabel, positionGroups, SNAPSHOT_STALE_MS, todayPnlGroups, todayTradeCounts } from '../lib/format';
+import { ErrorNotice, FreshnessText, PageTitle, Pnl, SignalButton, SignalChip, type Signal } from '../components/Common';
 import { runBatchControls, useControls } from '../components/Controls';
-import type { GridConfig, Overview, Pair, Trade } from '../lib/types';
+import type { Overview, Pair, Trade } from '../lib/types';
 import { OverviewLoading } from '../components/Loading';
+import { OverviewFinanceDisclosure } from '../components/OverviewFinanceDisclosure';
 import { OverviewHistory } from '../components/OverviewHistory';
-import { StrategyMenu, StrategyToggle } from '../components/StrategyMenu';
+import { StrategyCard, toPair } from '../components/StrategyCard';
 import { BatchResultDrawer, type BatchReport } from '../components/BatchResultDrawer';
 import { PaperGuide } from '../components/PaperGuide';
 import { TradesTable } from '../components/DataTables';
-
 import { useAccountGroups, useBeijingDay, useExpired } from '../lib/useNow';
 const emptyPairs: Overview['pairs'] = [];
 const emptyTrades: Trade[] = [];
-const toPair = (e: Overview['pairs'][number]): Pair => ({ symbol: e.snapshot.symbol, status: e.snapshot.status, mode: e.mode, grid_config: e.snapshot.grid_config, scoped: e.scoped });
-const StrategyConfigPopover = memo(function StrategyConfigPopover({ symbol, config, quoteUnit }: { symbol: string; config: GridConfig; quoteUnit: string }) {
-  return <div className="strategy-config-popover">
-    <dl>
-      <div><dt>交易方向</dt><dd><DirectionText direction={config.direction} /></dd></div>
-      <div><dt>网格间距</dt><dd>{trimFractionZeros(config.grid_interval)}{quoteUnit}</dd></div>
-      <div><dt>每格金额</dt><dd>{trimFractionZeros(config.order_amount_usdc)}{quoteUnit}</dd></div>
-      <div><dt>买单 / 卖单窗口</dt><dd>{config.buy_window} / {config.sell_window}</dd></div>
-      <div><dt>最低价格</dt><dd>{config.min_price == null ? '未设置' : trimFractionZeros(config.min_price)}</dd></div>
-      <div><dt>最高价格</dt><dd>{config.max_price == null ? '未设置' : trimFractionZeros(config.max_price)}</dd></div>
-      <div><dt>最大持仓名义价值</dt><dd>{config.max_position_usdc == null ? '未设置' : `${trimFractionZeros(config.max_position_usdc)}${quoteUnit}`}</dd></div>
-      <div><dt>持仓上限处理方式</dt><dd>{maxPositionPolicyLabel(config)}</dd></div>
-      <div><dt>强平距离阈值</dt><dd>{config.min_liquidation_distance_pct == null ? '未设置' : `${trimFractionZeros(config.min_liquidation_distance_pct)}%`}</dd></div>
-      <div><dt>仅挂单</dt><dd>{config.post_only ? '开启' : '关闭'}</dd></div>
-    </dl>
-    <Link to={`/pairs/${symbol}/config`}>查看完整配置 <ArrowRightOutlined /></Link>
-  </div>;
-});
-function OverviewFinanceDisclosure({
-  accountList,
-  positionList,
-  stale,
-  compactFinance,
-  financesExpanded,
-  setFinancesExpanded,
-}: {
-  accountList: AccountGroup[];
-  positionList: PositionGroup[];
-  stale: boolean;
-  compactFinance: boolean;
-  financesExpanded: boolean;
-  setFinancesExpanded: (open: boolean) => void;
-}) {
-  if (!accountList.length && !positionList.length) return null;
-  return <details className="finance-disclosure" open={!compactFinance || financesExpanded} onToggle={event => { if (compactFinance) setFinancesExpanded(event.currentTarget.open); }}>
-    <summary className="finance-disclosure-summary">
-      <span className="finance-disclosure-label">账户与持仓明细<ArrowRightOutlined aria-hidden="true" /></span>
-      <span className={`finance-summary-values${stale ? ' is-stale' : ''}`}>
-        {accountList.map(group => <span key={`account-${group.key}`}><small>账户权益 / {group.asset}</small><strong>{number(group.equity)}</strong></span>)}
-        {positionList.map(group => <span key={`position-${group.key}`}><small>总持仓 / {group.asset}</small><strong>{number(group.total)}</strong></span>)}
-      </span>
-    </summary>
-    <div className={`overview-finances${stale ? ' is-stale' : ''}`}>
-      {accountList.length > 0 && <section className="overview-finance-group" aria-labelledby="accounts-heading">
-        <div className="section-heading"><h2 id="accounts-heading">账户概览</h2></div>
-        <Row gutter={[16, 16]}>
-          {accountList.map(group => <Col span={24} key={group.key}><Card className="account-card finance-card" size="small">
-            <div className="section-line finance-card-heading"><span>保证金余额</span></div>
-            <div className="finance-card-primary"><Statistic value={group.equity ?? '--'} formatter={() => number(group.equity)} suffix={group.asset} />
-              <span className="finance-card-note muted">{cnyText(group.cny, true)}</span></div>
-            <div className="finance-metrics">
-              <div><span>可用余额</span><strong>{number(group.available)} <small>{group.asset}</small></strong></div>
-              <div><span>可用比例（按钱包余额）</span><strong>{ratioText(group.ratio, true)}</strong></div>
-            </div>
-            <div className="finance-metrics" aria-label={`${group.asset}账户资产`}>
-              <div><span>钱包余额</span><strong>{number(group.wallet)}</strong></div>
-              <div><span>未实现盈亏</span><strong><Pnl value={group.unrealized} /></strong></div>
-            </div>
-            <div className="muted">{group.count} 个策略共用账户 · 去重展示</div>
-          </Card></Col>)}
-        </Row>
-      </section>}
-      {positionList.length > 0 && <section className="overview-finance-group" aria-labelledby="positions-heading">
-        <div className="section-heading"><h2 id="positions-heading">持仓概览</h2><span className="muted">按标记价格计算 · 全部策略</span></div>
-        <Row gutter={[16, 16]}>
-          {positionList.map(group => <Col span={24} key={group.key}>
-            <Card className="position-summary finance-card" size="small">
-              <div className="section-line finance-card-heading"><span>总持仓金额 / {group.asset}</span></div>
-              <div className="finance-card-primary">
-                <Statistic value={group.total ?? '--'} formatter={() => number(group.total)} suffix={group.asset} />
-                <span className="finance-card-note muted">按标记价格估值</span>
-              </div>
-              <div className="finance-metrics">
-                <div><span>做多持仓金额</span><strong className="position-long">{number(group.long)}</strong></div>
-                <div><span>做空持仓金额</span><strong className="position-short">{number(group.short)}</strong></div>
-              </div>
-              <div className="finance-metrics">
-                <div><span>多空比（金额占比）</span><strong>{group.total !== null && group.total > 0 && group.long !== null && group.short !== null ? `${number(group.long / group.total * 100, 1)}% / ${number(group.short / group.total * 100, 1)}%` : '--'}</strong></div>
-                <div><span>覆盖策略</span><strong>{group.count} <small>个</small></strong></div>
-              </div>
-              <div className="position-summary-footer muted">按实际持仓方向统计{group.total === null ? ' · 部分持仓数据不可用' : ''}</div>
-            </Card>
-          </Col>)}
-        </Row>
-      </section>}
-    </div>
-  </details>;
-}
-const StrategyCard = memo(function StrategyCard({
-  entry,
-  stale,
-  buyCount,
-  sellCount,
-  controlResult,
-  clearResult,
-}: {
-  entry: Overview['pairs'][number];
-  stale: boolean;
-  buyCount: number | null;
-  sellCount: number | null;
-  controlResult?: string;
-  clearResult?: (symbol: string) => void;
-}) {
-  const { snapshot: s } = entry;
-  const pair = useMemo(() => toPair(entry), [entry]);
-  const quote = quoteAsset(s.symbol), quoteSuffix = quote ? ` / ${quote}` : '', quoteUnit = quote ? ` ${quote}` : '';
-  const change = entryChange(s.position, s.ticker.mark_price);
-  return <Card className={`strategy-card ${s.grid_config.direction === 'SHORT' ? 'strategy-short' : 'strategy-long'}`}>
-    <div className="section-line strategy-card-heading">
-      <div className="strategy-identity"><Link className="pair-name" to={`/pairs/${s.symbol}`}>{s.symbol}</Link></div>
-      <Space className="strategy-card-actions" size={6}><Popover trigger="click" placement="bottom" title={`${s.symbol} 策略配置`} content={<StrategyConfigPopover symbol={s.symbol} config={s.grid_config} quoteUnit={quoteUnit} />}><Button size="small" icon={<EyeOutlined />} aria-label={`查看 ${s.symbol} 策略配置`} /></Popover><StrategyToggle pair={pair} stale={stale} /><StrategyMenu pair={pair} stale={stale} /></Space>
-    </div>
-    <div className="strategy-main">
-      <div className="strategy-price"><span className="muted">标记价格{quoteSuffix}</span><strong>{positivePrice(s.ticker.mark_price, true)}</strong></div>
-      <div className="strategy-tags"><DirectionTag direction={s.grid_config.direction} /><StatusTag status={s.status} /></div>
-    </div>
-    <div className="strategy-metrics" aria-label={`${s.symbol} 策略指标`}>
-      <div><span>持仓金额{quoteSuffix}</span><strong>{number(positionAmount(s))}</strong></div>
-      <div><span>持仓数量</span><strong>{quantity(s.position.size)}</strong></div>
-      <div><span>开仓价格</span><strong>{entryPriceText(s.position, true)}</strong></div>
-      <div><span>涨跌幅</span><strong className={change.className}>{change.text}</strong></div>
-      <div><span>已实现盈亏{quoteSuffix}</span><strong><Pnl value={s.stats.total_realized_pnl} compact /></strong></div>
-      <div><span>未实现盈亏{quoteSuffix}</span><strong><Pnl value={s.position.unrealized_pnl} compact /></strong></div>
-      <div><span>今日成交</span><strong>{buyCount !== null && sellCount !== null ? buyCount + sellCount : '--'} <small>笔</small></strong></div>
-      <div><span>买单 / 卖单</span><strong>{buyCount ?? '--'} <small>/</small> {sellCount ?? '--'}</strong></div>
-    </div>
-    <ControlResultBanner symbol={s.symbol} result={controlResult} clearResult={clearResult} variant="inline" />
-  </Card>;
-}, (prev, next) => {
-  if (prev.stale !== next.stale || prev.buyCount !== next.buyCount || prev.sellCount !== next.sellCount || prev.controlResult !== next.controlResult || prev.clearResult !== next.clearResult) return false;
-  const a = prev.entry, b = next.entry;
-  if (a === b) return true;
-  const sa = a.snapshot, sb = b.snapshot;
-  return a.mode === b.mode && a.scoped === b.scoped && sa.symbol === sb.symbol && sa.status === sb.status &&
-    sa.ticker.mark_price === sb.ticker.mark_price &&
-    sa.position.size === sb.position.size && sa.position.entry_price === sb.position.entry_price &&
-    sa.position.mark_price === sb.position.mark_price && sa.position.unrealized_pnl === sb.position.unrealized_pnl &&
-    sa.stats.total_realized_pnl === sb.stats.total_realized_pnl &&
-    sameGridConfig(sa.grid_config, sb.grid_config);
-});
 export default function OverviewPage() {
   const overview = useOverview();
   const navigate = useNavigate();
@@ -200,12 +60,8 @@ export default function OverviewPage() {
   const [financesExpanded, setFinancesExpanded] = useState(false);
   const dayNow = useBeijingDay();
   const dataExpired = useExpired(overview.data ? overview.dataUpdatedAt + SNAPSHOT_STALE_MS : Infinity);
-  const batchLock = useRef(false);
-  const mounted = useRef(true);
-  useEffect(() => {
-    mounted.current = true;
-    return () => { mounted.current = false; };
-  }, []);
+  const runBatch = useAsyncLock();
+  const mounted = useMountedRef();
   const entries = overview.data?.pairs ?? emptyPairs;
   const recentTrades = overview.data?.recent_trades ?? emptyTrades;
   const displayedTrades = useMemo(() => recentTrades.slice(0, tradesExpanded ? 20 : 5), [recentTrades, tradesExpanded]);
@@ -225,9 +81,8 @@ export default function OverviewPage() {
   }
   const currentDay = beijingDay(dayNow);
   const tradeCountsBySymbol = useMemo(() => new Map(entries.map(e => [e.snapshot.symbol, todayTradeCounts(e.snapshot, dayNow)])), [entries, currentDay]);
-  const batch = async (action: 'pause' | 'resume') => {
-    if (batchLock.current) return;
-    batchLock.current = true; setBatchBusy(true);
+  const batch = (action: 'pause' | 'resume') => runBatch(async () => {
+    setBatchBusy(true);
     const refreshPairs = async () => {
       const refreshed = await overview.refetch();
       if (!mounted.current) return null;
@@ -261,8 +116,10 @@ export default function OverviewPage() {
       else { setReport(null); message.success(`已${action === 'pause' ? '暂停' : '恢复'} ${selected.length} 个策略`); }
     } catch (error) {
       if (mounted.current) message.error(`批量操作失败：${errorMessage(error)}`);
-    } finally { batchLock.current = false; if (mounted.current) setBatchBusy(false); }
-  };
+    } finally {
+      if (mounted.current) setBatchBusy(false);
+    }
+  });
   const visible = useMemo(() => {
     const query = search.toUpperCase().trim();
     const matchesStatus = (e: typeof entries[number]) => statusFilter === 'all' || (statusFilter === 'LIVE' ? e.mode === 'LIVE' : e.snapshot.status === statusFilter);

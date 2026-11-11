@@ -1,7 +1,8 @@
-import { useContext, useEffect, useRef, useState } from 'react';
+import { useContext, useState } from 'react';
 import { App, type ModalFuncProps } from 'antd';
 import type { QueryClient, QueryKey } from '@tanstack/react-query';
 import { ApiError, authenticatedFetch, errorMessage } from './api';
+import { useAsyncLock, useMountedRef } from './asyncGuard';
 import { downloadBlob } from './exportCsv';
 import { EditContext } from './session';
 
@@ -40,31 +41,27 @@ export function useDatabaseAction<T extends string>() {
   const { modal, message } = App.useApp();
   const edit = useContext(EditContext);
   const [busy, setBusy] = useState<T | null>(null);
-  const lock = useRef(false);
-  const mounted = useRef(true);
-  useEffect(() => {
-    mounted.current = true;
-    return () => { mounted.current = false; edit.setSaving(false); };
-  }, [edit.setSaving]);
-  const run = async (action: T, task: () => Promise<string | void>, confirm?: ModalFuncProps) => {
-    if (lock.current || !mounted.current) return;
-    lock.current = true;
-    try {
-      if (confirm && !await modal.confirm(confirm)) return;
-      if (!mounted.current) return;
-      setBusy(action);
-      edit.setSaving(true);
-      const text = await task();
-      if (mounted.current && text) message.success(text);
-    } catch (error) {
-      if (mounted.current) message.error(errorMessage(error));
-    } finally {
-      lock.current = false;
-      if (mounted.current) {
-        setBusy(null);
-        edit.setSaving(false);
+  const runLocked = useAsyncLock();
+  const mounted = useMountedRef(() => edit.setSaving(false));
+  const run = (action: T, task: () => Promise<string | void>, confirm?: ModalFuncProps) => {
+    if (!mounted.current) return Promise.resolve();
+    return runLocked(async () => {
+      try {
+        if (confirm && !await modal.confirm(confirm)) return;
+        if (!mounted.current) return;
+        setBusy(action);
+        edit.setSaving(true);
+        const text = await task();
+        if (mounted.current && text) message.success(text);
+      } catch (error) {
+        if (mounted.current) message.error(errorMessage(error));
+      } finally {
+        if (mounted.current) {
+          setBusy(null);
+          edit.setSaving(false);
+        }
       }
-    }
+    });
   };
   return { busy, run };
 }

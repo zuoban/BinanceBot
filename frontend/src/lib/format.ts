@@ -83,7 +83,7 @@ export function number(value: unknown, digits = 2) {
 export const price = (value: unknown) => number(value, Math.min(10, Math.max(4, 2 - Math.floor(Math.log10(Math.abs(Number(value)) || 1)))));
 export const trimFractionZeros = (value: string) => value.replace(/(\.\d*?[1-9])0+$|\.0+$/, '$1');
 export const compactNumber = (value: unknown, digits = 2) => trimFractionZeros(number(value, digits));
-export const compactPrice = (value: unknown) => trimFractionZeros(price(value));
+const compactPrice = (value: unknown) => trimFractionZeros(price(value));
 export const quantity = (value: unknown) => formatDecimalDisplay(value, { trimZeros: true }) ?? '--';
 export function positivePrice(value: unknown, compact = false) {
   const n = numeric(value);

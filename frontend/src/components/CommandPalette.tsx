@@ -7,8 +7,9 @@ import { directionLabel, statusLabel } from '../lib/format';
 import { useTheme, type ThemePreference } from '../lib/theme';
 import type { Pair } from '../lib/types';
 import { useControls } from './Controls';
+import { strategyActionGuard } from './StrategyMenu';
 import { themeLabels } from './ThemeSwitch';
-export interface Command {
+interface Command {
   key: string;
   label: string;
   group: string;
@@ -19,7 +20,7 @@ export interface Command {
   run: () => void;
 }
 
-export function CommandPalette({ open, onClose, commands }: { open: boolean; onClose: () => void; commands: Command[] }) {
+function CommandPalette({ open, onClose, commands }: { open: boolean; onClose: () => void; commands: Command[] }) {
   const [query, setQuery] = useState('');
   const [active, setActive] = useState(0);
   const input = useRef<InputRef>(null);
@@ -79,7 +80,7 @@ export function routeSymbol(pathname: string) {
 const recentKey = 'binance_bot_recent_commands';
 const readRecent = (): string[] => { try { const value = JSON.parse(localStorage.getItem(recentKey) ?? '[]'); return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string').slice(0, 5) : []; } catch { return []; } };
 
-export interface PaletteHostProps {
+interface PaletteHostProps {
   open: boolean;
   setOpen: (open: boolean | ((value: boolean) => boolean)) => void;
   pairs: Pair[] | undefined;
@@ -146,14 +147,13 @@ export function PaletteHost({ open, setOpen, pairs, stale, authEnabled, saving, 
       { key: 'go-settings', group: '页面', label: '全局设置', hint: 'g s', keywords: 'settings 设置 api telegram', icon: <SettingOutlined />, run: () => navigate('/settings') },
       { key: 'go-new', group: '页面', label: '新增交易对', hint: 'g n', keywords: 'new add 新增 添加', icon: <PlusOutlined />, run: () => navigate('/pairs/new') },
       ...(pairs ?? []).flatMap(pair => {
-        const running = pair.status === 'RUNNING';
-        const pairBusy = Boolean(busy?.has(pair.symbol));
+        const guard = strategyActionGuard(pair, stale, Boolean(busy?.has(pair.symbol)));
         return [
           { key: `pair-${pair.symbol}`, group: '交易对', label: pair.symbol, hint: `${statusLabel[pair.status]} · ${directionLabel(pair.grid_config.direction)}`, keywords: '策略 查看', icon: <LineChartOutlined />, run: () => navigate(`/pairs/${pair.symbol}`) },
           { key: `config-${pair.symbol}`, group: '交易对', label: `${pair.symbol} 策略参数`, hint: '编辑', keywords: 'config 配置 参数', icon: <EditOutlined />, run: () => navigate(`/pairs/${pair.symbol}/config`) },
-          { key: `toggle-${pair.symbol}`, group: '操作', label: `${running ? '暂停' : '恢复'} ${pair.symbol}`, hint: pair.mode === 'LIVE' && !running ? '实盘 · 需确认' : undefined, keywords: running ? 'pause 暂停 停止' : 'resume 恢复 启动', icon: running ? <PauseOutlined /> : <PlayCircleOutlined />, disabled: pairBusy || (stale && !running), run: () => void run(pair, running ? 'pause' : 'resume') },
-          { key: `rebalance-${pair.symbol}`, group: '操作', label: `重建 ${pair.symbol} 网格`, hint: '需确认', keywords: 'rebalance 重建 网格', icon: <ReloadOutlined />, disabled: pairBusy || stale || !running, run: () => void run(pair, 'rebalance') },
-          { key: `cancel-${pair.symbol}`, group: '操作', label: `撤单并暂停 ${pair.symbol}`, hint: '需确认', keywords: 'cancel 撤单', icon: <StopOutlined />, disabled: pairBusy, run: () => void run(pair, 'cancel_all') },
+          { key: `toggle-${pair.symbol}`, group: '操作', label: `${guard.toggleLabel} ${pair.symbol}`, hint: pair.mode === 'LIVE' && !guard.running ? '实盘 · 需确认' : undefined, keywords: guard.running ? 'pause 暂停 停止' : 'resume 恢复 启动', icon: guard.running ? <PauseOutlined /> : <PlayCircleOutlined />, disabled: guard.toggleDisabled, run: () => void run(pair, guard.toggleAction) },
+          { key: `rebalance-${pair.symbol}`, group: '操作', label: `重建 ${pair.symbol} 网格`, hint: '需确认', keywords: 'rebalance 重建 网格', icon: <ReloadOutlined />, disabled: guard.rebalanceDisabled, run: () => void run(pair, 'rebalance') },
+          { key: `cancel-${pair.symbol}`, group: '操作', label: `撤单并暂停 ${pair.symbol}`, hint: '需确认', keywords: 'cancel 撤单', icon: <StopOutlined />, disabled: guard.cancelDisabled, run: () => void run(pair, 'cancel_all') },
         ];
       }),
       ...(Object.entries(themeLabels) as [ThemePreference, string][]).map(([key, label]) => ({ key: `theme-${key}`, group: '外观', label: `主题：${label}`, hint: preference === key ? '当前' : undefined, keywords: 'theme dark light 主题 深色 浅色', icon: <BulbOutlined />, run: () => setPreference(key) })),
