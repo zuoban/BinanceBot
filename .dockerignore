@@ -14,6 +14,7 @@ frontend/dist
 **/*.db-shm
 **/*.db-wal
 **/*.db-journal
+**/*.db-listen*
 **/*.db.process-lock
 **/*.sqlite*
 frontend/*.tsbuildinfo

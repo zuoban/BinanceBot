@@ -169,6 +169,9 @@ impl Database {
             .position(|pair| pair.symbol == symbol)
             .context("交易对不存在")?;
         saved.pairs.remove(index);
+        if let Some(first) = saved.pairs.first() {
+            saved.exchange.symbol = first.symbol.clone();
+        }
         #[cfg(test)]
         self.before_membership_commit("remove");
         save_config_on(&tx, &saved)?;

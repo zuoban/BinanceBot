@@ -8,6 +8,24 @@ use rusqlite::{params, Connection, OptionalExtension};
 #[cfg(unix)]
 use std::path::Path;
 
+const MAX_ANALYSIS_EXPORT_DB_BYTES: u64 = 256 * 1024 * 1024;
+const TRADE_ANALYSIS_TABLES: &[&str] = &[
+    "trades",
+    "scoped_grid_stats",
+    "execution_frontiers",
+    "trade_hourly_rollups",
+    "trade_pnl_rollups",
+    "trade_hourly_rollup_state",
+    "trade_pnl_rollup_state",
+];
+const SYMBOL_SCOPED_ANALYSIS_TABLES: &[&str] = &[
+    "trades",
+    "scoped_grid_stats",
+    "execution_frontiers",
+    "trade_hourly_rollups",
+    "trade_pnl_rollups",
+];
+
 impl Database {
     pub(crate) fn cached_history_account_id(&self, identity: &[u8; 32]) -> Option<String> {
         self.history_account_ids
@@ -65,16 +83,18 @@ impl Database {
             "INSERT OR IGNORE INTO account_hourly_snapshots (hour, payload) VALUES (?1, ?2)",
         )?
         .execute(params![hour, payload])?;
+        let cutoff = hour.saturating_sub(Self::HOURLY_SNAPSHOT_RETENTION_SECS);
         tx.prepare_cached("DELETE FROM account_hourly_snapshots WHERE hour < ?1")?
-            .execute(params![hour - Self::HOURLY_SNAPSHOT_RETENTION_SECS])?;
+            .execute(params![cutoff])?;
         tx.commit()?;
         Ok(())
     }
 
     pub(crate) fn cleanup_hourly_account_snapshots(&self, now: i64) -> Result<()> {
         let conn = self.lock_connection("cleanup_hourly_account_snapshots");
+        let cutoff = now.saturating_sub(Self::HOURLY_SNAPSHOT_RETENTION_SECS);
         conn.prepare_cached("DELETE FROM account_hourly_snapshots WHERE hour < ?1")?
-            .execute(params![now - Self::HOURLY_SNAPSHOT_RETENTION_SECS])?;
+            .execute(params![cutoff])?;
         Ok(())
     }
 
@@ -132,9 +152,12 @@ impl Database {
         let payload = serde_json::to_string(snapshot)?;
         let cutoff = chrono::NaiveDate::parse_from_str(&snapshot.date, "%Y-%m-%d")
             .ok()
-            .map(|date| {
-                (date - ChronoDuration::days(Self::DAILY_SNAPSHOT_RETENTION_DAYS - 1)).to_string()
-            });
+            .and_then(|date| {
+                date.checked_sub_signed(ChronoDuration::days(
+                    Self::DAILY_SNAPSHOT_RETENTION_DAYS - 1,
+                ))
+            })
+            .map(|date| date.to_string());
         let mut conn = self.lock_connection("save_daily_snapshot");
         let tx = super::immediate_tx(&mut conn)?;
         let inserted = tx
@@ -154,11 +177,13 @@ impl Database {
         let today = now
             .with_timezone(&crate::types::beijing_offset())
             .date_naive();
-        let cutoff =
-            (today - ChronoDuration::days(Self::DAILY_SNAPSHOT_RETENTION_DAYS)).to_string();
-        let conn = self.lock_connection("cleanup_daily_snapshots");
-        conn.prepare_cached("DELETE FROM daily_snapshots WHERE date < ?1")?
-            .execute(params![cutoff])?;
+        if let Some(cutoff) =
+            today.checked_sub_signed(ChronoDuration::days(Self::DAILY_SNAPSHOT_RETENTION_DAYS))
+        {
+            let conn = self.lock_connection("cleanup_daily_snapshots");
+            conn.prepare_cached("DELETE FROM daily_snapshots WHERE date < ?1")?
+                .execute(params![cutoff.to_string()])?;
+        }
         Ok(())
     }
 
@@ -253,6 +278,7 @@ impl Database {
     pub(crate) fn export_analysis_snapshot(&self) -> Result<Vec<u8>> {
         let _export = self.try_analysis_export()?;
         let snapshot = self.backup_to_memory()?;
+        drop_views_and_triggers(&snapshot)?;
 
         if let Some(mut config) = load_config_on(&snapshot)? {
             redact_config_credentials(&mut config);
@@ -270,12 +296,8 @@ impl Database {
     /// Export only rows that can be attributed to this symbol.
     pub(crate) fn export_analysis_snapshot_for_symbol(&self, symbol: &str) -> Result<Vec<u8>> {
         let _export = self.try_analysis_export()?;
-        let snapshot = self.analysis_snapshot_with_tables(&[
-            "trades",
-            "scoped_grid_stats",
-            "execution_frontiers",
-        ])?;
-        for table in ["trades", "scoped_grid_stats", "execution_frontiers"] {
+        let snapshot = self.analysis_snapshot_with_tables(TRADE_ANALYSIS_TABLES)?;
+        for table in SYMBOL_SCOPED_ANALYSIS_TABLES {
             snapshot.execute(
                 &format!("DELETE FROM {table} WHERE symbol != ?1"),
                 params![symbol],
@@ -296,7 +318,7 @@ impl Database {
         if trade_history {
             // Legacy grid_stats has no symbol or mode and cannot be attributed
             // to history retained after a per-symbol cleanup.
-            tables.extend(["trades", "scoped_grid_stats"]);
+            tables.extend_from_slice(TRADE_ANALYSIS_TABLES);
         }
         if account_hourly_snapshots {
             tables.extend(["account_hourly_snapshots", "daily_snapshots"]);
@@ -327,23 +349,27 @@ impl Database {
     }
 
     fn backup_to_memory(&self) -> Result<Connection> {
-        const MAX_ANALYSIS_EXPORT_DB_BYTES: u64 = 256 * 1024 * 1024;
         let mut snapshot = Connection::open_in_memory()?;
         if self.path != ":memory:" {
             #[cfg(unix)]
             self.verify_on_disk_identity()?;
-            if let Ok(meta) = std::fs::metadata(&self.path) {
-                anyhow::ensure!(
-                    meta.len() <= MAX_ANALYSIS_EXPORT_DB_BYTES,
-                    "SQLite database exceeds 256 MiB analysis export limit"
-                );
-            }
+            let db_bytes = std::fs::symlink_metadata(&self.path)?.len();
+            let wal_bytes = match std::fs::symlink_metadata(format!("{}-wal", self.path)) {
+                Ok(meta) => meta.len(),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => 0,
+                Err(err) => return Err(err.into()),
+            };
+            anyhow::ensure!(
+                db_bytes.saturating_add(wal_bytes) <= MAX_ANALYSIS_EXPORT_DB_BYTES,
+                "SQLite database exceeds 256 MiB analysis export limit"
+            );
             let reader = Connection::open_with_flags(
                 &self.path,
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
                     | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
             )?;
             reader.busy_timeout(std::time::Duration::from_secs(5))?;
+            ensure_logical_export_size_within_limit(&reader)?;
             {
                 let backup = rusqlite::backup::Backup::new(&reader, &mut snapshot)?;
                 anyhow::ensure!(
@@ -357,6 +383,7 @@ impl Database {
         }
         {
             let source = self.lock_connection("backup_to_memory");
+            ensure_logical_export_size_within_limit(&source)?;
             let backup = rusqlite::backup::Backup::new(&source, &mut snapshot)?;
             anyhow::ensure!(
                 backup.step(-1)? == rusqlite::backup::StepResult::Done,
@@ -370,33 +397,58 @@ impl Database {
         let snapshot = self.backup_to_memory()?;
         // Remove triggers and views before clearing unselected tables so their
         // contents cannot affect the export or reveal data through a view.
-        let objects = {
+        drop_views_and_triggers(&snapshot)?;
+        let table_names = {
             let mut statement = snapshot.prepare(
-                "SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' \
-                 AND type IN ('table', 'view', 'trigger') \
-                 ORDER BY CASE type WHEN 'trigger' THEN 0 WHEN 'view' THEN 1 ELSE 2 END",
+                "SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' AND type = 'table'",
             )?;
-            let rows = statement.query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?;
+            let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
-        for (kind, name) in objects {
-            let quoted = name.replace('"', "\"\"");
-            if kind == "table" {
-                if !tables.contains(&name.as_str()) {
-                    snapshot.execute_batch(&format!("DELETE FROM \"{}\";", quoted))?;
-                }
-            } else {
-                snapshot.execute_batch(&format!(
-                    "DROP {} IF EXISTS \"{}\";",
-                    kind.to_ascii_uppercase(),
-                    quoted
-                ))?;
+        for name in table_names {
+            if !tables.contains(&name.as_str()) {
+                let quoted = name.replace('"', "\"\"");
+                snapshot.execute_batch(&format!("DELETE FROM \"{}\";", quoted))?;
             }
         }
         Ok(snapshot)
     }
+}
+
+fn ensure_logical_export_size_within_limit(conn: &Connection) -> Result<()> {
+    let page_count: i64 = conn.query_row("PRAGMA page_count", [], |row| row.get(0))?;
+    let page_size: i64 = conn.query_row("PRAGMA page_size", [], |row| row.get(0))?;
+    let logical_bytes = u64::try_from(page_count.max(0))
+        .unwrap_or(u64::MAX)
+        .saturating_mul(u64::try_from(page_size.max(0)).unwrap_or(u64::MAX));
+    anyhow::ensure!(
+        logical_bytes <= MAX_ANALYSIS_EXPORT_DB_BYTES,
+        "SQLite database exceeds 256 MiB analysis export limit"
+    );
+    Ok(())
+}
+
+fn drop_views_and_triggers(conn: &Connection) -> Result<()> {
+    let objects = {
+        let mut statement = conn.prepare(
+            "SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' \
+             AND type IN ('view', 'trigger') \
+             ORDER BY CASE type WHEN 'trigger' THEN 0 ELSE 1 END",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (kind, name) in objects {
+        let quoted = name.replace('"', "\"\"");
+        conn.execute_batch(&format!(
+            "DROP {} IF EXISTS \"{}\";",
+            kind.to_ascii_uppercase(),
+            quoted
+        ))?;
+    }
+    Ok(())
 }
 
 fn redact_config_credentials(config: &mut AppConfig) {

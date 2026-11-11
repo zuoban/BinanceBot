@@ -1,4 +1,4 @@
-import { Button, Drawer } from 'antd';
+import { Button, Drawer, Tooltip } from 'antd';
 import { Link } from 'react-router-dom';
 import { pairRoute } from '../lib/api';
 import type { Action, Pair } from '../lib/types';
@@ -18,7 +18,7 @@ const meta = (action: 'pause' | 'resume'): Record<BatchOutcome['result'], { labe
 const order: BatchOutcome['result'][] = ['failed', 'request_unconfirmed', 'not_submitted', 'state_unconfirmed', 'cancellation_unconfirmed'];
 
 /** Per-pair outcome of a batch action. Only strategies that were certainly not submitted offer a retry. */
-export function BatchResultDrawer({ report, busy, onClose, onRetry }: { report: BatchReport | null; busy?: Set<string>; onClose: () => void; onRetry: (pair: Pair, action: Action) => void }) {
+export function BatchResultDrawer({ report, busy, stale = false, onClose, onRetry }: { report: BatchReport | null; busy?: Set<string>; stale?: boolean; onClose: () => void; onRetry: (pair: Pair, action: Action) => void }) {
   const labels = report ? meta(report.action) : null;
   const rows = report ? [...report.outcomes].sort((a, b) => order.indexOf(a.result) - order.indexOf(b.result)) : [];
   const verb = report?.action === 'pause' ? '暂停' : '恢复';
@@ -29,10 +29,17 @@ export function BatchResultDrawer({ report, busy, onClose, onRetry }: { report: 
     {report && labels && <>
       <p className="muted">以下 {rows.length} 个交易对需要检查。请核对状态、交易所挂单和日志后再继续操作。</p>
       <ul className="batch-results">
-        {rows.map(({ pair, result }) => <li key={pair.symbol}>
-          <div className="batch-results-head"><div className="batch-results-title"><Link to={pairRoute(pair.symbol)} onClick={onClose}>{pair.symbol}</Link><DirectionText direction={pair.grid_config.direction} /></div><SignalChip tier={labels[result].tier}>{labels[result].label}</SignalChip></div>
-          {labels[result].retry && <Button size="small" loading={busy?.has(pair.symbol)} disabled={busy?.has(pair.symbol)} onClick={() => onRetry(pair, report.action)}>重试{verb}</Button>}
-        </li>)}
+        {rows.map(({ pair, result }) => {
+          const isBusy = busy?.has(pair.symbol);
+          const resumeBlocked = report.action === 'resume' && (stale || pair.status === 'RUNNING');
+          const retryButton = <Button size="small" loading={isBusy} disabled={isBusy || resumeBlocked} onClick={() => onRetry(pair, report.action)}>重试{verb}</Button>;
+          return <li key={pair.symbol}>
+            <div className="batch-results-head"><div className="batch-results-title"><Link to={pairRoute(pair.symbol)} onClick={onClose}>{pair.symbol}</Link><DirectionText direction={pair.grid_config.direction} /></div><SignalChip tier={labels[result].tier}>{labels[result].label}</SignalChip></div>
+            {labels[result].retry && (report.action === 'resume' && stale && !isBusy
+              ? <Tooltip title="状态过期，恢复前请刷新"><span className="strategy-toggle-tip">{retryButton}</span></Tooltip>
+              : retryButton)}
+          </li>;
+        })}
       </ul>
     </>}
   </Drawer>;

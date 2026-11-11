@@ -670,3 +670,138 @@ fn database_rejects_hard_links_and_canonicalizes_stored_path() {
     assert!(reopened.export_analysis_snapshot().is_ok());
     drop(reopened);
 }
+
+#[test]
+fn symbol_and_selected_exports_preserve_rollups_drop_triggers_and_saturate_snapshot_cutoffs() {
+    let db = Database::open(":memory:").unwrap();
+    db.save_config(&AppConfig::default()).unwrap();
+    db.create_session("export-trigger-session").unwrap();
+    let ts = chrono::DateTime::parse_from_rfc3339("2026-10-10T02:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    for (id, symbol, pnl) in [
+        ("sol-1", "SOLUSDC", dec!(12.5)),
+        ("btc-1", "BTCUSDC", dec!(45.0)),
+    ] {
+        db.insert_trade(&TradeRecord {
+            trade_id: id.into(),
+            client_order_id: format!("gb_s_{id}"),
+            symbol: symbol.into(),
+            mode: TradingMode::Live,
+            side: OrderSide::Sell,
+            price: dec!(100),
+            quantity: dec!(1),
+            amount_usdc: dec!(100),
+            realized_pnl: pnl,
+            commission: dec!(0.05),
+            pnl_verified: true,
+            is_maker: true,
+            timestamp: ts,
+            note: String::new(),
+        })
+        .unwrap();
+    }
+    db.conn
+        .lock()
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER block_session_delete BEFORE DELETE ON auth_sessions
+             BEGIN SELECT RAISE(ABORT, 'trigger must be dropped before redaction'); END;
+             CREATE VIEW leaked_sessions_view AS SELECT token FROM auth_sessions;",
+        )
+        .unwrap();
+
+    let dir = crate::test_support::TempTestDir::new("rollup-exports");
+    let full_path = dir.join("full.db");
+    std::fs::write(&full_path, db.export_analysis_snapshot().unwrap()).unwrap();
+    let full_conn = Connection::open(&full_path).unwrap();
+    let stray_objects: i64 = full_conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type IN ('view', 'trigger')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stray_objects, 0);
+
+    let sym_path = dir.join("sol.db");
+    std::fs::write(
+        &sym_path,
+        db.export_analysis_snapshot_for_symbol("SOLUSDC").unwrap(),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&sym_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let sym_db = Database::open(&sym_path).unwrap();
+    assert_eq!(
+        sym_db.get_pnl_totals("SOLUSDC", TradingMode::Live).unwrap(),
+        (dec!(12.5), dec!(0.05), 0)
+    );
+    assert_eq!(
+        sym_db.get_pnl_totals("BTCUSDC", TradingMode::Live).unwrap(),
+        (Decimal::ZERO, Decimal::ZERO, 0)
+    );
+    let query_end = ts + ChronoDuration::hours(1);
+    assert_eq!(
+        sym_db
+            .get_hourly_trade_stats("SOLUSDC", TradingMode::Live, query_end)
+            .unwrap()
+            .realized_pnl,
+        dec!(12.5)
+    );
+    assert_eq!(
+        sym_db
+            .get_hourly_trade_stats("BTCUSDC", TradingMode::Live, query_end)
+            .unwrap()
+            .total_counts(),
+        (0, 0)
+    );
+    drop(sym_db);
+
+    let sel_path = dir.join("selected.db");
+    std::fs::write(
+        &sel_path,
+        db.export_selected_analysis_snapshot(true, false).unwrap(),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&sel_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let sel_db = Database::open(&sel_path).unwrap();
+    assert_eq!(
+        sel_db.get_pnl_totals("SOLUSDC", TradingMode::Live).unwrap(),
+        (dec!(12.5), dec!(0.05), 0)
+    );
+    assert_eq!(
+        sel_db.get_pnl_totals("BTCUSDC", TradingMode::Live).unwrap(),
+        (dec!(45.0), dec!(0.05), 0)
+    );
+    drop(sel_db);
+
+    db.save_hourly_account_snapshot(i64::MIN, &[]).unwrap();
+    db.cleanup_hourly_account_snapshots(i64::MIN).unwrap();
+    let earliest = crate::snapshots::DailySnapshot {
+        date: chrono::NaiveDate::MIN.format("%Y-%m-%d").to_string(),
+        window_start: Utc::now(),
+        window_end: Utc::now(),
+        generated_at: Utc::now(),
+        accounts: Vec::new(),
+        positions: Vec::new(),
+        pair_positions: Vec::new(),
+        trades: Vec::new(),
+    };
+    assert!(db.save_daily_snapshot(&earliest).unwrap());
+    let oversized = Database::open(dir.join("oversized.db")).unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(dir.join("oversized.db-wal"))
+        .unwrap()
+        .set_len(256 * 1024 * 1024)
+        .unwrap();
+    assert!(oversized.export_analysis_snapshot().is_err());
+}

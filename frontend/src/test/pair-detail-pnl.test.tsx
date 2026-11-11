@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, renderHook, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
@@ -402,4 +402,39 @@ it('withholds shared PAPER equity during LIVE -> PAPER transition while /api/pai
   state.pairs = [{ ...pair('SOLUSDC'), mode: 'PAPER', account_scope: 'paper-shared-v1' }, { ...pair('BTCUSDC'), mode: 'PAPER', account_scope: 'paper-shared-v1' }];
   rerender(<AccountsContext.Provider value={[{ mode: 'PAPER', snapshot: paperSibling, generated_at_ms: now, received_at_ms: now }]}>{view()}</AccountsContext.Provider>);
   expect(card.querySelector('.ant-statistic-content-value')).toHaveTextContent('105.00');
+});
+
+it('rejects older WS snapshots and preserves newer cached snapshots when a stale HTTP poll resolves', async () => {
+  const { usePairSnapshot: realUsePairSnapshot } = await vi.importActual<typeof Queries>('../lib/queries');
+  let onMessage: ((event: { data: string }) => void) | undefined;
+  vi.stubGlobal('WebSocket', class {
+    set onmessage(fn: ((event: { data: string }) => void) | undefined) { onMessage = fn; }
+    get onmessage() { return onMessage; }
+    onclose?: () => void;
+    onerror?: () => void;
+    close() {}
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  try {
+    const newer = snapshot('SOLUSDC', 'PAPER'); newer.generated_at = '2026-11-05T01:00:05Z'; newer.ticker.last_price = '105';
+    const olderWs = snapshot('SOLUSDC', 'PAPER'); olderWs.generated_at = '2026-11-05T01:00:02Z'; olderWs.ticker.last_price = '102';
+    const olderHttp = snapshot('SOLUSDC', 'PAPER'); olderHttp.generated_at = '2026-11-05T01:00:03Z'; olderHttp.ticker.last_price = '103';
+    const freshestWs = snapshot('SOLUSDC', 'PAPER'); freshestWs.generated_at = '2026-11-05T01:00:09Z'; freshestWs.ticker.last_price = '109';
+    state.api.mockResolvedValueOnce(newer).mockResolvedValueOnce(olderHttp);
+    const wrapper = ({ children }: { children: React.ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+    const { result, unmount } = renderHook(() => realUsePairSnapshot(pair('SOLUSDC')), { wrapper });
+    await waitFor(() => expect(result.current.data?.ticker.last_price).toBe('105'));
+    act(() => onMessage?.({ data: JSON.stringify({ type: 'snapshot', data: olderWs }) }));
+    expect(result.current.live).toBe(false);
+    expect(result.current.data?.ticker.last_price).toBe('105');
+    await act(async () => { await result.current.refetch(); });
+    expect(result.current.data?.ticker.last_price).toBe('105');
+    act(() => onMessage?.({ data: JSON.stringify({ type: 'snapshot', data: freshestWs }) }));
+    expect(result.current.live).toBe(true);
+    expect(result.current.data?.ticker.last_price).toBe('109');
+    unmount();
+  } finally {
+    client.clear();
+    vi.unstubAllGlobals();
+  }
 });

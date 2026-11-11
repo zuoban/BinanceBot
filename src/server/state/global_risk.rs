@@ -16,6 +16,7 @@ pub(crate) struct GlobalPositionLimit {
     committed_config: std::sync::RwLock<Option<crate::config::GlobalConfig>>,
     triggered: AtomicBool,
     blocked: AtomicBool,
+    pub(super) has_pending_cancels: AtomicBool,
     pub(super) pending_fill_reconciliations: AtomicU64,
     pub(super) fill_failure_generation: AtomicU64,
     fill_recovered_generation: AtomicU64,
@@ -33,6 +34,7 @@ impl GlobalPositionLimit {
             committed_config: std::sync::RwLock::new(None),
             triggered: AtomicBool::new(false),
             blocked: AtomicBool::new(false),
+            has_pending_cancels: AtomicBool::new(false),
             pending_fill_reconciliations: AtomicU64::new(0),
             fill_failure_generation: AtomicU64::new(0),
             fill_recovered_generation: AtomicU64::new(0),
@@ -75,6 +77,7 @@ impl GlobalPositionLimit {
         let fill_generation = self.fill_failure_generation.load(Ordering::SeqCst);
         let states = self.states.read().await.clone();
         let Some(first) = states.first() else {
+            self.has_pending_cancels.store(false, Ordering::SeqCst);
             return self.enabled.load(Ordering::SeqCst)
                 && !self.membership_ready.load(Ordering::SeqCst);
         };
@@ -87,9 +90,13 @@ impl GlobalPositionLimit {
             self.enabled.store(false, Ordering::SeqCst);
             self.blocked.store(false, Ordering::SeqCst);
             self.triggered.store(false, Ordering::SeqCst);
+            let mut any_pending = false;
             for state in states.iter().filter(|state| !state.is_retired()) {
                 state.queue_global_cancel();
+                any_pending |= state.global_cancel_pending.load(Ordering::SeqCst);
             }
+            self.has_pending_cancels
+                .store(any_pending, Ordering::SeqCst);
             return false;
         }
         self.enabled.store(true, Ordering::SeqCst);
@@ -167,9 +174,11 @@ impl GlobalPositionLimit {
             self.triggered.store(false, Ordering::SeqCst);
         }
         let mut reason: Option<String> = None;
+        let mut any_pending = false;
         for state in states.iter().filter(|state| !state.is_retired()) {
             if unsafe_now && (first_trigger || *state.status.read().await == BotStatus::Running) {
                 state.global_cancel_pending.store(true, Ordering::SeqCst);
+                self.has_pending_cancels.store(true, Ordering::SeqCst);
                 if let Err(error) = Box::pin(state.pause_trading()).await {
                     state
                         .add_log("ERROR", format!("全局风控暂停状态保存失败: {}", error))
@@ -179,7 +188,10 @@ impl GlobalPositionLimit {
                 state.add_log("WARN", msg.as_str()).await;
             }
             state.queue_global_cancel();
+            any_pending |= state.global_cancel_pending.load(Ordering::SeqCst);
         }
+        self.has_pending_cancels
+            .store(any_pending, Ordering::SeqCst);
         if first_trigger {
             let msg = reason.unwrap_or_else(&build_reason);
             Self::spawn_global_risk_notification(notify_target, committed_ref, msg).await;
@@ -370,6 +382,7 @@ impl GlobalPositionLimit {
         if !self.enabled.load(Ordering::SeqCst)
             && !self.blocked.load(Ordering::SeqCst)
             && !self.triggered.load(Ordering::SeqCst)
+            && !self.has_pending_cancels.load(Ordering::SeqCst)
             && self.committed_config.read_unpoisoned().is_some()
         {
             return false;

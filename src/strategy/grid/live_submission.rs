@@ -197,6 +197,17 @@ impl GridTradingEngine {
             .insert(client_order_id, order);
     }
 
+    async fn delete_unsubmitted_order_intent(&mut self, client_order_id: &str, context: &str) {
+        if let Err(error) = self.delete_managed_order(client_order_id).await {
+            error!(
+                "Could not clear {} order intent {}: {}",
+                context, client_order_id, error
+            );
+            self.mark_orders_reconciliation_blocked().await;
+            self.pause_trading().await;
+        }
+    }
+
     async fn recover_failed_live_submission(
         &mut self,
         submission: LiveGridOrderSubmission<'_>,
@@ -211,13 +222,8 @@ impl GridTradingEngine {
             ..
         } = submission;
         if let ExchangeError::PostOnlyRejected(msg) = error {
-            if let Err(e) = self.delete_managed_order(&client_order_id).await {
-                error!(
-                    "Could not clear rejected order intent {}: {}",
-                    client_order_id, e
-                );
-                self.pause_trading().await;
-            }
+            self.delete_unsubmitted_order_intent(&client_order_id, "rejected")
+                .await;
             warn!(
                 "Maker GTX rejected (would take liquidity): {}. Will retry next tick.",
                 msg
@@ -246,12 +252,9 @@ impl GridTradingEngine {
         if error.execution_status_unknown() {
             self.recover_unknown_live_submission(symbol, client_order_id, order)
                 .await;
-        } else if let Err(clear_error) = self.delete_managed_order(&client_order_id).await {
-            error!(
-                "Could not clear failed order intent {}: {}",
-                client_order_id, clear_error
-            );
-            self.pause_trading().await;
+        } else {
+            self.delete_unsubmitted_order_intent(&client_order_id, "failed")
+                .await;
         }
         false
     }
@@ -272,22 +275,13 @@ impl GridTradingEngine {
             || *self.state.status.read().await != BotStatus::Running
             || !self.state.ticker.read().await.prices_are_fresh(Utc::now())
         {
-            if let Err(e) = self.delete_managed_order(&submission.client_order_id).await {
-                error!(
-                    "Could not clear paused order intent {}: {}",
-                    submission.client_order_id, e
-                );
-            }
+            self.delete_unsubmitted_order_intent(&submission.client_order_id, "paused")
+                .await;
             return false;
         }
         let Some(exchange_guard) = self.state.try_exchange_submission() else {
-            if let Err(e) = self.delete_managed_order(&submission.client_order_id).await {
-                error!(
-                    "Could not clear gated order intent {}: {}",
-                    submission.client_order_id, e
-                );
-                self.report_reconciliation_state(true).await;
-            }
+            self.delete_unsubmitted_order_intent(&submission.client_order_id, "gated")
+                .await;
             return false;
         };
         let (result, mut fill_guard) = self

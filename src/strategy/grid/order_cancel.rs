@@ -360,6 +360,9 @@ impl GridTradingEngine {
                 return false;
             }
         }
+        self.state
+            .global_cancel_pending
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         true
     }
 

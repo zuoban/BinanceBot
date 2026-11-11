@@ -588,11 +588,141 @@ async fn cli_rules_reject_invalid_fee_and_filter_overrides() {
     assert_eq!(format_funding_impact(Decimal::ZERO), "0");
     let candle_at_end = Candle::tick(60_000, dec!(100));
     assert_eq!(
-        next_kline_page_start(1500, Some(&candle_at_end), 60_000),
+        next_kline_page_start(0, 1500, Some(&candle_at_end), 60_000).unwrap(),
         None
     );
     assert_eq!(
-        next_kline_page_start(1500, Some(&candle_at_end), 60_001),
+        next_kline_page_start(0, 1500, Some(&candle_at_end), 60_001).unwrap(),
         Some(60_001)
     );
+}
+
+#[tokio::test]
+async fn offline_csv_backtest_supports_sub_ten_cent_pairs_and_validates_symbol_min_qty() {
+    let args = BacktestArgs {
+        symbol: None,
+        csv: None,
+        interval: "1m".into(),
+        days: 7,
+        direction: DirectionArg::Long,
+        grid_interval: vec![dec!(0.0005)],
+        amount: vec![dec!(20)],
+        buy_window: vec![3],
+        sell_window: vec![3],
+        min_price: None,
+        max_price: None,
+        max_position: None,
+        pause_on_max_position: false,
+        cancel_opening_on_max_position: false,
+        maker_fee: dec!(0.0002),
+        funding_rate: Decimal::ZERO,
+        capital: dec!(200),
+        tick_size: Some(dec!(0.0001)),
+        step_size: Some(Decimal::ONE),
+        min_qty: Some(Decimal::ONE),
+        min_notional: None,
+        exit_floor: None,
+        json: false,
+    };
+    let rules = load_rules(&args).await.unwrap();
+    assert_eq!(rules.min_price, dec!(0.0001));
+    assert_eq!(rules.max_qty, dec!(1_000_000_000));
+    let candles = parse_csv("time,price\n0,0.0200\n60000,0.0194\n120000,0.0201\n").unwrap();
+    let report = run(
+        &BacktestParams {
+            grid: GridConfig {
+                grid_interval: args.grid_interval[0],
+                order_amount_usdc: args.amount[0],
+                buy_window: args.buy_window[0],
+                sell_window: args.sell_window[0],
+                ..GridConfig::default()
+            },
+            rules,
+            maker_fee_rate: args.maker_fee,
+            funding_rate_8h: Decimal::ZERO,
+            capital: args.capital,
+            exit_floor_spacings: None,
+        },
+        &candles,
+    )
+    .unwrap();
+    assert_eq!((report.buys, report.sells), (1, 1));
+    assert!(report.realized_pnl > Decimal::ZERO);
+
+    let micro = load_rules(&BacktestArgs {
+        tick_size: Some(dec!(0.000001)),
+        min_price: Some(dec!(0.0000005)),
+        ..args.clone()
+    })
+    .await
+    .unwrap();
+    assert_eq!(micro.min_price, dec!(0.0000005));
+
+    let exchange_rules = SymbolRules {
+        max_qty: dec!(500),
+        ..SymbolRules::default()
+    };
+    let err = apply_rule_overrides(
+        exchange_rules,
+        &BacktestArgs {
+            symbol: Some("SOLUSDC".into()),
+            min_qty: Some(dec!(501)),
+            ..args
+        },
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("--min-qty 不能大于交易对规则上限"));
+}
+
+#[tokio::test]
+async fn non_advancing_kline_pagination_cursor_is_rejected() {
+    let stale = Candle::tick(60_000, dec!(100));
+    let equal_err = next_kline_page_start(60_001, 1500, Some(&stale), 120_000).unwrap_err();
+    assert!(equal_err.to_string().contains("K 线分页游标未推进"));
+    let backwards_err = next_kline_page_start(70_000, 1500, Some(&stale), 120_000).unwrap_err();
+    assert!(backwards_err.to_string().contains("K 线分页游标未推进"));
+
+    let app = axum::Router::new().route(
+        "/fapi/v1/klines",
+        axum::routing::get(|| async {
+            let page: Vec<_> = (0..1500)
+                .map(|_| serde_json::json!([60_000_i64, "100", "101", "99", "100"]))
+                .collect();
+            axum::Json(page)
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/fapi/v1/klines", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let err = fetch_klines_from_url(&url, "SOLUSDC", "1m", 60_001, 120_000)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("K 线分页游标未推进"));
+    server.abort();
+}
+
+#[test]
+fn negative_funding_overflow_saturates_to_decimal_min_not_max() {
+    let mut p = params(|_| {});
+    p.maker_fee_rate = Decimal::ZERO;
+    // Hold long 1.01 @ 99 across two 8h boundaries where each period's funding is ~ -5e28,
+    // so checked_mul succeeds per period while cumulative funding overflows negatively.
+    p.funding_rate_8h = dec!(-500_000_000_000_000_000_000_000_000);
+    let eight_hours = FUNDING_PERIOD_MS;
+    let candles = vec![
+        Candle::tick(eight_hours - 60_000, dec!(100)),
+        Candle::tick(eight_hours - 30_000, dec!(98.5)),
+        Candle::tick(eight_hours + 60_000, dec!(99.5)),
+        Candle::tick(2 * eight_hours + 60_000, dec!(99)),
+    ];
+    let report = run(&p, &candles).unwrap();
+    assert_eq!(report.funding, Decimal::MIN);
+    assert_eq!(report.net_realized, Decimal::MAX);
+    assert_eq!(report.net_total, Decimal::MAX);
+
+    p.funding_rate_8h = dec!(500_000_000_000_000_000_000_000_000);
+    let positive_overflow = run(&p, &candles).unwrap();
+    assert_eq!(positive_overflow.funding, Decimal::MAX);
+    assert_eq!(positive_overflow.net_realized, Decimal::MIN);
+    assert_eq!(positive_overflow.net_total, Decimal::MIN);
 }

@@ -32,9 +32,11 @@ mod tests;
 pub use cli::{run_cli, BacktestArgs, DirectionArg};
 
 #[cfg(test)]
-use cli::{format_funding_impact, load_rules};
+use cli::{apply_rule_overrides, format_funding_impact, load_rules};
 #[cfg(test)]
-use data::{fetch_klines, next_kline_page_start, parse_csv, MAX_BACKTEST_DAYS};
+use data::{
+    fetch_klines, fetch_klines_from_url, next_kline_page_start, parse_csv, MAX_BACKTEST_DAYS,
+};
 #[cfg(test)]
 use sim::BtOrder;
 use sim::Sim;
@@ -163,16 +165,13 @@ pub(crate) fn run(params: &BacktestParams, candles: &[Candle]) -> Result<Backtes
                 .time_ms
                 .div_euclid(FUNDING_PERIOD_MS)
                 .saturating_sub(previous.div_euclid(FUNDING_PERIOD_MS));
-            let delta = (periods > 0)
-                .then(|| {
-                    sim.size
-                        .checked_mul(candle.open)
-                        .and_then(|notional| notional.checked_mul(params.funding_rate_8h))
-                        .and_then(|fee| fee.checked_mul(Decimal::from(periods)))
-                })
-                .flatten();
-            if let Some(delta) = delta {
-                sim.funding = sim.funding.checked_add(delta).unwrap_or(Decimal::MAX);
+            if periods > 0 && !sim.size.is_zero() && !params.funding_rate_8h.is_zero() {
+                let delta = sim
+                    .size
+                    .saturating_mul(candle.open)
+                    .saturating_mul(params.funding_rate_8h)
+                    .saturating_mul(Decimal::from(periods));
+                sim.funding = sim.funding.saturating_add(delta);
             }
         }
         previous_time = Some(candle.time_ms);
@@ -201,18 +200,19 @@ fn build_backtest_report(
 ) -> BacktestReport {
     let net_realized = sim
         .realized
-        .checked_sub(sim.fees)
-        .and_then(|v| v.checked_sub(sim.funding))
-        .unwrap_or(Decimal::ZERO);
+        .saturating_sub(sim.fees)
+        .saturating_sub(sim.funding);
     let unrealized = sim.unrealized();
-    let net_total = net_realized
-        .checked_add(unrealized)
-        .unwrap_or(Decimal::ZERO);
+    let net_total = net_realized.saturating_add(unrealized);
     let hundred = Decimal::ONE_HUNDRED;
     let return_pct = net_total
         .checked_div(params.capital)
-        .and_then(|v| v.checked_mul(hundred))
-        .unwrap_or(Decimal::ZERO)
+        .map(|v| v.saturating_mul(hundred))
+        .unwrap_or(if net_total.is_sign_negative() {
+            Decimal::MIN
+        } else {
+            Decimal::MAX
+        })
         .round_dp(2);
     let max_drawdown_pct = sim
         .max_drawdown

@@ -404,6 +404,9 @@ impl AppConfig {
                 pair
             })
             .collect();
+        if let Some(first) = self.pairs.first() {
+            self.exchange.symbol = first.symbol.clone();
+        }
         Ok(())
     }
 

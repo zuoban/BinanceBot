@@ -382,3 +382,20 @@ it('navigates cleanly to /settings and / when current URL has query parameters, 
   await waitFor(() => expect(`${router.state.location.pathname}${router.state.location.search}`).toBe('/'));
   expect(navigateSpy).toHaveBeenCalledTimes(1);
 });
+
+it('prevents older live account observations from reverting a fresher /api/pairs status until a newer observation arrives', () => {
+  const now = Date.now();
+  const olderSnap = snapshot('ETHUSDC', 'PAPER');
+  olderSnap.status = 'RUNNING';
+  pairsState.setPairs([{ ...pair('BTCUSDC'), status: 'PAUSED' }, { ...pair('ETHUSDC'), status: 'PAUSED' }]);
+  pairsState.setUpdatedAt(now);
+  pairsState.setAccounts([{ mode: 'PAPER', snapshot: olderSnap, generated_at_ms: now - 1000, received_at_ms: now - 500 }]);
+  setup('/');
+  const sidebarPairs = within(screen.getByRole('complementary')).getByRole('navigation', { name: '交易对' });
+  expect(within(sidebarPairs).getByRole('link', { name: /ETHUSDC/ })).toHaveAttribute('title', expect.stringContaining('已暂停'));
+
+  act(() => {
+    pairsState.setAccounts([{ mode: 'PAPER', snapshot: olderSnap, generated_at_ms: now + 500, received_at_ms: now + 500 }]);
+  });
+  expect(within(sidebarPairs).getByRole('link', { name: /ETHUSDC/ })).toHaveAttribute('title', expect.stringContaining('运行中'));
+});

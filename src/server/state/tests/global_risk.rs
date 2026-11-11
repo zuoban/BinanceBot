@@ -479,3 +479,105 @@ async fn retired_recovery_failed_member_stays_fail_closed_without_queueing_cance
     retired.server.abort();
     active.server.abort();
 }
+
+#[tokio::test]
+async fn disabling_global_risk_retries_pending_cancel_until_cleared_then_restores_fast_path() {
+    let mut fixture = notification_fixture(false, false).await;
+    {
+        let mut config = fixture.state.config.write().await;
+        config.pause_on_zero_available_margin = true;
+    }
+    fixture
+        .state
+        .global_position_initialized
+        .store(true, Ordering::SeqCst);
+    fixture
+        .state
+        .global_position_ready
+        .store(true, Ordering::SeqCst);
+    fixture.state.account.write().await.total_wallet_balance = Decimal::ZERO;
+
+    let states = Arc::new(RwLock::new(vec![fixture.state.clone()]));
+    let global = GlobalPositionLimit::new(states.clone());
+    global.membership_ready.store(true, Ordering::SeqCst);
+    let _ = fixture
+        .state
+        .global_position_limit
+        .set(Arc::downgrade(&global));
+    let enabled_cfg = crate::config::GlobalConfig::from_app(&*fixture.state.config.read().await);
+    global.initialize_config(enabled_cfg);
+
+    assert!(global.check().await);
+    assert!(fixture.state.global_cancel_pending.load(Ordering::SeqCst));
+    assert!(global.has_pending_cancels.load(Ordering::SeqCst));
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(1), fixture.actions.recv())
+            .await
+            .unwrap(),
+        Some(BotControlAction::GlobalRiskCancel)
+    ));
+    // Simulate a transient cancel failure before disabling global risk.
+    fixture
+        .state
+        .global_cancel_queued
+        .store(false, Ordering::SeqCst);
+
+    fixture
+        .state
+        .config
+        .write()
+        .await
+        .pause_on_zero_available_margin = false;
+    let disabled_cfg = crate::config::GlobalConfig::from_app(&*fixture.state.config.read().await);
+    global.commit_config(disabled_cfg).await;
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(1), fixture.actions.recv())
+            .await
+            .unwrap(),
+        Some(BotControlAction::GlobalRiskCancel)
+    ));
+
+    // Simulate another transient cancel failure after global risk is disabled.
+    fixture
+        .state
+        .global_cancel_queued
+        .store(false, Ordering::SeqCst);
+    assert!(fixture.state.global_cancel_pending.load(Ordering::SeqCst));
+    assert!(!fixture.state.global_cancel_queued.load(Ordering::SeqCst));
+    assert!(!global.enabled.load(Ordering::SeqCst));
+    assert!(global.has_pending_cancels.load(Ordering::SeqCst));
+
+    // Subsequent tick must not short-circuit on the disabled fast path while cancel is pending.
+    assert!(!global.check().await);
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(1), fixture.actions.recv())
+            .await
+            .unwrap(),
+        Some(BotControlAction::GlobalRiskCancel)
+    ));
+
+    // Once the engine finishes cancelling and clears global_cancel_pending, has_pending_cancels clears.
+    fixture
+        .state
+        .global_cancel_pending
+        .store(false, Ordering::SeqCst);
+    fixture
+        .state
+        .global_cancel_queued
+        .store(false, Ordering::SeqCst);
+    assert!(!global.check().await);
+    assert!(!global.has_pending_cancels.load(Ordering::SeqCst));
+
+    // Verify the lock-free fast path is active again.
+    let _lock = global.lock.lock().await;
+    let _members = states.write().await;
+    assert!(
+        !tokio::time::timeout(Duration::from_secs(1), global.check())
+            .await
+            .unwrap()
+    );
+    drop(_members);
+    drop(_lock);
+    fixture.state.resume_trading().await.unwrap();
+    fixture.server.abort();
+}

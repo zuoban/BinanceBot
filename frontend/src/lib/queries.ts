@@ -181,15 +181,26 @@ function publishSocketQueryData<TData>(client: QueryClient, key: QueryKey, data:
   client.setQueryData(key, data);
 }
 
+function isOlderSnapshot(next: Snapshot, current: Snapshot | undefined): boolean {
+  if (!next.generated_at || !current?.generated_at) return false;
+  const nextAt = Date.parse(next.generated_at), currentAt = Date.parse(current.generated_at);
+  return Number.isFinite(nextAt) && Number.isFinite(currentAt) && nextAt < currentAt;
+}
+
 export function usePairSnapshot(pair: Pair | undefined) {
   const client = useQueryClient();
   const key = ['snapshot', pair?.symbol, pair?.scoped];
   const acceptSnapshot = (data: Snapshot) => {
-    if (data.symbol !== pair?.symbol) return false;
+    if (data.symbol !== pair?.symbol || isOlderSnapshot(data, client.getQueryData<Snapshot>(key))) return false;
     publishSocketQueryData(client, key, data);
   };
   const socket = useSocket(pair && pairPath(pair, 'ws'), 'snapshot', acceptSnapshot);
-  const query = useSocketFallbackQuery(key, signal => { if (!pair) throw new Error('该交易对不存在或已移除'); return api<Snapshot>(pairPath(pair, 'status'), { signal }); }, socket, !!pair);
+  const query = useSocketFallbackQuery(key, async signal => {
+    if (!pair) throw new Error('该交易对不存在或已移除');
+    const data = await api<Snapshot>(pairPath(pair, 'status'), { signal });
+    const current = client.getQueryData<Snapshot>(key);
+    return isOlderSnapshot(data, current) ? current! : data;
+  }, socket, !!pair);
   const socketSilent = useExpired(pair && socket.connected ? socket.lastReceived + SOCKET_LIVE_MS - 1 : -Infinity);
   const stale = useExpired(pair ? query.dataUpdatedAt + SNAPSHOT_STALE_MS : -Infinity);
   return { ...query, live: !!pair && socket.connected && !socketSilent, stale };

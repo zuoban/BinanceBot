@@ -37,7 +37,7 @@ const samePairEpoch = (pair: Pair, observation: AccountObservation) =>
   observation.mode === pair.mode
   && (pair.account_scope === undefined || observation.snapshot.account_scope === undefined || pair.account_scope === observation.snapshot.account_scope);
 
-function useLivePairStatuses(pairsData: Pair[] | undefined, accounts: AccountObservation[]) {
+function useLivePairStatuses(pairsData: Pair[] | undefined, accounts: AccountObservation[], pairsUpdatedAt = 0) {
   const accountPairs = useMemo(() => new Map(accounts.map(entry => [entry.snapshot.symbol, entry])), [accounts]);
   const pairCache = useRef<{ overrides: WeakMap<Pair, Pair>; current?: Pair[] }>({ overrides: new WeakMap() });
   const currentPairs = useMemo(() => {
@@ -45,7 +45,7 @@ function useLivePairStatuses(pairsData: Pair[] | undefined, accounts: AccountObs
     let changed = false;
     const mapped = pairsData.map(pair => {
       const observation = accountPairs.get(pair.symbol);
-      if (observation && samePairEpoch(pair, observation) && !observation.account_observation_stale && observation.snapshot.status !== pair.status) {
+      if (observation && samePairEpoch(pair, observation) && !observation.account_observation_stale && (observation.received_at_ms === undefined || observation.received_at_ms >= pairsUpdatedAt) && observation.snapshot.status !== pair.status) {
         changed = true;
         const cached = pairCache.current.overrides.get(pair);
         if (cached?.status === observation.snapshot.status) return cached;
@@ -59,7 +59,7 @@ function useLivePairStatuses(pairsData: Pair[] | undefined, accounts: AccountObs
     const result = !changed ? pairsData : previous?.length === mapped.length && mapped.every((pair, index) => pair === previous[index]) ? previous : mapped;
     pairCache.current.current = result;
     return result;
-  }, [pairsData, accountPairs]);
+  }, [pairsData, accountPairs, pairsUpdatedAt]);
   const mixedAccountScopes = useMemo(() => {
     const scopesByMode = new Map<Mode, string>();
     for (const entry of accounts) {
@@ -113,7 +113,7 @@ function useDirtyNavigationBlocker(dirty: boolean, saving: boolean, setDirty: (v
 export default function Shell() {
   const location = useLocation(), pairs = usePairs(), liveAccounts = useLiveAccounts();
   const accounts = liveAccounts.accounts;
-  const { currentPairs, pairModeChanged, mixedAccountScopes, mode } = useLivePairStatuses(pairs.data, accounts);
+  const { currentPairs, pairModeChanged, mixedAccountScopes, mode } = useLivePairStatuses(pairs.data, accounts, pairs.dataUpdatedAt);
   const [dirty, setDirty] = useState(false), [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
   savingRef.current = saving;

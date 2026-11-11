@@ -133,7 +133,7 @@ impl ProbeGate {
             .and_then(|at| PROBE_COOLDOWN.checked_sub(now.saturating_duration_since(at)))
             .filter(|wait| !wait.is_zero())
         {
-            return Err(wait.as_secs() + 1);
+            return Err(wait.as_secs() + u64::from(wait.subsec_nanos() > 0));
         }
         *last = Some(now);
         Ok(())

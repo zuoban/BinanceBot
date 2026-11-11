@@ -234,7 +234,7 @@ pub(crate) fn build_daily_snapshot(
 }
 
 pub(super) fn is_beijing_midnight_hour(hour: i64) -> bool {
-    (hour + 8 * 3600).rem_euclid(24 * 3600) == 0
+    hour.rem_euclid(24 * 3600) == 16 * 3600
 }
 
 pub(crate) async fn capture_daily_snapshot_at_midnight(

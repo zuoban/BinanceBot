@@ -383,7 +383,7 @@ impl GridTradingEngine {
             .await
     }
 
-    async fn submit_sized_grid_order(
+    pub(super) async fn submit_sized_grid_order(
         &mut self,
         config: &crate::config::AppConfig,
         rules: &SymbolRules,

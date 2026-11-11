@@ -189,6 +189,14 @@ fn pair_overrides_migrate_once_to_first_pair_globals() {
         .unwrap()
         .iter()
         .all(|c| c.exchange.api_key == "new-global-key"));
+    let mut non_default_first: AppConfig = serde_json::from_value(serde_json::json!({
+        "exchange": {},
+        "server": {},
+        "pairs": [{"symbol": "BTCUSDT"}, {"symbol": "ETHUSDT"}]
+    }))
+    .unwrap();
+    non_default_first.ensure_pair_list().unwrap();
+    assert_eq!(non_default_first.exchange.symbol, "BTCUSDT");
 }
 
 #[test]

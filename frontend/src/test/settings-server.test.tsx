@@ -4,8 +4,10 @@ import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type * as Antd from 'antd';
+import { ApiError } from '../lib/api';
 import type * as Api from '../lib/api';
-import { beforeEach, expect, it, vi } from 'vitest';
+import { downloadDatabase } from '../lib/database';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { EditContext } from '../lib/session';
 import type { ServerConfig } from '../lib/types';
 import { globalConfig as makeGlobalConfig, serverConfig } from './fixtures';
@@ -30,6 +32,10 @@ beforeEach(() => {
   mocks.api.mockReset();
   mocks.post.mockReset();
   mocks.confirm.mockReset().mockResolvedValue(true);
+});
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 function setup() {
@@ -105,4 +111,27 @@ it('clears validation errors when reverting dirty server settings', async () => 
   await user.click(screen.getByRole('button', { name: /还\s*原/ }));
   await waitFor(() => expect(host).toHaveValue('127.0.0.1'));
   await waitFor(() => expect(host).not.toHaveAttribute('aria-invalid', 'true'));
+});
+
+it('rejects 200 text/html SPA fallbacks and 200 JSON responses during database export instead of saving a corrupt .db file', async () => {
+  const createObjectURL = vi.spyOn(URL, 'createObjectURL');
+  vi.stubGlobal('fetch', vi.fn()
+    .mockResolvedValueOnce(new Response('<!doctype html><html><body>SPA</body></html>', { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ success: false, message: '上游代理返回异常 JSON' }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    .mockResolvedValueOnce(new Response('<!doctype html><html></html>', { status: 200, headers: { 'Content-Type': 'text/html' } })));
+
+  const htmlAttempt = downloadDatabase('/api/database/export');
+  await expect(htmlAttempt).rejects.toBeInstanceOf(ApiError);
+  await expect(htmlAttempt).rejects.toMatchObject({ message: '服务返回异常 (200)，请检查 API 连接', status: 200, kind: 'invalid-response' });
+  await expect(downloadDatabase('/api/database/export')).rejects.toMatchObject({ message: '上游代理返回异常 JSON', status: 200, kind: 'invalid-response' });
+  expect(createObjectURL).not.toHaveBeenCalled();
+
+  mocks.api.mockImplementation((path: string) => path === '/api/server/config' ? Promise.resolve(initial) : Promise.resolve(baseGlobalConfig));
+  setup();
+  const user = userEvent.setup();
+  await user.click(screen.getByRole('tab', { name: '数据库操作' }));
+  await user.click(await screen.findByRole('button', { name: '导出全库分析快照' }));
+  await waitFor(() => expect(mocks.error).toHaveBeenCalledWith('服务返回异常 (200)，请检查 API 连接'));
+  expect(mocks.success).not.toHaveBeenCalled();
+  expect(createObjectURL).not.toHaveBeenCalled();
 });

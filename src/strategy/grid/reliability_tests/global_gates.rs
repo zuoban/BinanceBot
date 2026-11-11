@@ -538,3 +538,104 @@ async fn duplicate_order_ids_with_zero_price_remain_blocked_after_snapshot_disap
         server.abort();
     }
 }
+
+#[tokio::test]
+async fn confirmed_pause_or_cancel_all_clears_stale_global_cancel_pending_for_resume() {
+    let fake = Exchange::default();
+    let (url, server) = exchange_server(fake.clone()).await;
+    for action in [
+        BotControlAction::Pause,
+        BotControlAction::PauseAlreadyPersisted,
+        BotControlAction::CancelAll,
+        BotControlAction::CancelAllAlreadyPersisted,
+    ] {
+        let db = database();
+        let mut first = engine(db.clone(), &url).await;
+        let second = engine(database(), &url).await;
+        let _global = test_pair_global_limit(&first, &second).await;
+        if matches!(
+            action,
+            BotControlAction::PauseAlreadyPersisted | BotControlAction::CancelAllAlreadyPersisted
+        ) {
+            first.state.pause_trading().await.unwrap();
+        }
+        first
+            .state
+            .global_cancel_pending
+            .store(true, Ordering::SeqCst);
+        first.handle_control_action(action).await;
+        assert!(!first.state.global_cancel_pending.load(Ordering::SeqCst));
+        let (reply, response) = tokio::sync::oneshot::channel();
+        first
+            .handle_control_action(BotControlAction::Resume {
+                expected_mode: TradingMode::Live,
+                expected_epoch: first.state.pause_epoch(),
+                reply,
+            })
+            .await;
+        assert!(response.await.unwrap().is_ok());
+        assert_eq!(*first.state.status.read().await, BotStatus::Running);
+        assert!(first.state.try_order_submission().is_some());
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn failed_unsubmitted_intent_cleanup_blocks_reconciliation_and_pauses_trading() {
+    for case in 0..4u8 {
+        let dir = crate::test_support::TempTestDir::new("intent-delete-fail");
+        let path = dir.join("intent-delete-fail.db");
+        let db = Arc::new(Database::open(&path).unwrap());
+        db.save_bot_status(BotStatus::Running).unwrap();
+        let fake = Exchange::default();
+        if case == 2 {
+            fake.submission.store(3, Ordering::SeqCst);
+        } else if case == 3 {
+            fake.submission.store(4, Ordering::SeqCst);
+        }
+        let (url, server) = exchange_server(fake).await;
+        let mut first = engine(db.clone(), &url).await;
+        let second = engine(database(), &url).await;
+        let _global = test_pair_global_limit(&first, &second).await;
+        first.last_orders_sync = Some(std::time::Instant::now());
+        let mut gate = if case == 1 {
+            Some(second.state.begin_fill_reconciliation().await)
+        } else {
+            None
+        };
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER reject_intent_delete BEFORE DELETE ON managed_orders \
+                 BEGIN SELECT RAISE(ABORT, 'intent delete failed'); END;",
+            )
+            .unwrap();
+        let submitted = if case <= 1 {
+            if case == 0 {
+                first.state.ticker.write().await.update_time =
+                    Utc::now() - chrono::Duration::seconds(16);
+            }
+            let config = first.state.config.read().await.clone();
+            let rules = first.state.rules.read().await.clone();
+            let (order, _) = managed_price_fixture();
+            first
+                .submit_sized_grid_order(&config, &rules, false, order)
+                .await
+        } else {
+            submit(&mut first).await
+        };
+        assert!(!submitted, "case={case}");
+        assert!(first.reconciliation_blocked, "case={case}");
+        assert!(first.last_orders_sync.is_none(), "case={case}");
+        assert_eq!(*first.state.status.read().await, BotStatus::Paused);
+        assert_eq!(db.load_bot_status().unwrap(), Some(BotStatus::Paused));
+        if let Some(guard) = &mut gate {
+            guard.resolve();
+        }
+        drop(gate);
+        assert!(second.state.try_order_submission().is_none(), "case={case}");
+        server.abort();
+        drop(connection);
+        drop(db);
+    }
+}

@@ -90,13 +90,16 @@ pub(super) fn ws_origin_allowed(headers: &HeaderMap) -> bool {
         let Ok(raw_proto) = proto_header.to_str() else {
             return false;
         };
-        let first = raw_proto.split(',').next().unwrap_or("").trim();
-        if first.eq_ignore_ascii_case("https") {
+        if raw_proto.contains(',') {
+            return false;
+        }
+        let proto = raw_proto.trim();
+        if proto.eq_ignore_ascii_case("https") {
             if origin.scheme() != "https" {
                 return false;
             }
             "https"
-        } else if first.eq_ignore_ascii_case("http") {
+        } else if proto.eq_ignore_ascii_case("http") {
             if origin.scheme() != "http" {
                 return false;
             }

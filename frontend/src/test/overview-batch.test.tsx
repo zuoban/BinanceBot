@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { App } from 'antd';
 import { MemoryRouter, useLocation } from 'react-router-dom';
@@ -39,11 +39,7 @@ it('confirms and resumes the freshly refreshed targets including newly paused li
   const newlyPaused = summarySnapshot('SOLUSDC'); newlyPaused.status = 'PAUSED';
   const anotherPaused = summarySnapshot('XRPUSDC'); anotherPaused.status = 'PAUSED';
   overview.data = { generated_at: '', pairs: [{ snapshot: old, mode: 'PAPER', scoped: true }], recent_trades: [] };
-  overview.refetch.mockResolvedValue({ data: { generated_at: '', pairs: [
-    { snapshot: running, mode: 'PAPER', scoped: true },
-    { snapshot: newlyPaused, mode: 'LIVE', scoped: true },
-    { snapshot: anotherPaused, mode: 'PAPER', scoped: true },
-  ], recent_trades: [] }, error: null });
+  overview.refetch.mockResolvedValue({ data: { generated_at: '', pairs: [{ snapshot: running, mode: 'PAPER', scoped: true }, { snapshot: newlyPaused, mode: 'LIVE', scoped: true }, { snapshot: anotherPaused, mode: 'PAPER', scoped: true }], recent_trades: [] }, error: null });
   render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
   const user = userEvent.setup();
   await user.type(screen.getByLabelText('搜索交易对'), 'BTC');
@@ -52,10 +48,7 @@ it('confirms and resumes the freshly refreshed targets including newly paused li
   expect(await screen.findByText('将操作 2 个交易对，不受当前筛选影响。其中包含实盘策略，恢复后会使用真实资金下单。')).toBeInTheDocument();
   expect(runBatchControls).not.toHaveBeenCalled();
   await user.click(screen.getByRole('button', { name: '确认执行' }));
-  await waitFor(() => expect(runBatchControls).toHaveBeenCalledWith([
-    expect.objectContaining({ symbol: 'SOLUSDC', status: 'PAUSED', mode: 'LIVE', scoped: true }),
-    expect.objectContaining({ symbol: 'XRPUSDC', status: 'PAUSED', mode: 'PAPER', scoped: true }),
-  ], 'resume', actions.run));
+  await waitFor(() => expect(runBatchControls).toHaveBeenCalledWith([expect.objectContaining({ symbol: 'SOLUSDC', status: 'PAUSED', mode: 'LIVE', scoped: true }), expect.objectContaining({ symbol: 'XRPUSDC', status: 'PAUSED', mode: 'PAPER', scoped: true })], 'resume', actions.run));
 });
 
 it('does not resume when the refreshed confirmation is cancelled', async () => {
@@ -132,13 +125,7 @@ it('lists each batch outcome per strategy and only offers a retry when nothing w
   overview.data = { generated_at: '', pairs: all.map(item => ({ snapshot: item, mode: 'PAPER' as const, scoped: true })), recent_trades: [] };
   overview.refetch.mockResolvedValue({ data: overview.data, error: null });
   const target = { symbol: s.symbol, status: s.status, mode: 'PAPER' as const, grid_config: s.grid_config, scoped: true };
-  vi.mocked(runBatchControls).mockResolvedValue([
-    { pair: target, result: 'failed' },
-    { pair: { ...target, symbol: 'BNBUSDC' }, result: 'request_unconfirmed' },
-    { pair: { ...target, symbol: 'BTCUSDC' }, result: 'state_unconfirmed' },
-    { pair: { ...target, symbol: 'ETHUSDC' }, result: 'cancellation_unconfirmed' },
-    { pair: { ...target, symbol: 'XRPUSDC' }, result: 'not_submitted' },
-  ]);
+  vi.mocked(runBatchControls).mockResolvedValue([{ pair: target, result: 'failed' }, { pair: { ...target, symbol: 'BNBUSDC' }, result: 'request_unconfirmed' }, { pair: { ...target, symbol: 'BTCUSDC' }, result: 'state_unconfirmed' }, { pair: { ...target, symbol: 'ETHUSDC' }, result: 'cancellation_unconfirmed' }, { pair: { ...target, symbol: 'XRPUSDC' }, result: 'not_submitted' }]);
   render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
   const user = userEvent.setup();
   await user.click(screen.getByRole('button', { name: /全部策略操作/ }));
@@ -218,10 +205,7 @@ it.each(['PAPER', 'LIVE'] as const)('shows shared %s asset balances once when a 
 it('shows grouped today pnl and pending trades across all strategies', () => {
   const a = summarySnapshot('BTCUSDC');
   const now = new Date().toISOString();
-  overview.data = { generated_at: now, pairs: [{ snapshot: a, mode: 'PAPER', scoped: true }], recent_trades: [], today_pnl: { window_start: now, window_end: now, groups: [
-    { symbol: 'BTCUSDC', mode: 'PAPER', realized_pnl: '8', pending_pnl_count: 1 },
-    { symbol: 'DELETEDUSDT', mode: 'LIVE', realized_pnl: '-3', pending_pnl_count: 0 },
-  ] } };
+  overview.data = { generated_at: now, pairs: [{ snapshot: a, mode: 'PAPER', scoped: true }], recent_trades: [], today_pnl: { window_start: now, window_end: now, groups: [{ symbol: 'BTCUSDC', mode: 'PAPER', realized_pnl: '8', pending_pnl_count: 1 }, { symbol: 'DELETEDUSDT', mode: 'LIVE', realized_pnl: '-3', pending_pnl_count: 0 }] } };
   render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
   const summary = screen.getByLabelText('策略运行概览');
   const section = within(summary).getByLabelText('今日已实现盈亏');
@@ -231,17 +215,13 @@ it('shows grouped today pnl and pending trades across all strategies', () => {
   expect(within(section).getByText('USDT')).toBeInTheDocument();
 });
 
-
 it('decrements batch report total when retrying after a pair was removed from pairs', async () => {
   const a = summarySnapshot('SOLUSDC'), b = summarySnapshot('BTCUSDC'), c = summarySnapshot('ETHUSDC');
   a.status = 'RUNNING'; b.status = 'RUNNING'; c.status = 'RUNNING';
   const initialPairs = [a, b, c].map(item => ({ snapshot: item, mode: 'PAPER' as const, scoped: true }));
   overview.data = { generated_at: '', pairs: initialPairs, recent_trades: [] };
   overview.refetch.mockResolvedValue({ data: overview.data, error: null });
-  vi.mocked(runBatchControls).mockResolvedValue([
-    { pair: { symbol: 'SOLUSDC', status: 'RUNNING', mode: 'PAPER', grid_config: a.grid_config, scoped: true }, result: 'failed' },
-    { pair: { symbol: 'BTCUSDC', status: 'RUNNING', mode: 'PAPER', grid_config: b.grid_config, scoped: true }, result: 'request_unconfirmed' },
-  ]);
+  vi.mocked(runBatchControls).mockResolvedValue([{ pair: { symbol: 'SOLUSDC', status: 'RUNNING', mode: 'PAPER', grid_config: a.grid_config, scoped: true }, result: 'failed' }, { pair: { symbol: 'BTCUSDC', status: 'RUNNING', mode: 'PAPER', grid_config: b.grid_config, scoped: true }, result: 'request_unconfirmed' }]);
   const { rerender } = render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
   const user = userEvent.setup();
   await user.click(screen.getByRole('button', { name: /全部策略操作/ }));
@@ -269,11 +249,7 @@ it('shows unavailable trade counts when a strategy has no current-day statistics
 
 it('shows five newest trades and expands to twenty across strategies', async () => {
   const btc = summarySnapshot('BTCUSDC'), eth = summarySnapshot('ETHUSDC');
-  const trade = (symbol: string, index: number) => ({
-    trade_id: `${symbol}-${index}`, symbol, mode: symbol === 'BTCUSDC' ? 'PAPER' as const : 'LIVE' as const,
-    side: 'BUY' as const, price: '123.456789', quantity: '1', amount_usdc: '100', realized_pnl: index === 20 ? '-0.004' : '0', commission: '0',
-    pnl_verified: true, is_maker: true, timestamp: new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString(), note: `成交 ${index}`,
-  });
+  const trade = (symbol: string, index: number) => ({ trade_id: `${symbol}-${index}`, symbol, mode: symbol === 'BTCUSDC' ? 'PAPER' as const : 'LIVE' as const, side: 'BUY' as const, price: '123.456789', quantity: '1', amount_usdc: '100', realized_pnl: index === 20 ? '-0.004' : '0', commission: '0', pnl_verified: true, is_maker: true, timestamp: new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString(), note: `成交 ${index}` });
   const recentTrades = Array.from({ length: 22 }, (_, i) => i % 2 === 0 ? trade('BTCUSDC', i) : { ...trade('ETHUSDC', i), side: 'SELL' as const, pnl_verified: i !== 21 }).reverse().slice(0, 20);
   overview.data = { generated_at: new Date().toISOString(), pairs: [{ snapshot: btc, mode: 'PAPER', scoped: true }, { snapshot: eth, mode: 'LIVE', scoped: true }], recent_trades: recentTrades };
   render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
@@ -375,10 +351,7 @@ it('marks an unchanged overview stale as time passes and clears the warning on r
 });
 
 it('does not mark the overview banner stale while initial data is still loading', () => {
-  overview.data = undefined;
-  overview.isPending = true;
-  overview.error = null;
-  overview.dataUpdatedAt = 0;
+  overview.data = undefined; overview.isPending = true; overview.error = null; overview.dataUpdatedAt = 0;
   render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
   expect(screen.getByLabelText('策略运行概览')).not.toHaveClass('is-stale');
   expect(screen.queryByText('数据暂未更新，请检查连接')).not.toBeInTheDocument();
@@ -407,10 +380,7 @@ it('renders strategy operation results with signal tier styling and allows dismi
 
 it('links recent trade symbols to their strategy detail pages', async () => {
   const s = summarySnapshot('BTCUSDC');
-  overview.data = {
-    generated_at: '', pairs: [{ snapshot: s, mode: 'PAPER', scoped: true }],
-    recent_trades: [{ trade_id: 't1', symbol: 'BTCUSDC', mode: 'PAPER', side: 'BUY', price: '100', quantity: '1', amount_usdc: '100', realized_pnl: '0', commission: '0', pnl_verified: true, is_maker: true, timestamp: new Date().toISOString(), note: '' }],
-  };
+  overview.data = { generated_at: '', pairs: [{ snapshot: s, mode: 'PAPER', scoped: true }], recent_trades: [{ trade_id: 't1', symbol: 'BTCUSDC', mode: 'PAPER', side: 'BUY', price: '100', quantity: '1', amount_usdc: '100', realized_pnl: '0', commission: '0', pnl_verified: true, is_maker: true, timestamp: new Date().toISOString(), note: '' }] };
   function Location() { return <output data-testid="location">{useLocation().pathname}</output>; }
   render(<MemoryRouter><App><OverviewPage /><Location /></App></MemoryRouter>);
   const table = screen.getByText('最近成交').closest('.ant-card') as HTMLElement;
@@ -429,12 +399,7 @@ it('aligns today trade counts and today pnl to server generated_at across Beijin
     const s = summarySnapshot('BTCUSDC');
     s.today_trade_counts = { window_start: '2026-11-10T16:00:00Z', window_end: serverNow, buy: 3, sell: 4 };
     overview.dataUpdatedAt = Date.now();
-    overview.data = {
-      generated_at: serverNow,
-      pairs: [{ snapshot: s, mode: 'PAPER', scoped: true }],
-      recent_trades: [],
-      today_pnl: { window_start: '2026-11-10T16:00:00Z', window_end: serverNow, groups: [{ symbol: 'BTCUSDC', mode: 'PAPER', realized_pnl: '6.5', pending_pnl_count: 0 }] },
-    };
+    overview.data = { generated_at: serverNow, pairs: [{ snapshot: s, mode: 'PAPER', scoped: true }], recent_trades: [], today_pnl: { window_start: '2026-11-10T16:00:00Z', window_end: serverNow, groups: [{ symbol: 'BTCUSDC', mode: 'PAPER', realized_pnl: '6.5', pending_pnl_count: 0 }] } };
     render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
     const summary = screen.getByLabelText('策略运行概览');
     expect(within(summary).getByText('今日成交').parentElement).toHaveTextContent('7 笔');
@@ -442,4 +407,40 @@ it('aligns today trade counts and today pnl to server generated_at across Beijin
   } finally {
     vi.useRealTimers();
   }
+});
+
+it('blocks batch resume retry with tooltip when overview becomes stale or target is already running', async () => {
+  actions.run.mockReset().mockResolvedValue('confirmed');
+  const paused = summarySnapshot('SOLUSDC'); paused.status = 'PAUSED';
+  overview.data = { generated_at: '', pairs: [{ snapshot: paused, mode: 'PAPER', scoped: true }], recent_trades: [] };
+  overview.refetch.mockResolvedValue({ data: overview.data, error: null });
+  vi.mocked(runBatchControls).mockResolvedValue([{ pair: { symbol: 'SOLUSDC', status: 'PAUSED', mode: 'PAPER', grid_config: paused.grid_config, scoped: true }, result: 'failed' }]);
+  const user = userEvent.setup();
+  const { rerender } = render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+  await user.click(screen.getByRole('button', { name: /全部策略操作/ }));
+  await user.click(screen.getByText('全部恢复'));
+  await user.click(await screen.findByRole('button', { name: '确认执行' }));
+  const drawer = await screen.findByLabelText('批量操作结果', { selector: '[role="dialog"]' });
+
+  overview.error = new Error('连接中断');
+  rerender(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+  const staleRetry = within(drawer).getByRole('button', { name: '重试恢复' });
+  expect(staleRetry).toBeDisabled();
+  fireEvent.mouseEnter(staleRetry.parentElement!);
+  expect(await screen.findByText('状态过期，恢复前请刷新')).toBeInTheDocument();
+  fireEvent.click(staleRetry);
+  expect(actions.run).not.toHaveBeenCalled();
+
+  const nowRunning = summarySnapshot('SOLUSDC'); nowRunning.status = 'RUNNING';
+  overview.error = null; overview.dataUpdatedAt = Date.now();
+  overview.data = { generated_at: '', pairs: [{ snapshot: nowRunning, mode: 'PAPER', scoped: true }], recent_trades: [] };
+  rerender(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+  expect(within(drawer).getByRole('button', { name: '重试恢复' })).toBeDisabled();
+
+  overview.data = { generated_at: '', pairs: [{ snapshot: paused, mode: 'PAPER', scoped: true }], recent_trades: [] };
+  rerender(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+  const enabledRetry = within(drawer).getByRole('button', { name: '重试恢复' });
+  expect(enabledRetry).toBeEnabled();
+  await user.click(enabledRetry);
+  expect(actions.run).toHaveBeenCalledWith(expect.objectContaining({ symbol: 'SOLUSDC', status: 'PAUSED' }), 'resume');
 });

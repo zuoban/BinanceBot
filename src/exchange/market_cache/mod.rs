@@ -25,11 +25,11 @@ pub(crate) struct MarketCache {
 
 impl MarketCache {
     fn record_demand(&self, endpoint: &str, symbol: &str) -> usize {
-        let now = Instant::now();
         let mut endpoints = self.demand.lock_unpoisoned();
+        let now = Instant::now();
         if endpoints.len() > 64 && !endpoints.contains_key(endpoint) {
             endpoints.retain(|_, symbols| {
-                symbols.retain(|_, at| now.duration_since(*at) < DEMAND_WINDOW);
+                symbols.retain(|_, at| now.saturating_duration_since(*at) < DEMAND_WINDOW);
                 !symbols.is_empty()
             });
         }
@@ -38,7 +38,7 @@ impl MarketCache {
         } else {
             endpoints.entry(endpoint.to_owned()).or_default()
         };
-        symbols.retain(|_, at| now.duration_since(*at) < DEMAND_WINDOW);
+        symbols.retain(|_, at| now.saturating_duration_since(*at) < DEMAND_WINDOW);
         if let Some(at) = symbols.get_mut(symbol) {
             *at = now;
         } else {

@@ -47,7 +47,7 @@ export function useDeleteStrategy(resetKey?: unknown) {
       if (deleteStarted) {
         void invalidateStrategyQueries(client, { accounts: true, history: 'reset' });
       }
-      const uncertain = deleteStarted && error instanceof ApiError && error.kind === 'invalid-response';
+      const uncertain = deleteStarted && error instanceof ApiError && (error.kind === 'invalid-response' || error.status === 502 || error.status === 504);
       message.error(`${errorMessage(error)}${uncertain ? '；删除结果可能已生效，请刷新状态或查看日志后再操作' : ''}`);
       return false;
     } finally {

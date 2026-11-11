@@ -33,7 +33,7 @@
 .metric-row .ant-statistic-content { font-size: 28px; line-height: 32px; letter-spacing: -0.02em; overflow-wrap: anywhere; }
 .metric-row .muted { margin-top: 8px; }
 .detail-card { margin-top: 20px; }
-.detail-tabs .ant-tabs-content-holder { padding-top: 4px; }
+.detail-tabs .ant-tabs-body-holder { padding-top: 4px; }
 .history-actions { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; padding: 8px 0; text-align: right; }
 .history-actions > p { margin: 0; }
 .today-trade-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
@@ -145,6 +145,7 @@
   .config-form .ant-switch, .settings-page .ant-switch { margin-block: var(--space-3); touch-action: manipulation; }
   .config-form .ant-switch:not(:disabled)::before, .settings-page .ant-switch:not(:disabled)::before { content: ''; position: absolute; inset-inline: 0; top: 50%; height: var(--control-touch); transform: translateY(-50%); cursor: pointer; }
   .config-form .ant-checkbox-wrapper, .settings-page .ant-checkbox-wrapper { min-height: var(--control-touch); align-items: center; }
+  .save-bar-status .ant-btn-link { min-height: var(--control-touch); padding-inline: var(--space-2); }
 }
 
 @media (max-width: 900px) {

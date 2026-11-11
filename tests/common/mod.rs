@@ -6,6 +6,7 @@ pub mod trades;
 
 use std::path::{Path, PathBuf};
 
+#[must_use = "dropping TempTestDir immediately deletes the temporary directory"]
 pub struct TempTestDir(PathBuf);
 
 impl TempTestDir {

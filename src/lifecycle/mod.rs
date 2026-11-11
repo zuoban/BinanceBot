@@ -97,14 +97,14 @@ pub(crate) async fn remove_engine(
 pub(crate) async fn begin_stop_engine(
     state: Arc<AppState>,
     limit: Duration,
-) -> (Instant, Result<()>) {
+) -> (Option<Instant>, Result<()>) {
     begin_stop_engine_inner(&state, limit, true).await
 }
 
 pub(crate) async fn finish_stop_engine(
     state: &Arc<AppState>,
     engine: &mut JoinHandle<()>,
-    early: (Instant, Result<()>),
+    early: (Option<Instant>, Result<()>),
 ) -> Result<()> {
     finish_stop_engine_inner(state, engine, early, true).await
 }
@@ -113,10 +113,10 @@ async fn begin_stop_engine_inner(
     state: &Arc<AppState>,
     limit: Duration,
     recover: bool,
-) -> (Instant, Result<()>) {
+) -> (Option<Instant>, Result<()>) {
     state.request_shutdown();
-    let deadline = Instant::now() + limit;
-    let requested = timeout_at(deadline, async {
+    let deadline = Instant::now().checked_add(limit);
+    let request_shutdown = async {
         if recover {
             state.pause_for_shutdown().await?;
         } else {
@@ -135,14 +135,16 @@ async fn begin_stop_engine_inner(
             .await
             .context("Strategy engine did not acknowledge shutdown")?
             .map_err(|error| anyhow!(error))
-    })
-    .await;
-    let outcome = match requested {
-        Ok(result) => result,
-        Err(_) => Err(anyhow!(
-            "停机超过 {} 秒；恢复元数据已保留，请核实交易所挂单",
-            limit.as_secs()
-        )),
+    };
+    let outcome = match deadline {
+        Some(deadline) => match timeout_at(deadline, request_shutdown).await {
+            Ok(result) => result,
+            Err(_) => Err(anyhow!(
+                "停机超过 {} 秒；恢复元数据已保留，请核实交易所挂单",
+                limit.as_secs()
+            )),
+        },
+        None => request_shutdown.await,
     };
     (deadline, outcome)
 }
@@ -150,7 +152,7 @@ async fn begin_stop_engine_inner(
 async fn finish_stop_engine_inner(
     state: &Arc<AppState>,
     engine: &mut JoinHandle<()>,
-    early: (Instant, Result<()>),
+    early: (Option<Instant>, Result<()>),
     recover: bool,
 ) -> Result<()> {
     let (deadline, outcome) = early;
@@ -160,15 +162,20 @@ async fn finish_stop_engine_inner(
             let _ = engine.await;
             Err(error)
         }
-        Ok(()) => match timeout_at(deadline, &mut *engine).await {
-            Ok(result) => result.context("Strategy engine failed during shutdown"),
-            Err(_) => {
-                engine.abort();
-                let _ = engine.await;
-                Err(anyhow!(
-                    "Strategy engine did not exit before the shutdown deadline"
-                ))
-            }
+        Ok(()) => match deadline {
+            Some(deadline) => match timeout_at(deadline, &mut *engine).await {
+                Ok(result) => result.context("Strategy engine failed during shutdown"),
+                Err(_) => {
+                    engine.abort();
+                    let _ = engine.await;
+                    Err(anyhow!(
+                        "Strategy engine did not exit before the shutdown deadline"
+                    ))
+                }
+            },
+            None => (&mut *engine)
+                .await
+                .context("Strategy engine failed during shutdown"),
         },
     };
     if let Err(error) = outcome {

@@ -22,6 +22,12 @@ export async function downloadDatabase(path: string, targets?: DatabaseTarget[],
     const result = await response.json().catch(() => null) as { message?: string } | null;
     throw new ApiError(result?.message || '数据库导出失败，请重试', response.status);
   }
+  const contentType = response.headers.get('Content-Type')?.toLowerCase() ?? '';
+  if (contentType.includes('text/html') || contentType.includes('application/json')) {
+    const result = contentType.includes('application/json') ? await response.json().catch(() => null) as { message?: unknown } | null : null;
+    const message = result && typeof result === 'object' && typeof result.message === 'string' && result.message ? result.message : `服务返回异常 (${response.status})，请检查 API 连接`;
+    throw new ApiError(message, response.status, 'invalid-response');
+  }
   const rawFilename = response.headers.get('Content-Disposition')?.match(/filename="?([^";]+)"?/)?.[1]?.trim() || 'binancebot-analysis.db';
   const filename = rawFilename.replace(/[/\\]/g, '_');
   let blob: Blob;

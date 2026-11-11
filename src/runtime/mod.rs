@@ -64,7 +64,7 @@ impl RuntimeCommand {
 type EngineAbortEntry = (std::sync::Weak<AppState>, tokio::task::AbortHandle);
 type EarlyStopEntry = (
     Arc<AppState>,
-    JoinHandle<(tokio::time::Instant, anyhow::Result<()>)>,
+    JoinHandle<(Option<tokio::time::Instant>, anyhow::Result<()>)>,
 );
 
 #[derive(Default)]
@@ -227,7 +227,7 @@ impl TradingRuntime {
 
     async fn stop_pair_for_shutdown(
         pair: &mut PairTask,
-        early_stop: Option<JoinHandle<(tokio::time::Instant, anyhow::Result<()>)>>,
+        early_stop: Option<JoinHandle<(Option<tokio::time::Instant>, anyhow::Result<()>)>>,
         limit: Duration,
     ) -> Result<(), String> {
         let symbol = pair.state.config.read().await.exchange.symbol.clone();

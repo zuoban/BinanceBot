@@ -23,7 +23,7 @@ import { useBeijingDay, useExpired } from '../lib/useNow';
 
 const emptyPairs: Overview['pairs'] = [], emptyTrades: Trade[] = [];
 
-function useOverviewBatchControls(pairs: Pair[], refetchOverview: () => Promise<{ data?: Overview; error: Error | null }>) {
+function useOverviewBatchControls(pairs: Pair[], stale: boolean, refetchOverview: () => Promise<{ data?: Overview; error: Error | null }>) {
   const { message } = App.useApp(), { confirm } = useConfirmDialog(), controls = useControls();
   const [batchBusy, setBatchBusy] = useState(false), [report, setReport] = useState<BatchReport | null>(null), batchId = useRef(0);
   const runBatch = useAsyncLock(), mounted = useMountedRef(), pairsRef = useRef(pairs);
@@ -80,6 +80,7 @@ function useOverviewBatchControls(pairs: Pair[], refetchOverview: () => Promise<
       return outcomes.length ? { ...current, total: Math.max(outcomes.length, current.total - removed), outcomes } : null;
     });
     if (!currentPair) { applyReport((outcomes, liveSymbols) => outcomes.filter(item => liveSymbols.has(item.pair.symbol) && item.pair.symbol !== pair.symbol)); return; }
+    if (action === 'resume' && (stale || currentPair.status === 'RUNNING')) return;
     void (async () => {
       const result = await controls.run(currentPair, action);
       if (!mounted.current || !result || result === 'not_submitted') return;
@@ -90,7 +91,12 @@ function useOverviewBatchControls(pairs: Pair[], refetchOverview: () => Promise<
     })();
   };
   const closeReport = useCallback(() => setReport(null), []);
-  return { controls, batchBusy, report, batch, retryItem, closeReport };
+  const liveReport = useMemo(() => {
+    if (!report) return null;
+    const liveBySymbol = new Map(pairs.map(p => [p.symbol, p]));
+    return { ...report, outcomes: report.outcomes.map(item => ({ ...item, pair: liveBySymbol.get(item.pair.symbol) ?? item.pair })) };
+  }, [report, pairs]);
+  return { controls, batchBusy, report: liveReport, batch, retryItem, closeReport };
 }
 
 function useAddPairFocus(hasOverview: boolean) {
@@ -123,7 +129,7 @@ export default function OverviewPage() {
   const entries = overview.data?.pairs ?? emptyPairs, recentTrades = overview.data?.recent_trades ?? emptyTrades;
   const stale = !!overview.error || (!!overview.data && dataExpired);
   const pairs = useMemo(() => entries.map(toPair), [entries]);
-  const { controls, batchBusy, report, batch, retryItem, closeReport } = useOverviewBatchControls(pairs, overview.refetch);
+  const { controls, batchBusy, report, batch, retryItem, closeReport } = useOverviewBatchControls(pairs, stale, overview.refetch);
   let runningCount = 0, pausedCount = 0, stoppedCount = 0, errorCount = 0, liveCount = 0, allPaper = pairs.length > 0;
   for (const p of pairs) {
     if (p.status === 'RUNNING') runningCount++;
@@ -175,7 +181,7 @@ export default function OverviewPage() {
       </section>
       <OverviewTradesCard recentTrades={recentTrades} />
       <OverviewHistory />
-      <BatchResultDrawer report={report} busy={controls.busy} onClose={closeReport} onRetry={retryItem} />
+      <BatchResultDrawer report={report} busy={controls.busy} stale={stale} onClose={closeReport} onRetry={retryItem} />
     </>}
   </>;
 }

@@ -284,9 +284,18 @@ impl std::fmt::Debug for AuthLoginPayload {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub(crate) struct AuthTokenResponse {
     pub(crate) token: String,
+}
+
+impl std::fmt::Debug for AuthTokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self { token } = self;
+        f.debug_struct("AuthTokenResponse")
+            .field("token", &crate::config::redact_secret(token))
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

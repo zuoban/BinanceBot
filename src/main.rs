@@ -1,13 +1,19 @@
 use binance_grid_bot::{
+    auth::AdminAuth,
     config::{AppConfig, ServerConfig},
-    db::{Database, DatabaseProcessLock},
+    db::{read_active_listen_addr, ActiveListenGuard, Database, DatabaseProcessLock},
     lifecycle::ShutdownSignals,
     runtime::TradingRuntime,
     server::create_managed_router,
+    snapshots::run_hourly_snapshots,
 };
 use clap::{Parser, Subcommand};
 use rusqlite::{Connection, OpenFlags};
-use std::{future::Future, path::PathBuf, pin::Pin, sync::Arc, time::Duration};
+use std::future::Future;
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::watch;
 use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -70,81 +76,41 @@ fn load_saved_config(db: &Database) -> anyhow::Result<AppConfig> {
     Ok(config)
 }
 
-fn listen_sidecar_path(db_path: &std::path::Path) -> PathBuf {
-    let mut os = db_path.as_os_str().to_os_string();
-    os.push("-listen");
-    PathBuf::from(os)
-}
-
-#[must_use = "dropping ActiveListenGuard unlinks the active listener sidecar"]
-struct ActiveListenGuard(PathBuf);
-
-impl ActiveListenGuard {
-    fn record(db_path: &std::path::Path, addr: std::net::SocketAddr) -> anyhow::Result<Self> {
-        let path = listen_sidecar_path(db_path);
-        if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
-            anyhow::bail!("Active listener sidecar {path:?} must not be a symbolic link");
-        }
-        let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-        }
-        use std::io::Write;
-        opts.open(&path)?.write_all(addr.to_string().as_bytes())?;
-        Ok(Self(path))
+fn load_saved_server_config(db_path: &Path) -> Option<ServerConfig> {
+    if db_path == Path::new(":memory:")
+        || !std::fs::symlink_metadata(db_path).is_ok_and(|m| m.file_type().is_file())
+    {
+        return None;
     }
-}
-
-impl Drop for ActiveListenGuard {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let conn = Connection::open_with_flags(db_path, flags).ok()?;
+    let _ = conn.busy_timeout(Duration::from_millis(500));
+    let sql = "SELECT config_json FROM app_config WHERE id = 1";
+    let raw: String = conn.query_row(sql, [], |r| r.get(0)).ok()?;
+    let mut val: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    serde_json::from_value(val.get_mut("server")?.take()).ok()
 }
 
 fn resolve_healthcheck_url(args: &CliArgs, url: Option<&str>) -> anyhow::Result<String> {
     if let Some(url) = url {
         return Ok(url.to_owned());
     }
-    let sidecar = listen_sidecar_path(&args.db);
-    let active_server = std::fs::symlink_metadata(&sidecar)
-        .ok()
-        .filter(|m| m.file_type().is_file() && m.len() <= 128)
-        .and_then(|_| std::fs::read_to_string(&sidecar).ok())
-        .and_then(|raw| raw.trim().parse::<std::net::SocketAddr>().ok())
+    let mut server = read_active_listen_addr(&args.db)
         .map(|addr| ServerConfig {
             host: addr.ip().to_string(),
             port: addr.port(),
-        });
-    let mut server: ServerConfig = active_server.unwrap_or_else(|| {
-        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-        Connection::open_with_flags(&args.db, flags)
-            .and_then(|conn| {
-                let _ = conn.busy_timeout(Duration::from_millis(500));
-                conn.query_row("SELECT config_json FROM app_config WHERE id = 1", [], |r| {
-                    r.get::<_, String>(0)
-                })
-            })
-            .ok()
-            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-            .and_then(|mut v| serde_json::from_value(v.get_mut("server")?.take()).ok())
-            .unwrap_or_default()
-    });
+        })
+        .or_else(|| load_saved_server_config(&args.db))
+        .unwrap_or_default();
     if let Some(host) = &args.host {
         server.host.clone_from(host);
     }
-    if let Some(port) = args.port {
-        server.port = port;
-    }
+    server.port = args.port.unwrap_or(server.port);
     let mut addr = server.socket_addr()?;
     if addr.ip().is_unspecified() {
-        addr.set_ip(if addr.is_ipv4() {
-            std::net::Ipv4Addr::LOCALHOST.into()
-        } else {
-            std::net::Ipv6Addr::LOCALHOST.into()
-        });
+        let v4 = std::net::IpAddr::from(std::net::Ipv4Addr::LOCALHOST);
+        let v6 = std::net::IpAddr::from(std::net::Ipv6Addr::LOCALHOST);
+        addr.set_ip(if addr.is_ipv4() { v4 } else { v6 });
     }
     Ok(format!("http://{addr}/api/auth/status"))
 }
@@ -179,52 +145,48 @@ async fn run_healthcheck(url: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_migrate_legacy_paper(db: PathBuf, symbol: String, confirm: String) -> anyhow::Result<()> {
+fn run_migrate_legacy_paper(db: &Path, symbol: &str, confirm: &str) -> anyhow::Result<()> {
     anyhow::ensure!(
         confirm == "INITIALIZE-EMPTY-PAPER-ACCOUNT",
         "Confirmation must be exactly INITIALIZE-EMPTY-PAPER-ACCOUNT"
     );
-    binance_grid_bot::config::validate_symbol(&symbol).map_err(|_| {
+    binance_grid_bot::config::validate_symbol(symbol).map_err(|_| {
         anyhow::anyhow!("Trading pair must contain 3–32 uppercase ASCII letters or digits")
     })?;
     #[cfg(not(unix))]
     anyhow::bail!("Offline paper migration requires Unix process locking");
     #[cfg(unix)]
     {
-        let metadata = std::fs::symlink_metadata(&db)
+        let metadata = std::fs::symlink_metadata(db)
             .map_err(|e| anyhow::anyhow!("Cannot inspect existing database {:?}: {}", db, e))?;
         anyhow::ensure!(
             metadata.file_type().is_file(),
             "Migration requires an existing regular database file, not a symlink"
         );
-        let _process_lock = DatabaseProcessLock::acquire(&db)?;
-        Database::open(&db)?.initialize_legacy_paper_account(&symbol)?;
+        let _process_lock = DatabaseProcessLock::acquire(db)?;
+        Database::open(db)?.initialize_legacy_paper_account(symbol)?;
         println!("Initialized paper subledger for {} with an empty position and a 10000 accounting baseline; no funds were added to the shared paper account. Historical positions and balances were not restored. Restart the bot and manually resume the paused strategy after reviewing the baseline.", symbol);
         Ok(())
     }
 }
 
-fn resolve_admin_auth(
-    cli_password: Option<String>,
-) -> anyhow::Result<Option<Arc<binance_grid_bot::auth::AdminAuth>>> {
-    let cli_supplied = cli_password.filter(|password| !password.is_empty());
+fn resolve_admin_auth(cli_password: Option<String>) -> anyhow::Result<Option<Arc<AdminAuth>>> {
+    let cli_supplied = cli_password.filter(|p| !p.is_empty());
     if cli_supplied.is_some() {
         warn!(
             "--admin-password was supplied on the command line and may be visible in process listings; \
              prefer the ADMIN_PASSWORD environment variable"
         );
     }
-    let admin_password = cli_supplied.or_else(|| {
+    let env_pw = || {
         std::env::var("ADMIN_PASSWORD")
             .ok()
-            .filter(|password| !password.is_empty())
-    });
-    match admin_password {
-        Some(password) => Ok(Some(Arc::new(
-            binance_grid_bot::auth::AdminAuth::from_password(&password)?,
-        ))),
-        None => Ok(None),
-    }
+            .filter(|p| !p.is_empty())
+    };
+    cli_supplied
+        .or_else(env_pw)
+        .map(|pw| AdminAuth::from_password(&pw).map(Arc::new))
+        .transpose()
 }
 
 fn init_tracing() {
@@ -237,7 +199,7 @@ fn init_tracing() {
         .init();
 }
 
-fn log_startup_summary(db_path: &std::path::Path, strategies: &[AppConfig], auth_enabled: bool) {
+fn log_startup_summary(db_path: &Path, strategies: &[AppConfig], auth_enabled: bool) {
     info!(
         "Binance Futures Grid Bot — SQLite {:?}, {} trading pair(s)",
         db_path,
@@ -267,7 +229,7 @@ fn log_startup_summary(db_path: &std::path::Path, strategies: &[AppConfig], auth
 async fn start_runtime_until_ready<F>(
     config: &AppConfig,
     db: Arc<Database>,
-    admin_auth: Option<Arc<binance_grid_bot::auth::AdminAuth>>,
+    admin_auth: Option<Arc<AdminAuth>>,
     mut signal: Pin<&mut F>,
 ) -> anyhow::Result<TradingRuntime>
 where
@@ -297,13 +259,12 @@ where
     }
 }
 
-fn spawn_web_server(
-    listener: tokio::net::TcpListener,
-    app: axum::Router,
-) -> (
+type WebServer = (
     watch::Sender<bool>,
     tokio::task::JoinHandle<std::io::Result<()>>,
-) {
+);
+
+fn spawn_web_server(listener: tokio::net::TcpListener, app: axum::Router) -> WebServer {
     let (web_stop, mut web_stop_rx) = watch::channel(false);
     let web_task = tokio::spawn(async move {
         axum::serve(
@@ -378,19 +339,18 @@ where
 async fn main() -> anyhow::Result<()> {
     init_tracing();
     let args = CliArgs::parse();
-    if let Some(Command::Backtest(backtest)) = &args.command {
-        return binance_grid_bot::strategy::backtest::run_cli(backtest).await;
-    }
-    if let Some(Command::Healthcheck { url }) = &args.command {
-        return run_healthcheck(&resolve_healthcheck_url(&args, url.as_deref())?).await;
-    }
-    if let Some(Command::MigrateLegacyPaper {
-        db,
-        symbol,
-        confirm,
-    }) = args.command
-    {
-        return run_migrate_legacy_paper(db, symbol, confirm);
+    if let Some(cmd) = &args.command {
+        return match cmd {
+            Command::Backtest(bt) => binance_grid_bot::strategy::backtest::run_cli(bt).await,
+            Command::Healthcheck { url } => {
+                run_healthcheck(&resolve_healthcheck_url(&args, url.as_deref())?).await
+            }
+            Command::MigrateLegacyPaper {
+                db,
+                symbol,
+                confirm,
+            } => run_migrate_legacy_paper(db, symbol, confirm),
+        };
     }
     let mut signals = ShutdownSignals::register().await?;
     let signal = signals.wait();
@@ -402,12 +362,8 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|error| error.context("Failed to clear persisted login sessions"))?;
     let mut config = load_saved_config(&db)?;
     // These options only select the listening address for this process (e.g. recovery).
-    if let Some(host) = args.host {
-        config.server.host = host;
-    }
-    if let Some(port) = args.port {
-        config.server.port = port;
-    }
+    config.server.host = args.host.unwrap_or(config.server.host);
+    config.server.port = args.port.unwrap_or(config.server.port);
     let strategies = config.strategy_configs()?;
     log_startup_summary(&args.db, &strategies, admin_auth.is_some());
     let addr = config.server.socket_addr()?;
@@ -415,9 +371,7 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let _listen_guard = ActiveListenGuard::record(&args.db, listener.local_addr()?)?;
     let runtime = start_runtime_until_ready(&config, db, admin_auth, signal.as_mut()).await?;
-    let snapshot_task = tokio::spawn(binance_grid_bot::snapshots::run_hourly_snapshots(
-        runtime.handle(),
-    ));
+    let snapshot_task = tokio::spawn(run_hourly_snapshots(runtime.handle()));
     let app = create_managed_router(runtime.handle());
     info!(
         "API server running at http://{} (local: http://127.0.0.1:{})",
@@ -444,11 +398,11 @@ mod tests {
         db.save_config(&saved).unwrap();
         let config = load_saved_config(&db).unwrap();
         let strategies = config.strategy_configs().unwrap();
-        assert_eq!(strategies.len(), 1);
-        assert_eq!(strategies[0].exchange.symbol, "BTCUSDT");
-        assert_eq!(strategies[0].exchange.api_key, "saved-key");
+        let s = &strategies[0];
+        assert_eq!((strategies.len(), s.grid.grid_interval), (1, dec!(10)));
+        assert_eq!(s.exchange.symbol, "BTCUSDT");
+        assert_eq!(s.exchange.api_key, "saved-key");
         assert_eq!(config.server.host, "0.0.0.0");
-        assert_eq!(strategies[0].grid.grid_interval, dec!(10));
         assert_eq!(config, load_saved_config(&db).unwrap());
     }
 
@@ -462,8 +416,7 @@ mod tests {
         assert_eq!(config.pairs.len(), 1);
         let strategy = &config.strategy_configs().unwrap()[0];
         assert_eq!(strategy.exchange.trading_mode(), TradingMode::Paper);
-        assert!(strategy.exchange.api_key.is_empty());
-        assert!(strategy.exchange.api_secret.is_empty());
+        assert!(strategy.exchange.api_key.is_empty() && strategy.exchange.api_secret.is_empty());
     }
 
     #[test]
@@ -486,6 +439,12 @@ mod tests {
             let got = resolve_healthcheck_url(&cli, None).unwrap();
             assert_eq!(got, format!("http://{addr}/api/auth/status"));
         };
+        let mem = Path::new(":memory:");
+        let mem_guard = ActiveListenGuard::record(mem, "0.0.0.0:9999".parse().unwrap()).unwrap();
+        assert_eq!(read_active_listen_addr(mem), None);
+        check(":memory:", "", "127.0.0.1:8080");
+        drop(mem_guard);
+        assert!(!mem.exists() && !Path::new(":memory:-listen").exists());
         check("no-such-hc.db", "", "127.0.0.1:8080");
         check("no-such-hc.db", "--host 0.0.0.0 -p 9090", "127.0.0.1:9090");
         check("no-such-hc.db", "--host [::] --port 9091", "[::1]:9091");
@@ -497,18 +456,27 @@ mod tests {
         }
         let dir = TempDir(std::env::temp_dir().join(format!("hc-{}", uuid::Uuid::new_v4())));
         std::fs::create_dir_all(&dir.0).unwrap();
-        let db_file = dir.0.join("bot.db");
+        let dbf = dir.0.join("bot.db");
         let mut saved = AppConfig::default();
         saved.server.host = "[::]".into();
         saved.server.port = 9123;
-        let db = Database::open(&db_file).unwrap();
-        db.save_config(&saved).unwrap();
-        drop(db);
-        check(db_file.to_str().unwrap(), "", "[::1]:9123");
-        let guard = ActiveListenGuard::record(&db_file, "0.0.0.0:8080".parse().unwrap()).unwrap();
-        check(db_file.to_str().unwrap(), "", "127.0.0.1:8080");
+        Database::open(&dbf).unwrap().save_config(&saved).unwrap();
+        let db_str = dbf.to_str().unwrap();
+        check(db_str, "", "[::1]:9123");
+        let guard = ActiveListenGuard::record(&dbf, "0.0.0.0:8080".parse().unwrap()).unwrap();
+        check(db_str, "", "127.0.0.1:8080");
         drop(guard);
-        check(db_file.to_str().unwrap(), "", "[::1]:9123");
+        check(db_str, "", "[::1]:9123");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let stale = dir.0.canonicalize().unwrap().join("bot.db-listen");
+            std::fs::write(&stale, b"127.0.0.1:7777").unwrap();
+            std::fs::set_permissions(&stale, std::fs::Permissions::from_mode(0o600)).unwrap();
+            assert_eq!(read_active_listen_addr(&dbf), None);
+            check(db_str, "", "[::1]:9123");
+            assert!(DatabaseProcessLock::acquire(&dbf).unwrap().is_some() && !stale.exists());
+        }
         let app = Router::new()
             .route("/ok", get(|| async { "ok" }))
             .route("/big", get(|| async { "x".repeat(8 * 1024 + 1) }))

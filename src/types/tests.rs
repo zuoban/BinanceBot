@@ -157,7 +157,10 @@ fn config_payload_debug_redacts_secrets() {
     let login = AuthLoginPayload {
         password: "login-secret-password".into(),
     };
-    let rendered = format!("{global:?} {pair:?} {login:?}");
+    let token_response = AuthTokenResponse {
+        token: "session-bearer-secret-token".into(),
+    };
+    let rendered = format!("{global:?} {pair:?} {login:?} {token_response:?}");
     for secret in [
         "payload-api-key",
         "payload-api-secret",
@@ -166,6 +169,7 @@ fn config_payload_debug_redacts_secrets() {
         "pair-payload-secret",
         "pair-payload-token",
         "login-secret-password",
+        "session-bearer-secret-token",
     ] {
         assert!(!rendered.contains(secret), "{rendered}");
     }

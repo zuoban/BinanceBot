@@ -45,6 +45,7 @@ it.each([
     expect(result.current.results.SOLUSDC).toContain('核对交易所挂单');
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['pairs'] });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['overview'] });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['accounts'] });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['snapshot', 'SOLUSDC'] });
   } finally {
     unmount();

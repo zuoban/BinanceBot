@@ -298,7 +298,7 @@ pub(crate) async fn collect_hourly(
 }
 
 pub(super) fn within_capture_window(hour: i64, now: DateTime<Utc>) -> bool {
-    now.timestamp() >= hour && now.timestamp() - hour < 60
+    now.timestamp() >= hour && now.timestamp().saturating_sub(hour) < 60
 }
 
 pub(crate) async fn try_capture_hour(handle: &RuntimeHandle, hour: i64) -> bool {

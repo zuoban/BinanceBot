@@ -75,10 +75,9 @@ impl<'a> Sim<'a> {
 
     fn equity(&self) -> Decimal {
         self.realized
-            .checked_sub(self.fees)
-            .and_then(|v| v.checked_sub(self.funding))
-            .and_then(|v| v.checked_add(self.unrealized()))
-            .unwrap_or(Decimal::ZERO)
+            .saturating_sub(self.fees)
+            .saturating_sub(self.funding)
+            .saturating_add(self.unrealized())
     }
 
     pub(super) fn record(&mut self) {

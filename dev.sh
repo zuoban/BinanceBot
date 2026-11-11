@@ -67,6 +67,9 @@ if [[ -z "${ADMIN_PASSWORD:-}" && "$has_password_arg" == false ]]; then
   fi
   printf '未设置 ADMIN_PASSWORD，本次强制绑定本机回环（127.0.0.1）访问。\n'
 fi
+if [[ -z "$backend_port" && -z "${API_PROXY_TARGET:-}" ]]; then
+  extra_backend_args+=(--port 8080)
+fi
 if [[ ! -d "$ROOT_DIR/frontend/node_modules" ]]; then
   printf '正在安装前端依赖...\n'
   (cd "$ROOT_DIR/frontend" && npm ci --ignore-scripts)

@@ -170,7 +170,7 @@ export function ControlProvider({ pairs, children }: { pairs?: Pair[]; children:
         setBusy(new Set(locked.current));
         setPending(p => { const { [pair.symbol]: _done, ...rest } = p; return rest; });
       }
-      if (submitted) void invalidateStrategyQueries(client, { snapshot: pair.symbol });
+      if (submitted) void invalidateStrategyQueries(client, { accounts: true, snapshot: pair.symbol });
     }
   }, [abortRef, client, confirm, message, mounted, sleep]);
   const value = useMemo(() => ({ busy, pending, results, clearResult, run }), [busy, pending, results, clearResult, run]);

@@ -8,15 +8,16 @@ grid behavior, `exchange/` handles Binance connectivity, `server/` exposes
 HTTP and WebSocket APIs, and `db/` manages SQLite persistence. Integration
 tests live in `tests/`; module-specific Rust tests also live alongside source.
 The frontend lives in `frontend/src/`, organized into `pages/`, `components/`,
-`lib/`, and `test/`. Supporting design documents are in `docs/`, `DESIGN.md`,
-and `PRODUCT.md`.
+`lib/`, `styles/`, and `test/`. Supporting design documents are in `docs/`,
+`DESIGN.md`, and `PRODUCT.md`.
 
 ## Build, Test, and Development Commands
 
 Use Rust 1.88+ and Node.js 22.22.2+ (or 24.15.0+ / 26+).
 
-- `cargo run --release`: start the backend with its default SQLite database.
-- `cargo test`: run Rust unit and integration tests.
+- `cargo run --locked --release`: start the backend with its default SQLite database.
+- `cargo test --locked`: run Rust unit and integration tests.
+- `cargo clippy --locked --all-targets -- -D warnings`: lint all Rust targets with warnings denied.
 - `cargo fmt --check`: check Rust formatting; use `cargo fmt` to apply it.
 - `cd frontend && npm ci`: install the locked frontend dependencies.
 - `cd frontend && npm run dev`: start Vite; API requests proxy to

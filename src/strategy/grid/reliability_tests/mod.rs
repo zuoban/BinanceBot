@@ -17,7 +17,7 @@ use std::sync::{
 struct Exchange {
     orders: Arc<Mutex<HashMap<String, BinanceOrderResponse>>>,
     posts: Arc<Mutex<Vec<String>>>,
-    // 0: accepted, 1: accepted but backend timeout, 2: timeout without acceptance.
+    // 0: accepted, 1: accepted+timeout, 2: timeout unaccepted, 3: GTX rejected, 4: order rejected.
     submission: Arc<AtomicU8>,
     lookup_unavailable: Arc<AtomicBool>,
     cancel_fails: Arc<AtomicBool>,
@@ -125,15 +125,16 @@ async fn exchange_server(fake: Exchange) -> (String, JoinHandle<()>) {
                 _ => {}
             }
             let behavior = fake.submission.load(Ordering::SeqCst);
-            if behavior != 2 { fake.orders.lock().unwrap().insert(id, order.clone()); }
+            if behavior <= 1 { fake.orders.lock().unwrap().insert(id, order.clone()); }
             if fake.block_submit.load(Ordering::SeqCst) {
                 fake.submit_started.notify_one();
                 fake.release_submit.notified().await;
             }
-            if behavior != 0 {
-                (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"code": -1007, "msg": "Timeout waiting for response from backend server."})))
-            } else {
-                (StatusCode::OK, Json(serde_json::to_value(order).unwrap()))
+            match behavior {
+                0 => (StatusCode::OK, Json(serde_json::to_value(order).unwrap())),
+                3 => (StatusCode::BAD_REQUEST, Json(json!({"code": -5022, "msg": "Post Only order rejected."}))),
+                4 => (StatusCode::BAD_REQUEST, Json(json!({"code": -2019, "msg": "Margin is insufficient."}))),
+                _ => (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"code": -1007, "msg": "Timeout waiting for response from backend server."}))),
             }
         }).delete(|State(fake): State<Exchange>, Query(query): Query<HashMap<String, String>>| async move {
             if fake.cancel_fails.load(Ordering::SeqCst) {

@@ -9,6 +9,7 @@ const SUPPORTED_KLINE_INTERVALS: &[&str] = &[
 ];
 pub(super) const MAX_BACKTEST_DAYS: u32 = 3650;
 const MAX_KLINE_SPAN_MS: i64 = MAX_BACKTEST_DAYS as i64 * 24 * 60 * 60 * 1000;
+const MAX_BACKTEST_CANDLES: usize = 1_500_000;
 
 pub(super) fn validate_kline_interval(interval: &str) -> Result<()> {
     ensure!(
@@ -75,15 +76,18 @@ pub(crate) fn parse_csv(text: &str) -> Result<Vec<Candle>> {
 }
 
 pub(super) fn next_kline_page_start(
+    start: i64,
     received: usize,
     last: Option<&Candle>,
     end_ms: i64,
-) -> Option<i64> {
+) -> Result<Option<i64>> {
     match last {
         Some(last) if received >= 1500 && last.time_ms < end_ms => {
-            Some(last.time_ms.saturating_add(1))
+            let next_start = last.time_ms.saturating_add(1);
+            ensure!(next_start > start, "K 线分页游标未推进");
+            Ok(Some(next_start))
         }
-        _ => None,
+        _ => Ok(None),
     }
 }
 
@@ -144,6 +148,23 @@ pub(crate) async fn fetch_klines(
     start_ms: i64,
     end_ms: i64,
 ) -> Result<Vec<Candle>> {
+    fetch_klines_from_url(
+        "https://fapi.binance.com/fapi/v1/klines",
+        symbol,
+        interval,
+        start_ms,
+        end_ms,
+    )
+    .await
+}
+
+pub(super) async fn fetch_klines_from_url(
+    url: &str,
+    symbol: &str,
+    interval: &str,
+    start_ms: i64,
+    end_ms: i64,
+) -> Result<Vec<Candle>> {
     crate::config::validate_symbol(symbol)?;
     validate_kline_interval(interval)?;
     ensure!(
@@ -157,7 +178,7 @@ pub(crate) async fn fetch_klines(
     loop {
         let start_str = start.to_string();
         let resp = client
-            .get("https://fapi.binance.com/fapi/v1/klines")
+            .get(url)
             .timeout(Duration::from_secs(15))
             .query(&[
                 ("symbol", symbol),
@@ -178,9 +199,15 @@ pub(crate) async fn fetch_klines(
                 .context("无法解析 K 线响应")?;
         let received = rows.len();
         candles.extend(rows.into_iter().map(|row| row.0));
-        let Some(next_start) = next_kline_page_start(received, candles.last(), end_ms) else {
+        ensure!(
+            candles.len() <= MAX_BACKTEST_CANDLES,
+            "K 线数量超过上限 ({MAX_BACKTEST_CANDLES})"
+        );
+        let Some(next_start) = next_kline_page_start(start, received, candles.last(), end_ms)?
+        else {
             break;
         };
+        ensure!(next_start > start, "K 线分页游标未推进");
         start = next_start;
         tokio::time::sleep(Duration::from_millis(150)).await;
     }

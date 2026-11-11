@@ -84,30 +84,10 @@ pub struct BacktestArgs {
     pub json: bool,
 }
 
-pub(super) async fn load_rules(args: &BacktestArgs) -> Result<SymbolRules> {
-    ensure!(
-        args.maker_fee >= Decimal::ZERO && args.maker_fee < Decimal::ONE,
-        "--maker-fee 必须在 [0, 1) 范围内"
-    );
-    let mut rules = match &args.symbol {
-        Some(symbol) => {
-            crate::config::validate_symbol(symbol)?;
-            let client = BinanceFuturesClient::new(&AppConfig::default().exchange);
-            let info = client
-                .get_exchange_info(Some(symbol))
-                .await
-                .context("无法获取交易所规则")?;
-            SymbolRules::from_exchange_info(&info, symbol)
-                .with_context(|| format!("交易所没有可用的 {symbol} 规则"))?
-        }
-        // Offline defaults: the built-in price cap is meant for a single small-cap symbol and
-        // would silently block every level on high-priced pairs, so use the exchange-info
-        // fallback cap instead.
-        None => SymbolRules {
-            max_price: dec!(1000000),
-            ..SymbolRules::default()
-        },
-    };
+pub(super) fn apply_rule_overrides(
+    mut rules: SymbolRules,
+    args: &BacktestArgs,
+) -> Result<SymbolRules> {
     if let Some(tick) = args.tick_size {
         ensure!(tick > Decimal::ZERO, "--tick-size 必须大于 0");
         rules.set_tick_size(tick);
@@ -124,7 +104,47 @@ pub(super) async fn load_rules(args: &BacktestArgs) -> Result<SymbolRules> {
         ensure!(min_notional > Decimal::ZERO, "--min-notional 必须大于 0");
         rules.min_notional = min_notional;
     }
+    if args.symbol.is_none() {
+        let mut min_price = rules.min_price.min(dec!(0.0001)).min(rules.tick_size);
+        if let Some(mp) = args.min_price.filter(|mp| *mp > Decimal::ZERO) {
+            min_price = min_price.min(mp);
+        }
+        rules.min_price = min_price;
+        rules.max_qty = rules.max_qty.max(dec!(1_000_000_000)).max(rules.min_qty);
+    } else {
+        ensure!(
+            rules.min_qty <= rules.max_qty,
+            "--min-qty 不能大于交易对规则上限 ({})",
+            rules.max_qty
+        );
+    }
     Ok(rules)
+}
+
+pub(super) async fn load_rules(args: &BacktestArgs) -> Result<SymbolRules> {
+    ensure!(
+        args.maker_fee >= Decimal::ZERO && args.maker_fee < Decimal::ONE,
+        "--maker-fee 必须在 [0, 1) 范围内"
+    );
+    let rules = match &args.symbol {
+        Some(symbol) => {
+            crate::config::validate_symbol(symbol)?;
+            let client = BinanceFuturesClient::new(&AppConfig::default().exchange);
+            let info = client
+                .get_exchange_info(Some(symbol))
+                .await
+                .context("无法获取交易所规则")?;
+            SymbolRules::from_exchange_info(&info, symbol)
+                .with_context(|| format!("交易所没有可用的 {symbol} 规则"))?
+        }
+        // Offline defaults: relax price and quantity bounds so high-priced and sub-$0.10 pairs
+        // work cleanly without exchangeInfo.
+        None => SymbolRules {
+            max_price: dec!(1000000),
+            ..SymbolRules::default()
+        },
+    };
+    apply_rule_overrides(rules, args)
 }
 
 fn when(ms: i64) -> String {

@@ -17,9 +17,14 @@ fn probe_gate_allows_one_call_per_cooldown_and_reports_the_wait() {
     let gate = ProbeGate::new();
     let start = std::time::Instant::now();
     assert_eq!(gate.enter(start), Ok(()));
+    assert_eq!(gate.enter(start), Err(3));
     assert_eq!(
         gate.enter(start + std::time::Duration::from_millis(400)),
         Err(3)
+    );
+    assert_eq!(
+        gate.enter(start + std::time::Duration::from_secs(1)),
+        Err(2)
     );
     assert_eq!(
         gate.enter(start + PROBE_COOLDOWN - std::time::Duration::from_millis(10)),

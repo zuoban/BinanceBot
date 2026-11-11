@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { useDeleteStrategy } from '../components/DeleteStrategy';
 import { ControlProvider } from '../components/Controls';
+import { ApiError } from '../lib/api';
 import type * as Api from '../lib/api';
 import { pair } from './fixtures';
 
@@ -78,6 +79,23 @@ it.each([[200, 'invalid JSON'], [502, 'invalid JSON'], [200, 'null']] as const)(
   await waitFor(() => expect(mocks.error).toHaveBeenCalledWith(`服务返回异常 (${status})，请检查 API 连接；删除结果可能已生效，请刷新状态或查看日志后再操作`));
   expect(invalidate).toHaveBeenCalledWith({ queryKey: ['pairs'] });
   expect(invalidate).toHaveBeenCalledWith({ queryKey: ['overview'] });
+});
+
+it('appends the uncertain-mutation warning for 502 and 504 JSON gateway errors', async () => {
+  mocks.confirm.mockResolvedValue(true);
+  mocks.api.mockRejectedValueOnce(new ApiError('网关等待后端响应超时', 504));
+  const invalidate = setup();
+  const user = userEvent.setup();
+  await user.click(screen.getByRole('button', { name: '删除策略' }));
+  await waitFor(() => expect(mocks.error).toHaveBeenCalledWith('网关等待后端响应超时；删除结果可能已生效，请刷新状态或查看日志后再操作'));
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ['pairs'] });
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ['overview'] });
+
+  const { api } = await vi.importActual<typeof Api>('../lib/api');
+  mocks.api.mockImplementation(api);
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ success: false, message: '无法连接后端服务，请检查服务是否已启动' }), { status: 502 })));
+  await user.click(screen.getByRole('button', { name: '删除策略' }));
+  await waitFor(() => expect(mocks.error).toHaveBeenLastCalledWith('无法连接后端服务，请检查服务是否已启动；删除结果可能已生效，请刷新状态或查看日志后再操作'));
 });
 
 it('explains an uncertain deletion after a timeout', async () => {

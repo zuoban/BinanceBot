@@ -4,7 +4,7 @@ import { sameDecimal } from './gridPreview';
 type Editable = Omit<GridConfig, 'post_only'>;
 export interface FieldChange { key: keyof Editable; label: string; before: string; after: string; risky: boolean }
 
-const fields: { key: keyof Editable; label: string; risky: boolean; show: (config: Editable) => string }[] = [
+const fields: { key: keyof Editable; label: string; risky: boolean; show: (config: Editable) => string; equals?: (a: Editable, b: Editable) => boolean }[] = [
   { key: 'direction', label: '交易方向', risky: true, show: c => directionLabel(c.direction) },
   { key: 'grid_interval', label: '网格间距', risky: false, show: c => String(c.grid_interval) },
   { key: 'order_amount_usdc', label: '每格金额', risky: true, show: c => String(c.order_amount_usdc) },
@@ -13,9 +13,8 @@ const fields: { key: keyof Editable; label: string; risky: boolean; show: (confi
   { key: 'min_price', label: '最低价格', risky: true, show: c => c.min_price ? String(c.min_price) : '未设置' },
   { key: 'max_price', label: '最高价格', risky: true, show: c => c.max_price ? String(c.max_price) : '未设置' },
   { key: 'max_position_usdc', label: '最大持仓名义价值', risky: true, show: c => c.max_position_usdc ? String(c.max_position_usdc) : '未设置' },
-  { key: 'pause_on_max_position', label: '持仓上限处理方式', risky: true, show: c => maxPositionPolicyLabel(c) },
+  { key: 'pause_on_max_position', label: '持仓上限处理方式', risky: true, show: c => maxPositionPolicyLabel(c), equals: (a, b) => maxPositionPolicyLabel(a) === maxPositionPolicyLabel(b) },
   { key: 'min_liquidation_distance_pct', label: '强平距离阈值', risky: true, show: c => c.min_liquidation_distance_pct ? `${c.min_liquidation_distance_pct}%` : '未设置' },
-  { key: 'cancel_opening_on_max_position', label: '达到上限时仅撤开仓单', risky: true, show: c => c.cancel_opening_on_max_position ? '开启' : '关闭' },
 ];
 
 const blank = (value: unknown) => value === null || value === undefined || value === '';
@@ -26,13 +25,18 @@ const same = (a: unknown, b: unknown) => {
 };
 
 export function sameGridConfig(a: GridConfig, b: GridConfig): boolean {
-  return a === b || (a.post_only === b.post_only && fields.every(({ key }) => same(a[key], b[key])));
+  return a === b || (
+    a.post_only === b.post_only
+    && Boolean(a.pause_on_max_position) === Boolean(b.pause_on_max_position)
+    && Boolean(a.cancel_opening_on_max_position) === Boolean(b.cancel_opening_on_max_position)
+    && fields.every(({ key, equals }) => equals ? equals(a, b) : same(a[key], b[key]))
+  );
 }
 
 /** Compare the saved configuration with the submitted one; numeric strings compare by value. */
 export function diffGridConfig(before: Editable, after: Editable): FieldChange[] {
-  return fields.flatMap(({ key, label, risky, show }) =>
-    same(before[key], after[key]) ? [] : [{ key, label, risky, before: show(before), after: show(after) }]);
+  return fields.flatMap(({ key, label, risky, show, equals }) =>
+    (equals ? equals(before, after) : same(before[key], after[key])) ? [] : [{ key, label, risky, before: show(before), after: show(after) }]);
 }
 
 /** Every field of a new strategy, shown as it will be created. */

@@ -331,8 +331,20 @@ fn ws_origin_allowed_enforces_forwarded_proto_and_host_syntax() {
     assert!(ws_origin_allowed(&build_headers(
         "bot.example.com",
         Some("https://bot.example.com"),
-        Some("HTTPS, http"),
+        Some("HTTPS"),
     )));
+    for multi_hop in ["http, https", "https, http", "HTTPS, http"] {
+        for origin in ["http://bot.example.com", "https://bot.example.com"] {
+            assert!(
+                !ws_origin_allowed(&build_headers(
+                    "bot.example.com",
+                    Some(origin),
+                    Some(multi_hop),
+                )),
+                "multi-hop proto {multi_hop:?} must be rejected"
+            );
+        }
+    }
     assert!(!ws_origin_allowed(&build_headers(
         "bot.example.com",
         Some("http://bot.example.com"),

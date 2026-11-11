@@ -91,7 +91,7 @@
 .content { min-width: 0; width: 100%; max-width: 1480px; margin: 0 auto; padding: 28px 32px 64px; }
 
 /* ---------- Palette ---------- */
-.palette .ant-modal { top: 12vh; }
+.ant-modal.palette { top: 12vh; }
 .palette .ant-modal-container { padding: 0; overflow: hidden; border: 1px solid var(--border-strong); box-shadow: var(--overlay-shadow); }
 .palette-search { display: flex; align-items: center; gap: 8px; padding: 8px 16px; border-bottom: 1px solid var(--border-hairline); color: var(--text-muted); }
 .palette-search .ant-input { font-size: 15px; padding-inline: 4px; height: 44px; }
@@ -160,7 +160,7 @@
 }
 
 @media (max-width: 600px) {
-  .palette .ant-modal { top: 6vh; max-width: calc(100vw - 24px); }
+  .ant-modal.palette { top: 6vh; max-width: calc(100vw - 24px); }
 }
 
 @media (max-width: 359px) {

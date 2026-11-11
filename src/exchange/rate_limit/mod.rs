@@ -49,7 +49,7 @@ impl Counter {
         while self
             .events
             .front()
-            .is_some_and(|(at, _)| now.duration_since(*at) >= window)
+            .is_some_and(|(at, _)| now.saturating_duration_since(*at) >= window)
         {
             if let Some((_, weight)) = self.events.pop_front() {
                 self.local_total -= weight;
@@ -58,7 +58,7 @@ impl Counter {
         while self
             .external
             .front()
-            .is_some_and(|(at, _)| now.duration_since(*at) >= window)
+            .is_some_and(|(at, _)| now.saturating_duration_since(*at) >= window)
         {
             self.external.pop_front();
         }

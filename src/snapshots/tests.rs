@@ -23,6 +23,8 @@ fn hourly_capture_rejects_observations_outside_first_minute() {
         hour,
         DateTime::from_timestamp(hour + 60, 0).unwrap()
     ));
+    assert!(!within_capture_window(i64::MIN, Utc::now()));
+    assert!(!within_capture_window(i64::MAX, Utc::now()));
 }
 
 fn aggregate(snapshots: &[BotSnapshot], now: DateTime<Utc>) -> Vec<SnapshotGroup> {
@@ -367,6 +369,8 @@ fn detects_beijing_midnight_hour_boundaries() {
     assert!(!is_beijing_midnight_hour(midnight_utc + 3600));
     assert!(!is_beijing_midnight_hour(midnight_utc - 3600));
     assert!(is_beijing_midnight_hour(midnight_utc + 24 * 3600));
+    let _ = is_beijing_midnight_hour(i64::MIN);
+    let _ = is_beijing_midnight_hour(i64::MAX);
 }
 
 #[tokio::test]

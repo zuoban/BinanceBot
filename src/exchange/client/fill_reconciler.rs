@@ -240,14 +240,14 @@ impl BinanceFuturesClient {
         let now = Instant::now();
         let retention_secs = self.fill_retention_seconds.load(Ordering::Relaxed);
         state.waiters.retain(|(_, last_seen)| {
-            now.duration_since(*last_seen) < Duration::from_secs(retention_secs)
+            now.saturating_duration_since(*last_seen) < Duration::from_secs(retention_secs)
         });
         if let Some((_, last_seen)) = state.waiters.iter_mut().find(|(waiting, _)| waiting == key) {
             *last_seen = now;
         } else if state.progress.len() >= 8 || !state.waiters.is_empty() {
             if state.waiters.len() >= 1024 {
                 if let Some(index) = state.waiters.iter().position(|(_, last_seen)| {
-                    now.duration_since(*last_seen) >= FILL_WAITER_ACTIVE_LEASE
+                    now.saturating_duration_since(*last_seen) >= FILL_WAITER_ACTIVE_LEASE
                 }) {
                     state.waiters.remove(index);
                 } else {
@@ -259,10 +259,9 @@ impl BinanceFuturesClient {
         // Keep FIFO positions for slow backlog scans, but let a recently
         // polled waiter pass an inactive head. Three minutes tolerates
         // normal one-minute reconciliation ticks and a missed tick.
-        let active = state
-            .waiters
-            .iter()
-            .position(|(_, last_seen)| now.duration_since(*last_seen) < FILL_WAITER_ACTIVE_LEASE);
+        let active = state.waiters.iter().position(|(_, last_seen)| {
+            now.saturating_duration_since(*last_seen) < FILL_WAITER_ACTIVE_LEASE
+        });
         let turn = active.is_none_or(|index| &state.waiters[index].0 == key);
         if turn && active.is_some() && state.progress.len() >= 8 {
             // Preserve healthy cursors while releasing repeated failures

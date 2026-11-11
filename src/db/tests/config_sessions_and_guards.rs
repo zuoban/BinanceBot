@@ -112,6 +112,7 @@ fn dashboard_membership_and_settings_survive_reopen_without_losing_history() {
     drop(db);
     let db = Database::open(&path).unwrap();
     let config = db.load_config().unwrap().unwrap();
+    assert_eq!(config.exchange.symbol, "BTCUSDT");
     assert_eq!(config.server.port, 9090);
     let strategies = config.strategy_configs().unwrap();
     assert_eq!(strategies.len(), 1);
