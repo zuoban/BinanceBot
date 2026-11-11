@@ -1,15 +1,36 @@
 use super::*;
 
 impl GridTradingEngine {
+    fn reject_action_during_shutdown(action: BotControlAction) {
+        if let BotControlAction::UpdateConfig { reply, .. }
+        | BotControlAction::UpdateGlobalConfig { reply, .. }
+        | BotControlAction::Resume { reply, .. }
+        | BotControlAction::Rebalance { reply, .. } = action
+        {
+            let _ = reply.send(Err("程序正在退出，操作未执行".into()));
+        }
+    }
+
+    async fn handle_global_risk_cancel(&mut self) {
+        // The engine serializes submissions and cancellations. Any order already
+        // in flight when the global gate closed has finished before this runs.
+        if self.cancel_all_orders().await {
+            self.state
+                .global_cancel_pending
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+        } else {
+            self.state
+                .add_log("ERROR", "全局风控撤单未完成，将继续重试")
+                .await;
+        }
+        self.state
+            .global_cancel_queued
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
     pub(super) async fn handle_control_action(&mut self, action: BotControlAction) {
         if self.state.is_shutting_down() && !matches!(action, BotControlAction::Shutdown { .. }) {
-            if let BotControlAction::UpdateConfig { reply, .. }
-            | BotControlAction::UpdateGlobalConfig { reply, .. }
-            | BotControlAction::Resume { reply, .. }
-            | BotControlAction::Rebalance { reply, .. } = action
-            {
-                let _ = reply.send(Err("程序正在退出，操作未执行".into()));
-            }
+            Self::reject_action_during_shutdown(action);
             return;
         }
         match action {
@@ -26,23 +47,7 @@ impl GridTradingEngine {
             | BotControlAction::CancelAllAlreadyPersisted => {
                 self.handle_pause_or_cancel_action(action).await;
             }
-            BotControlAction::GlobalRiskCancel => {
-                // The engine serializes submissions and cancellations. Any order already
-                // in flight when the global gate closed has finished before this runs.
-                let complete = self.cancel_all_orders().await;
-                if complete {
-                    self.state
-                        .global_cancel_pending
-                        .store(false, std::sync::atomic::Ordering::SeqCst);
-                } else {
-                    self.state
-                        .add_log("ERROR", "全局风控撤单未完成，将继续重试")
-                        .await;
-                }
-                self.state
-                    .global_cancel_queued
-                    .store(false, std::sync::atomic::Ordering::SeqCst);
-            }
+            BotControlAction::GlobalRiskCancel => self.handle_global_risk_cancel().await,
             BotControlAction::Resume {
                 expected_mode,
                 expected_epoch,
@@ -123,18 +128,10 @@ impl GridTradingEngine {
         }
     }
 
-    async fn handle_resume_action(
+    async fn ensure_resume_rules_ready(
         &mut self,
-        expected_mode: TradingMode,
-        expected_epoch: u64,
-        reply: tokio::sync::oneshot::Sender<std::result::Result<(), String>>,
-    ) {
-        let config = self.state.config.read().await.clone();
-        let current_mode = config.exchange.trading_mode();
-        if expected_mode == TradingMode::Unknown || current_mode != expected_mode {
-            let _ = reply.send(Err("策略运行模式已改变，无法恢复策略".into()));
-            return;
-        }
+        config: &crate::config::AppConfig,
+    ) -> std::result::Result<(), String> {
         if !self.exchange_rules_loaded {
             if let Err(error) = self.load_exchange_rules(&config.exchange.symbol).await {
                 if !config.exchange.is_paper() {
@@ -143,8 +140,7 @@ impl GridTradingEngine {
                         config.exchange.symbol, error
                     );
                     self.state.add_log("ERROR", &message).await;
-                    let _ = reply.send(Err(message));
-                    return;
+                    return Err(message);
                 }
                 self.state
                     .add_log(
@@ -166,6 +162,24 @@ impl GridTradingEngine {
         {
             let message = format!("Resume failed: {}", error);
             self.state.add_log("ERROR", &message).await;
+            return Err(message);
+        }
+        Ok(())
+    }
+
+    async fn handle_resume_action(
+        &mut self,
+        expected_mode: TradingMode,
+        expected_epoch: u64,
+        reply: tokio::sync::oneshot::Sender<std::result::Result<(), String>>,
+    ) {
+        let config = self.state.config.read().await.clone();
+        let current_mode = config.exchange.trading_mode();
+        if expected_mode == TradingMode::Unknown || current_mode != expected_mode {
+            let _ = reply.send(Err("策略运行模式已改变，无法恢复策略".into()));
+            return;
+        }
+        if let Err(message) = self.ensure_resume_rules_ready(&config).await {
             let _ = reply.send(Err(message));
             return;
         }

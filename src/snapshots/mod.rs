@@ -68,34 +68,27 @@ pub(super) fn snapshot_max_age_secs(interval: u64) -> i64 {
     interval.saturating_add(15).max(30).min(i64::MAX as u64) as i64
 }
 
-pub(super) type SnapshotBucketKey = (String, String, Option<String>);
+pub(super) type SnapshotBucketKey = (&'static str, String, Option<String>);
+pub(super) type SnapshotBucketMap<'a> =
+    BTreeMap<SnapshotBucketKey, (TradingMode, Vec<(&'a BotSnapshot, u64)>)>;
 fn aggregate(
     snapshots: &[(BotSnapshot, u64, Option<String>)],
     now: DateTime<Utc>,
 ) -> Vec<SnapshotGroup> {
-    let mut groups: BTreeMap<SnapshotBucketKey, Vec<(&BotSnapshot, u64)>> = BTreeMap::new();
+    let mut groups: SnapshotBucketMap<'_> = BTreeMap::new();
     for (snapshot, sync_interval, account_id) in snapshots {
         let mode = snapshot.mode;
         let asset = resolve_quote_asset(&snapshot.symbol, &snapshot.account.asset);
         groups
-            .entry((
-                mode.as_str().to_owned(),
-                asset.to_owned(),
-                account_id.clone(),
-            ))
-            .or_default()
+            .entry((mode.as_str(), asset.to_owned(), account_id.clone()))
+            .or_insert_with(|| (mode, Vec::new()))
+            .1
             .push((snapshot, *sync_interval));
     }
     groups
         .into_iter()
-        .map(|((mode, asset, account_id), snapshots)| {
-            aggregate_snapshot_bucket(
-                TradingMode::from_db(&mode),
-                asset,
-                account_id,
-                snapshots,
-                now,
-            )
+        .map(|((_, asset, account_id), (mode, snapshots))| {
+            aggregate_snapshot_bucket(mode, asset, account_id, snapshots, now)
         })
         .collect()
 }
@@ -234,7 +227,7 @@ pub(crate) async fn current_accounts(
         let config = handle.db.load_saved_config().await?;
         (states, config.strategy_configs()?)
     };
-    let mut accounts = BTreeMap::new();
+    let mut accounts: BTreeMap<SnapshotBucketKey, TradingMode> = BTreeMap::new();
     let mut identities = HashMap::new();
     for state in states {
         let config = match state.pair_scope() {
@@ -258,14 +251,17 @@ pub(crate) async fn current_accounts(
             None => resolve_quote_asset(symbol, &state.account.read().await.asset).to_owned(),
         };
         accounts
-            .entry((mode.as_str().to_owned(), asset.clone(), account_id.clone()))
-            .or_insert(HistoryAccount {
-                mode,
-                asset,
-                account_id,
-            });
+            .entry((mode.as_str(), asset, account_id))
+            .or_insert(mode);
     }
-    Ok(accounts.into_values().collect())
+    Ok(accounts
+        .into_iter()
+        .map(|((_, asset, account_id), mode)| HistoryAccount {
+            mode,
+            asset,
+            account_id,
+        })
+        .collect())
 }
 
 pub(crate) async fn collect_hourly(

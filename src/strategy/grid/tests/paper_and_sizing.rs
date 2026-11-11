@@ -100,7 +100,8 @@ async fn paper_fill_persistence_failure_preserves_account_and_retry_applies_once
             dec!(10),
         ),
     ] {
-        let path = std::env::temp_dir().join(format!("paper-fill-{}.db", uuid::Uuid::new_v4()));
+        let dir = crate::test_support::TempTestDir::new("paper-fill");
+        let path = dir.join("paper-fill.db");
         let db = Arc::new(Database::open(&path).unwrap());
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection
@@ -214,7 +215,6 @@ async fn paper_fill_persistence_failure_preserves_account_and_retry_applies_once
         drop(state);
         drop(connection);
         drop(db);
-        std::fs::remove_file(path).unwrap();
     }
 }
 

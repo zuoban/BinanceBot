@@ -715,7 +715,8 @@ async fn protective_opening_cancellation_retries_unconfirmed_orders_and_preserve
 
 #[tokio::test]
 async fn partial_submission_persistence_failure_blocks_global_risk() {
-    let path = std::env::temp_dir().join(format!("partial-submit-{}.db", uuid::Uuid::new_v4()));
+    let dir = crate::test_support::TempTestDir::new("partial-submit");
+    let path = dir.join("partial-submit.db");
     let db = Arc::new(Database::open(&path).unwrap());
     db.save_bot_status(BotStatus::Running).unwrap();
     let connection = rusqlite::Connection::open(&path).unwrap();
@@ -770,109 +771,4 @@ async fn partial_submission_persistence_failure_blocks_global_risk() {
     drop(connection);
     drop(engine);
     drop(db);
-    let _ = std::fs::remove_file(path);
-}
-
-#[tokio::test]
-async fn zero_fill_terminal_submission_does_not_leave_a_new_order() {
-    for response in [3, 4] {
-        let fake = Exchange::default();
-        fake.fill_on_submit.store(response, Ordering::SeqCst);
-        let (url, server) = exchange_server(fake).await;
-        let db = database();
-        let mut engine = engine(db.clone(), &url).await;
-        assert!(!submit(&mut engine).await);
-        assert!(engine.state.active_orders.read().await.is_empty());
-        assert!(db.load_managed_orders("SOLUSDC").unwrap().is_empty());
-        assert!(db.get_recent_trades(10).unwrap().is_empty());
-        server.abort();
-    }
-}
-
-#[tokio::test]
-async fn filled_with_zero_quantity_remains_blocked_until_terminal_details_are_consistent() {
-    for (confirmed_fill, submission) in [(false, 0), (true, 0), (false, 1), (true, 1)] {
-        let fake = Exchange::default();
-        fake.fill_on_submit.store(5, Ordering::SeqCst);
-        fake.submission.store(submission, Ordering::SeqCst);
-        let (url, server) = exchange_server(fake.clone()).await;
-        let db = database();
-        let mut engine = engine(db.clone(), &url).await;
-        assert!(!submit(&mut engine).await);
-        let order = engine.state.active_orders.read().await["gb_b_reliability"].clone();
-        assert!(!engine.cancel_single_order(&order).await);
-        assert!(!engine.sync_live_orders().await);
-        assert!(engine.reconciliation_blocked);
-        assert!(engine.last_account_sync.is_none());
-        assert!(engine
-            .state
-            .active_orders
-            .read()
-            .await
-            .contains_key("gb_b_reliability"));
-        assert_eq!(db.load_managed_orders("SOLUSDC").unwrap().len(), 1);
-        assert!(db.get_recent_trades(10).unwrap().is_empty());
-        {
-            let mut orders = fake.orders.lock().unwrap();
-            let found = orders.get_mut("gb_b_reliability").unwrap();
-            if confirmed_fill {
-                found.executed_qty = found.orig_qty;
-                found.avg_price = Some(found.price);
-            } else {
-                found.status = "CANCELED".into();
-            }
-        }
-        assert!(engine.sync_live_orders().await);
-        assert!(!engine
-            .state
-            .active_orders
-            .read()
-            .await
-            .contains_key("gb_b_reliability"));
-        assert!(db.load_managed_orders("SOLUSDC").unwrap().is_empty());
-        assert_eq!(
-            db.get_recent_trades(10).unwrap().len(),
-            usize::from(confirmed_fill)
-        );
-        server.abort();
-    }
-}
-
-#[tokio::test]
-async fn inconsistent_submission_and_timeout_lookup_block_before_active_order_lock() {
-    for submission in [0, 1] {
-        let fake = Exchange::default();
-        fake.fill_on_submit.store(5, Ordering::SeqCst);
-        fake.submission.store(submission, Ordering::SeqCst);
-        fake.block_submit.store(true, Ordering::SeqCst);
-        let (url, server) = exchange_server(fake.clone()).await;
-        let db = database();
-        let mut engine = engine(db, &url).await;
-        engine
-            .state
-            .global_position_ready
-            .store(true, Ordering::SeqCst);
-        let state = engine.state.clone();
-        let task = tokio::spawn(async move { submit(&mut engine).await });
-        tokio::time::timeout(Duration::from_secs(2), fake.submit_started.notified())
-            .await
-            .unwrap();
-        let guard = state.active_orders.write().await;
-        fake.release_submit.notify_one();
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while state.global_position_ready.load(Ordering::SeqCst) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        drop(guard);
-        assert!(!task.await.unwrap());
-        assert!(state
-            .active_orders
-            .read()
-            .await
-            .contains_key("gb_b_reliability"));
-        server.abort();
-    }
 }

@@ -1,268 +1,15 @@
 use super::*;
-use crate::{config::AppConfig, db::Database};
 use axum::{
     extract::{Query, State},
     http::StatusCode,
     routing::get,
     Json, Router,
 };
-use rust_decimal_macros::dec;
 use serde_json::{json, Value};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Mutex,
 };
-
-fn source(id: &str, price: Decimal, quantity: Decimal) -> GridOrder {
-    GridOrder {
-        client_order_id: format!("gb_s_{id}"),
-        order_id: None,
-        symbol: "SOLUSDC".into(),
-        side: OrderSide::Sell,
-        price,
-        quantity,
-        amount_usdc: price * quantity,
-        status: OrderStatus::New,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
-        grid_level: 1,
-        paired_client_order_id: None,
-        is_take_profit: false,
-        purpose: OrderPurpose::Remainder,
-        merge_sources: vec![],
-    }
-}
-
-async fn engine(db: Arc<Database>, url: Option<String>) -> GridTradingEngine {
-    let mut config = AppConfig::default();
-    if url.is_some() {
-        config.exchange.api_key = "live-key".into();
-        config.exchange.api_secret = "live-secret".into();
-    }
-    config.grid.grid_interval = dec!(1.2);
-    config.grid.order_amount_usdc = dec!(3000);
-    config.grid.buy_window = 0;
-    config.grid.sell_window = 4;
-    let (action_tx, action_rx) = mpsc::channel(1);
-    let (_, ticker_rx) = broadcast::channel(1);
-    let state = AppState::new(config.clone(), db.clone(), action_tx);
-    {
-        let mut ticker = state.ticker.write().await;
-        ticker.last_price = dec!(122.31);
-        ticker.update_time = Utc::now();
-        ticker.mark_update_time = Utc::now();
-    }
-    state.position.write().await.size = dec!(0.48);
-    if url.is_some() {
-        for order in db.load_managed_orders("SOLUSDC").unwrap() {
-            state
-                .active_orders
-                .write()
-                .await
-                .insert(order.client_order_id.clone(), order);
-        }
-    }
-    let client = Arc::new(match url {
-        Some(url) => BinanceFuturesClient::with_base_url(&config.exchange, url),
-        None => BinanceFuturesClient::new(&config.exchange),
-    });
-    let mut engine = GridTradingEngine::new(state, client, action_rx, ticker_rx);
-    engine.last_account_sync = Some(Instant::now());
-    engine.last_orders_sync = Some(Instant::now());
-    engine
-}
-
-fn database() -> Arc<Database> {
-    let db = Arc::new(Database::open(":memory:").unwrap());
-    db.save_bot_status(BotStatus::Running).unwrap();
-    db
-}
-
-async fn seed(engine: &GridTradingEngine, orders: &[GridOrder]) {
-    for order in orders {
-        engine.state.db.save_managed_order(order).unwrap();
-        engine
-            .state
-            .active_orders
-            .write()
-            .await
-            .insert(order.client_order_id.clone(), order.clone());
-    }
-}
-
-fn two_sources() -> Vec<GridOrder> {
-    vec![
-        source("a", dec!(123.6), dec!(0.24)),
-        source("b", dec!(126), dec!(0.24)),
-    ]
-}
-
-#[tokio::test]
-async fn merges_remainders_at_nearest_available_sell_level_and_is_idempotent() {
-    let mut engine = engine(database(), None).await;
-    seed(&engine, &two_sources()).await;
-    engine.maintain_grid_window().await;
-    let merged = engine
-        .state
-        .active_orders
-        .read()
-        .await
-        .values()
-        .next()
-        .unwrap()
-        .clone();
-    assert_eq!(engine.state.active_orders.read().await.len(), 1);
-    assert_eq!(merged.price, dec!(122.4));
-    assert_eq!(merged.quantity, dec!(0.48));
-    assert_eq!(merged.amount_usdc, dec!(58.752));
-    assert_eq!(merged.purpose, OrderPurpose::Remainder);
-    assert_eq!(merged.merge_sources.len(), 2);
-    for _ in 0..3 {
-        engine.maintain_grid_window().await;
-    }
-    assert!(engine
-        .state
-        .active_orders
-        .read()
-        .await
-        .contains_key(&merged.client_order_id));
-    assert!(engine.load_remainder_plan().await.unwrap().is_none());
-}
-
-#[tokio::test]
-async fn legacy_partial_grid_and_take_profit_orders_are_not_merge_candidates() {
-    let mut engine = engine(database(), None).await;
-    let mut legacy = source("legacy", dec!(123.6), dec!(0.24));
-    legacy.purpose = OrderPurpose::Legacy;
-    let mut partial = source("partial", dec!(123.6), dec!(0.24));
-    partial.purpose = OrderPurpose::Grid;
-    partial.status = OrderStatus::PartiallyFilled;
-    let mut tp = source("tp", dec!(124.38), dec!(24.11));
-    tp.purpose = OrderPurpose::TakeProfit;
-    tp.is_take_profit = true;
-    tp.paired_client_order_id = Some("gb_b_parent".into());
-    engine.state.position.write().await.size = dec!(25.07);
-    let mut orders = two_sources();
-    orders.extend([legacy.clone(), partial.clone(), tp.clone()]);
-    seed(&engine, &orders).await;
-    engine
-        .reconcile_remainder(&[dec!(122.4), dec!(123.6), dec!(124.8), dec!(126)])
-        .await
-        .unwrap();
-    let active = engine.state.active_orders.read().await;
-    assert_eq!(active.len(), 4);
-    for preserved in [legacy, partial, tp] {
-        assert_eq!(
-            active[&preserved.client_order_id].quantity,
-            preserved.quantity
-        );
-    }
-    assert_eq!(
-        active
-            .values()
-            .find(|o| o.purpose == OrderPurpose::Remainder)
-            .unwrap()
-            .quantity,
-        dec!(0.48)
-    );
-}
-
-#[tokio::test]
-async fn tops_up_one_remainder_after_coalescing_delay_without_creating_another() {
-    let mut engine = engine(database(), None).await;
-    seed(&engine, &two_sources()).await;
-    engine.maintain_grid_window().await;
-    engine.state.position.write().await.size = dec!(0.72);
-    engine.maintain_grid_window().await;
-    assert_eq!(engine.state.active_orders.read().await.len(), 1);
-    assert_eq!(
-        engine
-            .state
-            .active_orders
-            .read()
-            .await
-            .values()
-            .next()
-            .unwrap()
-            .quantity,
-        dec!(0.48)
-    );
-    engine.last_remainder_change = Some(Instant::now() - Duration::from_secs(31));
-    engine.maintain_grid_window().await;
-    let orders = engine.state.active_orders.read().await;
-    assert_eq!(orders.len(), 1);
-    assert_eq!(orders.values().next().unwrap().quantity, dec!(0.72));
-    assert_eq!(orders.values().next().unwrap().price, dec!(122.4));
-}
-
-#[tokio::test]
-async fn remainder_fill_never_places_full_buy_even_when_configured_amount_matches() {
-    let mut engine = engine(database(), None).await;
-    let mut order = source("filled", dec!(123.6), dec!(0.48));
-    engine.state.config.write().await.grid.order_amount_usdc = dec!(59.328);
-    seed(&engine, &[order.clone()]).await;
-    assert!(engine.on_order_filled(&mut order).await);
-    assert!(engine.state.active_orders.read().await.is_empty());
-    assert!(engine
-        .state
-        .db
-        .load_pair_intents("SOLUSDC", TradingMode::Paper)
-        .unwrap()
-        .is_empty());
-    assert_eq!(engine.state.position.read().await.size, Decimal::ZERO);
-}
-
-#[tokio::test]
-async fn promotes_whole_grid_then_allocates_only_one_final_remainder() {
-    let mut engine = engine(database(), None).await;
-    let sources = vec![
-        source("a", dec!(123.6), dec!(12)),
-        source("b", dec!(126), dec!(12)),
-    ];
-    engine.state.config.write().await.grid.order_amount_usdc = dec!(2000);
-    engine.state.position.write().await.size = dec!(24);
-    seed(&engine, &sources).await;
-    engine.maintain_grid_window().await;
-    let promoted = engine
-        .state
-        .active_orders
-        .read()
-        .await
-        .values()
-        .next()
-        .unwrap()
-        .clone();
-    assert_eq!(promoted.purpose, OrderPurpose::Grid);
-    assert_eq!(promoted.price, dec!(122.4));
-    assert_eq!(promoted.quantity, dec!(16.33));
-    engine.maintain_grid_window().await;
-    let orders: Vec<_> = engine
-        .state
-        .active_orders
-        .read()
-        .await
-        .values()
-        .cloned()
-        .collect();
-    assert_eq!(
-        orders
-            .iter()
-            .filter(|o| o.purpose == OrderPurpose::Remainder)
-            .count(),
-        1
-    );
-    assert_eq!(reserved_sell_quantity(&orders), dec!(24));
-}
-
-#[test]
-fn legacy_json_retains_unknown_provenance() {
-    let mut value = serde_json::to_value(source("legacy", dec!(126), dec!(0.24))).unwrap();
-    value.as_object_mut().unwrap().remove("purpose");
-    value.as_object_mut().unwrap().remove("merge_sources");
-    let old: GridOrder = serde_json::from_value(value).unwrap();
-    assert_eq!(old.purpose, OrderPurpose::Legacy);
-    assert!(old.merge_sources.is_empty());
-}
 
 #[derive(Clone, Default)]
 struct Exchange {
@@ -815,7 +562,8 @@ async fn filled_remainder_with_zero_quantity_stays_recoverable_until_cancel_conf
 
 #[tokio::test]
 async fn remainder_partial_persistence_failure_blocks_global_and_keeps_reservation() {
-    let path = std::env::temp_dir().join(format!("remainder-partial-{}.db", uuid::Uuid::new_v4()));
+    let dir = crate::test_support::TempTestDir::new("remainder-partial");
+    let path = dir.join("remainder-partial.db");
     let db = Arc::new(Database::open(&path).unwrap());
     db.save_bot_status(BotStatus::Running).unwrap();
     let fake = Exchange::default();
@@ -883,7 +631,6 @@ async fn remainder_partial_persistence_failure_blocks_global_and_keeps_reservati
     drop(connection);
     drop(engine);
     drop(db);
-    let _ = std::fs::remove_file(path);
 }
 
 #[tokio::test]
@@ -897,47 +644,6 @@ async fn canceled_sources_that_fall_below_minimum_leave_no_invalid_replacement()
     assert!(engine.load_remainder_plan().await.unwrap().is_none());
     assert_eq!(*fake.position.lock().unwrap(), dec!(0.24));
     server.abort();
-}
-
-#[test]
-fn plans_survive_database_reopen_and_are_scoped_and_unique() {
-    let directory = std::env::temp_dir().join(format!("remainder-test-{}", Uuid::new_v4()));
-    let path = directory.join("test.db");
-    let mut plan = RemainderPlan {
-        symbol: "SOLUSDC".into(),
-        mode: TradingMode::Live,
-        sources: two_sources(),
-        target: source("target", dec!(123.6), dec!(0.48)),
-        phase: RemainderPhase::Canceling,
-    };
-    {
-        let db = Database::open(&path).unwrap();
-        db.save_remainder_plan(&plan).unwrap();
-        let mut conflicting = plan.clone();
-        conflicting.target.client_order_id = "gb_s_other_target".into();
-        assert!(db.save_remainder_plan(&conflicting).is_err());
-    }
-    {
-        let db = Database::open(&path).unwrap();
-        let restored = db
-            .load_remainder_plan("SOLUSDC", TradingMode::Live)
-            .unwrap()
-            .unwrap();
-        assert_eq!(restored.sources.len(), 2);
-        assert_eq!(restored.target.quantity, dec!(0.48));
-        assert_eq!(restored.phase, RemainderPhase::Canceling);
-        assert!(db
-            .load_remainder_plan("BTCUSDC", TradingMode::Live)
-            .unwrap()
-            .is_none());
-        plan.phase = RemainderPhase::Complete;
-        db.save_remainder_plan(&plan).unwrap();
-        assert!(db
-            .load_remainder_plan("SOLUSDC", TradingMode::Live)
-            .unwrap()
-            .is_none());
-    }
-    std::fs::remove_dir_all(directory).unwrap();
 }
 
 #[tokio::test]

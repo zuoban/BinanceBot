@@ -64,7 +64,8 @@ fn pair_intent(symbol: &str) -> GridOrder {
 
 #[test]
 fn paper_trade_and_state_roll_back_on_database_failures() {
-    let path = std::env::temp_dir().join(format!("paper-db-{}.sqlite", uuid::Uuid::new_v4()));
+    let dir = crate::test_support::TempTestDir::new("paper-db");
+    let path = dir.join("paper.sqlite");
     let db = Database::open(&path).unwrap();
     let editor = rusqlite::Connection::open(&path).unwrap();
     let initial = paper_state("SOLUSDC", 1, 900);
@@ -122,7 +123,6 @@ fn paper_trade_and_state_roll_back_on_database_failures() {
     }
     drop(editor);
     drop(db);
-    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
@@ -268,8 +268,8 @@ fn migration_rejects_missing_or_live_only_legacy_scope() {
 
 #[test]
 fn migration_rolls_back_account_if_pausing_fails() {
-    let path =
-        std::env::temp_dir().join(format!("paper-migration-{}.sqlite", uuid::Uuid::new_v4()));
+    let dir = crate::test_support::TempTestDir::new("paper-migration");
+    let path = dir.join("paper-migration.sqlite");
     let db = Database::open(&path).unwrap();
     let editor = rusqlite::Connection::open(&path).unwrap();
     assert!(db
@@ -288,14 +288,13 @@ fn migration_rolls_back_account_if_pausing_fails() {
     assert_eq!(db.get_recent_trades(10).unwrap().len(), 1);
     drop(editor);
     drop(db);
-    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
 fn migration_accepts_unknown_legacy_history_and_preserves_cleanup_metadata() {
     for cleared in [false, true] {
-        let path =
-            std::env::temp_dir().join(format!("paper-migration-{}.sqlite", uuid::Uuid::new_v4()));
+        let dir = crate::test_support::TempTestDir::new("paper-migration");
+        let path = dir.join("paper-migration.sqlite");
         let db = Database::open(&path).unwrap();
         let editor = rusqlite::Connection::open(&path).unwrap();
         assert!(db
@@ -334,7 +333,6 @@ fn migration_accepts_unknown_legacy_history_and_preserves_cleanup_metadata() {
         assert!(db.initialize_legacy_paper_account("BTCUSDT").is_err());
         drop(editor);
         drop(db);
-        std::fs::remove_file(path).unwrap();
     }
 }
 
@@ -498,8 +496,8 @@ fn shared_paper_freshness_tracks_the_oldest_open_position() {
 #[test]
 fn shared_paper_wallet_restores_inactive_subledgers_after_history_cleanup() {
     for cleanup in 0..3 {
-        let path =
-            std::env::temp_dir().join(format!("paper-shared-{}.sqlite", uuid::Uuid::new_v4()));
+        let dir = crate::test_support::TempTestDir::new("paper-shared");
+        let path = dir.join("paper-shared.sqlite");
         let db = Database::open(&path).unwrap();
         let inactive = paper_state("SOLUSDC", 0, 10017);
         let mut open = paper_state("BTCUSDC", 2, 9995);
@@ -541,7 +539,6 @@ fn shared_paper_wallet_restores_inactive_subledgers_after_history_cleanup() {
         assert_eq!(shared.margin_balance, dec!(10019));
         assert_eq!(shared.available_balance, dec!(9809));
         drop(reopened);
-        std::fs::remove_file(path).unwrap();
     }
 }
 
@@ -662,7 +659,8 @@ fn concurrent_paper_commits_and_publications_keep_each_symbols_contribution() {
 
 #[test]
 fn registered_paper_baseline_survives_analysis_history_until_restart() {
-    let path = std::env::temp_dir().join(format!("paper-known-{}.sqlite", uuid::Uuid::new_v4()));
+    let dir = crate::test_support::TempTestDir::new("paper-known");
+    let path = dir.join("paper-known.sqlite");
     let db = Database::open(&path).unwrap();
     let initial = paper_state("SOLUSDC", 0, 10000);
     db.shared_paper_account("SOLUSDC", &initial.0, &initial.1)
@@ -681,15 +679,12 @@ fn registered_paper_baseline_survives_analysis_history_until_restart() {
         .shared_paper_account("SOLUSDC", &initial.0, &initial.1)
         .is_err());
     drop(reopened);
-    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
 fn failed_paper_migration_does_not_clear_cached_legacy_failure() {
-    let path = std::env::temp_dir().join(format!(
-        "paper-failed-migration-{}.sqlite",
-        uuid::Uuid::new_v4()
-    ));
+    let dir = crate::test_support::TempTestDir::new("paper-failed-migration");
+    let path = dir.join("paper-failed-migration.sqlite");
     let db = Database::open(&path).unwrap();
     let editor = rusqlite::Connection::open(&path).unwrap();
     db.insert_trade(&trade("legacy", "SOLUSDC", TradingMode::Paper))
@@ -717,5 +712,4 @@ fn failed_paper_migration_does_not_clear_cached_legacy_failure() {
     );
     drop(editor);
     drop(db);
-    std::fs::remove_file(path).unwrap();
 }

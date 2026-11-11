@@ -59,7 +59,8 @@ async fn invalid_symbol_removal_blocks_unreadable_recovery_state() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let path = std::env::temp_dir().join(format!("invalid-symbol-db-{}.db", uuid::Uuid::new_v4()));
+    let dir = crate::test_support::TempTestDir::new("invalid-symbol-db");
+    let path = dir.join("invalid-symbol.db");
     let db = Arc::new(Database::open(&path).unwrap());
     let connection = rusqlite::Connection::open(&path).unwrap();
     connection.execute_batch("DROP TABLE pair_intents").unwrap();
@@ -71,7 +72,6 @@ async fn invalid_symbol_removal_blocks_unreadable_recovery_state() {
     assert!(engine.shutdown_inner(true).await.is_err());
     drop(engine);
     drop(db);
-    std::fs::remove_file(path).unwrap();
     server.abort();
 }
 
@@ -518,11 +518,8 @@ async fn concurrent_pause_during_dirty_live_cancellation_stays_paused() {
 #[tokio::test]
 async fn cancellation_continues_when_managed_metadata_cannot_be_read() {
     let (config, _, mut order) = pending_pair_fixture();
-    let path = std::env::temp_dir().join(format!(
-        "grid-cancel-fault-{}-{}.db",
-        std::process::id(),
-        Utc::now().timestamp_nanos_opt().unwrap()
-    ));
+    let dir = crate::test_support::TempTestDir::new("grid-cancel-fault");
+    let path = dir.join("grid-cancel-fault.db");
     let db = Arc::new(Database::open(&path).unwrap());
     db.save_bot_status(BotStatus::Running).unwrap();
     order.client_order_id = "gb_b_partial_fault".into();
@@ -601,7 +598,6 @@ async fn cancellation_continues_when_managed_metadata_cannot_be_read() {
     drop(engine);
     drop(db);
     drop(conn);
-    let _ = std::fs::remove_file(path);
 }
 
 #[tokio::test]

@@ -27,7 +27,7 @@ export const OverviewFinanceDisclosure = memo(function OverviewFinanceDisclosure
     <summary className="finance-disclosure-summary">
       <span className="finance-disclosure-label">账户与持仓明细<ArrowRightOutlined aria-hidden="true" /></span>
       <span className={`finance-summary-values${stale ? ' is-stale' : ''}`}>
-        {accountList.map(group => <span key={`account-${group.key}`}><small>账户权益 / {group.asset}</small><strong>{number(group.equity)}</strong></span>)}
+        {accountList.map(group => <span key={`account-${group.key}:${group.account_scope ?? ''}`}><small>账户权益 / {group.asset}</small><strong>{number(group.equity)}</strong></span>)}
         {positionList.map(group => <span key={`position-${group.key}`}><small>总持仓 / {group.asset}</small><strong>{number(group.total)}</strong></span>)}
       </span>
     </summary>
@@ -35,7 +35,7 @@ export const OverviewFinanceDisclosure = memo(function OverviewFinanceDisclosure
       {accountList.length > 0 && <section className="overview-finance-group" aria-labelledby="accounts-heading">
         <div className="section-heading"><h2 id="accounts-heading">账户概览</h2></div>
         <Row gutter={[16, 16]}>
-          {accountList.map(group => <Col span={24} key={group.key}><Card className="account-card finance-card" size="small">
+          {accountList.map(group => <Col span={24} key={`${group.key}:${group.account_scope ?? ''}`}><Card className="account-card finance-card" size="small">
             <div className="section-line finance-card-heading"><span>保证金余额</span></div>
             <div className="finance-card-primary"><Statistic value={group.equity ?? '--'} formatter={() => number(group.equity)} suffix={group.asset} />
               <span className="finance-card-note muted">{cnyText(group.cny, true)}</span></div>

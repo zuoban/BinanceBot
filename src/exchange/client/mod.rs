@@ -35,7 +35,8 @@ use error::{
     parse_api_error_body, read_bounded_error_body,
 };
 pub(crate) use error::{
-    read_bounded_bytes, summarize_non_json_body, ExchangeError, LocalRateLimitError,
+    read_bounded_bytes, read_bounded_json, summarize_non_json_body, ExchangeError,
+    LocalRateLimitError,
 };
 
 #[cfg(test)]
@@ -71,6 +72,8 @@ pub struct BinanceFuturesClient {
 }
 
 impl BinanceFuturesClient {
+    #[must_use]
+    #[inline]
     pub(crate) fn market_cache_key(&self) -> &str {
         &self.base_url
     }
@@ -258,16 +261,22 @@ impl BinanceFuturesClient {
         )
     }
 
+    #[must_use]
+    #[inline]
     pub(crate) fn account_cache_key(&self) -> [u8; 32] {
         self.account_cache_key
     }
 
     // Recovery records belong to the exchange account, independent of request
     // timing settings or changes to the API secret for the same API key.
+    #[must_use]
+    #[inline]
     pub(crate) fn account_identity_key(&self) -> [u8; 32] {
         self.account_identity_key
     }
 
+    #[must_use]
+    #[inline]
     pub(crate) fn configured_account_identity(config: &ExchangeConfig) -> [u8; 32] {
         identity_key("https://fapi.binance.com", &config.api_key)
     }
@@ -346,7 +355,7 @@ impl BinanceFuturesClient {
             req = req.query(query);
         }
         let resp = checked_response(self.send(req).await?).await?;
-        Ok(resp.json().await.map_err(reqwest::Error::without_url)?)
+        read_bounded_json(resp, 16 * 1024 * 1024).await
     }
 
     pub(super) fn prepare_signed_get_url(
@@ -368,7 +377,7 @@ impl BinanceFuturesClient {
         let resp = self
             .ensure_signed_success(self.send(self.client.get(url)).await?, context)
             .await?;
-        Ok(resp.json().await.map_err(reqwest::Error::without_url)?)
+        read_bounded_json(resp, 8 * 1024 * 1024).await
     }
 }
 

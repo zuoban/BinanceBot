@@ -269,3 +269,41 @@ it('校验 API Key 与 Telegram Bot Token 格式，拒绝空白、控制字符�
   await user.click(screen.getByRole('button', { name: '保存全局设置' }));
   expect(mocks.post).not.toHaveBeenCalled();
 }, 40000);
+
+it('提交失败后在 API Secret 输入空白仍保留缺失提示，拒绝非法字符并在输入合法密钥后消除错误', async () => {
+  setup();
+  const user = userEvent.setup();
+  const key = await screen.findByLabelText('API Key');
+  await waitFor(() => expect(key).toBeEnabled());
+  const secret = screen.getByLabelText('API Secret');
+  const token = screen.getByLabelText('Bot Token');
+  const chatId = screen.getByLabelText('Chat ID');
+
+  await user.type(key, 'valid-key');
+  const clearApiCheckbox = screen.getByRole('checkbox', { name: /清除已保存的 API Key 和 Secret/ });
+  await user.click(clearApiCheckbox);
+  await user.click(clearApiCheckbox);
+  expect(screen.queryByText('请同时填写 API Key 和 API Secret')).not.toBeInTheDocument();
+
+  await user.type(token, '123:abc');
+  await user.click(screen.getByRole('button', { name: '保存全局设置' }));
+  expect(await screen.findByText('请同时填写 API Key 和 API Secret')).toBeInTheDocument();
+  expect(await screen.findByText('请填写 Chat ID')).toBeInTheDocument();
+
+  await user.type(secret, ' ');
+  await waitFor(() => expect(secret).toHaveValue(' '));
+  expect(screen.getByText('请同时填写 API Key 和 API Secret')).toBeInTheDocument();
+
+  await user.clear(secret);
+  await user.type(secret, 'bad secret');
+  expect(await screen.findByText('API Secret 格式无效')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: '测试连接' })).toBeDisabled();
+
+  await user.clear(secret);
+  await user.type(secret, 'valid-secret');
+  await user.type(chatId, '10001');
+  await waitFor(() => expect(screen.queryByText('API Secret 格式无效')).not.toBeInTheDocument());
+  await waitFor(() => expect(screen.queryByText('请同时填写 API Key 和 API Secret')).not.toBeInTheDocument());
+  await waitFor(() => expect(screen.queryByText('请填写 Chat ID')).not.toBeInTheDocument());
+  expect(screen.getByRole('button', { name: '测试连接' })).toBeEnabled();
+}, 40000);

@@ -11,7 +11,7 @@ type LadderItem = { key: string; side: 'sell' | 'buy'; price: string; sizing: { 
 
 function GridLadderLevel({ item, quote }: { item: LadderItem; quote: string }) {
   const { side, price, sizing: s, diff } = item;
-  return <li className={`grid-preview-${side}${s?.error ? ' grid-preview-unplaceable' : ''}`} title={s?.error ?? undefined}><span className="grid-preview-order"><span className="grid-preview-side">{side === 'sell' ? '卖' : '买'}</span>{s && <small className="grid-preview-qty"> · {s.quantity} ({s.notional} {quote})</small>}</span><span className="grid-preview-price">{diff && <small className="grid-preview-diff">{diff}</small>}<strong className="grid-preview-value">{price}</strong></span></li>;
+  return <li className={`grid-preview-${side}${s?.error ? ' grid-preview-unplaceable' : ''}`} title={s?.error ?? undefined}><span className="grid-preview-order"><span className="grid-preview-side">{side === 'sell' ? '卖' : '买'}</span>{s && <small className="grid-preview-qty"> · {s.quantity} ({s.notional} {quote})</small>}</span><span className="grid-preview-price">{diff && <small className="grid-preview-diff">{diff}</small>}<strong className="grid-preview-value">{price}</strong></span>{s?.error && <span className="sr-only">（无法挂单：{s.error}）</span>}</li>;
 }
 
 /** Live ladder of the orders the engine would place, from the form values and a reference price. */

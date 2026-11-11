@@ -265,7 +265,7 @@ it('shows five newest trades and expands to twenty across strategies', async () 
   expect(card.getByRole('columnheader', { name: '方向' })).not.toHaveClass('ant-table-cell-fix-left');
   expect(card.getAllByRole('row')[1]).toHaveTextContent('ETHUSDC');
   expect(card.getAllByRole('row')[1]).toHaveTextContent('成交 21');
-  const mobileTrades = table.querySelector('.overview-trades-mobile') as HTMLElement;
+  const mobileTrades = table.querySelector('.table-mobile') as HTMLElement;
   const firstTrade = within(mobileTrades).getAllByRole('listitem')[0];
   expect(within(firstTrade).getByText('成交均价').nextElementSibling).toHaveTextContent('123.4568');
   expect(within(firstTrade).queryByText('模式')).not.toBeInTheDocument();

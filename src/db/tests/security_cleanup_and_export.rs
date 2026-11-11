@@ -11,14 +11,13 @@ use rust_decimal_macros::dec;
 fn database_files_are_private_without_changing_existing_parent() {
     use std::os::unix::fs::PermissionsExt;
 
-    let root = std::env::temp_dir().join(format!("db-permissions-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir(&root).unwrap();
-    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let root = crate::test_support::TempTestDir::new("db-permissions");
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
     let directory = root.join("new").join("nested");
     let path = directory.join("bot.db");
     let db = Database::open(&path).unwrap();
     let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode(&root), 0o755);
+    assert_eq!(mode(root.path()), 0o755);
     assert_eq!(mode(&root.join("new")) & 0o077, 0);
     assert_eq!(mode(&directory) & 0o077, 0);
     assert_eq!(mode(&path) & 0o077, 0);
@@ -50,7 +49,7 @@ fn database_files_are_private_without_changing_existing_parent() {
         assert_eq!(mode(file), 0o644);
         std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
-    assert_eq!(mode(&root), 0o755);
+    assert_eq!(mode(root.path()), 0o755);
     let reopened = Database::open(&path).unwrap();
     drop(reopened);
     drop(db);
@@ -62,7 +61,6 @@ fn database_files_are_private_without_changing_existing_parent() {
     std::fs::set_permissions(&journal, std::fs::Permissions::from_mode(0o600)).unwrap();
     assert!(validate_database_file(&journal, uid.wrapping_add(1)).is_err());
     prepare_database_path(&path).unwrap();
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[cfg(unix)]
@@ -70,8 +68,7 @@ fn database_files_are_private_without_changing_existing_parent() {
 fn database_and_sidecar_symlinks_are_rejected_without_changing_targets() {
     use std::os::unix::fs::{symlink, PermissionsExt};
 
-    let root = std::env::temp_dir().join(format!("db-symlinks-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir(&root).unwrap();
+    let root = crate::test_support::TempTestDir::new("db-symlinks");
     let path = root.join("bot.db");
     let target = root.join("target");
     std::fs::write(&target, b"unrelated").unwrap();
@@ -98,7 +95,6 @@ fn database_and_sidecar_symlinks_are_rejected_without_changing_targets() {
         assert!(prepare_database_path(&path).is_err());
         std::fs::remove_file(&sidecar).unwrap();
     }
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -108,7 +104,8 @@ fn database_rejects_sqlite_uri_paths() {
 
 #[test]
 fn database_uses_durable_journal_settings() {
-    let path = std::env::temp_dir().join(format!("durable-{}.db", uuid::Uuid::new_v4()));
+    let dir = crate::test_support::TempTestDir::new("durable");
+    let path = dir.join("bot.db");
     let db = Database::open(&path).unwrap();
     {
         let conn = db.conn.lock().unwrap();
@@ -122,7 +119,6 @@ fn database_uses_durable_journal_settings() {
         assert_eq!(synchronous, 2);
     }
     drop(db);
-    std::fs::remove_file(path).unwrap();
 
     let memory = Database::open(":memory:").unwrap();
     let conn = memory.conn.lock().unwrap();
@@ -154,8 +150,7 @@ fn symbol_cleanup_preserves_unattributed_legacy_stats_but_selected_export_omits_
     );
     assert_eq!(db.load_stats().unwrap().unwrap().0, 7);
 
-    let directory = std::env::temp_dir().join(format!("legacy-export-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir(&directory).unwrap();
+    let directory = crate::test_support::TempTestDir::new("legacy-export");
     for (name, bytes, expected) in [
         (
             "selected.db",
@@ -181,14 +176,15 @@ fn symbol_cleanup_preserves_unattributed_legacy_stats_but_selected_export_omits_
         assert_eq!(legacy, expected);
         assert_eq!(other, 1);
     }
-    std::fs::remove_dir_all(directory).unwrap();
+    drop(directory);
     db.clear_trade_history().unwrap();
     assert!(db.load_stats().unwrap().is_none());
 }
 
 #[test]
 fn cleanup_preserves_frontiers_and_deduplication_across_restarts() {
-    let path = std::env::temp_dir().join(format!("cleanup-{}.db", uuid::Uuid::new_v4()));
+    let dir = crate::test_support::TempTestDir::new("cleanup");
+    let path = dir.join("bot.db");
     let db = Database::open(&path).unwrap();
     let mut trade = TradeRecord {
         trade_id: "cleanup-buy".into(),
@@ -284,7 +280,6 @@ fn cleanup_preserves_frontiers_and_deduplication_across_restarts() {
         Some((OrderSide::Buy, dec!(119.2)))
     );
     drop(db);
-    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
@@ -363,9 +358,7 @@ fn selected_cleanup_rolls_back_trade_changes_when_snapshot_deletion_fails() {
 
 #[test]
 fn history_identity_survives_reopen_and_is_removed_from_analysis_export() {
-    let directory =
-        std::env::temp_dir().join(format!("history-identities-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir(&directory).unwrap();
+    let directory = crate::test_support::TempTestDir::new("history-identities");
     let path = directory.join("source.db");
     let identity = [42_u8; 32];
     let other = [43_u8; 32];
@@ -399,14 +392,11 @@ fn history_identity_survives_reopen_and_is_removed_from_analysis_export() {
     let reopened = Database::open(&path).unwrap();
     assert_eq!(first, reopened.history_account_id(identity).unwrap());
     drop(reopened);
-    std::fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
 fn analysis_export_captures_wal_and_preserves_records_without_credentials() {
-    let directory =
-        std::env::temp_dir().join(format!("binancebot-export-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir(&directory).unwrap();
+    let directory = crate::test_support::TempTestDir::new("binancebot-export");
     let source_path = directory.join("source.db");
     let export_path = directory.join("analysis.db");
     let db = Database::open(&source_path).unwrap();
@@ -546,7 +536,6 @@ fn analysis_export_captures_wal_and_preserves_records_without_credentials() {
     assert_eq!(db.load_bot_status().unwrap(), Some(BotStatus::Running));
     drop(snapshot);
     drop(db);
-    std::fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
@@ -623,7 +612,7 @@ fn trade_from_row_surfaces_corrupted_decimal_and_side_values() {
 #[cfg(unix)]
 #[test]
 fn database_rejects_hard_links_and_canonicalizes_stored_path() {
-    let root = std::env::temp_dir().join(format!("db-hardlink-{}", uuid::Uuid::new_v4()));
+    let root = crate::test_support::TempTestDir::new("db-hardlink");
     std::fs::create_dir_all(root.join("sub")).unwrap();
     let nested = root.join("sub").join("..").join("bot.db");
     let db = Database::open(&nested).unwrap();
@@ -639,5 +628,4 @@ fn database_rejects_hard_links_and_canonicalizes_stored_path() {
     let reopened = Database::open(&canonical).unwrap();
     assert!(reopened.export_analysis_snapshot().is_ok());
     drop(reopened);
-    std::fs::remove_dir_all(root).unwrap();
 }

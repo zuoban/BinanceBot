@@ -37,6 +37,7 @@ async fn collect_pairs(states: &[Arc<AppState>]) -> Json<ApiResponse<Vec<Trading
             scoped: state.pair_scope().is_some(),
             status: *state.status.read().await,
             mode: config.exchange.trading_mode(),
+            account_scope: config.exchange.account_scope(),
             grid_config: config.summary(),
         });
     }
@@ -172,6 +173,13 @@ pub(super) async fn get_trades_handler(
 pub(super) async fn get_logs_handler(
     State(state): State<Arc<AppState>>,
 ) -> Json<ApiResponse<Vec<LogEntry>>> {
-    let logs: Vec<LogEntry> = state.recent_logs.read().await.iter().cloned().collect();
+    let logs: Vec<LogEntry> = state
+        .recent_logs
+        .read()
+        .await
+        .iter()
+        .rev()
+        .cloned()
+        .collect();
     json_ok(logs)
 }

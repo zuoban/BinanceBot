@@ -22,6 +22,25 @@ struct Contribution {
     committed: bool,
 }
 
+fn open_valuation_time(position: &PositionInfo, account: &AccountInfo) -> Option<DateTime<Utc>> {
+    (!position.size.is_zero()).then(|| {
+        position
+            .update_time
+            .unwrap_or(account.update_time)
+            .min(account.update_time)
+    })
+}
+
+fn add_or_saturate(acc: &mut Decimal, delta: Decimal, saturated: &mut bool) {
+    match acc.checked_add(delta) {
+        Some(next) => *acc = next,
+        None => {
+            *acc = acc.saturating_add(delta);
+            *saturated = true;
+        }
+    }
+}
+
 impl Contribution {
     fn new(position: &PositionInfo, account: &AccountInfo, committed: bool) -> Self {
         let mut contribution = Self {
@@ -48,12 +67,7 @@ impl Contribution {
         self.size = position.size;
         self.entry_price = position.entry_price;
         // Paper valuation timestamps live on the local account in older states.
-        self.open_valuation_time = (!position.size.is_zero()).then(|| {
-            position
-                .update_time
-                .unwrap_or(account.update_time)
-                .min(account.update_time)
-        });
+        self.open_valuation_time = open_valuation_time(position, account);
         self.update_time = account.update_time;
         self.committed |= committed;
     }
@@ -75,12 +89,7 @@ impl Contribution {
     }
 
     fn is_unchanged(&self, position: &PositionInfo, account: &AccountInfo) -> bool {
-        let open_time = (!position.size.is_zero()).then(|| {
-            position
-                .update_time
-                .unwrap_or(account.update_time)
-                .min(account.update_time)
-        });
+        let open_time = open_valuation_time(position, account);
         self.asset == account.asset
             && self.wallet_delta
                 == account
@@ -160,27 +169,9 @@ impl AssetLedger {
         let mut margin = Decimal::ZERO;
         let mut saturated = false;
         for item in contributions {
-            match wallet.checked_add(item.wallet_delta) {
-                Some(next) => wallet = next,
-                None => {
-                    wallet = wallet.saturating_add(item.wallet_delta);
-                    saturated = true;
-                }
-            }
-            match pnl.checked_add(item.unrealized_pnl) {
-                Some(next) => pnl = next,
-                None => {
-                    pnl = pnl.saturating_add(item.unrealized_pnl);
-                    saturated = true;
-                }
-            }
-            match margin.checked_add(item.position_margin) {
-                Some(next) => margin = next,
-                None => {
-                    margin = margin.saturating_add(item.position_margin);
-                    saturated = true;
-                }
-            }
+            add_or_saturate(&mut wallet, item.wallet_delta, &mut saturated);
+            add_or_saturate(&mut pnl, item.unrealized_pnl, &mut saturated);
+            add_or_saturate(&mut margin, item.position_margin, &mut saturated);
         }
         self.wallet_delta = wallet;
         self.unrealized_pnl = pnl;

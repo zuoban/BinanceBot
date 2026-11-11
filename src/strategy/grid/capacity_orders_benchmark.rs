@@ -74,41 +74,17 @@ fn parameter(name: &str, default: usize) -> usize {
 }
 
 // Only directories created by this owner are eligible for cleanup, including SQLite sidecars.
-struct BenchmarkDatabase(Option<std::path::PathBuf>);
+struct BenchmarkDatabase(Option<crate::test_support::TempTestDir>);
+
 impl BenchmarkDatabase {
     fn new(disk: bool) -> Self {
-        if !disk {
-            return Self(None);
-        }
-        loop {
-            let directory = std::env::temp_dir().join(format!(
-                "binancebot-orders-bench-{}-{}",
-                std::process::id(),
-                Uuid::new_v4()
-            ));
-            match std::fs::create_dir(&directory) {
-                Ok(()) => return Self(Some(directory)),
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(e) => panic!("cannot create benchmark directory: {e}"),
-            }
-        }
+        Self(disk.then(|| crate::test_support::TempTestDir::new("binancebot-orders-bench")))
     }
+
     fn open(&self) -> Database {
         match &self.0 {
             Some(directory) => Database::open(directory.join("benchmark.sqlite")).unwrap(),
             None => Database::open(":memory:").unwrap(),
-        }
-    }
-}
-impl Drop for BenchmarkDatabase {
-    fn drop(&mut self) {
-        if let Some(directory) = &self.0 {
-            if let Err(error) = std::fs::remove_dir_all(directory) {
-                eprintln!(
-                    "failed to remove benchmark directory {}: {error}",
-                    directory.display()
-                );
-            }
         }
     }
 }

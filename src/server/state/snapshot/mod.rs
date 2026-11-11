@@ -97,6 +97,7 @@ impl AppState {
             snapshot: AccountSnapshotData {
                 symbol: config.exchange.symbol.clone(),
                 status,
+                account_scope: config.exchange.account_scope(),
                 sync_interval_secs: config.exchange.sync_interval_secs,
                 ticker,
                 position,
@@ -178,6 +179,7 @@ impl AppState {
                 symbol: config.exchange.symbol.clone(),
                 status,
                 mode,
+                account_scope: config.exchange.account_scope(),
                 sync_interval_secs: config.exchange.sync_interval_secs,
                 grid_config: config.summary(),
                 ticker,
@@ -244,6 +246,7 @@ impl AppState {
             status,
             mode: config.exchange.trading_mode(),
             symbol: config.exchange.symbol.clone(),
+            account_scope: config.exchange.account_scope(),
             sync_interval_secs: config.exchange.sync_interval_secs,
             ticker,
             stats,

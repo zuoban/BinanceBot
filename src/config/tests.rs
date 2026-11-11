@@ -439,3 +439,63 @@ fn sync_interval_secs_validation_accepts_bounds_and_rejects_out_of_range() {
         );
     }
 }
+
+#[test]
+fn account_scope_is_deterministic_trimmed_and_isolates_modes_and_credentials() {
+    let paper = super::ExchangeConfig::default();
+    let paper_padded = super::ExchangeConfig {
+        api_key: "   ".into(),
+        api_secret: "\t\n".into(),
+        ..Default::default()
+    };
+    let scope_paper = paper.account_scope();
+    assert_eq!(scope_paper.len(), 16);
+    assert!(scope_paper
+        .bytes()
+        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+    assert_eq!(scope_paper, paper.account_scope());
+    assert_eq!(scope_paper, paper_padded.account_scope());
+
+    let live_a = super::ExchangeConfig {
+        symbol: "SOLUSDC".into(),
+        api_key: "alpha-key".into(),
+        api_secret: "alpha-secret".into(),
+        ..Default::default()
+    };
+    let live_a_other_symbol = super::ExchangeConfig {
+        symbol: "BTCUSDT".into(),
+        api_key: "  alpha-key ".into(),
+        api_secret: " alpha-secret\n".into(),
+        ..Default::default()
+    };
+    let live_b_key = super::ExchangeConfig {
+        api_key: "bravo-key".into(),
+        api_secret: "alpha-secret".into(),
+        ..Default::default()
+    };
+    let live_b_secret = super::ExchangeConfig {
+        api_key: "alpha-key".into(),
+        api_secret: "bravo-secret".into(),
+        ..Default::default()
+    };
+    let boundary_left = super::ExchangeConfig {
+        api_key: "ab".into(),
+        api_secret: "c".into(),
+        ..Default::default()
+    };
+    let boundary_right = super::ExchangeConfig {
+        api_key: "a".into(),
+        api_secret: "bc".into(),
+        ..Default::default()
+    };
+
+    assert_eq!(live_a.account_scope(), live_a_other_symbol.account_scope());
+    assert_ne!(scope_paper, live_a.account_scope());
+    assert_ne!(live_a.account_scope(), live_b_key.account_scope());
+    assert_ne!(live_a.account_scope(), live_b_secret.account_scope());
+    assert_ne!(
+        boundary_left.account_scope(),
+        boundary_right.account_scope()
+    );
+    assert!(!live_a.account_scope().contains("alpha"));
+}

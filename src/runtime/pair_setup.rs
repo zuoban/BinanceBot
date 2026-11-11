@@ -77,6 +77,17 @@ impl TradingRuntime {
         let _ = state
             .global_position_limit
             .set(Arc::downgrade(&self.global_position_limit));
+        self.enforce_pair_safety_pauses(&state, strategy, options.prearmed)
+            .await?;
+        Ok(state)
+    }
+
+    async fn enforce_pair_safety_pauses(
+        &self,
+        state: &Arc<AppState>,
+        strategy: &AppConfig,
+        prearmed: Option<bool>,
+    ) -> anyhow::Result<()> {
         if let Err(error) = strategy.validate() {
             state.pause_trading().await?;
             state
@@ -87,7 +98,7 @@ impl TradingRuntime {
                 .await;
         }
         if !self.auth.is_auth_configured() && !strategy.exchange.is_paper() {
-            if options.prearmed.is_none() {
+            if prearmed.is_none() {
                 state.pause_trading().await?;
             }
             state
@@ -97,7 +108,7 @@ impl TradingRuntime {
                 )
                 .await;
         }
-        Ok(state)
+        Ok(())
     }
 
     pub(super) async fn prepare_pair_with_state(
@@ -120,16 +131,7 @@ impl TradingRuntime {
             .build_and_configure_pair_state(&strategy, &mut options, action_tx)
             .await?;
         #[cfg(test)]
-        if let Some(hook) = options.prepare_hook.take() {
-            let (ack, received) = oneshot::channel();
-            if hook
-                .send((strategy.exchange.symbol.clone(), ack))
-                .await
-                .is_ok()
-            {
-                let _ = received.await;
-            }
-        }
+        Self::notify_test_prepare_hook(&mut options, &strategy.exchange.symbol).await;
         let mut engine = GridTradingEngine::new_with_caches(
             state.clone(),
             client,
@@ -150,18 +152,7 @@ impl TradingRuntime {
             Some(self.handle.stop.subscribe()),
             shutdown_rx,
         );
-        #[cfg(test)]
-        let spawn_background = self.test_exchange_url.is_none();
-        #[cfg(not(test))]
-        let spawn_background = true;
-        let background = if spawn_background {
-            vec![
-                tokio::spawn(stream.run()),
-                tokio::spawn(state.clone().run_snapshot_broadcast()),
-            ]
-        } else {
-            Vec::new()
-        };
+        let background = self.spawn_pair_background_tasks(stream, &state);
         Ok(PairTask {
             state,
             engine: engine_task,
@@ -170,6 +161,31 @@ impl TradingRuntime {
             shutdown_tx,
             background,
         })
+    }
+
+    #[cfg(test)]
+    async fn notify_test_prepare_hook(options: &mut PreparePairOptions, symbol: &str) {
+        if let Some(hook) = options.prepare_hook.take() {
+            let (ack, received) = oneshot::channel();
+            if hook.send((symbol.to_string(), ack)).await.is_ok() {
+                let _ = received.await;
+            }
+        }
+    }
+
+    fn spawn_pair_background_tasks(
+        &self,
+        stream: BinanceWsStream,
+        state: &Arc<AppState>,
+    ) -> Vec<JoinHandle<()>> {
+        #[cfg(test)]
+        if self.test_exchange_url.is_some() {
+            return Vec::new();
+        }
+        vec![
+            tokio::spawn(stream.run()),
+            tokio::spawn(state.clone().run_snapshot_broadcast()),
+        ]
     }
 
     fn spawn_pair_engine_task(

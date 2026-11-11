@@ -213,49 +213,54 @@ impl TradingRuntime {
                 .map(|index| early_stops.swap_remove(index).1);
             pair_stops.push(stop);
         }
-        let results = join_all(self.pairs.iter_mut().zip(pair_stops).map(
-            |(pair, early_stop)| async move {
-                let symbol = pair.state.config.read().await.exchange.symbol.clone();
-                let result =
-                    if pair.engine_joined || (early_stop.is_none() && pair.engine.is_finished()) {
-                        if let Some(early_stop) = early_stop {
-                            let _ = early_stop.await;
-                        }
-                        let paused = pair.state.pause_trading().await;
-                        paused.and(Err(anyhow::anyhow!("策略引擎已退出，请核实交易所挂单")))
-                    } else if let Some(early_stop) = early_stop {
-                        match early_stop.await {
-                            Ok(early) => {
-                                crate::lifecycle::finish_stop_engine(
-                                    &pair.state,
-                                    &mut pair.engine,
-                                    early,
-                                )
-                                .await
-                            }
-                            Err(error) => {
-                                pair.engine.abort();
-                                let _ = (&mut pair.engine).await;
-                                if let Err(pause_err) = pair.state.pause_trading().await {
-                                    tracing::error!(
-                                        %pause_err,
-                                        "Failed to persist pause after early shutdown task failure"
-                                    );
-                                }
-                                Err(anyhow::anyhow!("停机任务失败: {error}"))
-                            }
-                        }
-                    } else {
-                        stop_engine(&pair.state, &mut pair.engine, limit).await
-                    };
-                pair.stop_background().await;
-                result.map_err(|error| format!("{}: {}", symbol, error))
-            },
-        ))
+        let results = join_all(
+            self.pairs
+                .iter_mut()
+                .zip(pair_stops)
+                .map(|(pair, early_stop)| Self::stop_pair_for_shutdown(pair, early_stop, limit)),
+        )
         .await;
         let errors: Vec<_> = results.into_iter().filter_map(Result::err).collect();
         anyhow::ensure!(errors.is_empty(), "{}", errors.join("; "));
         Ok(())
+    }
+
+    async fn stop_pair_for_shutdown(
+        pair: &mut PairTask,
+        early_stop: Option<JoinHandle<(tokio::time::Instant, anyhow::Result<()>)>>,
+        limit: Duration,
+    ) -> Result<(), String> {
+        let symbol = pair.state.config.read().await.exchange.symbol.clone();
+        let result = if pair.engine_joined || (early_stop.is_none() && pair.engine.is_finished()) {
+            if let Some(early_stop) = early_stop {
+                let _ = early_stop.await;
+            }
+            pair.state
+                .pause_trading()
+                .await
+                .and(Err(anyhow::anyhow!("策略引擎已退出，请核实交易所挂单")))
+        } else if let Some(early_stop) = early_stop {
+            match early_stop.await {
+                Ok(early) => {
+                    crate::lifecycle::finish_stop_engine(&pair.state, &mut pair.engine, early).await
+                }
+                Err(error) => {
+                    pair.engine.abort();
+                    let _ = (&mut pair.engine).await;
+                    if let Err(pause_err) = pair.state.pause_trading().await {
+                        tracing::error!(
+                            %pause_err,
+                            "Failed to persist pause after early shutdown task failure"
+                        );
+                    }
+                    Err(anyhow::anyhow!("停机任务失败: {error}"))
+                }
+            }
+        } else {
+            stop_engine(&pair.state, &mut pair.engine, limit).await
+        };
+        pair.stop_background().await;
+        result.map_err(|error| format!("{}: {}", symbol, error))
     }
 }
 

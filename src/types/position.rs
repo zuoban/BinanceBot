@@ -37,6 +37,8 @@ pub struct PositionInfo {
 }
 
 impl PositionInfo {
+    #[must_use]
+    #[inline]
     pub fn position_margin(&self) -> Decimal {
         let valuation_price = if self.mark_price > Decimal::ZERO {
             self.mark_price
@@ -57,6 +59,8 @@ impl PositionInfo {
 
     /// Best-effort market valuation price using an optional ticker (`mark_price`,
     /// then `self.mark_price`, then `ticker.last_price`), without falling back to `entry_price`.
+    #[must_use]
+    #[inline]
     pub fn market_valuation_price(&self, ticker: Option<&TickerInfo>) -> Decimal {
         if let Some(price) = ticker.map(|t| t.mark_price).filter(|p| *p > Decimal::ZERO) {
             price
@@ -70,6 +74,8 @@ impl PositionInfo {
     }
 
     /// Strictly fresh market valuation price (`ticker.mark_price`, `self.mark_price`, or `ticker.last_price`).
+    #[must_use]
+    #[inline]
     pub fn fresh_market_valuation_price(
         &self,
         ticker: &TickerInfo,
@@ -87,6 +93,8 @@ impl PositionInfo {
     }
 
     /// Valuation price preferring fresh mark prices, falling back to best-effort market price or `entry_price`.
+    #[must_use]
+    #[inline]
     pub fn valuation_price_with_freshness(
         &self,
         ticker: &TickerInfo,
@@ -117,6 +125,78 @@ impl PositionInfo {
     }
 }
 
+fn increase_position_entry(
+    size: Decimal,
+    entry_price: Decimal,
+    new_size: Decimal,
+    price: Decimal,
+    qty: Decimal,
+) -> Decimal {
+    let abs_new = new_size.abs();
+    if abs_new.is_zero() {
+        return Decimal::ZERO;
+    }
+    let abs_size = size.abs();
+    entry_price
+        .checked_mul(abs_size)
+        .zip(price.checked_mul(qty))
+        .and_then(|(a, b)| a.checked_add(b))
+        .and_then(|sum| sum.checked_div(abs_new))
+        .or_else(|| {
+            abs_size
+                .checked_div(abs_new)
+                .and_then(|w1| w1.checked_mul(entry_price))
+                .zip(
+                    qty.checked_div(abs_new)
+                        .and_then(|w2| w2.checked_mul(price)),
+                )
+                .and_then(|(a, b)| a.checked_add(b))
+        })
+        .unwrap_or(price)
+}
+
+fn reduce_or_flip_position(
+    size: Decimal,
+    entry_price: Decimal,
+    new_size: Decimal,
+    price: Decimal,
+    qty: Decimal,
+) -> (Decimal, Decimal, Decimal) {
+    let closed_qty = qty.min(size.abs());
+    let (exit_price, open_price) = if size > Decimal::ZERO {
+        (price, entry_price)
+    } else {
+        (entry_price, price)
+    };
+    let realized = exit_price
+        .checked_sub(open_price)
+        .and_then(|diff| diff.checked_mul(closed_qty))
+        .or_else(|| {
+            exit_price
+                .checked_mul(closed_qty)
+                .zip(open_price.checked_mul(closed_qty))
+                .and_then(|(a, b)| a.checked_sub(b))
+        })
+        .unwrap_or_else(|| {
+            if closed_qty.is_zero() || exit_price == open_price {
+                Decimal::ZERO
+            } else if (exit_price > open_price) == (closed_qty > Decimal::ZERO) {
+                Decimal::MAX
+            } else {
+                Decimal::MIN
+            }
+        });
+    let new_entry = if new_size.is_zero() {
+        Decimal::ZERO
+    } else if new_size.is_sign_positive() != size.is_sign_positive() {
+        price
+    } else {
+        entry_price
+    };
+    (new_size, new_entry, realized)
+}
+
+#[must_use]
 pub(crate) fn apply_fill_to_position(
     size: Decimal,
     entry_price: Decimal,
@@ -129,75 +209,26 @@ pub(crate) fn apply_fill_to_position(
         OrderSide::Sell => -qty,
     };
     let new_size = size.saturating_add(signed_qty);
-    let same_direction = size.is_zero() || size.is_sign_positive() == signed_qty.is_sign_positive();
-    if same_direction {
-        let abs_new = new_size.abs();
-        let new_entry = if abs_new.is_zero() {
-            Decimal::ZERO
-        } else {
-            let abs_size = size.abs();
-            entry_price
-                .checked_mul(abs_size)
-                .zip(price.checked_mul(qty))
-                .and_then(|(a, b)| a.checked_add(b))
-                .and_then(|sum| sum.checked_div(abs_new))
-                .or_else(|| {
-                    abs_size
-                        .checked_div(abs_new)
-                        .and_then(|w1| w1.checked_mul(entry_price))
-                        .zip(
-                            qty.checked_div(abs_new)
-                                .and_then(|w2| w2.checked_mul(price)),
-                        )
-                        .and_then(|(a, b)| a.checked_add(b))
-                })
-                .unwrap_or(price)
-        };
+    if size.is_zero() || size.is_sign_positive() == signed_qty.is_sign_positive() {
+        let new_entry = increase_position_entry(size, entry_price, new_size, price, qty);
         (new_size, new_entry, Decimal::ZERO)
     } else {
-        let closed_qty = qty.min(size.abs());
-        let (exit_price, open_price) = if size > Decimal::ZERO {
-            (price, entry_price)
-        } else {
-            (entry_price, price)
-        };
-        let realized = exit_price
-            .checked_sub(open_price)
-            .and_then(|diff| diff.checked_mul(closed_qty))
-            .or_else(|| {
-                exit_price
-                    .checked_mul(closed_qty)
-                    .zip(open_price.checked_mul(closed_qty))
-                    .and_then(|(a, b)| a.checked_sub(b))
-            })
-            .unwrap_or_else(|| {
-                if closed_qty.is_zero() || exit_price == open_price {
-                    Decimal::ZERO
-                } else if (exit_price > open_price) == (closed_qty > Decimal::ZERO) {
-                    Decimal::MAX
-                } else {
-                    Decimal::MIN
-                }
-            });
-        let new_entry = if new_size.is_zero() {
-            Decimal::ZERO
-        } else if new_size.is_sign_positive() != size.is_sign_positive() {
-            price
-        } else {
-            entry_price
-        };
-        (new_size, new_entry, realized)
+        reduce_or_flip_position(size, entry_price, new_size, price, qty)
     }
 }
 
 pub(crate) const PAPER_INITIAL_BALANCE: Decimal = rust_decimal_macros::dec!(10000);
 
+#[must_use]
+#[inline]
 pub(crate) fn quote_asset(symbol: &str) -> Option<&'static str> {
     ["FDUSD", "USDC", "USDT", "BUSD"]
         .into_iter()
         .find(|asset| symbol.ends_with(asset))
 }
 
+#[must_use]
+#[inline]
 pub(crate) fn resolve_quote_asset<'a>(symbol: &'a str, fallback_asset: &'a str) -> &'a str {
     quote_asset(symbol).unwrap_or(if fallback_asset.is_empty() {
         symbol
@@ -217,6 +248,7 @@ pub struct AccountInfo {
 }
 
 impl AccountInfo {
+    #[must_use]
     pub fn initial_paper(symbol: &str, update_time: Option<DateTime<Utc>>) -> Self {
         Self {
             asset: quote_asset(symbol).unwrap_or(symbol).to_string(),
@@ -253,25 +285,19 @@ fn format_scaled_decimal(mut scaled: Decimal, dp: u32, force_sign: bool) -> Stri
         None => ("", raw.as_str()),
     };
     let dp_usize = dp as usize;
+    let (whole, frac) = unsigned.split_once('.').unwrap_or((unsigned, ""));
     if dp_usize == 0 {
-        let whole = unsigned.split_once('.').map_or(unsigned, |(w, _)| w);
         return format!("{sign}{whole}");
     }
-    match unsigned.split_once('.') {
-        Some((whole, frac)) if frac.len() >= dp_usize => {
-            format!("{sign}{whole}.{}", &frac[..dp_usize])
-        }
-        Some((whole, frac)) => {
-            let pad = "0".repeat(dp_usize - frac.len());
-            format!("{sign}{whole}.{frac}{pad}")
-        }
-        None => {
-            let pad = "0".repeat(dp_usize);
-            format!("{sign}{unsigned}.{pad}")
-        }
+    if frac.len() >= dp_usize {
+        format!("{sign}{whole}.{}", &frac[..dp_usize])
+    } else {
+        format!("{sign}{whole}.{frac:0<dp_usize$}")
     }
 }
 
+#[must_use]
+#[inline]
 pub(crate) fn format_decimal_dp(value: Decimal, dp: u32, force_sign: bool) -> String {
     let rounded = if dp <= Decimal::MAX_SCALE {
         value.round_dp(dp)
@@ -281,6 +307,8 @@ pub(crate) fn format_decimal_dp(value: Decimal, dp: u32, force_sign: bool) -> St
     format_scaled_decimal(rounded, dp, force_sign)
 }
 
+#[must_use]
+#[inline]
 pub(crate) fn format_truncated_decimal_dp(value: Decimal, dp: u32, force_sign: bool) -> String {
     let truncated = if dp <= Decimal::MAX_SCALE {
         value.trunc_with_scale(dp)

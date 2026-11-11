@@ -329,10 +329,17 @@ async fn submit(engine: &mut GridTradingEngine) -> bool {
 }
 
 mod batch_and_pnl;
-mod cancel_and_identity;
+mod cancel_and_provisional;
+mod conflicting_snapshot_recovery;
 mod control_and_submission;
-mod evidence_and_duplicates;
+mod evidence_batches_and_dedup;
 mod global_gates;
-mod pair_and_remainder_recovery;
-mod snapshot_prices;
-mod untrusted_and_lifecycle;
+mod identity_barriers_and_cleanup;
+mod identity_resolution_and_mismatches;
+mod managed_and_partial_evidence;
+mod pair_intent_recovery;
+mod remainder_identity_recovery;
+mod snapshot_open_prices;
+mod submission_staleness_and_shutdown;
+mod terminal_price_completion;
+mod untrusted_snapshots;

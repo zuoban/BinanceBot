@@ -165,6 +165,7 @@ export interface AccountGroup {
   key: string;
   mode: Mode;
   asset: string;
+  account_scope?: string;
   count: number;
   equity: number | null;
   available: number | null;
@@ -190,15 +191,15 @@ const recentAt = (timestamp: string, maxAge: number, refNow: number) => {
 export function accountGroups<T extends AccountObservation>(entries: T[], now = Date.now()): AccountGroup[] {
   const groups = groupByKey(
     entries,
-    ({ mode, snapshot: s }) => `${mode}:${s.account.asset || quoteAsset(s.symbol)}`,
-    ({ mode, snapshot: s }) => ({ mode, asset: s.account.asset || quoteAsset(s.symbol), items: [] as T[], observed: [] as T[], observationStale: false }),
+    ({ mode, snapshot: s }) => `${mode}:${s.account.asset || quoteAsset(s.symbol)}:${s.account_scope ?? ''}`,
+    ({ mode, snapshot: s }) => ({ mode, asset: s.account.asset || quoteAsset(s.symbol), account_scope: s.account_scope, items: [] as T[], observed: [] as T[], observationStale: false }),
     (group, entry) => {
       group.items.push(entry);
       if (!entry.account_observation_stale) group.observed.push(entry);
       group.observationStale ||= !!entry.account_observation_stale || (entry.mode === 'PAPER' && !entry.snapshot.account.asset);
     },
   );
-  return [...groups.values()].map(({ mode, asset, items, observed, observationStale }) => {
+  return [...groups.values()].map(({ mode, asset, account_scope, items, observed, observationStale }) => {
     let latest: T | undefined;
     let latestTs = -Infinity;
     for (const entry of observed) {
@@ -213,7 +214,7 @@ export function accountGroups<T extends AccountObservation>(entries: T[], now = 
     }
     const chosen = latest ?? items[0];
     const account = chosen.snapshot;
-    const unavailable = !latest || (mode === 'PAPER' && observationStale);
+    const unavailable = !latest || observationStale;
     // A shared paper account can include positions outside this page's symbol.
     // Its valuation time follows the oldest open position's mark price.
     const paperValued = items.every(entry => {
@@ -232,7 +233,7 @@ export function accountGroups<T extends AccountObservation>(entries: T[], now = 
     const wallet = unavailable ? null : numeric(account.account.total_wallet_balance);
     const unrealized = valued ? numeric(account.account.unrealized_profit) : null;
     const rate = account.account_cny_rate?.asset === asset ? numeric(account.account_cny_rate.cny_per_unit) : null;
-    return { key: `${mode}:${asset}`, mode, asset, count: items.length, equity, available, wallet, unrealized, ratio: availableRatio(available, wallet), cny: equity !== null && rate !== null && rate > 0 && Number.isFinite(equity * rate) ? equity * rate : null };
+    return { key: `${mode}:${asset}`, mode, asset, account_scope, count: items.length, equity, available, wallet, unrealized, ratio: availableRatio(available, wallet), cny: equity !== null && rate !== null && rate > 0 && Number.isFinite(equity * rate) ? equity * rate : null };
   });
 }
 

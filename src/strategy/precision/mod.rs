@@ -45,6 +45,8 @@ pub(crate) enum SymbolRulesError {
 }
 
 impl SymbolRulesError {
+    #[must_use]
+    #[inline]
     pub(crate) fn into_chinese_error(self, symbol: &str) -> anyhow::Error {
         match self {
             Self::NotFound => anyhow::anyhow!("币安合约不存在交易对 {symbol}"),
@@ -53,6 +55,8 @@ impl SymbolRulesError {
         }
     }
 
+    #[must_use]
+    #[inline]
     pub(crate) fn preview_status_and_message(self) -> (axum::http::StatusCode, &'static str) {
         use axum::http::StatusCode;
         match self {
@@ -64,6 +68,7 @@ impl SymbolRulesError {
 }
 
 impl SymbolRules {
+    #[must_use]
     pub(crate) fn from_exchange_info(
         info: &BinanceExchangeInfo,
         symbol_name: &str,
@@ -204,6 +209,8 @@ impl SymbolRules {
     }
 
     /// Both directions share the same zero-anchored price lattice.
+    #[must_use]
+    #[inline]
     pub(crate) fn is_grid_price(&self, price: Decimal, interval: Decimal) -> bool {
         interval > Decimal::ZERO
             && price > Decimal::ZERO
@@ -214,6 +221,7 @@ impl SymbolRules {
                 == Some(price)
     }
 
+    #[must_use]
     pub(crate) fn is_valid_maker_grid_price(
         &self,
         grid: &crate::config::GridConfig,
@@ -241,6 +249,7 @@ impl SymbolRules {
     /// Zero-anchored levels survive market moves and restarts.
     /// Count eligible levels, skipping reservations without consuming window slots.
     /// At an exact level, neither side places an order at the current market price.
+    #[must_use]
     pub(crate) fn grid_window_prices(
         &self,
         market: Decimal,
@@ -311,6 +320,8 @@ impl SymbolRules {
     }
 
     /// Round price to the nearest tick size
+    #[must_use]
+    #[inline]
     pub(crate) fn round_price(&self, price: Decimal) -> Decimal {
         self.checked_round_price(price).unwrap_or(Decimal::ZERO)
     }
@@ -328,11 +339,14 @@ impl SymbolRules {
     }
 
     /// Truncate quantity down to the nearest lot step size
+    #[must_use]
+    #[inline]
     pub(crate) fn round_quantity(&self, qty: Decimal) -> Decimal {
         self.checked_round_quantity(qty).unwrap_or(Decimal::ZERO)
     }
 
     /// Calculate compliant order quantity given target USDC notional amount and price
+    #[must_use]
     pub(crate) fn calculate_quantity(
         &self,
         price: Decimal,
@@ -373,6 +387,7 @@ impl SymbolRules {
     /// Plan a remainder/closing order quantity bounded by `available` and a single grid order's
     /// full quantity. Returns `(quantity, OrderPurpose)` when `quantity` meets `min_qty` and
     /// `min_notional`.
+    #[must_use]
     pub(crate) fn plan_remainder_quantity(
         &self,
         price: Decimal,
@@ -396,10 +411,14 @@ impl SymbolRules {
         Some((quantity, purpose))
     }
 
+    #[must_use]
+    #[inline]
     pub(crate) fn format_price(&self, price: Decimal) -> String {
         crate::types::format_decimal_dp(self.round_price(price), self.price_scale, false)
     }
 
+    #[must_use]
+    #[inline]
     pub(crate) fn format_quantity(&self, qty: Decimal) -> String {
         crate::types::format_truncated_decimal_dp(
             self.round_quantity(qty),
@@ -409,6 +428,8 @@ impl SymbolRules {
     }
 }
 
+#[must_use]
+#[inline]
 fn calculate_scale(d: Decimal) -> u32 {
     d.normalize().scale()
 }

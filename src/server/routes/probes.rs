@@ -59,11 +59,16 @@ pub(super) fn resolve_exchange_probe(
     saved: &crate::config::ExchangeConfig,
     payload: TestExchangePayload,
 ) -> Result<crate::config::ExchangeConfig, String> {
+    let key = non_blank(payload.api_key);
+    let secret = non_blank(payload.api_secret);
+    if key.is_some() != secret.is_some() {
+        return Err("请同时填写 API Key 和 Secret（或留空以测试已保存的凭证）".into());
+    }
     let mut config = saved.clone();
-    if let Some(key) = non_blank(payload.api_key) {
+    if let Some(key) = key {
         config.api_key = key;
     }
-    if let Some(secret) = non_blank(payload.api_secret) {
+    if let Some(secret) = secret {
         config.api_secret = secret;
     }
     if let Some(window) = payload.recv_window {
@@ -79,7 +84,7 @@ pub(super) fn resolve_exchange_probe(
     Ok(config)
 }
 
-fn resolve_telegram_probe(
+pub(super) fn resolve_telegram_probe(
     saved: &crate::config::TelegramConfig,
     payload: TestTelegramPayload,
 ) -> Result<crate::config::TelegramConfig, String> {
@@ -93,6 +98,8 @@ fn resolve_telegram_probe(
     if config.bot_token.trim().is_empty() || config.chat_id.trim().is_empty() {
         return Err("请填写 Bot Token 和 Chat ID（或先保存后再测试）".into());
     }
+    crate::config::TelegramConfig::validate_bot_token(&config.bot_token)
+        .map_err(|e| e.to_string())?;
     Ok(config)
 }
 

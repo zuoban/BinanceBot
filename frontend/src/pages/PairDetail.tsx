@@ -52,17 +52,14 @@ export function resolveLogs(snapshot: Snapshot | undefined, fetched: Log[] | und
   const recent = snapshot?.recent_logs ?? [];
   if (!snapshot || isError || !Array.isArray(fetched) || !fetchedAt) return recent;
   if (!fetched.length) return snapshotAt > fetchedAt ? recent : fetched;
-  const firstTs = Date.parse(fetched[0].timestamp), lastTs = Date.parse(fetched[fetched.length - 1].timestamp);
-  const chronological = fetched.length > 1 && !(firstTs > lastTs);
-  const ordered = chronological ? [...fetched].reverse() : fetched;
-  if (!recent.length) return ordered;
-  const head = ordered[0];
+  if (!recent.length) return fetched;
+  const head = fetched[0];
   const overlap = recent.findIndex(item => item.timestamp === head.timestamp && item.level === head.level && item.message === head.message);
-  if (overlap > 0) return [...recent.slice(0, overlap), ...ordered].slice(0, 250);
-  if (overlap === 0) return ordered;
+  if (overlap > 0) return [...recent.slice(0, overlap), ...fetched].slice(0, 250);
+  if (overlap === 0) return fetched;
   const tailTs = Date.parse(recent[recent.length - 1].timestamp), headTs = Date.parse(head.timestamp);
-  if (fetchedAt >= snapshotAt ? tailTs > headTs : tailTs >= headTs) return [...recent, ...ordered].slice(0, 250);
-  return fetchedAt >= snapshotAt || ordered.length >= recent.length ? ordered : recent;
+  if (fetchedAt >= snapshotAt ? tailTs > headTs : tailTs >= headTs) return [...recent, ...fetched].slice(0, 250);
+  return fetchedAt >= snapshotAt || fetched.length >= recent.length ? fetched : recent;
 }
 function usePairTabHistory(pair: Pair | undefined, tab: (typeof detailTabs)[number], snapshot: Snapshot | undefined, snapshotUpdatedAt = 0) {
   const client = useContext(QueryClientContext) ?? fallbackClient;
@@ -84,9 +81,10 @@ function usePairTabHistory(pair: Pair | undefined, tab: (typeof detailTabs)[numb
   return { trades, logs };
 }
 
-function buildDetailAccountEntries(s: Snapshot | undefined, pair: Pair | undefined, liveAccounts: AccountObservation[], dataUpdatedAt: number, stale: boolean): AccountObservation[] {
+const sameScope = (a?: string, b?: string) => (a ?? '') === (b ?? '');
+
+function buildDetailAccountEntries(s: Snapshot | undefined, pair: Pair | undefined, liveAccounts: AccountObservation[], pairs: Pair[] | undefined, dataUpdatedAt: number, snapshotStale: boolean): AccountObservation[] {
   if (!s || !pair) return [];
-  const siblings = liveAccounts.filter(entry => entry.snapshot.symbol !== pair.symbol);
   const receivedAtMs = dataUpdatedAt > 0 ? dataUpdatedAt : undefined;
   const parsedGeneratedAt = s.generated_at ? Date.parse(s.generated_at) : NaN;
   const skewRef = liveAccounts.find(entry => entry.generated_at_ms !== undefined && entry.received_at_ms !== undefined);
@@ -95,7 +93,24 @@ function buildDetailAccountEntries(s: Snapshot | undefined, pair: Pair | undefin
     : receivedAtMs !== undefined && skewRef
       ? receivedAtMs + (skewRef.generated_at_ms! - skewRef.received_at_ms!)
       : undefined;
-  return [...siblings, { snapshot: s, mode: s.mode, account_observation_stale: stale, generated_at_ms: generatedAtMs, received_at_ms: receivedAtMs }];
+  if (snapshotStale) {
+    return [{ mode: s.mode, snapshot: s, account_observation_stale: true, generated_at_ms: generatedAtMs, received_at_ms: receivedAtMs }];
+  }
+  const ownLive = liveAccounts.find(e => e.snapshot.symbol === pair.symbol);
+  const epochAligned = !ownLive || (ownLive.mode === s.mode && sameScope(ownLive.snapshot.account_scope, s.account_scope));
+  const siblings = epochAligned
+    ? liveAccounts.filter(entry => entry.snapshot.symbol !== pair.symbol && entry.mode === s.mode && sameScope(entry.snapshot.account_scope, s.account_scope))
+    : [];
+  const targetAsset = s.account.asset || quoteAsset(pair.symbol);
+  const siblingSymbols = new Set(siblings.map(entry => entry.snapshot.symbol));
+  const missingPaperSibling = s.mode === 'PAPER' && Boolean(pairs?.some(p =>
+    p.symbol !== pair.symbol
+    && p.mode === 'PAPER'
+    && quoteAsset(p.symbol) === targetAsset
+    && (p.account_scope === undefined || sameScope(p.account_scope, s.account_scope))
+    && !siblingSymbols.has(p.symbol),
+  ));
+  return [...siblings, { snapshot: s, mode: s.mode, account_observation_stale: missingPaperSibling, generated_at_ms: generatedAtMs, received_at_ms: receivedAtMs }];
 }
 
 export default function PairDetail() {
@@ -106,9 +121,9 @@ export default function PairDetail() {
   const dayNow = useBeijingDay(s?.generated_at, query.dataUpdatedAt);
   const [tab, setTab] = useUrlParam('tab', 'monitor', detailTabs);
   const { trades, logs } = usePairTabHistory(pair, tab, s, query.dataUpdatedAt);
-  const accountEntries = useMemo(() => buildDetailAccountEntries(s, pair, liveAccounts, query.dataUpdatedAt, stale), [s, pair, liveAccounts, query.dataUpdatedAt, stale]);
+  const accountEntries = useMemo(() => buildDetailAccountEntries(s, pair, liveAccounts, pairs.data, query.dataUpdatedAt, stale), [s, pair, liveAccounts, pairs.data, query.dataUpdatedAt, stale]);
   const groups = useAccountGroups(accountEntries, !!s && !!pair);
-  const account = s ? groups.find(group => group.key === `${s.mode}:${s.account.asset || asset}`) : undefined;
+  const account = s ? groups.find(g => g.mode === s.mode && g.asset === (s.account.asset || asset) && sameScope(g.account_scope, s.account_scope)) : undefined;
   const today = useMemo(() => s ? todayTradeCounts(s, dayNow) : null, [s, dayNow]);
   useDocumentTitle(`${positivePrice(s?.ticker.mark_price)} | ${today?.buy ?? '--'}B | ${today?.sell ?? '--'}S`);
   const todayPnl = today && s?.hourly_trade_stats && s.hourly_trade_stats.pending_pnl_count === 0 ? s.hourly_trade_stats.realized_pnl : null;

@@ -364,12 +364,10 @@ impl BinanceFuturesClient {
                 .signed_error_from_body(status, &body, Some(&context))
                 .await);
         }
-        resp.json()
+        read_bounded_json(resp, 8 * 1024 * 1024)
             .await
-            .map_err(reqwest::Error::without_url)
-            .map_err(|error| {
+            .inspect_err(|_| {
                 *failed_query = true;
-                error.into()
             })
     }
 

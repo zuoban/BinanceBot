@@ -21,44 +21,24 @@ impl TradingRuntime {
         admin_auth: Option<Arc<crate::auth::AdminAuth>>,
     ) -> Self {
         let (commands, command_rx) = mpsc::channel(16);
-        let (stop, _) = watch::channel(false);
-        let states = Arc::new(RwLock::new(
-            pairs.iter().map(|pair| pair.state.clone()).collect(),
-        ));
-        let global_position_limit = crate::server::state::GlobalPositionLimit::new(states.clone());
-        global_position_limit.initialize_config(global_config);
-        for state in pairs.iter().map(|pair| &pair.state) {
-            let _ = state
-                .global_position_limit
-                .set(Arc::downgrade(&global_position_limit));
-        }
         let rate_limiter = Arc::new(RateLimiter::default());
-        let engine_aborts = pairs
-            .iter()
-            .map(|pair| (Arc::downgrade(&pair.state), pair.engine.abort_handle()))
-            .collect();
         let auth = pairs
             .first()
             .map(|pair| pair.state.auth.clone())
             .unwrap_or_else(|| crate::server::state::AuthContext::new(db.clone(), admin_auth));
+        let (global_position_limit, handle) = Self::build_runtime_handle(
+            &pairs,
+            db,
+            auth.clone(),
+            active_server,
+            global_config,
+            rate_limiter.clone(),
+            commands,
+        );
         Self {
             pairs,
-            global_position_limit: global_position_limit.clone(),
-            handle: RuntimeHandle {
-                states,
-                membership_lock: Arc::new(Mutex::new(())),
-                global_position_limit,
-                db,
-                auth: auth.clone(),
-                active_server,
-                rate_limiter: rate_limiter.clone(),
-                probes: Arc::default(),
-                commands,
-                stop,
-                active_removal: Arc::new(std::sync::Mutex::new(None)),
-                engine_aborts: Arc::new(std::sync::Mutex::new(engine_aborts)),
-                early_stops: Arc::new(Mutex::new(Vec::new())),
-            },
+            global_position_limit,
+            handle,
             command_rx,
             trade_lock,
             cny_rates: Arc::new(CnyRateCache::new()),
@@ -73,6 +53,50 @@ impl TradingRuntime {
             #[cfg(test)]
             fail_next_prepare_pair: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    fn build_runtime_handle(
+        pairs: &[PairTask],
+        db: Arc<Database>,
+        auth: Arc<crate::server::state::AuthContext>,
+        active_server: crate::config::ServerConfig,
+        global_config: GlobalConfig,
+        rate_limiter: Arc<RateLimiter>,
+        commands: mpsc::Sender<super::RuntimeCommand>,
+    ) -> (
+        Arc<crate::server::state::GlobalPositionLimit>,
+        RuntimeHandle,
+    ) {
+        let states = Arc::new(RwLock::new(
+            pairs.iter().map(|pair| pair.state.clone()).collect(),
+        ));
+        let global_position_limit = crate::server::state::GlobalPositionLimit::new(states.clone());
+        global_position_limit.initialize_config(global_config);
+        for state in pairs.iter().map(|pair| &pair.state) {
+            let _ = state
+                .global_position_limit
+                .set(Arc::downgrade(&global_position_limit));
+        }
+        let engine_aborts = pairs
+            .iter()
+            .map(|pair| (Arc::downgrade(&pair.state), pair.engine.abort_handle()))
+            .collect();
+        let handle = RuntimeHandle {
+            states,
+            membership_lock: Arc::new(Mutex::new(())),
+            global_position_limit: global_position_limit.clone(),
+            db,
+            auth,
+            active_server,
+            rate_limiter,
+            probes: Arc::default(),
+            commands,
+            stop: watch::channel(false).0,
+            active_removal: Arc::new(std::sync::Mutex::new(None)),
+            engine_aborts: Arc::new(std::sync::Mutex::new(engine_aborts)),
+            early_stops: Arc::new(Mutex::new(Vec::new())),
+        };
+        (global_position_limit, handle)
     }
 
     pub async fn start_interruptible(
@@ -217,56 +241,76 @@ impl TradingRuntime {
             if shutdown.as_ref().is_some_and(|rx| *rx.borrow()) {
                 return Some(anyhow::anyhow!("启动过程中收到退出信号"));
             }
-            // Preparation may have an in-flight database write. Let it finish, but
-            // block every existing engine as soon as an interruption arrives.
-            let (start_tx, start_rx) = oneshot::channel();
-            let engine_shutdown = shutdown.clone();
-            let prepared = {
-                let preparing = self.prepare_pair(
+            if let Err(error) = self
+                .prepare_single_startup_pair(
                     strategy,
                     multi,
-                    start_rx,
-                    engine_shutdown,
+                    shutdown,
+                    #[cfg(test)]
+                    hook.as_ref(),
                     #[cfg(test)]
                     prepare_hook.clone(),
-                );
-                tokio::pin!(preparing);
-                tokio::select! {
-                    biased;
-                    _ = Self::wait_for_startup_shutdown(shutdown) => {
-                        for pair in &self.pairs {
-                            pair.signal_shutdown();
-                        }
-                        preparing.await
-                    }
-                    result = &mut preparing => result,
-                }
-            };
-            match prepared {
-                Ok(pair) => {
-                    #[cfg(test)]
-                    let symbol = pair.state.config.read().await.exchange.symbol.clone();
-                    let stopped = shutdown.as_ref().is_some_and(|rx| *rx.borrow());
-                    if stopped {
-                        pair.signal_shutdown();
-                    }
-                    self.handle.register_engine(&pair);
-                    self.pairs.push(pair);
-                    if !stopped {
-                        let _ = start_tx.send(());
-                    }
-                    #[cfg(test)]
-                    if let Some(hook) = &hook {
-                        let (ack, received) = oneshot::channel();
-                        if hook.send((symbol, ack)).await.is_ok() {
-                            let _ = received.await;
-                        }
-                    }
-                }
-                Err(error) => return Some(error),
+                )
+                .await
+            {
+                return Some(error);
             }
         }
         None
+    }
+
+    async fn prepare_single_startup_pair(
+        &mut self,
+        strategy: AppConfig,
+        multi: bool,
+        shutdown: &mut Option<watch::Receiver<bool>>,
+        #[cfg(test)] hook: Option<&mpsc::Sender<(String, oneshot::Sender<()>)>>,
+        #[cfg(test)] prepare_hook: Option<mpsc::Sender<(String, oneshot::Sender<()>)>>,
+    ) -> anyhow::Result<()> {
+        // Preparation may have an in-flight database write. Let it finish, but
+        // block every existing engine as soon as an interruption arrives.
+        let (start_tx, start_rx) = oneshot::channel();
+        let engine_shutdown = shutdown.clone();
+        let pair = {
+            let preparing = self.prepare_pair(
+                strategy,
+                multi,
+                start_rx,
+                engine_shutdown,
+                #[cfg(test)]
+                prepare_hook,
+            );
+            tokio::pin!(preparing);
+            tokio::select! {
+                biased;
+                _ = Self::wait_for_startup_shutdown(shutdown) => {
+                    for pair in &self.pairs {
+                        pair.signal_shutdown();
+                    }
+                    preparing.await
+                }
+                result = &mut preparing => result,
+            }
+        }?;
+        #[cfg(test)]
+        let symbol = pair.state.config.read().await.exchange.symbol.clone();
+        let stopped = shutdown.as_ref().is_some_and(|rx| *rx.borrow());
+        if stopped {
+            pair.signal_shutdown();
+        }
+        self.handle.register_engine(&pair);
+        self.pairs.push(pair);
+        if !stopped {
+            let _ = start_tx.send(());
+        }
+        #[cfg(test)]
+        if let Some(hook) = hook {
+            let (ack, received) = oneshot::channel();
+            if hook.send((symbol, ack)).await.is_ok() {
+                let _ = received.await;
+            }
+        }
+        Ok(())
     }
 
     async fn run_initial_global_risk_check(&self, shutdown: &mut Option<watch::Receiver<bool>>) {

@@ -3,10 +3,11 @@ use crate::types::{OrderSide, TradeRecord, TradingMode};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
+mod config_sessions_and_guards;
 mod legacy_migrations;
 mod rollups_and_revisions;
 mod security_cleanup_and_export;
-mod trades_orders_and_config;
+mod trades_and_scoped_stats;
 
 pub(super) fn revision_test_trade() -> TradeRecord {
     TradeRecord {

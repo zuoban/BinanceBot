@@ -92,25 +92,9 @@ impl GlobalPositionLimit {
             return false;
         }
         self.enabled.store(true, Ordering::SeqCst);
-        let mut total = Decimal::ZERO;
-        let mut incomplete = !self.membership_ready.load(Ordering::SeqCst);
-        let mut initialized_incomplete = false;
-        let mut zero_margin = false;
-        for state in &states {
-            let (member_incomplete, member_init_incomplete, member_zero_margin) =
-                Self::evaluate_member_risk(
-                    state,
-                    committed_ref,
-                    margin_guard,
-                    margin_pct,
-                    limit,
-                    &mut total,
-                )
-                .await;
-            incomplete |= member_incomplete;
-            initialized_incomplete |= member_init_incomplete;
-            zero_margin |= member_zero_margin;
-        }
+        let (total, incomplete, initialized_incomplete, zero_margin) = self
+            .accumulate_members_risk(&states, committed_ref, margin_guard, margin_pct, limit)
+            .await;
         let position_limit_reached = limit.is_some_and(|limit| total >= limit);
         let unsafe_now = initialized_incomplete || position_limit_reached || zero_margin;
         let blocked = incomplete || position_limit_reached || zero_margin;
@@ -133,6 +117,36 @@ impl GlobalPositionLimit {
         self.apply_risk_outcome(&states, first, committed_ref, unsafe_now, reason)
             .await;
         blocked
+    }
+
+    async fn accumulate_members_risk(
+        &self,
+        states: &[Arc<AppState>],
+        committed_ref: Option<&crate::config::GlobalConfig>,
+        margin_guard: bool,
+        margin_pct: Option<Decimal>,
+        limit: Option<Decimal>,
+    ) -> (Decimal, bool, bool, bool) {
+        let mut total = Decimal::ZERO;
+        let mut incomplete = !self.membership_ready.load(Ordering::SeqCst);
+        let mut initialized_incomplete = false;
+        let mut zero_margin = false;
+        for state in states {
+            let (member_incomplete, member_init_incomplete, member_zero_margin) =
+                Self::evaluate_member_risk(
+                    state,
+                    committed_ref,
+                    margin_guard,
+                    margin_pct,
+                    limit,
+                    &mut total,
+                )
+                .await;
+            incomplete |= member_incomplete;
+            initialized_incomplete |= member_init_incomplete;
+            zero_margin |= member_zero_margin;
+        }
+        (total, incomplete, initialized_incomplete, zero_margin)
     }
 
     async fn apply_risk_outcome(
@@ -208,18 +222,12 @@ impl GlobalPositionLimit {
         let mut member_incomplete = !initialized
             || !state.global_position_ready.load(Ordering::SeqCst)
             || state.paper_restore_failed.load(Ordering::SeqCst);
-        let (sync_interval_secs, is_paper) = match committed_ref {
-            Some(committed) => (
-                committed.sync_interval_secs,
-                committed.api_key.trim().is_empty() && committed.api_secret.trim().is_empty(),
-            ),
-            None => {
-                let config = state.config.read().await;
-                (
-                    config.exchange.sync_interval_secs,
-                    config.exchange.is_paper(),
-                )
-            }
+        let (sync_interval_secs, is_paper) = {
+            let config = state.config.read().await;
+            (
+                committed_ref.map_or(config.exchange.sync_interval_secs, |c| c.sync_interval_secs),
+                config.exchange.is_paper(),
+            )
         };
         let max_age = crate::types::max_reconciliation_age_secs(sync_interval_secs);
         let now = Utc::now();
@@ -231,17 +239,28 @@ impl GlobalPositionLimit {
             member_incomplete |= margin_incomplete;
             zero_margin |= margin_zero;
         }
-        if limit.is_none() {
-            return (
-                member_incomplete,
-                initialized && member_incomplete,
-                zero_margin,
-            );
+        if limit.is_some() {
+            member_incomplete |=
+                Self::accumulate_member_position_notional(state, is_paper, fresh, total).await;
         }
+        (
+            member_incomplete,
+            initialized && member_incomplete,
+            zero_margin,
+        )
+    }
+
+    async fn accumulate_member_position_notional(
+        state: &AppState,
+        is_paper: bool,
+        fresh: impl Fn(chrono::DateTime<Utc>) -> bool + Copy,
+        total: &mut Decimal,
+    ) -> bool {
+        let mut incomplete = false;
         let (position_size, price) = {
             let position = state.position.read().await;
             if !is_paper && !position.update_time.is_some_and(fresh) {
-                member_incomplete = true;
+                incomplete = true;
             }
             let ticker = state.ticker.read().await;
             (
@@ -250,7 +269,7 @@ impl GlobalPositionLimit {
             )
         };
         if !position_size.is_zero() && price <= Decimal::ZERO {
-            member_incomplete = true;
+            incomplete = true;
         }
         if price > Decimal::ZERO {
             match position_size
@@ -259,14 +278,10 @@ impl GlobalPositionLimit {
                 .and_then(|v| total.checked_add(v))
             {
                 Some(value) => *total = value,
-                None => member_incomplete = true,
+                None => incomplete = true,
             }
         }
-        (
-            member_incomplete,
-            initialized && member_incomplete,
-            zero_margin,
-        )
+        incomplete
     }
 
     fn format_global_risk_reason(

@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+#[must_use = "dropping TempTestDir immediately deletes the temporary directory"]
 pub(crate) struct TempTestDir(PathBuf);
 
 impl TempTestDir {
@@ -12,6 +13,10 @@ impl TempTestDir {
 
     pub(crate) fn join(&self, name: impl AsRef<Path>) -> PathBuf {
         self.0.join(name)
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.0
     }
 }
 

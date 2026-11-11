@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { formatDecimalDisplay, parseSignedDecimal, parseUnsignedDecimal, subSignedDecimals } from '../lib/decimal';
-import { ageText, number, positiveDecimalText, quantity, relativeTime, trimFractionZeros } from '../lib/format';
+import { ageText, number, positiveDecimalText, quantity, trimFractionZeros } from '../lib/format';
 import { accountGroups, availableRatio, comparePositionAmount, entryMarkExpiry, groupTradePnl, isEntryMarkFresh, nextAccountExpiry, positionAmount, positionGroups, todayCount, todayPnlGroups } from '../lib/portfolio';
 import { snapshot } from './fixtures';
 
@@ -51,15 +51,13 @@ it('rejects decimal strings exceeding 30 whole/fractional digits or 64 character
   }
 });
 
-it('formats relative trade times across units and handles invalid or future dates', () => {
+it('formats ageText across units and handles invalid or future timestamps', () => {
   const now = Date.parse('2026-01-02T00:00:00Z');
-  const at = (seconds: number) => new Date(now - seconds * 1000).toISOString();
-  expect([1, 59, 60, 3600, 86400].map(seconds => relativeTime(at(seconds), now)))
-    .toEqual(['1秒前', '59秒前', '1分钟前', '1小时前', '1天前']);
-  expect(relativeTime(now, now)).toBe('0秒前');
-  expect(relativeTime(now + 400, now)).toBe('0秒前');
-  expect(relativeTime(at(-2), now)).toBe('2秒后');
-  expect(relativeTime('invalid', now)).toBe('--');
+  const at = (seconds: number) => now - seconds * 1000;
+  expect([0, 1, 2, 59, 60, 3600, 86400].map(seconds => ageText(at(seconds), now)))
+    .toEqual(['刚刚', '刚刚', '2秒前', '59秒前', '1分钟前', '1小时前', '1天前']);
+  expect(ageText(now + 2_000, now)).toBe('刚刚');
+  expect(ageText(Date.parse('invalid'), now)).toBe('--');
 });
 
 describe('account and trade summaries', () => {
@@ -141,19 +139,34 @@ describe('account and trade summaries', () => {
     expect(accountGroups([{ snapshot: s, mode: 'LIVE', scoped: true }])[0]).toMatchObject({ equity: null, wallet: null, unrealized: null });
     expect(todayCount(s)).toBeNull();
   });
-  it('uses the newest valid observation of a shared live account', () => {
-    const now = Date.now(), old = snapshot('SOLUSDC', 'LIVE'), current = snapshot('BTCUSDC', 'LIVE');
-    old.account.update_time = new Date(now + 1000).toISOString();
-    old.account.margin_balance = '999';
-    current.account.update_time = new Date(now - 1000).toISOString();
+  it('uses the newest valid observation of a shared live account, blanks stale observations, and isolates account_scope', () => {
+    const now = Date.now(), expired = snapshot('SOLUSDC', 'LIVE'), older = snapshot('ETHUSDC', 'LIVE'), current = snapshot('BTCUSDC', 'LIVE');
+    expired.account.update_time = new Date(now - 31_000).toISOString();
+    expired.account.margin_balance = '999';
+    older.account.update_time = new Date(now - 5_000).toISOString();
+    older.account.margin_balance = '150';
+    current.account.update_time = new Date(now - 1_000).toISOString();
     current.account.margin_balance = '200';
     const entries = [
-      { snapshot: old, mode: 'LIVE' as const, scoped: true, account_observation_stale: true },
-      { snapshot: current, mode: 'LIVE' as const, scoped: true, account_observation_stale: false },
+      { snapshot: expired, mode: 'LIVE' as const, scoped: true },
+      { snapshot: older, mode: 'LIVE' as const, scoped: true },
+      { snapshot: current, mode: 'LIVE' as const, scoped: true },
     ];
     expect(accountGroups(entries, now)[0].equity).toBe(200);
+    expect(accountGroups([{ ...entries[1], account_observation_stale: true }, entries[2]], now)[0]).toMatchObject({ equity: null, wallet: null });
     current.account.update_time = new Date(now - 31_000).toISOString();
+    older.account.update_time = new Date(now - 31_000).toISOString();
     expect(accountGroups(entries, now)[0].equity).toBeNull();
+
+    const scopeA = snapshot('SOLUSDC', 'LIVE'), scopeB = snapshot('BTCUSDC', 'LIVE');
+    scopeA.account_scope = 'scope-a';
+    scopeA.account = { ...scopeA.account, margin_balance: '120', update_time: new Date(now).toISOString() };
+    scopeB.account_scope = 'scope-b';
+    scopeB.account = { ...scopeB.account, margin_balance: '450', update_time: new Date(now).toISOString() };
+    const scopedGroups = accountGroups([{ snapshot: scopeA, mode: 'LIVE' }, { snapshot: scopeB, mode: 'LIVE' }], now);
+    expect(scopedGroups).toHaveLength(2);
+    expect(scopedGroups.find(g => g.account_scope === 'scope-a')).toMatchObject({ key: 'LIVE:USDC', equity: 120 });
+    expect(scopedGroups.find(g => g.account_scope === 'scope-b')).toMatchObject({ key: 'LIVE:USDC', equity: 450 });
   });
   it('honors dynamic sync_interval_secs and tolerates client/server clock skew on live accounts', () => {
     const now = 1_700_000_000_000;

@@ -15,28 +15,13 @@ fn parameter(name: &str, default: usize) -> usize {
 // The directory owns the database and its SQLite sidecars; it is removed after
 // all engines and database handles have been dropped, including during unwinding.
 struct BenchmarkDatabase {
-    directory: Option<std::path::PathBuf>,
+    directory: Option<crate::test_support::TempTestDir>,
 }
 
 impl BenchmarkDatabase {
     fn new(disk: bool) -> Self {
-        if !disk {
-            return Self { directory: None };
-        }
-        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        loop {
-            let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let directory = std::env::temp_dir()
-                .join(format!("binancebot-benchmark-{}-{id}", std::process::id()));
-            match std::fs::create_dir(&directory) {
-                Ok(()) => {
-                    return Self {
-                        directory: Some(directory),
-                    }
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(error) => panic!("cannot create benchmark database directory: {error}"),
-            }
+        Self {
+            directory: disk.then(|| crate::test_support::TempTestDir::new("binancebot-benchmark")),
         }
     }
 
@@ -44,19 +29,6 @@ impl BenchmarkDatabase {
         match &self.directory {
             Some(directory) => Database::open(directory.join("benchmark.sqlite")).unwrap(),
             None => Database::open(":memory:").unwrap(),
-        }
-    }
-}
-
-impl Drop for BenchmarkDatabase {
-    fn drop(&mut self) {
-        if let Some(directory) = &self.directory {
-            if let Err(error) = std::fs::remove_dir_all(directory) {
-                eprintln!(
-                    "failed to remove benchmark directory {}: {error}",
-                    directory.display()
-                );
-            }
         }
     }
 }
@@ -93,7 +65,7 @@ fn benchmark_disk_database_is_isolated_and_cleaned_up() {
     let directory;
     {
         let owner = BenchmarkDatabase::new(true);
-        directory = owner.directory.as_ref().unwrap().clone();
+        directory = owner.directory.as_ref().unwrap().path().to_path_buf();
         let db = owner.open();
         assert!(directory.join("benchmark.sqlite").exists());
         drop(db);

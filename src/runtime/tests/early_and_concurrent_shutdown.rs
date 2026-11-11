@@ -1,15 +1,13 @@
 use super::super::*;
 use super::{
     exchange_info, fixture, fixture_with_database, fixture_with_shutdown_observer,
-    fixture_with_unresponsive_engine, mock_exchange, payload, request, valid_filters,
+    fixture_with_unresponsive_engine, mock_exchange, valid_filters,
 };
 use crate::config::{GlobalConfig, TradingPairConfig};
 use crate::db::Database;
-use crate::server::create_managed_router;
 use crate::types::{BotControlAction, BotStatus, TradingMode};
 use axum::http::StatusCode;
 use axum::Router;
-use serde_json::json;
 
 #[tokio::test]
 async fn startup_registers_engines_for_early_shutdown_timeout() {
@@ -64,6 +62,7 @@ async fn startup_registers_engines_for_early_shutdown_timeout() {
     .unwrap_err();
     assert!(error.to_string().contains("SOLUSDC"), "{error}");
     server.abort();
+    let _ = server.await;
 }
 
 #[tokio::test]
@@ -149,11 +148,8 @@ async fn early_shutdown_reports_engine_already_joined_by_run() {
 #[tokio::test]
 async fn early_shutdown_aborts_unresponsive_engine_before_membership_commit_returns() {
     for operation in ["add", "remove"] {
-        let directory = std::env::temp_dir().join(format!(
-            "runtime-early-timeout-{operation}-{}",
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir(&directory).unwrap();
+        let directory =
+            crate::test_support::TempTestDir::new(&format!("runtime-early-timeout-{operation}"));
         let db = Arc::new(Database::open(directory.join("bot.db")).unwrap());
         let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
         let mut runtime =
@@ -249,7 +245,7 @@ async fn early_shutdown_aborts_unresponsive_engine_before_membership_commit_retu
         drop(states);
         drop(db);
         server.abort();
-        std::fs::remove_dir_all(directory).unwrap();
+        let _ = server.await;
     }
 }
 
@@ -322,11 +318,8 @@ async fn shutdown_stops_all_engines_while_removal_waits_for_membership_lock() {
 #[tokio::test]
 async fn early_shutdown_cleans_existing_engines_during_membership_commit() {
     for operation in ["add", "remove"] {
-        let directory = std::env::temp_dir().join(format!(
-            "runtime-early-{operation}-{}",
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir(&directory).unwrap();
+        let directory =
+            crate::test_support::TempTestDir::new(&format!("runtime-early-{operation}"));
         let path = directory.join("bot.db");
         let db = Arc::new(Database::open(&path).unwrap());
         let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
@@ -447,6 +440,7 @@ async fn early_shutdown_cleans_existing_engines_during_membership_commit() {
                 [], |row| row.get(0)
             ).unwrap();
             assert_eq!(dirty, 0);
+            drop(connection);
         }
         assert!(observed_rx.try_recv().is_err());
         drop(added_state);
@@ -455,18 +449,15 @@ async fn early_shutdown_cleans_existing_engines_during_membership_commit() {
         drop(states);
         drop(db);
         server.abort();
-        std::fs::remove_dir_all(directory).unwrap();
+        let _ = server.await;
     }
 }
 
 #[tokio::test]
 async fn shutdown_during_membership_commit_finishes_command_and_preserves_restart() {
     for operation in ["add", "remove"] {
-        let directory = std::env::temp_dir().join(format!(
-            "runtime-shutdown-{operation}-{}",
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir(&directory).unwrap();
+        let directory =
+            crate::test_support::TempTestDir::new(&format!("runtime-shutdown-{operation}"));
         let path = directory.join("bot.db");
         let db = Arc::new(Database::open(&path).unwrap());
         let mut runtime = fixture_with_database(db.clone(), false, false);
@@ -584,16 +575,13 @@ async fn shutdown_during_membership_commit_finishes_command_and_preserves_restar
         drop(restarted);
         drop(reopened);
         server.abort();
-        std::fs::remove_dir_all(directory).unwrap();
+        let _ = server.await;
     }
 }
+
 #[tokio::test]
 async fn shutdown_during_failed_removal_reports_error_and_preserves_pair_on_restart() {
-    let directory = std::env::temp_dir().join(format!(
-        "runtime-shutdown-remove-failure-{}",
-        uuid::Uuid::new_v4()
-    ));
-    std::fs::create_dir(&directory).unwrap();
+    let directory = crate::test_support::TempTestDir::new("runtime-shutdown-remove-failure");
     let path = directory.join("bot.db");
     let db = Arc::new(Database::open(&path).unwrap());
     let mut runtime = fixture_with_database(db.clone(), false, false);
@@ -676,194 +664,7 @@ async fn shutdown_during_failed_removal_reports_error_and_preserves_pair_on_rest
     drop(restarted);
     drop(reopened);
     server.abort();
-    std::fs::remove_dir_all(directory).unwrap();
-}
-
-#[tokio::test]
-async fn adding_pair_rolls_back_when_guard_write_fails_and_can_be_retried() {
-    let path = std::env::temp_dir().join(format!("add-guard-failure-{}.db", uuid::Uuid::new_v4()));
-    let db = Arc::new(Database::open(&path).unwrap());
-    let mut runtime = fixture_with_database(db.clone(), false, false);
-    let (url, server) =
-        mock_exchange(StatusCode::OK, exchange_info("TRADING", valid_filters())).await;
-    runtime.test_exchange_url = Some(url);
-    let handle = runtime.handle();
-    let router = create_managed_router(handle.clone()).await;
-    let connection = rusqlite::Connection::open(&path).unwrap();
-    connection.execute_batch("CREATE TRIGGER reject_new_guard BEFORE INSERT ON pair_execution_guard WHEN NEW.symbol = 'ETHUSDT' BEGIN SELECT RAISE(ABORT, 'guard write failed'); END;").unwrap();
-    let manager = tokio::spawn(async move { runtime.run().await });
-
-    let (_, response) = request(&router, "/api/pairs", "POST", payload("ETHUSDT"), true).await;
-    assert_eq!(response["success"], false, "{response}");
-    assert!(!db
-        .load_config()
-        .unwrap()
-        .unwrap()
-        .pairs
-        .iter()
-        .any(|pair| pair.symbol == "ETHUSDT"));
-    assert_eq!(
-        db.load_pair_status("ETHUSDT", TradingMode::Paper).unwrap(),
-        None
-    );
-    assert_eq!(handle.states.read().await.len(), 2);
-    connection
-        .execute_batch("DROP TRIGGER reject_new_guard;")
-        .unwrap();
-    let (_, response) = request(&router, "/api/pairs", "POST", payload("ETHUSDT"), true).await;
-    assert_eq!(response["success"], true, "{response}");
-    assert!(db
-        .load_config()
-        .unwrap()
-        .unwrap()
-        .pairs
-        .iter()
-        .any(|pair| pair.symbol == "ETHUSDT"));
-    assert_eq!(
-        db.load_pair_status("ETHUSDT", TradingMode::Paper).unwrap(),
-        Some(BotStatus::Paused)
-    );
-    assert_eq!(handle.states.read().await.len(), 3);
-    manager.abort();
-    server.abort();
-    drop(connection);
-    drop(db);
-    std::fs::remove_file(path).unwrap();
-}
-
-#[tokio::test]
-async fn adding_pairs_requires_valid_exchange_rules_before_saving() {
-    let valid = valid_filters();
-    let mut no_price = valid.clone();
-    no_price.as_array_mut().unwrap().remove(0);
-    let mut no_lot = valid.clone();
-    no_lot.as_array_mut().unwrap().remove(1);
-    let mut zero_tick = valid.clone();
-    zero_tick[0]["tickSize"] = json!("0");
-    let mut negative_tick = valid.clone();
-    negative_tick[0]["tickSize"] = json!("-0.01");
-    let mut zero_step = valid.clone();
-    zero_step[1]["stepSize"] = json!("0");
-    let mut negative_step = valid.clone();
-    negative_step[1]["stepSize"] = json!("-0.001");
-    let mut mismatched_tick = valid.clone();
-    mismatched_tick[0]["tickSize"] = json!("0.03");
-
-    for (name, status, body) in [
-        ("missing symbol", StatusCode::OK, json!({"symbols": []})),
-        (
-            "wrong symbol",
-            StatusCode::OK,
-            json!({"symbols": [{"symbol":"OTHER", "status":"TRADING", "pricePrecision":2, "quantityPrecision":3, "filters":valid.clone()}]}),
-        ),
-        (
-            "not trading",
-            StatusCode::OK,
-            exchange_info("BREAK", valid.clone()),
-        ),
-        (
-            "missing price filter",
-            StatusCode::OK,
-            exchange_info("TRADING", no_price),
-        ),
-        (
-            "missing lot filter",
-            StatusCode::OK,
-            exchange_info("TRADING", no_lot),
-        ),
-        (
-            "zero tick",
-            StatusCode::OK,
-            exchange_info("TRADING", zero_tick),
-        ),
-        (
-            "negative tick",
-            StatusCode::OK,
-            exchange_info("TRADING", negative_tick),
-        ),
-        (
-            "zero step",
-            StatusCode::OK,
-            exchange_info("TRADING", zero_step),
-        ),
-        (
-            "negative step",
-            StatusCode::OK,
-            exchange_info("TRADING", negative_step),
-        ),
-        (
-            "grid mismatch",
-            StatusCode::OK,
-            exchange_info("TRADING", mismatched_tick),
-        ),
-        (
-            "invalid response",
-            StatusCode::OK,
-            json!({"symbols": "invalid"}),
-        ),
-        (
-            "API error",
-            StatusCode::BAD_REQUEST,
-            json!({"code":-1121,"msg":"Invalid symbol."}),
-        ),
-        (
-            "other API error",
-            StatusCode::BAD_REQUEST,
-            json!({"code":-1000,"msg":"Internal error"}),
-        ),
-    ] {
-        let (url, server) = mock_exchange(status, body).await;
-        let mut runtime = fixture();
-        runtime.test_exchange_url = Some(url);
-        let handle = runtime.handle();
-        let router = create_managed_router(handle.clone()).await;
-        let manager = tokio::spawn(async move { runtime.run().await });
-        let (_, response) = request(&router, "/api/pairs", "POST", payload("ETHUSDT"), true).await;
-        assert_eq!(response["success"], false, "{name}: {response}");
-        if name == "API error" {
-            assert!(response["message"]
-                .as_str()
-                .unwrap()
-                .contains("交易对 ETHUSDT 不存在"));
-        } else if name == "other API error" || name == "invalid response" {
-            assert!(response["message"]
-                .as_str()
-                .unwrap()
-                .contains("暂时无法验证交易对"));
-        }
-        let saved = handle.db.load_config().unwrap().unwrap();
-        assert_eq!(saved.pairs.len(), 2, "{name}");
-        assert!(
-            !saved.pairs.iter().any(|pair| pair.symbol == "ETHUSDT"),
-            "{name}"
-        );
-        assert_eq!(handle.states.read().await.len(), 2, "{name}");
-        manager.abort();
-        server.abort();
-    }
-}
-
-#[tokio::test]
-async fn adding_pair_rejects_network_failure_without_saving() {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    drop(listener);
-    let mut runtime = fixture();
-    runtime.test_exchange_url = Some(url);
-    let handle = runtime.handle();
-    let router = create_managed_router(handle.clone()).await;
-    let manager = tokio::spawn(async move { runtime.run().await });
-    let (_, response) = request(&router, "/api/pairs", "POST", payload("ETHUSDT"), true).await;
-    assert_eq!(response["success"], false);
-    assert!(response["message"]
-        .as_str()
-        .unwrap()
-        .contains("暂时无法验证交易对"));
-    let saved = handle.db.load_config().unwrap().unwrap();
-    assert_eq!(saved.pairs.len(), 2);
-    assert!(!saved.pairs.iter().any(|pair| pair.symbol == "ETHUSDT"));
-    assert_eq!(handle.states.read().await.len(), 2);
-    manager.abort();
+    let _ = server.await;
 }
 
 #[tokio::test]
@@ -932,101 +733,4 @@ async fn shutdown_stops_all_pairs_before_waiting_and_cancels_them_concurrently()
         );
         assert!(state.resume_trading().await.is_err());
     }
-}
-
-#[tokio::test]
-async fn add_pair_rolls_back_config_and_guard_on_prepare_failure_or_fails_closed() {
-    struct TempDir(std::path::PathBuf);
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-    let dir = TempDir(
-        std::env::temp_dir().join(format!("runtime-add-rollback-{}", uuid::Uuid::new_v4())),
-    );
-    std::fs::create_dir(&dir.0).unwrap();
-    let path = dir.0.join("bot.db");
-    let db = Arc::new(Database::open(&path).unwrap());
-    let mut runtime = fixture_with_database(db.clone(), false, false);
-    runtime
-        .global_position_limit
-        .membership_ready
-        .store(true, std::sync::atomic::Ordering::SeqCst);
-    let (url, server) =
-        mock_exchange(StatusCode::OK, exchange_info("TRADING", valid_filters())).await;
-    runtime.test_exchange_url = Some(url);
-
-    let mut added = db
-        .load_config()
-        .unwrap()
-        .unwrap()
-        .strategy_configs()
-        .unwrap()
-        .remove(0);
-    added.exchange.symbol = "ETHUSDT".into();
-
-    runtime
-        .fail_next_prepare_pair
-        .store(true, std::sync::atomic::Ordering::SeqCst);
-    assert!(runtime.add_pair(added.clone()).await.is_err());
-    assert!(runtime
-        .global_position_limit
-        .membership_ready
-        .load(std::sync::atomic::Ordering::SeqCst));
-    let symbols: Vec<_> = db
-        .load_config()
-        .unwrap()
-        .unwrap()
-        .pairs
-        .into_iter()
-        .map(|p| p.symbol)
-        .collect();
-    assert_eq!(symbols, vec!["SOLUSDC", "BTCUSDT"]);
-    let external = rusqlite::Connection::open(&path).unwrap();
-    let dirty: i64 = external
-        .query_row(
-            "SELECT dirty FROM pair_execution_guard WHERE symbol = 'ETHUSDT' AND mode = 'PAPER'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(dirty, 0);
-
-    // If rollback itself fails, membership_ready must stay false.
-    let (reached_tx, reached_rx) = oneshot::channel();
-    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
-    db.set_membership_commit_hook("add_after", reached_tx, resume_rx);
-    runtime
-        .fail_next_prepare_pair
-        .store(true, std::sync::atomic::Ordering::SeqCst);
-    let trigger_path = path.clone();
-    let blocker = std::thread::spawn(move || {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(reached_rx)
-            .unwrap();
-        let conn = rusqlite::Connection::open(&trigger_path).unwrap();
-        conn.execute_batch(
-            "CREATE TRIGGER fail_rollback_config BEFORE UPDATE ON app_config
-             BEGIN SELECT RAISE(ABORT, 'rollback failed'); END;",
-        )
-        .unwrap();
-        drop(conn);
-        resume_tx.send(()).unwrap();
-    });
-    assert!(runtime.add_pair(added).await.is_err());
-    blocker.join().unwrap();
-    assert!(!runtime
-        .global_position_limit
-        .membership_ready
-        .load(std::sync::atomic::Ordering::SeqCst));
-    external
-        .execute_batch("DROP TRIGGER fail_rollback_config;")
-        .unwrap();
-    drop(external);
-    runtime.shutdown(Duration::from_secs(5)).await.unwrap();
-    server.abort();
 }

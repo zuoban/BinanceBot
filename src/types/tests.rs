@@ -287,3 +287,88 @@ fn decimal_formatters_handle_rounding_truncation_negative_zero_and_extreme_digit
         }
     }
 }
+
+#[test]
+fn bot_status_db_round_trip_and_const_order_side_helpers() {
+    for (status, text) in [
+        (BotStatus::Running, "RUNNING"),
+        (BotStatus::Paused, "PAUSED"),
+        (BotStatus::Stopped, "STOPPED"),
+        (BotStatus::Error, "ERROR"),
+    ] {
+        assert_eq!(status.as_str(), text);
+        assert_eq!(BotStatus::from_db(text).unwrap(), status);
+    }
+    assert!(BotStatus::from_db("running").is_err());
+    assert!(BotStatus::from_db("\"RUNNING\"").is_err());
+    assert!(BotStatus::from_db("UNKNOWN").is_err());
+
+    const OPP_BUY: OrderSide = OrderSide::Buy.opposite();
+    const OPP_SELL: OrderSide = OrderSide::Sell.opposite();
+    const BUY_STR: &str = OrderSide::Buy.as_str();
+    const SELL_STR: &str = OrderSide::Sell.as_str();
+    assert_eq!(OPP_BUY, OrderSide::Sell);
+    assert_eq!(OPP_SELL, OrderSide::Buy);
+    assert_eq!(BUY_STR, "BUY");
+    assert_eq!(SELL_STR, "SELL");
+}
+
+#[test]
+fn validate_credential_updates_rejects_contradictory_or_half_configured_payloads() {
+    assert!(UpdateGlobalConfigPayload::default()
+        .validate_credential_updates()
+        .is_ok());
+    assert!(UpdateGlobalConfigPayload {
+        clear_api_credentials: true,
+        api_key: Some("   ".into()),
+        ..Default::default()
+    }
+    .validate_credential_updates()
+    .is_ok());
+    assert!(UpdateGlobalConfigPayload {
+        api_key: Some("new-key".into()),
+        api_secret: Some("new-secret".into()),
+        ..Default::default()
+    }
+    .validate_credential_updates()
+    .is_ok());
+
+    let clear_api_conflict = UpdateGlobalConfigPayload {
+        clear_api_credentials: true,
+        api_key: Some("new-key".into()),
+        ..Default::default()
+    }
+    .validate_credential_updates()
+    .unwrap_err()
+    .to_string();
+    assert_eq!(
+        clear_api_conflict,
+        "清除 API 凭证时请勿同时提交新的 API Key 或 Secret"
+    );
+
+    let clear_tg_conflict = UpdateGlobalConfigPayload {
+        clear_telegram_credentials: true,
+        telegram_chat_id: Some("12345".into()),
+        ..Default::default()
+    }
+    .validate_credential_updates()
+    .unwrap_err()
+    .to_string();
+    assert_eq!(
+        clear_tg_conflict,
+        "清除 Telegram 凭证时请勿同时提交新的 Bot Token 或 Chat ID"
+    );
+
+    let partial_api = UpdateGlobalConfigPayload {
+        api_key: Some("only-key".into()),
+        api_secret: Some("   ".into()),
+        ..Default::default()
+    }
+    .validate_credential_updates()
+    .unwrap_err()
+    .to_string();
+    assert_eq!(
+        partial_api,
+        "更换或配置 API 凭证时请同时填写 API Key 和 Secret"
+    );
+}

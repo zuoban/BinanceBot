@@ -195,3 +195,42 @@ it('ignores global shortcuts during IME composition and skips redundant same-rou
   fireEvent.keyDown(window, { key: 'o' });
   await waitFor(() => expect(router.state.location.pathname).toBe('/'));
 });
+
+it('disables the form while preflight refetchGlobal is pending and aborts an open save submission on revert', async () => {
+  const preflight = Promise.withResolvers<{ version: string; has_api_key: boolean; has_api_secret: boolean }>();
+  let globalCalls = 0;
+  mocks.api.mockImplementation((path: string) => {
+    if (path === '/api/global/config') {
+      globalCalls++;
+      return globalCalls === 1
+        ? Promise.resolve({ version: 'global-version', has_api_key: true, has_api_secret: true })
+        : preflight.promise;
+    }
+    return Promise.resolve({ ...pair('BTCUSDC').grid_config, config_version: 'version-1' });
+  });
+  const saveConfirm = Promise.withResolvers<boolean>();
+  mocks.confirm.mockReturnValueOnce(saveConfirm.promise).mockResolvedValueOnce(true);
+
+  setup();
+  const user = await prepareLive();
+  const interval = await screen.findByLabelText('网格间距');
+  await waitFor(() => expect(interval).toBeEnabled());
+  await user.clear(interval);
+  await user.type(interval, '0.2');
+
+  const saveButton = screen.getByRole('button', { name: '保存并立即生效' });
+  await user.click(saveButton);
+  await waitFor(() => expect(globalCalls).toBe(2));
+  expect(saveButton).toHaveClass('ant-btn-loading');
+  expect(interval).toBeDisabled();
+  expect(mocks.confirm).not.toHaveBeenCalled();
+
+  await act(async () => { preflight.resolve({ version: 'global-version', has_api_key: true, has_api_secret: true }); });
+  await waitFor(() => expect(mocks.confirm).toHaveBeenCalledTimes(1));
+  expect(interval).toBeEnabled();
+
+  await user.click(screen.getByRole('button', { name: /还\s*原/ }));
+  await waitFor(() => expect(interval).toHaveValue('0.1'));
+  await act(async () => { saveConfirm.resolve(true); });
+  expect(mocks.post).not.toHaveBeenCalled();
+});

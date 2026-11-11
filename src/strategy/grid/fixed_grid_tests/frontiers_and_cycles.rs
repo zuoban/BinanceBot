@@ -382,7 +382,7 @@ async fn legacy_exit_label_does_not_change_pruning_or_duplicate_priority() {
 
 #[tokio::test]
 async fn restart_uses_the_latest_opposite_fill_to_unlock_the_previous_buy_level() {
-    let directory = std::env::temp_dir().join(format!("window-restart-{}", Uuid::new_v4()));
+    let directory = crate::test_support::TempTestDir::new("window-restart");
     let path = directory.join("bot.db");
     {
         let db = Arc::new(Database::open(&path).unwrap());
@@ -428,7 +428,6 @@ async fn restart_uses_the_latest_opposite_fill_to_unlock_the_previous_buy_level(
             .iter()
             .any(|o| o.side == OrderSide::Sell && o.price == dec!(119)));
     }
-    std::fs::remove_dir_all(directory).unwrap();
 }
 
 #[tokio::test]

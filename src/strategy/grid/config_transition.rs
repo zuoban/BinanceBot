@@ -1,30 +1,66 @@
 use super::*;
+use std::sync::atomic::Ordering;
 
-struct PreparedConfigTransition {
-    new_client: Arc<BinanceFuturesClient>,
-    new_rules: SymbolRules,
-    new_price: Option<Decimal>,
-    paper_state: Option<(PositionInfo, AccountInfo)>,
-    direction_changed: bool,
-    only_window_changed: bool,
-    market_changed: bool,
-    mode_changed: bool,
-    credentials_changed: bool,
-    client_changed: bool,
-    fetch_rules: bool,
+#[must_use = "dropping this guard immediately restores global_position_initialized"]
+struct ScopeTransitionInitGuard(Arc<AppState>);
+
+impl Drop for ScopeTransitionInitGuard {
+    fn drop(&mut self) {
+        self.0
+            .global_position_initialized
+            .store(true, Ordering::SeqCst);
+    }
 }
 
-struct ConfigScopeReset<'a> {
-    new_config: &'a crate::config::AppConfig,
-    new_client: Arc<BinanceFuturesClient>,
-    new_rules: SymbolRules,
-    new_price: Option<Decimal>,
-    paper_state: Option<(PositionInfo, AccountInfo)>,
-    market_changed: bool,
-    mode_changed: bool,
-    credentials_changed: bool,
-    client_changed: bool,
-    fetch_rules: bool,
+#[derive(Clone, Copy)]
+pub(super) struct ConfigTransitionFlags {
+    pub(super) direction_changed: bool,
+    pub(super) only_window_changed: bool,
+    pub(super) market_changed: bool,
+    pub(super) mode_changed: bool,
+    pub(super) credentials_changed: bool,
+    pub(super) client_changed: bool,
+}
+
+impl ConfigTransitionFlags {
+    pub(super) fn from_configs(
+        old_config: &crate::config::AppConfig,
+        new_config: &crate::config::AppConfig,
+    ) -> Option<Self> {
+        if old_config.exchange == new_config.exchange && old_config.grid == new_config.grid {
+            return None;
+        }
+        let mut resized_grid = old_config.grid;
+        resized_grid.buy_window = new_config.grid.buy_window;
+        resized_grid.sell_window = new_config.grid.sell_window;
+        let credentials_changed = old_config.exchange.api_key != new_config.exchange.api_key
+            || old_config.exchange.api_secret != new_config.exchange.api_secret;
+        Some(Self {
+            direction_changed: old_config.grid.direction != new_config.grid.direction,
+            only_window_changed: old_config.exchange == new_config.exchange
+                && resized_grid == new_config.grid,
+            market_changed: old_config.exchange.symbol != new_config.exchange.symbol,
+            mode_changed: old_config.exchange.trading_mode() != new_config.exchange.trading_mode(),
+            credentials_changed,
+            client_changed: credentials_changed
+                || old_config.exchange.recv_window != new_config.exchange.recv_window,
+        })
+    }
+
+    #[must_use]
+    #[inline]
+    pub(super) const fn scope_changed(self) -> bool {
+        self.market_changed || self.mode_changed || self.credentials_changed
+    }
+}
+
+pub(super) struct ConfigScopeReset {
+    pub(super) new_client: Arc<BinanceFuturesClient>,
+    pub(super) new_rules: SymbolRules,
+    pub(super) new_price: Option<Decimal>,
+    pub(super) paper_state: Option<(PositionInfo, AccountInfo)>,
+    pub(super) flags: ConfigTransitionFlags,
+    pub(super) fetch_rules: bool,
 }
 
 impl GridTradingEngine {
@@ -113,11 +149,10 @@ impl GridTradingEngine {
         &self,
         new_client: &BinanceFuturesClient,
         new_config: &crate::config::AppConfig,
-        market_changed: bool,
-        mode_changed: bool,
+        flags: ConfigTransitionFlags,
     ) -> Result<(SymbolRules, Option<Decimal>, bool)> {
-        let fetch_rules = market_changed
-            || mode_changed
+        let market_or_mode_changed = flags.market_changed || flags.mode_changed;
+        let fetch_rules = market_or_mode_changed
             || (!new_config.exchange.is_paper() && !self.exchange_rules_loaded);
         let new_rules = if fetch_rules {
             let info = new_client
@@ -133,7 +168,7 @@ impl GridTradingEngine {
             rules.validate_grid_interval(new_config.grid.grid_interval)?;
             rules
         };
-        let new_price = if market_changed || mode_changed {
+        let new_price = if market_or_mode_changed {
             let price = new_client
                 .get_ticker_price(&new_config.exchange.symbol)
                 .await?;
@@ -153,7 +188,7 @@ impl GridTradingEngine {
     async fn prepare_config_transition(
         &mut self,
         new_config: &crate::config::AppConfig,
-    ) -> Result<Option<PreparedConfigTransition>> {
+    ) -> Result<Option<ConfigScopeReset>> {
         new_config.validate()?;
         self.retire_market_requests();
         if let Some(symbol) = self.state.pair_scope() {
@@ -163,56 +198,38 @@ impl GridTradingEngine {
             );
         }
         let old_config = self.state.config.read().await.clone();
-        let direction_changed = old_config.grid.direction != new_config.grid.direction;
-        if direction_changed {
+        if old_config.grid.direction != new_config.grid.direction {
             self.ensure_flat_for_direction_change(new_config.grid.direction)
                 .await?;
         }
-        let strategy_changed =
-            old_config.exchange != new_config.exchange || old_config.grid != new_config.grid;
-        if !strategy_changed {
+        let Some(flags) = ConfigTransitionFlags::from_configs(&old_config, new_config) else {
             return Ok(None);
-        }
-        let mut resized_grid = old_config.grid;
-        resized_grid.buy_window = new_config.grid.buy_window;
-        resized_grid.sell_window = new_config.grid.sell_window;
-        let only_window_changed =
-            old_config.exchange == new_config.exchange && resized_grid == new_config.grid;
-        let market_changed = old_config.exchange.symbol != new_config.exchange.symbol;
-        let mode_changed = old_config.exchange.trading_mode() != new_config.exchange.trading_mode();
-        let credentials_changed = old_config.exchange.api_key != new_config.exchange.api_key
-            || old_config.exchange.api_secret != new_config.exchange.api_secret;
-        let client_changed = credentials_changed
-            || old_config.exchange.recv_window != new_config.exchange.recv_window;
-
-        let paper_state = if new_config.exchange.is_paper() && (market_changed || mode_changed) {
-            self.load_target_paper_state(new_config, direction_changed)
-                .await?
-        } else {
-            None
         };
-        let new_client = if client_changed {
+        let paper_state =
+            if new_config.exchange.is_paper() && (flags.market_changed || flags.mode_changed) {
+                self.load_target_paper_state(new_config, flags.direction_changed)
+                    .await?
+            } else {
+                None
+            };
+        let new_client = if flags.client_changed {
             Arc::new(self.client.reconfig(&new_config.exchange))
         } else {
             Arc::clone(&self.client)
         };
         if !new_config.exchange.is_paper() {
-            Self::validate_live_config_target(&new_client, new_config, direction_changed).await?;
+            Self::validate_live_config_target(&new_client, new_config, flags.direction_changed)
+                .await?;
         }
         let (new_rules, new_price, fetch_rules) = self
-            .load_transition_rules_and_price(&new_client, new_config, market_changed, mode_changed)
+            .load_transition_rules_and_price(&new_client, new_config, flags)
             .await?;
-        Ok(Some(PreparedConfigTransition {
+        Ok(Some(ConfigScopeReset {
             new_client,
             new_rules,
             new_price,
             paper_state,
-            direction_changed,
-            only_window_changed,
-            market_changed,
-            mode_changed,
-            credentials_changed,
-            client_changed,
+            flags,
             fetch_rules,
         }))
     }
@@ -220,22 +237,20 @@ impl GridTradingEngine {
     async fn commit_config_transition(
         &mut self,
         new_config: &crate::config::AppConfig,
-        mut prepared: PreparedConfigTransition,
-    ) -> Result<(bool, bool, bool)> {
+        mut prepared: ConfigScopeReset,
+    ) -> Result<ConfigTransitionFlags> {
+        let flags = prepared.flags;
         // Resizing uses ordinary window pruning so existing exits keep their
         // prices and queue priority. Other changes cancel in the old scope first.
-        let cancel_before_switch = !prepared.only_window_changed
-            || prepared.market_changed
-            || prepared.mode_changed
-            || prepared.credentials_changed;
-        if cancel_before_switch && !self.cancel_all_orders().await {
+        if (!flags.only_window_changed || flags.scope_changed()) && !self.cancel_all_orders().await
+        {
             return Err(anyhow!(
                 "Could not cancel old managed orders; configuration unchanged"
             ));
         }
         // Cancellation may reveal a racing fill. Recheck the old account before
         // committing the new direction so an exit cannot become an opening order.
-        if prepared.direction_changed {
+        if flags.direction_changed {
             if let Err(error) = self
                 .ensure_flat_for_direction_change(new_config.grid.direction)
                 .await
@@ -244,9 +259,9 @@ impl GridTradingEngine {
                 return Err(error);
             }
         }
-        if new_config.exchange.is_paper() && (prepared.market_changed || prepared.mode_changed) {
+        if new_config.exchange.is_paper() && (flags.market_changed || flags.mode_changed) {
             prepared.paper_state = self
-                .load_target_paper_state(new_config, prepared.direction_changed)
+                .load_target_paper_state(new_config, flags.direction_changed)
                 .await?;
         }
         // Snapshot readers must see the new config together with its matching runtime data.
@@ -256,51 +271,34 @@ impl GridTradingEngine {
             self.pause_trading().await;
             return Err(error);
         }
-        let (market_changed, mode_changed, credentials_changed) = (
-            prepared.market_changed,
-            prepared.mode_changed,
-            prepared.credentials_changed,
-        );
-        self.reset_runtime_scope_after_config_change(ConfigScopeReset {
-            new_config,
-            new_client: prepared.new_client,
-            new_rules: prepared.new_rules,
-            new_price: prepared.new_price,
-            paper_state: prepared.paper_state,
-            market_changed,
-            mode_changed,
-            credentials_changed,
-            client_changed: prepared.client_changed,
-            fetch_rules: prepared.fetch_rules,
-        })
-        .await;
+        self.reset_runtime_scope_after_config_change(new_config, prepared)
+            .await;
         drop(scope_transition);
-        Ok((market_changed, mode_changed, credentials_changed))
+        Ok(flags)
     }
 
-    async fn reconcile_committed_config_transition(
+    pub(super) async fn reconcile_committed_config_transition(
         &mut self,
         new_config: &crate::config::AppConfig,
         market_changed: bool,
         mode_changed: bool,
         credentials_changed: bool,
     ) -> Result<()> {
+        let scope_changed = market_changed || mode_changed || credentials_changed;
+        let init_guard = scope_changed.then(|| ScopeTransitionInitGuard(Arc::clone(&self.state)));
         if self.state.is_stats_dirty() {
             self.state.refresh_current_scope().await;
         }
         let scope_ready = if new_config.exchange.is_paper() {
             self.update_paper_valuation().await;
-            !self
-                .state
-                .paper_restore_failed
-                .load(std::sync::atomic::Ordering::SeqCst)
+            !self.state.paper_restore_failed.load(Ordering::SeqCst)
         } else {
             self.sync_live_orders().await && self.sync_account_and_position().await
         };
         let ready = scope_ready && !self.state.is_stats_dirty();
         // A dirty target scope is installed paused, but reconciliation can have
         // recovered its live orders. Apply the same cancellation as startup.
-        let cancellation_complete = if (market_changed || mode_changed || credentials_changed)
+        let cancellation_complete = if scope_changed
             && !new_config.exchange.is_paper()
             && *self.state.status.read().await == BotStatus::Paused
         {
@@ -308,6 +306,7 @@ impl GridTradingEngine {
         } else {
             true
         };
+        drop(init_guard);
         if !cancellation_complete {
             self.set_global_reconciliation_ready(false).await;
             return Err(anyhow!(
@@ -324,15 +323,11 @@ impl GridTradingEngine {
         if *self.state.status.read().await == BotStatus::Running {
             self.maintain_grid_window().await;
         }
-        self.state
-            .add_log(
-                "SUCCESS",
-                format!(
-                    "Strategy configuration updated for {}",
-                    new_config.exchange.symbol
-                ),
-            )
-            .await;
+        let msg = format!(
+            "Strategy configuration updated for {}",
+            new_config.exchange.symbol
+        );
+        self.state.add_log("SUCCESS", msg).await;
         Ok(())
     }
 
@@ -349,13 +344,12 @@ impl GridTradingEngine {
                 .await;
             return Ok(());
         };
-        let (market_changed, mode_changed, credentials_changed) =
-            self.commit_config_transition(&new_config, prepared).await?;
+        let flags = self.commit_config_transition(&new_config, prepared).await?;
         self.reconcile_committed_config_transition(
             &new_config,
-            market_changed,
-            mode_changed,
-            credentials_changed,
+            flags.market_changed,
+            flags.mode_changed,
+            flags.credentials_changed,
         )
         .await
     }
@@ -419,7 +413,7 @@ impl GridTradingEngine {
         }
         self.state
             .paper_restore_failed
-            .store(false, std::sync::atomic::Ordering::SeqCst);
+            .store(false, Ordering::SeqCst);
         if let Some(tx) = &self.market_stream_tx {
             let _ = tx.send(new_config.exchange.symbol.clone());
         }
@@ -429,53 +423,55 @@ impl GridTradingEngine {
         self.state.refresh_current_scope().await;
     }
 
-    async fn reset_runtime_scope_after_config_change(&mut self, reset: ConfigScopeReset<'_>) {
-        let ConfigScopeReset {
-            new_config,
-            new_client,
-            new_rules,
-            new_price,
-            paper_state,
-            market_changed,
-            mode_changed,
-            credentials_changed,
-            client_changed,
-            fetch_rules,
-        } = reset;
-        if client_changed {
-            self.client = new_client;
+    fn clear_scope_reconciliation_state(&mut self) {
+        self.state
+            .global_position_ready
+            .store(false, Ordering::SeqCst);
+        self.state
+            .global_position_initialized
+            .store(false, Ordering::SeqCst);
+        if let Some(task) = self.pnl_reconcile_task.take() {
+            task.abort();
+        }
+        self.pnl_order_ids.clear();
+        self.pnl_clear_revision = 0;
+        self.pnl_reconcile_offset = 0;
+        self.pnl_retry_at = None;
+        self.reconciliation_blocked = false;
+        self.market_data_blocked = false;
+        self.paper_window_cache = None;
+        self.last_account_sync = None;
+        self.last_orders_sync = None;
+        self.evidence = OrderEvidenceBook::default();
+    }
+
+    pub(super) async fn reset_runtime_scope_after_config_change(
+        &mut self,
+        new_config: &crate::config::AppConfig,
+        reset: ConfigScopeReset,
+    ) {
+        if reset.flags.client_changed {
+            self.client = reset.new_client;
         }
         self.sync_interval_secs = new_config.exchange.sync_interval_secs.max(1);
         if !new_config.exchange.is_paper() {
             self.next_time_sync_at = Instant::now() + super::PERIODIC_TIME_SYNC_INTERVAL;
         }
-        if market_changed || mode_changed || credentials_changed {
-            if let Some(task) = self.pnl_reconcile_task.take() {
-                task.abort();
-            }
-            self.pnl_order_ids.clear();
-            self.pnl_clear_revision = 0;
-            self.pnl_reconcile_offset = 0;
-            self.pnl_retry_at = None;
-            self.reconciliation_blocked = false;
-            self.market_data_blocked = false;
-            self.paper_window_cache = None;
-            self.last_account_sync = None;
-            self.last_orders_sync = None;
-            self.evidence = OrderEvidenceBook::default();
+        if reset.flags.scope_changed() {
+            self.clear_scope_reconciliation_state();
         }
-        if credentials_changed {
+        if reset.flags.credentials_changed {
             self.state.position.write().await.update_time = None;
             self.state.account.write().await.update_time = chrono::DateTime::<Utc>::default();
         }
-        if fetch_rules {
-            *self.state.rules.write().await = new_rules;
+        if reset.fetch_rules {
+            *self.state.rules.write().await = reset.new_rules;
             self.exchange_rules_loaded = true;
         }
-        if market_changed || mode_changed {
-            self.reset_market_or_mode_scope(new_config, new_price, paper_state)
+        if reset.flags.market_changed || reset.flags.mode_changed {
+            self.reset_market_or_mode_scope(new_config, reset.new_price, reset.paper_state)
                 .await;
-        } else if credentials_changed && !new_config.exchange.is_paper() {
+        } else if reset.flags.credentials_changed && !new_config.exchange.is_paper() {
             *self.state.position.write().await = PositionInfo {
                 symbol: new_config.exchange.symbol.clone(),
                 ..Default::default()

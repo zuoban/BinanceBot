@@ -236,11 +236,9 @@ impl AppState {
         expected_epoch: Option<u64>,
         expected_mode: Option<TradingMode>,
     ) -> anyhow::Result<()> {
-        let global = if status == BotStatus::Running {
-            self.global_limit()
-        } else {
-            None
-        };
+        let global = (status == BotStatus::Running)
+            .then(|| self.global_limit())
+            .flatten();
         let _global_guard = if let Some(coordinator) = &global {
             let guard = coordinator.lock.lock().await;
             anyhow::ensure!(
@@ -256,9 +254,27 @@ impl AppState {
             self.pause_epoch.fetch_add(1, Ordering::SeqCst);
         }
         let _update = self.status_update_lock.lock().await;
+        self.validate_status_transition(status, expected_epoch, expected_mode)
+            .await?;
+        if status == BotStatus::Paused {
+            // An unsafe strategy must stop even if persistence fails.
+            *self.status.write().await = status;
+            self.persist_status(status).await
+        } else {
+            self.persist_status(status).await?;
+            *self.status.write().await = status;
+            Ok(())
+        }
+    }
+
+    async fn validate_status_transition(
+        &self,
+        status: BotStatus,
+        expected_epoch: Option<u64>,
+        expected_mode: Option<TradingMode>,
+    ) -> anyhow::Result<()> {
         if let Some(expected) = expected_mode {
-            let config = self.config.read().await;
-            let current = config.exchange.trading_mode();
+            let current = self.config.read().await.exchange.trading_mode();
             anyhow::ensure!(
                 expected != TradingMode::Unknown && current == expected,
                 "策略运行模式已改变，无法恢复策略"
@@ -284,16 +300,7 @@ impl AppState {
             status != BotStatus::Running || !self.is_shutting_down(),
             "程序正在退出，不能恢复策略"
         );
-        let saved = if status == BotStatus::Paused {
-            // An unsafe strategy must stop even if persistence fails.
-            *self.status.write().await = status;
-            self.persist_status(status).await
-        } else {
-            self.persist_status(status).await?;
-            *self.status.write().await = status;
-            Ok(())
-        };
-        saved
+        Ok(())
     }
 
     pub(crate) fn pause_epoch(&self) -> u64 {

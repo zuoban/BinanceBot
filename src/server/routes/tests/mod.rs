@@ -3,9 +3,11 @@ use crate::config::AppConfig;
 use crate::db::Database;
 use crate::types::BotControlAction;
 
-mod http_auth_and_dispatch;
+mod accounts_stream_and_ws_security;
+mod http_auth_and_limits;
+mod http_dispatch_and_control;
 mod probes_preview_and_config;
-mod ws_and_accounts;
+mod ws_control_and_retirement;
 
 fn test_admin_auth() -> Option<Arc<crate::auth::AdminAuth>> {
     Some(Arc::new(

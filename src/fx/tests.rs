@@ -77,3 +77,45 @@ async fn rejects_missing_cny_and_strips_request_urls_from_http_errors() {
     assert!(!err.contains("secret-path"), "{err}");
     server.abort();
 }
+
+#[tokio::test]
+async fn oversized_http_200_response_is_rejected_without_oom() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/rates", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        // 1st request: unannounced (>256 KiB) streamed 200 OK body without Content-Length.
+        if let Ok((mut stream, _)) = listener.accept().await {
+            let mut req_buf = [0u8; 1024];
+            let _ = stream.read(&mut req_buf).await;
+            let header = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"data\":{\"currency\":\"USDC\",\"rates\":{\"CNY\":\"7.1\",\"PAD\":\"";
+            let _ = stream.write_all(header).await;
+            let chunk = [b'A'; 8192];
+            for _ in 0..40 {
+                if stream.write_all(&chunk).await.is_err() {
+                    break;
+                }
+            }
+            let _ = stream.write_all(b"\"}}}").await;
+        }
+        // 2nd request: huge advertised Content-Length rejected immediately before reading body.
+        if let Ok((mut stream, _)) = listener.accept().await {
+            let mut req_buf = [0u8; 1024];
+            let _ = stream.read(&mut req_buf).await;
+            let header = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1073741824\r\nConnection: close\r\n\r\n";
+            let _ = stream.write_all(header).await;
+        }
+    });
+
+    let cache = CnyRateCache::with_endpoint(endpoint);
+    let err_stream = cache.refresh_if_due("USDC").await.unwrap_err().to_string();
+    assert!(err_stream.contains("exceeded"), "{err_stream}");
+    assert!(cache.get("USDC").await.is_none());
+
+    let err_len = cache.refresh_if_due("USDT").await.unwrap_err().to_string();
+    assert!(err_len.contains("exceeded"), "{err_len}");
+    assert!(cache.get("USDT").await.is_none());
+
+    server.abort();
+}

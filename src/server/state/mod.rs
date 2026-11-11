@@ -84,6 +84,18 @@ pub struct AppState {
     telegram_notifier: TelegramNotifier,
 }
 
+struct RestoredPairState {
+    ticker: TickerInfo,
+    status: BotStatus,
+    position: PositionInfo,
+    account: AccountInfo,
+    paper_failed: bool,
+    trades: VecDeque<TradeRecord>,
+    stats: GridStats,
+    stats_dirty: bool,
+    trades_dirty: bool,
+}
+
 impl AppState {
     pub fn new(
         config: AppConfig,
@@ -140,11 +152,11 @@ impl AppState {
         )
     }
 
-    fn restore_initial_status_and_paper(
+    fn load_initial_bot_status(
         config: &AppConfig,
         db: &Database,
         pair_scope: Option<&str>,
-    ) -> (BotStatus, PositionInfo, AccountInfo, bool) {
+    ) -> BotStatus {
         let symbol = &config.exchange.symbol;
         let mode = config.exchange.trading_mode();
         let saved_status = db.load_pair_status(symbol, mode).and_then(|status| {
@@ -154,7 +166,7 @@ impl AppState {
                 db.load_bot_status()
             }
         });
-        let mut initial_status = match saved_status {
+        match saved_status {
             Ok(Some(status)) => status,
             Ok(None) if config.exchange.is_paper() => BotStatus::Running,
             Ok(None) => BotStatus::Paused,
@@ -165,7 +177,16 @@ impl AppState {
                 );
                 BotStatus::Paused
             }
-        };
+        }
+    }
+
+    fn restore_initial_status_and_paper(
+        config: &AppConfig,
+        db: &Database,
+        pair_scope: Option<&str>,
+    ) -> (BotStatus, PositionInfo, AccountInfo, bool) {
+        let symbol = &config.exchange.symbol;
+        let mut initial_status = Self::load_initial_bot_status(config, db, pair_scope);
         if !config.exchange.is_paper() {
             // Warm the shared paper ledger while already on a blocking thread so a
             // subsequent Live -> Paper switch never queries SQLite on Tokio workers.
@@ -190,9 +211,8 @@ impl AppState {
             }
         };
         if !paper_restore_failed {
-            if let Err(error) = db.shared_paper_account(symbol, &initial_position, &initial_account)
-            {
-                error!(%symbol, %error, "Could not restore shared paper account; starting paused");
+            if let Err(err) = db.shared_paper_account(symbol, &initial_position, &initial_account) {
+                error!(%symbol, %err, "Could not restore shared paper account; starting paused");
                 initial_status = BotStatus::Paused;
                 paper_restore_failed = true;
             }
@@ -244,6 +264,33 @@ impl AppState {
         )
     }
 
+    fn restore_pair_state(
+        config: &AppConfig,
+        db: &Database,
+        pair_scope: Option<&str>,
+    ) -> RestoredPairState {
+        let symbol = config.exchange.symbol.clone();
+        let mode = config.exchange.trading_mode();
+        let (status, position, account, paper_failed) =
+            Self::restore_initial_status_and_paper(config, db, pair_scope);
+        let (trades, stats, stats_dirty, trades_dirty) =
+            Self::restore_initial_trades_and_stats(db, &symbol, mode);
+        RestoredPairState {
+            ticker: TickerInfo {
+                symbol,
+                ..Default::default()
+            },
+            status,
+            position,
+            account,
+            paper_failed,
+            trades,
+            stats,
+            stats_dirty,
+            trades_dirty,
+        }
+    }
+
     pub(crate) fn build_with_auth(
         config: AppConfig,
         db: Arc<Database>,
@@ -253,37 +300,28 @@ impl AppState {
         cny_rates: Arc<CnyRateCache>,
         auth: Arc<AuthContext>,
     ) -> Arc<Self> {
-        let (ws_broadcast_tx, _) = broadcast::channel(100);
-        let symbol = config.exchange.symbol.clone();
-        let mode = config.exchange.trading_mode();
-        let (initial_status, initial_position, initial_account, paper_restore_failed) =
-            Self::restore_initial_status_and_paper(&config, &db, pair_scope.as_deref());
-        let (recent_trades, initial_stats, stats_dirty, recent_trades_dirty) =
-            Self::restore_initial_trades_and_stats(&db, &symbol, mode);
+        let r = Self::restore_pair_state(&config, &db, pair_scope.as_deref());
         Arc::new(Self {
             db,
             config: RwLock::new(config),
             config_update_lock: Mutex::new(()),
             config_instance: rand::random(),
             rules: RwLock::new(SymbolRules::default()),
-            status: RwLock::new(initial_status),
-            ticker: RwLock::new(TickerInfo {
-                symbol,
-                ..Default::default()
-            }),
-            stats: RwLock::new(initial_stats),
-            position: RwLock::new(initial_position),
-            account: RwLock::new(initial_account),
+            status: RwLock::new(r.status),
+            ticker: RwLock::new(r.ticker),
+            stats: RwLock::new(r.stats),
+            position: RwLock::new(r.position),
+            account: RwLock::new(r.account),
             cny_rates,
             active_orders: RwLock::new(HashMap::new()),
-            recent_trades: RwLock::new(recent_trades),
+            recent_trades: RwLock::new(r.trades),
             recent_logs: RwLock::new(VecDeque::with_capacity(MAX_RECENT_LOGS)),
             global_position_limit: std::sync::OnceLock::new(),
             global_position_ready: AtomicBool::new(false),
             global_position_initialized: AtomicBool::new(false),
-            paper_restore_failed: AtomicBool::new(paper_restore_failed),
-            stats_dirty: AtomicBool::new(stats_dirty),
-            recent_trades_dirty: AtomicBool::new(recent_trades_dirty),
+            paper_restore_failed: AtomicBool::new(r.paper_failed),
+            stats_dirty: AtomicBool::new(r.stats_dirty),
+            recent_trades_dirty: AtomicBool::new(r.trades_dirty),
             global_cancel_pending: AtomicBool::new(false),
             global_cancel_queued: AtomicBool::new(false),
             pause_epoch: AtomicU64::new(0),
@@ -304,7 +342,7 @@ impl AppState {
             snapshot_cache: snapshot::SnapshotCache::default(),
             auth,
             action_tx,
-            ws_broadcast_tx,
+            ws_broadcast_tx: broadcast::channel(100).0,
             managed_router: std::sync::OnceLock::new(),
             telegram_notifier: TelegramNotifier::new(),
         })

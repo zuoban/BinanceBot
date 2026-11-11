@@ -161,30 +161,35 @@ fn build_daily_position_group(
     }
 }
 
-pub(crate) fn build_daily_snapshot(
-    date: String,
-    window_start: DateTime<Utc>,
-    window_end: DateTime<Utc>,
-    now: DateTime<Utc>,
-    snapshots: &[(BotSnapshot, u64, Option<String>)],
-    trades: Vec<DailyTradeGroup>,
-) -> DailySnapshot {
-    let mut account_buckets: BTreeMap<SnapshotBucketKey, Vec<(&BotSnapshot, u64)>> =
-        BTreeMap::new();
-    let mut position_buckets: BTreeMap<(String, String), Vec<(&BotSnapshot, u64)>> =
-        BTreeMap::new();
-    let mut pair_positions = Vec::with_capacity(snapshots.len());
+type DailyAccountBuckets<'a> =
+    BTreeMap<SnapshotBucketKey, (TradingMode, Vec<(&'a BotSnapshot, u64)>)>;
+type DailyPositionBuckets<'a> =
+    BTreeMap<(&'static str, String), (TradingMode, Vec<(&'a BotSnapshot, u64)>)>;
 
+fn collect_daily_buckets(
+    snapshots: &[(BotSnapshot, u64, Option<String>)],
+    now: DateTime<Utc>,
+) -> (
+    DailyAccountBuckets<'_>,
+    DailyPositionBuckets<'_>,
+    Vec<DailyPositionItem>,
+) {
+    let mut account_buckets: DailyAccountBuckets<'_> = BTreeMap::new();
+    let mut position_buckets: DailyPositionBuckets<'_> = BTreeMap::new();
+    let mut pair_positions = Vec::with_capacity(snapshots.len());
     for (snapshot, sync_interval, account_id) in snapshots {
-        let mode_str = snapshot.mode.as_str();
+        let mode = snapshot.mode;
+        let mode_key = mode.as_str();
         let asset = resolve_quote_asset(&snapshot.symbol, &snapshot.account.asset);
         account_buckets
-            .entry((mode_str.to_owned(), asset.to_owned(), account_id.clone()))
-            .or_default()
+            .entry((mode_key, asset.to_owned(), account_id.clone()))
+            .or_insert_with(|| (mode, Vec::new()))
+            .1
             .push((snapshot, *sync_interval));
         position_buckets
-            .entry((mode_str.to_owned(), asset.to_owned()))
-            .or_default()
+            .entry((mode_key, asset.to_owned()))
+            .or_insert_with(|| (mode, Vec::new()))
+            .1
             .push((snapshot, *sync_interval));
         pair_positions.push(build_daily_position_item(snapshot, *sync_interval, now));
     }
@@ -194,23 +199,27 @@ pub(crate) fn build_daily_snapshot(
             .cmp(b.mode.as_str())
             .then_with(|| a.symbol.cmp(&b.symbol))
     });
+    (account_buckets, position_buckets, pair_positions)
+}
+
+pub(crate) fn build_daily_snapshot(
+    date: String,
+    window_start: DateTime<Utc>,
+    window_end: DateTime<Utc>,
+    now: DateTime<Utc>,
+    snapshots: &[(BotSnapshot, u64, Option<String>)],
+    trades: Vec<DailyTradeGroup>,
+) -> DailySnapshot {
+    let (account_buckets, position_buckets, pair_positions) = collect_daily_buckets(snapshots, now);
     let accounts = account_buckets
         .into_iter()
-        .map(|((mode_str, asset, account_id), items)| {
-            build_daily_account_group(
-                TradingMode::from_db(&mode_str),
-                asset,
-                account_id,
-                &items,
-                now,
-            )
+        .map(|((_, asset, account_id), (mode, items))| {
+            build_daily_account_group(mode, asset, account_id, &items, now)
         })
         .collect();
     let positions = position_buckets
         .into_iter()
-        .map(|((mode_str, asset), items)| {
-            build_daily_position_group(TradingMode::from_db(&mode_str), asset, items, now)
-        })
+        .map(|((_, asset), (mode, items))| build_daily_position_group(mode, asset, items, now))
         .collect();
     DailySnapshot {
         date,

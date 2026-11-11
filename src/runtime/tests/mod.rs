@@ -10,9 +10,12 @@ use axum::{
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
-mod managed_api_and_global;
-mod removal_and_recovery;
-mod shutdown_and_membership;
+mod add_pair_validation_and_rollback;
+mod early_and_concurrent_shutdown;
+mod failed_removal_rebuild;
+mod global_config_and_probes;
+mod managed_api_and_history;
+mod removal_positions_and_guards;
 mod startup_and_restart;
 
 pub(super) fn fixture() -> TradingRuntime {
@@ -243,4 +246,46 @@ pub(super) async fn versioned_payload(router: &Router, symbol: &str) -> Value {
     let mut result = payload(symbol);
     result["baseline_version"] = current["data"]["config_version"].clone();
     result
+}
+
+pub(super) async fn seed_paper_account_and_position(
+    state: &AppState,
+) -> (crate::types::AccountInfo, crate::types::PositionInfo) {
+    assert!(state.config.read().await.exchange.is_paper());
+    let account = {
+        let mut account = state.account.write().await;
+        account.asset = "USDC".into();
+        account.total_wallet_balance = rust_decimal_macros::dec!(9123.45);
+        account.available_balance = rust_decimal_macros::dec!(8765.43);
+        account.margin_balance = rust_decimal_macros::dec!(9135.45);
+        account.unrealized_profit = rust_decimal_macros::dec!(12);
+        account.clone()
+    };
+    let position = {
+        let mut position = state.position.write().await;
+        position.symbol = "SOLUSDC".into();
+        position.size = rust_decimal_macros::dec!(2.5);
+        position.entry_price = rust_decimal_macros::dec!(100);
+        position.mark_price = rust_decimal_macros::dec!(104.8);
+        position.unrealized_pnl = rust_decimal_macros::dec!(12);
+        position.liquidation_price = rust_decimal_macros::dec!(70);
+        position.leverage = 10;
+        position.clone()
+    };
+    (account, position)
+}
+
+pub(super) async fn assert_paper_account_and_position_preserved(
+    state: &AppState,
+    account: &crate::types::AccountInfo,
+    position: &crate::types::PositionInfo,
+) {
+    assert_eq!(
+        serde_json::to_value(&*state.account.read().await).unwrap(),
+        serde_json::to_value(account).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(&*state.position.read().await).unwrap(),
+        serde_json::to_value(position).unwrap()
+    );
 }

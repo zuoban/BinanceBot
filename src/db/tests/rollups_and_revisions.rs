@@ -291,7 +291,8 @@ async fn revision_read_does_not_block_runtime_during_sql_write() {
         true
     }
 
-    let path = std::env::temp_dir().join(format!("revision-lock-{}.db", uuid::Uuid::new_v4()));
+    let dir = crate::test_support::TempTestDir::new("revision-lock");
+    let path = dir.join("bot.db");
     let db = Arc::new(Database::open(&path).unwrap());
     let external = Connection::open(&path).unwrap();
     external.execute_batch("BEGIN IMMEDIATE").unwrap();
@@ -325,7 +326,6 @@ async fn revision_read_does_not_block_runtime_during_sql_write() {
     assert!(writer.await.unwrap().unwrap());
     assert_eq!(db.symbol_trade_revision("SOLUSDC"), 1);
     drop(db);
-    std::fs::remove_file(path).unwrap();
 }
 
 #[test]

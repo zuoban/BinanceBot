@@ -97,7 +97,7 @@ impl CnyRateCache {
             }
         }
 
-        let response = self
+        let resp = self
             .client
             .get(&self.endpoint)
             .query(&[("currency", asset)])
@@ -106,10 +106,10 @@ impl CnyRateCache {
             .await
             .map_err(reqwest::Error::without_url)?
             .error_for_status()
-            .map_err(reqwest::Error::without_url)?
-            .json::<CoinbaseResponse>()
-            .await
             .map_err(reqwest::Error::without_url)?;
+        let response =
+            crate::exchange::client::read_bounded_json::<CoinbaseResponse>(resp, 256 * 1024)
+                .await?;
         if response.data.currency != asset {
             bail!("Exchange-rate response currency does not match {}", asset);
         }

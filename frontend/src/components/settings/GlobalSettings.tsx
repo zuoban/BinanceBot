@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { Alert, App, Button, Card, Checkbox, Col, Form, Input, InputNumber, Row, Space, Switch, type FormInstance } from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, post } from '../../lib/api';
@@ -22,17 +23,19 @@ function apiCredentialError(side: 'key' | 'secret', keyVal: string | undefined, 
   return savedKey || savedSecret ? '更换或配置 API 凭证时请同时填写 API Key 和 API Secret' : '请同时填写 API Key 和 API Secret';
 }
 
-function ExchangeCredentialsCard({ form, data, version, formDisabled }: {
+function ExchangeCredentialsCard({ form, data, version, formDisabled, armed }: {
   form: FormInstance<GlobalForm>;
   data: GlobalConfig | undefined;
   version: string;
   formDisabled: boolean;
+  armed: boolean;
 }) {
   const apiKey = Form.useWatch('api_key', form);
   const apiSecret = Form.useWatch('api_secret', form);
   const recvWindow = Form.useWatch('recv_window', form);
   const clearApi = !!Form.useWatch('clear_api_credentials', form);
   const credDisabled = formDisabled || clearApi;
+  const invalidFormat = Boolean((apiKey && (!apiKey.trim() || !API_KEY_RE.test(apiKey.trim()))) || (apiSecret?.trim() && !API_KEY_RE.test(apiSecret.trim())));
   return <Card title="交易所连接" className="settings-card">
     <Alert type="info" showIcon title={`密钥不会回显，留空将保留已有值。${data?.has_api_key ? `当前 API Key：${data.api_key_preview}` : '尚未配置 API Key。'}运行模式由 API Key 决定：已配置以实盘运行，未配置以模拟盘运行。`} />
     <Row gutter={[20, 16]} className="settings-fields">
@@ -45,25 +48,34 @@ function ExchangeCredentialsCard({ form, data, version, formDisabled }: {
           },
         }),
         ({ getFieldValue }) => ({
-          validateTrigger: form.getFieldError('api_key').length > 0 ? undefined : 'onSubmit',
+          validateTrigger: armed ? undefined : 'onSubmit',
           validator: (_, value: string | undefined) => {
             const error = apiCredentialError('key', value, getFieldValue('api_secret'), Boolean(getFieldValue('clear_api_credentials')), data);
             return error ? Promise.reject(new Error(error)) : Promise.resolve();
           },
         }),
       ]}><Input.Password autoComplete="off" placeholder="留空保留已保存的值" disabled={credDisabled} /></Form.Item></Col>
-      <Col xs={24} md={12}><Form.Item name="api_secret" label="API Secret" rules={[({ getFieldValue }) => ({
-        validateTrigger: form.getFieldError('api_secret').length > 0 ? undefined : 'onSubmit',
-        validator: (_, value: string | undefined) => {
-          const error = apiCredentialError('secret', getFieldValue('api_key'), value, Boolean(getFieldValue('clear_api_credentials')), data);
-          return error ? Promise.reject(new Error(error)) : Promise.resolve();
-        },
-      })]}><Input.Password autoComplete="new-password" placeholder="留空保留已保存的值" disabled={credDisabled} /></Form.Item></Col>
+      <Col xs={24} md={12}><Form.Item name="api_secret" label="API Secret" rules={[
+        ({ getFieldValue }) => ({
+          validator: (_, value: string | undefined) => {
+            const trimmed = value?.trim();
+            if (getFieldValue('clear_api_credentials') || !trimmed) return Promise.resolve();
+            return API_KEY_RE.test(trimmed) ? Promise.resolve() : Promise.reject(new Error('API Secret 格式无效'));
+          },
+        }),
+        ({ getFieldValue }) => ({
+          validateTrigger: armed ? undefined : 'onSubmit',
+          validator: (_, value: string | undefined) => {
+            const error = apiCredentialError('secret', getFieldValue('api_key'), value, Boolean(getFieldValue('clear_api_credentials')), data);
+            return error ? Promise.reject(new Error(error)) : Promise.resolve();
+          },
+        }),
+      ]}><Input.Password autoComplete="new-password" placeholder="留空保留已保存的值" disabled={credDisabled} /></Form.Item></Col>
       <Col xs={24} md={12}><Form.Item name="recv_window" label="请求有效窗口（毫秒）" extra="交易所接受已签名请求的时间窗口" rules={[{ required: true }]}><InputNumber min={1} max={60000} precision={0} className="full-width-input" /></Form.Item></Col>
       <Col xs={24} md={12}><Form.Item name="sync_interval_secs" label="同步间隔（秒）" extra="策略定期同步订单、账户和持仓的间隔" rules={[{ required: true }]}><InputNumber min={1} max={300} precision={0} className="full-width-input" /></Form.Item></Col>
     </Row>
     <div className="settings-card-footer">
-      <ProbeButton label="测试连接" path="/api/global/test-exchange" disabled={credDisabled}
+      <ProbeButton label="测试连接" path="/api/global/test-exchange" disabled={credDisabled || invalidFormat}
         resetKey={JSON.stringify([version, apiKey ?? '', apiSecret ?? '', recvWindow ?? '', clearApi])}
         body={() => ({ api_key: form.getFieldValue('api_key'), api_secret: form.getFieldValue('api_secret'), recv_window: form.getFieldValue('recv_window') })} />
       <Form.Item name="clear_api_credentials" valuePropName="checked" className="settings-checkbox-item"><Checkbox>清除已保存的 API Key 和 Secret（清除后所有交易对将以模拟盘运行）</Checkbox></Form.Item>
@@ -87,16 +99,18 @@ function GlobalRiskCard() {
   </Card>;
 }
 
-function TelegramSettingsCard({ form, hasBotToken, version, formDisabled }: {
+function TelegramSettingsCard({ form, hasBotToken, version, formDisabled, armed }: {
   form: FormInstance<GlobalForm>;
   hasBotToken: boolean | undefined;
   version: string;
   formDisabled: boolean;
+  armed: boolean;
 }) {
   const botToken = Form.useWatch('telegram_bot_token', form);
   const chatId = Form.useWatch('telegram_chat_id', form);
   const clearTelegram = !!Form.useWatch('clear_telegram_credentials', form);
   const credDisabled = formDisabled || clearTelegram;
+  const invalidToken = Boolean(botToken && (!botToken.trim() || INVALID_BOT_TOKEN_RE.test(botToken.trim())));
   return <Card title="Telegram 通知" className="settings-card settings-card-fill">
     <Row gutter={[16, 16]}>
       <Col span={24}><Form.Item name="telegram_enabled" label="通知开关" valuePropName="checked"><Switch checkedChildren="开启" unCheckedChildren="关闭" /></Form.Item></Col>
@@ -109,7 +123,7 @@ function TelegramSettingsCard({ form, hasBotToken, version, formDisabled }: {
           },
         }),
         ({ getFieldValue }) => ({
-          validateTrigger: form.getFieldError('telegram_bot_token').length > 0 ? undefined : 'onSubmit',
+          validateTrigger: armed ? undefined : 'onSubmit',
           validator: (_, value: string | undefined) => {
             if (!getFieldValue('telegram_enabled') || getFieldValue('clear_telegram_credentials')) return Promise.resolve();
             return hasBotToken || Boolean(value?.trim()) ? Promise.resolve() : Promise.reject(new Error('请填写 Bot Token'));
@@ -117,15 +131,15 @@ function TelegramSettingsCard({ form, hasBotToken, version, formDisabled }: {
         }),
       ]}><Input.Password autoComplete="new-password" disabled={credDisabled} /></Form.Item></Col>
       <Col xs={24} sm={12}><Form.Item name="telegram_chat_id" label="Chat ID" extra="向机器人发送消息后，可通过 Telegram Bot API 的 getUpdates 获取会话 ID" rules={[({ getFieldValue }) => ({
-        validateTrigger: form.getFieldError('telegram_chat_id').length > 0 ? undefined : 'onSubmit',
+        validateTrigger: armed ? undefined : 'onSubmit',
         validator: (_, value: string | undefined) => {
-          if (!getFieldValue('telegram_enabled') || getFieldValue('clear_telegram_credentials')) return Promise.resolve();
+          if (getFieldValue('clear_telegram_credentials') || !(getFieldValue('telegram_enabled') || Boolean(getFieldValue('telegram_bot_token')?.trim()))) return Promise.resolve();
           return Boolean(value?.trim()) ? Promise.resolve() : Promise.reject(new Error('请填写 Chat ID'));
         },
       })]}><Input className="numeric" disabled={credDisabled} /></Form.Item></Col>
     </Row>
     <div className="settings-card-footer">
-      <ProbeButton label="发送测试消息" path="/api/global/test-telegram" disabled={credDisabled}
+      <ProbeButton label="发送测试消息" path="/api/global/test-telegram" disabled={credDisabled || invalidToken}
         resetKey={JSON.stringify([version, botToken ?? '', chatId ?? '', clearTelegram])}
         body={() => ({ bot_token: form.getFieldValue('telegram_bot_token'), chat_id: form.getFieldValue('telegram_chat_id') })} />
       <Form.Item name="clear_telegram_credentials" valuePropName="checked" className="settings-checkbox-item" rules={[({ getFieldValue }) => ({
@@ -138,7 +152,9 @@ function TelegramSettingsCard({ form, hasBotToken, version, formDisabled }: {
 export function GlobalSettings() {
   const [form] = Form.useForm<GlobalForm>(), { message } = App.useApp(), { confirm } = useConfirmDialog(), client = useQueryClient();
   const query = useQuery({ queryKey: ['global-config'], queryFn: ({ signal }) => api<GlobalConfig>('/api/global/config', { signal }), refetchOnWindowFocus: false });
+  const [armedCross, setArmedCross] = useState({ api: false, telegram: false });
   const { edit, ready, baseline, mounted, submitting, fill } = useSettingsFormLifecycle(query.data, data => {
+    setArmedCross({ api: false, telegram: false });
     form.setFieldsValue({ ...data, pause_on_zero_available_margin: data.pause_on_zero_available_margin ?? false, api_key: '', api_secret: '', telegram_bot_token: '', clear_api_credentials: false, clear_telegram_credentials: false });
   });
   const mutation = useMutation({
@@ -182,16 +198,37 @@ export function GlobalSettings() {
     <ErrorNotice error={mutation.error} />
     {isConfigConflict(mutation.error, '全局设置已被其他请求修改', '无法确认设置版本') && <ConflictReloadButton form={form} label="全局设置" activeRef={mounted} refetch={query.refetch} onReset={mutation.reset} onLoaded={fill} />}
     <Form form={form} layout="vertical" disabled={formDisabled} onValuesChange={changed => {
-      const revalidate = CROSS_FIELDS.filter(name => !(name in changed) && (form.getFieldError(name).length > 0 || (name === 'clear_telegram_credentials' && 'telegram_enabled' in changed && Boolean(form.getFieldValue('clear_telegram_credentials')))));
+      const apiTouched = 'api_key' in changed || 'api_secret' in changed || 'clear_api_credentials' in changed;
+      const telegramTouched = 'telegram_bot_token' in changed || 'telegram_chat_id' in changed || 'telegram_enabled' in changed || 'clear_telegram_credentials' in changed;
+      const uncheckApi = 'clear_api_credentials' in changed && !changed.clear_api_credentials;
+      const uncheckTelegram = 'clear_telegram_credentials' in changed && !changed.clear_telegram_credentials;
+      const invalidUncheckedFormat = (name: keyof GlobalForm) => {
+        const raw = form.getFieldValue(name) as string | undefined;
+        if (name === 'api_key') return Boolean(raw && (!raw.trim() || !API_KEY_RE.test(raw.trim())));
+        if (name === 'api_secret') return Boolean(raw?.trim() && !API_KEY_RE.test(raw.trim()));
+        if (name === 'telegram_bot_token') return Boolean(raw && (!raw.trim() || INVALID_BOT_TOKEN_RE.test(raw.trim())));
+        return false;
+      };
+      const revalidate = CROSS_FIELDS.filter(name => {
+        if (name in changed) return false;
+        if (form.getFieldError(name).length > 0 || form.isFieldValidating(name)) return true;
+        if ((name === 'api_key' || name === 'api_secret') && ((armedCross.api && apiTouched) || (uncheckApi && invalidUncheckedFormat(name)))) return true;
+        if ((name === 'telegram_bot_token' || name === 'telegram_chat_id') && ((armedCross.telegram && telegramTouched) || (uncheckTelegram && invalidUncheckedFormat(name)))) return true;
+        return name === 'clear_telegram_credentials' && 'telegram_enabled' in changed && Boolean(form.getFieldValue('clear_telegram_credentials'));
+      });
       if (revalidate.length) void form.validateFields(revalidate).catch(() => {});
       edit.setDirty(true);
+    }} onFinishFailed={({ errorFields }) => {
+      const failed = new Set(errorFields.flatMap(f => f.errors.length > 0 ? [f.name[0] as keyof GlobalForm] : []));
+      const apiErr = failed.has('api_key') || failed.has('api_secret'), tgErr = failed.has('telegram_bot_token') || failed.has('telegram_chat_id');
+      if (apiErr || tgErr) setArmedCross(prev => ({ api: prev.api || apiErr, telegram: prev.telegram || tgErr }));
     }} onFinish={v => void submit(v)}>
-      <ExchangeCredentialsCard form={form} data={activeData} version={version} formDisabled={formDisabled} />
+      <ExchangeCredentialsCard form={form} data={activeData} version={version} formDisabled={formDisabled} armed={armedCross.api} />
       <Row gutter={[20, 20]} className="settings-grid-row">
         <Col xs={24} xl={12} className="settings-grid-col"><GlobalRiskCard /></Col>
-        <Col xs={24} xl={12} className="settings-grid-col"><TelegramSettingsCard form={form} hasBotToken={activeData?.has_telegram_bot_token} version={version} formDisabled={formDisabled} /></Col>
+        <Col xs={24} xl={12} className="settings-grid-col"><TelegramSettingsCard form={form} hasBotToken={activeData?.has_telegram_bot_token} version={version} formDisabled={formDisabled} armed={armedCross.telegram} /></Col>
       </Row>
-      <div className={`save-bar${edit.dirty ? ' save-bar-dirty' : ''}`}><span className="muted" role="status">{edit.dirty ? '有未保存的修改' : '所有修改已保存'}</span><Space wrap><FormRevertButton form={form} activeRef={mounted} onReset={mutation.reset} onRevert={() => { const source = baseline.current ?? query.data; if (source) fill(source); }} /><Button type="primary" htmlType="submit" loading={mutation.isPending}>保存全局设置</Button></Space></div>
+      <div className={`save-bar${edit.dirty ? ' save-bar-dirty' : ''}`}><span className="muted" role="status">{edit.dirty ? '有未保存的修改' : '所有修改已保存'}</span><Space wrap><FormRevertButton form={form} activeRef={mounted} onReset={mutation.reset} onRevert={() => { setArmedCross({ api: false, telegram: false }); const source = baseline.current ?? query.data; if (source) fill(source); }} /><Button type="primary" htmlType="submit" loading={mutation.isPending}>保存全局设置</Button></Space></div>
     </Form>
   </>;
 }

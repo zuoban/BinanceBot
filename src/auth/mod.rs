@@ -30,6 +30,8 @@ impl AdminAuth {
         })
     }
 
+    #[must_use]
+    #[inline]
     pub fn verify(&self, password: &str) -> bool {
         verify_password_argon2(password, &self.password_hash)
     }
@@ -55,6 +57,8 @@ fn verify_password_argon2(password: &str, stored_hash: &str) -> bool {
 }
 
 /// Generates a secure random 32-byte hex session token (64 hex characters).
+#[must_use]
+#[inline]
 pub(crate) fn generate_session_token() -> String {
     let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);

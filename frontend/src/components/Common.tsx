@@ -122,7 +122,7 @@ export function ConflictReloadButton<T>({ form, label, activeRef, resetKey, refe
     });
   }}>重新加载{label}</Button>;
 }
-export function clearFormErrors(form: FormInstance) {
+function clearFormErrors(form: FormInstance) {
   const fields = form.getFieldsError().filter(item => item.errors.length > 0 || item.warnings.length > 0);
   if (fields.length > 0) {
     form.setFields(fields.map(item => ({ name: item.name, errors: [], warnings: [] })));

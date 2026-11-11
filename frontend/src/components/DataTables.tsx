@@ -78,10 +78,9 @@ function TableFilterBar<T extends string>({ label, value, onChange, options, sho
     <Button size="small" icon={<DownloadOutlined />} disabled={!shown} onClick={onExport}>导出 CSV</Button>
   </div>;
 }
-function ResponsiveTableSection({ hint, desktop, mobileClassName = 'table-mobile', hasRows, totalCount, emptyFilteredText, emptyAllText, listLabel, mobileRows, truncatedLimit, totalFilteredCount }: {
+function ResponsiveTableSection({ hint, desktop, hasRows, totalCount, emptyFilteredText, emptyAllText, listLabel, mobileRows, truncatedLimit, totalFilteredCount }: {
   hint: string;
   desktop: React.ReactNode;
-  mobileClassName?: string;
   hasRows: boolean;
   totalCount: number;
   emptyFilteredText: string;
@@ -93,7 +92,7 @@ function ResponsiveTableSection({ hint, desktop, mobileClassName = 'table-mobile
 }) {
   return <>
     <div className="table-desktop"><p className="table-scroll-hint">{hint}</p>{desktop}</div>
-    <div className={mobileClassName}>
+    <div className="table-mobile">
       {hasRows ? <ul className="trade-list" aria-label={listLabel}>{mobileRows}</ul> : <div className="trade-list-empty">{totalCount ? emptyFilteredText : emptyAllText}</div>}
       {truncatedLimit !== undefined && (totalFilteredCount ?? 0) > truncatedLimit && <p className="muted">仅显示最近 {truncatedLimit} 条，完整数据请导出 CSV。</p>}
     </div>
@@ -177,7 +176,6 @@ export const TradesTable = memo(function TradesTable({ trades: allTrades, overvi
     <ResponsiveTableSection
       hint="左右滑动查看完整成交信息"
       desktop={<Table<Trade> rowKey="trade_id" columns={columns} dataSource={trades} size="small" scroll={tradeScroll} pagination={overview ? false : tradePagination} />}
-      mobileClassName={overview ? 'overview-trades-mobile' : 'table-mobile'}
       hasRows={trades.length > 0}
       totalCount={overview ? 0 : allTrades.length}
       emptyFilteredText="没有符合筛选条件的成交记录"

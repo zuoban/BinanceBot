@@ -85,5 +85,7 @@ fn assert_execution_steps(trades: &[TradeRecord], interval: Decimal) {
 }
 
 mod frontiers_and_cycles;
-mod risk_and_limits;
-mod window_maintenance;
+mod max_position_pause;
+mod opening_protection_and_liquidation;
+mod window_alignment_and_cancels;
+mod window_pruning_and_caching;

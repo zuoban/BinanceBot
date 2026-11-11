@@ -1,5 +1,6 @@
 use super::*;
 use crate::types::HourlyTradeCount;
+use chrono::Duration;
 use rust_decimal_macros::dec;
 
 #[test]
@@ -401,7 +402,8 @@ fn notification_escapes_symbol_in_title() {
 
 #[test]
 fn ordinals_survive_restart_and_reset_at_beijing_hour_and_day_boundaries() {
-    let path = std::env::temp_dir().join(format!("telegram-counts-{}.db", uuid::Uuid::new_v4()));
+    let dir = crate::test_support::TempTestDir::new("telegram-counts");
+    let path = dir.join("counts.db");
     let db = crate::db::Database::open(&path).unwrap();
     let mut fill = trade(OrderSide::Buy);
     let midnight = fill.timestamp - Duration::hours(20) - Duration::minutes(26);
@@ -495,7 +497,6 @@ fn ordinals_survive_restart_and_reset_at_beijing_hour_and_day_boundaries() {
     assert_eq!(context.today_count, Some(5));
     assert_eq!(context.hour_count, Some(3));
     drop(reopened);
-    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
@@ -670,4 +671,43 @@ async fn send_message_rejects_oversized_gateway_response_without_unbounded_buffe
         "{err}"
     );
     server.abort();
+}
+
+#[test]
+fn trade_context_rejects_future_dated_cny_rate_and_live_account_timestamps() {
+    let fill = trade(OrderSide::Buy);
+    let now = fill.timestamp;
+    let fresh_account = account(now);
+    let future_rate = crate::fx::CnyRate {
+        asset: "USDC".into(),
+        cny_per_unit: dec!(7.12),
+        updated_at: now + Duration::seconds(5),
+    };
+    let ctx = TradeNotificationContext::for_trade(
+        &fill,
+        None,
+        &fresh_account,
+        Some(&future_rate),
+        now,
+        3,
+    );
+    assert_eq!(ctx.cny_per_unit, None);
+    assert_eq!(ctx.account_equity, Some(fresh_account.margin_balance));
+
+    let future_account = account(now + Duration::seconds(5));
+    let valid_rate = crate::fx::CnyRate {
+        updated_at: now - Duration::minutes(5),
+        ..future_rate
+    };
+    let future_acc_ctx = TradeNotificationContext::for_trade(
+        &fill,
+        None,
+        &future_account,
+        Some(&valid_rate),
+        now,
+        3,
+    );
+    assert_eq!(future_acc_ctx.account_equity, None);
+    assert_eq!(future_acc_ctx.available_balance, None);
+    assert_eq!(future_acc_ctx.cny_per_unit, Some(dec!(7.12)));
 }

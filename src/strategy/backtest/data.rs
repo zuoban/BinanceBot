@@ -87,6 +87,57 @@ pub(super) fn next_kline_page_start(
     }
 }
 
+struct KlineRow(Candle);
+
+impl<'de> serde::Deserialize<'de> for KlineRow {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct Visitor;
+
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = KlineRow;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a Binance kline array [time_ms, open, high, low, close, ...]")
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                use serde::de::Error;
+                let time_ms: i64 = seq
+                    .next_element()?
+                    .ok_or_else(|| A::Error::invalid_length(0, &self))?;
+                let open: Decimal = seq
+                    .next_element()?
+                    .ok_or_else(|| A::Error::invalid_length(1, &self))?;
+                let high: Decimal = seq
+                    .next_element()?
+                    .ok_or_else(|| A::Error::invalid_length(2, &self))?;
+                let low: Decimal = seq
+                    .next_element()?
+                    .ok_or_else(|| A::Error::invalid_length(3, &self))?;
+                let close: Decimal = seq
+                    .next_element()?
+                    .ok_or_else(|| A::Error::invalid_length(4, &self))?;
+                while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+                Ok(KlineRow(Candle {
+                    time_ms,
+                    open,
+                    high,
+                    low,
+                    close,
+                }))
+            }
+        }
+
+        deserializer.deserialize_seq(Visitor)
+    }
+}
+
 pub(crate) async fn fetch_klines(
     symbol: &str,
     interval: &str,
@@ -105,7 +156,7 @@ pub(crate) async fn fetch_klines(
     let mut candles: Vec<Candle> = Vec::new();
     loop {
         let start_str = start.to_string();
-        let rows: Vec<Vec<serde_json::Value>> = client
+        let resp = client
             .get("https://fapi.binance.com/fapi/v1/klines")
             .timeout(Duration::from_secs(15))
             .query(&[
@@ -120,31 +171,13 @@ pub(crate) async fn fetch_klines(
             .map_err(reqwest::Error::without_url)?
             .error_for_status()
             .map_err(reqwest::Error::without_url)
-            .context("K 线请求失败，请检查交易对和周期")?
-            .json()
-            .await
-            .map_err(reqwest::Error::without_url)?;
+            .context("K 线请求失败，请检查交易对和周期")?;
+        let rows =
+            crate::exchange::client::read_bounded_json::<Vec<KlineRow>>(resp, 4 * 1024 * 1024)
+                .await
+                .context("无法解析 K 线响应")?;
         let received = rows.len();
-        for row in rows {
-            let price = |position: usize| -> Result<Decimal> {
-                Decimal::from_str(
-                    row.get(position)
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default(),
-                )
-                .context("无法解析 K 线价格")
-            };
-            candles.push(Candle {
-                time_ms: row
-                    .first()
-                    .and_then(|v| v.as_i64())
-                    .context("无法解析 K 线时间")?,
-                open: price(1)?,
-                high: price(2)?,
-                low: price(3)?,
-                close: price(4)?,
-            });
-        }
+        candles.extend(rows.into_iter().map(|row| row.0));
         let Some(next_start) = next_kline_page_start(received, candles.last(), end_ms) else {
             break;
         };
@@ -152,4 +185,34 @@ pub(crate) async fn fetch_klines(
         tokio::time::sleep(Duration::from_millis(150)).await;
     }
     Ok(candles)
+}
+
+#[cfg(test)]
+mod kline_row_tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+
+    #[test]
+    fn kline_row_deserializes_binance_12_column_arrays_and_rejects_short_rows() {
+        let json = r#"[
+            [1700000000000,"100.10","105.50","99.25","103.75","1234.5",1700000059999,"126000.0",42,"600.0","61200.0","0"],
+            [1700000060000,"103.75","104.00","101.00","102.00"]
+        ]"#;
+        let rows: Vec<KlineRow> = serde_json::from_str(json).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0].0,
+            Candle {
+                time_ms: 1_700_000_000_000,
+                open: dec!(100.10),
+                high: dec!(105.50),
+                low: dec!(99.25),
+                close: dec!(103.75),
+            }
+        );
+        assert_eq!(rows[1].0.close, dec!(102.00));
+        assert!(
+            serde_json::from_str::<Vec<KlineRow>>(r#"[[1700000000000,"100","101","99"]]"#).is_err()
+        );
+    }
 }

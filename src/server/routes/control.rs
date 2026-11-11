@@ -17,6 +17,7 @@ pub(super) type ControlReply = tokio::sync::oneshot::Receiver<Result<(), String>
 
 // A persisted pause must reach the engine before a later resume can use its
 // epoch. Keep this guard alive until the pause is queued or dispatch fails.
+#[must_use = "dropping this guard immediately releases the lock or barrier"]
 pub(super) struct PendingControlPause(Arc<AppState>);
 
 impl PendingControlPause {
@@ -186,9 +187,6 @@ pub(super) async fn dispatch_prepared_control(
     if state.is_retired() {
         return json_err("交易对已移除，无法执行操作");
     }
-    // Checking immediately before submission closes the channel-wait window.
-    // Revocation can still race with this check after it completes; actions
-    // already submitted to the engine cannot be recalled here.
     if pending_pause.is_none() {
         if let Some(token) = &socket_token {
             if !state.is_token_valid(token).await {
@@ -206,21 +204,32 @@ pub(super) async fn dispatch_prepared_control(
         let _ = submitted.send(());
     }
     if let Some(reply) = reply {
-        let response = tokio::select! {
-            biased;
-            _ = retired.changed() => return json_err("交易对已移除，无法执行操作"),
-            _ = async {
-                if let Some(results) = &socket_results { results.closed().await; }
-                else { std::future::pending::<()>().await; }
-            } => return json_err("控制连接已关闭"),
-            response = reply => response,
-        };
-        match response {
-            Ok(Ok(())) => {}
-            Ok(Err(message)) => return json_err(message),
-            Err(error) => return json_err(format!("策略未确认控制操作: {}", error)),
+        if let Err(message) =
+            await_control_reply(reply, &mut retired, socket_results.as_ref()).await
+        {
+            return json_err(message);
         }
     }
-
     json_ok(format!("Action {} triggered successfully", action_name))
+}
+
+async fn await_control_reply(
+    reply: ControlReply,
+    retired: &mut tokio::sync::watch::Receiver<bool>,
+    socket_results: Option<&tokio::sync::mpsc::Sender<String>>,
+) -> Result<(), String> {
+    let response = tokio::select! {
+        biased;
+        _ = retired.changed() => return Err("交易对已移除，无法执行操作".into()),
+        _ = async {
+            if let Some(results) = socket_results { results.closed().await; }
+            else { std::future::pending::<()>().await; }
+        } => return Err("控制连接已关闭".into()),
+        response = reply => response,
+    };
+    match response {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(message)) => Err(message),
+        Err(error) => Err(format!("策略未确认控制操作: {}", error)),
+    }
 }

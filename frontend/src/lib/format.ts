@@ -58,12 +58,6 @@ function formatSeconds(seconds: number) {
   const [amount, unit] = seconds < 60 ? [seconds, '秒'] : seconds < 3600 ? [Math.floor(seconds / 60), '分钟'] : seconds < 86400 ? [Math.floor(seconds / 3600), '小时'] : [Math.floor(seconds / 86400), '天'];
   return `${amount}${unit}`;
 }
-export function relativeTime(value: string | number, now = Date.now()) {
-  const timestamp = typeof value === 'number' ? value : Date.parse(value);
-  if (!Number.isFinite(timestamp)) return '--';
-  const seconds = Math.floor(Math.abs(now - timestamp) / 1000);
-  return `${formatSeconds(seconds)}${seconds > 0 && timestamp > now ? '后' : '前'}`;
-}
 /** How long ago a past moment was; a clock a hair ahead of `now` still reads as just now. */
 export function ageText(updatedAt: number, now = Date.now()) {
   const seconds = Math.max(0, Math.floor((now - updatedAt) / 1000));

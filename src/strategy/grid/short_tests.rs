@@ -183,8 +183,7 @@ async fn paper_position_and_wallet_survive_restart_and_history_cleanup() {
         ),
     ] {
         for cleanup in 0..3 {
-            let directory =
-                std::env::temp_dir().join(format!("paper-restart-{}", uuid::Uuid::new_v4()));
+            let directory = crate::test_support::TempTestDir::new("paper-restart");
             let path = directory.join("bot.db");
             {
                 let db = Arc::new(Database::open(&path).unwrap());
@@ -255,7 +254,6 @@ async fn paper_position_and_wallet_survive_restart_and_history_cleanup() {
                     dec!(10020)
                 );
             }
-            std::fs::remove_dir_all(directory).unwrap();
         }
     }
 }

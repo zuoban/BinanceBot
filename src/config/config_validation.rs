@@ -1,4 +1,4 @@
-use super::{AppConfig, ExchangeConfig, GridConfig, TelegramConfig};
+use super::{AppConfig, ExchangeConfig, GridConfig, ServerConfig, TelegramConfig};
 use anyhow::Context;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -23,6 +23,29 @@ impl AppConfig {
         self.exchange.validate()?;
         self.telegram.validate()?;
         Ok(())
+    }
+
+    /// Resolve independent engine configs; the global symbol is ignored when pairs are explicit.
+    pub fn strategy_configs(&self) -> anyhow::Result<Vec<Self>> {
+        if self.pairs.is_empty() {
+            return Ok(vec![self.clone()]);
+        }
+        let mut symbols = std::collections::HashSet::new();
+        let mut configs = Vec::with_capacity(self.pairs.len());
+        for pair in &self.pairs {
+            validate_symbol(&pair.symbol)?;
+            anyhow::ensure!(
+                symbols.insert(&pair.symbol),
+                "重复配置交易对: {}",
+                pair.symbol
+            );
+            let mut config = self.clone();
+            config.pairs.clear();
+            config.exchange.symbol = pair.symbol.clone();
+            config.grid = pair.grid.unwrap_or(self.grid);
+            configs.push(config);
+        }
+        Ok(configs)
     }
 }
 
@@ -86,6 +109,17 @@ impl GridConfig {
             );
         }
         Ok(())
+    }
+}
+
+impl ServerConfig {
+    pub fn socket_addr(&self) -> anyhow::Result<std::net::SocketAddr> {
+        anyhow::ensure!(self.port > 0, "监听端口必须在 1-65535 之间");
+        let host = self
+            .host
+            .parse::<std::net::IpAddr>()
+            .context("监听地址必须是有效的 IPv4 或 IPv6 地址")?;
+        Ok(std::net::SocketAddr::new(host, self.port))
     }
 }
 

@@ -120,6 +120,7 @@
 @media (pointer: coarse), (max-width: 600px) {
   .sidebar-link, .sidebar-pair { min-height: 44px; }
   .sidebar-add { width: 44px; height: 44px; }
+  .sidebar-drawer .theme-segmented .ant-segmented-item { min-width: var(--control-touch); min-height: var(--control-touch); display: flex; align-items: center; justify-content: center; }
   .palette-item { min-height: 44px; }
   .palette-esc { min-width: var(--control-touch); min-height: var(--control-touch); align-items: center; justify-content: center; touch-action: manipulation; }
 }

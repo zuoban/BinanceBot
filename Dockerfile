@@ -40,5 +40,7 @@ EXPOSE 8080
 
 ENV RUST_LOG="binance_grid_bot=info"
 
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD ["/app/binance-grid-bot", "healthcheck"]
+
 ENTRYPOINT ["/app/binance-grid-bot"]
 CMD ["--db", "/app/data/bot.db", "--host", "0.0.0.0"]

@@ -58,22 +58,45 @@ enum Command {
         #[arg(long)]
         confirm: String,
     },
+    /// Probe the HTTP server health endpoint and exit non-zero on failure.
+    Healthcheck {
+        #[arg(long, default_value = "http://127.0.0.1:8080/api/auth/status")]
+        url: String,
+    },
 }
 
 fn load_saved_config(db: &Database) -> anyhow::Result<AppConfig> {
     let loaded = db.load_config()?;
     let mut config = loaded.clone().unwrap_or_default();
     config.ensure_pair_list()?;
-    if loaded
-        .as_ref()
-        .map(serde_json::to_value)
-        .transpose()?
-        .as_ref()
-        != Some(&serde_json::to_value(&config)?)
-    {
+    if loaded.as_ref() != Some(&config) {
         db.save_config(&config)?;
     }
     Ok(config)
+}
+
+async fn run_healthcheck(url: &str) -> anyhow::Result<()> {
+    let parsed =
+        reqwest::Url::parse(url).map_err(|_| anyhow::anyhow!("Invalid healthcheck URL"))?;
+    anyhow::ensure!(
+        matches!(parsed.scheme(), "http" | "https"),
+        "Healthcheck URL must use http or https"
+    );
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let resp = client
+        .get(parsed)
+        .send()
+        .await
+        .map_err(reqwest::Error::without_url)?;
+    let status = resp.status();
+    anyhow::ensure!(
+        status.is_success(),
+        "Healthcheck failed with HTTP status {status}"
+    );
+    Ok(())
 }
 
 fn run_migrate_legacy_paper(db: PathBuf, symbol: String, confirm: String) -> anyhow::Result<()> {
@@ -278,6 +301,9 @@ async fn main() -> anyhow::Result<()> {
     if let Some(Command::Backtest(backtest)) = &args.command {
         return binance_grid_bot::strategy::backtest::run_cli(backtest).await;
     }
+    if let Some(Command::Healthcheck { url }) = &args.command {
+        return run_healthcheck(url).await;
+    }
     if let Some(Command::MigrateLegacyPaper {
         db,
         symbol,
@@ -341,10 +367,7 @@ mod tests {
         assert_eq!(strategies[0].exchange.api_key, "saved-key");
         assert_eq!(config.server.host, "0.0.0.0");
         assert_eq!(strategies[0].grid.grid_interval, dec!(10));
-        assert_eq!(
-            serde_json::to_value(&config).unwrap(),
-            serde_json::to_value(load_saved_config(&db).unwrap()).unwrap()
-        );
+        assert_eq!(config, load_saved_config(&db).unwrap());
     }
 
     #[test]
@@ -378,5 +401,28 @@ mod tests {
         ] {
             assert!(CliArgs::try_parse_from(["bot", option, "value"]).is_err());
         }
+    }
+
+    #[tokio::test]
+    async fn healthcheck_command_defaults_and_verifies_http_status() {
+        use axum::{http::StatusCode, routing::get, Router};
+        let Some(Command::Healthcheck { url }) = CliArgs::try_parse_from(["bot", "healthcheck"])
+            .unwrap()
+            .command
+        else {
+            panic!("expected healthcheck subcommand");
+        };
+        assert_eq!(url, "http://127.0.0.1:8080/api/auth/status");
+        let app = Router::new()
+            .route("/ok", get(|| async { "ok" }))
+            .route("/fail", get(|| async { StatusCode::SERVICE_UNAVAILABLE }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        run_healthcheck(&format!("http://{addr}/ok")).await.unwrap();
+        assert!(run_healthcheck(&format!("http://{addr}/fail"))
+            .await
+            .is_err());
+        server.abort();
     }
 }

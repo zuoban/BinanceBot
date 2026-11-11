@@ -5,7 +5,7 @@ use crate::types::{
     TickerInfo, TradeRecord, TradingMode,
 };
 use anyhow::{anyhow, Result};
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use reqwest::Client;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -161,7 +161,6 @@ impl TradeNotificationContext {
                 .last()
                 .map(|bucket| select_side((bucket.buy_count, bucket.sell_count)))
         });
-        let age = now - account.update_time;
         let flat_paper = trade.mode == TradingMode::Paper
             && account.margin_balance == account.available_balance
             && account.unrealized_profit.is_zero();
@@ -170,7 +169,8 @@ impl TradeNotificationContext {
         } else {
             crate::types::max_reconciliation_age_secs(sync_interval_secs)
         };
-        let fresh = flat_paper || (age >= Duration::zero() && age < Duration::seconds(max_age));
+        let fresh =
+            flat_paper || crate::types::is_timestamp_fresh(account.update_time, now, max_age);
         let matching_asset =
             crate::types::quote_asset(&trade.symbol).is_some_and(|asset| account.asset == asset);
         let account_equity = (fresh && matching_asset).then_some(account.margin_balance);
@@ -181,7 +181,7 @@ impl TradeNotificationContext {
             .filter(|rate| {
                 rate.asset == account.asset
                     && rate.cny_per_unit > Decimal::ZERO
-                    && now - rate.updated_at < Duration::hours(1)
+                    && crate::types::is_timestamp_fresh(rate.updated_at, now, 3600)
             })
             .map(|rate| rate.cny_per_unit);
         Self {
@@ -341,26 +341,26 @@ fn format_daily_account_lines(accounts: &[crate::snapshots::DailyAccountGroup]) 
 
 fn format_daily_pnl_lines(trades: &[crate::snapshots::DailyTradeGroup]) -> String {
     let mut pnl_groups: std::collections::BTreeMap<
-        (String, String),
-        (TradingMode, String, Decimal, u64),
+        (&'static str, &str),
+        (TradingMode, Decimal, u64),
     > = std::collections::BTreeMap::new();
     for trade in trades {
-        let asset = crate::types::quote_asset(&trade.symbol)
-            .unwrap_or(&trade.symbol)
-            .to_owned();
-        let entry = pnl_groups
-            .entry((trade.mode.as_str().to_owned(), asset.clone()))
-            .or_insert((trade.mode, asset, Decimal::ZERO, 0));
-        entry.2 = entry.2.saturating_add(trade.realized_pnl);
-        entry.3 = entry.3.saturating_add(trade.pending_pnl_count);
+        let asset = crate::types::quote_asset(&trade.symbol).unwrap_or(&trade.symbol);
+        let entry = pnl_groups.entry((trade.mode.as_str(), asset)).or_insert((
+            trade.mode,
+            Decimal::ZERO,
+            0,
+        ));
+        entry.1 = entry.1.saturating_add(trade.realized_pnl);
+        entry.2 = entry.2.saturating_add(trade.pending_pnl_count);
     }
     if pnl_groups.is_empty() {
         return "· 0.00".to_string();
     }
     pnl_groups
-        .into_values()
-        .map(|(mode, asset, pnl, pending)| {
-            let asset = escape_html(&asset);
+        .into_iter()
+        .map(|((_, asset), (mode, pnl, pending))| {
+            let asset = escape_html(asset);
             let formatted_pnl = format_decimal_dp(pnl, 4, true);
             if pending > 0 {
                 format!(

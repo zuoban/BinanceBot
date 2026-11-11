@@ -62,9 +62,11 @@ function useLivePairStatuses(pairsData: Pair[] | undefined, accounts: AccountObs
   return { currentPairs, pairModeChanged, mode };
 }
 
+const settingsTab = (loc: { pathname: string; search: string }) => loc.pathname === '/settings' ? (new URLSearchParams(loc.search).get('tab') || 'global') : null;
+
 function useDirtyNavigationBlocker(dirty: boolean, saving: boolean, setDirty: (value: boolean) => void) {
   const blockerDialog = useConfirmDialog();
-  const blocker = useBlocker(({ currentLocation, nextLocation }) => (dirty || saving) && currentLocation.pathname !== nextLocation.pathname);
+  const blocker = useBlocker(({ currentLocation, nextLocation }) => (dirty || saving) && (currentLocation.pathname !== nextLocation.pathname || settingsTab(currentLocation) !== settingsTab(nextLocation)));
   useEffect(() => {
     if (blocker.state !== 'blocked') return;
     if (saving) { blocker.reset(); return; }

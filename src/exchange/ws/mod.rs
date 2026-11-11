@@ -114,6 +114,44 @@ fn extract_ws_market_fields(
     Some((stream, fields))
 }
 
+fn build_24hr_ticker(
+    fields: WsMarketFields<'_>,
+    symbol: &str,
+    observed_at: DateTime<Utc>,
+    times: &mut EventTimes,
+) -> Option<TickerInfo> {
+    let close_price = fields.close_price?;
+    let open_price = fields.open_price?;
+    let high_price = fields.high_price?;
+    let low_price = fields.low_price?;
+    let volume = fields.volume?;
+    let _ = fields.quote_volume?;
+    if close_price <= Decimal::ZERO || times.ticker.is_some_and(|last| fields.event_time <= last) {
+        return None;
+    }
+    times.ticker = Some(fields.event_time);
+    let change = close_price.checked_sub(open_price).unwrap_or(Decimal::ZERO);
+    let change_pct = if open_price.is_zero() {
+        Decimal::ZERO
+    } else {
+        change
+            .checked_div(open_price)
+            .and_then(|ratio| ratio.checked_mul(rust_decimal_macros::dec!(100)))
+            .unwrap_or(Decimal::ZERO)
+    };
+    Some(TickerInfo {
+        symbol: symbol.to_string(),
+        last_price: close_price,
+        high_24h: high_price,
+        low_24h: low_price,
+        change_24h: change,
+        change_percent_24h: change_pct,
+        volume_24h: volume,
+        update_time: observed_at,
+        ..Default::default()
+    })
+}
+
 fn parse_market_update(
     text: &str,
     symbol: &str,
@@ -133,38 +171,7 @@ fn parse_market_update(
     let observed_at = event_at.min(now);
     match fields.event_type.as_ref() {
         "24hrTicker" if stream_matches_symbol(stream.as_deref(), "@ticker", symbol) => {
-            let close_price = fields.close_price?;
-            let open_price = fields.open_price?;
-            let high_price = fields.high_price?;
-            let low_price = fields.low_price?;
-            let volume = fields.volume?;
-            let _ = fields.quote_volume?;
-            if close_price <= Decimal::ZERO
-                || times.ticker.is_some_and(|last| fields.event_time <= last)
-            {
-                return None;
-            }
-            times.ticker = Some(fields.event_time);
-            let change = close_price.checked_sub(open_price).unwrap_or(Decimal::ZERO);
-            let change_pct = if open_price.is_zero() {
-                Decimal::ZERO
-            } else {
-                change
-                    .checked_div(open_price)
-                    .and_then(|ratio| ratio.checked_mul(rust_decimal_macros::dec!(100)))
-                    .unwrap_or(Decimal::ZERO)
-            };
-            Some(TickerInfo {
-                symbol: symbol.to_string(),
-                last_price: close_price,
-                high_24h: high_price,
-                low_24h: low_price,
-                change_24h: change,
-                change_percent_24h: change_pct,
-                volume_24h: volume,
-                update_time: observed_at,
-                ..Default::default()
-            })
+            build_24hr_ticker(fields, symbol, observed_at, times)
         }
         "markPriceUpdate" if stream_matches_symbol(stream.as_deref(), "@markPrice@1s", symbol) => {
             let mark_price = fields.price_field?;
@@ -182,6 +189,23 @@ fn parse_market_update(
             })
         }
         _ => None,
+    }
+}
+
+async fn send_ws_pong<W>(write: &mut W, payload: Vec<u8>, ws_url: &str) -> bool
+where
+    W: futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+{
+    match tokio::time::timeout(WS_PONG_WRITE_TIMEOUT, write.send(Message::Pong(payload))).await {
+        Ok(Ok(())) => true,
+        Ok(Err(e)) => {
+            warn!("WebSocket pong send error: {}", e);
+            false
+        }
+        Err(_) => {
+            warn!("WebSocket pong send timed out for {}", ws_url);
+            false
+        }
     }
 }
 
@@ -273,21 +297,8 @@ impl BinanceWsStream {
             };
             match msg_res {
                 Ok(Message::Ping(payload)) => {
-                    match tokio::time::timeout(
-                        WS_PONG_WRITE_TIMEOUT,
-                        write.send(Message::Pong(payload)),
-                    )
-                    .await
-                    {
-                        Ok(Ok(())) => {}
-                        Ok(Err(e)) => {
-                            warn!("WebSocket pong send error: {}", e);
-                            return WsSessionExit::Reconnect;
-                        }
-                        Err(_) => {
-                            warn!("WebSocket pong send timed out for {}", ws_url);
-                            return WsSessionExit::Reconnect;
-                        }
+                    if !send_ws_pong(&mut write, payload, ws_url).await {
+                        return WsSessionExit::Reconnect;
                     }
                 }
                 Ok(Message::Close(_)) => return WsSessionExit::Reconnect,

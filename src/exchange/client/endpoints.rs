@@ -128,9 +128,7 @@ impl BinanceFuturesClient {
             .checked_signed_response(self.send(self.client.get(&url)).await?)
             .await?;
 
-        let orders: Vec<BinanceOrderResponse> =
-            resp.json().await.map_err(reqwest::Error::without_url)?;
-        Ok(orders)
+        read_bounded_json(resp, 8 * 1024 * 1024).await
     }
 
     /// Fetch an order's final status before treating it as a fill.
@@ -219,9 +217,7 @@ impl BinanceFuturesClient {
                 .signed_error_from_body(status, &body, Some(&context))
                 .await);
         }
-        Ok(Some(
-            resp.json().await.map_err(reqwest::Error::without_url)?,
-        ))
+        Ok(Some(read_bounded_json(resp, 64 * 1024).await?))
     }
 
     /// Place an order. If post_only is true, timeInForce is set to GTX (Maker Only).
@@ -277,11 +273,9 @@ impl BinanceFuturesClient {
             return Err(order_response_error(status, &body));
         }
 
-        let order: BinanceOrderResponse = resp
-            .json()
+        let order: BinanceOrderResponse = read_bounded_json(resp, 64 * 1024)
             .await
-            .map_err(reqwest::Error::without_url)
-            .map_err(|e| ExchangeError::Other(format!("Failed to parse order response: {}", e)))?;
+            .map_err(|e| ExchangeError::Other(format!("Failed to parse order response: {e}")))?;
         Ok(order)
     }
 

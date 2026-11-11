@@ -143,16 +143,12 @@ impl RuntimeHandle {
             )
             .into());
         }
+        payload.validate_credential_updates()?;
         payload.apply_to(&mut config);
         // Retired members remain published for risk accounting, but their engines
         // are no longer available to validate or apply configuration changes.
         let states = self.active_states().await;
-        // Validate every active mode before changing any engine (including credential clearing).
-        for state in &states {
-            let mut strategy = state.config.read().await.clone();
-            config.apply_to(&mut strategy);
-            strategy.validate()?;
-        }
+        Self::validate_global_config_for_states(&states, &config).await?;
         // Drain in-flight submissions in every old scope before installing any new
         // credentials. Keep all writers through persistence and any rollback so no
         // engine can replenish orders using settings that are not yet durable.
@@ -160,12 +156,38 @@ impl RuntimeHandle {
         for state in &states {
             submission_guards.push(state.order_submission_lock.clone().write_owned().await);
         }
+        self.propagate_and_persist_global_config(&states, &config)
+            .await?;
+        self.global_position_limit
+            .commit_config(config.clone())
+            .await;
+        Ok(config)
+    }
+
+    async fn validate_global_config_for_states(
+        states: &[Arc<AppState>],
+        config: &GlobalConfig,
+    ) -> anyhow::Result<()> {
+        // Validate every active mode before changing any engine (including credential clearing).
+        for state in states {
+            let mut strategy = state.config.read().await.clone();
+            config.apply_to(&mut strategy);
+            strategy.validate()?;
+        }
+        Ok(())
+    }
+
+    async fn propagate_and_persist_global_config(
+        &self,
+        states: &[Arc<AppState>],
+        config: &GlobalConfig,
+    ) -> anyhow::Result<()> {
         let mut attempted = Vec::new();
         let mut failure = None;
-        for state in &states {
+        for state in states {
             let old = GlobalConfig::from_app(&*state.config.read().await);
             attempted.push((state.clone(), old));
-            if let Err(error) = Self::send_global_config(state, &config).await {
+            if let Err(error) = Self::send_global_config(state, config).await {
                 failure = Some(error);
                 break;
             }
@@ -181,12 +203,9 @@ impl RuntimeHandle {
             }
         }
         if let Some(error) = failure {
-            return Err(Self::rollback_global_config_attempt(&states, attempted, error).await);
+            return Err(Self::rollback_global_config_attempt(states, attempted, error).await);
         }
-        self.global_position_limit
-            .commit_config(config.clone())
-            .await;
-        Ok(config)
+        Ok(())
     }
 
     async fn rollback_global_config_attempt(

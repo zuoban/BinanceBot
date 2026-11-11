@@ -9,8 +9,8 @@ use axum::Router;
 
 #[tokio::test]
 async fn engine_start_fails_when_execution_guard_cannot_be_written() {
-    let path =
-        std::env::temp_dir().join(format!("guard-write-failure-{}.db", uuid::Uuid::new_v4()));
+    let dir = crate::test_support::TempTestDir::new("guard-write-failure");
+    let path = dir.join("bot.db");
     let db = Arc::new(Database::open(&path).unwrap());
     let config = AppConfig::default();
     db.save_config(&config).unwrap();
@@ -25,7 +25,6 @@ async fn engine_start_fails_when_execution_guard_cannot_be_written() {
     .await
     .is_err());
     drop(db);
-    std::fs::remove_file(path).unwrap();
 }
 
 #[tokio::test]
@@ -34,9 +33,7 @@ async fn later_startup_failure_cleans_up_prepared_engine_and_preserves_unstarted
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let directory =
-        std::env::temp_dir().join(format!("runtime-start-failure-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir(&directory).unwrap();
+    let directory = crate::test_support::TempTestDir::new("runtime-start-failure");
     let path = directory.join("bot.db");
     let config = AppConfig {
         pairs: ["SOLUSDC", "BTCUSDT"]
@@ -91,7 +88,6 @@ async fn later_startup_failure_cleans_up_prepared_engine_and_preserves_unstarted
     drop(connection);
     drop(db);
     server.abort();
-    std::fs::remove_dir_all(directory).unwrap();
 }
 
 #[tokio::test]
@@ -135,11 +131,7 @@ async fn startup_reports_cleanup_failure_and_retains_dirty_recovery_guard() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let directory = std::env::temp_dir().join(format!(
-        "runtime-start-cleanup-failure-{}",
-        uuid::Uuid::new_v4()
-    ));
-    std::fs::create_dir(&directory).unwrap();
+    let directory = crate::test_support::TempTestDir::new("runtime-start-cleanup-failure");
     let path = directory.join("bot.db");
     let config = AppConfig {
         pairs: ["SOLUSDC", "BTCUSDT"]
@@ -181,7 +173,6 @@ async fn startup_reports_cleanup_failure_and_retains_dirty_recovery_guard() {
     drop(connection);
     drop(db);
     server.abort();
-    std::fs::remove_dir_all(directory).unwrap();
 }
 
 #[tokio::test]
@@ -190,11 +181,7 @@ async fn interrupted_startup_cleans_every_prepared_engine_and_leaves_unstarted_p
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let directory = std::env::temp_dir().join(format!(
-        "runtime-start-interrupted-{}",
-        uuid::Uuid::new_v4()
-    ));
-    std::fs::create_dir(&directory).unwrap();
+    let directory = crate::test_support::TempTestDir::new("runtime-start-interrupted");
     let path = directory.join("bot.db");
     let config = AppConfig {
         pairs: ["SOLUSDC", "BTCUSDT", "ETHUSDT"]
@@ -267,7 +254,6 @@ async fn interrupted_startup_cleans_every_prepared_engine_and_leaves_unstarted_p
     drop(connection);
     drop(db);
     server.abort();
-    std::fs::remove_dir_all(directory).unwrap();
 }
 
 #[tokio::test]
@@ -295,11 +281,7 @@ async fn interrupt_during_pair_preparation_blocks_orders_and_cleans_up_guards() 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let directory = std::env::temp_dir().join(format!(
-        "runtime-prepare-interrupted-{}",
-        uuid::Uuid::new_v4()
-    ));
-    std::fs::create_dir(&directory).unwrap();
+    let directory = crate::test_support::TempTestDir::new("runtime-prepare-interrupted");
     let path = directory.join("bot.db");
     let mut config = AppConfig {
         pairs: ["SOLUSDC", "BTCUSDT", "ETHUSDT"]
@@ -379,7 +361,6 @@ async fn interrupt_during_pair_preparation_blocks_orders_and_cleans_up_guards() 
     drop(connection);
     drop(db);
     server.abort();
-    std::fs::remove_dir_all(directory).unwrap();
 }
 
 async fn wait_for_runtime_initialization(runtime: &TradingRuntime) {
@@ -412,8 +393,7 @@ async fn restart_restores_each_pair_after_clean_shutdown() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let directory = std::env::temp_dir().join(format!("runtime-restart-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir(&directory).unwrap();
+    let directory = crate::test_support::TempTestDir::new("runtime-restart");
     let path = directory.join("bot.db");
     let config = AppConfig {
         pairs: ["SOLUSDC", "BTCUSDT"]
@@ -456,14 +436,11 @@ async fn restart_restores_each_pair_after_clean_shutdown() {
         runtime.shutdown(Duration::from_secs(10)).await.unwrap();
     }
     server.abort();
-    std::fs::remove_dir_all(directory).unwrap();
 }
 
 #[tokio::test]
 async fn failed_runtime_shutdown_keeps_running_pairs_paused_after_reopen() {
-    let directory =
-        std::env::temp_dir().join(format!("runtime-failed-shutdown-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir(&directory).unwrap();
+    let directory = crate::test_support::TempTestDir::new("runtime-failed-shutdown");
     let path = directory.join("bot.db");
     {
         let db = Arc::new(Database::open(&path).unwrap());
@@ -488,15 +465,12 @@ async fn failed_runtime_shutdown_keeps_running_pairs_paused_after_reopen() {
             );
         }
     }
-    std::fs::remove_dir_all(directory).unwrap();
 }
 
 #[tokio::test]
 async fn manual_pause_before_recovery_commit_remains_paused_after_reopen() {
     for pause_before_commit in [true, false] {
-        let directory =
-            std::env::temp_dir().join(format!("runtime-pause-order-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir(&directory).unwrap();
+        let directory = crate::test_support::TempTestDir::new("runtime-pause-order");
         let path = directory.join("bot.db");
         {
             let db = Arc::new(Database::open(&path).unwrap());
@@ -531,7 +505,6 @@ async fn manual_pause_before_recovery_commit_remains_paused_after_reopen() {
                 })
             );
         }
-        std::fs::remove_dir_all(directory).unwrap();
     }
 }
 
@@ -551,9 +524,7 @@ async fn shutdown_during_initialization_does_not_restore_running_status() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let directory =
-        std::env::temp_dir().join(format!("runtime-interrupted-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir(&directory).unwrap();
+    let directory = crate::test_support::TempTestDir::new("runtime-interrupted");
     let path = directory.join("bot.db");
     let config = AppConfig::default();
     {
@@ -574,14 +545,11 @@ async fn shutdown_during_initialization_does_not_restore_running_status() {
         assert_eq!(db.load_bot_status().unwrap(), Some(BotStatus::Paused));
     }
     server.abort();
-    std::fs::remove_dir_all(directory).unwrap();
 }
 
 #[tokio::test]
 async fn concurrent_safety_pause_prevents_shutdown_recovery() {
-    let directory =
-        std::env::temp_dir().join(format!("runtime-concurrent-pause-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir(&directory).unwrap();
+    let directory = crate::test_support::TempTestDir::new("runtime-concurrent-pause");
     let path = directory.join("bot.db");
     {
         let db = Arc::new(Database::open(&path).unwrap());
@@ -634,5 +602,4 @@ async fn concurrent_safety_pause_prevents_shutdown_recovery() {
         let db = Database::open(&path).unwrap();
         assert_eq!(db.load_bot_status().unwrap(), Some(BotStatus::Paused));
     }
-    std::fs::remove_dir_all(directory).unwrap();
 }

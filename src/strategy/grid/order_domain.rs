@@ -18,15 +18,21 @@ pub(super) fn new_grid_client_order_id(side: OrderSide) -> String {
     id
 }
 
+#[must_use]
+#[inline]
 pub(super) fn is_grid_order(client_order_id: &str) -> bool {
     client_order_id.starts_with(GRID_ORDER_PREFIX)
 }
 
+#[must_use]
+#[inline]
 pub(super) fn unresolved_filled_quantity(order: &BinanceOrderResponse) -> bool {
     order.status == "FILLED" && order.executed_qty <= Decimal::ZERO
 }
 
 /// All idle orders follow the window. Partial executions finish on their existing order.
+#[must_use]
+#[inline]
 pub(super) fn is_window_order(order: &GridOrder) -> bool {
     is_grid_order(&order.client_order_id) && order.status == OrderStatus::New
 }
@@ -68,6 +74,8 @@ pub(super) fn update_paper_account(
     };
 }
 
+#[must_use]
+#[inline]
 pub(super) fn within_grid_spacing(
     a: Decimal,
     b: Decimal,
@@ -78,6 +86,8 @@ pub(super) fn within_grid_spacing(
     a.checked_sub(b).is_some_and(|diff| diff.abs() < spacing)
 }
 
+#[must_use]
+#[inline]
 pub(super) fn has_nearby_grid_order(
     prices: &[Decimal],
     target: Decimal,

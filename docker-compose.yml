@@ -26,8 +26,17 @@ services:
     image: "ghcr.io/zuoban/binancebot-frontend:${BOT_VERSION:-0.10.7}"
     restart: unless-stopped
     depends_on:
-      - binance-bot
+      binance-bot:
+        condition: service_healthy
     ports:
       - "127.0.0.1:8080:80"
     security_opt:
       - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE

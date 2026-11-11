@@ -300,6 +300,11 @@ fn migrate_identity_observations_on(tx: &Connection) -> Result<()> {
 }
 
 fn migrate_initial_responses_and_disagreements_on(tx: &Connection) -> Result<()> {
+    migrate_initial_order_responses_on(tx)?;
+    migrate_terminal_disagreements_on(tx)
+}
+
+fn migrate_initial_order_responses_on(tx: &Connection) -> Result<()> {
     // Older versions deduplicated by response content. Preserve the order
     // of surviving rows; observations already discarded cannot be restored.
     let has_observation_id: i64 = tx.query_row(
@@ -343,6 +348,10 @@ fn migrate_initial_responses_and_disagreements_on(tx: &Connection) -> Result<()>
             "ALTER TABLE initial_order_responses ADD COLUMN batch_id TEXT NOT NULL DEFAULT 'legacy';",
         )?;
     }
+    Ok(())
+}
+
+fn migrate_terminal_disagreements_on(tx: &Connection) -> Result<()> {
     let terminal_key_columns: i64 = tx.query_row(
         "SELECT count(*) FROM pragma_table_info('terminal_order_disagreements') WHERE pk > 0",
         [],

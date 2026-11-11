@@ -24,6 +24,7 @@ pub(crate) struct AccountSnapshot {
 pub(super) struct AccountSnapshotData {
     pub(super) symbol: String,
     pub(super) status: BotStatus,
+    pub(super) account_scope: String,
     pub(super) sync_interval_secs: u64,
     pub(super) ticker: AccountTicker,
     pub(super) position: AccountPosition,

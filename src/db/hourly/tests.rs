@@ -165,8 +165,7 @@ fn aggregate_write_failures_roll_back_trade_insert_verification_and_clear() {
 
 #[test]
 fn old_history_backfills_atomically_once_and_reopens_without_rebuilding() {
-    let directory = std::env::temp_dir().join(format!("hourly-migration-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir(&directory).unwrap();
+    let directory = crate::test_support::TempTestDir::new("hourly-migration");
     let path = directory.join("history.db");
     let db = Database::open(&path).unwrap();
     db.conn.lock().unwrap().execute_batch(
@@ -281,7 +280,6 @@ fn old_history_backfills_atomically_once_and_reopens_without_rebuilding() {
     assert!(plan.contains("idx_trades_unverified_scope"), "{plan}");
     drop(conn);
     drop(db);
-    std::fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]

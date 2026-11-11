@@ -22,17 +22,24 @@ type LoadedGridConfig = GridConfig & { config_version: string; tick_size?: strin
 
 function usePageSubmissionGuard(pathname: string) {
   const router = useContext(UNSAFE_DataRouterContext)?.router;
-  const removing = useRef(false), submission = useRef<object | null>(null), page = useRef<object | null>(null);
+  const removing = useRef(false), submission = useRef<object | null>(null), page = useRef<object | null>(null), activePreflight = useRef<object | null>(null);
+  const [preflightPending, setPreflightPending] = useState(false);
   useLayoutEffect(() => {
     const current = {};
     page.current = current;
-    const invalidate = () => { if (page.current === current) { page.current = null; submission.current = null; } };
+    const invalidate = () => {
+      if (page.current === current) {
+        page.current = null;
+        submission.current = null;
+        if (activePreflight.current) { activePreflight.current = null; setPreflightPending(false); }
+      }
+    };
     // Router state can change before React commits the new route and runs cleanup.
     const unsubscribe = router?.subscribe(state => { if (state.location.pathname !== pathname) invalidate(); });
     if (router && router.state.location.pathname !== pathname) invalidate();
     return () => { unsubscribe?.(); invalidate(); };
   }, [pathname, router]);
-  return { page, removing, submission };
+  return { page, removing, submission, activePreflight, preflightPending, setPreflightPending };
 }
 
 function usePairConfigActions({ adding, symbol, pair, live, baseline, form, refetchGlobal, pathname, navigate }: {
@@ -40,7 +47,7 @@ function usePairConfigActions({ adding, symbol, pair, live, baseline, form, refe
   baseline: React.RefObject<BaselineState | null>; form: FormInstance<FormValues>;
   refetchGlobal: () => Promise<{ data?: GlobalConfig }>; pathname: string; navigate: NavigateFunction;
 }) {
-  const { page, removing, submission } = usePageSubmissionGuard(pathname);
+  const { page, removing, submission, activePreflight, preflightPending, setPreflightPending } = usePageSubmissionGuard(pathname);
   const edit = useContext(EditContext), client = useQueryClient(), { message } = App.useApp();
   const { confirm } = useConfirmDialog(symbol), deletion = useDeleteStrategy(symbol);
   const mutation = useMutation({
@@ -89,10 +96,20 @@ function usePairConfigActions({ adding, symbol, pair, live, baseline, form, refe
   };
   const submit = async (values: FormValues) => {
     if (removing.current || submission.current || !page.current) return;
-    const currentPage = page.current, currentSubmission = {};
+    const currentPage = page.current, currentSubmission = {}, preflightToken = {};
     submission.current = currentSubmission;
+    activePreflight.current = preflightToken;
+    setPreflightPending(true);
     try {
-      const latest = await refetchGlobal();
+      let latest: { data?: GlobalConfig };
+      try {
+        latest = await refetchGlobal();
+      } finally {
+        if (activePreflight.current === preflightToken) {
+          activePreflight.current = null;
+          setPreflightPending(false);
+        }
+      }
       if (page.current !== currentPage || submission.current !== currentSubmission) return;
       const currentLive = latest.data ? latest.data.has_api_key && latest.data.has_api_secret : pair ? pair.mode === 'LIVE' : true;
       const changes = adding || !baseline.current ? null : diffGridConfig(baseline.current.config, values);
@@ -103,7 +120,7 @@ function usePairConfigActions({ adding, symbol, pair, live, baseline, form, refe
       if (submission.current === currentSubmission) submission.current = null;
     }
   };
-  return { page, submission, edit, mutation, deletionBusy: deletion.busy, remove, submit };
+  return { page, submission, preflightPending, edit, mutation, deletionBusy: deletion.busy, remove, submit };
 }
 
 function PairConfigSaveBar({ form, adding, dirty, saving, isPending, symbol, page, baseline, hasPair, deletionBusy, onReset, onRevert, onRemove }: {
@@ -129,7 +146,7 @@ function PairConfigSaveBar({ form, adding, dirty, saving, isPending, symbol, pag
         <Button type="primary" htmlType="submit" loading={isPending}>{adding ? '保存并添加' : '保存并立即生效'}</Button>
       </Space>
     </div>
-    {!adding && <Card className="danger-zone" title="删除策略"><p>删除前请暂停策略、等待挂单撤销并平仓；删除不会自动平仓，历史记录会保留。</p><Button danger disabled={saving || !hasPair} loading={deletionBusy} onClick={onRemove}>删除策略</Button></Card>}
+    {!adding && <Card className="danger-zone" title="删除策略"><p>删除前请暂停策略、等待挂单撤销并平仓；删除不会自动平仓，历史记录会保留。</p><Button danger disabled={saving || isPending || !hasPair} loading={deletionBusy} onClick={onRemove}>删除策略</Button></Card>}
   </>;
 }
 
@@ -143,7 +160,7 @@ export default function PairConfig() {
   const live = global.data ? global.data.has_api_key && global.data.has_api_secret : pair ? pair.mode === 'LIVE' : true;
   const symbols = useQuery({ queryKey: ['exchange-symbols'], queryFn: ({ signal }) => api<string[]>('/api/exchange/symbols?environment=mainnet', { signal }), enabled: adding, retry: false, refetchOnWindowFocus: false });
   const config = useQuery({ queryKey: ['config', symbol, pair?.scoped], queryFn: ({ signal }) => { if (!pair) throw new Error('该交易对不存在或已移除'); return api<LoadedGridConfig>(pairPath(pair, 'config'), { signal }); }, enabled: !!pair, refetchOnWindowFocus: false });
-  const { page, submission, edit, mutation, deletionBusy, remove, submit } = usePairConfigActions({ adding, symbol, pair, live, baseline, form, refetchGlobal: global.refetch, pathname, navigate });
+  const { page, submission, preflightPending, edit, mutation, deletionBusy, remove, submit } = usePairConfigActions({ adding, symbol, pair, live, baseline, form, refetchGlobal: global.refetch, pathname, navigate });
   resetMutation.current = mutation.reset;
   useEffect(() => {
     setReady(adding); setLiveMark(undefined); baseline.current = null; customInterval.current = false; appliedSymbol.current = undefined; editedFields.current.clear();
@@ -154,7 +171,8 @@ export default function PairConfig() {
     if (config.data && config.data.symbol === symbol && !ready && !adding && symbol) { baseline.current = { symbol, config: config.data }; form.setFieldsValue(config.data); setReady(true); }
   }, [config.data, ready, adding, form, symbol]);
   useEffect(() => () => { edit.setDirty(false); edit.setSaving(false); }, [edit.setDirty, edit.setSaving]);
-  const formDisabled = !ready || edit.saving || deletionBusy || (!adding && !pair);
+  const disabled = !ready || edit.saving || deletionBusy || (!adding && !pair);
+  const formDisabled = disabled || preflightPending || mutation.isPending;
   const watchedSymbol = Form.useWatch('symbol', form) as string | undefined;
   const selectedSymbol = adding ? watchedSymbol?.trim().toUpperCase() : symbol, quote = quoteAsset(selectedSymbol ?? '');
   const symbolPreview = useQuery({ queryKey: ['symbol-preview', selectedSymbol], queryFn: ({ signal }) => api<{ symbol: string; last_price?: string | null; mark_price?: string | null; tick_size?: string; step_size?: string; min_qty?: string; min_notional?: string }>(`/api/exchange/symbol-preview?environment=mainnet&symbol=${encodeURIComponent(selectedSymbol ?? '')}`, { signal }), enabled: adding && !!selectedSymbol, retry: false, refetchOnWindowFocus: false });
@@ -175,14 +193,15 @@ export default function PairConfig() {
     if ((stepSize || minQty || minNotional) && ready && (editedFields.current.has('order_amount_usdc') || form.getFieldError('order_amount_usdc').length > 0)) void form.validateFields(['order_amount_usdc']).catch(() => {});
   }, [stepSize, minQty, minNotional, effectiveMark, ready, form]);
   return <div className="config-page">
-    {!adding && symbol && <AccountMarkBridge symbol={symbol} mode={pair?.mode} onMark={setLiveMark} />}
+    {!adding && symbol && <AccountMarkBridge symbol={symbol} mode={global.data ? (live ? 'LIVE' : 'PAPER') : pair?.mode} onMark={setLiveMark} />}
     <PageBreadcrumb disabled={edit.saving} items={!symbol ? [{ label: '策略总览', to: '/' }, { label: '新增交易对' }] : [{ label: '策略总览', to: '/' }, { label: symbol, to: pairRoute(symbol) }, { label: '策略参数' }]} />
     <PageTitle title={adding ? '新增交易对' : `${symbol} 策略参数`} description={adding ? '新策略创建后保持暂停，检查参数后手动恢复' : '参数保存后立即生效，请先核对策略设置'} />
     <ErrorNotice error={pairs.error || config.error} retry={() => { if (pairs.error) void pairs.refetch(); if (!adding && pair) void config.refetch(); }} />
     <ErrorNotice error={mutation.error} />
-    {!adding && isConfigConflict(mutation.error, '无法确认配置版本') && <ConflictReloadButton form={form} label="策略配置" activeRef={page} resetKey={symbol} refetch={config.refetch} onReset={mutation.reset} onLoaded={data => { if (!symbol || data.symbol !== symbol) return false; editedFields.current.clear(); baseline.current = { symbol, config: data }; form.setFieldsValue(data); }} />}
+    {!adding && isConfigConflict(mutation.error, '无法确认配置版本') && <ConflictReloadButton form={form} label="策略配置" activeRef={page} resetKey={symbol} refetch={config.refetch} onReset={mutation.reset} onLoaded={data => { if (!symbol || data.symbol !== symbol) return false; submission.current = null; editedFields.current.clear(); baseline.current = { symbol, config: data }; form.setFieldsValue(data); }} />}
     {pairs.data && !pair && !adding && !pairs.isFetching && <Alert type="warning" title="该交易对不存在或已移除" />}
     <Form<FormValues> className="config-form" form={form} layout="vertical" disabled={formDisabled} onFinish={values => void submit(values)} onValuesChange={changed => {
+      submission.current = null;
       for (const key of Object.keys(changed)) editedFields.current.add(key);
       if ('symbol' in changed) { editedFields.current.delete('grid_interval'); form.setFieldValue('grid_interval', defaults.grid_interval); customInterval.current = false; appliedSymbol.current = undefined; }
       else if ('grid_interval' in changed) customInterval.current = true;
@@ -198,8 +217,8 @@ export default function PairConfig() {
         <GridPreview key={selectedSymbol ?? 'new'} form={form} markPrice={effectiveMark} tickSize={tickSize} stepSize={stepSize} minQty={minQty} minNotional={minNotional} quote={quote || '报价资产'} />
       </div>
       <PairRiskAndRangeSection />
-      <PairConfigSaveBar form={form} adding={adding} dirty={edit.dirty} saving={edit.saving} isPending={mutation.isPending} symbol={symbol} page={page} baseline={baseline.current} hasPair={!!pair} deletionBusy={deletionBusy} onReset={mutation.reset} onRemove={() => void remove()}
-        onRevert={() => { editedFields.current.clear(); if (adding) { customInterval.current = false; appliedSymbol.current = undefined; form.setFieldsValue(defaults); } else if (baseline.current?.symbol === symbol) { form.setFieldsValue(baseline.current.config); } }} />
+      <PairConfigSaveBar form={form} adding={adding} dirty={edit.dirty} saving={edit.saving} isPending={preflightPending || mutation.isPending} symbol={symbol} page={page} baseline={baseline.current} hasPair={!!pair} deletionBusy={deletionBusy} onReset={mutation.reset} onRemove={() => void remove()}
+        onRevert={() => { submission.current = null; editedFields.current.clear(); if (adding) { customInterval.current = false; appliedSymbol.current = undefined; form.setFieldsValue(defaults); } else if (baseline.current?.symbol === symbol) { form.setFieldsValue(baseline.current.config); } }} />
     </Form>
   </div>;
 }

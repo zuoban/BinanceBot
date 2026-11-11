@@ -295,7 +295,8 @@ async fn immediate_fill_response_gates_other_pair_before_order_processing() {
 
 #[tokio::test]
 async fn fill_gate_prevents_send_after_placement_intent_is_persisted() {
-    let path = std::env::temp_dir().join(format!("pre-send-gate-{}.db", uuid::Uuid::new_v4()));
+    let dir = crate::test_support::TempTestDir::new("pre-send-gate");
+    let path = dir.join("pre-send-gate.db");
     let db = Arc::new(Database::open(&path).unwrap());
     db.save_bot_status(BotStatus::Running).unwrap();
     let fake = Exchange::default();
@@ -353,7 +354,6 @@ async fn fill_gate_prevents_send_after_placement_intent_is_persisted() {
     server.abort();
     drop(connection);
     drop(db);
-    let _ = std::fs::remove_file(path);
 }
 
 #[tokio::test]
@@ -391,7 +391,8 @@ async fn recorded_fill_refreshes_account_and_global_risk_before_other_pair_can_s
             .lock()
             .unwrap()
             .insert(order.client_order_id.clone(), response);
-        let path = std::env::temp_dir().join(format!("recorded-risk-{}.db", uuid::Uuid::new_v4()));
+        let dir = crate::test_support::TempTestDir::new("recorded-risk");
+        let path = dir.join("recorded-risk.db");
         let second_db = Arc::new(Database::open(&path).unwrap());
         second_db.save_bot_status(BotStatus::Running).unwrap();
         let mut first = engine(first_db, &url).await;
@@ -438,7 +439,6 @@ async fn recorded_fill_refreshes_account_and_global_risk_before_other_pair_can_s
         server.abort();
         drop(connection);
         drop(second_db);
-        let _ = std::fs::remove_file(path);
     }
 }
 

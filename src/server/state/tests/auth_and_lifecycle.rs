@@ -61,8 +61,7 @@ async fn saturated_login_table_keeps_active_windows_until_expiry() {
 
 #[tokio::test]
 async fn shutdown_global_lock_timeout_persists_pause_after_database_write_finishes() {
-    let directory = std::env::temp_dir().join(format!("shutdown-lock-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir(&directory).unwrap();
+    let directory = crate::test_support::TempTestDir::new("shutdown-lock");
     let path = directory.join("bot.db");
     {
         let db = Arc::new(Database::open(&path).unwrap());
@@ -96,13 +95,11 @@ async fn shutdown_global_lock_timeout_persists_pause_after_database_write_finish
     let db = Database::open(&path).unwrap();
     assert_eq!(db.load_bot_status().unwrap(), Some(BotStatus::Paused));
     drop(db);
-    std::fs::remove_dir_all(directory).unwrap();
 }
 
 #[tokio::test]
 async fn shutdown_timeout_waits_for_inflight_pause_before_failure_returns() {
-    let directory = std::env::temp_dir().join(format!("shutdown-write-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir(&directory).unwrap();
+    let directory = crate::test_support::TempTestDir::new("shutdown-write");
     let path = directory.join("bot.db");
     {
         let db = Arc::new(Database::open(&path).unwrap());
@@ -131,13 +128,11 @@ async fn shutdown_timeout_waits_for_inflight_pause_before_failure_returns() {
     let db = Database::open(&path).unwrap();
     assert_eq!(db.load_bot_status().unwrap(), Some(BotStatus::Paused));
     drop(db);
-    std::fs::remove_dir_all(directory).unwrap();
 }
 
 #[tokio::test]
 async fn cancelled_recovery_commit_finishes_before_safety_pause() {
-    let directory = std::env::temp_dir().join(format!("cancelled-commit-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir(&directory).unwrap();
+    let directory = crate::test_support::TempTestDir::new("cancelled-commit");
     let path = directory.join("bot.db");
     {
         let db = Arc::new(Database::open(&path).unwrap());
@@ -167,14 +162,11 @@ async fn cancelled_recovery_commit_finishes_before_safety_pause() {
     let db = Database::open(&path).unwrap();
     assert_eq!(db.load_bot_status().unwrap(), Some(BotStatus::Running));
     drop(db);
-    std::fs::remove_dir_all(directory).unwrap();
 }
 
 #[tokio::test]
 async fn cancelled_pause_during_recovery_write_remains_paused_after_reopen() {
-    let directory =
-        std::env::temp_dir().join(format!("shutdown-cancelled-pause-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir(&directory).unwrap();
+    let directory = crate::test_support::TempTestDir::new("shutdown-cancelled-pause");
     let path = directory.join("bot.db");
     {
         let db = Arc::new(Database::open(&path).unwrap());
@@ -205,7 +197,6 @@ async fn cancelled_pause_during_recovery_write_remains_paused_after_reopen() {
     let db = Database::open(&path).unwrap();
     assert_eq!(db.load_bot_status().unwrap(), Some(BotStatus::Running));
     drop(db);
-    std::fs::remove_dir_all(directory).unwrap();
 }
 
 #[tokio::test]
@@ -344,9 +335,7 @@ async fn manual_resume_waiting_for_status_lock_rejects_newer_pause() {
 #[tokio::test]
 async fn cancelled_running_writes_finish_before_shutdown_pause() {
     for operation in 0..3 {
-        let directory =
-            std::env::temp_dir().join(format!("cancelled-running-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir(&directory).unwrap();
+        let directory = crate::test_support::TempTestDir::new("cancelled-running");
         let path = directory.join("bot.db");
         {
             let db = Arc::new(Database::open(&path).unwrap());
@@ -393,7 +382,6 @@ async fn cancelled_running_writes_finish_before_shutdown_pause() {
             "operation {operation}"
         );
         drop(db);
-        std::fs::remove_dir_all(directory).unwrap();
     }
 }
 

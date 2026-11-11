@@ -8,11 +8,12 @@ import Shell from '../components/Shell';
 import { StrategyToggle, strategyActionGuard } from '../components/StrategyMenu';
 import PairConfig from '../pages/PairConfig';
 import PairDetail from '../pages/PairDetail';
+import Settings from '../pages/Settings';
 import type * as Antd from 'antd';
 import type * as Api from '../lib/api';
 import type * as Queries from '../lib/queries';
 import { PAIRS_STALE_MS, SNAPSHOT_STALE_MS } from '../lib/portfolio';
-import { pair } from './fixtures';
+import { globalConfig, pair, serverConfig } from './fixtures';
 
 const mocks = vi.hoisted(() => {
   const confirm = vi.fn(), success = vi.fn(), error = vi.fn();
@@ -264,3 +265,43 @@ it('only flags staleResumeBlocked when a non-running strategy is stale and not b
     vi.useRealTimers();
   }
 });
+
+it('blocks dirty navigation across /settings?tab=... from sidebar link without double-prompting on Tabs.onChange', async () => {
+  mocks.api.mockImplementation((path: string) => path === '/api/server/config'
+    ? Promise.resolve(serverConfig())
+    : Promise.resolve(globalConfig()));
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const router = createMemoryRouter([{ element: <Shell />, children: [
+    { path: '/', element: <div>总览页面</div> },
+    { path: '/settings', element: <Settings /> },
+  ] }], { initialEntries: ['/settings?tab=server'] });
+  render(<QueryClientProvider client={client}><RouterProvider router={router} /></QueryClientProvider>);
+
+  const user = userEvent.setup();
+  const host = await screen.findByLabelText('监听地址');
+  await waitFor(() => expect(host).toHaveValue('127.0.0.1'));
+  await user.clear(host);
+  await user.type(host, '127.0.0.2');
+
+  mocks.confirm.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+  const sidebarSettings = within(screen.getByRole('complementary')).getByRole('link', { name: '全局设置' });
+  await user.click(sidebarSettings);
+  await waitFor(() => expect(mocks.confirm).toHaveBeenCalledTimes(1));
+  expect(router.state.location.search).toBe('?tab=server');
+  expect(host).toHaveValue('127.0.0.2');
+
+  await user.click(sidebarSettings);
+  await waitFor(() => expect(router.state.location.search).toBe(''));
+  expect(mocks.confirm).toHaveBeenCalledTimes(2);
+  expect(await screen.findByLabelText('API Key')).toBeInTheDocument();
+
+  await user.click(screen.getByRole('tab', { name: '服务设置' }));
+  const nextHost = await screen.findByLabelText('监听地址');
+  await waitFor(() => expect(nextHost).toHaveValue('127.0.0.1'));
+  await user.clear(nextHost);
+  await user.type(nextHost, '127.0.0.3');
+  mocks.confirm.mockResolvedValueOnce(true);
+  await user.click(screen.getByRole('tab', { name: '连接与通知' }));
+  await waitFor(() => expect(router.state.location.search).toBe(''));
+  expect(mocks.confirm).toHaveBeenCalledTimes(3);
+}, 40000);

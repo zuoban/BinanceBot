@@ -21,30 +21,7 @@ impl TradingRuntime {
         let saved = self.handle.db.load_saved_config().await?;
         GlobalConfig::from_app(&saved).apply_to(&mut config);
         config.validate()?;
-        anyhow::ensure!(
-            !self
-                .pairs
-                .iter()
-                .any(|pair| pair.state.pair_scope() == Some(config.exchange.symbol.as_str())),
-            "交易对已存在"
-        );
-        let symbol = &config.exchange.symbol;
-        let info = self
-            .exchange_client(&config.exchange)
-            .get_exchange_info(Some(symbol))
-            .await
-            .map_err(|error| {
-                if matches!(
-                    error.downcast_ref::<crate::exchange::ExchangeError>(),
-                    Some(crate::exchange::ExchangeError::ApiError { code: -1121, .. })
-                ) {
-                    anyhow::anyhow!("币安交易对 {} 不存在", symbol)
-                } else {
-                    anyhow::anyhow!("暂时无法验证交易对 {}: {}", symbol, error)
-                }
-            })?;
-        let rules =
-            SymbolRules::parse_and_validate_interval(&info, symbol, config.grid.grid_interval)?;
+        let rules = self.validate_new_pair_rules(&config).await?;
         let added_symbol = config.exchange.symbol.clone();
         let added_mode = config.exchange.trading_mode();
         let saved = config.clone();
@@ -85,6 +62,32 @@ impl TradingRuntime {
         Ok(())
     }
 
+    async fn validate_new_pair_rules(&self, config: &AppConfig) -> anyhow::Result<SymbolRules> {
+        let symbol = &config.exchange.symbol;
+        anyhow::ensure!(
+            !self
+                .pairs
+                .iter()
+                .any(|pair| pair.state.pair_scope() == Some(symbol.as_str())),
+            "交易对已存在"
+        );
+        let info = self
+            .exchange_client(&config.exchange)
+            .get_exchange_info(Some(symbol))
+            .await
+            .map_err(|error| {
+                if matches!(
+                    error.downcast_ref::<crate::exchange::ExchangeError>(),
+                    Some(crate::exchange::ExchangeError::ApiError { code: -1121, .. })
+                ) {
+                    anyhow::anyhow!("币安交易对 {} 不存在", symbol)
+                } else {
+                    anyhow::anyhow!("暂时无法验证交易对 {}: {}", symbol, error)
+                }
+            })?;
+        SymbolRules::parse_and_validate_interval(&info, symbol, config.grid.grid_interval)
+    }
+
     async fn rollback_failed_add_pair(
         &self,
         symbol: String,
@@ -121,6 +124,37 @@ impl TradingRuntime {
     pub(super) async fn remove_pair(&mut self, symbol: &str) -> anyhow::Result<()> {
         let membership_lock = self.handle.membership_lock.clone();
         let _membership = membership_lock.lock().await;
+        let (index, _removal) = self.admit_pair_removal(symbol).await?;
+        let pair = &mut self.pairs[index];
+        pair.signal_shutdown();
+        let mut result =
+            remove_engine(&pair.state, &mut pair.engine, Duration::from_secs(30)).await;
+        let state = pair.state.clone();
+        pair.stop_background().await;
+        // Retired states reject new verification admission. Finish old commits
+        // before either removing the member or restoring a replacement.
+        // Use the old state's lock, and release it before replacement startup.
+        state.drain_trade_commits().await;
+        if result.is_ok() {
+            result = self.verify_pair_flat_before_removal(&state, symbol).await;
+        }
+        if result.is_ok() {
+            let symbol = symbol.to_string();
+            result = self
+                .handle
+                .db
+                .run_blocking(move |db| db.remove_pair_config(&symbol))
+                .await;
+        }
+        if let Err(error) = result {
+            return self.recover_pair_after_failed_removal(index, error).await;
+        }
+        self.pairs.remove(index);
+        *self.handle.states.write().await = self.states();
+        Ok(())
+    }
+
+    async fn admit_pair_removal(&mut self, symbol: &str) -> anyhow::Result<(usize, ActiveRemoval)> {
         anyhow::ensure!(self.pairs.len() > 1, "至少保留一个交易对");
         let index = self
             .pairs
@@ -148,7 +182,7 @@ impl TradingRuntime {
         );
         // Claim the engine only once all potentially blocking admission checks
         // are complete. Shutdown can stop it while removal waits for those locks.
-        let _removal = {
+        let removal = {
             let mut active = self.handle.active_removal.lock_unpoisoned();
             anyhow::ensure!(
                 !*self.handle.stop.borrow(),
@@ -159,32 +193,7 @@ impl TradingRuntime {
         };
         pair.state.retire();
         drop(control);
-        pair.signal_shutdown();
-        let mut result =
-            remove_engine(&pair.state, &mut pair.engine, Duration::from_secs(30)).await;
-        let state = pair.state.clone();
-        pair.stop_background().await;
-        // Retired states reject new verification admission. Finish old commits
-        // before either removing the member or restoring a replacement.
-        // Use the old state's lock, and release it before replacement startup.
-        state.drain_trade_commits().await;
-        if result.is_ok() {
-            result = self.verify_pair_flat_before_removal(&state, symbol).await;
-        }
-        if result.is_ok() {
-            let symbol = symbol.to_string();
-            result = self
-                .handle
-                .db
-                .run_blocking(move |db| db.remove_pair_config(&symbol))
-                .await;
-        }
-        if let Err(error) = result {
-            return self.recover_pair_after_failed_removal(index, error).await;
-        }
-        self.pairs.remove(index);
-        *self.handle.states.write().await = self.states();
-        Ok(())
+        Ok((index, removal))
     }
 
     async fn verify_pair_flat_before_removal(

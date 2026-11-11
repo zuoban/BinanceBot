@@ -20,6 +20,7 @@ const state = vi.hoisted(() => ({
   pairsFetching: false,
   pairsError: null as Error | null,
   queryError: null as Error | null,
+  stale: false,
   refetchPairs: vi.fn(),
   refetchQuery: vi.fn(),
   api: vi.fn(),
@@ -30,7 +31,7 @@ vi.mock('../lib/queries', async importOriginal => {
   return {
     ...actual,
     usePairs: () => ({ data: state.pairs, error: state.pairsError, isPending: state.pairsPending, isFetching: state.pairsFetching, refetch: state.refetchPairs }),
-    usePairSnapshot: () => ({ data: state.data, dataUpdatedAt: state.dataUpdatedAt, error: state.queryError, live: true, stale: false, isPending: false, refetch: state.refetchQuery }),
+    usePairSnapshot: () => ({ data: state.data, dataUpdatedAt: state.dataUpdatedAt, error: state.queryError, live: true, stale: state.stale, isPending: false, refetch: state.refetchQuery }),
   };
 });
 vi.mock('../components/Controls', () => ({ PairControls: () => null, useControls: () => ({ busy: new Set<string>(), pending: {}, results: {}, clearResult: vi.fn(), run: vi.fn() }) }));
@@ -50,6 +51,7 @@ beforeEach(() => {
   state.pairsFetching = false;
   state.pairsError = null;
   state.queryError = null;
+  state.stale = false;
   state.refetchPairs.mockReset();
   state.refetchQuery.mockReset();
   state.api.mockReset();
@@ -169,8 +171,8 @@ it('lazily fetches full buffered trades and logs on tab activation and falls bac
     }
     if (path === '/api/pairs/SOLUSDC/logs') {
       return Promise.resolve([
-        { timestamp: '2026-11-05T01:00:00Z', level: 'INFO', message: 'older-log' },
         { timestamp: '2026-11-05T01:01:00Z', level: 'SUCCESS', message: 'newer-log' },
+        { timestamp: '2026-11-05T01:00:00Z', level: 'INFO', message: 'older-log' },
       ]);
     }
     return Promise.reject(new Error('unexpected path'));
@@ -225,9 +227,9 @@ it('never resurrects pre-clear fetched trades after clearing trades and receivin
 
 it('preserves the newest 50 live logs during a >=50-log burst between /logs polls', async () => {
   const oldFetched: Log[] = Array.from({ length: 60 }, (_, idx) => ({
-    timestamp: new Date(Date.parse('2026-11-05T01:00:00Z') + idx * 1000).toISOString(),
+    timestamp: new Date(Date.parse('2026-11-05T01:00:59Z') - idx * 1000).toISOString(),
     level: 'INFO',
-    message: `old-${idx}`,
+    message: `old-${59 - idx}`,
   }));
   state.api.mockResolvedValue(oldFetched);
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -312,8 +314,71 @@ it('merges newer WS trades, pnl_verified upgrades, and WS logs when an overlappi
     log({ timestamp: '2026-11-05T01:02:00Z', message: 'shared-head' }),
   ];
   const slowHttpLogs: Log[] = [
-    log({ timestamp: '2026-11-05T01:01:00Z', message: 'older-tail' }),
     log({ timestamp: '2026-11-05T01:02:00Z', message: 'shared-head' }),
+    log({ timestamp: '2026-11-05T01:01:00Z', message: 'older-tail' }),
   ];
   expect(resolveLogs(wsSnap, slowHttpLogs, false, 2_020, 2_000).map(l => l.message)).toEqual(['ws-newest', 'shared-head', 'older-tail']);
+  const emptyRecent = snapshot('SOLUSDC', 'PAPER');
+  emptyRecent.recent_logs = [];
+  const sameTsLogs = [log({ timestamp: '2026-11-05T01:00:00Z', message: 'newest-same-ts' }), log({ timestamp: '2026-11-05T01:00:00Z', message: 'older-same-ts' })];
+  expect(resolveLogs(emptyRecent, sameTsLogs, false, 2_000, 1_000).map(l => l.message)).toEqual(['newest-same-ts', 'older-same-ts']);
+});
+
+it('isolates LIVE account equity across different account_scope tags and credential epochs', () => {
+  const now = Date.now();
+  const current = snapshot('SOLUSDC', 'LIVE');
+  current.account_scope = 'scope-a';
+  current.account = { ...current.account, margin_balance: '120', available_balance: '90', total_wallet_balance: '120', unrealized_profit: '0', update_time: new Date(now - 2_000).toISOString() };
+  const otherAccountSibling = snapshot('BTCUSDC', 'LIVE');
+  otherAccountSibling.account_scope = 'scope-b';
+  otherAccountSibling.account = { ...otherAccountSibling.account, margin_balance: '999', available_balance: '999', total_wallet_balance: '999', unrealized_profit: '0', update_time: new Date(now).toISOString() };
+  const staleEpochSelf = snapshot('SOLUSDC', 'LIVE');
+  staleEpochSelf.account_scope = 'scope-b';
+  staleEpochSelf.account = { ...otherAccountSibling.account, margin_balance: '888' };
+  state.pairs = [{ ...pair('SOLUSDC'), mode: 'LIVE' }, { ...pair('BTCUSDC'), mode: 'LIVE' }];
+  state.data = current;
+  state.dataUpdatedAt = now;
+  render(<AccountsContext.Provider value={[
+    { mode: 'LIVE', snapshot: staleEpochSelf, generated_at_ms: now, received_at_ms: now },
+    { mode: 'LIVE', snapshot: otherAccountSibling, generated_at_ms: now, received_at_ms: now },
+  ]}>{view()}</AccountsContext.Provider>);
+  const card = screen.getByText('账户权益 / USDC').closest('.ant-card')!;
+  expect(card.querySelector('.ant-statistic-content-value')).toHaveTextContent('120.00');
+});
+
+it('withholds shared PAPER equity as -- while a same-asset PAPER sibling in pairs is unobserved', () => {
+  const now = Date.now();
+  const current = snapshot('SOLUSDC', 'PAPER');
+  current.account_scope = 'paper-scope';
+  current.account = { ...current.account, margin_balance: '105', available_balance: '80', total_wallet_balance: '100', unrealized_profit: '5', update_time: new Date(now).toISOString() };
+  const sibling = snapshot('BTCUSDC', 'PAPER');
+  sibling.account_scope = 'paper-scope';
+  sibling.account = { ...current.account };
+  sibling.ticker.mark_update_time = new Date(now).toISOString();
+  state.pairs = [pair('SOLUSDC'), pair('BTCUSDC')];
+  state.data = current;
+  state.dataUpdatedAt = now;
+  const { rerender } = render(<AccountsContext.Provider value={[]}>{view()}</AccountsContext.Provider>);
+  const card = screen.getByText('账户权益 / USDC').closest('.ant-card')!;
+  expect(card.querySelector('.ant-statistic-content-value')).toHaveTextContent('--');
+
+  rerender(<AccountsContext.Provider value={[{ mode: 'PAPER', snapshot: sibling, generated_at_ms: now, received_at_ms: now }]}>{view()}</AccountsContext.Provider>);
+  expect(card.querySelector('.ant-statistic-content-value')).toHaveTextContent('105.00');
+});
+
+it('blanks LIVE equity to -- when PairDetail snapshot is stale even if a fresh LIVE sibling exists', () => {
+  const now = Date.now();
+  const staleCurrent = snapshot('SOLUSDC', 'LIVE');
+  staleCurrent.account_scope = 'scope-a';
+  staleCurrent.account = { ...staleCurrent.account, margin_balance: '120', available_balance: '100', total_wallet_balance: '120', unrealized_profit: '0', update_time: new Date(now).toISOString() };
+  const freshSibling = snapshot('BTCUSDC', 'LIVE');
+  freshSibling.account_scope = 'scope-a';
+  freshSibling.account = { ...staleCurrent.account, margin_balance: '500', total_wallet_balance: '500', available_balance: '500' };
+  state.pairs = [{ ...pair('SOLUSDC'), mode: 'LIVE' }, { ...pair('BTCUSDC'), mode: 'LIVE' }];
+  state.data = staleCurrent;
+  state.dataUpdatedAt = now - 20_000;
+  state.stale = true;
+  render(<AccountsContext.Provider value={[{ mode: 'LIVE', snapshot: freshSibling, account_observation_stale: false, generated_at_ms: now, received_at_ms: now }]}>{view()}</AccountsContext.Provider>);
+  const card = screen.getByText('账户权益 / USDC').closest('.ant-card')!;
+  expect(card.querySelector('.ant-statistic-content-value')).toHaveTextContent('--');
 });

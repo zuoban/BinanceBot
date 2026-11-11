@@ -49,7 +49,7 @@ function DailyTradesBlock({ date, trades }: { date: string; trades: DailySnapsho
           {!tradeSummary.pnlGroups.length ? <strong>0</strong> : tradeSummary.pnlGroups.map(group => (
             <div className="daily-snapshot-pnl-row" key={group.key}>
               <span>{modeLabel[group.mode]} {group.asset}</span>
-              <strong><Pnl value={group.available ? group.sum : null} compact /> <small>{group.asset}</small>{group.pending > 0 && <em className="pending-pnl-warn">（{group.pending} 笔待同步）</em>}</strong>
+              <strong><Pnl value={group.available && group.pending === 0 ? group.sum : null} compact /> <small>{group.asset}</small>{group.pending > 0 && <em className="pending-pnl-warn">（{group.pending} 笔待同步）</em>}</strong>
             </div>
           ))}
         </div>
@@ -60,7 +60,7 @@ function DailyTradesBlock({ date, trades }: { date: string; trades: DailySnapsho
             const quote = quoteAsset(t.symbol) || t.symbol;
             return <div className="daily-snapshot-subrow" key={`${t.mode}:${t.symbol}`}>
               <span>{t.symbol} <small className="muted">{modeLabel[t.mode]} · 买 {t.buy_count} / 卖 {t.sell_count}</small></span>
-              <strong><Pnl value={t.realized_pnl} compact /> <small>{quote}</small>{t.pending_pnl_count > 0 && <em className="pending-pnl-warn"> 待同步</em>}</strong>
+              <strong><Pnl value={t.pending_pnl_count === 0 ? t.realized_pnl : null} compact /> <small>{quote}</small>{t.pending_pnl_count > 0 && <em className="pending-pnl-warn"> 待同步</em>}</strong>
             </div>;
           })}
         </div>

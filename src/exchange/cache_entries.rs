@@ -45,6 +45,16 @@ impl<K, T> Default for CacheEntries<K, T> {
     }
 }
 
+fn prune_idle_entries<K, Q, T>(entries: &mut CacheEntryMap<K, T>, keep_key: &Q)
+where
+    K: Eq + Hash + Borrow<Q>,
+    Q: ?Sized + Eq,
+{
+    if entries.len() > 256 {
+        entries.retain(|k, (_, entry)| k.borrow() == keep_key || Arc::strong_count(entry) > 1);
+    }
+}
+
 impl<K: Eq + Hash, T> CacheEntries<K, T> {
     // A critical refresh detaches shared loaders without representing a fill.
     // Concurrent critical refreshes must not invalidate one another.
@@ -62,9 +72,7 @@ impl<K: Eq + Hash, T> CacheEntries<K, T> {
             entries.insert(key.to_owned(), (epoch, Default::default()));
             epoch
         };
-        if entries.len() > 256 {
-            entries.retain(|k, (_, entry)| k.borrow() == key || Arc::strong_count(entry) > 1);
-        }
+        prune_idle_entries(&mut entries, key);
         current_epoch
     }
 
@@ -119,9 +127,7 @@ impl<K: Eq + Hash, T> CacheEntries<K, T> {
             entries.insert(key.to_owned(), (epoch, entry.clone()));
             (epoch, entry)
         };
-        if entries.len() > 256 {
-            entries.retain(|k, (_, entry)| k.borrow() == key || Arc::strong_count(entry) > 1);
-        }
+        prune_idle_entries(&mut entries, key);
         result
     }
 
@@ -148,9 +154,7 @@ impl<K: Eq + Hash, T> CacheEntries<K, T> {
         } else {
             entries.insert(key.to_owned(), (next, Default::default()));
         }
-        if entries.len() > 256 {
-            entries.retain(|k, (_, entry)| k.borrow() == key || Arc::strong_count(entry) > 1);
-        }
+        prune_idle_entries(&mut entries, key);
         next
     }
 

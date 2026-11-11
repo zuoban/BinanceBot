@@ -6,6 +6,7 @@ use std::path::PathBuf;
 /// A persistent sidecar lock shared by the server and offline maintenance.
 /// The file is deliberately not removed: unlinking it can split the lock domain.
 #[cfg(unix)]
+#[must_use = "dropping this guard immediately releases the lock or barrier"]
 pub struct DatabaseProcessLock {
     _file: std::fs::File,
 }
@@ -111,6 +112,7 @@ impl DatabaseProcessLock {
 }
 
 #[cfg(not(unix))]
+#[must_use = "dropping this guard immediately releases the lock or barrier"]
 pub struct DatabaseProcessLock;
 
 #[cfg(not(unix))]

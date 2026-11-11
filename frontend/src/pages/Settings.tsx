@@ -1,4 +1,5 @@
 import { Suspense, lazy, useContext, useRef } from 'react';
+import { flushSync } from 'react-dom';
 import { Tabs } from 'antd';
 import { useAsyncLock, useMountedRef } from '../lib/asyncGuard';
 import { useConfirmDialog } from '../lib/confirmDialog';
@@ -27,7 +28,7 @@ export default function Settings() {
       await runSwitch(async () => {
         if (edit.dirty && !await confirm({ title: '放弃未保存的修改？', okText: '放弃修改', cancelText: '继续编辑' })) return;
         if (!mounted.current || savingRef.current) return;
-        edit.setDirty(false); setActive(next);
+        flushSync(() => edit.setDirty(false)); setActive(next);
       });
     }} destroyOnHidden items={[
       { key: 'global', label: '连接与通知', children: <GlobalSettings /> },

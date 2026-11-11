@@ -238,7 +238,9 @@ async fn pair_recovery_engine(
     engine
 }
 
+mod credentials_and_scope_transitions;
 mod lifecycle_and_cancel;
-mod market_and_credentials;
-mod pair_intents_and_reconcile;
+mod market_feed_and_fallbacks;
+mod pair_intent_lifecycle;
 mod paper_and_sizing;
+mod reconcile_and_mode_cancel;

@@ -207,7 +207,8 @@ async fn failed_batch_refresh_preserves_all_fill_reservations_until_critical_ret
 
 #[tokio::test]
 async fn terminal_batch_keeps_original_reservations_until_every_fill_commit_is_durable() {
-    let path = std::env::temp_dir().join(format!("batch-fill-commit-{}.db", uuid::Uuid::new_v4()));
+    let dir = crate::test_support::TempTestDir::new("batch-fill-commit");
+    let path = dir.join("batch-fill-commit.db");
     let db = Arc::new(Database::open(&path).unwrap());
     db.save_bot_status(BotStatus::Running).unwrap();
     let fake = Exchange::default();
@@ -251,7 +252,6 @@ async fn terminal_batch_keeps_original_reservations_until_every_fill_commit_is_d
     drop(first);
     drop(connection);
     drop(db);
-    let _ = std::fs::remove_file(path);
 }
 
 #[tokio::test]

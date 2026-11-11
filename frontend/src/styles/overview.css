@@ -138,7 +138,6 @@
 .recent-trades-summary { display: flex; flex-wrap: wrap; gap: 8px 24px; padding: 16px 0; color: var(--text-secondary); font-size: 13px; }
 .recent-trades-summary strong { color: var(--text-primary); font-family: var(--font-mono); font-weight: 500; }
 .overview-trades-toggle { display: flex; justify-content: center; padding-top: 8px; }
-.overview-trades-mobile { display: none; }
 
 /* ---------- Batch result drawer, stale data & first-run guide ---------- */
 .batch-results { display: grid; gap: 12px; margin: 16px 0 0; padding: 0; list-style: none; }
@@ -169,7 +168,7 @@
   .strategy-card-actions .ant-btn::before { content: ''; position: absolute; inset-inline: -2px; top: 50%; min-width: var(--control-touch); height: var(--control-touch); transform: translateY(-50%); }
   .strategy-toggle.ant-btn { min-width: 72px; padding-inline: 8px; }
   .strategy-card-actions .ant-btn-icon-only { width: 36px; }
-  .batch-results .ant-btn { min-height: 36px; }
+  .batch-results .ant-btn { min-height: var(--control-touch); }
   .paper-guide-dismiss.ant-btn { min-width: var(--control-touch); min-height: var(--control-touch); }
 }
 
@@ -189,7 +188,6 @@
   .finance-card-primary .ant-statistic-content { font-size: 24px; line-height: 30px; }
   .overview-trades .ant-card-body { padding: 0 16px 8px; }
   .overview-trades .ant-card-extra { font-size: 12px; line-height: 1.45; }
-  .overview-trades-mobile { display: block; }
   .finance-card-primary .ant-statistic-content { overflow-wrap: anywhere; }
 }
 

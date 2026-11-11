@@ -1,5 +1,5 @@
 use crate::exchange::model::BinanceApiError;
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 const MAX_ERROR_BODY_BYTES: usize = 8 * 1024;
 const MAX_SUMMARIZED_ERROR_CHARS: usize = 256;
@@ -34,6 +34,8 @@ pub(crate) enum ExchangeError {
 }
 
 impl ExchangeError {
+    #[must_use]
+    #[inline]
     pub(crate) fn execution_status_unknown(&self) -> bool {
         matches!(
             self,
@@ -59,6 +61,23 @@ pub(crate) async fn read_bounded_bytes(
         }
     }
     Ok(buf)
+}
+
+pub(crate) async fn read_bounded_json<T: serde::de::DeserializeOwned>(
+    resp: reqwest::Response,
+    max_bytes: usize,
+) -> anyhow::Result<T> {
+    anyhow::ensure!(
+        resp.content_length()
+            .is_none_or(|len| len <= max_bytes as u64),
+        "HTTP response body exceeded {max_bytes} bytes"
+    );
+    let bytes = read_bounded_bytes(resp, max_bytes.saturating_add(1)).await?;
+    anyhow::ensure!(
+        bytes.len() <= max_bytes,
+        "HTTP response body exceeded {max_bytes} bytes"
+    );
+    serde_json::from_slice(&bytes).context("Failed to parse JSON response")
 }
 
 pub(super) async fn read_bounded_error_body(

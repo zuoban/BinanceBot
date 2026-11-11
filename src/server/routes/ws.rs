@@ -336,55 +336,69 @@ fn spawn_socket_recv_task(
     tokio::spawn(async move {
         while let Some(Ok(msg)) = receiver.next().await {
             if let Message::Text(text) = msg {
-                if !state_clone.is_token_valid(&token).await {
-                    break;
-                }
-                let parsed = serde_json::from_str::<ControlRequest>(&text);
-                let (name, action) = match parsed {
-                    Ok(req) => {
-                        let action = control_action(&req, state_clone.pause_epoch());
-                        (Some(req.action), action)
-                    }
-                    Err(error) => (None, Err(format!("无效的控制请求: {}", error))),
-                };
-                let action = match action {
-                    Ok(action) => action,
-                    Err(message) => {
-                        if result_tx
-                            .send(control_ws_message(
-                                name.as_deref(),
-                                &ApiResponse::err(message),
-                            ))
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                        continue;
-                    }
-                };
-                let pending_pause = PendingControlPause::new(&state_clone, &action.0);
-                let prepare_state = state_clone.clone();
-                let prepare_results = result_tx.clone();
-                let prepare_queue = control_tx.clone();
-                let preparation = tokio::spawn(async move {
-                    if let Err(message) = prepare_control(&prepare_state, &action.0).await {
-                        let _ = prepare_results
-                            .send(control_ws_message(
-                                name.as_deref(),
-                                &ApiResponse::err(message),
-                            ))
-                            .await;
-                    } else if let Some(action_name) = name {
-                        let _ = prepare_queue
-                            .send((action_name, action, pending_pause))
-                            .await;
-                    }
-                });
-                if preparation.await.is_err() {
+                let keep_going = handle_socket_control_text(
+                    &text,
+                    &state_clone,
+                    &token,
+                    &result_tx,
+                    &control_tx,
+                )
+                .await;
+                if !keep_going {
                     break;
                 }
             }
         }
     })
+}
+
+async fn handle_socket_control_text(
+    text: &str,
+    state: &Arc<AppState>,
+    token: &str,
+    result_tx: &tokio::sync::mpsc::Sender<String>,
+    control_tx: &tokio::sync::mpsc::Sender<SocketControlEntry>,
+) -> bool {
+    if !state.is_token_valid(token).await {
+        return false;
+    }
+    let (name, action) = match serde_json::from_str::<ControlRequest>(text) {
+        Ok(req) => {
+            let action = control_action(&req, state.pause_epoch());
+            (Some(req.action), action)
+        }
+        Err(error) => (None, Err(format!("无效的控制请求: {}", error))),
+    };
+    let action = match action {
+        Ok(action) => action,
+        Err(message) => {
+            return result_tx
+                .send(control_ws_message(
+                    name.as_deref(),
+                    &ApiResponse::err(message),
+                ))
+                .await
+                .is_ok();
+        }
+    };
+    let pending_pause = PendingControlPause::new(state, &action.0);
+    let prepare_state = state.clone();
+    let prepare_results = result_tx.clone();
+    let prepare_queue = control_tx.clone();
+    tokio::spawn(async move {
+        if let Err(message) = prepare_control(&prepare_state, &action.0).await {
+            let _ = prepare_results
+                .send(control_ws_message(
+                    name.as_deref(),
+                    &ApiResponse::err(message),
+                ))
+                .await;
+        } else if let Some(action_name) = name {
+            let _ = prepare_queue
+                .send((action_name, action, pending_pause))
+                .await;
+        }
+    })
+    .await
+    .is_ok()
 }

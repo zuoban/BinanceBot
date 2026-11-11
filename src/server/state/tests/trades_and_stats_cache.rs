@@ -506,16 +506,8 @@ async fn record_trade_saturates_counters_and_volume_on_extreme_stats() {
 #[tokio::test]
 async fn refresh_current_scope_wipes_old_mode_on_sqlite_error_and_recovers_durable_stats_on_next_fill(
 ) {
-    struct TempDbDir(std::path::PathBuf);
-    impl Drop for TempDbDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-    let dir =
-        TempDbDir(std::env::temp_dir().join(format!("state-dirty-stats-{}", uuid::Uuid::new_v4())));
-    std::fs::create_dir_all(&dir.0).unwrap();
-    let db_path = dir.0.join("bot.db");
+    let dir = crate::test_support::TempTestDir::new("state-dirty-stats");
+    let db_path = dir.join("bot.db");
     let db = Arc::new(Database::open(&db_path).unwrap());
     let config = AppConfig::default();
     db.save_config(&config).unwrap();

@@ -10,20 +10,26 @@ pub enum OrderSide {
 }
 
 impl OrderSide {
-    pub fn opposite(&self) -> Self {
+    #[must_use]
+    #[inline]
+    pub const fn opposite(self) -> Self {
         match self {
             OrderSide::Buy => OrderSide::Sell,
             OrderSide::Sell => OrderSide::Buy,
         }
     }
 
-    pub fn as_str(&self) -> &'static str {
+    #[must_use]
+    #[inline]
+    pub const fn as_str(self) -> &'static str {
         match self {
             OrderSide::Buy => "BUY",
             OrderSide::Sell => "SELL",
         }
     }
 
+    #[must_use]
+    #[inline]
     pub fn from_exchange_str(side: &str) -> Option<Self> {
         match side {
             "BUY" => Some(Self::Buy),
@@ -32,6 +38,8 @@ impl OrderSide {
         }
     }
 
+    #[must_use]
+    #[inline]
     pub(crate) fn is_maker_price(self, price: Decimal, market: Decimal) -> bool {
         match self {
             Self::Buy => price < market,
@@ -50,17 +58,23 @@ pub enum GridDirection {
 }
 
 impl GridDirection {
-    pub fn opening_side(self) -> OrderSide {
+    #[must_use]
+    #[inline]
+    pub const fn opening_side(self) -> OrderSide {
         match self {
             Self::Long => OrderSide::Buy,
             Self::Short => OrderSide::Sell,
         }
     }
 
-    pub fn closing_side(self) -> OrderSide {
+    #[must_use]
+    #[inline]
+    pub const fn closing_side(self) -> OrderSide {
         self.opening_side().opposite()
     }
 
+    #[must_use]
+    #[inline]
     pub fn sign(self) -> Decimal {
         match self {
             Self::Long => Decimal::ONE,
@@ -68,10 +82,13 @@ impl GridDirection {
         }
     }
 
+    #[must_use]
+    #[inline]
     pub fn position_quantity(self, size: Decimal) -> Decimal {
         (size * self.sign()).max(Decimal::ZERO)
     }
 
+    #[inline]
     pub fn closing_price_cmp(self, a: Decimal, b: Decimal) -> std::cmp::Ordering {
         match self {
             Self::Long => a.cmp(&b),
@@ -91,7 +108,9 @@ pub enum TradingMode {
 }
 
 impl TradingMode {
-    pub fn as_str(self) -> &'static str {
+    #[must_use]
+    #[inline]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Unknown => "UNKNOWN",
             Self::Paper => "PAPER",
@@ -99,6 +118,8 @@ impl TradingMode {
         }
     }
 
+    #[must_use]
+    #[inline]
     pub fn from_db(value: &str) -> Self {
         match value {
             "PAPER" => Self::Paper,
@@ -128,6 +149,7 @@ pub(crate) struct ObservedOrderIdentity {
 }
 
 impl ObservedOrderIdentity {
+    #[must_use]
     pub(crate) fn from_response(resp: &crate::exchange::BinanceOrderResponse) -> Self {
         Self {
             client_order_id: resp.client_order_id.clone(),
@@ -137,6 +159,7 @@ impl ObservedOrderIdentity {
         }
     }
 
+    #[must_use]
     pub(crate) fn from_order(order: &GridOrder) -> Option<Self> {
         Some(Self {
             client_order_id: order.client_order_id.clone(),
@@ -146,6 +169,8 @@ impl ObservedOrderIdentity {
         })
     }
 
+    #[must_use]
+    #[inline]
     pub(crate) fn matches_order(&self, expected: &GridOrder) -> bool {
         self.client_order_id == expected.client_order_id
             && self.symbol == expected.symbol
@@ -153,6 +178,8 @@ impl ObservedOrderIdentity {
             && expected.order_id.is_none_or(|id| self.order_id == id)
     }
 
+    #[must_use]
+    #[inline]
     pub(crate) fn matches_confirmed_order(&self, expected: &GridOrder) -> bool {
         self.client_order_id == expected.client_order_id
             && self.symbol == expected.symbol
@@ -184,6 +211,7 @@ pub struct GridOrder {
 }
 
 impl GridOrder {
+    #[must_use]
     pub(crate) fn from_exchange_response(
         found: &crate::exchange::BinanceOrderResponse,
         quantity: Decimal,
@@ -229,6 +257,8 @@ impl GridOrder {
             .unwrap_or(Decimal::MAX);
     }
 
+    #[must_use]
+    #[inline]
     pub(crate) fn matches_exchange_identity(
         &self,
         resp: &crate::exchange::BinanceOrderResponse,
@@ -239,6 +269,8 @@ impl GridOrder {
             && self.order_id.is_none_or(|id| resp.order_id == id)
     }
 
+    #[must_use]
+    #[inline]
     pub(crate) fn has_compatible_identity(&self, other: &GridOrder) -> bool {
         self.client_order_id == other.client_order_id
             && self.symbol == other.symbol
@@ -268,6 +300,7 @@ impl GridOrder {
         self.reserve_quantity(min_quantity);
     }
 
+    #[must_use]
     pub(crate) fn matches_persisted_state(&self, other: &Self) -> bool {
         self.client_order_id == other.client_order_id
             && self.order_id == other.order_id
@@ -322,6 +355,8 @@ pub(crate) struct RemainderPlan {
 }
 
 impl RemainderPlan {
+    #[must_use]
+    #[inline]
     pub(crate) fn find_order(&self, client_order_id: &str) -> Option<&GridOrder> {
         self.sources
             .iter()

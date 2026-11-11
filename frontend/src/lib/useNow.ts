@@ -38,28 +38,25 @@ export function serverAlignedNow(generatedAt?: string, receivedAt?: number): num
   return genMs + (typeof receivedAt === 'number' && receivedAt > 0 ? Math.max(0, Date.now() - receivedAt) : 0);
 }
 
-/** Re-render only when Beijing midnight (00:00 UTC+8) passes, returning that day's start timestamp. */
-export function useBeijingDay(generatedAt?: string, receivedAt?: number) {
+function useServerBoundaryBucket(periodMs: number, offsetMs: number, enabled: boolean, generatedAt?: string, receivedAt?: number) {
   const genMs = generatedAt ? Date.parse(generatedAt) : NaN;
   const hasServer = Number.isFinite(genMs);
   const hasReceived = typeof receivedAt === 'number' && receivedAt > 0;
   const now = hasServer ? genMs + (hasReceived ? Math.max(0, Date.now() - receivedAt) : 0) : Date.now();
-  const day = Math.floor((now + BEIJING_OFFSET_MS) / DAY_MS);
-  const startMs = day * DAY_MS - BEIJING_OFFSET_MS;
-  useExpired(!hasServer ? startMs + DAY_MS - 1 : hasReceived ? receivedAt + (startMs + DAY_MS - genMs) - 1 : Infinity);
-  return startMs;
+  const bucket = Math.floor((now + offsetMs) / periodMs);
+  const nextBoundaryMs = (bucket + 1) * periodMs - offsetMs;
+  useExpired(!enabled ? Infinity : !hasServer ? nextBoundaryMs - 1 : hasReceived ? receivedAt + (nextBoundaryMs - genMs) - 1 : Infinity);
+  return bucket;
+}
+
+/** Re-render only when Beijing midnight (00:00 UTC+8) passes, returning that day's start timestamp. */
+export function useBeijingDay(generatedAt?: string, receivedAt?: number) {
+  return useServerBoundaryBucket(DAY_MS, BEIJING_OFFSET_MS, true, generatedAt, receivedAt) * DAY_MS - BEIJING_OFFSET_MS;
 }
 
 /** Return the current UTC hour index, re-rendering only when the hour turns over. */
 export function useUtcHour(enabled = true, generatedAt?: string, receivedAt?: number) {
-  const genMs = generatedAt ? Date.parse(generatedAt) : NaN;
-  const hasServer = Number.isFinite(genMs);
-  const hasReceived = typeof receivedAt === 'number' && receivedAt > 0;
-  const now = hasServer ? genMs + (hasReceived ? Math.max(0, Date.now() - receivedAt) : 0) : Date.now();
-  const hour = Math.floor(now / 3_600_000);
-  const nextHourMs = (hour + 1) * 3_600_000;
-  useExpired(!enabled ? Infinity : !hasServer ? nextHourMs - 1 : hasReceived ? receivedAt + (nextHourMs - genMs) - 1 : Infinity);
-  return hour;
+  return useServerBoundaryBucket(3_600_000, 0, enabled, generatedAt, receivedAt);
 }
 
 /** Recompute `accountGroups` on data changes and exact freshness threshold expiries without a 1 Hz clock. */

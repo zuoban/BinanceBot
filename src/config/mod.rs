@@ -1,4 +1,3 @@
-use anyhow::Context;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
@@ -6,7 +5,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 pub(crate) struct ConfigVersionConflict(pub &'static str);
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AppConfig {
     pub exchange: ExchangeConfig,
     #[serde(default)]
@@ -26,7 +25,7 @@ pub struct AppConfig {
     pub min_available_margin_pct: Option<Decimal>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TradingPairConfig {
     pub symbol: String,
     /// Omitted grids inherit the saved global defaults.
@@ -44,7 +43,7 @@ mod internal {
     use serde::{Deserialize, Serialize};
 
     /// Legacy per-pair connection fields, read only to migrate older configurations.
-    #[derive(Clone, Default, Serialize, Deserialize)]
+    #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
     pub struct PairExchangeConfig {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub(crate) api_key: Option<String>,
@@ -183,6 +182,8 @@ pub struct ExchangeConfig {
     pub sync_interval_secs: u64,
 }
 
+#[must_use]
+#[inline]
 pub(crate) fn redact_secret(value: &str) -> &'static str {
     if value.is_empty() {
         ""
@@ -191,6 +192,8 @@ pub(crate) fn redact_secret(value: &str) -> &'static str {
     }
 }
 
+#[must_use]
+#[inline]
 pub(crate) fn redact_optional_secret(value: &Option<String>) -> Option<&'static str> {
     value.as_deref().map(redact_secret)
 }
@@ -269,7 +272,7 @@ pub struct GridConfig {
     pub min_liquidation_distance_pct: Option<Decimal>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServerConfig {
     #[serde(default = "default_host")]
     pub host: String,
@@ -277,18 +280,7 @@ pub struct ServerConfig {
     pub port: u16,
 }
 
-impl ServerConfig {
-    pub fn socket_addr(&self) -> anyhow::Result<std::net::SocketAddr> {
-        anyhow::ensure!(self.port > 0, "监听端口必须在 1-65535 之间");
-        let host = self
-            .host
-            .parse::<std::net::IpAddr>()
-            .context("监听地址必须是有效的 IPv4 或 IPv6 地址")?;
-        Ok(std::net::SocketAddr::new(host, self.port))
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GridConfigSummary {
     pub symbol: String,
     pub direction: crate::types::GridDirection,
@@ -415,29 +407,7 @@ impl AppConfig {
         Ok(())
     }
 
-    /// Resolve independent engine configs; the global symbol is ignored when pairs are explicit.
-    pub fn strategy_configs(&self) -> anyhow::Result<Vec<Self>> {
-        if self.pairs.is_empty() {
-            return Ok(vec![self.clone()]);
-        }
-        let mut symbols = std::collections::HashSet::new();
-        let mut configs = Vec::with_capacity(self.pairs.len());
-        for pair in &self.pairs {
-            validate_symbol(&pair.symbol)?;
-            anyhow::ensure!(
-                symbols.insert(&pair.symbol),
-                "重复配置交易对: {}",
-                pair.symbol
-            );
-            let mut config = self.clone();
-            config.pairs.clear();
-            config.exchange.symbol = pair.symbol.clone();
-            config.grid = pair.grid.unwrap_or(self.grid);
-            configs.push(config);
-        }
-        Ok(configs)
-    }
-
+    #[must_use]
     pub(crate) fn summary(&self) -> GridConfigSummary {
         GridConfigSummary {
             symbol: self.exchange.symbol.clone(),
@@ -459,6 +429,8 @@ impl AppConfig {
 
 impl ExchangeConfig {
     /// Paper mode is the absence of API credentials; configured credentials run live.
+    #[must_use]
+    #[inline]
     pub fn trading_mode(&self) -> crate::types::TradingMode {
         if self.api_key.trim().is_empty() && self.api_secret.trim().is_empty() {
             crate::types::TradingMode::Paper
@@ -467,8 +439,29 @@ impl ExchangeConfig {
         }
     }
 
+    #[must_use]
+    #[inline]
     pub(crate) fn is_paper(&self) -> bool {
         self.trading_mode() == crate::types::TradingMode::Paper
+    }
+
+    #[must_use]
+    pub fn account_scope(&self) -> String {
+        use hmac::{Hmac, Mac};
+        static KEY: std::sync::LazyLock<[u8; 32]> = std::sync::LazyLock::new(|| {
+            let mut key = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut key);
+            key
+        });
+        let mut mac = Hmac::<sha2::Sha256>::new_from_slice(KEY.as_slice())
+            .expect("HMAC-SHA256 accepts a 32-byte key");
+        mac.update(self.trading_mode().as_str().as_bytes());
+        mac.update(&[0u8]);
+        mac.update(self.api_key.trim().as_bytes());
+        mac.update(&[0u8]);
+        mac.update(self.api_secret.trim().as_bytes());
+        let bytes = mac.finalize().into_bytes();
+        hex::encode(&bytes[..8])
     }
 }
 

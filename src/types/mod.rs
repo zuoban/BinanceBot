@@ -24,6 +24,29 @@ pub enum BotStatus {
     Error,
 }
 
+impl BotStatus {
+    #[must_use]
+    #[inline]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "RUNNING",
+            Self::Paused => "PAUSED",
+            Self::Stopped => "STOPPED",
+            Self::Error => "ERROR",
+        }
+    }
+
+    pub fn from_db(s: &str) -> anyhow::Result<Self> {
+        match s {
+            "RUNNING" => Ok(Self::Running),
+            "PAUSED" => Ok(Self::Paused),
+            "STOPPED" => Ok(Self::Stopped),
+            "ERROR" => Ok(Self::Error),
+            _ => anyhow::bail!("Unknown bot status in database: {s:?}"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GridStats {
     pub total_trades: usize,
@@ -62,7 +85,9 @@ impl Default for GridStats {
 
 pub(crate) const MARKET_PRICE_MAX_AGE_SECS: i64 = 15;
 
-pub(crate) fn beijing_offset() -> chrono::FixedOffset {
+#[must_use]
+#[inline]
+pub(crate) const fn beijing_offset() -> chrono::FixedOffset {
     const OFFSET: chrono::FixedOffset = match chrono::FixedOffset::east_opt(8 * 3600) {
         Some(offset) => offset,
         None => panic!("invalid UTC+8 offset"),
@@ -70,12 +95,16 @@ pub(crate) fn beijing_offset() -> chrono::FixedOffset {
     OFFSET
 }
 
+#[must_use]
+#[inline]
 pub(crate) fn non_blank(value: Option<String>) -> Option<String> {
     value
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
 }
 
+#[must_use]
+#[inline]
 pub(crate) fn is_timestamp_fresh(
     updated_at: DateTime<Utc>,
     now: DateTime<Utc>,
@@ -85,6 +114,8 @@ pub(crate) fn is_timestamp_fresh(
     age >= chrono::Duration::zero() && age < chrono::Duration::seconds(max_age_secs)
 }
 
+#[must_use]
+#[inline]
 pub(crate) fn max_reconciliation_age_secs(sync_interval_secs: u64) -> i64 {
     sync_interval_secs
         .saturating_mul(3)
@@ -107,6 +138,8 @@ pub struct TickerInfo {
 }
 
 impl TickerInfo {
+    #[must_use]
+    #[inline]
     pub fn mark_price_is_fresh(&self, now: DateTime<Utc>) -> bool {
         self.mark_price > Decimal::ZERO
             && is_timestamp_fresh(self.mark_update_time, now, MARKET_PRICE_MAX_AGE_SECS)
@@ -114,6 +147,8 @@ impl TickerInfo {
 
     /// A positive cached mark must be fresh too; do not silently change the
     /// strategy reference to the last price when a previously available mark expires.
+    #[must_use]
+    #[inline]
     pub fn prices_are_fresh(&self, now: DateTime<Utc>) -> bool {
         self.last_price > Decimal::ZERO
             && is_timestamp_fresh(self.update_time, now, MARKET_PRICE_MAX_AGE_SECS)
@@ -121,6 +156,8 @@ impl TickerInfo {
     }
 
     /// Center the grid on the mark price; use the last price until a mark is available.
+    #[must_use]
+    #[inline]
     pub fn grid_reference_price(&self) -> Decimal {
         if self.mark_price > Decimal::ZERO {
             self.mark_price
@@ -154,6 +191,8 @@ pub struct HourlyTradeStats {
 }
 
 impl HourlyTradeStats {
+    #[must_use]
+    #[inline]
     pub fn total_counts(&self) -> (u64, u64) {
         self.buckets
             .iter()
@@ -176,6 +215,8 @@ pub struct BotSnapshot {
     pub generated_at: DateTime<Utc>,
     pub status: BotStatus,
     pub mode: TradingMode,
+    #[serde(default)]
+    pub account_scope: String,
     pub symbol: String,
     #[serde(default = "default_sync_interval_secs")]
     pub sync_interval_secs: u64,
@@ -223,6 +264,85 @@ pub enum BotControlAction {
     },
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AuthStatusResponse {
+    pub(crate) initialized: bool,
+    pub(crate) authenticated: bool,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct AuthLoginPayload {
+    pub(crate) password: String,
+}
+
+impl std::fmt::Debug for AuthLoginPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self { password } = self;
+        f.debug_struct("AuthLoginPayload")
+            .field("password", &crate::config::redact_secret(password))
+            .finish()
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AuthTokenResponse {
+    pub(crate) token: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ApiResponse<T> {
+    pub(crate) success: bool,
+    pub(crate) data: Option<T>,
+    pub(crate) message: Option<String>,
+}
+
+impl<T> ApiResponse<T> {
+    #[must_use]
+    #[inline]
+    pub(crate) fn ok(data: T) -> Self {
+        Self {
+            success: true,
+            data: Some(data),
+            message: None,
+        }
+    }
+
+    #[must_use]
+    #[inline]
+    pub(crate) fn ok_with_message(data: T, message: impl Into<String>) -> Self {
+        Self {
+            success: true,
+            data: Some(data),
+            message: Some(message.into()),
+        }
+    }
+
+    #[must_use]
+    #[inline]
+    pub(crate) fn err(message: impl Into<String>) -> Self {
+        Self {
+            success: false,
+            data: None,
+            message: Some(message.into()),
+        }
+    }
+}
+
+#[must_use]
+pub(crate) fn ws_frame_json<T: Serialize + ?Sized>(
+    kind: &'static str,
+    data: &T,
+) -> Option<std::sync::Arc<str>> {
+    #[derive(Serialize)]
+    struct WsFrame<'a, T: ?Sized> {
+        #[serde(rename = "type")]
+        kind: &'static str,
+        data: &'a T,
+    }
+    serde_json::to_string(&WsFrame { kind, data })
+        .ok()
+        .map(std::sync::Arc::<str>::from)
+}
 mod api;
 pub(crate) use api::*;
 

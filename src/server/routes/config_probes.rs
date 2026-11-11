@@ -132,6 +132,9 @@ pub(super) async fn post_global_config_handler(
     {
         return status_err(StatusCode::BAD_REQUEST, message);
     }
+    if let Err(error) = payload.validate_credential_updates() {
+        return status_err(StatusCode::BAD_REQUEST, error.to_string());
+    }
     if let Err(error) = crate::config::validate_global_position_limit(
         payload.global_max_position_notional.flatten(),
     ) {
@@ -347,7 +350,7 @@ pub(super) fn apply_config_payload(
     current_config.grid.min_liquidation_distance_pct = payload.min_liquidation_distance_pct;
 
     let mut global = crate::config::GlobalConfig::from_app(&current_config);
-    UpdateGlobalConfigPayload {
+    let global_update = UpdateGlobalConfigPayload {
         recv_window: payload.recv_window,
         sync_interval_secs: payload.sync_interval_secs,
         api_key: payload.api_key,
@@ -358,8 +361,9 @@ pub(super) fn apply_config_payload(
         telegram_bot_token: payload.telegram_bot_token,
         telegram_chat_id: payload.telegram_chat_id,
         ..Default::default()
-    }
-    .apply_to(&mut global);
+    };
+    global_update.validate_credential_updates()?;
+    global_update.apply_to(&mut global);
     global.apply_to(&mut current_config);
     current_config.validate()?;
     Ok(current_config)
@@ -406,6 +410,20 @@ async fn apply_pair_config(
             StatusCode::CONFLICT,
             "交易对设置已被其他请求修改，请刷新后重试",
         );
+    }
+    if state.pair_scope().is_none() {
+        let credential_check = UpdateGlobalConfigPayload {
+            api_key: payload.api_key.clone(),
+            api_secret: payload.api_secret.clone(),
+            clear_api_credentials: payload.clear_api_credentials,
+            clear_telegram_credentials: payload.clear_telegram_credentials,
+            telegram_bot_token: payload.telegram_bot_token.clone(),
+            telegram_chat_id: payload.telegram_chat_id.clone(),
+            ..Default::default()
+        };
+        if let Err(error) = credential_check.validate_credential_updates() {
+            return status_err(StatusCode::BAD_REQUEST, error.to_string());
+        }
     }
     (
         StatusCode::OK,

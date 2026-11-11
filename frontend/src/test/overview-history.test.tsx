@@ -184,6 +184,8 @@ it('renders daily snapshots with account overview, trade counts, realized pnl, a
   expect(within(section).getByText('成交与实现盈亏（2026-11-08）')).toBeInTheDocument();
   expect(within(section).getAllByText(/9,980/).length).toBeGreaterThan(0);
   expect(within(section).getByText('（1 笔待同步）')).toBeInTheDocument();
+  expect(within(section).queryByText('-20')).not.toBeInTheDocument();
+  expect(within(section).getAllByText('--')).toHaveLength(2);
 });
 
 it('surfaces a background poll error and retry action without unmounting existing snapshot data', async () => {

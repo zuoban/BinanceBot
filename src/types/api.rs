@@ -10,6 +10,8 @@ pub(crate) struct TradingPairView {
     pub(crate) scoped: bool,
     pub(crate) status: BotStatus,
     pub(crate) mode: TradingMode,
+    #[serde(default)]
+    pub(crate) account_scope: String,
     pub(crate) grid_config: crate::config::GridConfigSummary,
 }
 
@@ -25,6 +27,8 @@ pub(crate) struct PairSummary {
     pub(crate) symbol: String,
     pub(crate) status: BotStatus,
     pub(crate) mode: TradingMode,
+    #[serde(default)]
+    pub(crate) account_scope: String,
     #[serde(default = "super::default_sync_interval_secs")]
     pub(crate) sync_interval_secs: u64,
     pub(crate) grid_config: crate::config::GridConfigSummary,
@@ -172,7 +176,32 @@ where
     Option::<Decimal>::deserialize(deserializer).map(Some)
 }
 
+#[inline]
+fn has_non_blank(value: &Option<String>) -> bool {
+    value.as_deref().is_some_and(|s| !s.trim().is_empty())
+}
+
 impl UpdateGlobalConfigPayload {
+    pub(crate) fn validate_credential_updates(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !(self.clear_api_credentials
+                && (has_non_blank(&self.api_key) || has_non_blank(&self.api_secret))),
+            "清除 API 凭证时请勿同时提交新的 API Key 或 Secret"
+        );
+        anyhow::ensure!(
+            !(self.clear_telegram_credentials
+                && (has_non_blank(&self.telegram_bot_token)
+                    || has_non_blank(&self.telegram_chat_id))),
+            "清除 Telegram 凭证时请勿同时提交新的 Bot Token 或 Chat ID"
+        );
+        anyhow::ensure!(
+            self.clear_api_credentials
+                || (has_non_blank(&self.api_key) == has_non_blank(&self.api_secret)),
+            "更换或配置 API 凭证时请同时填写 API Key 和 Secret"
+        );
+        Ok(())
+    }
+
     pub(crate) fn apply_to(self, config: &mut crate::config::GlobalConfig) {
         if let Some(value) = self.pause_on_zero_available_margin {
             config.pause_on_zero_available_margin = value;
@@ -350,6 +379,8 @@ impl std::fmt::Debug for UpdateConfigPayload {
 }
 
 impl UpdateConfigPayload {
+    #[must_use]
+    #[inline]
     pub(crate) fn has_global_updates(&self) -> bool {
         self.recv_window.is_some()
             || self.sync_interval_secs.is_some()
@@ -395,77 +426,4 @@ pub(crate) struct WebConfigView {
     pub(crate) min_qty: Option<Decimal>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) min_notional: Option<Decimal>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct AuthStatusResponse {
-    pub(crate) initialized: bool,
-    pub(crate) authenticated: bool,
-}
-
-#[derive(Deserialize)]
-pub(crate) struct AuthLoginPayload {
-    pub(crate) password: String,
-}
-
-impl std::fmt::Debug for AuthLoginPayload {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Self { password } = self;
-        f.debug_struct("AuthLoginPayload")
-            .field("password", &crate::config::redact_secret(password))
-            .finish()
-    }
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct AuthTokenResponse {
-    pub(crate) token: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ApiResponse<T> {
-    pub(crate) success: bool,
-    pub(crate) data: Option<T>,
-    pub(crate) message: Option<String>,
-}
-
-impl<T> ApiResponse<T> {
-    pub(crate) fn ok(data: T) -> Self {
-        Self {
-            success: true,
-            data: Some(data),
-            message: None,
-        }
-    }
-
-    pub(crate) fn ok_with_message(data: T, message: impl Into<String>) -> Self {
-        Self {
-            success: true,
-            data: Some(data),
-            message: Some(message.into()),
-        }
-    }
-
-    pub(crate) fn err(message: impl Into<String>) -> Self {
-        Self {
-            success: false,
-            data: None,
-            message: Some(message.into()),
-        }
-    }
-}
-
-pub(crate) fn ws_frame_json<T: Serialize + ?Sized>(
-    kind: &'static str,
-    data: &T,
-) -> Option<std::sync::Arc<str>> {
-    #[derive(Serialize)]
-    struct WsFrame<'a, T: ?Sized> {
-        #[serde(rename = "type")]
-        kind: &'static str,
-        data: &'a T,
-    }
-    serde_json::to_string(&WsFrame { kind, data })
-        .ok()
-        .map(std::sync::Arc::<str>::from)
 }

@@ -3,6 +3,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard};
 
+#[must_use = "dropping this guard immediately releases the lock or barrier"]
 pub(crate) struct ExchangeSubmissionGuard {
     state: Arc<AppState>,
     global: Option<Arc<GlobalPositionLimit>>,
@@ -31,6 +32,7 @@ impl Drop for ExchangeSubmissionGuard {
     }
 }
 
+#[must_use = "dropping this guard immediately releases the lock or barrier"]
 pub(crate) struct PendingFillReconciliation {
     state: Arc<AppState>,
     global: Option<Arc<GlobalPositionLimit>>,

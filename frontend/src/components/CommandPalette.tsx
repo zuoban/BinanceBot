@@ -55,12 +55,12 @@ function CommandPalette({ open, onClose, commands }: { open: boolean; onClose: (
       <Input ref={input} variant="borderless" aria-label="搜索命令" placeholder="搜索交易对、页面或操作" value={query} onChange={event => setQuery(event.target.value)} onKeyDown={onKeyDown} role="combobox" aria-expanded={results.length > 0} aria-controls="palette-list" aria-activedescendant={results[currentActive] ? `palette-${results[currentActive].key}` : undefined} autoComplete="off" />
       <button type="button" className="palette-esc" onClick={onClose} aria-label="关闭命令面板"><kbd>Esc</kbd></button>
     </div>
-    <ul className="palette-list" id="palette-list" role="listbox" aria-label="命令列表" ref={list}>
+    <ul className="palette-list" id="palette-list" role="listbox" aria-label="命令列表" ref={list} hidden={!results.length}>
       {results.map((command, index) => {
         const heading = command.group !== lastGroup ? command.group : null;
         lastGroup = command.group;
         return <li key={command.key} role="presentation">
-          {heading && <div className="palette-group">{heading}</div>}
+          {heading && <div className="palette-group" aria-hidden="true">{heading}</div>}
           <div id={`palette-${command.key}`} role="option" aria-selected={index === currentActive} className={`palette-item${index === currentActive ? ' palette-item-active' : ''}`} onMouseMove={() => setActive(index)} onClick={() => choose(command)}>
             <span className="palette-icon" aria-hidden="true">{command.icon}</span>
             <span className="palette-label">{command.label}</span>
@@ -68,8 +68,8 @@ function CommandPalette({ open, onClose, commands }: { open: boolean; onClose: (
           </div>
         </li>;
       })}
-      {!results.length && <li className="palette-empty" role="presentation">没有匹配的命令</li>}
     </ul>
+    {!results.length && <div className="palette-empty" role="status">没有匹配的命令</div>}
   </Modal>;
 }
 

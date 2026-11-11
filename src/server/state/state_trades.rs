@@ -263,7 +263,7 @@ impl AppState {
         let trades_dirty = self.recent_trades_dirty.load(Ordering::SeqCst);
         let cached_stats = self.stats.read().await.clone();
         let stored_trade = trade.clone();
-        let stored_paper_state = paper_state.clone();
+        let stored_paper = paper_state.clone();
         let persisted = self
             .db
             .run_blocking(move |db| {
@@ -277,19 +277,32 @@ impl AppState {
                         cycle_profit,
                         pair_intent: pair_intent.as_ref(),
                         consumed_pair_source: consumed_pair_source.as_deref(),
-                        paper_state: stored_paper_state.as_ref(),
+                        paper_state: stored_paper.as_ref(),
                         notify_trade,
                     },
                 )
             })
             .await;
-        let (inserted, next_stats, reloaded_trades, notification_stats) = match persisted {
-            Ok(outcome) => outcome,
-            Err(e) => {
-                error!("Failed to persist trade and grid stats to SQLite database: {e}");
-                return Err(());
-            }
-        };
+        let outcome = persisted.map_err(|e| {
+            error!("Failed to persist trade and grid stats to SQLite database: {e}");
+        })?;
+        Ok(self
+            .apply_persisted_trade_outcome(trade, paper_state, outcome)
+            .await)
+    }
+
+    async fn apply_persisted_trade_outcome(
+        &self,
+        trade: &TradeRecord,
+        paper_state: Option<(PositionInfo, AccountInfo)>,
+        outcome: (
+            bool,
+            GridStats,
+            Option<VecDeque<TradeRecord>>,
+            Option<HourlyTradeStats>,
+        ),
+    ) -> (bool, Option<HourlyTradeStats>) {
+        let (inserted, next_stats, reloaded_trades, notification_stats) = outcome;
         let had_reloaded_trades = reloaded_trades.is_some();
         if let Some(reloaded) = reloaded_trades {
             *self.recent_trades.write().await = reloaded;
@@ -298,18 +311,16 @@ impl AppState {
         *self.stats.write().await = next_stats;
         self.stats_dirty.store(false, Ordering::SeqCst);
         if !inserted {
-            return Ok((false, None));
+            return (false, None);
         }
         if let Some((position, account)) = paper_state {
             self.apply_committed_paper_state(&trade.symbol, trade.mode, position, account)
                 .await;
         }
-        // Keep the cache update in the same critical section as persistence
-        // so cleanup cannot be followed by an old trade reappearing here.
         if !had_reloaded_trades {
             cache_recent_trade(&mut *self.recent_trades.write().await, trade.clone());
         }
-        Ok((true, notification_stats))
+        (true, notification_stats)
     }
 
     async fn apply_committed_paper_state(

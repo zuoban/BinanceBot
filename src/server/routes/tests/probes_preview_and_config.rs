@@ -4,7 +4,7 @@ use super::super::config_probes::{
 use super::super::exchange_preview::{
     fetch_exchange_symbol_preview, fetch_exchange_symbols, ExchangePreviewService,
 };
-use super::super::probes::{resolve_exchange_probe, PROBE_COOLDOWN};
+use super::super::probes::{resolve_exchange_probe, resolve_telegram_probe, PROBE_COOLDOWN};
 use super::super::*;
 use super::auth_state;
 use crate::config::AppConfig;
@@ -47,6 +47,60 @@ fn exchange_probe_rejects_malformed_api_keys() {
     .unwrap();
     let resolved = resolve_exchange_probe(&saved, valid_payload).unwrap();
     assert_eq!(resolved.api_key, "validKey123");
+}
+
+#[test]
+fn exchange_and_telegram_probes_enforce_completeness_and_token_format_with_saved_credentials() {
+    let mut saved_exchange = AppConfig::default().exchange;
+    saved_exchange.api_key = "validKey123".into();
+    saved_exchange.api_secret = "validSecret456".into();
+    let saved_blank: probes::TestExchangePayload =
+        serde_json::from_value(serde_json::json!({"api_key": "  ", "api_secret": ""})).unwrap();
+    let resolved = resolve_exchange_probe(&saved_exchange, saved_blank).unwrap();
+    assert_eq!(resolved.api_key, "validKey123");
+    assert_eq!(resolved.api_secret, "validSecret456");
+
+    for partial in [
+        serde_json::json!({"api_key": "probe-secret-key"}),
+        serde_json::json!({"api_secret": "probe-secret-val"}),
+        serde_json::json!({"api_key": "probe-secret-key", "api_secret": "   "}),
+    ] {
+        let payload: probes::TestExchangePayload = serde_json::from_value(partial.clone()).unwrap();
+        let error = resolve_exchange_probe(&saved_exchange, payload).unwrap_err();
+        assert!(
+            error.contains("请同时填写 API Key 和 Secret"),
+            "{partial}: {error}"
+        );
+    }
+
+    let saved_telegram = crate::config::TelegramConfig {
+        enabled: true,
+        bot_token: "123456:valid-token".into(),
+        chat_id: "10001".into(),
+    };
+    let prefilled_chat: probes::TestTelegramPayload =
+        serde_json::from_value(serde_json::json!({"bot_token": "", "chat_id": "10002"})).unwrap();
+    let resolved_tg = resolve_telegram_probe(&saved_telegram, prefilled_chat).unwrap();
+    assert_eq!(resolved_tg.bot_token, "123456:valid-token");
+    assert_eq!(resolved_tg.chat_id, "10002");
+
+    for bad_token in [
+        "123:abc/../../getMe",
+        "123:abc?x=1",
+        "123:abc#f",
+        "bad token",
+    ] {
+        let payload: probes::TestTelegramPayload = serde_json::from_value(serde_json::json!({
+            "bot_token": bad_token,
+            "chat_id": "10001"
+        }))
+        .unwrap();
+        let err = resolve_telegram_probe(&saved_telegram, payload).unwrap_err();
+        assert!(
+            err.contains("Telegram Bot Token 格式无效"),
+            "{bad_token}: {err}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -288,10 +342,33 @@ fn pair_update_preserves_optional_settings_and_handles_explicit_clears() {
     payload["min_price"] = serde_json::Value::Null;
     payload["max_price"] = serde_json::Value::Null;
     payload["max_position_usdc"] = serde_json::Value::Null;
+
+    let mut contradictory_api = payload.clone();
+    contradictory_api["clear_api_credentials"] = serde_json::json!(true);
+    contradictory_api["api_key"] = serde_json::json!("replacement");
+    let err = apply_config_payload(
+        config.clone(),
+        serde_json::from_value(contradictory_api).unwrap(),
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("清除 API 凭证"));
+
+    let mut contradictory_tg = payload.clone();
+    contradictory_tg["clear_telegram_credentials"] = serde_json::json!(true);
+    contradictory_tg["telegram_bot_token"] = serde_json::json!("replacement");
+    let err = apply_config_payload(
+        config.clone(),
+        serde_json::from_value(contradictory_tg).unwrap(),
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("清除 Telegram 凭证"));
+
     payload["clear_api_credentials"] = serde_json::json!(true);
     payload["clear_telegram_credentials"] = serde_json::json!(true);
-    payload["api_key"] = serde_json::json!("replacement");
-    payload["telegram_bot_token"] = serde_json::json!("replacement");
+    payload["api_key"] = serde_json::json!("");
+    payload["api_secret"] = serde_json::Value::Null;
+    payload["telegram_bot_token"] = serde_json::json!("");
+    payload["telegram_chat_id"] = serde_json::Value::Null;
     let cleared = apply_config_payload(config, serde_json::from_value(payload).unwrap()).unwrap();
     assert!(cleared.exchange.api_key.is_empty() && cleared.exchange.api_secret.is_empty());
     assert!(cleared.telegram.bot_token.is_empty() && cleared.telegram.chat_id.is_empty());
@@ -352,6 +429,45 @@ async fn pair_update_rejects_missing_and_stale_versions_before_dispatch() {
         assert!(action_rx.try_recv().is_err());
         assert!(db.load_config().unwrap().is_none());
     }
+}
+
+#[tokio::test]
+async fn single_pair_config_rejects_partial_credential_rotation_with_400_without_mutation() {
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    let mut initial = AppConfig::default();
+    initial.exchange.api_key = "validKey123".into();
+    initial.exchange.api_secret = "validSecret456".into();
+    db.save_config(&initial).unwrap();
+    let (action_tx, mut action_rx) = tokio::sync::mpsc::channel(1);
+    let state = AppState::new(initial.clone(), db.clone(), action_tx);
+    let version = pair_config_version(&*state.config.read().await, state.config_instance);
+    for partial in [
+        serde_json::json!({"api_key": "probe-secret-key"}),
+        serde_json::json!({"api_secret": "probe-secret-val"}),
+    ] {
+        let mut body = serde_json::json!({
+            "baseline_version": version,
+            "symbol": "SOLUSDC",
+            "grid_interval": "0.1",
+            "order_amount_usdc": "100",
+            "buy_window": 5,
+            "sell_window": 5,
+        });
+        for (k, v) in partial.as_object().unwrap() {
+            body[k] = v.clone();
+        }
+        let (status, response) = post_config_handler(
+            State(state.clone()),
+            Json(serde_json::from_value(body).unwrap()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(!response.0.success);
+        assert!(action_rx.try_recv().is_err());
+    }
+    let saved = db.load_config().unwrap().unwrap();
+    assert_eq!(saved.exchange.api_key, "validKey123");
+    assert_eq!(saved.exchange.api_secret, "validSecret456");
 }
 
 #[tokio::test]

@@ -98,7 +98,8 @@ fn non_testnet_recovery_rows(db: &Database) -> Vec<Vec<Vec<rusqlite::types::Valu
 
 #[test]
 fn legacy_testnet_configuration_is_retired_to_paused_paper_mode() {
-    let path = std::env::temp_dir().join(format!("legacy-testnet-{}.db", uuid::Uuid::new_v4()));
+    let dir = crate::test_support::TempTestDir::new("legacy-testnet");
+    let path = dir.join("bot.db");
     {
         let db = Database::open(&path).unwrap();
         db.save_config(&AppConfig::default()).unwrap();
@@ -147,12 +148,12 @@ fn legacy_testnet_configuration_is_retired_to_paused_paper_mode() {
         );
     }
     drop(db);
-    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
 fn legacy_root_testnet_without_pairs_pauses_existing_paper_runtime() {
-    let path = std::env::temp_dir().join(format!("root-testnet-{}.db", uuid::Uuid::new_v4()));
+    let dir = crate::test_support::TempTestDir::new("root-testnet");
+    let path = dir.join("bot.db");
     {
         let db = Database::open(&path).unwrap();
         let mut config = serde_json::to_value(AppConfig::default()).unwrap();
@@ -169,12 +170,12 @@ fn legacy_root_testnet_without_pairs_pauses_existing_paper_runtime() {
     assert_retired_testnet_paused(&db, &["SOLUSDC"]);
     assert!(db.load_paper_state("SOLUSDC").unwrap().is_none());
     drop(db);
-    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
 fn legacy_first_pair_testnet_clears_credentials_for_all_pairs() {
-    let path = std::env::temp_dir().join(format!("pair-testnet-{}.db", uuid::Uuid::new_v4()));
+    let dir = crate::test_support::TempTestDir::new("pair-testnet");
+    let path = dir.join("bot.db");
     {
         let db = Database::open(&path).unwrap();
         let mut config = legacy_mixed_testnet_config();
@@ -189,13 +190,13 @@ fn legacy_first_pair_testnet_clears_credentials_for_all_pairs() {
     let db = Database::open(&path).unwrap();
     assert_retired_testnet_paused(&db, &["SOLUSDC", "BTCUSDT"]);
     drop(db);
-    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
 fn legacy_first_live_second_testnet_pauses_paper_and_preserves_recovery_across_reopen() {
     for paper_intent in [false, true] {
-        let path = std::env::temp_dir().join(format!("mixed-testnet-{}.db", uuid::Uuid::new_v4()));
+        let dir = crate::test_support::TempTestDir::new("mixed-testnet");
+        let path = dir.join("bot.db");
         let position = PositionInfo {
             symbol: "SOLUSDC".into(),
             size: dec!(2),
@@ -329,15 +330,14 @@ fn legacy_first_live_second_testnet_pauses_paper_and_preserves_recovery_across_r
         );
         assert_eq!(non_testnet_recovery_rows(&db), before);
         drop(db);
-        std::fs::remove_file(path).unwrap();
     }
 }
 
 #[test]
 fn legacy_live_only_config_keeps_credentials_and_running_state() {
     for legacy_flags in [false, true] {
-        let path =
-            std::env::temp_dir().join(format!("live-only-migration-{}.db", uuid::Uuid::new_v4()));
+        let dir = crate::test_support::TempTestDir::new("live-only-migration");
+        let path = dir.join("bot.db");
         {
             let db = Database::open(&path).unwrap();
             let mut config = legacy_mixed_testnet_config();
@@ -405,7 +405,7 @@ fn legacy_live_only_config_keeps_credentials_and_running_state() {
                     .unwrap();
             }
         }
-        std::fs::remove_file(path).unwrap();
+        drop(dir);
     }
 }
 
@@ -418,10 +418,8 @@ fn legacy_testnet_migration_rolls_back_configuration_and_all_pauses_on_failure()
              WHEN NEW.symbol = 'SOLUSDC' AND NEW.mode = 'PAPER'
              BEGIN SELECT RAISE(ABORT, 'reject second pause'); END;",
     ] {
-        let path = std::env::temp_dir().join(format!(
-            "testnet-migration-rollback-{}.db",
-            uuid::Uuid::new_v4()
-        ));
+        let dir = crate::test_support::TempTestDir::new("testnet-migration-rollback");
+        let path = dir.join("bot.db");
         let legacy = legacy_mixed_testnet_config();
         {
             let db = Database::open(&path).unwrap();
@@ -453,10 +451,7 @@ fn legacy_testnet_migration_rolls_back_configuration_and_all_pauses_on_failure()
                     |row| row.get(0),
                 )
                 .unwrap();
-            assert_eq!(
-                serde_json::from_str::<BotStatus>(&status).unwrap(),
-                BotStatus::Running
-            );
+            assert_eq!(BotStatus::from_db(&status).unwrap(), BotStatus::Running);
         }
         conn.execute_batch("DROP TRIGGER reject_migration;")
             .unwrap();
@@ -467,14 +462,13 @@ fn legacy_testnet_migration_rolls_back_configuration_and_all_pauses_on_failure()
         let db = Database::open(&path).unwrap();
         assert_retired_testnet_paused(&db, &["SOLUSDC", "BTCUSDT"]);
         drop(db);
-        std::fs::remove_file(path).unwrap();
     }
 }
 
 #[test]
 fn legacy_paper_intent_with_credentials_pauses_derived_live_mode_once() {
-    let path =
-        std::env::temp_dir().join(format!("legacy-paper-intent-{}.db", uuid::Uuid::new_v4()));
+    let dir = crate::test_support::TempTestDir::new("legacy-paper-intent");
+    let path = dir.join("bot.db");
     let mut config = AppConfig::default();
     config.exchange.api_key = "legacy-key".into();
     config.exchange.api_secret = "legacy-secret".into();
@@ -538,13 +532,12 @@ fn legacy_paper_intent_with_credentials_pauses_derived_live_mode_once() {
         Some(BotStatus::Running)
     );
     drop(db);
-    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
 fn retired_testnet_rows_are_removed_and_trade_history_becomes_unknown() {
-    let path =
-        std::env::temp_dir().join(format!("legacy-testnet-rows-{}.db", uuid::Uuid::new_v4()));
+    let dir = crate::test_support::TempTestDir::new("legacy-testnet-rows");
+    let path = dir.join("bot.db");
     {
         let db = Database::open(&path).unwrap();
         db.save_config(&AppConfig::default()).unwrap();
@@ -587,14 +580,14 @@ fn retired_testnet_rows_are_removed_and_trade_history_becomes_unknown() {
     }
     drop(conn);
     drop(db);
-    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
 fn first_exchange_mode_switch_persists_pause_across_reopen() {
     let target = TradingMode::Live;
     for scoped in [false, true] {
-        let path = std::env::temp_dir().join(format!("mode-switch-{}.db", uuid::Uuid::new_v4()));
+        let dir = crate::test_support::TempTestDir::new("mode-switch");
+        let path = dir.join("bot.db");
         let mut config = AppConfig::default();
         if scoped {
             config.pairs = vec![crate::config::TradingPairConfig::new("SOLUSDC".into())];
@@ -630,13 +623,13 @@ fn first_exchange_mode_switch_persists_pause_across_reopen() {
             assert_eq!(db.load_bot_status().unwrap(), Some(BotStatus::Paused));
         }
         drop(db);
-        std::fs::remove_file(path).unwrap();
     }
 }
 
 #[test]
 fn pair_status_survives_restart_and_only_the_original_pair_inherits_legacy_pause() {
-    let path = std::env::temp_dir().join(format!("multi-pair-status-{}.db", uuid::Uuid::new_v4()));
+    let dir = crate::test_support::TempTestDir::new("multi-pair-status");
+    let path = dir.join("bot.db");
     {
         let db = Database::open(&path).unwrap();
         db.save_config(&AppConfig::default()).unwrap();
@@ -667,8 +660,19 @@ fn pair_status_survives_restart_and_only_the_original_pair_inherits_legacy_pause
         db.load_pair_status("BTCUSDT", TradingMode::Live).unwrap(),
         None
     );
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE pair_runtime SET status = '\"PAUSED\"' WHERE symbol = 'SOLUSDC' AND mode = 'PAPER'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        db.load_pair_status("SOLUSDC", TradingMode::Paper).unwrap(),
+        Some(BotStatus::Paused)
+    );
     drop(db);
-    std::fs::remove_file(path).unwrap();
 }
 
 #[test]

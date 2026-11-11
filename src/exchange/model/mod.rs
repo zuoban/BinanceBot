@@ -97,6 +97,8 @@ pub(crate) struct BinanceOrderResponse {
 }
 
 impl BinanceOrderResponse {
+    #[must_use]
+    #[inline]
     pub(crate) fn is_terminal_status(status: &str) -> bool {
         matches!(
             status,
@@ -104,10 +106,14 @@ impl BinanceOrderResponse {
         )
     }
 
+    #[must_use]
+    #[inline]
     pub(crate) fn is_terminal(&self) -> bool {
         Self::is_terminal_status(&self.status)
     }
 
+    #[must_use]
+    #[inline]
     pub(crate) fn is_unfilled_terminal_status(status: &str) -> bool {
         matches!(
             status,
@@ -115,10 +121,14 @@ impl BinanceOrderResponse {
         )
     }
 
+    #[must_use]
+    #[inline]
     pub(crate) fn is_unfilled_terminal(&self) -> bool {
         Self::is_unfilled_terminal_status(&self.status)
     }
 
+    #[must_use]
+    #[inline]
     pub(crate) fn is_known_status(status: &str) -> bool {
         matches!(
             status,
@@ -132,6 +142,8 @@ impl BinanceOrderResponse {
         )
     }
 
+    #[must_use]
+    #[inline]
     pub(crate) fn open_order_status(&self) -> crate::types::OrderStatus {
         if self.executed_qty > Decimal::ZERO {
             crate::types::OrderStatus::PartiallyFilled
@@ -140,6 +152,8 @@ impl BinanceOrderResponse {
         }
     }
 
+    #[must_use]
+    #[inline]
     pub(crate) fn remaining_qty(&self) -> Decimal {
         self.orig_qty
             .checked_sub(self.executed_qty)
@@ -147,10 +161,14 @@ impl BinanceOrderResponse {
             .max(Decimal::ZERO)
     }
 
+    #[must_use]
+    #[inline]
     pub(crate) fn has_valid_symbol_and_side(&self, symbol: &str) -> bool {
         self.symbol == symbol && crate::types::OrderSide::from_exchange_str(&self.side).is_some()
     }
 
+    #[must_use]
+    #[inline]
     pub(crate) fn matches_identity(&self, other: &Self) -> bool {
         self.client_order_id == other.client_order_id
             && self.symbol == other.symbol
@@ -158,6 +176,8 @@ impl BinanceOrderResponse {
             && self.order_id == other.order_id
     }
 
+    #[must_use]
+    #[inline]
     pub(crate) fn matches_snapshot(&self, other: &Self) -> bool {
         self.matches_identity(other)
             && self.status == other.status
@@ -231,6 +251,8 @@ pub(crate) struct BinancePositionRisk {
 }
 
 impl BinancePositionRisk {
+    #[must_use]
+    #[inline]
     pub(crate) fn into_position_info(
         self,
         update_time: Option<chrono::DateTime<chrono::Utc>>,
@@ -274,6 +296,8 @@ pub(crate) struct BinanceAccountInfoResponse {
 impl BinanceAccountInfoResponse {
     /// USDⓈ-M balances are reported per asset. The account-wide totals can be zero
     /// for a USDC-margined symbol even when its USDC balance is nonzero.
+    #[must_use]
+    #[inline]
     pub(crate) fn margin_asset_for_symbol(&self, symbol: &str) -> Option<&BinanceAccountAsset> {
         self.assets
             .iter()

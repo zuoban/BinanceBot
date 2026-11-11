@@ -13,9 +13,7 @@ impl Database {
             .prepare_cached("SELECT status FROM bot_runtime WHERE id = 1;")?
             .query_row([], |row| row.get(0))
             .optional()?;
-        value
-            .map(|status| serde_json::from_str(&format!("\"{}\"", status)).map_err(Into::into))
-            .transpose()
+        value.as_deref().map(BotStatus::from_db).transpose()
     }
 
     #[cfg(test)]
@@ -33,7 +31,11 @@ impl Database {
                 .optional()?
         };
         if let Some(value) = value {
-            return Ok(Some(serde_json::from_str(&value)?));
+            let raw = value
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .unwrap_or(&value);
+            return Ok(Some(BotStatus::from_db(raw)?));
         }
         // Only the former single strategy inherits the legacy global status.
         if let Some(config) = self.load_config()? {
@@ -391,21 +393,17 @@ pub(super) fn save_pair_status_on(
     .execute(params![
         symbol,
         mode.as_str(),
-        serde_json::to_string(&status)?,
+        status.as_str(),
         Utc::now().to_rfc3339()
     ])?;
     Ok(())
 }
 
 fn save_bot_status_on(conn: &Connection, status: BotStatus) -> Result<()> {
-    let value = serde_json::to_value(status)?;
-    let name = value
-        .as_str()
-        .context("Invalid bot status representation")?;
     conn.prepare_cached(
         "INSERT INTO bot_runtime (id, status, updated_at) VALUES (1, ?1, ?2)
          ON CONFLICT(id) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at",
     )?
-    .execute(params![name, Utc::now().to_rfc3339()])?;
+    .execute(params![status.as_str(), Utc::now().to_rfc3339()])?;
     Ok(())
 }
