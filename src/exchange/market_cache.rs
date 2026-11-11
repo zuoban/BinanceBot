@@ -27,7 +27,7 @@ struct Snapshot {
 
 #[derive(Default)]
 pub(crate) struct MarketCache {
-    entries: Mutex<HashMap<String, Arc<Mutex<MarketEntry>>>>,
+    entries: std::sync::RwLock<HashMap<String, Arc<Mutex<MarketEntry>>>>,
 }
 
 impl MarketCache {
@@ -36,14 +36,16 @@ impl MarketCache {
         client: &BinanceFuturesClient,
         symbol: &str,
     ) -> Result<(Decimal, DateTime<Utc>)> {
-        let entry = {
-            let mut entries = self.entries.lock().await;
-            let key = client.market_cache_key();
-            entries
-                .get(key)
-                .cloned()
-                .unwrap_or_else(|| entries.entry(key.to_owned()).or_default().clone())
-        };
+        let key = client.market_cache_key();
+        let existing = self.entries.read().unwrap().get(key).cloned();
+        let entry = existing.unwrap_or_else(|| {
+            self.entries
+                .write()
+                .unwrap()
+                .entry(key.to_owned())
+                .or_default()
+                .clone()
+        });
         // A slow shared HTTP request must not stall every engine's reconciliation.
         let mut entry = tokio::time::timeout(ENTRY_WAIT, entry.lock())
             .await
@@ -52,7 +54,11 @@ impl MarketCache {
         entry
             .demand
             .retain(|_, at| now.duration_since(*at) < DEMAND_WINDOW);
-        entry.demand.insert(symbol.to_owned(), now);
+        if let Some(at) = entry.demand.get_mut(symbol) {
+            *at = now;
+        } else {
+            entry.demand.insert(symbol.to_owned(), now);
+        }
         if entry.demand.len() < BULK_THRESHOLD {
             drop(entry);
             let requested_at = Utc::now();
@@ -189,7 +195,7 @@ mod tests {
         );
         assert_eq!(single.load(Ordering::SeqCst), 11);
 
-        let entry = cache.entries.lock().await.get(&url).unwrap().clone();
+        let entry = cache.entries.read().unwrap().get(&url).unwrap().clone();
         entry.lock().await.snapshot = None;
         fail.store(true, Ordering::SeqCst);
         let failed = futures_util::future::join_all((0..10).map(|i| {

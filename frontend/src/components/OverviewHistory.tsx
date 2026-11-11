@@ -1,8 +1,8 @@
-import { Suspense, lazy, useMemo, useState } from 'react';
+import { Suspense, lazy, memo, useMemo, useState } from 'react';
 import { Button, Card, Select } from 'antd';
 import { useOverviewHistory } from '../lib/queries';
 import { availableRatio, compactNumber, compactPrice, modeLabel, numeric, quoteAsset, ratioText, time } from '../lib/format';
-import { useNow } from '../lib/useNow';
+import { useExpired } from '../lib/useNow';
 import type { DailySnapshot, HistoryAccount, Mode, OverviewHistoryData } from '../lib/types';
 import { Pnl } from './Common';
 import { LoadErrorBoundary } from './LoadErrorBoundary';
@@ -10,7 +10,7 @@ import { LoadErrorBoundary } from './LoadErrorBoundary';
 const OverviewHistoryChart = lazy(() => import('./OverviewHistoryChart'));
 const historyDateFormat = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
 const formatDate = (hour: number) => historyDateFormat.format(hour * 1000);
-const accountKey = (account: HistoryAccount) => JSON.stringify([account.mode, account.asset, account.account_id]);
+const accountKey = (account: HistoryAccount) => account.account_id === null ? `${account.mode}\0${account.asset}` : `${account.mode}\0${account.asset}\0${account.account_id}`;
 const isUnidentified = (account: HistoryAccount) => account.mode !== 'PAPER' && account.account_id === null;
 
 function buildHistoryAccountOptions(
@@ -20,7 +20,7 @@ function buildHistoryAccountOptions(
   const snapshotList = snapshots ?? [];
   const accountList = currentAccounts ?? [];
   const currentKeys = new Set(accountList.map(accountKey));
-  const current = JSON.stringify([...currentKeys].sort());
+  const current = [...currentKeys].sort().join('\x01');
   const groups = new Map<string, HistoryAccount>();
   for (const account of accountList) groups.set(accountKey(account), account);
   for (const hour of snapshotList) for (const group of hour.groups) groups.set(accountKey(group), group);
@@ -43,25 +43,37 @@ function buildHistoryAccountOptions(
 
 function buildHistorySeries(
   snapshots: OverviewHistoryData['snapshots'] | undefined,
-  key: string | undefined,
+  account: HistoryAccount | undefined,
   lastHour: number,
 ) {
-  const byHour = new Map((snapshots ?? []).map(point => [point.hour, point]));
+  const byHour = new Map<number, OverviewHistoryData['snapshots'][number]['groups']>();
+  for (const point of snapshots ?? []) byHour.set(point.hour, point.groups);
   const pointAt = (hour: number) => {
-    const group = byHour.get(hour)?.groups.find(g => accountKey(g) === key);
-    return { hour, equity: numeric(group?.equity) };
+    if (!account) return { hour, equity: null };
+    const list = byHour.get(hour);
+    if (list) {
+      for (let i = 0; i < list.length; i++) {
+        const g = list[i];
+        if (g.mode === account.mode && g.asset === account.asset && g.account_id === account.account_id) {
+          return { hour, equity: numeric(g.equity) };
+        }
+      }
+    }
+    return { hour, equity: null };
   };
   const data = Array.from({ length: 24 }, (_, i) => pointAt(lastHour - (23 - i) * 3600));
   const midnight = Math.floor((lastHour + 8 * 3600) / (24 * 3600)) * 24 * 3600 - 8 * 3600;
   const dailyData = Array.from({ length: 7 }, (_, i) => pointAt(midnight - (6 - i) * 24 * 3600));
-  const latestDay = [...dailyData].reverse().find(point => point.equity !== null);
-  const latest = [...data].reverse().find(point => point.equity !== null);
+  let latestDay: (typeof dailyData)[number] | undefined;
+  for (let i = dailyData.length - 1; i >= 0; i--) { if (dailyData[i].equity !== null) { latestDay = dailyData[i]; break; } }
+  let latest: (typeof data)[number] | undefined;
+  for (let i = data.length - 1; i >= 0; i--) { if (data[i].equity !== null) { latest = data[i]; break; } }
   const ticks = data.filter(point => point.hour % (4 * 3600) === 0).map(point => point.hour);
   const dailyTicks = dailyData.map(point => point.hour);
   return { data, dailyData, latestDay, latest, ticks, dailyTicks };
 }
 
-function DailySnapshotsSection({ snapshots }: { snapshots: DailySnapshot[] }) {
+const DailySnapshotsSection = memo(function DailySnapshotsSection({ snapshots }: { snapshots: DailySnapshot[] }) {
   const [selectedDate, setSelectedDate] = useState<string>();
   const active = useMemo(
     () => snapshots.find(s => s.date === selectedDate) ?? snapshots[0],
@@ -184,11 +196,12 @@ function DailySnapshotsSection({ snapshots }: { snapshots: DailySnapshot[] }) {
       </div>
     </div>
   </div>;
-}
+});
 
 export function OverviewHistory() {
   const history = useOverviewHistory();
-  const now = useNow(60_000);
+  const liveHour = Math.floor(Date.now() / 3600_000);
+  useExpired((liveHour + 1) * 3600_000 - 1);
   const [selected, setSelected] = useState<{ current: string; key: string }>();
   const snapshots = history.data?.snapshots;
   const currentAccounts = history.data?.current_accounts;
@@ -201,10 +214,10 @@ export function OverviewHistory() {
   const account = key ? groups.get(key) : undefined;
   const asset = account?.asset;
   const discrete = account ? isUnidentified(account) : false;
-  const lastHour = Math.floor(now / 3600_000) * 3600;
+  const lastHour = Math.floor(Date.now() / 3600_000) * 3600;
   const { data, dailyData, latestDay, latest, ticks, dailyTicks } = useMemo(
-    () => buildHistorySeries(snapshots, key, lastHour),
-    [snapshots, key, lastHour],
+    () => buildHistorySeries(snapshots, account, lastHour),
+    [snapshots, account, lastHour],
   );
   const renderPlot = (points: typeof data, plotTicks: number[], label: string, ariaLabel: string, emptyText: string, daily = false) =>
     points.some(point => point.equity !== null) ? <div className="history-plot chart" role="group" aria-label={ariaLabel}>

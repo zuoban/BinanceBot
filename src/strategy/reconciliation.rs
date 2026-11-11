@@ -391,17 +391,35 @@ impl GridTradingEngine {
         let config = self.state.config.read().await.clone();
         let symbol = config.exchange.symbol.clone();
         let mode = config.exchange.trading_mode();
-        let pair_intents = match self.load_pair_intent_map(&symbol, mode).await {
-            Ok(intents) => intents,
-            Err(e) => {
+        let preflight_symbol = symbol.clone();
+        let preflight = self
+            .state
+            .db
+            .run_blocking(move |db| {
+                let intents = match db.load_pair_intents(&preflight_symbol, mode) {
+                    Ok(orders) => orders,
+                    Err(e) => return Ok(Err((true, e))),
+                };
+                match db.load_remainder_plan(&preflight_symbol, mode) {
+                    Ok(plan) => Ok(Ok((intents, plan))),
+                    Err(e) => Ok(Err((false, e))),
+                }
+            })
+            .await;
+        let (pair_intents, mut remainder_plan) = match preflight {
+            Ok(Ok((intents, plan))) => {
+                let map: HashMap<String, GridOrder> = intents
+                    .into_iter()
+                    .map(|order| (order.client_order_id.clone(), order))
+                    .collect();
+                (map, plan)
+            }
+            Ok(Err((true, e))) | Err(e) => {
                 error!("Could not load pending pair intents: {}", e);
                 self.report_reconciliation_state(true).await;
                 return false;
             }
-        };
-        let mut remainder_plan = match self.load_remainder_plan().await {
-            Ok(plan) => plan,
-            Err(e) => {
+            Ok(Err((false, e))) => {
                 error!("Could not load remainder recovery metadata: {}", e);
                 self.last_orders_sync = None;
                 return false;

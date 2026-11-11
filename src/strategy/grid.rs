@@ -354,6 +354,12 @@ struct PaperWindowCache {
     orders: HashMap<String, GridOrder>,
 }
 
+#[derive(Clone, Copy)]
+struct WindowPlacementContext<'a> {
+    last_fill: LastFillSnapshot,
+    precomputed: Option<(Decimal, &'a [Decimal])>,
+}
+
 pub struct GridTradingEngine {
     state: Arc<AppState>,
     client: Arc<BinanceFuturesClient>,
@@ -3672,20 +3678,24 @@ impl GridTradingEngine {
                 if !already_exists && on_maker_side {
                     let client_id = new_grid_client_order_id(side);
                     if self
-                        .place_grid_order_with_last_fill(
+                        .place_grid_order_in_window(
                             side,
                             target_price,
                             client_id,
                             grid_level,
                             None,
-                            Some(last_fill),
+                            Some(WindowPlacementContext {
+                                last_fill,
+                                precomputed: Some((current_price, desired_prices)),
+                            }),
                         )
                         .await
                     {
                         active_prices.push(target_price);
-                        if self
-                            .prune_grid_window(&desired_buy_prices, &desired_sell_prices)
-                            .await
+                        if !config.exchange.is_paper()
+                            && self
+                                .prune_grid_window(&desired_buy_prices, &desired_sell_prices)
+                                .await
                         {
                             return;
                         }
@@ -3930,7 +3940,7 @@ impl GridTradingEngine {
         rules: &SymbolRules,
         side: OrderSide,
         price: Decimal,
-        cached_last_fill: Option<LastFillSnapshot>,
+        placement_ctx: Option<WindowPlacementContext<'_>>,
     ) -> Option<Decimal> {
         let full_quantity = rules.calculate_quantity(price, config.grid.order_amount_usdc)?;
         if !config.exchange.is_paper() && !self.live_reconciliation_ready() {
@@ -3962,26 +3972,39 @@ impl GridTradingEngine {
             return None;
         }
         if reference_price > Decimal::ZERO {
-            let last_fill = match cached_last_fill.filter(|snapshot| {
-                snapshot.revision == self.state.db.symbol_trade_revision(&config.exchange.symbol)
-            }) {
-                Some(last_fill) => last_fill,
-                None => match self.load_last_fill(config).await {
-                    Ok(last_fill) => last_fill,
-                    Err(error) => {
-                        self.state
-                            .add_log("ERROR", format!("Could not load last fills: {}", error))
-                            .await;
-                        self.pause_trading().await;
-                        return None;
-                    }
-                },
-            };
-            let (buys, sells) =
-                Self::window_prices_with_last_fill(config, rules, reference_price, last_fill);
-            let window = if side == OrderSide::Buy { buys } else { sells };
-            if !window.contains(&price) {
-                return None;
+            let current_rev = self.state.db.symbol_trade_revision(&config.exchange.symbol);
+            if let Some(window_prices) = placement_ctx
+                .filter(|ctx| ctx.last_fill.revision == current_rev)
+                .and_then(|ctx| ctx.precomputed)
+                .filter(|(window_ref, _)| *window_ref == reference_price)
+                .map(|(_, prices)| prices)
+            {
+                if !window_prices.contains(&price) {
+                    return None;
+                }
+            } else {
+                let last_fill = match placement_ctx
+                    .map(|ctx| ctx.last_fill)
+                    .filter(|snapshot| snapshot.revision == current_rev)
+                {
+                    Some(last_fill) => last_fill,
+                    None => match self.load_last_fill(config).await {
+                        Ok(last_fill) => last_fill,
+                        Err(error) => {
+                            self.state
+                                .add_log("ERROR", format!("Could not load last fills: {}", error))
+                                .await;
+                            self.pause_trading().await;
+                            return None;
+                        }
+                    },
+                };
+                let (buys, sells) =
+                    Self::window_prices_with_last_fill(config, rules, reference_price, last_fill);
+                let window = if side == OrderSide::Buy { buys } else { sells };
+                if !window.contains(&price) {
+                    return None;
+                }
             }
         }
 
@@ -4100,6 +4123,7 @@ impl GridTradingEngine {
         .await
     }
 
+    #[cfg(test)]
     async fn place_grid_order_with_last_fill(
         &mut self,
         side: OrderSide,
@@ -4108,6 +4132,29 @@ impl GridTradingEngine {
         grid_level: i32,
         paired_client_order_id: Option<String>,
         cached_last_fill: Option<LastFillSnapshot>,
+    ) -> bool {
+        self.place_grid_order_in_window(
+            side,
+            price,
+            client_order_id,
+            grid_level,
+            paired_client_order_id,
+            cached_last_fill.map(|last_fill| WindowPlacementContext {
+                last_fill,
+                precomputed: None,
+            }),
+        )
+        .await
+    }
+
+    async fn place_grid_order_in_window(
+        &mut self,
+        side: OrderSide,
+        price: Decimal,
+        client_order_id: String,
+        grid_level: i32,
+        paired_client_order_id: Option<String>,
+        placement_ctx: Option<WindowPlacementContext<'_>>,
     ) -> bool {
         if self.state.is_shutting_down() || *self.state.status.read().await != BotStatus::Running {
             return false;
@@ -4130,7 +4177,7 @@ impl GridTradingEngine {
         }
         let rules = self.state.rules.read().await.clone();
         let Some(quantity) = self
-            .validate_and_size_grid_order(&config, &rules, side, price, cached_last_fill)
+            .validate_and_size_grid_order(&config, &rules, side, price, placement_ctx)
             .await
         else {
             return false;

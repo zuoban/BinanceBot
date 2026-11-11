@@ -60,6 +60,126 @@ impl Rollup {
     }
 }
 
+#[derive(Default)]
+struct PnlRollup {
+    pnl: Decimal,
+    commission: Decimal,
+    pending: i64,
+}
+
+fn load_pnl_on(conn: &Connection, symbol: &str, mode: &str) -> Result<PnlRollup> {
+    Ok(conn
+        .prepare_cached(
+            "SELECT realized_pnl, commission, pending_pnl_count
+             FROM trade_pnl_rollups WHERE symbol = ?1 AND mode = ?2",
+        )?
+        .query_row(params![symbol, mode], |row| {
+            let pnl_str: String = row.get(0)?;
+            let fee_str: String = row.get(1)?;
+            let pnl = Decimal::from_str(&pnl_str).map_err(|err| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(err),
+                )
+            })?;
+            let commission = Decimal::from_str(&fee_str).map_err(|err| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    1,
+                    rusqlite::types::Type::Text,
+                    Box::new(err),
+                )
+            })?;
+            Ok(PnlRollup {
+                pnl,
+                commission,
+                pending: row.get(2)?,
+            })
+        })
+        .optional()?
+        .unwrap_or_default())
+}
+
+fn save_pnl_on(conn: &Connection, symbol: &str, mode: &str, value: &PnlRollup) -> Result<()> {
+    conn.prepare_cached(
+        "INSERT INTO trade_pnl_rollups
+         (symbol, mode, realized_pnl, commission, pending_pnl_count)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(symbol, mode) DO UPDATE SET
+             realized_pnl = excluded.realized_pnl,
+             commission = excluded.commission,
+             pending_pnl_count = excluded.pending_pnl_count",
+    )?
+    .execute(params![
+        symbol,
+        mode,
+        value.pnl.to_string(),
+        value.commission.to_string(),
+        value.pending,
+    ])?;
+    Ok(())
+}
+
+fn migrate_pnl_on(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS trade_pnl_rollups (
+             symbol TEXT NOT NULL,
+             mode TEXT NOT NULL,
+             realized_pnl TEXT NOT NULL,
+             commission TEXT NOT NULL,
+             pending_pnl_count INTEGER NOT NULL,
+             PRIMARY KEY (symbol, mode)
+         );
+         CREATE TABLE IF NOT EXISTS trade_pnl_rollup_state (
+             id INTEGER PRIMARY KEY CHECK (id = 1)
+         );",
+    )?;
+    let initialized: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM trade_pnl_rollup_state WHERE id = 1)",
+        [],
+        |row| row.get(0),
+    )?;
+    if initialized {
+        return Ok(());
+    }
+    conn.execute("DELETE FROM trade_pnl_rollups", [])?;
+    let mut rollups: HashMap<(String, String), PnlRollup> = HashMap::new();
+    {
+        let mut statement = conn
+            .prepare("SELECT symbol, mode, realized_pnl, commission, pnl_verified FROM trades")?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let symbol: String = row.get(0)?;
+            let mode: String = row.get(1)?;
+            let verified: bool = row.get(4)?;
+            let entry = rollups.entry((symbol, mode)).or_default();
+            if verified {
+                entry.pnl += Decimal::from_str(&row.get::<_, String>(2)?)?;
+                entry.commission += Decimal::from_str(&row.get::<_, String>(3)?)?;
+            } else {
+                entry.pending += 1;
+            }
+        }
+    }
+    for ((symbol, mode), rollup) in rollups {
+        save_pnl_on(conn, &symbol, &mode, &rollup)?;
+    }
+    conn.execute("INSERT INTO trade_pnl_rollup_state (id) VALUES (1)", [])?;
+    Ok(())
+}
+
+pub(super) fn pnl_totals_on(
+    conn: &Connection,
+    symbol: &str,
+    mode: TradingMode,
+) -> Result<(Decimal, Decimal, usize)> {
+    let rollup = load_pnl_on(conn, symbol, mode.as_str())?;
+    Ok((
+        rollup.pnl,
+        rollup.commission,
+        rollup.pending.max(0) as usize,
+    ))
+}
 pub(super) fn hour(timestamp: DateTime<Utc>) -> i64 {
     timestamp.timestamp().div_euclid(3600) * 3600
 }
@@ -89,7 +209,7 @@ pub(super) fn migrate_on(conn: &Connection) -> Result<()> {
         |row| row.get(0),
     )?;
     if initialized {
-        return Ok(());
+        return migrate_pnl_on(conn);
     }
     let has_hour: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('trades') WHERE name = 'stats_hour')",
@@ -126,7 +246,7 @@ pub(super) fn migrate_on(conn: &Connection) -> Result<()> {
         "CREATE INDEX IF NOT EXISTS idx_trades_stats_hour ON trades (symbol, mode, stats_hour);
          INSERT INTO trade_hourly_rollup_state (id) VALUES (1);",
     )?;
-    Ok(())
+    migrate_pnl_on(conn)
 }
 
 fn load_on(conn: &Connection, symbol: &str, mode: &str, bucket: i64) -> Result<Rollup> {
@@ -173,7 +293,15 @@ pub(super) fn insert_on(conn: &Connection, trade: &TradeRecord) -> Result<()> {
         trade.realized_pnl,
         trade.pnl_verified,
     );
-    save_on(conn, &trade.symbol, trade.mode.as_str(), bucket, &rollup)
+    save_on(conn, &trade.symbol, trade.mode.as_str(), bucket, &rollup)?;
+    let mut pnl_rollup = load_pnl_on(conn, &trade.symbol, trade.mode.as_str())?;
+    if trade.pnl_verified {
+        pnl_rollup.pnl += trade.realized_pnl;
+        pnl_rollup.commission += trade.commission;
+    } else {
+        pnl_rollup.pending += 1;
+    }
+    save_pnl_on(conn, &trade.symbol, trade.mode.as_str(), &pnl_rollup)
 }
 
 pub(super) fn verify_on(
@@ -182,15 +310,24 @@ pub(super) fn verify_on(
     mode: TradingMode,
     timestamp: DateTime<Utc>,
     pnl: Decimal,
+    commission: Decimal,
 ) -> Result<()> {
     let bucket = hour(timestamp);
     let mut rollup = load_on(conn, symbol, mode.as_str(), bucket)?;
     anyhow::ensure!(rollup.pending > 0, "Missing pending trade in hourly rollup");
     rollup.pending -= 1;
     rollup.pnl += pnl;
-    save_on(conn, symbol, mode.as_str(), bucket, &rollup)
+    save_on(conn, symbol, mode.as_str(), bucket, &rollup)?;
+    let mut pnl_rollup = load_pnl_on(conn, symbol, mode.as_str())?;
+    anyhow::ensure!(
+        pnl_rollup.pending > 0,
+        "Missing pending trade in PnL rollup"
+    );
+    pnl_rollup.pending -= 1;
+    pnl_rollup.pnl += pnl;
+    pnl_rollup.commission += commission;
+    save_pnl_on(conn, symbol, mode.as_str(), &pnl_rollup)
 }
-
 pub(super) fn stats_on(
     conn: &Connection,
     symbol: &str,

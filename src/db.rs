@@ -113,6 +113,9 @@ type MembershipHook = (
 pub struct Database {
     conn: Mutex<Connection>,
     path: String,
+    #[cfg(unix)]
+    file_identity: Option<(u64, u64)>,
+    history_account_ids: Mutex<HashMap<[u8; 32], String>>,
     trade_revisions: RevisionTracker,
     trade_clear_revisions: RevisionTracker,
     #[cfg(test)]
@@ -304,6 +307,15 @@ impl Database {
             );
             prepare_database_path(path_ref)?;
         }
+        #[cfg(unix)]
+        let file_identity = if path_str != ":memory:" {
+            use std::os::unix::fs::MetadataExt;
+            let meta = std::fs::symlink_metadata(path_ref)
+                .with_context(|| format!("Failed to inspect {:?}", path_ref))?;
+            Some((meta.dev(), meta.ino()))
+        } else {
+            None
+        };
 
         let conn = Connection::open(path_ref)
             .with_context(|| format!("Failed to open SQLite database at {:?}", path_ref))?;
@@ -339,6 +351,9 @@ impl Database {
         let db = Self {
             conn: Mutex::new(conn),
             path: path_str,
+            #[cfg(unix)]
+            file_identity,
+            history_account_ids: Mutex::new(HashMap::new()),
             trade_revisions: RevisionTracker::default(),
             trade_clear_revisions: RevisionTracker::default(),
             #[cfg(test)]
@@ -362,27 +377,49 @@ impl Database {
     pub fn path(&self) -> &str {
         &self.path
     }
+    pub(crate) fn cached_history_account_id(&self, identity: &[u8; 32]) -> Option<String> {
+        self.history_account_ids
+            .lock()
+            .unwrap()
+            .get(identity)
+            .cloned()
+    }
     pub(crate) fn history_account_id(&self, identity: [u8; 32]) -> Result<String> {
-        let conn = self.lock_connection("history_account_id");
-        if let Some(id) = conn
-            .query_row(
-                "SELECT account_id FROM history_account_ids WHERE identity = ?1",
-                params![identity.as_slice()],
-                |row| row.get(0),
-            )
-            .optional()?
-        {
-            return Ok(id);
+        if let Some(cached) = self.history_account_ids.lock().unwrap().get(&identity) {
+            return Ok(cached.clone());
         }
-        conn.execute(
-            "INSERT OR IGNORE INTO history_account_ids (identity, account_id) VALUES (?1, ?2)",
-            params![identity.as_slice(), uuid::Uuid::new_v4().to_string()],
-        )?;
-        Ok(conn.query_row(
-            "SELECT account_id FROM history_account_ids WHERE identity = ?1",
-            params![identity.as_slice()],
-            |row| row.get(0),
-        )?)
+        let id: String = {
+            let conn = self.lock_connection("history_account_id");
+            let existing: Option<String> = {
+                let mut stmt = conn.prepare_cached(
+                    "SELECT account_id FROM history_account_ids WHERE identity = ?1",
+                )?;
+                stmt.query_row(params![identity.as_slice()], |row| row.get(0))
+                    .optional()?
+            };
+            if let Some(id) = existing {
+                id
+            } else {
+                {
+                    let mut insert = conn.prepare_cached(
+                        "INSERT OR IGNORE INTO history_account_ids (identity, account_id) VALUES (?1, ?2)",
+                    )?;
+                    insert.execute(params![
+                        identity.as_slice(),
+                        uuid::Uuid::new_v4().to_string()
+                    ])?;
+                }
+                let mut stmt = conn.prepare_cached(
+                    "SELECT account_id FROM history_account_ids WHERE identity = ?1",
+                )?;
+                stmt.query_row(params![identity.as_slice()], |row| row.get(0))?
+            }
+        };
+        self.history_account_ids
+            .lock()
+            .unwrap()
+            .insert(identity, id.clone());
+        Ok(id)
     }
 
     const HOURLY_SNAPSHOT_RETENTION_SECS: i64 = 30 * 24 * 3600;
@@ -441,6 +478,31 @@ impl Database {
             .collect()
     }
 
+    pub(crate) fn hourly_account_snapshots_raw(
+        &self,
+        since: i64,
+    ) -> Result<Vec<crate::snapshots::RawHourlySnapshot>> {
+        let raw_rows: Vec<(i64, String)> = {
+            let conn = self.lock_connection("hourly_account_snapshots_raw");
+            let mut statement = conn.prepare_cached(
+                "SELECT hour, payload FROM account_hourly_snapshots WHERE hour >= ?1 ORDER BY hour",
+            )?;
+            let rows = statement.query_map(params![since], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        raw_rows
+            .into_iter()
+            .map(|(hour, payload)| {
+                Ok(crate::snapshots::RawHourlySnapshot {
+                    hour,
+                    groups: serde_json::value::RawValue::from_string(payload)?,
+                })
+            })
+            .collect()
+    }
+
     const DAILY_SNAPSHOT_RETENTION_DAYS: i64 = 90;
 
     pub fn save_daily_snapshot(&self, snapshot: &crate::snapshots::DailySnapshot) -> Result<bool> {
@@ -491,6 +553,24 @@ impl Database {
         raw_rows
             .into_iter()
             .map(|payload| Ok(serde_json::from_str(&payload)?))
+            .collect()
+    }
+
+    pub(crate) fn daily_snapshots_raw(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<Box<serde_json::value::RawValue>>> {
+        let raw_rows: Vec<String> = {
+            let conn = self.lock_connection("daily_snapshots_raw");
+            let mut statement = conn.prepare_cached(
+                "SELECT payload FROM daily_snapshots ORDER BY date DESC LIMIT ?1",
+            )?;
+            let rows = statement.query_map(params![limit as i64], |row| row.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        raw_rows
+            .into_iter()
+            .map(|payload| Ok(serde_json::value::RawValue::from_string(payload)?))
             .collect()
     }
 
@@ -635,6 +715,33 @@ impl Database {
 
     fn backup_to_memory(&self) -> Result<Connection> {
         let mut snapshot = Connection::open_in_memory()?;
+        if self.path != ":memory:" {
+            #[cfg(unix)]
+            if let Some(expected_id) = self.file_identity {
+                use std::os::unix::fs::MetadataExt;
+                let effective_uid = unsafe { libc::geteuid() } as u32;
+                validate_database_file(Path::new(&self.path), effective_uid)?;
+                let meta = std::fs::symlink_metadata(&self.path)?;
+                anyhow::ensure!(
+                    (meta.dev(), meta.ino()) == expected_id,
+                    "SQLite database file changed on disk; retry the export"
+                );
+            }
+            let reader = Connection::open_with_flags(
+                &self.path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?;
+            reader.busy_timeout(std::time::Duration::from_secs(5))?;
+            {
+                let backup = rusqlite::backup::Backup::new(&reader, &mut snapshot)?;
+                anyhow::ensure!(
+                    backup.step(-1)? == rusqlite::backup::StepResult::Done,
+                    "Database is busy; retry the export"
+                );
+            }
+            return Ok(snapshot);
+        }
         {
             let source = self.lock_connection("backup_to_memory");
             let backup = rusqlite::backup::Backup::new(&source, &mut snapshot)?;
@@ -1929,7 +2036,14 @@ impl Database {
             saved
         };
         if let Some((symbol, timestamp)) = &updated_trade {
-            hourly::verify_on(&tx, symbol, trade.mode, *timestamp, trade.realized_pnl)?;
+            hourly::verify_on(
+                &tx,
+                symbol,
+                trade.mode,
+                *timestamp,
+                trade.realized_pnl,
+                trade.commission,
+            )?;
         }
         tx.commit()?;
         if let Some((symbol, _)) = updated_trade {
@@ -2058,24 +2172,7 @@ impl Database {
         mode: TradingMode,
     ) -> Result<(Decimal, Decimal, usize)> {
         let conn = self.lock_connection("get_pnl_totals");
-        let mut stmt = conn.prepare_cached(
-            "SELECT realized_pnl, commission FROM trades WHERE symbol = ?1 AND mode = ?2 AND pnl_verified != 0;",
-        )?;
-        let rows = stmt.query_map(params![symbol, mode.as_str()], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
-        let (mut pnl, mut fees) = (Decimal::ZERO, Decimal::ZERO);
-        for row in rows {
-            let (gross, commission) = row?;
-            pnl += Decimal::from_str(&gross)?;
-            fees += Decimal::from_str(&commission)?;
-        }
-        let pending: i64 = conn
-            .prepare_cached(
-                "SELECT COUNT(*) FROM trades WHERE symbol = ?1 AND mode = ?2 AND pnl_verified = 0;",
-            )?
-            .query_row(params![symbol, mode.as_str()], |row| row.get(0))?;
-        Ok((pnl, fees, pending as usize))
+        hourly::pnl_totals_on(&conn, symbol, mode)
     }
 
     pub fn load_scoped_stats(
@@ -2522,6 +2619,10 @@ fn clear_trades_on(tx: &Connection, symbol: Option<&str>) -> Result<usize> {
     )?;
     tx.execute(
         "DELETE FROM trade_hourly_rollups WHERE (?1 IS NULL OR symbol = ?1)",
+        params![symbol],
+    )?;
+    tx.execute(
+        "DELETE FROM trade_pnl_rollups WHERE (?1 IS NULL OR symbol = ?1)",
         params![symbol],
     )?;
     tx.execute(
@@ -4347,6 +4448,9 @@ mod tests {
         let db = Database {
             conn: Mutex::new(conn),
             path: ":memory:".into(),
+            #[cfg(unix)]
+            file_identity: None,
+            history_account_ids: Mutex::new(HashMap::new()),
             trade_revisions: RevisionTracker::default(),
             trade_clear_revisions: RevisionTracker::default(),
             revision_publish_hook: Mutex::new(None),

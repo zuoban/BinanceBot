@@ -28,12 +28,12 @@ type Entry<T> = Arc<Mutex<CacheEntry<T>>>;
 type CacheEntryMap<T> = HashMap<[u8; 32], (u64, Entry<T>)>;
 
 pub(super) struct CacheEntries<T> {
-    entries: Mutex<CacheEntryMap<T>>,
+    entries: std::sync::RwLock<CacheEntryMap<T>>,
 }
 impl<T> Default for CacheEntries<T> {
     fn default() -> Self {
         Self {
-            entries: Mutex::new(HashMap::new()),
+            entries: std::sync::RwLock::new(HashMap::new()),
         }
     }
 }
@@ -41,15 +41,15 @@ impl<T> Default for CacheEntries<T> {
 impl<T> CacheEntries<T> {
     // A critical refresh detaches shared loaders without representing a fill.
     // Concurrent critical refreshes must not invalidate one another.
-    pub(super) async fn detach(&self, key: [u8; 32]) -> u64 {
-        let mut entries = self.entries.lock().await;
+    fn detach_sync(&self, key: [u8; 32]) -> u64 {
+        let mut entries = self.entries.write().unwrap();
         let (epoch, entry) = entries.entry(key).or_default();
         *entry = Default::default();
         *epoch
     }
 
-    pub(super) async fn detach_if_current(&self, key: [u8; 32], expected: u64) -> bool {
-        let mut entries = self.entries.lock().await;
+    fn detach_if_current_sync(&self, key: [u8; 32], expected: u64) -> bool {
+        let mut entries = self.entries.write().unwrap();
         let (epoch, entry) = entries.entry(key).or_default();
         if *epoch != expected {
             return false;
@@ -57,16 +57,15 @@ impl<T> CacheEntries<T> {
         *entry = Default::default();
         true
     }
-
     pub(super) async fn refresh_critical<R, F, Fut>(&self, key: [u8; 32], mut fetch: F) -> Result<R>
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = anyhow::Result<R>>,
     {
         loop {
-            let epoch = self.detach(key).await;
+            let epoch = self.detach_sync(key);
             let result = fetch().await;
-            let current = self.detach_if_current(key, epoch).await;
+            let current = self.detach_if_current_sync(key, epoch);
             let value = result?;
             if current {
                 return Ok(value);
@@ -74,27 +73,39 @@ impl<T> CacheEntries<T> {
         }
     }
 
-    pub(super) async fn entry(&self, key: [u8; 32]) -> (u64, Entry<T>) {
-        let mut entries = self.entries.lock().await;
+    fn entry_sync(&self, key: [u8; 32]) -> (u64, Entry<T>) {
+        if let Some((epoch, entry)) = self.entries.read().unwrap().get(&key) {
+            return (*epoch, entry.clone());
+        }
+        let mut entries = self.entries.write().unwrap();
         let (epoch, entry) = entries.entry(key).or_default();
         (*epoch, entry.clone())
     }
 
+    #[cfg(test)]
+    pub(super) async fn entry(&self, key: [u8; 32]) -> (u64, Entry<T>) {
+        self.entry_sync(key)
+    }
+
     // Retire the entry without waiting for an in-flight loader holding its lock.
     pub(super) async fn retire(&self, key: [u8; 32]) -> u64 {
-        let mut entries = self.entries.lock().await;
+        let mut entries = self.entries.write().unwrap();
         let (epoch, entry) = entries.entry(key).or_default();
         *epoch = epoch.wrapping_add(1);
         *entry = Default::default();
         *epoch
     }
 
-    pub(super) async fn is_current(&self, key: [u8; 32], epoch: u64, entry: &Entry<T>) -> bool {
+    fn is_current_sync(&self, key: [u8; 32], epoch: u64, entry: &Entry<T>) -> bool {
         self.entries
-            .lock()
-            .await
+            .read()
+            .unwrap()
             .get(&key)
             .is_some_and(|(e, current)| *e == epoch && Arc::ptr_eq(current, entry))
+    }
+
+    pub(super) async fn is_current(&self, key: [u8; 32], epoch: u64, entry: &Entry<T>) -> bool {
+        self.is_current_sync(key, epoch, entry)
     }
 
     pub(super) async fn get_or_fetch<R, Fresh, Fetch, Fut, Project>(
@@ -112,11 +123,11 @@ impl<T> CacheEntries<T> {
         Project: FnMut(&T) -> R,
     {
         loop {
-            let (epoch, entry) = self.entry(key).await;
+            let (epoch, entry) = self.entry_sync(key);
             let mut cached = tokio::time::timeout(ENTRY_WAIT, entry.lock())
                 .await
                 .map_err(|_| anyhow!("shared {label} request is still in flight"))?;
-            if !self.is_current(key, epoch, &entry).await {
+            if !self.is_current_sync(key, epoch, &entry) {
                 continue;
             }
             if cached
@@ -129,7 +140,7 @@ impl<T> CacheEntries<T> {
                 // Do not serve an expired or invalidated snapshot after a failure.
                 cached.snapshot = None;
                 let fetched = fetch().await;
-                if !self.is_current(key, epoch, &entry).await {
+                if !self.is_current_sync(key, epoch, &entry) {
                     continue;
                 }
                 let snapshot = match fetched {
@@ -147,7 +158,7 @@ impl<T> CacheEntries<T> {
             };
             let projected = project(snapshot);
             drop(cached);
-            if self.is_current(key, epoch, &entry).await {
+            if self.is_current_sync(key, epoch, &entry) {
                 return Ok((epoch, entry, projected));
             }
         }

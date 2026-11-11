@@ -766,17 +766,20 @@ async fn get_managed_overview_handler(
 
 async fn get_overview_history_handler(
     State(handle): State<RuntimeHandle>,
-) -> Json<ApiResponse<crate::snapshots::OverviewHistory>> {
+) -> Json<ApiResponse<crate::snapshots::RawOverviewHistory>> {
     let since = chrono::Utc::now().timestamp() - 7 * 24 * 3600;
     let result = async {
         let current_accounts = crate::snapshots::current_accounts(&handle).await?;
         let (snapshots, daily_snapshots) = handle
             .db
             .run_blocking(move |db| {
-                Ok((db.hourly_account_snapshots(since)?, db.daily_snapshots(30)?))
+                Ok((
+                    db.hourly_account_snapshots_raw(since)?,
+                    db.daily_snapshots_raw(30)?,
+                ))
             })
             .await?;
-        Ok::<_, anyhow::Error>(crate::snapshots::OverviewHistory {
+        Ok::<_, anyhow::Error>(crate::snapshots::RawOverviewHistory {
             snapshots,
             current_accounts,
             daily_snapshots,

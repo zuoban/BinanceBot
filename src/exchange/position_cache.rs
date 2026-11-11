@@ -38,8 +38,12 @@ impl PositionSnapshot {
     }
 
     fn lookup(&self, symbol: &str) -> Result<Option<BinancePositionRisk>> {
-        let key = symbol.to_ascii_uppercase();
-        match self.positions.get(&key) {
+        let key: std::borrow::Cow<'_, str> = if symbol.bytes().any(|b| b.is_ascii_lowercase()) {
+            std::borrow::Cow::Owned(symbol.to_ascii_uppercase())
+        } else {
+            std::borrow::Cow::Borrowed(symbol)
+        };
+        match self.positions.get(key.as_ref()) {
             None => Ok(None),
             Some(Some(position)) => Ok(Some(position.clone())),
             Some(None) => anyhow::bail!(ONE_WAY_POSITION_ERROR),

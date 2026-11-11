@@ -102,6 +102,19 @@ pub struct OverviewHistory {
     pub daily_snapshots: Vec<DailySnapshot>,
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct RawHourlySnapshot {
+    pub hour: i64,
+    pub groups: Box<serde_json::value::RawValue>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct RawOverviewHistory {
+    pub snapshots: Vec<RawHourlySnapshot>,
+    pub current_accounts: Vec<HistoryAccount>,
+    pub daily_snapshots: Vec<Box<serde_json::value::RawValue>>,
+}
+
 fn snapshot_max_age_secs(interval: u64) -> i64 {
     interval.saturating_add(15).max(30).min(i64::MAX as u64) as i64
 }
@@ -457,6 +470,10 @@ async fn resolve_account_id(
         Some(identity) => {
             if let Some(id) = cache.get(&identity) {
                 return Ok(Some(id.clone()));
+            }
+            if let Some(id) = handle.db.cached_history_account_id(&identity) {
+                cache.insert(identity, id.clone());
+                return Ok(Some(id));
             }
             let id = handle
                 .db

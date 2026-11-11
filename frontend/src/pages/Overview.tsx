@@ -5,7 +5,7 @@ import { ArrowRightOutlined, EyeOutlined, PlusOutlined, SearchOutlined, Thunderb
 import { useOverview } from '../lib/queries';
 import { useUrlParams } from '../lib/urlState';
 import { AccountsContext } from '../lib/session';
-import { beijingDay, cnyText, compactNumber as number, compactPrice as price, comparePositionAmount, entryChange, entryPriceText, groupTradePnl, maxPositionPolicyLabel, modeLabel, positivePrice, positionAmount, positionGroups, quoteAsset, ratioText, SNAPSHOT_STALE_MS, todayPnlGroups, todayTradeCounts, trimFractionZeros, type AccountGroup, type PositionGroup } from '../lib/format';
+import { beijingDay, cnyText, compactNumber as number, compactPrice as price, entryChange, entryPriceText, groupTradePnl, maxPositionPolicyLabel, modeLabel, positivePrice, positionAmount, positionGroups, quoteAsset, ratioText, SNAPSHOT_STALE_MS, todayPnlGroups, todayTradeCounts, trimFractionZeros, type AccountGroup, type PositionGroup } from '../lib/format';
 import { ControlResultBanner, DirectionTag, DirectionText, ErrorNotice, FreshnessText, PageTitle, Pnl, SignalButton, SignalChip, StatusTag, type Signal } from '../components/Common';
 import { runBatchControls, useControls } from '../components/Controls';
 import type { GridConfig, Overview, Pair, Trade } from '../lib/types';
@@ -20,7 +20,7 @@ import { useAccountGroups, useBeijingDay, useExpired } from '../lib/useNow';
 const emptyPairs: Overview['pairs'] = [];
 const emptyTrades: Trade[] = [];
 const toPair = (e: Overview['pairs'][number]): Pair => ({ symbol: e.snapshot.symbol, status: e.snapshot.status, mode: e.mode, grid_config: e.snapshot.grid_config, scoped: e.scoped });
-function StrategyConfigPopover({ symbol, config, quoteUnit }: { symbol: string; config: GridConfig; quoteUnit: string }) {
+const StrategyConfigPopover = memo(function StrategyConfigPopover({ symbol, config, quoteUnit }: { symbol: string; config: GridConfig; quoteUnit: string }) {
   return <div className="strategy-config-popover">
     <dl>
       <div><dt>交易方向</dt><dd><DirectionText direction={config.direction} /></dd></div>
@@ -36,7 +36,7 @@ function StrategyConfigPopover({ symbol, config, quoteUnit }: { symbol: string; 
     </dl>
     <Link to={`/pairs/${symbol}/config`}>查看完整配置 <ArrowRightOutlined /></Link>
   </div>;
-}
+});
 function OverviewFinanceDisclosure({
   accountList,
   positionList,
@@ -279,22 +279,25 @@ export default function OverviewPage() {
   };
   const visible = useMemo(() => {
     const query = search.toUpperCase().trim();
-    const totalToday = (symbol: string) => { const c = tradeCountsBySymbol.get(symbol); return c ? c.buy + c.sell : -1; };
     const matchesStatus = (e: typeof entries[number]) => statusFilter === 'all' || (statusFilter === 'LIVE' ? e.mode === 'LIVE' : e.snapshot.status === statusFilter);
-    return entries
-      .filter(e => e.snapshot.symbol.includes(query) && matchesStatus(e))
-      .sort((a, b) => {
-        if (sort === 'position') {
-          return Number(b.snapshot.status === 'RUNNING') - Number(a.snapshot.status === 'RUNNING') || comparePositionAmount(a.snapshot, b.snapshot);
-        }
-        if (sort === 'today') {
-          return totalToday(b.snapshot.symbol) - totalToday(a.snapshot.symbol) || a.snapshot.symbol.localeCompare(b.snapshot.symbol);
-        }
-        if (sort === 'orders') {
-          return (b.snapshot.stats.active_buy_orders + b.snapshot.stats.active_sell_orders) - (a.snapshot.stats.active_buy_orders + a.snapshot.stats.active_sell_orders) || a.snapshot.symbol.localeCompare(b.snapshot.symbol);
-        }
-        return a.snapshot.symbol.localeCompare(b.snapshot.symbol);
-      });
+    const filtered = entries.filter(e => e.snapshot.symbol.includes(query) && matchesStatus(e));
+    if (sort === 'position') {
+      return filtered
+        .map(entry => ({ entry, running: entry.snapshot.status === 'RUNNING' ? 1 : 0, amount: positionAmount(entry.snapshot) ?? -1 }))
+        .sort((a, b) => (b.running - a.running) || (b.amount - a.amount) || a.entry.snapshot.symbol.localeCompare(b.entry.snapshot.symbol))
+        .map(item => item.entry);
+    }
+    if (sort === 'today') {
+      const totalToday = (symbol: string) => { const c = tradeCountsBySymbol.get(symbol); return c ? c.buy + c.sell : -1; };
+      return filtered
+        .map(entry => ({ entry, count: totalToday(entry.snapshot.symbol) }))
+        .sort((a, b) => (b.count - a.count) || a.entry.snapshot.symbol.localeCompare(b.entry.snapshot.symbol))
+        .map(item => item.entry);
+    }
+    if (sort === 'orders') {
+      return filtered.sort((a, b) => (b.snapshot.stats.active_buy_orders + b.snapshot.stats.active_sell_orders) - (a.snapshot.stats.active_buy_orders + a.snapshot.stats.active_sell_orders) || a.snapshot.symbol.localeCompare(b.snapshot.symbol));
+    }
+    return filtered.sort((a, b) => a.snapshot.symbol.localeCompare(b.snapshot.symbol));
   }, [entries, search, statusFilter, sort, tradeCountsBySymbol]);
   const clearFilters = () => updateFilters({ q: '', sort: 'position', status: 'all' });
   const counts = [...tradeCountsBySymbol.values()];
