@@ -1,4 +1,5 @@
 use super::cache_entries::CacheEntries;
+use super::model::ONE_WAY_POSITION_ERROR;
 use super::{BinanceFuturesClient, BinancePositionRisk};
 use anyhow::Result;
 use std::collections::hash_map::Entry;
@@ -6,7 +7,6 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 const MAX_AGE: Duration = Duration::from_secs(1);
-const ONE_WAY_POSITION_ERROR: &str = "策略仅支持币安单向持仓模式，请先将账户设置为单向持仓";
 
 struct PositionSnapshot {
     positions: HashMap<String, Option<BinancePositionRisk>>,
@@ -53,22 +53,22 @@ impl PositionSnapshot {
 
 #[derive(Default)]
 pub(crate) struct PositionCache {
-    entries: CacheEntries<PositionSnapshot>,
+    entries: CacheEntries<[u8; 32], PositionSnapshot>,
 }
 
 impl PositionCache {
-    pub async fn invalidate(&self, client: &BinanceFuturesClient) {
-        self.entries.retire(client.account_cache_key()).await;
+    pub(crate) async fn invalidate(&self, client: &BinanceFuturesClient) {
+        self.entries.retire(&client.account_cache_key()).await;
     }
 
-    pub async fn refresh_critical(
+    pub(crate) async fn refresh_critical(
         &self,
         client: &BinanceFuturesClient,
         symbol: &str,
     ) -> Result<(Option<BinancePositionRisk>, Instant)> {
         let key = client.account_cache_key();
         self.entries
-            .refresh_critical(key, || async {
+            .refresh_critical(&key, || async {
                 let position = client.get_position(symbol).await;
                 let received_at = Instant::now();
                 Ok((position?, received_at))
@@ -76,7 +76,7 @@ impl PositionCache {
             .await
     }
 
-    pub async fn get(
+    pub(crate) async fn get(
         &self,
         client: &BinanceFuturesClient,
         symbol: &str,
@@ -86,7 +86,7 @@ impl PositionCache {
             let (epoch, entry, (position, received_instant)) = self
                 .entries
                 .get_or_fetch(
-                    key,
+                    &key,
                     "position",
                     |snapshot| snapshot.received_instant.elapsed() < MAX_AGE,
                     || async {
@@ -105,7 +105,7 @@ impl PositionCache {
             // symbol-specific endpoint before allowing reconciliation to succeed.
             let position = client.get_position(symbol).await;
             let received_instant = Instant::now();
-            if self.entries.is_current(key, epoch, &entry).await {
+            if self.entries.is_current(&key, epoch, &entry).await {
                 return Ok((position?, received_instant));
             }
         }
@@ -252,7 +252,7 @@ mod tests {
         let client = BinanceFuturesClient::with_base_url(&AppConfig::default().exchange, url);
         let cache = PositionCache::default();
         cache.get(&client, "SOLUSDC").await.unwrap();
-        let (_epoch, entry) = cache.entries.entry(client.account_cache_key()).await;
+        let (_epoch, entry) = cache.entries.entry(&client.account_cache_key()).await;
         entry
             .lock()
             .await
@@ -284,7 +284,7 @@ mod tests {
         assert!(cache.get(&client, "SOLUSDC").await.is_err());
         mode.store(0, Ordering::SeqCst);
         assert!(cache.get(&client, "SOLUSDC").await.is_err());
-        let (_, entry) = cache.entries.entry(client.account_cache_key()).await;
+        let (_, entry) = cache.entries.entry(&client.account_cache_key()).await;
         let held = entry.lock().await;
         let critical = tokio::time::timeout(
             Duration::from_secs(1),

@@ -544,17 +544,7 @@ impl GridTradingEngine {
         order.order_id = Some(found.order_id);
         if inconsistent_fill {
             order.reserve_quantity(found.orig_qty);
-            self.state
-                .active_orders
-                .write()
-                .await
-                .entry(order.client_order_id.clone())
-                .or_insert(order.clone());
-            let saved = self.save_managed_order(&order).await;
-            if let Err(error) = saved {
-                self.pause_trading().await;
-                return Err(error);
-            }
+            self.retain_uncertain_active_order(&order).await?;
             return Err(anyhow!("Remainder fill quantity remains unresolved"));
         }
         if found.is_terminal() {
@@ -568,16 +558,11 @@ impl GridTradingEngine {
                     .await?;
             }
         } else {
-            if !self.prepare_partial_adoption(&mut order, &found).await {
-                return Err(anyhow!(
-                    "Could not refresh risk data for partially filled remainder"
-                ));
-            }
             let mut original = order.clone();
             original.reserve_quantity(found.orig_qty);
             order.price = found.price;
             if !self
-                .adopt_open_exchange_order(&mut order, original, &found)
+                .prepare_and_adopt_open_order(&mut order, original, &found)
                 .await
             {
                 return Err(anyhow!("Could not persist remainder order"));

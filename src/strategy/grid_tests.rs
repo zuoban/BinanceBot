@@ -1,7 +1,8 @@
 use super::{
     aggregate_execution_pnl, buy_exposure_usdc, grid_level_occupied, has_nearby_grid_order,
-    is_grid_order, new_grid_client_order_id, new_pair_intent, paired_grid_client_order_id,
-    reserved_sell_quantity, sell_quantity_available, GridTradingEngine,
+    is_grid_order, live_sync_freshness, new_grid_client_order_id, new_pair_intent,
+    paired_grid_client_order_id, reserved_sell_quantity, sell_quantity_available,
+    GridTradingEngine,
 };
 use crate::config::AppConfig;
 use crate::db::Database;
@@ -3495,4 +3496,85 @@ async fn config_scope_switch_resets_blocked_flags_and_paper_window_cache() {
     assert!(!engine.market_data_blocked);
     assert!(engine.paper_window_cache.is_none());
     server.abort();
+}
+
+#[tokio::test]
+async fn live_sync_freshness_scales_with_configured_sync_interval() {
+    assert_eq!(live_sync_freshness(1), std::time::Duration::from_secs(10));
+    assert_eq!(live_sync_freshness(5), std::time::Duration::from_secs(14));
+    assert_eq!(live_sync_freshness(20), std::time::Duration::from_secs(44));
+
+    let mut config = AppConfig::default();
+    config.exchange.sync_interval_secs = 20;
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    let (action_tx, action_rx) = mpsc::channel(1);
+    let (_, ticker_rx) = broadcast::channel(1);
+    let state = AppState::new(config.clone(), db, action_tx);
+    let client = Arc::new(BinanceFuturesClient::new(&config.exchange));
+    let mut engine = GridTradingEngine::new(state, client, action_rx, ticker_rx);
+    let recent = std::time::Instant::now() - std::time::Duration::from_secs(25);
+    engine.last_account_sync = Some(recent);
+    engine.last_orders_sync = Some(recent);
+    assert!(engine.sync_timestamps_fresh());
+
+    let expired = std::time::Instant::now() - std::time::Duration::from_secs(45);
+    engine.last_account_sync = Some(expired);
+    assert!(!engine.sync_timestamps_fresh());
+}
+
+#[tokio::test]
+async fn paper_single_buy_window_places_closing_sell_immediately_on_fill_tick() {
+    let mut config = AppConfig::default();
+    config.grid.grid_interval = dec!(1);
+    config.grid.order_amount_usdc = dec!(100);
+    config.grid.buy_window = 1;
+    config.grid.sell_window = 1;
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    let (action_tx, action_rx) = mpsc::channel(1);
+    let (_, ticker_rx) = broadcast::channel(1);
+    let state = AppState::new(config.clone(), db, action_tx);
+    *state.status.write().await = BotStatus::Running;
+    {
+        let mut ticker = state.ticker.write().await;
+        ticker.symbol = config.exchange.symbol.clone();
+        ticker.last_price = dec!(100.5);
+        ticker.mark_price = dec!(100.5);
+        ticker.update_time = Utc::now();
+        ticker.mark_update_time = Utc::now();
+    }
+    let client = Arc::new(BinanceFuturesClient::new(&config.exchange));
+    let mut engine = GridTradingEngine::new(state.clone(), client, action_rx, ticker_rx);
+
+    engine.maintain_grid_window().await;
+    {
+        let active = state.active_orders.read().await;
+        assert_eq!(active.len(), 1);
+        let only = active.values().next().unwrap();
+        assert_eq!(only.side, OrderSide::Buy);
+        assert_eq!(only.price, dec!(100));
+    }
+
+    // Price crosses the single buy order, temporarily emptying active_orders.
+    // That same tick must immediately place the closing sell order at 101.
+    let now = Utc::now();
+    engine
+        .handle_ticker_update(TickerInfo {
+            symbol: config.exchange.symbol,
+            last_price: dec!(100),
+            mark_price: dec!(100),
+            update_time: now,
+            mark_update_time: now,
+            ..Default::default()
+        })
+        .await;
+
+    assert!(state.position.read().await.size > Decimal::ZERO);
+    let active = state.active_orders.read().await;
+    assert!(
+        active
+            .values()
+            .any(|o| o.side == OrderSide::Sell && o.price == dec!(101)),
+        "expected immediate closing sell at 101, got: {:?}",
+        active.values().collect::<Vec<_>>()
+    );
 }

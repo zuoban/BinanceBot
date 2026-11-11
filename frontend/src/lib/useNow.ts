@@ -37,6 +37,13 @@ export function useBeijingDay() {
   return Date.now();
 }
 
+/** Return the current UTC hour index, re-rendering only when the hour turns over. */
+export function useUtcHour(enabled = true) {
+  const hour = Math.floor(Date.now() / 3_600_000);
+  useExpired(enabled ? (hour + 1) * 3_600_000 - 1 : Infinity);
+  return Math.floor(Date.now() / 3_600_000);
+}
+
 /** Recompute `accountGroups` on data changes and exact freshness threshold expiries without a 1 Hz clock. */
 export function useAccountGroups(entries: AccountObservation[], enabled = true) {
   const deadline = enabled ? nextAccountExpiry(entries, Date.now()) : Infinity;

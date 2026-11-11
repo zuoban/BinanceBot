@@ -2,6 +2,7 @@ use super::{json_ok, status_err, ApiResponse};
 use crate::config::AppConfig;
 use crate::exchange::rate_limit::RateLimiter;
 use crate::exchange::BinanceFuturesClient;
+use crate::strategy::SymbolRules;
 use axum::extract::Query;
 use axum::http::StatusCode;
 use axum::{Extension, Json};
@@ -149,9 +150,7 @@ async fn fetch_exchange_symbol_preview_with_cache(
         .filter(|cached| cached.fetched_at.elapsed() < EXCHANGE_INFO_CACHE_TTL)
         .map(|cached| Arc::clone(&cached.info));
     if let Some(info) = cached_info {
-        if let Ok(rules) =
-            crate::strategy::precision::SymbolRules::from_trading_exchange_info(&info, symbol)
-        {
+        if let Ok(rules) = SymbolRules::from_trading_exchange_info(&info, symbol) {
             let (last_res, mark_res) = tokio::join!(
                 service.client.get_ticker_price(symbol),
                 service.client.get_mark_price(symbol)
@@ -178,19 +177,18 @@ pub(super) async fn fetch_exchange_symbol_preview(
             return status_err(StatusCode::BAD_GATEWAY, "获取交易对规则失败，请稍后重试");
         }
     };
-    let rules =
-        match crate::strategy::precision::SymbolRules::from_trading_exchange_info(&info, symbol) {
-            Ok(rules) => rules,
-            Err(err) => {
-                let (status, message) = err.preview_status_and_message();
-                return status_err(status, message);
-            }
-        };
+    let rules = match SymbolRules::from_trading_exchange_info(&info, symbol) {
+        Ok(rules) => rules,
+        Err(err) => {
+            let (status, message) = err.preview_status_and_message();
+            return status_err(status, message);
+        }
+    };
     build_symbol_preview_response(rules, last_res, mark_res)
 }
 
 fn build_symbol_preview_response(
-    rules: crate::strategy::precision::SymbolRules,
+    rules: SymbolRules,
     last_res: anyhow::Result<rust_decimal::Decimal>,
     mark_res: anyhow::Result<rust_decimal::Decimal>,
 ) -> (StatusCode, Json<ApiResponse<ExchangeSymbolPreview>>) {

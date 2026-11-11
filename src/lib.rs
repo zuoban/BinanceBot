@@ -2,7 +2,7 @@ pub mod auth;
 pub mod config;
 pub mod db;
 pub mod exchange;
-pub mod fx;
+pub(crate) mod fx;
 pub mod lifecycle;
 pub mod runtime;
 pub mod server;

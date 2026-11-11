@@ -4,14 +4,16 @@ import { MoreOutlined } from '@ant-design/icons';
 import { useQueryClient } from '@tanstack/react-query';
 import { api, errorMessage, pairPath, post } from '../lib/api';
 import { useMountedRef } from '../lib/asyncGuard';
+import { useConfirmDialog } from '../lib/confirmDialog';
+import { invalidateStrategyQueries } from '../lib/queries';
 import type { Action, Pair, Snapshot } from '../lib/types';
 import { StrategyToggle, strategySecondaryItems } from './StrategyMenu';
-async function confirmControlState(pair: Pair, action: Action, sleep: (ms: number) => Promise<boolean>, isMounted: () => boolean): Promise<boolean> {
+async function confirmControlState(pair: Pair, action: Action, sleep: (ms: number) => Promise<boolean>, signal: AbortSignal): Promise<boolean> {
   if (action === 'rebalance') return true;
   for (let attempt = 0; attempt < 5; attempt++) {
-    if (!await sleep(800)) return false;
-    const snapshot = await api<Snapshot>(pairPath(pair, 'status'));
-    if (!isMounted()) return false;
+    if (!await sleep(800) || signal.aborted) return false;
+    const snapshot = await api<Snapshot>(pairPath(pair, 'status'), { signal });
+    if (signal.aborted) return false;
     const matches = action === 'resume' ? snapshot.status === 'RUNNING' : snapshot.status === 'PAUSED';
     if (matches) return true;
   }
@@ -79,15 +81,23 @@ export function useControls(): ControlState {
   return context;
 }
 export function ControlProvider({ pairs, children }: { pairs?: Pair[]; children: React.ReactNode }) {
-  const { modal, message } = App.useApp();
+  const { message } = App.useApp();
+  const { confirm } = useConfirmDialog();
   const client = useQueryClient();
   const locked = useRef(new Set<string>());
   const wakeups = useRef(new Set<() => void>());
+  const abortRef = useRef<AbortController | null>(null);
+  if (!abortRef.current || abortRef.current.signal.aborted) abortRef.current = new AbortController();
+  useEffect(() => {
+    if (!abortRef.current || abortRef.current.signal.aborted) abortRef.current = new AbortController();
+    return () => abortRef.current?.abort();
+  }, []);
   const mounted = useMountedRef(() => {
+    abortRef.current?.abort();
     for (const wake of wakeups.current) wake();
     wakeups.current.clear();
   });
-  const [busy, setBusy] = useState(new Set<string>());
+  const [busy, setBusy] = useState<Set<string>>(new Set());
   const [pending, setPending] = useState<Record<string, Action>>({});
   const [results, setResults] = useState<Record<string, string>>({});
   const sleep = useCallback((ms: number) => new Promise<boolean>(resolve => {
@@ -127,7 +137,7 @@ export function ControlProvider({ pairs, children }: { pairs?: Pair[]; children:
       const dangerous = action === 'rebalance' || action === 'cancel_all' || (action === 'resume' && pair.mode === 'LIVE');
       if (dangerous && !confirmed) {
         const { title, content } = controlConfirmCopy(pair, action);
-        const accepted = await modal.confirm({ title, content, okText: '确认执行', cancelText: '取消' });
+        const accepted = await confirm({ title, content, okText: '确认执行', cancelText: '取消' });
         if (!accepted || !mounted.current) return 'not_submitted';
       }
       if (!mounted.current) return 'not_submitted';
@@ -136,7 +146,7 @@ export function ControlProvider({ pairs, children }: { pairs?: Pair[]; children:
       submitted = true;
       await post(pairPath(pair, 'control'), action === 'resume' || action === 'rebalance' ? { action, expected_mode: pair.mode } : { action });
       if (!mounted.current) return 'state_unconfirmed';
-      const observedState = await confirmControlState(pair, action, sleep, () => mounted.current).catch(() => false);
+      const observedState = await confirmControlState(pair, action, sleep, abortRef.current!.signal).catch(() => false);
       const { resultText, confirmedState, outcome } = resolveControlOutcome(action, observedState);
       if (mounted.current) {
         setResults(r => ({ ...r, [pair.symbol]: resultText }));
@@ -165,12 +175,10 @@ export function ControlProvider({ pairs, children }: { pairs?: Pair[]; children:
         setPending(p => { const { [pair.symbol]: _done, ...rest } = p; return rest; });
       }
       if (submitted) {
-        void client.invalidateQueries({ queryKey: ['pairs'] });
-        void client.invalidateQueries({ queryKey: ['overview'] });
-        void client.invalidateQueries({ queryKey: ['snapshot', pair.symbol] });
+        void invalidateStrategyQueries(client, { snapshot: pair.symbol });
       }
     }
-  }, [client, message, modal, sleep]);
+  }, [client, confirm, message, sleep]);
   const value = useMemo(() => ({ busy, pending, results, clearResult, run }), [busy, pending, results, clearResult, run]);
   return <Context.Provider value={value}>{children}</Context.Provider>;
 }

@@ -119,7 +119,7 @@ export function PaletteHost({ open, setOpen, pairs, stale, authEnabled, saving, 
   shortcutState.current = { symbols, current, pathname, saving };
   useEffect(() => { if (saving) setOpen(false); }, [saving, setOpen]);
   useEffect(() => {
-    const typing = (target: EventTarget | null) => target instanceof HTMLElement && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName));
+    const typing = (target: EventTarget | null) => target instanceof HTMLElement && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) || Boolean(target.closest('[role="menu"], [role="listbox"]')));
     const onKey = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey && event.key?.toLowerCase() === 'k') {
         event.preventDefault();

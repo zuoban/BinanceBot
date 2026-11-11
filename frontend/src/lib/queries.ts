@@ -6,7 +6,37 @@ import type { AccountFrame, AccountObservation, OverviewHistoryData, Overview, P
 import { useExpired } from './useNow';
 const SOCKET_LIVE_MS = 5000;
 const HTTP_FALLBACK_MS = 3000;
+const TOKEN_CHAR_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 
+export async function invalidateStrategyQueries(client: QueryClient, options: {
+  pairs?: boolean;
+  overview?: boolean;
+  accounts?: boolean;
+  snapshot?: boolean | string;
+  configSymbol?: string;
+  history?: 'invalidate' | 'reset';
+  cancelFirst?: boolean;
+} = {}) {
+  const { pairs = true, overview = true, accounts = false, snapshot = false, configSymbol, history, cancelFirst = false } = options;
+  const keys: QueryKey[] = [];
+  if (pairs) keys.push(['pairs']);
+  if (overview) keys.push(['overview']);
+  if (accounts) keys.push(['accounts']);
+  if (snapshot === true) keys.push(['snapshot']);
+  else if (typeof snapshot === 'string') keys.push(['snapshot', snapshot]);
+  if (configSymbol) keys.push(['config', configSymbol]);
+  if (history === 'invalidate') keys.push(['overview-history']);
+  if (cancelFirst) {
+    await Promise.all([
+      ...keys.map(queryKey => client.cancelQueries({ queryKey })),
+      ...(history === 'reset' ? [client.cancelQueries({ queryKey: ['overview-history'] })] : []),
+    ]);
+  }
+  await Promise.all([
+    ...keys.map(queryKey => client.invalidateQueries({ queryKey })),
+    ...(history === 'reset' ? [client.resetQueries({ queryKey: ['overview-history'] })] : []),
+  ]);
+}
 export function usePairs() {
   return useQuery({ queryKey: ['pairs'], queryFn: ({ signal }) => api<Pair[]>('/api/pairs', { signal }), refetchInterval: 10_000 });
 }
@@ -33,10 +63,25 @@ export function useSocket<T extends keyof SocketDataByType>(path: string | undef
     if (!path) return;
     let stopped = false, socket: WebSocket | undefined, retry: ReturnType<typeof setTimeout>;
     let attempts = 0, receiving = false;
-    const connect = () => {
-      const token = tokenStore.get();
+    const scheduleRetry = () => {
       if (stopped) return;
-      socket = new WebSocket(socketUrl(path), token ? ['auth', `token.${token}`] : ['auth']);
+      if (receiving) {
+        receiving = false;
+        setState(prev => prev.path === path ? { ...prev, connected: false } : prev);
+      }
+      retry = setTimeout(connect, Math.min(1000 * 2 ** attempts++, 15_000));
+    };
+    const connect = () => {
+      const rawToken = tokenStore.get();
+      const token = rawToken && TOKEN_CHAR_RE.test(rawToken) ? rawToken : null;
+      if (stopped) return;
+      try {
+        socket = new WebSocket(socketUrl(path), token ? ['auth', `token.${token}`] : ['auth']);
+      } catch {
+        socket = undefined;
+        scheduleRetry();
+        return;
+      }
       socket.onmessage = event => {
         if (stopped) return;
         try {
@@ -57,14 +102,7 @@ export function useSocket<T extends keyof SocketDataByType>(path: string | undef
           }
         } catch { /* Ignore malformed frames; HTTP remains the fallback. */ }
       };
-      socket.onclose = () => {
-        if (stopped) return;
-        if (receiving) {
-          receiving = false;
-          setState(prev => prev.path === path ? { ...prev, connected: false } : prev);
-        }
-        retry = setTimeout(connect, Math.min(1000 * 2 ** attempts++, 15_000));
-      };
+      socket.onclose = scheduleRetry;
       socket.onerror = () => socket?.close();
     };
     connect();
@@ -143,7 +181,7 @@ export function usePairSnapshot(pair: Pair | undefined) {
     publishSocketQueryData(client, key, data);
   };
   const socket = useSocket(pair && pairPath(pair, 'ws'), 'snapshot', acceptSnapshot);
-  const query = useSocketFallbackQuery(key, signal => api<Snapshot>(pairPath(pair!, 'status'), { signal }), socket, !!pair);
+  const query = useSocketFallbackQuery(key, signal => { if (!pair) throw new Error('该交易对不存在或已移除'); return api<Snapshot>(pairPath(pair, 'status'), { signal }); }, socket, !!pair);
   const socketSilent = useExpired(pair && socket.connected ? socket.lastReceived + SOCKET_LIVE_MS - 1 : -Infinity);
   const stale = useExpired(pair ? query.dataUpdatedAt + SNAPSHOT_STALE_MS : -Infinity);
   return { ...query, live: !!pair && socket.connected && !socketSilent, stale };
@@ -164,8 +202,7 @@ export function useLiveAccounts() {
     const current = client.getQueryData<AccountFrame>(key);
     return current && Date.parse(data.generated_at) < Date.parse(current.generated_at) ? current : data;
   }, stream);
-  const generatedAt = Date.parse(query.data?.generated_at ?? '');
-  const stale = useExpired(Math.min(query.dataUpdatedAt, generatedAt) + SNAPSHOT_STALE_MS);
+  const stale = useExpired(query.data ? query.dataUpdatedAt + SNAPSHOT_STALE_MS : -Infinity);
   const accounts = useMemo<AccountObservation[]>(() => (query.data?.pairs ?? []).map(entry => ({ ...entry, account_observation_stale: stale })), [query.data?.pairs, stale]);
   return { accounts, stale, error: query.error };
 }

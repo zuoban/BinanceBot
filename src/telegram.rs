@@ -24,23 +24,22 @@ struct TelegramResponse {
 }
 
 #[derive(Clone)]
-pub struct TelegramNotifier {
+pub(crate) struct TelegramNotifier {
     client: Client,
     api_base_url: String,
 }
 
 impl TelegramNotifier {
-    pub fn shared_client() -> Client {
+    pub(crate) fn shared_client() -> Client {
         crate::exchange::client::shared_http_client()
     }
 
-    pub fn new(client: Client) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
-            client,
+            client: Self::shared_client(),
             api_base_url: "https://api.telegram.org".into(),
         }
     }
-
     #[cfg(test)]
     pub(crate) fn with_base_url(client: Client, api_base_url: String) -> Self {
         Self {
@@ -49,7 +48,7 @@ impl TelegramNotifier {
         }
     }
 
-    pub async fn send_trade_notification(
+    pub(crate) async fn send_trade_notification(
         &self,
         config: &TelegramConfig,
         trade: &TradeRecord,
@@ -59,7 +58,7 @@ impl TelegramNotifier {
             .await
     }
 
-    pub async fn send_global_risk_notification(
+    pub(crate) async fn send_global_risk_notification(
         &self,
         config: &TelegramConfig,
         reason: &str,
@@ -67,7 +66,6 @@ impl TelegramNotifier {
         self.send_message(config, format_global_risk_message(reason, Utc::now()))
             .await
     }
-
     pub(crate) async fn send_daily_snapshot_notification(
         &self,
         config: &TelegramConfig,
@@ -78,7 +76,7 @@ impl TelegramNotifier {
     }
 
     /// Deliver a fixed probe message so credentials can be verified before they are saved.
-    pub async fn send_test_message(&self, config: &TelegramConfig) -> Result<()> {
+    pub(crate) async fn send_test_message(&self, config: &TelegramConfig) -> Result<()> {
         self.send_message(config, format_test_message(Utc::now()))
             .await
     }
@@ -128,19 +126,19 @@ impl TelegramNotifier {
 }
 
 #[derive(Debug, Default)]
-pub struct TradeNotificationContext {
-    pub direction: GridDirection,
-    pub today_count: Option<u64>,
-    pub hour_count: Option<u64>,
-    pub account_equity: Option<Decimal>,
-    pub wallet_balance: Option<Decimal>,
-    pub available_balance: Option<Decimal>,
-    pub position_amount: Option<Decimal>,
-    pub cny_per_unit: Option<Decimal>,
+pub(crate) struct TradeNotificationContext {
+    pub(crate) direction: GridDirection,
+    pub(crate) today_count: Option<u64>,
+    pub(crate) hour_count: Option<u64>,
+    pub(crate) account_equity: Option<Decimal>,
+    pub(crate) wallet_balance: Option<Decimal>,
+    pub(crate) available_balance: Option<Decimal>,
+    pub(crate) position_amount: Option<Decimal>,
+    pub(crate) cny_per_unit: Option<Decimal>,
 }
 
 impl TradeNotificationContext {
-    pub fn for_trade(
+    pub(crate) fn for_trade(
         trade: &TradeRecord,
         hourly_stats: Option<&HourlyTradeStats>,
         account: &AccountInfo,
@@ -193,12 +191,12 @@ impl TradeNotificationContext {
         }
     }
 
-    pub fn with_direction(mut self, direction: GridDirection) -> Self {
+    pub(crate) fn with_direction(mut self, direction: GridDirection) -> Self {
         self.direction = direction;
         self
     }
 
-    pub fn with_position(
+    pub(crate) fn with_position(
         mut self,
         trade: &TradeRecord,
         position: &PositionInfo,
@@ -253,7 +251,10 @@ fn format_decimal_dp(value: Decimal, dp: u32, force_sign: bool) -> String {
     }
 }
 
-pub fn format_trade_message(trade: &TradeRecord, context: &TradeNotificationContext) -> String {
+pub(crate) fn format_trade_message(
+    trade: &TradeRecord,
+    context: &TradeNotificationContext,
+) -> String {
     let icon = match trade.side {
         OrderSide::Buy => "🟢",
         OrderSide::Sell => "🔴",
@@ -332,65 +333,49 @@ fn mode_label(mode: TradingMode) -> &'static str {
     }
 }
 
-pub(crate) fn format_daily_snapshot_message(snapshot: &crate::snapshots::DailySnapshot) -> String {
-    let money = |value: Option<Decimal>, asset: &str| {
-        value.map_or_else(
-            || format!("-- {asset}"),
-            |n| format!("{} {asset}", format_decimal_dp(n, 2, false)),
-        )
-    };
-    let signed_money = |value: Option<Decimal>, asset: &str| {
-        value.map_or_else(
-            || format!("-- {asset}"),
-            |n| format!("{} {asset}", format_decimal_dp(n, 2, true)),
-        )
-    };
+fn format_optional_money(value: Option<Decimal>, asset: &str, force_sign: bool) -> String {
+    value.map_or_else(
+        || format!("-- {asset}"),
+        |n| format!("{} {asset}", format_decimal_dp(n, 2, force_sign)),
+    )
+}
 
-    let account_lines = if snapshot.accounts.is_empty() {
-        "暂无账户数据".to_string()
-    } else {
-        snapshot
-            .accounts
-            .iter()
-            .map(|acc| {
-                let asset = escape_html(&acc.asset);
-                let ratio = acc
-                    .available
-                    .zip(acc.wallet)
-                    .filter(|(_, wallet)| *wallet > Decimal::ZERO)
-                    .and_then(|(available, wallet)| available.checked_div(wallet))
-                    .and_then(|ratio| ratio.checked_mul(Decimal::ONE_HUNDRED))
-                    .map_or_else(
-                        || "--".to_string(),
-                        |value| format!("{}%", format_decimal_dp(value, 2, false)),
-                    );
-                format!(
-                    "· {mode} {asset}：权益 {equity}｜可用 {available}（{ratio}）｜浮盈 {unrealized}",
-                    mode = mode_label(acc.mode),
-                    equity = money(acc.equity, &asset),
-                    available = money(acc.available, &asset),
-                    unrealized = signed_money(acc.unrealized, &asset),
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-
-    let total_buys = snapshot
-        .trades
+fn format_daily_account_lines(accounts: &[crate::snapshots::DailyAccountGroup]) -> String {
+    if accounts.is_empty() {
+        return "暂无账户数据".to_string();
+    }
+    accounts
         .iter()
-        .fold(0u64, |acc, t| acc.saturating_add(t.buy_count));
-    let total_sells = snapshot
-        .trades
-        .iter()
-        .fold(0u64, |acc, t| acc.saturating_add(t.sell_count));
-    let total_trades = total_buys.saturating_add(total_sells);
+        .map(|acc| {
+            let asset = escape_html(&acc.asset);
+            let ratio = acc
+                .available
+                .zip(acc.wallet)
+                .filter(|(_, wallet)| *wallet > Decimal::ZERO)
+                .and_then(|(available, wallet)| available.checked_div(wallet))
+                .and_then(|ratio| ratio.checked_mul(Decimal::ONE_HUNDRED))
+                .map_or_else(
+                    || "--".to_string(),
+                    |value| format!("{}%", format_decimal_dp(value, 2, false)),
+                );
+            format!(
+                "· {mode} {asset}：权益 {equity}｜可用 {available}（{ratio}）｜浮盈 {unrealized}",
+                mode = mode_label(acc.mode),
+                equity = format_optional_money(acc.equity, &asset, false),
+                available = format_optional_money(acc.available, &asset, false),
+                unrealized = format_optional_money(acc.unrealized, &asset, true),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
+fn format_daily_pnl_lines(trades: &[crate::snapshots::DailyTradeGroup]) -> String {
     let mut pnl_groups: std::collections::BTreeMap<
         (String, String),
         (TradingMode, String, Decimal, u64),
     > = std::collections::BTreeMap::new();
-    for trade in &snapshot.trades {
+    for trade in trades {
         let asset = crate::types::quote_asset(&trade.symbol)
             .unwrap_or(&trade.symbol)
             .to_owned();
@@ -400,66 +385,81 @@ pub(crate) fn format_daily_snapshot_message(snapshot: &crate::snapshots::DailySn
         entry.2 = entry.2.saturating_add(trade.realized_pnl);
         entry.3 = entry.3.saturating_add(trade.pending_pnl_count);
     }
-    let pnl_lines = if pnl_groups.is_empty() {
-        "· 0.00".to_string()
-    } else {
-        pnl_groups
-            .into_values()
-            .map(|(mode, asset, pnl, pending)| {
-                let asset = escape_html(&asset);
-                let formatted_pnl = format_decimal_dp(pnl, 4, true);
-                if pending > 0 {
-                    format!(
-                        "· {mode} {asset}：{formatted_pnl} {asset}（{pending} 笔待同步）",
-                        mode = mode_label(mode),
-                    )
-                } else {
-                    format!(
-                        "· {mode} {asset}：{formatted_pnl} {asset}",
-                        mode = mode_label(mode),
-                    )
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-
-    let position_lines = if snapshot.positions.is_empty() {
-        "暂无持仓数据".to_string()
-    } else {
-        let mut lines: Vec<String> = snapshot
-            .positions
-            .iter()
-            .map(|pos| {
-                let asset = escape_html(&pos.asset);
+    if pnl_groups.is_empty() {
+        return "· 0.00".to_string();
+    }
+    pnl_groups
+        .into_values()
+        .map(|(mode, asset, pnl, pending)| {
+            let asset = escape_html(&asset);
+            let formatted_pnl = format_decimal_dp(pnl, 4, true);
+            if pending > 0 {
                 format!(
-                    "· {mode} {asset}：总持仓 {total}（多 {long} / 空 {short}）",
-                    mode = mode_label(pos.mode),
-                    total = money(pos.total, &asset),
-                    long = money(pos.long, &asset),
-                    short = money(pos.short, &asset),
+                    "· {mode} {asset}：{formatted_pnl} {asset}（{pending} 笔待同步）",
+                    mode = mode_label(mode),
                 )
-            })
-            .collect();
-        for item in snapshot.pair_positions.iter().filter(|p| !p.size.is_zero()) {
-            let asset =
-                escape_html(crate::types::quote_asset(&item.symbol).unwrap_or(&item.symbol));
-            let side = if item.size > Decimal::ZERO {
-                "多"
             } else {
-                "空"
-            };
-            lines.push(format!(
-                "  - {symbol}（{side} {qty}）：{amount}｜浮盈 {unrealized}",
-                symbol = escape_html(&item.symbol),
-                qty = item.size.abs().normalize(),
-                amount = money(item.position_amount, &asset),
-                unrealized = signed_money(item.unrealized_pnl, &asset),
-            ));
-        }
-        lines.join("\n")
-    };
+                format!(
+                    "· {mode} {asset}：{formatted_pnl} {asset}",
+                    mode = mode_label(mode)
+                )
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
+fn format_daily_position_lines(
+    positions: &[crate::snapshots::DailyPositionGroup],
+    pair_positions: &[crate::snapshots::DailyPositionItem],
+) -> String {
+    if positions.is_empty() {
+        return "暂无持仓数据".to_string();
+    }
+    let mut lines: Vec<String> = positions
+        .iter()
+        .map(|pos| {
+            let asset = escape_html(&pos.asset);
+            format!(
+                "· {mode} {asset}：总持仓 {total}（多 {long} / 空 {short}）",
+                mode = mode_label(pos.mode),
+                total = format_optional_money(pos.total, &asset, false),
+                long = format_optional_money(pos.long, &asset, false),
+                short = format_optional_money(pos.short, &asset, false),
+            )
+        })
+        .collect();
+    for item in pair_positions.iter().filter(|p| !p.size.is_zero()) {
+        let asset = escape_html(crate::types::quote_asset(&item.symbol).unwrap_or(&item.symbol));
+        let side = if item.size > Decimal::ZERO {
+            "多"
+        } else {
+            "空"
+        };
+        lines.push(format!(
+            "  - {symbol}（{side} {qty}）：{amount}｜浮盈 {unrealized}",
+            symbol = escape_html(&item.symbol),
+            qty = item.size.abs().normalize(),
+            amount = format_optional_money(item.position_amount, &asset, false),
+            unrealized = format_optional_money(item.unrealized_pnl, &asset, true),
+        ));
+    }
+    lines.join("\n")
+}
+
+pub(crate) fn format_daily_snapshot_message(snapshot: &crate::snapshots::DailySnapshot) -> String {
+    let account_lines = format_daily_account_lines(&snapshot.accounts);
+    let total_buys = snapshot
+        .trades
+        .iter()
+        .fold(0u64, |acc, t| acc.saturating_add(t.buy_count));
+    let total_sells = snapshot
+        .trades
+        .iter()
+        .fold(0u64, |acc, t| acc.saturating_add(t.sell_count));
+    let total_trades = total_buys.saturating_add(total_sells);
+    let pnl_lines = format_daily_pnl_lines(&snapshot.trades);
+    let position_lines = format_daily_position_lines(&snapshot.positions, &snapshot.pair_positions);
     let time = format_beijing_time(snapshot.generated_at);
     format!(
         "<b>📊 每日运行数据快照（{date}）</b>\n\n<b>【账户概览】</b>\n{account_lines}\n\n<b>【昨日成交与盈亏】</b>\n· 成交笔数：{total_trades} 笔（买 {total_buys} / 卖 {total_sells}）\n· 已实现盈亏：\n{pnl_lines}\n\n<b>【持仓概览】</b>\n{position_lines}\n\n生成时间：{time}（北京时间）",

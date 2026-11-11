@@ -39,6 +39,63 @@ pub(crate) fn beijing_midnight(now: DateTime<Utc>) -> DateTime<Utc> {
         .map_or(now, |midnight| midnight.with_timezone(&Utc))
 }
 
+pub(super) fn query_json_vec<T, P>(
+    conn: &Connection,
+    sql: &str,
+    params: P,
+    context_label: &str,
+) -> Result<Vec<T>>
+where
+    T: serde::de::DeserializeOwned,
+    P: rusqlite::Params,
+{
+    let mut stmt = conn
+        .prepare_cached(sql)
+        .with_context(|| format!("Failed to prepare {context_label} query"))?;
+    let rows = stmt
+        .query_map(params, |row| row.get::<_, String>(0))
+        .with_context(|| format!("Failed to execute {context_label} query"))?;
+    let mut items = Vec::new();
+    for row in rows {
+        let raw = row.with_context(|| format!("Failed to read {context_label} row"))?;
+        items.push(
+            serde_json::from_str(&raw)
+                .with_context(|| format!("Failed to deserialize {context_label}"))?,
+        );
+    }
+    Ok(items)
+}
+
+fn open_configured_connection(open_path: &Path, is_memory: bool) -> Result<Connection> {
+    let conn = Connection::open(open_path)
+        .with_context(|| format!("Failed to open SQLite database at {:?}", open_path))?;
+    // Persist committed order intents across power loss before sending orders.
+    let journal_mode: String = conn
+        .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+        .context("Failed to enable SQLite WAL journal mode")?;
+    anyhow::ensure!(
+        journal_mode.eq_ignore_ascii_case(if is_memory { "memory" } else { "wal" }),
+        "SQLite journal mode is {journal_mode}, expected WAL"
+    );
+    conn.busy_timeout(std::time::Duration::from_secs(5))
+        .context("Failed to configure SQLite busy timeout")?;
+    conn.set_prepared_statement_cache_capacity(64);
+    conn.execute_batch(
+        "PRAGMA synchronous = FULL;
+         PRAGMA temp_store = MEMORY;
+         PRAGMA cache_size = -16000;",
+    )
+    .context("Failed to configure SQLite synchronous mode")?;
+    if !is_memory {
+        let _ = conn.execute_batch("PRAGMA mmap_size = 67108864;");
+    }
+    let synchronous: i64 = conn
+        .query_row("PRAGMA synchronous", [], |row| row.get(0))
+        .context("Failed to read SQLite synchronous mode")?;
+    anyhow::ensure!(synchronous == 2, "SQLite synchronous mode is not FULL");
+    Ok(conn)
+}
+
 type TodayPnlCacheEntry = (
     u64,
     DateTime<Utc>,
@@ -233,7 +290,7 @@ fn prepare_database_path(path: &Path) -> Result<()> {
 }
 
 impl Database {
-    pub async fn run_blocking<T, F>(self: &std::sync::Arc<Self>, operation: F) -> Result<T>
+    pub(crate) async fn run_blocking<T, F>(self: &std::sync::Arc<Self>, operation: F) -> Result<T>
     where
         T: Send + 'static,
         F: FnOnce(&Database) -> Result<T> + Send + 'static,
@@ -326,37 +383,7 @@ impl Database {
             None
         };
 
-        let conn = Connection::open(&open_path)
-            .with_context(|| format!("Failed to open SQLite database at {:?}", open_path))?;
-
-        // Persist committed order intents across power loss before sending orders.
-        let journal_mode: String = conn
-            .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
-            .context("Failed to enable SQLite WAL journal mode")?;
-        anyhow::ensure!(
-            journal_mode.eq_ignore_ascii_case(if path_str == ":memory:" {
-                "memory"
-            } else {
-                "wal"
-            }),
-            "SQLite journal mode is {journal_mode}, expected WAL"
-        );
-        conn.busy_timeout(std::time::Duration::from_secs(5))
-            .context("Failed to configure SQLite busy timeout")?;
-        conn.set_prepared_statement_cache_capacity(64);
-        conn.execute_batch(
-            "PRAGMA synchronous = FULL;
-             PRAGMA temp_store = MEMORY;
-             PRAGMA cache_size = -16000;",
-        )
-        .context("Failed to configure SQLite synchronous mode")?;
-        if path_str != ":memory:" {
-            let _ = conn.execute_batch("PRAGMA mmap_size = 67108864;");
-        }
-        let synchronous: i64 = conn
-            .query_row("PRAGMA synchronous", [], |row| row.get(0))
-            .context("Failed to read SQLite synchronous mode")?;
-        anyhow::ensure!(synchronous == 2, "SQLite synchronous mode is not FULL");
+        let conn = open_configured_connection(&open_path, path_str == ":memory:")?;
         let db = Self {
             conn: Mutex::new(conn),
             path: path_str,
@@ -383,11 +410,11 @@ impl Database {
         Ok(db)
     }
 
-    pub fn path(&self) -> &str {
+    pub(crate) fn path(&self) -> &str {
         &self.path
     }
 
-    pub fn init_tables(&self) -> Result<()> {
+    pub(crate) fn init_tables(&self) -> Result<()> {
         let mut conn = self.lock_connection("init_tables");
         conn.execute_batch(
             r#"

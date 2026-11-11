@@ -1,7 +1,11 @@
+/// <reference lib="es2024.promise" />
+import { useSyncExternalStore } from 'react';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type * as Antd from 'antd';
 import type * as Api from '../lib/api';
+import type * as Queries from '../lib/queries';
+import type { Pair } from '../lib/types';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { createMemoryRouter, RouterProvider } from 'react-router-dom';
 import { beforeEach, expect, it, vi } from 'vitest';
@@ -18,14 +22,28 @@ vi.mock('antd', async importOriginal => {
   return { ...antd, App: { useApp: () => mocks.app } };
 });
 vi.mock('../lib/api', async importOriginal => ({ ...await importOriginal<typeof Api>(), api: mocks.api, post: mocks.post }));
-vi.mock('../lib/queries', () => {
-  return { usePairs: () => ({ data: [pair('BTCUSDC'), pair('ETHUSDC')], dataUpdatedAt: Date.now() }), useLiveAccounts: () => ({ accounts: [], stale: false, error: null }) };
+const pairsState = vi.hoisted(() => {
+  const listeners = new Set<() => void>();
+  return {
+    list: [] as Pair[],
+    set(next: Pair[]) { this.list = next; for (const listener of listeners) listener(); },
+    subscribe: (listener: () => void) => { listeners.add(listener); return () => listeners.delete(listener); },
+  };
+});
+vi.mock('../lib/queries', async importOriginal => {
+  const actual = await importOriginal<typeof Queries>();
+  return {
+    ...actual,
+    usePairs: () => ({ data: useSyncExternalStore(pairsState.subscribe, () => pairsState.list), isFetching: false, dataUpdatedAt: Date.now() }),
+    useLiveAccounts: () => ({ accounts: [], stale: false, error: null }),
+  };
 });
 vi.mock('../components/Controls', () => ({ ControlProvider: ({ children }: { children: React.ReactNode }) => children, useControls: () => ({ busy: new Set<string>(), pending: {}, results: {}, clearResult: vi.fn(), run: vi.fn() }) }));
 vi.mock('../components/ThemeSwitch', () => ({ ThemeSwitch: () => null, ThemeSegmented: () => null, themeLabels: { system: '跟随系统', light: '浅色', dark: '深色' } }));
 
 beforeEach(() => {
   vi.clearAllMocks();
+  pairsState.set([pair('BTCUSDC'), pair('ETHUSDC')]);
   mocks.confirm.mockReset();
   mocks.post.mockReset();
   mocks.api.mockImplementation((path: string) => path === '/api/global/config'
@@ -85,15 +103,39 @@ it('ignores repeated submissions while confirmation or saving is pending and all
   await act(async () => { finishSave('BTCUSDC'); });
 });
 
-it('does not save the previous pair after switching to another configuration', async () => {
-  let confirmSave!: (value: boolean) => void;
-  mocks.confirm.mockReturnValueOnce(new Promise<boolean>(resolve => { confirmSave = resolve; })).mockResolvedValueOnce(true);
+it('destroys unsettled confirm dialogs on route switch without deadlocking subsequent saves', async () => {
+  const { promise: neverSettles } = Promise.withResolvers<boolean>();
+  const destroy = vi.fn();
+  mocks.confirm
+    .mockReturnValueOnce(Object.assign(neverSettles, { destroy }))
+    .mockResolvedValueOnce(true);
+  mocks.post.mockResolvedValueOnce(undefined);
   const router = setup();
   const user = await prepareLive();
   await user.click(screen.getByRole('button', { name: '保存并立即生效' }));
   await waitFor(() => expect(mocks.confirm).toHaveBeenCalledTimes(1));
   act(() => { void router.navigate('/pairs/ETHUSDC/config'); });
   await waitFor(() => expect(router.state.location.pathname).toBe('/pairs/ETHUSDC/config'));
-  await act(async () => { confirmSave(true); });
+  expect(destroy).toHaveBeenCalledTimes(1);
   expect(mocks.post).not.toHaveBeenCalled();
+  const nextInterval = await screen.findByLabelText('网格间距');
+  await waitFor(() => expect(nextInterval).toBeEnabled());
+  await user.click(screen.getByRole('button', { name: '保存并立即生效' }));
+  await waitFor(() => expect(mocks.confirm).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(mocks.post).toHaveBeenCalledWith('/api/pairs/ETHUSDC/config', expect.anything()));
+});
+
+it('disables the form and delete button cleanly without crashing when the pair disappears from pairs', async () => {
+  setup();
+  await prepareLive();
+  const interval = await screen.findByLabelText('网格间距');
+  const saveButton = screen.getByRole('button', { name: '保存并立即生效' });
+  const deleteButton = screen.getByRole('button', { name: '删除策略' });
+  await waitFor(() => expect(interval).toBeEnabled());
+  expect(deleteButton).toBeEnabled();
+  act(() => { pairsState.set([pair('ETHUSDC')]); });
+  expect(await screen.findByText('该交易对不存在或已移除')).toBeInTheDocument();
+  expect(interval).toBeDisabled();
+  expect(saveButton).toBeDisabled();
+  expect(deleteButton).toBeDisabled();
 });

@@ -31,8 +31,12 @@ export async function copyText(text: string): Promise<boolean> {
   try {
     if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(text); return true; }
   } catch { /* Fall through to the textarea path. */ }
+  const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   const area = document.createElement('textarea');
   area.value = text; area.setAttribute('readonly', ''); area.style.position = 'fixed'; area.style.opacity = '0';
   document.body.append(area); area.select();
-  try { return document.execCommand('copy'); } finally { area.remove(); }
+  try { return document.execCommand('copy'); } finally {
+    area.remove();
+    if (previousFocus?.isConnected) previousFocus.focus({ preventScroll: true });
+  }
 }

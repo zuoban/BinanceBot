@@ -1,10 +1,9 @@
-use super::{config_runtime::load_config_on, hourly, Database};
+use super::{beijing_midnight, config_runtime::load_config_on, hourly, Database};
 use crate::config::AppConfig;
 use crate::types::TradingMode;
 use anyhow::Result;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
-use rust_decimal::Decimal;
 #[cfg(unix)]
 use std::path::Path;
 
@@ -86,7 +85,7 @@ impl Database {
         Ok(())
     }
 
-    pub fn cleanup_hourly_account_snapshots(&self, now: i64) -> Result<()> {
+    pub(crate) fn cleanup_hourly_account_snapshots(&self, now: i64) -> Result<()> {
         self.lock_connection("cleanup_hourly_account_snapshots")
             .execute(
                 "DELETE FROM account_hourly_snapshots WHERE hour < ?1",
@@ -168,7 +167,7 @@ impl Database {
         Ok(inserted == 1)
     }
 
-    pub fn cleanup_daily_snapshots(&self, now: DateTime<Utc>) -> Result<()> {
+    pub(crate) fn cleanup_daily_snapshots(&self, now: DateTime<Utc>) -> Result<()> {
         let today = now
             .with_timezone(&crate::types::beijing_offset())
             .date_naive();
@@ -181,37 +180,31 @@ impl Database {
         Ok(())
     }
 
-    fn query_daily_snapshot_payloads(
-        &self,
-        limit: usize,
-        operation: &'static str,
-    ) -> Result<Vec<String>> {
-        let conn = self.lock_connection(operation);
-        let mut statement =
-            conn.prepare_cached("SELECT payload FROM daily_snapshots ORDER BY date DESC LIMIT ?1")?;
-        let rows = statement.query_map(params![limit as i64], |row| row.get::<_, String>(0))?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
-    }
-
     #[cfg(test)]
     pub(crate) fn daily_snapshots(
         &self,
         limit: usize,
     ) -> Result<Vec<crate::snapshots::DailySnapshot>> {
-        self.query_daily_snapshot_payloads(limit, "daily_snapshots")?
-            .into_iter()
-            .map(|payload| Ok(serde_json::from_str(&payload)?))
-            .collect()
+        let conn = self.lock_connection("daily_snapshots");
+        super::query_json_vec(
+            &conn,
+            "SELECT payload FROM daily_snapshots ORDER BY date DESC LIMIT ?1",
+            params![limit as i64],
+            "daily_snapshots",
+        )
     }
 
     pub(crate) fn daily_snapshots_raw(
         &self,
         limit: usize,
     ) -> Result<Vec<Box<serde_json::value::RawValue>>> {
-        self.query_daily_snapshot_payloads(limit, "daily_snapshots_raw")?
-            .into_iter()
-            .map(|payload| Ok(serde_json::value::RawValue::from_string(payload)?))
-            .collect()
+        let conn = self.lock_connection("daily_snapshots_raw");
+        super::query_json_vec(
+            &conn,
+            "SELECT payload FROM daily_snapshots ORDER BY date DESC LIMIT ?1",
+            params![limit as i64],
+            "daily_snapshots_raw",
+        )
     }
 
     pub(crate) fn daily_trade_summaries(
@@ -219,78 +212,63 @@ impl Database {
         window_start: DateTime<Utc>,
         window_end: DateTime<Utc>,
     ) -> Result<Vec<crate::snapshots::DailyTradeGroup>> {
-        if window_end <= window_start {
-            return Ok(Vec::new());
-        }
-        let start_unaligned =
-            window_start.timestamp() % 3600 != 0 || window_start.timestamp_subsec_nanos() != 0;
-        let end_unaligned =
-            window_end.timestamp() % 3600 != 0 || window_end.timestamp_subsec_nanos() != 0;
-        let first_hour = hourly::hour(window_start);
-        let last_hour = if end_unaligned {
-            hourly::hour(window_end)
-        } else {
-            hourly::hour(window_end).saturating_sub(3600)
-        };
         let conn = self.lock_connection("daily_trade_summaries");
-        let mut statement = conn.prepare_cached(
-            "SELECT hour, buy_count, sell_count, realized_pnl, pending_pnl_count, latest_timestamp, symbol, mode
-             FROM trade_hourly_rollups
-             WHERE hour >= ?1 AND hour <= ?2
-             ORDER BY mode, symbol, hour",
-        )?;
-        let mut rows = statement.query(params![first_hour, last_hour])?;
-        let mut groups: std::collections::BTreeMap<
-            (String, String),
-            crate::snapshots::DailyTradeGroup,
-        > = std::collections::BTreeMap::new();
-        while let Some(row) = rows.next()? {
-            let (bucket, stored) = hourly::Rollup::from_row(row)?;
-            let symbol: String = row.get(6)?;
-            let mode: String = row.get(7)?;
-            let needs_boundary_scan = (start_unaligned && bucket == first_hour)
-                || (end_unaligned && bucket == last_hour)
-                || stored.latest.is_none_or(|latest| latest >= window_end);
-            let value = if needs_boundary_scan {
-                hourly::load_boundary_rollup_on(
-                    &conn,
-                    &symbol,
-                    &mode,
-                    bucket,
-                    window_start,
-                    window_end,
-                    false,
-                )?
+        Ok(
+            hourly::scan_window_rollups_on(&conn, window_start, window_end, false)?
+                .into_iter()
+                .map(
+                    |((mode, symbol), rollup)| crate::snapshots::DailyTradeGroup {
+                        symbol,
+                        mode: TradingMode::from_db(&mode),
+                        buy_count: rollup.buys,
+                        sell_count: rollup.sells,
+                        realized_pnl: rollup.realized_pnl,
+                        pending_pnl_count: rollup.pending_pnl_count,
+                    },
+                )
+                .collect(),
+        )
+    }
+
+    /// Aggregate persisted trades across all modes and symbols for the Beijing day.
+    pub(crate) fn get_today_pnl(&self, now: DateTime<Utc>) -> Result<crate::types::TodayPnl> {
+        let conn = self.lock_connection("get_today_pnl");
+        hourly::today_pnl_on(&conn, now)
+    }
+
+    pub(crate) async fn cached_today_pnl(
+        self: &std::sync::Arc<Self>,
+        now: DateTime<Utc>,
+    ) -> Option<crate::types::TodayPnl> {
+        let mut cache = self.today_pnl_cache.lock().await;
+        let revision = self.trade_data_revision();
+        let day = beijing_midnight(now);
+        if let Some((cached_revision, cached_day, loaded, value)) = cache.as_ref() {
+            let ttl = if value.is_some() {
+                std::time::Duration::from_secs(2)
             } else {
-                stored
+                std::time::Duration::from_secs(1)
             };
-            let buys = value.buys.max(0) as u64;
-            let sells = value.sells.max(0) as u64;
-            let pending = value.pending.max(0) as u64;
-            if buys == 0 && sells == 0 && pending == 0 && value.pnl.is_zero() {
-                continue;
+            if *cached_revision == revision
+                && *cached_day == day
+                && loaded.elapsed() < ttl
+                && value.as_ref().is_none_or(|v| v.window_end <= now)
+            {
+                return value.clone();
             }
-            let entry = groups
-                .entry((mode, symbol))
-                .or_insert_with_key(|(mode, symbol)| crate::snapshots::DailyTradeGroup {
-                    symbol: symbol.clone(),
-                    mode: TradingMode::from_db(mode),
-                    buy_count: 0,
-                    sell_count: 0,
-                    realized_pnl: Decimal::ZERO,
-                    pending_pnl_count: 0,
-                });
-            entry.buy_count = entry.buy_count.saturating_add(buys);
-            entry.sell_count = entry.sell_count.saturating_add(sells);
-            entry.realized_pnl = entry.realized_pnl.saturating_add(value.pnl);
-            entry.pending_pnl_count = entry.pending_pnl_count.saturating_add(pending);
         }
-        Ok(groups.into_values().collect())
+        let value = self
+            .run_blocking(move |db| db.get_today_pnl(now))
+            .await
+            .map_err(|error| tracing::warn!("Failed to load overview today PnL: {}", error))
+            .ok();
+        *cache = Some((revision, day, std::time::Instant::now(), value.clone()));
+        value
     }
 
     /// A consistent analysis snapshot, including committed WAL transactions.
     /// Redaction happens only on the copy; never expose a raw live database file.
-    pub fn export_analysis_snapshot(&self) -> Result<Vec<u8>> {
+    pub(crate) fn export_analysis_snapshot(&self) -> Result<Vec<u8>> {
         let _export = self.try_analysis_export()?;
         let snapshot = self.backup_to_memory()?;
 
@@ -307,7 +285,7 @@ impl Database {
     }
 
     /// Export only rows that can be attributed to this symbol.
-    pub fn export_analysis_snapshot_for_symbol(&self, symbol: &str) -> Result<Vec<u8>> {
+    pub(crate) fn export_analysis_snapshot_for_symbol(&self, symbol: &str) -> Result<Vec<u8>> {
         let _export = self.try_analysis_export()?;
         let snapshot = self.analysis_snapshot_with_tables(&[
             "trades",
@@ -325,7 +303,7 @@ impl Database {
     }
 
     /// Export only the selected analysis data categories.
-    pub fn export_selected_analysis_snapshot(
+    pub(crate) fn export_selected_analysis_snapshot(
         &self,
         trade_history: bool,
         account_hourly_snapshots: bool,

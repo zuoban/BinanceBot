@@ -11,29 +11,32 @@ const MAX_AGE: Duration = Duration::from_secs(1);
 
 #[derive(Clone)]
 pub(crate) struct AccountSnapshot {
-    pub account: Arc<BinanceAccountInfoResponse>,
-    pub received_at: DateTime<Utc>,
-    pub received_instant: Instant,
+    pub(crate) account: Arc<BinanceAccountInfoResponse>,
+    pub(crate) received_at: DateTime<Utc>,
+    pub(crate) received_instant: Instant,
 }
 
 #[derive(Default)]
 pub(crate) struct AccountCache {
-    entries: CacheEntries<AccountSnapshot>,
+    entries: CacheEntries<[u8; 32], AccountSnapshot>,
 }
 
 impl AccountCache {
-    pub async fn get(&self, client: &BinanceFuturesClient) -> Result<AccountSnapshot> {
+    pub(crate) async fn get(&self, client: &BinanceFuturesClient) -> Result<AccountSnapshot> {
         self.get_inner(client, false).await
     }
 
-    pub async fn refresh(&self, client: &BinanceFuturesClient) -> Result<AccountSnapshot> {
+    pub(crate) async fn refresh(&self, client: &BinanceFuturesClient) -> Result<AccountSnapshot> {
         self.get_inner(client, true).await
     }
 
-    pub async fn refresh_critical(&self, client: &BinanceFuturesClient) -> Result<AccountSnapshot> {
+    pub(crate) async fn refresh_critical(
+        &self,
+        client: &BinanceFuturesClient,
+    ) -> Result<AccountSnapshot> {
         let key = client.account_cache_key();
         self.entries
-            .refresh_critical(key, || async {
+            .refresh_critical(&key, || async {
                 let account = client.get_account_critical().await?;
                 Ok(AccountSnapshot {
                     account: Arc::new(account),
@@ -44,8 +47,8 @@ impl AccountCache {
             .await
     }
 
-    pub async fn invalidate(&self, client: &BinanceFuturesClient) {
-        self.entries.retire(client.account_cache_key()).await;
+    pub(crate) async fn invalidate(&self, client: &BinanceFuturesClient) {
+        self.entries.retire(&client.account_cache_key()).await;
     }
 
     async fn get_inner(
@@ -53,10 +56,11 @@ impl AccountCache {
         client: &BinanceFuturesClient,
         force: bool,
     ) -> Result<AccountSnapshot> {
+        let key = client.account_cache_key();
         let (_, _, snapshot) = self
             .entries
             .get_or_fetch(
-                client.account_cache_key(),
+                &key,
                 "account",
                 |snapshot| !force && snapshot.received_instant.elapsed() < MAX_AGE,
                 || async {
@@ -240,7 +244,7 @@ mod tests {
         let client = BinanceFuturesClient::with_base_url(&AppConfig::default().exchange, url);
         let cache = AccountCache::default();
         cache.get(&client).await.unwrap();
-        let (_epoch, entry) = cache.entries.entry(client.account_cache_key()).await;
+        let (_epoch, entry) = cache.entries.entry(&client.account_cache_key()).await;
         entry
             .lock()
             .await
@@ -272,7 +276,7 @@ mod tests {
         assert!(cache.get(&client).await.is_err());
         fail.store(false, Ordering::SeqCst);
         assert!(cache.refresh(&client).await.is_err());
-        let (_, entry) = cache.entries.entry(client.account_cache_key()).await;
+        let (_, entry) = cache.entries.entry(&client.account_cache_key()).await;
         let held = entry.lock().await;
         let critical =
             tokio::time::timeout(Duration::from_secs(1), cache.refresh_critical(&client))
@@ -280,7 +284,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
         assert_eq!(
-            critical.account.available_balance,
+            critical.account.assets[0].available_balance,
             rust_decimal::Decimal::from(8)
         );
         assert_eq!(calls.load(Ordering::SeqCst), 2);
@@ -346,13 +350,13 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(
-            fresh.account.available_balance,
+            fresh.account.assets[0].available_balance,
             rust_decimal::Decimal::from(2)
         );
         release.notify_one();
         let old_result = old_load.await.unwrap();
         assert_eq!(
-            old_result.account.available_balance,
+            old_result.account.assets[0].available_balance,
             rust_decimal::Decimal::from(2)
         );
         assert_eq!(calls.load(Ordering::SeqCst), 2);
@@ -405,7 +409,7 @@ mod tests {
         release.notify_one();
         let snapshot = critical_task.await.unwrap();
         assert_eq!(
-            snapshot.account.available_balance,
+            snapshot.account.assets[0].available_balance,
             rust_decimal::Decimal::from(2)
         );
         assert_eq!(calls.load(Ordering::SeqCst), 2);

@@ -4,16 +4,14 @@ use crate::exchange::account_cache::AccountCache;
 use crate::exchange::market_cache::MarketCache;
 use crate::exchange::position_cache::PositionCache;
 use crate::exchange::rate_limit::RateLimiter;
-use crate::exchange::{BinanceFuturesClient, BinanceWsStream};
+use crate::exchange::BinanceFuturesClient;
 use crate::fx::CnyRateCache;
 use crate::lifecycle::stop_engine;
 use crate::server::AppState;
-use crate::strategy::GridTradingEngine;
-use crate::types::TickerInfo;
 use futures_util::future::{join_all, select_all};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex, RwLock};
+use tokio::sync::{mpsc, oneshot, watch, Mutex, RwLock};
 use tokio::task::JoinHandle;
 
 #[path = "runtime/handle.rs"]
@@ -89,6 +87,7 @@ pub struct TradingRuntime {
     command_rx: mpsc::Receiver<RuntimeCommand>,
     trade_lock: Arc<Mutex<()>>,
     cny_rates: Arc<CnyRateCache>,
+    cny_refresh_task: Option<JoinHandle<()>>,
     account_cache: Arc<AccountCache>,
     position_cache: Arc<PositionCache>,
     market_cache: Arc<MarketCache>,
@@ -150,6 +149,7 @@ impl TradingRuntime {
             command_rx,
             trade_lock,
             cny_rates: Arc::new(CnyRateCache::new()),
+            cny_refresh_task: None,
             account_cache: Arc::new(AccountCache::default()),
             position_cache: Arc::new(PositionCache::default()),
             market_cache: Arc::new(MarketCache::default()),
@@ -242,8 +242,8 @@ impl TradingRuntime {
         let trade_lock = Arc::new(Mutex::new(()));
         let mut runtime = Self::from_pairs(
             Vec::new(),
-            db.clone(),
-            trade_lock.clone(),
+            db,
+            trade_lock,
             config.server.clone(),
             GlobalConfig::from_app(config),
             admin_auth,
@@ -252,20 +252,64 @@ impl TradingRuntime {
         {
             runtime.test_exchange_url = test_exchange_url;
         }
-        let mut startup_error = None;
-        for strategy in config.strategy_configs()? {
+        let strategies = config.strategy_configs()?;
+        let mut startup_error = runtime
+            .prepare_startup_pairs(
+                strategies,
+                !config.pairs.is_empty(),
+                &mut shutdown,
+                #[cfg(test)]
+                hook,
+                #[cfg(test)]
+                prepare_hook,
+            )
+            .await;
+        if startup_error.is_none() && shutdown.as_ref().is_some_and(|rx| *rx.borrow()) {
+            startup_error = Some(anyhow::anyhow!("启动过程中收到退出信号"));
+        }
+        if let Some(error) = startup_error {
+            return match runtime.shutdown(Duration::from_secs(30)).await {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(error.context(format!("启动失败后的清理也失败: {cleanup:#}"))),
+            };
+        }
+        *runtime.handle.states.write().await = runtime.states();
+        runtime
+            .global_position_limit
+            .membership_ready
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        runtime.run_initial_global_risk_check(&mut shutdown).await;
+        if shutdown.as_ref().is_some_and(|rx| *rx.borrow()) {
+            let error = anyhow::anyhow!("启动过程中收到退出信号");
+            return match runtime.shutdown(Duration::from_secs(30)).await {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(error.context(format!("启动中断后的清理失败: {cleanup:#}"))),
+            };
+        }
+        runtime.spawn_runtime_background_tasks();
+        Ok(runtime)
+    }
+
+    async fn prepare_startup_pairs(
+        &mut self,
+        strategies: Vec<AppConfig>,
+        multi: bool,
+        shutdown: &mut Option<watch::Receiver<bool>>,
+        #[cfg(test)] hook: Option<mpsc::Sender<(String, oneshot::Sender<()>)>>,
+        #[cfg(test)] prepare_hook: Option<mpsc::Sender<(String, oneshot::Sender<()>)>>,
+    ) -> Option<anyhow::Error> {
+        for strategy in strategies {
             if shutdown.as_ref().is_some_and(|rx| *rx.borrow()) {
-                startup_error = Some(anyhow::anyhow!("启动过程中收到退出信号"));
-                break;
+                return Some(anyhow::anyhow!("启动过程中收到退出信号"));
             }
             // Preparation may have an in-flight database write. Let it finish, but
             // block every existing engine as soon as an interruption arrives.
             let (start_tx, start_rx) = oneshot::channel();
             let engine_shutdown = shutdown.clone();
             let prepared = {
-                let preparing = runtime.prepare_pair(
+                let preparing = self.prepare_pair(
                     strategy,
-                    !config.pairs.is_empty(),
+                    multi,
                     start_rx,
                     engine_shutdown,
                     #[cfg(test)]
@@ -274,8 +318,8 @@ impl TradingRuntime {
                 tokio::pin!(preparing);
                 tokio::select! {
                     biased;
-                    _ = Self::wait_for_startup_shutdown(&mut shutdown) => {
-                        for pair in &runtime.pairs {
+                    _ = Self::wait_for_startup_shutdown(shutdown) => {
+                        for pair in &self.pairs {
                             pair.signal_shutdown();
                         }
                         preparing.await
@@ -291,8 +335,8 @@ impl TradingRuntime {
                     if stopped {
                         pair.signal_shutdown();
                     }
-                    runtime.handle.register_engine(&pair);
-                    runtime.pairs.push(pair);
+                    self.handle.register_engine(&pair);
+                    self.pairs.push(pair);
                     if !stopped {
                         let _ = start_tx.send(());
                     }
@@ -304,48 +348,29 @@ impl TradingRuntime {
                         }
                     }
                 }
-                Err(error) => {
-                    startup_error = Some(error);
-                    break;
-                }
+                Err(error) => return Some(error),
             }
         }
-        if startup_error.is_none() && shutdown.as_ref().is_some_and(|rx| *rx.borrow()) {
-            startup_error = Some(anyhow::anyhow!("启动过程中收到退出信号"));
-        }
-        if let Some(error) = startup_error {
-            return match runtime.shutdown(Duration::from_secs(30)).await {
-                Ok(()) => Err(error),
-                Err(cleanup) => Err(error.context(format!("启动失败后的清理也失败: {cleanup:#}"))),
-            };
-        }
-        *runtime.handle.states.write().await = runtime.states();
-        runtime
-            .global_position_limit
-            .membership_ready
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        {
-            let check = runtime.global_position_limit.check();
-            tokio::pin!(check);
-            tokio::select! {
-                biased;
-                _ = Self::wait_for_startup_shutdown(&mut shutdown) => {
-                    for pair in &runtime.pairs {
-                        pair.signal_shutdown();
-                    }
-                    check.await;
+        None
+    }
+
+    async fn run_initial_global_risk_check(&self, shutdown: &mut Option<watch::Receiver<bool>>) {
+        let check = self.global_position_limit.check();
+        tokio::pin!(check);
+        tokio::select! {
+            biased;
+            _ = Self::wait_for_startup_shutdown(shutdown) => {
+                for pair in &self.pairs {
+                    pair.signal_shutdown();
                 }
-                _ = &mut check => {}
+                check.await;
             }
+            _ = &mut check => {}
         }
-        if shutdown.as_ref().is_some_and(|rx| *rx.borrow()) {
-            let error = anyhow::anyhow!("启动过程中收到退出信号");
-            return match runtime.shutdown(Duration::from_secs(30)).await {
-                Ok(()) => Err(error),
-                Err(cleanup) => Err(error.context(format!("启动中断后的清理失败: {cleanup:#}"))),
-            };
-        }
-        let weak = Arc::downgrade(&runtime.global_position_limit);
+    }
+
+    fn spawn_runtime_background_tasks(&mut self) {
+        let weak = Arc::downgrade(&self.global_position_limit);
         tokio::spawn(async move {
             let mut timer = tokio::time::interval(Duration::from_millis(250));
             loop {
@@ -357,7 +382,17 @@ impl TradingRuntime {
                 drop(global);
             }
         });
-        Ok(runtime)
+        #[cfg(test)]
+        let spawn_cny = self.test_exchange_url.is_none();
+        #[cfg(not(test))]
+        let spawn_cny = true;
+        if spawn_cny {
+            self.cny_refresh_task = Some(handle::spawn_cny_rate_refresh_task(
+                self.handle.states.clone(),
+                self.cny_rates.clone(),
+                self.handle.stop.subscribe(),
+            ));
+        }
     }
 
     async fn wait_for_startup_shutdown(shutdown: &mut Option<watch::Receiver<bool>>) {
@@ -399,219 +434,6 @@ impl TradingRuntime {
             );
         }
         BinanceFuturesClient::new_with_limiter(config, self.rate_limiter.clone())
-    }
-
-    async fn prepare_pair(
-        &self,
-        strategy: AppConfig,
-        multi: bool,
-        start: oneshot::Receiver<()>,
-        startup_shutdown: Option<watch::Receiver<bool>>,
-        #[cfg(test)] prepare_hook: Option<mpsc::Sender<(String, oneshot::Sender<()>)>>,
-    ) -> anyhow::Result<PairTask> {
-        self.prepare_pair_with_state(
-            strategy,
-            PreparePairOptions {
-                multi,
-                start: Some(start),
-                startup_shutdown,
-                #[cfg(test)]
-                prepare_hook,
-                ..Default::default()
-            },
-        )
-        .await
-    }
-
-    async fn prepare_pair_with_state(
-        &self,
-        strategy: AppConfig,
-        options: PreparePairOptions,
-    ) -> anyhow::Result<PairTask> {
-        let db = self.handle.db.clone();
-        let multi = options.multi;
-        let previous_state = options.previous_state;
-        let force_paused = options.force_paused;
-        let prearmed = options.prearmed;
-        let start = options.start;
-        let startup_shutdown = options.startup_shutdown;
-        #[cfg(test)]
-        let prepare_hook = options.prepare_hook;
-        let previous_unclean = if let Some(prearmed) = prearmed {
-            prearmed
-        } else {
-            let symbol = strategy.exchange.symbol.clone();
-            let mode = strategy.exchange.trading_mode();
-            db.run_blocking(move |db| db.arm_execution_guard(&symbol, mode))
-                .await?
-        };
-        let (action_tx, action_rx) = mpsc::channel(32);
-        let (ticker_tx, ticker_rx) = broadcast::channel::<TickerInfo>(64);
-        let (market_tx, market_rx) = watch::channel(strategy.exchange.symbol.clone());
-        let client = Arc::new(self.exchange_client(&strategy.exchange));
-        // Restoring durable state can wait for SQLite and scan trade history.
-        // Keep that work off the Tokio thread that handles membership and shutdown.
-        let state_config = strategy.clone();
-        let state_db = db.clone();
-        let trade_lock = self.trade_lock.clone();
-        let cny_rates = self.cny_rates.clone();
-        let auth = self.auth.clone();
-        let pair_scope = multi.then(|| state_config.exchange.symbol.clone());
-        let state = db
-            .run_blocking(move |_| {
-                Ok(AppState::build_with_auth(
-                    state_config,
-                    state_db,
-                    action_tx,
-                    pair_scope,
-                    trade_lock,
-                    cny_rates,
-                    auth,
-                ))
-            })
-            .await?;
-        if force_paused || previous_unclean {
-            *state.status.write().await = crate::types::BotStatus::Paused;
-        }
-        if let Some((position, account)) = previous_state {
-            *state.position.write().await = position;
-            *state.account.write().await = account;
-        }
-        let _ = state
-            .global_position_limit
-            .set(Arc::downgrade(&self.global_position_limit));
-        if let Err(error) = strategy.validate() {
-            state.pause_trading().await?;
-            state
-                .add_log(
-                    "ERROR",
-                    format!("Saved configuration is invalid; trading paused: {}", error),
-                )
-                .await;
-        }
-        if !self.auth.is_auth_configured() && !strategy.exchange.is_paper() {
-            if prearmed.is_none() {
-                state.pause_trading().await?;
-            }
-            state
-                .add_log(
-                    "WARN",
-                    "Live trading paused because no administrator password is configured",
-                )
-                .await;
-        }
-        #[cfg(test)]
-        if let Some(hook) = prepare_hook {
-            let (ack, received) = oneshot::channel();
-            if hook
-                .send((strategy.exchange.symbol.clone(), ack))
-                .await
-                .is_ok()
-            {
-                let _ = received.await;
-            }
-        }
-        let mut engine = GridTradingEngine::new_with_caches(
-            state.clone(),
-            client,
-            action_rx,
-            ticker_rx,
-            self.account_cache.clone(),
-            self.position_cache.clone(),
-            self.market_cache.clone(),
-        );
-        engine.set_market_stream_tx(market_tx);
-        let stream = BinanceWsStream::new(market_rx, ticker_tx);
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let engine_task = Self::spawn_pair_engine_task(
-            engine,
-            state.clone(),
-            start,
-            startup_shutdown,
-            Some(self.handle.stop.subscribe()),
-            shutdown_rx,
-        );
-        #[cfg(test)]
-        let spawn_background = self.test_exchange_url.is_none();
-        #[cfg(not(test))]
-        let spawn_background = true;
-        let background = if spawn_background {
-            vec![
-                tokio::spawn(stream.run()),
-                tokio::spawn(state.clone().run_cny_rate_refresh()),
-                tokio::spawn(state.clone().run_snapshot_broadcast()),
-            ]
-        } else {
-            Vec::new()
-        };
-        Ok(PairTask {
-            state,
-            engine: engine_task,
-            engine_joined: false,
-            recovery_failed: false,
-            shutdown_tx,
-            background,
-        })
-    }
-
-    fn spawn_pair_engine_task(
-        mut engine: GridTradingEngine,
-        engine_state: Arc<AppState>,
-        start: Option<oneshot::Receiver<()>>,
-        mut startup_shutdown: Option<watch::Receiver<bool>>,
-        mut runtime_shutdown: Option<watch::Receiver<bool>>,
-        mut shutdown_rx: watch::Receiver<bool>,
-    ) -> JoinHandle<()> {
-        tokio::spawn(async move {
-            // Do not initialize until startup has registered the new engine.
-            let permitted = if let Some(start) = start {
-                tokio::select! {
-                    biased;
-                    _ = Self::wait_for_any_shutdown(&mut startup_shutdown, &mut runtime_shutdown) => false,
-                    result = start => result.is_ok(),
-                }
-            } else {
-                true
-            };
-            let initialized = if permitted {
-                tokio::select! {
-                    biased;
-                    _ = Self::wait_for_any_shutdown(&mut startup_shutdown, &mut runtime_shutdown) => {
-                        engine_state.request_shutdown();
-                        None
-                    }
-                    _ = shutdown_rx.changed() => None,
-                    result = engine.initialize() => Some(result),
-                }
-            } else {
-                engine_state.request_shutdown();
-                None
-            };
-            if let Some(Err(error)) = &initialized {
-                if let Err(pause_err) = engine_state.pause_trading().await {
-                    tracing::error!(
-                        %pause_err,
-                        "Failed to persist pause after startup reconciliation failure"
-                    );
-                }
-                engine_state
-                    .add_log(
-                        "ERROR",
-                        format!("Startup reconciliation failed; trading paused: {}", error),
-                    )
-                    .await;
-            }
-            engine_state
-                .global_position_initialized
-                .store(true, std::sync::atomic::Ordering::SeqCst);
-            engine_state.global_position_ready.store(
-                matches!(initialized, Some(Ok(()))),
-                std::sync::atomic::Ordering::SeqCst,
-            );
-            engine_state.check_global_position_limit().await;
-            engine.reconcile_initial_pause().await;
-            engine.run().await;
-        })
     }
 
     pub async fn run(&mut self) -> String {
@@ -659,7 +481,7 @@ impl TradingRuntime {
         }
     }
 
-    pub fn states(&self) -> Vec<Arc<AppState>> {
+    pub(crate) fn states(&self) -> Vec<Arc<AppState>> {
         self.pairs.iter().map(|pair| pair.state.clone()).collect()
     }
 
@@ -691,11 +513,14 @@ impl TradingRuntime {
 
     pub async fn shutdown(&mut self, limit: Duration) -> anyhow::Result<()> {
         self.handle.request_shutdown();
+        if let Some(task) = self.cny_refresh_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
         self.command_rx.close();
         while let Ok(command) = self.command_rx.try_recv() {
             command.reject_on_shutdown();
         }
-        // Stop submissions for ALL pairs before awaiting any cancellation.
         for pair in &self.pairs {
             pair.signal_shutdown();
         }
@@ -757,6 +582,9 @@ impl TradingRuntime {
 impl Drop for TradingRuntime {
     fn drop(&mut self) {
         // Normal exits use shutdown(); this prevents detached tasks after a panic or canceled owner.
+        if let Some(task) = &self.cny_refresh_task {
+            task.abort();
+        }
         for pair in &self.pairs {
             pair.state.request_shutdown();
             pair.engine.abort();

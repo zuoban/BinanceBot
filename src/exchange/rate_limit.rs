@@ -7,6 +7,7 @@ use tracing::warn;
 
 const MINUTE: Duration = Duration::from_secs(60);
 const TEN_SECONDS: Duration = Duration::from_secs(10);
+const MAX_RETRY_AFTER_SECS: u64 = 3 * 24 * 60 * 60;
 // Conservative local ceilings leave room for other applications and emergency work.
 const IP_NORMAL: u64 = 1800;
 const IP_CRITICAL: u64 = 2280;
@@ -145,6 +146,9 @@ impl RateLimiter {
         endpoints: &'a mut HashMap<String, EndpointLimits>,
         endpoint: &str,
     ) -> &'a mut EndpointLimits {
+        if endpoints.contains_key(endpoint) {
+            return endpoints.get_mut(endpoint).expect("checked key");
+        }
         endpoints.entry(endpoint.to_owned()).or_default()
     }
 
@@ -166,7 +170,7 @@ impl RateLimiter {
         accounts.entry(account).or_default()
     }
 
-    pub fn reserve(
+    pub(crate) fn reserve(
         &self,
         endpoint: &str,
         account: [u8; 32],
@@ -248,7 +252,7 @@ impl RateLimiter {
         Ok(())
     }
 
-    pub fn update_exchange_limits(&self, endpoint: &str, limits: &[BinanceRateLimit]) {
+    pub(crate) fn update_exchange_limits(&self, endpoint: &str, limits: &[BinanceRateLimit]) {
         let mut endpoints = self.endpoints.lock().unwrap_or_else(|e| e.into_inner());
         let endpoint = Self::endpoint_mut(&mut endpoints, endpoint);
         for limit in limits.iter().filter(|limit| limit.limit > 0) {
@@ -266,7 +270,7 @@ impl RateLimiter {
         }
     }
 
-    pub fn observe(
+    pub(crate) fn observe(
         &self,
         endpoint: &str,
         account: [u8; 32],
@@ -294,15 +298,17 @@ impl RateLimiter {
         }
         if status == StatusCode::TOO_MANY_REQUESTS || status.as_u16() == 418 {
             let default = if status.as_u16() == 418 {
-                3 * 24 * 60 * 60
+                MAX_RETRY_AFTER_SECS
             } else {
                 60
             };
-            let seconds = value("retry-after").unwrap_or(default).max(1);
+            let seconds = value("retry-after")
+                .unwrap_or(default)
+                .clamp(1, MAX_RETRY_AFTER_SECS);
             let duration = Duration::from_secs(seconds);
             let until = now
                 .checked_add(duration)
-                .unwrap_or(now + Duration::from_secs(3 * 24 * 60 * 60));
+                .unwrap_or(now + Duration::from_secs(MAX_RETRY_AFTER_SECS));
             endpoint.blocked_until =
                 Some(endpoint.blocked_until.map_or(until, |old| old.max(until)));
             warn!(
@@ -598,6 +604,20 @@ mod tests {
         let endpoints = limiter.endpoints.lock().unwrap();
         let until = endpoints["main"].blocked_until.unwrap();
         assert!(until.duration_since(Instant::now()) > Duration::from_secs(3 * 24 * 60 * 60 - 5));
+    }
+
+    #[test]
+    fn epoch_sized_retry_after_clamps_to_max_retry_after_secs() {
+        let limiter = RateLimiter::default();
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after", HeaderValue::from_static("1794393632"));
+        let before = Instant::now();
+        limiter.observe("main", [1; 32], StatusCode::TOO_MANY_REQUESTS, &headers);
+        let endpoints = limiter.endpoints.lock().unwrap();
+        let until = endpoints["main"].blocked_until.unwrap();
+        let cooldown = until.duration_since(before);
+        assert!(cooldown >= Duration::from_secs(MAX_RETRY_AFTER_SECS - 1));
+        assert!(cooldown <= Duration::from_secs(MAX_RETRY_AFTER_SECS + 5));
     }
 
     #[test]

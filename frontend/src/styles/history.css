@@ -1,0 +1,52 @@
+/* ---------- History & daily snapshots ---------- */
+.overview-history { margin-bottom: 24px; }
+.overview-history .ant-card-body { padding: 20px; }
+.history-heading { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }
+.history-heading h2 { margin: 0; font-size: 16px; font-weight: 500; }
+.history-metric { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.history-metric span { color: var(--text-secondary); font-size: 12px; }
+.history-metric strong { font: 500 20px/28px var(--font-mono); font-variant-numeric: tabular-nums; }
+.history-account-row { margin-bottom: 12px; }
+.history-account-row .ant-select { min-width: 220px; max-width: 100%; }
+.history-charts-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; align-items: end; }
+@media (min-width: 1080px) {
+  .history-charts-grid { grid-template-columns: minmax(0, 1.65fr) minmax(0, 1fr); gap: 24px; }
+  .history-chart-secondary { padding-left: 24px; border-left: 1px solid var(--border-hairline); }
+}
+.history-chart-primary, .history-chart-secondary { min-width: 0; }
+.history-caption { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; margin: 12px 0 8px; color: var(--text-muted); font-size: 12px; }
+.history-caption-main { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.history-caption h3 { margin: 0; color: var(--text-primary); font-size: 14px; font-weight: 500; }
+.history-daily { margin-top: 24px; padding-top: 8px; border-top: 1px solid var(--border-hairline); }
+.history-empty { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px; padding: 28px 0; text-align: center; color: var(--text-muted); font-size: 13px; }
+.history-plot { min-width: 0; }
+.history-plot-loading { min-height: 180px; display: grid; place-content: center; }
+
+.daily-snapshot-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 16px; margin-top: 12px; }
+.daily-snapshot-block { display: flex; flex-direction: column; gap: 12px; padding: 16px; border: 1px solid var(--border-hairline); border-radius: var(--radius-control); background: var(--bg-raised); min-width: 0; }
+.daily-snapshot-block h4 { margin: 0; font-size: 13px; font-weight: 500; color: var(--text-secondary); }
+.daily-snapshot-item { display: grid; gap: 12px; }
+.daily-snapshot-item + .daily-snapshot-item { padding-top: 12px; border-top: 1px solid var(--border-hairline); }
+.daily-snapshot-item-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px; }
+.daily-snapshot-item-head strong { font-weight: 500; }
+.daily-snapshot-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; }
+.daily-snapshot-metrics > div { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.daily-snapshot-metrics span { color: var(--text-secondary); font-size: 12px; line-height: 16px; }
+.daily-snapshot-metrics strong { font: 500 13px/20px var(--font-mono); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.daily-snapshot-metrics strong small { color: var(--text-muted); font: 400 11px var(--font-sans); }
+.daily-snapshot-span { grid-column: 1 / -1; }
+.daily-snapshot-pnl-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-top: 4px; }
+.daily-snapshot-pnl-row em { font-style: normal; font-size: 11px; margin-left: 4px; }
+.daily-snapshot-sublist { display: grid; gap: 8px; padding-top: 8px; border-top: 1px dashed var(--border-hairline); font-size: 12px; }
+.daily-snapshot-subrow { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.daily-snapshot-subrow strong { font: 500 12px/16px var(--font-mono); font-variant-numeric: tabular-nums; }
+.daily-snapshot-subrow em { font-style: normal; font-size: 11px; }
+
+@media (max-width: 600px) {
+  .history-metric { align-items: flex-start; }
+  .overview-history .ant-card-body { padding: 16px; }
+  .history-heading { gap: 12px; }
+  .history-account-row .ant-select { width: 100%; min-width: 0; }
+  .history-metric strong { overflow-wrap: anywhere; }
+  .history-point-hourly { display: none; }
+}

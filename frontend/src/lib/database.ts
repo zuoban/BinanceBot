@@ -1,11 +1,10 @@
 import { useContext, useRef, useState } from 'react';
 import { App, type ModalFuncProps } from 'antd';
-import type { QueryClient, QueryKey } from '@tanstack/react-query';
 import { ApiError, authenticatedFetch, errorMessage } from './api';
 import { useAsyncLock, useMountedRef } from './asyncGuard';
+import { useConfirmDialog } from './confirmDialog';
 import { downloadBlob } from './exportCsv';
 import { EditContext } from './session';
-
 export type DatabaseTarget = 'trade_history' | 'account_hourly_snapshots';
 
 export const exportSnapshotNotice = (scope = '') =>
@@ -13,14 +12,10 @@ export const exportSnapshotNotice = (scope = '') =>
 
 export const exportSnapshotSuccess = (scope: string) => `${scope}脱敏分析快照已导出，不能用于完整恢复`;
 
-export async function refreshClearedQueries(client: QueryClient, keys: QueryKey[]) {
-  await Promise.all(keys.map(queryKey => client.cancelQueries({ queryKey })));
-  await Promise.all(keys.map(queryKey => client.invalidateQueries({ queryKey })));
-}
-
-export async function downloadDatabase(path: string, targets?: DatabaseTarget[]) {
+export async function downloadDatabase(path: string, targets?: DatabaseTarget[], signal?: AbortSignal) {
   const response = await authenticatedFetch(path, {
-    ...(targets ? { method: 'POST', body: JSON.stringify({ targets }) } : {}),
+    ...(targets ? { method: 'POST', body: JSON.stringify({ targets }), readOnly: true } : {}),
+    ...(signal ? { signal } : {}),
     timeoutMs: 120_000,
   });
   if (!response.ok) {
@@ -32,42 +27,43 @@ export async function downloadDatabase(path: string, targets?: DatabaseTarget[])
   let blob: Blob;
   try {
     blob = await response.blob();
-  } catch {
+  } catch (error) {
+    if (signal?.aborted) throw signal.reason ?? error;
     throw new ApiError('读取导出文件失败，请重试', response.status, 'invalid-response');
   }
+  if (signal?.aborted) return;
   downloadBlob(blob, filename);
 }
 
 export function useDatabaseAction<T extends string>() {
-  const { modal, message } = App.useApp();
+  const { message } = App.useApp();
+  const { confirm: confirmDialog } = useConfirmDialog();
   const edit = useContext(EditContext);
   const [busy, setBusy] = useState<T | null>(null);
   const runLocked = useAsyncLock();
-  const dialogRef = useRef<{ destroy?: () => void } | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
   const mounted = useMountedRef(() => {
-    dialogRef.current?.destroy?.();
-    dialogRef.current = null;
+    abortRef.current?.abort();
+    abortRef.current = null;
     edit.setSaving(false);
   });
-  const run = (action: T, task: () => Promise<string | void>, confirm?: ModalFuncProps) => {
+  const run = (action: T, task: (signal: AbortSignal) => Promise<string | void>, confirm?: ModalFuncProps) => {
     if (!mounted.current) return Promise.resolve();
     return runLocked(async () => {
+      const controller = new AbortController();
+      abortRef.current = controller;
       try {
-        if (confirm) {
-          const dialog = modal.confirm(confirm);
-          dialogRef.current = dialog;
-          const accepted = await dialog;
-          if (dialogRef.current === dialog) dialogRef.current = null;
-          if (!accepted) return;
-        }
-        if (!mounted.current) return;
+        if (confirm && !await confirmDialog(confirm)) return;
+        if (!mounted.current || controller.signal.aborted) return;
         setBusy(action);
         edit.setSaving(true);
-        const text = await task();
-        if (mounted.current && text) message.success(text);
+        const text = await task(controller.signal);
+        if (mounted.current && !controller.signal.aborted && text) message.success(text);
       } catch (error) {
+        if (controller.signal.aborted || (error instanceof DOMException && error.name === 'AbortError')) return;
         if (mounted.current) message.error(errorMessage(error));
       } finally {
+        if (abortRef.current === controller) abortRef.current = null;
         if (mounted.current) {
           setBusy(null);
           edit.setSaving(false);

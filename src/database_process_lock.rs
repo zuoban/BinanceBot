@@ -4,13 +4,13 @@ use std::path::Path;
 /// A persistent sidecar lock shared by the server and offline maintenance.
 /// The file is deliberately not removed: unlinking it can split the lock domain.
 #[cfg(unix)]
-pub struct DatabaseProcessLock {
+pub(crate) struct DatabaseProcessLock {
     _file: std::fs::File,
 }
 
 #[cfg(unix)]
 impl DatabaseProcessLock {
-    pub fn acquire(path: &Path) -> Result<Option<Self>> {
+    pub(crate) fn acquire(path: &Path) -> Result<Option<Self>> {
         use std::os::fd::AsRawFd;
         use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 
@@ -89,11 +89,11 @@ impl DatabaseProcessLock {
 }
 
 #[cfg(not(unix))]
-pub struct DatabaseProcessLock;
+pub(crate) struct DatabaseProcessLock;
 
 #[cfg(not(unix))]
 impl DatabaseProcessLock {
-    pub fn acquire(path: &Path) -> Result<Option<Self>> {
+    pub(crate) fn acquire(path: &Path) -> Result<Option<Self>> {
         if path != Path::new(":memory:") {
             tracing::warn!(
                 "Database process locking is only enforced on Unix; ensure no other bot instance shares {:?}",

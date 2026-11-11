@@ -528,6 +528,18 @@ async fn cli_rules_reject_invalid_fee_and_filter_overrides() {
     .await
     .is_err());
     assert!(load_rules(&BacktestArgs {
+        maker_fee: Decimal::ONE,
+        ..base.clone()
+    })
+    .await
+    .is_err());
+    assert!(load_rules(&BacktestArgs {
+        maker_fee: dec!(1.5),
+        ..base.clone()
+    })
+    .await
+    .is_err());
+    assert!(load_rules(&BacktestArgs {
         min_qty: Some(Decimal::ZERO),
         ..base.clone()
     })
@@ -571,4 +583,16 @@ async fn cli_rules_reject_invalid_fee_and_filter_overrides() {
     })
     .await
     .is_err());
+    assert_eq!(format_funding_impact(dec!(12.34)), "-12.34");
+    assert_eq!(format_funding_impact(dec!(-12.34)), "+12.34");
+    assert_eq!(format_funding_impact(Decimal::ZERO), "0");
+    let candle_at_end = Candle::tick(60_000, dec!(100));
+    assert_eq!(
+        next_kline_page_start(1500, Some(&candle_at_end), 60_000),
+        None
+    );
+    assert_eq!(
+        next_kline_page_start(1500, Some(&candle_at_end), 60_001),
+        Some(60_001)
+    );
 }

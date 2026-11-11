@@ -115,13 +115,15 @@ fn validate_optional_baseline_version(
 }
 
 fn versioned_update_error<T>(error: anyhow::Error) -> (StatusCode, Json<ApiResponse<T>>) {
-    let message = error.to_string();
-    let status = if message.contains("已被其他请求修改") {
+    let status = if error
+        .downcast_ref::<crate::config::ConfigVersionConflict>()
+        .is_some()
+    {
         StatusCode::CONFLICT
     } else {
         StatusCode::OK
     };
-    (status, json_err(message))
+    (status, json_err(error.to_string()))
 }
 
 pub(super) async fn post_global_config_handler(
@@ -354,15 +356,7 @@ pub(super) async fn test_telegram_handler(
         Ok(config) => config,
         Err(response) => return response,
     };
-    let Some(notifier) = handle
-        .states
-        .read()
-        .await
-        .first()
-        .map(|state| state.telegram_notifier().clone())
-    else {
-        return json_err("没有活跃的交易对实例");
-    };
+    let notifier = crate::telegram::TelegramNotifier::new();
     match notifier.send_test_message(&config).await {
         Ok(()) => json_ok("测试消息已发送，请在 Telegram 中查看".into()),
         Err(error) => json_err(format!("测试消息发送失败：{error}")),

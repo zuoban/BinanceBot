@@ -1,6 +1,5 @@
 use super::{
-    beijing_midnight, config_runtime::save_pair_status_on, hourly,
-    migrations::has_legacy_paper_history_on, Database,
+    config_runtime::save_pair_status_on, hourly, migrations::has_legacy_paper_history_on, Database,
 };
 use crate::types::{
     AccountInfo, BotStatus, GridOrder, GridStats, HourlyTradeStats, OrderSide, PositionInfo,
@@ -42,7 +41,8 @@ impl Database {
         self.hourly_stats_queries.load(Ordering::Relaxed)
     }
 
-    pub fn insert_trade(&self, trade: &TradeRecord) -> Result<bool> {
+    #[cfg(test)]
+    pub(crate) fn insert_trade(&self, trade: &TradeRecord) -> Result<bool> {
         let mut conn = self.lock_connection("insert_trade");
         // Acquire write intent before deduplication reads so contention can use
         // SQLite's busy handler instead of failing a deferred lock upgrade.
@@ -67,11 +67,16 @@ impl Database {
 
     /// Delete analysis history atomically while preserving order deduplication
     /// and the execution frontier needed by a running or restarted strategy.
-    pub fn clear_trade_history(&self) -> Result<usize> {
+    #[cfg(test)]
+    pub(crate) fn clear_trade_history(&self) -> Result<usize> {
         Ok(self.clear_selected_database(true, false)?.0)
     }
 
-    pub fn clear_selected_database(&self, trades: bool, snapshots: bool) -> Result<(usize, usize)> {
+    pub(crate) fn clear_selected_database(
+        &self,
+        trades: bool,
+        snapshots: bool,
+    ) -> Result<(usize, usize)> {
         let mut conn = self.lock_connection("clear_selected_database");
         let tx = conn.transaction()?;
         let deleted_trades = if trades {
@@ -97,7 +102,7 @@ impl Database {
     }
 
     /// Clear every mode for one symbol while retaining recovery metadata.
-    pub fn clear_trade_history_for_symbol(&self, symbol: &str) -> Result<usize> {
+    pub(crate) fn clear_trade_history_for_symbol(&self, symbol: &str) -> Result<usize> {
         let mut conn = self.lock_connection("clear_trade_history_for_symbol");
         let tx = conn.transaction()?;
         let deleted = clear_trades_on(&tx, Some(symbol))?;
@@ -112,7 +117,7 @@ impl Database {
     }
 
     #[cfg(test)]
-    pub fn insert_trade_with_recovery(
+    pub(crate) fn insert_trade_with_recovery(
         &self,
         trade: &TradeRecord,
         stats: &GridStats,
@@ -263,7 +268,7 @@ impl Database {
     }
 
     #[cfg(test)]
-    pub fn get_trade_by_client_id(
+    pub(crate) fn get_trade_by_client_id(
         &self,
         client_order_id: &str,
         mode: TradingMode,
@@ -280,7 +285,7 @@ impl Database {
     }
 
     /// Look up the data required by a paired cycle, including cleared history.
-    pub fn get_pair_opening(
+    pub(crate) fn get_pair_opening(
         &self,
         symbol: &str,
         client_order_id: &str,
@@ -315,7 +320,11 @@ impl Database {
             .transpose()
     }
 
-    pub fn has_recorded_order(&self, client_order_id: &str, mode: TradingMode) -> Result<bool> {
+    pub(crate) fn has_recorded_order(
+        &self,
+        client_order_id: &str,
+        mode: TradingMode,
+    ) -> Result<bool> {
         let conn = self.lock_connection("has_recorded_order");
         let mut stmt = conn.prepare_cached(
             "SELECT EXISTS(SELECT 1 FROM trades WHERE client_order_id = ?1 AND mode = ?2)
@@ -359,7 +368,7 @@ impl Database {
     }
 
     /// Return true only for the first successful PnL verification of a saved trade.
-    pub fn verify_trade_pnl(
+    pub(crate) fn verify_trade_pnl(
         &self,
         trade: &TradeRecord,
         expected_clear_revision: u64,
@@ -429,7 +438,7 @@ impl Database {
             .map_err(Into::into)
     }
 
-    pub fn get_recent_trades_for(
+    pub(crate) fn get_recent_trades_for(
         &self,
         symbol: &str,
         mode: TradingMode,
@@ -445,7 +454,7 @@ impl Database {
     }
 
     /// Count today's persisted orders from Beijing midnight to now, including empty hours.
-    pub fn get_hourly_trade_stats(
+    pub(crate) fn get_hourly_trade_stats(
         &self,
         symbol: &str,
         mode: TradingMode,
@@ -457,44 +466,8 @@ impl Database {
         hourly::stats_on(&conn, symbol, mode, now)
     }
 
-    /// Aggregate persisted trades across all modes and symbols for the Beijing day.
-    pub fn get_today_pnl(&self, now: DateTime<Utc>) -> Result<crate::types::TodayPnl> {
-        let conn = self.lock_connection("get_today_pnl");
-        hourly::today_pnl_on(&conn, now)
-    }
-
-    pub async fn cached_today_pnl(
-        self: &std::sync::Arc<Self>,
-        now: DateTime<Utc>,
-    ) -> Option<crate::types::TodayPnl> {
-        let mut cache = self.today_pnl_cache.lock().await;
-        let revision = self.trade_data_revision();
-        let day = beijing_midnight(now);
-        if let Some((cached_revision, cached_day, loaded, value)) = cache.as_ref() {
-            let ttl = if value.is_some() {
-                std::time::Duration::from_secs(2)
-            } else {
-                std::time::Duration::from_secs(1)
-            };
-            if *cached_revision == revision
-                && *cached_day == day
-                && loaded.elapsed() < ttl
-                && value.as_ref().is_none_or(|v| v.window_end <= now)
-            {
-                return value.clone();
-            }
-        }
-        let value = self
-            .run_blocking(move |db| db.get_today_pnl(now))
-            .await
-            .map_err(|error| tracing::warn!("Failed to load overview today PnL: {}", error))
-            .ok();
-        *cache = Some((revision, day, std::time::Instant::now(), value.clone()));
-        value
-    }
-
     #[cfg(test)]
-    pub fn get_unverified_trades(
+    pub(crate) fn get_unverified_trades(
         &self,
         symbol: &str,
         mode: TradingMode,
@@ -505,7 +478,7 @@ impl Database {
             .map(|(trades, _)| trades)
     }
 
-    pub fn get_unverified_trades_with_clear_revision(
+    pub(crate) fn get_unverified_trades_with_clear_revision(
         &self,
         symbol: &str,
         mode: TradingMode,
@@ -539,7 +512,7 @@ impl Database {
         hourly::pnl_totals_on(&conn, symbol, mode)
     }
 
-    pub fn load_scoped_stats(
+    pub(crate) fn load_scoped_stats(
         &self,
         symbol: &str,
         mode: TradingMode,
@@ -573,16 +546,12 @@ impl Database {
     pub fn save_stats(&self, stats: &GridStats) -> Result<()> {
         let conn = self.lock_connection("save_stats");
         conn.execute(
-            r#"
-            INSERT INTO grid_stats (id, total_trades, completed_cycles, total_realized_profit, total_volume_usdc, updated_at)
-            VALUES (1, ?1, ?2, ?3, ?4, ?5)
-            ON CONFLICT(id) DO UPDATE SET
-                total_trades = excluded.total_trades,
-                completed_cycles = excluded.completed_cycles,
-                total_realized_profit = excluded.total_realized_profit,
-                total_volume_usdc = excluded.total_volume_usdc,
-                updated_at = excluded.updated_at;
-            "#,
+            "INSERT INTO grid_stats (id, total_trades, completed_cycles, total_realized_profit, total_volume_usdc, updated_at)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(id) DO UPDATE SET
+                 total_trades = excluded.total_trades, completed_cycles = excluded.completed_cycles,
+                 total_realized_profit = excluded.total_realized_profit,
+                 total_volume_usdc = excluded.total_volume_usdc, updated_at = excluded.updated_at;",
             params![
                 stats.total_trades as i64,
                 stats.completed_cycles as i64,

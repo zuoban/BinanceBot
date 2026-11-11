@@ -9,23 +9,30 @@ use std::time::Duration;
 // Legacy PAPER history summed independent symbol balances; keep that series separate.
 const PAPER_SHARED_ACCOUNT_ID: &str = "paper-shared-v1";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SnapshotGroup {
-    pub mode: TradingMode,
-    pub asset: String,
-    #[serde(default)]
-    pub account_id: Option<String>,
-    pub equity: Option<Decimal>,
-    pub long: Option<Decimal>,
-    pub short: Option<Decimal>,
+mod types {
+    use crate::types::TradingMode;
+    use rust_decimal::Decimal;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct SnapshotGroup {
+        pub(crate) mode: TradingMode,
+        pub(crate) asset: String,
+        #[serde(default)]
+        pub(crate) account_id: Option<String>,
+        pub(crate) equity: Option<Decimal>,
+        pub(crate) long: Option<Decimal>,
+        pub(crate) short: Option<Decimal>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct HourlySnapshot {
+        pub(crate) hour: i64,
+        pub(crate) groups: Vec<SnapshotGroup>,
+    }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HourlySnapshot {
-    pub hour: i64,
-    pub groups: Vec<SnapshotGroup>,
-}
-
+pub(crate) use types::{HourlySnapshot, SnapshotGroup};
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct HistoryAccount {
     pub mode: TradingMode,
@@ -145,14 +152,16 @@ fn aggregate(
         .collect()
 }
 
-fn aggregate_snapshot_bucket(
+fn select_valued_bucket_account<'a>(
     mode: TradingMode,
-    asset: String,
-    account_id: Option<String>,
-    snapshots: Vec<(&BotSnapshot, u64)>,
+    asset: &str,
+    items: &[(&'a BotSnapshot, u64)],
     now: DateTime<Utc>,
-) -> SnapshotGroup {
-    let latest = snapshots
+) -> (
+    Option<&'a crate::types::AccountInfo>,
+    Option<&'a crate::types::AccountInfo>,
+) {
+    let latest = items
         .iter()
         .filter(|(s, interval)| {
             s.account.asset == asset
@@ -164,9 +173,9 @@ fn aggregate_snapshot_bucket(
                     ))
         })
         .max_by_key(|(s, _)| s.account.update_time)
-        .copied();
-    let equity = if mode == TradingMode::Paper {
-        if snapshots.iter().all(|(s, interval)| {
+        .map(|(s, _)| &s.account);
+    let paper_valued = mode != TradingMode::Paper
+        || items.iter().all(|(s, interval)| {
             s.account.asset == asset
                 && (s.position.size.is_zero()
                     || (is_timestamp_fresh(
@@ -174,14 +183,19 @@ fn aggregate_snapshot_bucket(
                         now,
                         snapshot_max_age_secs(*interval),
                     ) && s.ticker.mark_price_is_fresh(now)))
-        }) {
-            latest.map(|(s, _)| s.account.margin_balance)
-        } else {
-            None
-        }
-    } else {
-        latest.map(|(s, _)| s.account.margin_balance)
-    };
+        });
+    (latest, latest.filter(|_| paper_valued))
+}
+
+fn aggregate_snapshot_bucket(
+    mode: TradingMode,
+    asset: String,
+    account_id: Option<String>,
+    snapshots: Vec<(&BotSnapshot, u64)>,
+    now: DateTime<Utc>,
+) -> SnapshotGroup {
+    let (_, valued) = select_valued_bucket_account(mode, &asset, &snapshots, now);
+    let equity = valued.map(|acc| acc.margin_balance);
     let mut long = Decimal::ZERO;
     let mut short = Decimal::ZERO;
     let mut valid = true;
@@ -227,6 +241,74 @@ fn aggregate_snapshot_bucket(
     }
 }
 
+fn build_daily_position_item(
+    snapshot: &BotSnapshot,
+    sync_interval: u64,
+    now: DateTime<Utc>,
+) -> DailyPositionItem {
+    let mode = snapshot.mode;
+    let position_fresh = mode == TradingMode::Paper
+        || snapshot
+            .position
+            .update_time
+            .is_some_and(|at| is_timestamp_fresh(at, now, snapshot_max_age_secs(sync_interval)));
+    let mark_fresh = snapshot.ticker.mark_price_is_fresh(now);
+    let mark_price = mark_fresh.then_some(snapshot.ticker.mark_price);
+    let size = snapshot.position.size;
+    let (position_amount, unrealized_pnl) = if !position_fresh {
+        (None, None)
+    } else if size.is_zero() {
+        (Some(Decimal::ZERO), Some(Decimal::ZERO))
+    } else if let Some(mark) = mark_price {
+        (
+            size.abs().checked_mul(mark),
+            Some(snapshot.position.unrealized_pnl),
+        )
+    } else {
+        (None, None)
+    };
+    DailyPositionItem {
+        symbol: snapshot.symbol.clone(),
+        mode,
+        direction: snapshot.grid_config.direction,
+        status: snapshot.status,
+        size,
+        entry_price: snapshot.position.entry_price,
+        mark_price,
+        position_amount,
+        unrealized_pnl,
+    }
+}
+
+fn build_daily_account_group(
+    mode: TradingMode,
+    asset: String,
+    account_id: Option<String>,
+    items: &[(&BotSnapshot, u64)],
+    now: DateTime<Utc>,
+) -> DailyAccountGroup {
+    let (latest, valued) = select_valued_bucket_account(mode, &asset, items, now);
+    let wallet = if mode == TradingMode::Paper {
+        items
+            .iter()
+            .all(|(s, _)| s.account.asset == asset)
+            .then(|| latest.map(|acc| acc.total_wallet_balance))
+            .flatten()
+    } else {
+        valued.map(|acc| acc.total_wallet_balance)
+    };
+    DailyAccountGroup {
+        mode,
+        asset,
+        account_id,
+        count: items.len(),
+        equity: valued.map(|acc| acc.margin_balance),
+        available: valued.map(|acc| acc.available_balance),
+        wallet,
+        unrealized: valued.map(|acc| acc.unrealized_profit),
+    }
+}
+
 pub(crate) fn build_daily_snapshot(
     date: String,
     window_start: DateTime<Utc>,
@@ -242,51 +324,17 @@ pub(crate) fn build_daily_snapshot(
     let mut pair_positions = Vec::with_capacity(snapshots.len());
 
     for (snapshot, sync_interval, account_id) in snapshots {
-        let mode = snapshot.mode;
+        let mode_str = snapshot.mode.as_str();
         let asset = resolve_snapshot_asset(&snapshot.symbol, &snapshot.account.asset);
         account_buckets
-            .entry((
-                mode.as_str().to_owned(),
-                asset.to_owned(),
-                account_id.clone(),
-            ))
+            .entry((mode_str.to_owned(), asset.to_owned(), account_id.clone()))
             .or_default()
             .push((snapshot, *sync_interval));
         position_buckets
-            .entry((mode.as_str().to_owned(), asset.to_owned()))
+            .entry((mode_str.to_owned(), asset.to_owned()))
             .or_default()
             .push((snapshot, *sync_interval));
-
-        let position_fresh = mode == TradingMode::Paper
-            || snapshot.position.update_time.is_some_and(|at| {
-                is_timestamp_fresh(at, now, snapshot_max_age_secs(*sync_interval))
-            });
-        let mark_fresh = snapshot.ticker.mark_price_is_fresh(now);
-        let mark_price = mark_fresh.then_some(snapshot.ticker.mark_price);
-        let size = snapshot.position.size;
-        let (position_amount, unrealized_pnl) = if !position_fresh {
-            (None, None)
-        } else if size.is_zero() {
-            (Some(Decimal::ZERO), Some(Decimal::ZERO))
-        } else if let Some(mark) = mark_price {
-            (
-                size.abs().checked_mul(mark),
-                Some(snapshot.position.unrealized_pnl),
-            )
-        } else {
-            (None, None)
-        };
-        pair_positions.push(DailyPositionItem {
-            symbol: snapshot.symbol.clone(),
-            mode,
-            direction: snapshot.grid_config.direction,
-            status: snapshot.status,
-            size,
-            entry_price: snapshot.position.entry_price,
-            mark_price,
-            position_amount,
-            unrealized_pnl,
-        });
+        pair_positions.push(build_daily_position_item(snapshot, *sync_interval, now));
     }
     pair_positions.sort_by(|a, b| {
         a.mode
@@ -294,58 +342,18 @@ pub(crate) fn build_daily_snapshot(
             .cmp(b.mode.as_str())
             .then_with(|| a.symbol.cmp(&b.symbol))
     });
-
     let accounts = account_buckets
         .into_iter()
         .map(|((mode_str, asset, account_id), items)| {
-            let mode = TradingMode::from_db(&mode_str);
-            let count = items.len();
-            let latest = items
-                .iter()
-                .filter(|(s, interval)| {
-                    s.account.asset == asset
-                        && (mode == TradingMode::Paper
-                            || is_timestamp_fresh(
-                                s.account.update_time,
-                                now,
-                                snapshot_max_age_secs(*interval),
-                            ))
-                })
-                .max_by_key(|(s, _)| s.account.update_time)
-                .copied();
-            let paper_valued = mode != TradingMode::Paper
-                || items.iter().all(|(s, interval)| {
-                    s.account.asset == asset
-                        && (s.position.size.is_zero()
-                            || (is_timestamp_fresh(
-                                s.account.update_time,
-                                now,
-                                snapshot_max_age_secs(*interval),
-                            ) && s.ticker.mark_price_is_fresh(now)))
-                });
-            let valued = latest.filter(|_| paper_valued).map(|(s, _)| &s.account);
-            let wallet = if mode == TradingMode::Paper {
-                items
-                    .iter()
-                    .all(|(s, _)| s.account.asset == asset)
-                    .then(|| latest.map(|(s, _)| s.account.total_wallet_balance))
-                    .flatten()
-            } else {
-                valued.map(|acc| acc.total_wallet_balance)
-            };
-            DailyAccountGroup {
-                mode,
+            build_daily_account_group(
+                TradingMode::from_db(&mode_str),
                 asset,
                 account_id,
-                count,
-                equity: valued.map(|acc| acc.margin_balance),
-                available: valued.map(|acc| acc.available_balance),
-                wallet,
-                unrealized: valued.map(|acc| acc.unrealized_profit),
-            }
+                &items,
+                now,
+            )
         })
         .collect();
-
     let positions = position_buckets
         .into_iter()
         .map(|((mode_str, asset), items)| {
@@ -366,7 +374,6 @@ pub(crate) fn build_daily_snapshot(
             }
         })
         .collect();
-
     DailySnapshot {
         date,
         window_start,
@@ -455,9 +462,8 @@ fn live_account_identity(
     mode: TradingMode,
     exchange: &crate::config::ExchangeConfig,
 ) -> Option<[u8; 32]> {
-    (mode == TradingMode::Live).then(|| {
-        crate::exchange::client::BinanceFuturesClient::configured_account_identity(exchange)
-    })
+    (mode == TradingMode::Live)
+        .then(|| crate::exchange::BinanceFuturesClient::configured_account_identity(exchange))
 }
 
 async fn resolve_account_id(

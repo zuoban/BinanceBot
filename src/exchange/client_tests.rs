@@ -47,7 +47,7 @@ async fn backlog_retention_survives_long_rounds_and_shrinking_count() {
     );
     client.note_pnl_reconcile_backlog(33);
     client.note_pnl_reconcile_backlog(1);
-    client.fill_waiters.lock().unwrap().push_back((
+    client.fill_reconciler.lock().unwrap().waiters.push_back((
         ("BTCUSDT".into(), 1),
         Instant::now() - Duration::from_secs(11 * 60),
     ));
@@ -56,13 +56,24 @@ async fn backlog_retention_survives_long_rounds_and_shrinking_count() {
         .await
         .unwrap_err();
     assert!(!err.to_string().contains("waiting"));
-    assert_eq!(client.fill_waiters.lock().unwrap().front().unwrap().0 .1, 1);
+    assert_eq!(
+        client
+            .fill_reconciler
+            .lock()
+            .unwrap()
+            .waiters
+            .front()
+            .unwrap()
+            .0
+             .1,
+        1
+    );
 
     client.note_pnl_reconcile_backlog(2000);
     {
-        let mut cache = client.fill_progress.lock().unwrap();
+        let mut state = client.fill_reconciler.lock().unwrap();
         for id in 10..18 {
-            cache.insert(
+            state.progress.insert(
                 ("ETHUSDT".into(), id),
                 FillCacheEntry {
                     progress: Arc::new(tokio::sync::Mutex::new(FillProgress::new(Decimal::ONE))),
@@ -77,16 +88,20 @@ async fn backlog_retention_survives_long_rounds_and_shrinking_count() {
         .await
         .is_err());
     assert!(client
-        .fill_progress
+        .fill_reconciler
         .lock()
         .unwrap()
+        .progress
         .contains_key(&("ETHUSDT".into(), 10)));
 
     // Pending==0 preserves elevated retention while progress/waiters remain, then resets to 600s.
     client.note_pnl_reconcile_backlog(0);
     assert!(client.fill_retention_seconds.load(Ordering::Relaxed) > 600);
-    client.fill_progress.lock().unwrap().clear();
-    client.fill_waiters.lock().unwrap().clear();
+    {
+        let mut state = client.fill_reconciler.lock().unwrap();
+        state.progress.clear();
+        state.waiters.clear();
+    }
     client.note_pnl_reconcile_backlog(0);
     assert_eq!(client.fill_retention_seconds.load(Ordering::Relaxed), 600);
 }
@@ -111,12 +126,12 @@ async fn inactive_waiter_is_skipped_but_keeps_its_queue_position() {
         BinanceFuturesClient::with_base_url(&crate::config::AppConfig::default().exchange, url);
     client.note_pnl_reconcile_backlog(33);
     {
-        let mut waiters = client.fill_waiters.lock().unwrap();
-        waiters.push_back((
+        let mut state = client.fill_reconciler.lock().unwrap();
+        state.waiters.push_back((
             ("BTCUSDT".into(), 1),
             Instant::now() - Duration::from_secs(181),
         ));
-        waiters.push_back((
+        state.waiters.push_back((
             ("BTCUSDT".into(), 2),
             Instant::now() - Duration::from_secs(60),
         ));
@@ -151,7 +166,7 @@ async fn inactive_waiter_is_skipped_but_keeps_its_queue_position() {
             .len(),
         1
     );
-    assert!(client.fill_waiters.lock().unwrap().is_empty());
+    assert!(client.fill_reconciler.lock().unwrap().waiters.is_empty());
     server.abort();
 }
 
@@ -162,9 +177,9 @@ async fn full_inactive_waiting_queue_admits_a_new_order() {
         "http://127.0.0.1:1".into(),
     );
     {
-        let mut waiters = client.fill_waiters.lock().unwrap();
+        let mut state = client.fill_reconciler.lock().unwrap();
         for id in 1..=1024 {
-            waiters.push_back((
+            state.waiters.push_back((
                 ("BTCUSDT".into(), id),
                 Instant::now() - Duration::from_secs(181),
             ));
@@ -177,9 +192,9 @@ async fn full_inactive_waiting_queue_admits_a_new_order() {
         .to_string();
     assert!(!error.contains("waiting"));
     assert!(!error.contains("queue is full"));
-    let waiters = client.fill_waiters.lock().unwrap();
-    assert_eq!(waiters.len(), 1023);
-    assert_eq!(waiters.front().unwrap().0 .1, 2);
+    let state = client.fill_reconciler.lock().unwrap();
+    assert_eq!(state.waiters.len(), 1023);
+    assert_eq!(state.waiters.front().unwrap().0 .1, 2);
 }
 
 #[tokio::test]
@@ -215,7 +230,7 @@ async fn failed_progress_does_not_starve_a_new_order() {
     let mut client =
         BinanceFuturesClient::with_base_url(&crate::config::AppConfig::default().exchange, url);
     {
-        let mut cache = client.fill_progress.lock().unwrap();
+        let mut state = client.fill_reconciler.lock().unwrap();
         for order_id in 1..=8 {
             let fill: ExecutionFill = serde_json::from_value(json!({ "id": 1, "orderId": order_id, "qty": "1", "realizedPnl": "1", "commission": "0.1", "commissionAsset": "USDT", "maker": true })).unwrap();
             let mut progress = FillProgress::new(Decimal::from(2));
@@ -223,7 +238,7 @@ async fn failed_progress_does_not_starve_a_new_order() {
             progress.quantity = Decimal::ONE;
             progress.from_id = Some(2);
             progress.restarted = true;
-            cache.insert(
+            state.progress.insert(
                 ("BTCUSDT".into(), order_id),
                 FillCacheEntry {
                     progress: Arc::new(tokio::sync::Mutex::new(progress)),
@@ -262,9 +277,9 @@ async fn failed_progress_does_not_starve_a_new_order() {
         1
     );
     {
-        let cache = client.fill_progress.lock().unwrap();
-        assert!(!cache.contains_key(&("BTCUSDT".into(), 1)));
-        assert!((2..=8).all(|id| cache.contains_key(&("BTCUSDT".into(), id))));
+        let state = client.fill_reconciler.lock().unwrap();
+        assert!(!state.progress.contains_key(&("BTCUSDT".into(), 1)));
+        assert!((2..=8).all(|id| state.progress.contains_key(&("BTCUSDT".into(), id))));
     }
     // The evicted order starts over, rather than combining incomplete history.
     assert!(client
@@ -303,7 +318,7 @@ async fn abandoned_cursor_is_reclaimed_after_backlog_retention() {
         .fill_retention_seconds
         .store(3 * 60 * 60, Ordering::Relaxed);
     {
-        let mut cache = client.fill_progress.lock().unwrap();
+        let mut state = client.fill_reconciler.lock().unwrap();
         for order_id in 1..=8 {
             let fill: ExecutionFill = serde_json::from_value(json!({
                 "id": 1, "orderId": order_id, "qty": "1", "realizedPnl": "1",
@@ -315,7 +330,7 @@ async fn abandoned_cursor_is_reclaimed_after_backlog_retention() {
             progress.quantity = Decimal::ONE;
             progress.from_id = Some(2);
             progress.restarted = true;
-            cache.insert(
+            state.progress.insert(
                 ("BTCUSDT".into(), order_id),
                 FillCacheEntry {
                     progress: Arc::new(tokio::sync::Mutex::new(progress)),
@@ -336,9 +351,10 @@ async fn abandoned_cursor_is_reclaimed_after_backlog_retention() {
         .to_string()
         .contains("waiting"));
     client
-        .fill_progress
+        .fill_reconciler
         .lock()
         .unwrap()
+        .progress
         .get_mut(&("BTCUSDT".into(), 1))
         .unwrap()
         .last_used = Instant::now() - Duration::from_secs(3 * 60 * 60 + 1);
@@ -350,9 +366,9 @@ async fn abandoned_cursor_is_reclaimed_after_backlog_retention() {
             .len(),
         1
     );
-    let cache = client.fill_progress.lock().unwrap();
-    assert!(!cache.contains_key(&("BTCUSDT".into(), 1)));
-    assert!((2..=8).all(|id| cache.contains_key(&("BTCUSDT".into(), id))));
+    let state = client.fill_reconciler.lock().unwrap();
+    assert!(!state.progress.contains_key(&("BTCUSDT".into(), 1)));
+    assert!((2..=8).all(|id| state.progress.contains_key(&("BTCUSDT".into(), id))));
     server.abort();
 }
 
@@ -460,7 +476,7 @@ async fn local_budget_and_cancelled_requests_do_not_mark_progress_failed() {
     use serde_json::json;
 
     fn populate(client: &BinanceFuturesClient) {
-        let mut cache = client.fill_progress.lock().unwrap();
+        let mut state = client.fill_reconciler.lock().unwrap();
         for order_id in 1..=8 {
             let fill: ExecutionFill = serde_json::from_value(json!({
                 "id": 1, "orderId": order_id, "qty": "1", "realizedPnl": "1",
@@ -472,7 +488,7 @@ async fn local_budget_and_cancelled_requests_do_not_mark_progress_failed() {
             progress.quantity = Decimal::ONE;
             progress.from_id = Some(2);
             progress.restarted = true;
-            cache.insert(
+            state.progress.insert(
                 ("BTCUSDT".into(), order_id),
                 FillCacheEntry {
                     progress: Arc::new(tokio::sync::Mutex::new(progress)),
@@ -500,7 +516,7 @@ async fn local_budget_and_cancelled_requests_do_not_mark_progress_failed() {
             .contains("budget"));
     }
     assert_eq!(
-        limited.fill_progress.lock().unwrap()[&("BTCUSDT".into(), 1)].stalled_attempts,
+        limited.fill_reconciler.lock().unwrap().progress[&("BTCUSDT".into(), 1)].stalled_attempts,
         0
     );
     assert!(limited
@@ -544,7 +560,7 @@ async fn local_budget_and_cancelled_requests_do_not_mark_progress_failed() {
         assert!(task.await.unwrap_err().is_cancelled());
     }
     assert_eq!(
-        client.fill_progress.lock().unwrap()[&("BTCUSDT".into(), 1)].stalled_attempts,
+        client.fill_reconciler.lock().unwrap().progress[&("BTCUSDT".into(), 1)].stalled_attempts,
         0
     );
     assert!(client
@@ -566,7 +582,7 @@ async fn busy_caller_cannot_interrupt_cleanup_or_failure_accounting() {
     );
     let key = ("BTCUSDT".to_owned(), 1);
     let shared = Arc::new(tokio::sync::Mutex::new(FillProgress::new(Decimal::from(2))));
-    client.fill_progress.lock().unwrap().insert(
+    client.fill_reconciler.lock().unwrap().progress.insert(
         key.clone(),
         FillCacheEntry {
             progress: Arc::clone(&shared),
@@ -575,7 +591,7 @@ async fn busy_caller_cannot_interrupt_cleanup_or_failure_accounting() {
         },
     );
     let cleanup = FillCacheCleanup {
-        cache: &client.fill_progress,
+        reconciler: &client.fill_reconciler,
         key: key.clone(),
         shared: Arc::clone(&shared),
         progress: Arc::clone(&shared).try_lock_owned().unwrap(),
@@ -589,7 +605,12 @@ async fn busy_caller_cannot_interrupt_cleanup_or_failure_accounting() {
         .to_string()
         .contains("already in progress"));
     drop(cleanup);
-    assert!(!client.fill_progress.lock().unwrap().contains_key(&key));
+    assert!(!client
+        .fill_reconciler
+        .lock()
+        .unwrap()
+        .progress
+        .contains_key(&key));
 
     let mut progress = FillProgress::new(Decimal::from(2));
     let fill: ExecutionFill = serde_json::from_value(json!({
@@ -602,7 +623,7 @@ async fn busy_caller_cannot_interrupt_cleanup_or_failure_accounting() {
     progress.from_id = Some(2);
     progress.restarted = true;
     let shared = Arc::new(tokio::sync::Mutex::new(progress));
-    client.fill_progress.lock().unwrap().insert(
+    client.fill_reconciler.lock().unwrap().progress.insert(
         key.clone(),
         FillCacheEntry {
             progress: Arc::clone(&shared),
@@ -611,7 +632,7 @@ async fn busy_caller_cannot_interrupt_cleanup_or_failure_accounting() {
         },
     );
     let cleanup = FillCacheCleanup {
-        cache: &client.fill_progress,
+        reconciler: &client.fill_reconciler,
         key: key.clone(),
         shared: Arc::clone(&shared),
         progress: Arc::clone(&shared).try_lock_owned().unwrap(),
@@ -626,26 +647,26 @@ async fn busy_caller_cannot_interrupt_cleanup_or_failure_accounting() {
         .contains("already in progress"));
     drop(cleanup);
     assert_eq!(
-        client.fill_progress.lock().unwrap()[&key].stalled_attempts,
+        client.fill_reconciler.lock().unwrap().progress[&key].stalled_attempts,
         1
     );
 }
 
 #[test]
 fn old_cleanup_does_not_remove_replacement_progress() {
-    let cache = std::sync::Mutex::new(std::collections::HashMap::new());
+    let reconciler = std::sync::Mutex::new(FillReconcilerState::default());
     let key = ("BTCUSDT".to_owned(), 1);
     let old = Arc::new(tokio::sync::Mutex::new(FillProgress::new(Decimal::ONE)));
     let replacement = Arc::new(tokio::sync::Mutex::new(FillProgress::new(Decimal::ONE)));
     let cleanup = FillCacheCleanup {
-        cache: &cache,
+        reconciler: &reconciler,
         key: key.clone(),
         progress: Arc::clone(&old).try_lock_owned().unwrap(),
         shared: old,
         initial_advances: 0,
         failed_query: false,
     };
-    cache.lock().unwrap().insert(
+    reconciler.lock().unwrap().progress.insert(
         key.clone(),
         FillCacheEntry {
             progress: Arc::clone(&replacement),
@@ -655,7 +676,7 @@ fn old_cleanup_does_not_remove_replacement_progress() {
     );
     drop(cleanup);
     assert!(Arc::ptr_eq(
-        &cache.lock().unwrap()[&key].progress,
+        &reconciler.lock().unwrap().progress[&key].progress,
         &replacement
     ));
 }
@@ -1071,4 +1092,22 @@ async fn reactive_invalid_timestamp_resyncs_and_throttles_repeat_requests() {
     assert_eq!(time_hits.load(Ordering::SeqCst), 1);
 
     server.abort();
+}
+
+#[test]
+fn reconfig_preserves_clock_offset_and_mainnet_client_seeds_shared_offset() {
+    let mut config = crate::config::AppConfig::default().exchange;
+    let client = BinanceFuturesClient::with_base_url(&config, "http://127.0.0.1:1".into());
+    client.time_offset_ms.store(-4_321, Ordering::SeqCst);
+    client.last_time_sync_ms.store(98_765, Ordering::SeqCst);
+    config.recv_window = 9_000;
+    let rebuilt = client.reconfig(&config);
+    assert_eq!(rebuilt.time_offset_ms.load(Ordering::SeqCst), -4_321);
+    assert_eq!(rebuilt.last_time_sync_ms.load(Ordering::SeqCst), 98_765);
+
+    let previous_mainnet = MAINNET_TIME_OFFSET_MS.swap(2_500, Ordering::SeqCst);
+    let mainnet_client = BinanceFuturesClient::new(&config);
+    let seeded = mainnet_client.time_offset_ms.load(Ordering::SeqCst);
+    MAINNET_TIME_OFFSET_MS.store(previous_mainnet, Ordering::SeqCst);
+    assert_eq!(seeded, 2_500);
 }

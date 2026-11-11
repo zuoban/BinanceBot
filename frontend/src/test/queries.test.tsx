@@ -13,7 +13,7 @@ class FakeSocket {
   onmessage?: (event: { data: string }) => void;
   onclose?: () => void;
   onerror?: () => void;
-  constructor(public url: string) { FakeSocket.instances.push(this); }
+  constructor(public url: string, public protocols?: string | string[]) { FakeSocket.instances.push(this); }
   close() { this.onclose?.(); }
   sendSnapshot(symbol: string, price: string) {
     const data = snapshot(symbol); data.ticker.last_price = price;
@@ -301,4 +301,51 @@ it('ignores non-object JSON frames and detaches socket handlers before closing o
   };
   unmount();
   expect(handlersClearedBeforeClose).toBe(true);
+});
+
+it('does not mark fresh live accounts stale when browser clock is ahead of server generated_at', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2025-01-01T00:01:00Z'));
+  vi.stubGlobal('WebSocket', FakeSocket);
+  const lagged = { generated_at: '2025-01-01T00:00:00Z', pairs: [{ snapshot: snapshot(), mode: 'PAPER' }] };
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ success: true, data: lagged }), { status: 200 })));
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const wrapper = ({ children }: { children: React.ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+  const { result, unmount } = renderHook(() => useLiveAccounts(), { wrapper });
+  try {
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(result.current.stale).toBe(false);
+    expect(result.current.accounts[0].account_observation_stale).toBe(false);
+  } finally {
+    unmount();
+    client.clear();
+    vi.useRealTimers();
+  }
+});
+
+it('omits malformed sessionStorage tokens from WebSocket subprotocols and survives synchronous WebSocket errors', async () => {
+  vi.useFakeTimers();
+  tokenStore.set('corrupted token with spaces');
+  vi.stubGlobal('WebSocket', FakeSocket);
+  const first = renderHook(() => useSocket('/api/accounts/ws', 'accounts', vi.fn()));
+  expect(FakeSocket.instances[0].protocols).toEqual(['auth']);
+  first.unmount();
+
+  let calls = 0;
+  vi.stubGlobal('WebSocket', class extends FakeSocket {
+    constructor(url: string, protocols?: string | string[]) {
+      if (calls++ === 0) throw new DOMException('Invalid subprotocol', 'SyntaxError');
+      super(url, protocols);
+    }
+  });
+  const second = renderHook(() => useSocket('/api/accounts/ws', 'accounts', vi.fn()));
+  try {
+    expect(FakeSocket.instances).toHaveLength(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(FakeSocket.instances).toHaveLength(2);
+  } finally {
+    second.unmount();
+    tokenStore.clear();
+    vi.useRealTimers();
+  }
 });

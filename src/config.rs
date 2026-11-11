@@ -3,6 +3,9 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub(crate) struct ConfigVersionConflict(pub &'static str);
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppConfig {
     pub exchange: ExchangeConfig,
@@ -35,19 +38,110 @@ pub struct TradingPairConfig {
     pub telegram: Option<TelegramConfig>,
 }
 
-/// Legacy per-pair connection fields, read only to migrate older configurations.
-#[derive(Clone, Default, Serialize, Deserialize)]
-pub struct PairExchangeConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub api_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub api_secret: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recv_window: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sync_interval_secs: Option<u64>,
+mod internal {
+    use super::{redact_optional_secret, redact_secret, AppConfig, TelegramConfig};
+    use rust_decimal::Decimal;
+    use serde::{Deserialize, Serialize};
+
+    /// Legacy per-pair connection fields, read only to migrate older configurations.
+    #[derive(Clone, Default, Serialize, Deserialize)]
+    pub struct PairExchangeConfig {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub(crate) api_key: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub(crate) api_secret: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub(crate) recv_window: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub(crate) sync_interval_secs: Option<u64>,
+    }
+
+    impl std::fmt::Debug for PairExchangeConfig {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            let Self {
+                api_key,
+                api_secret,
+                recv_window,
+                sync_interval_secs,
+            } = self;
+            f.debug_struct("PairExchangeConfig")
+                .field("api_key", &redact_optional_secret(api_key))
+                .field("api_secret", &redact_optional_secret(api_secret))
+                .field("recv_window", recv_window)
+                .field("sync_interval_secs", sync_interval_secs)
+                .finish()
+        }
+    }
+
+    /// Shared connection and notification settings, without a pair's symbol or mode.
+    #[derive(Clone, PartialEq, Serialize)]
+    pub struct GlobalConfig {
+        pub(crate) api_key: String,
+        pub(crate) api_secret: String,
+        pub(crate) recv_window: u64,
+        pub(crate) sync_interval_secs: u64,
+        pub(crate) telegram: TelegramConfig,
+        pub(crate) global_max_position_notional: Option<Decimal>,
+        pub(crate) pause_on_zero_available_margin: bool,
+        pub(crate) min_available_margin_pct: Option<Decimal>,
+    }
+
+    impl GlobalConfig {
+        pub(crate) fn from_app(config: &AppConfig) -> Self {
+            Self {
+                api_key: config.exchange.api_key.clone(),
+                api_secret: config.exchange.api_secret.clone(),
+                recv_window: config.exchange.recv_window,
+                sync_interval_secs: config.exchange.sync_interval_secs,
+                telegram: config.telegram.clone(),
+                global_max_position_notional: config.global_max_position_notional,
+                pause_on_zero_available_margin: config.pause_on_zero_available_margin,
+                min_available_margin_pct: config.min_available_margin_pct,
+            }
+        }
+
+        pub(crate) fn apply_to(&self, config: &mut AppConfig) {
+            config.exchange.api_key = self.api_key.clone();
+            config.exchange.api_secret = self.api_secret.clone();
+            config.exchange.recv_window = self.recv_window;
+            config.exchange.sync_interval_secs = self.sync_interval_secs;
+            config.telegram = self.telegram.clone();
+            config.global_max_position_notional = self.global_max_position_notional;
+            config.pause_on_zero_available_margin = self.pause_on_zero_available_margin;
+            config.min_available_margin_pct = self.min_available_margin_pct;
+        }
+    }
+
+    impl std::fmt::Debug for GlobalConfig {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            let Self {
+                api_key,
+                api_secret,
+                recv_window,
+                sync_interval_secs,
+                telegram,
+                global_max_position_notional,
+                pause_on_zero_available_margin,
+                min_available_margin_pct,
+            } = self;
+            f.debug_struct("GlobalConfig")
+                .field("api_key", &redact_secret(api_key))
+                .field("api_secret", &redact_secret(api_secret))
+                .field("recv_window", recv_window)
+                .field("sync_interval_secs", sync_interval_secs)
+                .field("telegram", telegram)
+                .field("global_max_position_notional", global_max_position_notional)
+                .field(
+                    "pause_on_zero_available_margin",
+                    pause_on_zero_available_margin,
+                )
+                .field("min_available_margin_pct", min_available_margin_pct)
+                .finish()
+        }
+    }
 }
 
+pub(crate) use internal::{GlobalConfig, PairExchangeConfig};
 impl TradingPairConfig {
     pub fn new(symbol: String) -> Self {
         Self {
@@ -58,7 +152,7 @@ impl TradingPairConfig {
         }
     }
 
-    pub fn update_from(&mut self, config: &AppConfig) {
+    pub(crate) fn update_from(&mut self, config: &AppConfig) {
         self.grid = Some(config.grid.clone());
         self.exchange = PairExchangeConfig::default();
         self.telegram = None;
@@ -73,45 +167,6 @@ pub struct TelegramConfig {
     pub bot_token: String,
     #[serde(default)]
     pub chat_id: String,
-}
-
-/// Shared connection and notification settings, without a pair's symbol or mode.
-#[derive(Clone, PartialEq, serde::Serialize)]
-pub struct GlobalConfig {
-    pub api_key: String,
-    pub api_secret: String,
-    pub recv_window: u64,
-    pub sync_interval_secs: u64,
-    pub telegram: TelegramConfig,
-    pub global_max_position_notional: Option<Decimal>,
-    pub pause_on_zero_available_margin: bool,
-    pub min_available_margin_pct: Option<Decimal>,
-}
-
-impl GlobalConfig {
-    pub fn from_app(config: &AppConfig) -> Self {
-        Self {
-            api_key: config.exchange.api_key.clone(),
-            api_secret: config.exchange.api_secret.clone(),
-            recv_window: config.exchange.recv_window,
-            sync_interval_secs: config.exchange.sync_interval_secs,
-            telegram: config.telegram.clone(),
-            global_max_position_notional: config.global_max_position_notional,
-            pause_on_zero_available_margin: config.pause_on_zero_available_margin,
-            min_available_margin_pct: config.min_available_margin_pct,
-        }
-    }
-
-    pub fn apply_to(&self, config: &mut AppConfig) {
-        config.exchange.api_key = self.api_key.clone();
-        config.exchange.api_secret = self.api_secret.clone();
-        config.exchange.recv_window = self.recv_window;
-        config.exchange.sync_interval_secs = self.sync_interval_secs;
-        config.telegram = self.telegram.clone();
-        config.global_max_position_notional = self.global_max_position_notional;
-        config.pause_on_zero_available_margin = self.pause_on_zero_available_margin;
-        config.min_available_margin_pct = self.min_available_margin_pct;
-    }
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -140,23 +195,6 @@ pub(crate) fn redact_optional_secret(value: &Option<String>) -> Option<&'static 
     value.as_deref().map(redact_secret)
 }
 
-impl std::fmt::Debug for PairExchangeConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Self {
-            api_key,
-            api_secret,
-            recv_window,
-            sync_interval_secs,
-        } = self;
-        f.debug_struct("PairExchangeConfig")
-            .field("api_key", &redact_optional_secret(api_key))
-            .field("api_secret", &redact_optional_secret(api_secret))
-            .field("recv_window", recv_window)
-            .field("sync_interval_secs", sync_interval_secs)
-            .finish()
-    }
-}
-
 impl std::fmt::Debug for TelegramConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let Self {
@@ -168,34 +206,6 @@ impl std::fmt::Debug for TelegramConfig {
             .field("enabled", enabled)
             .field("bot_token", &redact_secret(bot_token))
             .field("chat_id", chat_id)
-            .finish()
-    }
-}
-
-impl std::fmt::Debug for GlobalConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Self {
-            api_key,
-            api_secret,
-            recv_window,
-            sync_interval_secs,
-            telegram,
-            global_max_position_notional,
-            pause_on_zero_available_margin,
-            min_available_margin_pct,
-        } = self;
-        f.debug_struct("GlobalConfig")
-            .field("api_key", &redact_secret(api_key))
-            .field("api_secret", &redact_secret(api_secret))
-            .field("recv_window", recv_window)
-            .field("sync_interval_secs", sync_interval_secs)
-            .field("telegram", telegram)
-            .field("global_max_position_notional", global_max_position_notional)
-            .field(
-                "pause_on_zero_available_margin",
-                pause_on_zero_available_margin,
-            )
-            .field("min_available_margin_pct", min_available_margin_pct)
             .finish()
     }
 }
@@ -456,7 +466,7 @@ impl AppConfig {
         Ok(())
     }
 
-    pub fn summary(&self) -> GridConfigSummary {
+    pub(crate) fn summary(&self) -> GridConfigSummary {
         GridConfigSummary {
             symbol: self.exchange.symbol.clone(),
             direction: self.grid.direction,
@@ -550,7 +560,7 @@ impl ExchangeConfig {
         }
     }
 
-    pub fn is_paper(&self) -> bool {
+    pub(crate) fn is_paper(&self) -> bool {
         self.trading_mode() == crate::types::TradingMode::Paper
     }
 

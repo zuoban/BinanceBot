@@ -4,7 +4,8 @@ import { CheckOutlined, CopyOutlined, DownloadOutlined } from '@ant-design/icons
 import { Link, useInRouterContext } from 'react-router-dom';
 import type { ColumnsType } from 'antd/es/table';
 import { pairRoute } from '../lib/api';
-import { beijingDay, number, price, quantity, relativeTime, time } from '../lib/format';
+import { useMountedRef } from '../lib/asyncGuard';
+import { beijingDay, number, numeric, price, quantity, relativeTime, time } from '../lib/format';
 import { priceDiffPercent } from '../lib/gridPreview';
 import { useNow } from '../lib/useNow';
 import type { Log, Order, Trade } from '../lib/types';
@@ -49,12 +50,13 @@ function Copyable({ value, children }: { value: string; children: React.ReactNod
   const { message } = App.useApp();
   const [copied, setCopied] = useState(false);
   const timer = useRef<number | null>(null);
-  useEffect(() => () => { if (timer.current !== null) window.clearTimeout(timer.current); }, []);
+  const mounted = useMountedRef(() => { if (timer.current !== null) window.clearTimeout(timer.current); });
   return <button type="button" className={`copyable${copied ? ' copyable-copied' : ''}`} title={copied ? '已复制' : '点击复制'} aria-label={`复制 ${value}`} onClick={() => void copyText(value).then(ok => {
+    if (!mounted.current) return;
     if (ok) {
       setCopied(true);
       if (timer.current !== null) window.clearTimeout(timer.current);
-      timer.current = window.setTimeout(() => setCopied(false), 1500);
+      timer.current = window.setTimeout(() => { if (mounted.current) setCopied(false); }, 1500);
       void message.success(`已复制 ${value}`);
     } else {
       void message.error('复制失败，请手动选择文本');
@@ -99,7 +101,7 @@ function ResponsiveTableSection({ hint, desktop, mobileClassName = 'table-mobile
 }
 const orderColumns: ColumnsType<Order> = [
   { title: '方向', dataIndex: 'side', render: side, width: 90, fixed: 'left' },
-  { title: '价格', align: 'right', className: 'table-numeric', dataIndex: 'price', render: (v: string) => <Copyable value={v}>{price(v)}</Copyable>, sorter: (a, b) => Number(a.price) - Number(b.price) },
+  { title: '价格', align: 'right', className: 'table-numeric', dataIndex: 'price', render: (v: string) => <Copyable value={v}>{price(v)}</Copyable>, sorter: (a, b) => (numeric(a.price) ?? -Infinity) - (numeric(b.price) ?? -Infinity) },
   { title: '距标记价格', align: 'right', className: 'table-numeric', render: (_, o) => <OrderMarkDiff orderPrice={o.price} /> },
   { title: '数量', align: 'right', className: 'table-numeric', dataIndex: 'quantity', render: quantity },
   { title: '金额', align: 'right', className: 'table-numeric', dataIndex: 'amount_usdc', render: (v: string) => number(v) },

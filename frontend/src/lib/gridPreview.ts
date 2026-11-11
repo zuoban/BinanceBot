@@ -11,7 +11,7 @@ const floorDiv = (a: bigint, b: bigint) => a / b;
 const ceilDiv = (a: bigint, b: bigint) => (a + b - 1n) / b;
 
 interface GridPreviewInput { reference: unknown; interval: unknown; buyWindow: unknown; sellWindow: unknown; min?: unknown; max?: unknown }
-export interface GridPreview { buys: string[]; sells: string[]; buyClipped: boolean; sellClipped: boolean }
+interface GridPreview { buys: string[]; sells: string[]; buyClipped: boolean; sellClipped: boolean }
 
 export function gridPreview(input: GridPreviewInput): GridPreview | null {
   const reference = parse(input.reference), interval = parse(input.interval);

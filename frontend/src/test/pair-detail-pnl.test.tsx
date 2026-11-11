@@ -4,6 +4,7 @@ import { beforeEach, expect, it, vi } from 'vitest';
 import PairDetail from '../pages/PairDetail';
 import { Pnl } from '../components/Common';
 import { pair, snapshot } from './fixtures';
+import type * as Queries from '../lib/queries';
 import type { Pair, Snapshot } from '../lib/types';
 
 const state = vi.hoisted(() => ({
@@ -12,10 +13,14 @@ const state = vi.hoisted(() => ({
   pairsPending: false,
   pairsFetching: false,
 }));
-vi.mock('../lib/queries', () => ({
-  usePairs: () => ({ data: state.pairs, isPending: state.pairsPending, isFetching: state.pairsFetching }),
-  usePairSnapshot: () => ({ data: state.data, live: true, stale: false, isPending: false }),
-}));
+vi.mock('../lib/queries', async importOriginal => {
+  const actual = await importOriginal<typeof Queries>();
+  return {
+    ...actual,
+    usePairs: () => ({ data: state.pairs, isPending: state.pairsPending, isFetching: state.pairsFetching }),
+    usePairSnapshot: () => ({ data: state.data, live: true, stale: false, isPending: false }),
+  };
+});
 vi.mock('../components/Controls', () => ({ PairControls: () => null, useControls: () => ({ busy: new Set<string>(), pending: {}, results: {}, clearResult: vi.fn(), run: vi.fn() }) }));
 vi.mock('../components/Charts', () => ({ DepthChart: () => null, HourlyChart: () => null }));
 vi.mock('../components/DataTables', () => ({ LogsTable: () => null, OrdersTable: () => null, TradesTable: () => null }));

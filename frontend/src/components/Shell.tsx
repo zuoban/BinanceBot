@@ -4,6 +4,7 @@ import { App, Button, Drawer } from 'antd';
 import { AppstoreOutlined, ArrowDownOutlined, ArrowUpOutlined, LineChartOutlined, LogoutOutlined, MenuOutlined, PlusOutlined, SearchOutlined, SettingOutlined } from '@ant-design/icons';
 import { pairRoute } from '../lib/api';
 import { useAsyncLock } from '../lib/asyncGuard';
+import { useConfirmDialog } from '../lib/confirmDialog';
 import { useLiveAccounts, usePairs } from '../lib/queries';
 import { AccountsContext, EditContext, useSession } from '../lib/session';
 import { compactNumber, directionLabel, ratioText, statusLabel } from '../lib/format';
@@ -62,7 +63,9 @@ export default function Shell() {
     setSaving(value);
   }, []);
   const runLogout = useAsyncLock();
-  const { modal, message } = App.useApp();
+  const { message } = App.useApp();
+  const blockerDialog = useConfirmDialog();
+  const logoutDialog = useConfirmDialog();
   const { logout, authEnabled } = useSession();
   const pairsStale = useExpired(pairs.dataUpdatedAt + SNAPSHOT_STALE_MS);
   const alert = !!liveAccounts.error || liveAccounts.stale || accounts.some(entry => entry.account_observation_stale || entry.snapshot.status === 'ERROR');
@@ -72,17 +75,16 @@ export default function Shell() {
     if (blocker.state !== 'blocked') return;
     if (saving) { blocker.reset(); return; }
     let active = true;
-    const dialog = modal.confirm({ title: '放弃未保存的修改？', content: '当前表单的修改尚未保存。', okText: '放弃修改', cancelText: '继续编辑' });
     void (async () => {
-      const confirmed = await dialog;
+      const confirmed = await blockerDialog.confirm({ title: '放弃未保存的修改？', content: '当前表单的修改尚未保存。', okText: '放弃修改', cancelText: '继续编辑' });
       if (!active) return;
       if (confirmed) { setDirty(false); blocker.proceed(); } else blocker.reset();
     })();
     return () => {
       active = false;
-      dialog.destroy?.();
+      blockerDialog.destroyAll();
     };
-  }, [blocker, saving, modal]);
+  }, [blocker, saving, blockerDialog.confirm, blockerDialog.destroyAll]);
   useEffect(() => {
     if (!dirty && !saving) return;
     const beforeUnload = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = ''; };
@@ -92,13 +94,20 @@ export default function Shell() {
   const context = useMemo(() => ({ dirty, setDirty, saving, setSaving: updateSaving }), [dirty, saving, updateSaving]);
   const logOut = useCallback(() => runLogout(async () => {
     if (savingRef.current) return;
-    if (dirty && !await modal.confirm({ title: '放弃未保存的修改并退出？', okText: '退出', cancelText: '继续编辑' })) return;
+    if (dirty && !await logoutDialog.confirm({ title: '放弃未保存的修改并退出？', okText: '退出', cancelText: '继续编辑' })) return;
     if (savingRef.current) return;
     try { await logout(); } catch { message.error('退出失败，会话可能仍然有效，请重试'); }
-  }), [dirty, logout, modal, message, runLogout]);
+  }), [dirty, logout, logoutDialog.confirm, message, runLogout]);
   const [drawer, setDrawer] = useState(false), [palette, setPalette] = useState(false);
   useEffect(() => { setDrawer(false); }, [location.pathname]);
-  const mode = accounts[0]?.mode ?? currentPairs?.[0]?.mode;
+  const mode = useMemo<Mode | undefined>(() => {
+    const pairModes = currentPairs?.map(pair => accountPairs.get(pair.symbol)?.mode ?? pair.mode) ?? [];
+    const observed = accounts.length ? [...accounts.map(entry => entry.mode), ...pairModes] : pairModes;
+    if (!observed.length) return undefined;
+    if (observed.includes('LIVE')) return 'LIVE';
+    if (observed.includes('UNKNOWN')) return 'UNKNOWN';
+    return 'PAPER';
+  }, [accounts, accountPairs, currentPairs]);
   const page: SidebarProps['page'] = location.pathname.startsWith('/settings') ? 'settings' : location.pathname.startsWith('/pairs/') ? 'pair' : 'overview';
   const closeDrawer = useCallback(() => setDrawer(false), []);
   const openPalette = useCallback(() => { if (saving) return; setDrawer(false); setPalette(true); }, [saving]);

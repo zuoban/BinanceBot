@@ -1,5 +1,5 @@
 use super::{json_ok, json_ok_msg, status_err, ApiResponse};
-use crate::server::state::{AuthContext, SessionCheckError};
+use crate::server::state::{sanitize_session_token, AuthContext, SessionCheckError};
 use crate::types::{AuthLoginPayload, AuthStatusResponse, AuthTokenResponse};
 use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -10,38 +10,22 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
-fn sanitize_token(token: &str) -> Option<&str> {
-    let t = token.trim();
-    if t.is_empty() || t.len() > 128 || !t.bytes().all(|b| b.is_ascii_graphic()) {
-        None
-    } else {
-        Some(t)
-    }
-}
-
 fn extract_token(headers: &HeaderMap) -> Option<&str> {
-    if let Some(auth_val) = headers.get(axum::http::header::AUTHORIZATION) {
-        if let Ok(auth_str) = auth_val.to_str() {
-            if let Some(token) = auth_str
-                .strip_prefix("Bearer ")
-                .or_else(|| auth_str.strip_prefix("bearer "))
-            {
-                if !token.trim().is_empty() {
-                    return sanitize_token(token);
-                }
-            }
-        }
+    if let Some(token) = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|val| val.to_str().ok())
+        .and_then(|s| {
+            s.strip_prefix("Bearer ")
+                .or_else(|| s.strip_prefix("bearer "))
+        })
+        .and_then(sanitize_session_token)
+    {
+        return Some(token);
     }
-
-    if let Some(token_val) = headers.get("X-Auth-Token") {
-        if let Ok(token_str) = token_val.to_str() {
-            if !token_str.trim().is_empty() {
-                return sanitize_token(token_str);
-            }
-        }
-    }
-
-    None
+    headers
+        .get("X-Auth-Token")
+        .and_then(|val| val.to_str().ok())
+        .and_then(sanitize_session_token)
 }
 
 fn auth_service_error<T>() -> (StatusCode, Json<ApiResponse<T>>) {
@@ -128,18 +112,19 @@ pub(super) async fn post_auth_login_handler(
     ConnectInfo(address): ConnectInfo<SocketAddr>,
     Json(payload): Json<AuthLoginPayload>,
 ) -> (StatusCode, Json<ApiResponse<AuthTokenResponse>>) {
+    let Some(admin_auth) = auth.admin_auth() else {
+        warn!("Admin login rejected: no password configured for this process");
+        return status_err(StatusCode::BAD_REQUEST, "未启用管理员密码认证，无需登录");
+    };
     let Some(permit) = auth.try_begin_auth_work() else {
         return auth_busy();
     };
-    if !auth.begin_login_attempt(peer_ip(address)).await {
+    let source = peer_ip(address);
+    let Some(attempt_at) = auth.begin_login_attempt(source).await else {
         return status_err(
             StatusCode::TOO_MANY_REQUESTS,
             "登录尝试过于频繁，请一分钟后重试",
         );
-    }
-    let Some(admin_auth) = auth.admin_auth() else {
-        warn!("Admin login rejected: no password configured for this process");
-        return status_err(StatusCode::BAD_REQUEST, "未启用管理员密码认证，无需登录");
     };
 
     let password = payload.password;
@@ -163,7 +148,7 @@ pub(super) async fn post_auth_login_handler(
     let token = crate::auth::generate_session_token();
     match auth.create_session(&token).await {
         Ok(()) => {
-            auth.clear_login_attempts(peer_ip(address)).await;
+            auth.rollback_single_login_attempt(source, attempt_at).await;
             info!("Admin authentication successful");
             (
                 StatusCode::OK,

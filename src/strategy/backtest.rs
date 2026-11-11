@@ -33,9 +33,9 @@ mod tests;
 pub use cli::{run_cli, BacktestArgs, DirectionArg};
 
 #[cfg(test)]
-use cli::load_rules;
+use cli::{format_funding_impact, load_rules};
 #[cfg(test)]
-use data::{fetch_klines, parse_csv, MAX_BACKTEST_DAYS};
+use data::{fetch_klines, next_kline_page_start, parse_csv, MAX_BACKTEST_DAYS};
 
 const FUNDING_PERIOD_MS: i64 = 8 * 60 * 60 * 1000;
 
@@ -315,14 +315,22 @@ impl<'a> Sim<'a> {
         if qty <= Decimal::ZERO {
             return;
         }
-        let signed = if side == OrderSide::Buy { qty } else { -qty };
         let (new_size, new_entry, realized_delta) =
             crate::types::apply_fill_to_position(self.size, self.entry, side, price, qty);
         self.size = new_size;
         self.entry = new_entry;
-        self.realized += realized_delta;
-        self.cash_flow -= signed * price;
-        self.fees += price * qty * self.p.maker_fee_rate;
+        self.realized = self.realized.saturating_add(realized_delta);
+        let fill_notional = price.checked_mul(qty).unwrap_or(Decimal::MAX);
+        let signed_flow = if side == OrderSide::Buy {
+            fill_notional
+        } else {
+            -fill_notional
+        };
+        self.cash_flow = self.cash_flow.saturating_sub(signed_flow);
+        let fee = fill_notional
+            .checked_mul(self.p.maker_fee_rate)
+            .unwrap_or(Decimal::MAX);
+        self.fees = self.fees.saturating_add(fee);
         self.last_fill = Some(price);
         self.fills += 1;
         if side == OrderSide::Buy {
@@ -427,7 +435,7 @@ impl<'a> Sim<'a> {
         let mut drop = Vec::new();
         for index in closing_orders {
             if self.orders[index].qty <= position_qty {
-                position_qty -= self.orders[index].qty;
+                position_qty = position_qty.saturating_sub(self.orders[index].qty);
             } else {
                 drop.push(index);
             }
@@ -463,12 +471,10 @@ impl<'a> Sim<'a> {
             {
                 continue;
             }
-            let maker_ok = if opening == OrderSide::Buy {
-                price < market
-            } else {
-                price > market
-            };
-            let Some(qty) = self.qty_at(price).filter(|_| maker_ok) else {
+            let Some(qty) = self
+                .qty_at(price)
+                .filter(|_| opening.is_maker_price(price, market))
+            else {
                 continue;
             };
             let Some(order_notional) = price.checked_mul(qty) else {
@@ -536,12 +542,10 @@ impl<'a> Sim<'a> {
             {
                 continue;
             }
-            let maker_ok = if closing == OrderSide::Sell {
-                price > market
-            } else {
-                price < market
-            };
-            let Some(qty) = self.qty_at(price).filter(|_| maker_ok) else {
+            let Some(qty) = self
+                .qty_at(price)
+                .filter(|_| closing.is_maker_price(price, market))
+            else {
                 continue;
             };
             let available = position_qty
@@ -578,11 +582,7 @@ impl<'a> Sim<'a> {
                 .orders
                 .iter()
                 .any(|o| o.side == closing && o.price == price && !o.remainder)
-                && if closing == OrderSide::Sell {
-                    price > market
-                } else {
-                    price < market
-                }
+                && closing.is_maker_price(price, market)
         }) {
             let Some((qty, purpose)) = self.p.rules.plan_remainder_quantity(
                 price,
@@ -618,8 +618,8 @@ fn validate_backtest_inputs(params: &BacktestParams, candles: &[Candle]) -> Resu
     let grid = &params.grid;
     ensure!(!candles.is_empty(), "没有可回放的行情数据");
     grid.validate()?;
-    if params.maker_fee_rate < Decimal::ZERO {
-        bail!("maker_fee_rate 不能为负数");
+    if params.maker_fee_rate < Decimal::ZERO || params.maker_fee_rate >= Decimal::ONE {
+        bail!("maker_fee_rate 必须在 [0, 1) 范围内");
     }
     ensure!(params.capital > Decimal::ZERO, "参考资金必须大于 0");
     ensure!(

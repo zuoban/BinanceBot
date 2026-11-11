@@ -23,21 +23,23 @@ export const errorMessage = (error: unknown): string => error instanceof Error ?
 export class ApiError extends Error {
   constructor(message: string, public status: number, public kind: 'rejection' | 'invalid-response' = 'rejection') { super(message); }
 }
-type ApiRequestInit = RequestInit & { timeoutMs?: number };
+type ApiRequestInit = RequestInit & { timeoutMs?: number; readOnly?: boolean };
 export async function authenticatedFetch(path: string, init: ApiRequestInit = {}) {
   const token = tokenStore.get();
-  const { timeoutMs = 15_000, ...requestInit } = init;
-  const headers = new Headers(init.headers);
+  const { timeoutMs = 15_000, readOnly = false, ...requestInit } = init;
+  const method = (requestInit.method ?? 'GET').toUpperCase();
+  const mutating = !readOnly && method !== 'GET' && method !== 'HEAD';
+  const headers = new Headers(requestInit.headers);
   if (token) headers.set('Authorization', `Bearer ${token}`);
-  if (init.body) headers.set('Content-Type', 'application/json');
+  if (requestInit.body) headers.set('Content-Type', 'application/json');
   const timeout = AbortSignal.timeout(timeoutMs);
-  const signal = init.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
+  const signal = requestInit.signal ? AbortSignal.any([requestInit.signal, timeout]) : timeout;
   let response: Response;
   try {
     response = await fetch(path, { ...requestInit, headers, signal });
   } catch (error) {
-    if (init.signal?.aborted && signal.reason === init.signal.reason && signal.reason?.name !== 'TimeoutError') throw error;
-    throw new ApiError(init.method && init.method !== 'GET'
+    if (requestInit.signal?.aborted && signal.reason === requestInit.signal.reason && signal.reason?.name !== 'TimeoutError') throw error;
+    throw new ApiError(mutating
       ? '请求未完成，操作可能已生效；请刷新状态或查看日志后再操作'
       : '无法连接后端服务，请检查网络后重试', 0);
   }
@@ -62,7 +64,8 @@ export async function api<T>(path: string, init?: ApiRequestInit): Promise<T> {
   if (!response.ok || !result.success) throw new ApiError(result.message || '请求失败，请重试', response.status);
   return result.data;
 }
-export const post = <T,>(path: string, data: unknown) => api<T>(path, { method: 'POST', body: JSON.stringify(data) });
+export const post = <T,>(path: string, data: unknown, init?: Omit<ApiRequestInit, 'method' | 'body'>) =>
+  api<T>(path, { ...init, method: 'POST', body: JSON.stringify(data) });
 export const pairPath = (pair: Pick<Pair, 'symbol' | 'scoped'>, resource: string) =>
   pair.scoped ? `/api/pairs/${encodeURIComponent(pair.symbol)}/${resource}` : resource === 'ws' ? '/ws' : `/api/${resource}`;
 export const pairRoute = (symbol: string, config = false) => `/pairs/${encodeURIComponent(symbol)}${config ? '/config' : ''}`;

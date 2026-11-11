@@ -7,26 +7,24 @@ import { useUrlParams } from '../lib/urlState';
 import { AccountsContext } from '../lib/session';
 import { errorMessage } from '../lib/api';
 import { useAsyncLock, useMountedRef } from '../lib/asyncGuard';
-import { beijingDay, modeLabel } from '../lib/format';
-import { comparePositionAmount, groupTradePnl, positionGroups, SNAPSHOT_STALE_MS, todayPnlGroups, todayTradeCounts } from '../lib/portfolio';
-import { ErrorNotice, FreshnessText, PageTitle, Pnl, SignalButton, SignalChip, type Signal } from '../components/Common';
+import { useConfirmDialog } from '../lib/confirmDialog';
+import { beijingDay } from '../lib/format';
+import { positionGroups, SNAPSHOT_STALE_MS, todayPnlGroups, todayTradeCounts } from '../lib/portfolio';
+import { ErrorNotice, PageTitle } from '../components/Common';
 import { runBatchControls, useControls } from '../components/Controls';
 import type { Overview, Pair, Trade } from '../lib/types';
 import { OverviewLoading } from '../components/Loading';
 import { OverviewFinanceDisclosure } from '../components/OverviewFinanceDisclosure';
 import { OverviewHistory } from '../components/OverviewHistory';
+import { filterAndSortOverviewEntries, OverviewBanner, OverviewTradesCard } from '../components/OverviewSections';
 import { StrategyCard, toPair } from '../components/StrategyCard';
 import { BatchResultDrawer, type BatchReport } from '../components/BatchResultDrawer';
 import { PaperGuide } from '../components/PaperGuide';
-import { TradesTable } from '../components/DataTables';
 import { useAccountGroups, useBeijingDay, useExpired } from '../lib/useNow';
-const emptyPairs: Overview['pairs'] = [];
-const emptyTrades: Trade[] = [];
+const emptyPairs: Overview['pairs'] = [], emptyTrades: Trade[] = [];
 export default function OverviewPage() {
-  const overview = useOverview();
-  const navigate = useNavigate();
-  const addLink = useRef<HTMLAnchorElement>(null);
-  const restoreAddFocus = useRef(false);
+  const overview = useOverview(), navigate = useNavigate();
+  const addLink = useRef<HTMLAnchorElement>(null), restoreAddFocus = useRef(false);
   const setAddLink = useCallback((node: HTMLAnchorElement | null) => {
     if (!node && addLink.current === document.activeElement) restoreAddFocus.current = true;
     addLink.current = node;
@@ -37,41 +35,23 @@ export default function OverviewPage() {
     restoreAddFocus.current = false;
   }, [hasOverview]);
   const addPairButton = (props?: { ref?: React.Ref<HTMLAnchorElement>; icon?: React.ReactNode; type?: 'primary' }) => <Button {...props} href="/pairs/new" onClick={event => {
-    if (event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) {
-      event.preventDefault();
-      navigate('/pairs/new');
-    }
+    if (event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) { event.preventDefault(); navigate('/pairs/new'); }
   }}>新增交易对</Button>;
   const addPairLink = addPairButton({ ref: setAddLink, icon: <PlusOutlined /> });
-  const accounts = useContext(AccountsContext);
-  const { modal, message } = App.useApp();
-  const controls = useControls();
+  const accounts = useContext(AccountsContext), { message } = App.useApp(), { confirm } = useConfirmDialog(), controls = useControls();
   const [{ q: search, sort, status: statusFilter }, updateFilters] = useUrlParams({
     q: { fallback: '' },
     sort: { fallback: 'position', allowed: ['position', 'symbol', 'today', 'orders'] },
     status: { fallback: 'all', allowed: ['all', 'RUNNING', 'PAUSED', 'ERROR', 'STOPPED', 'LIVE'] },
   });
-  const setSearch = (value: string) => updateFilters({ q: value });
-  const setSort = (value: typeof sort) => updateFilters({ sort: value });
-  const setStatusFilter = (value: typeof statusFilter) => updateFilters({ status: value });
-  const [batchBusy, setBatchBusy] = useState(false);
-  const [report, setReport] = useState<BatchReport | null>(null);
-  const batchId = useRef(0);
-  const [tradesExpanded, setTradesExpanded] = useState(false);
-  const compactFinance = Grid.useBreakpoint().md === false;
-  const [financesExpanded, setFinancesExpanded] = useState(false);
-  const dayNow = useBeijingDay();
-  const dataExpired = useExpired(overview.data ? overview.dataUpdatedAt + SNAPSHOT_STALE_MS : Infinity);
-  const runBatch = useAsyncLock();
-  const mounted = useMountedRef();
-  const entries = overview.data?.pairs ?? emptyPairs;
-  const recentTrades = overview.data?.recent_trades ?? emptyTrades;
-  const displayedTrades = useMemo(() => recentTrades.slice(0, tradesExpanded ? 20 : 5), [recentTrades, tradesExpanded]);
-  const buyTrades = displayedTrades.filter(trade => trade.side === 'BUY').length;
-  const sellTrades = displayedTrades.filter(trade => trade.side === 'SELL').length;
-  const tradePnlGroups = useMemo(() => groupTradePnl(displayedTrades), [displayedTrades]);
+  const [batchBusy, setBatchBusy] = useState(false), [report, setReport] = useState<BatchReport | null>(null), batchId = useRef(0);
+  const compactFinance = Grid.useBreakpoint().md === false, [financesExpanded, setFinancesExpanded] = useState(false);
+  const dayNow = useBeijingDay(), dataExpired = useExpired(overview.data ? overview.dataUpdatedAt + SNAPSHOT_STALE_MS : Infinity);
+  const runBatch = useAsyncLock(), mounted = useMountedRef();
+  const entries = overview.data?.pairs ?? emptyPairs, recentTrades = overview.data?.recent_trades ?? emptyTrades;
   const stale = !!overview.error || (!!overview.data && dataExpired);
-  const pairs = useMemo(() => entries.map(toPair), [entries]);
+  const pairs = useMemo(() => entries.map(toPair), [entries]), pairsRef = useRef(pairs);
+  pairsRef.current = pairs;
   let runningCount = 0, pausedCount = 0, stoppedCount = 0, errorCount = 0, liveCount = 0, allPaper = pairs.length > 0;
   for (const p of pairs) {
     if (p.status === 'RUNNING') runningCount++;
@@ -99,7 +79,7 @@ export default function OverviewPage() {
         targets = latest.filter(e => e.snapshot.status !== 'RUNNING').map(toPair);
         if (!targets.length) { message.info('当前没有可恢复的策略'); return; }
       }
-      const accepted = await modal.confirm({
+      const accepted = await confirm({
         title: `${action === 'resume' ? '恢复' : '暂停'}全部策略`,
         content: action === 'pause' ? '将刷新策略列表并暂停全部交易对，不受当前筛选影响。' : `将操作 ${targets.length} 个交易对，不受当前筛选影响。${targets.some(p => p.mode === 'LIVE') ? '其中包含实盘策略，恢复后会使用真实资金下单。' : ''}`,
         okText: '确认执行', cancelText: '取消',
@@ -123,60 +103,19 @@ export default function OverviewPage() {
       if (mounted.current) setBatchBusy(false);
     }
   });
-  const visible = useMemo(() => {
-    const query = search.toUpperCase().trim();
-    const matchesStatus = (e: typeof entries[number]) => statusFilter === 'all' || (statusFilter === 'LIVE' ? e.mode === 'LIVE' : e.snapshot.status === statusFilter);
-    const filtered = entries.filter(e => e.snapshot.symbol.includes(query) && matchesStatus(e));
-    if (sort === 'position') {
-      return filtered.sort((a, b) => (Number(b.snapshot.status === 'RUNNING') - Number(a.snapshot.status === 'RUNNING')) || comparePositionAmount(a.snapshot, b.snapshot));
-    }
-    if (sort === 'today') {
-      const totalToday = (symbol: string) => { const c = tradeCountsBySymbol.get(symbol); return c ? c.buy + c.sell : -1; };
-      return filtered
-        .map(entry => ({ entry, count: totalToday(entry.snapshot.symbol) }))
-        .sort((a, b) => (b.count - a.count) || a.entry.snapshot.symbol.localeCompare(b.entry.snapshot.symbol))
-        .map(item => item.entry);
-    }
-    if (sort === 'orders') {
-      return filtered.sort((a, b) => (b.snapshot.stats.active_buy_orders + b.snapshot.stats.active_sell_orders) - (a.snapshot.stats.active_buy_orders + a.snapshot.stats.active_sell_orders) || a.snapshot.symbol.localeCompare(b.snapshot.symbol));
-    }
-    return filtered.sort((a, b) => a.snapshot.symbol.localeCompare(b.snapshot.symbol));
-  }, [entries, search, statusFilter, sort, tradeCountsBySymbol]);
+  const visible = useMemo(() => filterAndSortOverviewEntries(entries, search, statusFilter, sort, tradeCountsBySymbol), [entries, search, statusFilter, sort, tradeCountsBySymbol]);
   const clearFilters = () => updateFilters({ q: '', sort: 'position', status: 'all' });
   const counts = [...tradeCountsBySymbol.values()];
   const today = counts.every(c => c !== null) ? counts.reduce<{ buy: number; sell: number }>((sum, c) => ({ buy: sum.buy + c.buy, sell: sum.sell + c.sell }), { buy: 0, sell: 0 }) : null;
   const pnlGroups = useMemo(() => todayPnlGroups(overview.data?.today_pnl, dayNow), [overview.data?.today_pnl, currentDay]);
-  const accountList = useAccountGroups(accounts);
-  const positionList = useMemo(() => positionGroups(entries), [entries]);
-  const renderStatusButton = (value: Exclude<typeof statusFilter, 'all'>, tier: Signal, label: string, count: number) =>
-    overview.data && count > 0 ? <SignalButton tier={tier} active={statusFilter === value} onClick={() => setStatusFilter(statusFilter === value ? 'all' : value)}>{label} {count}</SignalButton> : null;
+  const accountList = useAccountGroups(accounts), positionList = useMemo(() => positionGroups(entries), [entries]);
   return <>
     <PageTitle title="策略运行概览" description="账户、持仓与全部策略的实时状态" />
     <ErrorNotice error={overview.error} retry={() => void overview.refetch()} />
     {overview.data && allPaper && <PaperGuide firstSymbol={pairs[0].symbol} />}
-    <section className={`overview-banner${stale ? ' is-stale' : ''}`} aria-label="策略运行概览">
-      <div className="signal-strip">
-        {stale && <SignalChip tier="yellow">数据暂未更新，请检查连接</SignalChip>}
-        {stale && overview.dataUpdatedAt > 0 && <span className="muted freshness"><FreshnessText updatedAt={overview.dataUpdatedAt} prefix="上次更新于 " /></span>}
-        {renderStatusButton('LIVE', 'orange', '实盘策略', liveCount)}
-        {renderStatusButton('ERROR', 'red', '异常', errorCount)}
-        {renderStatusButton('PAUSED', 'blue', '已暂停', pausedCount)}
-        {overview.data && !stale && pairs.length > 0 && runningCount === pairs.length && <SignalChip tier="calm">全部策略运行正常</SignalChip>}
-        {renderStatusButton('STOPPED', 'blue', '已停止', stoppedCount)}
-      </div>
-      <div className="overview-stats">
-        <div className="overview-stat"><span>运行中</span><strong>{overview.data ? runningCount : '--'}</strong></div>
-        <div className="overview-stat"><span>策略总数</span><strong>{overview.data ? pairs.length : '--'}</strong></div>
-        <div className="overview-stat"><span>今日成交</span><strong>{overview.data && today ? today.buy + today.sell : '--'}<small> 笔</small></strong><em className="overview-trade-breakdown">买单 {overview.data && today ? today.buy : '--'} 笔 / 卖单 {overview.data && today ? today.sell : '--'} 笔</em></div>
-        <div className="overview-stat" aria-label="今日已实现盈亏">
-          <span>今日已实现盈亏</span>
-          {!pnlGroups ? <strong>--</strong> : !pnlGroups.length ? <strong>0</strong> : pnlGroups.map(group => <div className="overview-pnl-group" key={group.key}>
-            <strong><Pnl value={group.total} compact /><small>{group.asset}</small></strong>
-            {group.pending > 0 && <span>盈亏待同步</span>}
-          </div>)}
-        </div>
-      </div>
-    </section>
+    <OverviewBanner hasData={!!overview.data} stale={stale} dataUpdatedAt={overview.dataUpdatedAt} statusFilter={statusFilter}
+      onToggleStatus={value => updateFilters({ status: statusFilter === value ? 'all' : value })}
+      counts={{ total: pairs.length, running: runningCount, paused: pausedCount, stopped: stoppedCount, error: errorCount, live: liveCount }} today={today} pnlGroups={pnlGroups} />
     {overview.isPending && !overview.data ? <OverviewLoading addPairLink={addPairLink} /> : !overview.data ? <section className="strategies-section" aria-labelledby="strategies-heading"><div className="section-heading"><h2 id="strategies-heading">交易策略</h2>{addPairLink}</div></section> : <>
     <OverviewFinanceDisclosure accountList={accountList} positionList={positionList} stale={stale} compactFinance={compactFinance} financesExpanded={financesExpanded} setFinancesExpanded={setFinancesExpanded} />
     <section className={`strategies-section${stale ? ' is-stale' : ''}`} aria-labelledby="strategies-heading">
@@ -189,8 +128,8 @@ export default function OverviewPage() {
       </div>
     </div>
     <div className="filter-bar">
-      <Input prefix={<SearchOutlined />} placeholder="搜索交易对" aria-label="搜索交易对" allowClear value={search} onChange={e => setSearch(e.target.value)} />
-      <Select aria-label="策略排序" value={sort} onChange={setSort} options={[{ value: 'position', label: '按状态与持仓排序' }, { value: 'symbol', label: '按交易对排序' }, { value: 'today', label: '按今日成交排序' }, { value: 'orders', label: '按挂单数排序' }]} />
+      <Input prefix={<SearchOutlined />} placeholder="搜索交易对" aria-label="搜索交易对" allowClear value={search} onChange={e => updateFilters({ q: e.target.value })} />
+      <Select aria-label="策略排序" value={sort} onChange={value => updateFilters({ sort: value })} options={[{ value: 'position', label: '按状态与持仓排序' }, { value: 'symbol', label: '按交易对排序' }, { value: 'today', label: '按今日成交排序' }, { value: 'orders', label: '按挂单数排序' }]} />
       {(search || statusFilter !== 'all') && <span className="muted filter-count">显示 {visible.length} / {entries.length} 个</span>}
       {(search || sort !== 'position' || statusFilter !== 'all') && <Button type="text" onClick={clearFilters}>清除筛选</Button>}
     </div>
@@ -202,32 +141,24 @@ export default function OverviewPage() {
       {!visible.length && <Card className="strategy-empty"><Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={pairs.length ? '没有符合筛选条件的策略' : '暂无策略数据'}>{pairs.length ? <Button onClick={clearFilters}>清除筛选</Button> : addPairButton({ type: 'primary' })}</Empty></Card>}
     </div>
     </section>
-    <Card className="overview-trades" title="最近成交" extra={<span className="muted">全部策略当前模式 · 最近 20 条</span>}>
-      <div className="recent-trades-summary" aria-label="当前显示成交汇总">
-        <span>当前显示 <strong>{displayedTrades.length}</strong> 笔</span>
-        <span>买入 <strong>{buyTrades}</strong> 笔</span>
-        <span>卖出 <strong>{sellTrades}</strong> 笔</span>
-        <span>合计盈亏 {tradePnlGroups.size === 0 ? <strong>--</strong> : [...tradePnlGroups.entries()].map(([key, group]) => <span key={key}> {modeLabel[group.mode]} <strong>{group.available && Number.isFinite(group.total) ? <Pnl value={group.total} compact /> : <span className="pending-pnl-warn">待核实</span>}</strong> {group.asset}</span>)}</span>
-      </div>
-      <div id="recent-trades-list"><TradesTable overview trades={displayedTrades} /></div>
-      {recentTrades.length > 5 && <div className="overview-trades-toggle"><Button type="text" aria-expanded={tradesExpanded} aria-controls="recent-trades-list" onClick={() => setTradesExpanded(value => !value)}>{tradesExpanded ? '收起' : '展开最近 20 条'}</Button></div>}
-    </Card>
+    <OverviewTradesCard recentTrades={recentTrades} />
     <OverviewHistory />
     <BatchResultDrawer report={report} busy={controls.busy} onClose={() => setReport(null)} onRetry={(pair, action) => {
       if (!report) return;
-      const activeReportId = report.id;
-      const currentPair = pairs.find(p => p.symbol === pair.symbol);
-      if (!currentPair) return;
+      const activeReportId = report.id, currentPair = pairs.find(p => p.symbol === pair.symbol);
+      const applyReport = (update: (outcomes: BatchReport['outcomes'], liveSymbols: Set<string>) => BatchReport['outcomes']) => setReport(current => {
+        if (!current || current.id !== activeReportId) return current;
+        const outcomes = update(current.outcomes, new Set(pairsRef.current.map(p => p.symbol)));
+        return outcomes.length ? { ...current, outcomes } : null;
+      });
+      if (!currentPair) { applyReport((outcomes, liveSymbols) => outcomes.filter(item => liveSymbols.has(item.pair.symbol) && item.pair.symbol !== pair.symbol)); return; }
       void (async () => {
         const result = await controls.run(currentPair, action);
         if (!mounted.current || !result || result === 'not_submitted') return;
-        setReport(current => {
-          if (!current || current.id !== activeReportId) return current;
-          const outcomes = result === 'confirmed'
-            ? current.outcomes.filter(item => item.pair.symbol !== currentPair.symbol)
-            : current.outcomes.map(item => item.pair.symbol === currentPair.symbol ? { ...item, pair: currentPair, result } : item);
-          return outcomes.length ? { ...current, outcomes } : null;
-        });
+        applyReport((outcomes, liveSymbols) => (result === 'confirmed'
+          ? outcomes.filter(item => item.pair.symbol !== currentPair.symbol)
+          : outcomes.map(item => item.pair.symbol === currentPair.symbol ? { ...item, pair: currentPair, result } : item))
+          .filter(item => liveSymbols.has(item.pair.symbol)));
       })();
     }} />
     </>}

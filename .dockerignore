@@ -13,3 +13,11 @@ frontend/dist
 *.db
 *.db-shm
 *.db-wal
+frontend/*.tsbuildinfo
+frontend/.impeccable
+.impeccable
+.claude
+.serena
+tests
+docs
+*.md

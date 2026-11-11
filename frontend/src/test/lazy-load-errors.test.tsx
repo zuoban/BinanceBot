@@ -5,6 +5,7 @@ import { App } from 'antd';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeEach, expect, it, vi } from 'vitest';
 import type * as Api from '../lib/api';
+import type * as Queries from '../lib/queries';
 import { LoadErrorBoundary } from '../components/LoadErrorBoundary';
 import { OverviewHistory } from '../components/OverviewHistory';
 import { MemoryRouter } from 'react-router-dom';
@@ -12,9 +13,10 @@ import Settings from '../pages/Settings';
 
 vi.mock('../components/OverviewHistoryChart', () => { throw new Error('chart module unavailable'); });
 vi.mock('../components/DatabaseSettings', () => { throw new Error('database module unavailable'); });
-vi.mock('../lib/queries', () => ({
-  useOverviewHistory: () => ({ data: { snapshots: [{ hour: Math.floor(Date.now() / 3600000) * 3600, groups: [{ mode: 'PAPER', asset: 'USDC', account_id: null, equity: '100' }] }], current_accounts: [{ mode: 'PAPER', asset: 'USDC', account_id: null }] }, isPending: false, error: null }),
-}));
+vi.mock('../lib/queries', async importOriginal => {
+  const actual = await importOriginal<typeof Queries>();
+  return { ...actual, useOverviewHistory: () => ({ data: { snapshots: [{ hour: Math.floor(Date.now() / 3600000) * 3600, groups: [{ mode: 'PAPER', asset: 'USDC', account_id: null, equity: '100' }] }], current_accounts: [{ mode: 'PAPER', asset: 'USDC', account_id: null }] }, isPending: false, error: null }) };
+});
 vi.mock('../lib/api', async importOriginal => {
   const actual = await importOriginal<typeof Api>();
   return { ...actual, api: vi.fn().mockResolvedValue({}), post: vi.fn() };

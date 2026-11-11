@@ -226,7 +226,7 @@ impl GridTradingEngine {
             }
         }
 
-        if !self.state.active_orders.read().await.is_empty() {
+        if had_fills || !self.state.active_orders.read().await.is_empty() {
             self.maintain_grid_window_inner(!had_fills).await;
         }
     }

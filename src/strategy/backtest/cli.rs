@@ -85,7 +85,10 @@ pub struct BacktestArgs {
 }
 
 pub(super) async fn load_rules(args: &BacktestArgs) -> Result<SymbolRules> {
-    ensure!(args.maker_fee >= Decimal::ZERO, "--maker-fee 不能为负数");
+    ensure!(
+        args.maker_fee >= Decimal::ZERO && args.maker_fee < Decimal::ONE,
+        "--maker-fee 必须在 [0, 1) 范围内"
+    );
     let mut rules = match &args.symbol {
         Some(symbol) => {
             crate::config::validate_symbol(symbol)?;
@@ -133,6 +136,18 @@ fn when(ms: i64) -> String {
 const OPTIMISM_NOTE: &str =
     "注意：挂单一经触价即成交，不计排队与部分成交，结果偏乐观；未模拟杠杆、保证金与强平。";
 
+pub(super) fn format_funding_impact(funding: Decimal) -> String {
+    if funding.is_zero() {
+        return "0".to_string();
+    }
+    let impact = -funding;
+    if impact > Decimal::ZERO {
+        format!("+{impact}")
+    } else {
+        impact.to_string()
+    }
+}
+
 fn print_report(report: &BacktestReport, candles: &[Candle], capital: Decimal) {
     println!(
         "回放 {} 根行情，{} 至 {}",
@@ -145,8 +160,12 @@ fn print_report(report: &BacktestReport, candles: &[Candle], capital: Decimal) {
         report.fills, report.buys, report.sells
     );
     println!("已实现盈亏      {}", report.realized_pnl);
-    println!("手续费          -{}", report.fees);
-    println!("资金费          -{}", report.funding);
+    if report.fees.is_zero() {
+        println!("手续费          {}", report.fees);
+    } else {
+        println!("手续费          -{}", report.fees);
+    }
+    println!("资金费          {}", format_funding_impact(report.funding));
     println!("净已实现        {}", report.net_realized);
     println!(
         "未实现盈亏      {}（期末价 {}，持仓 {}，均价 {}）",

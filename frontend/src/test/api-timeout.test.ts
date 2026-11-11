@@ -78,3 +78,32 @@ it('distinguishes export body stream read failure from connection failure with A
   await expect(failure).rejects.toBeInstanceOf(ApiError);
   await expect(failure).rejects.toMatchObject({ message: '读取导出文件失败，请重试', status: 200, kind: 'invalid-response' });
 });
+
+it('reports connection error instead of uncertain mutation for read-only POST requests and strips readOnly from fetch', async () => {
+  const timeout = new AbortController();
+  vi.spyOn(AbortSignal, 'timeout').mockReturnValue(timeout.signal);
+  const fetchMock = pendingFetch();
+  vi.stubGlobal('fetch', fetchMock);
+  const request = downloadDatabase('/api/database/export', ['trade_history']);
+  const result = expect(request).rejects.toMatchObject({ message: '无法连接后端服务，请检查网络后重试', status: 0 });
+  expect(fetchMock.mock.calls[0][1]).not.toHaveProperty('readOnly');
+  timeout.abort(new DOMException('Timed out', 'TimeoutError'));
+  await result;
+});
+
+it('skips file download if signal is aborted while reading the export blob', async () => {
+  const caller = new AbortController();
+  const createObjectURL = vi.spyOn(URL, 'createObjectURL');
+  const response = {
+    ok: true,
+    status: 200,
+    headers: new Headers({ 'Content-Disposition': 'attachment; filename="snap.db"' }),
+    blob: async () => {
+      caller.abort(new DOMException('Unmounted', 'AbortError'));
+      return new Blob(['sqlite']);
+    },
+  } as unknown as Response;
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response));
+  await downloadDatabase('/api/database/export', undefined, caller.signal);
+  expect(createObjectURL).not.toHaveBeenCalled();
+});

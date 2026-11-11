@@ -29,7 +29,7 @@ mod ws;
 #[path = "routes_tests.rs"]
 mod tests;
 
-pub use crate::types::ApiResponse;
+pub(crate) use crate::types::ApiResponse;
 #[cfg(test)]
 pub(crate) use config_probes::ProbeGate;
 pub(crate) use config_probes::ProbeGates;

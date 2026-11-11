@@ -1,5 +1,6 @@
 @import './styles/base.css';
 @import './styles/shell.css';
 @import './styles/overview.css';
+@import './styles/history.css';
 @import './styles/detail-forms.css';
 @import './styles/auth-loading.css';

@@ -99,100 +99,6 @@ impl GridTradingEngine {
         true
     }
 
-    async fn restore_provisional_before_cancel(&mut self, symbol: &str, mode: TradingMode) -> bool {
-        let account = self.client.account_identity_key();
-        let ids = self.provisional_order_ids_for(account);
-        if ids.is_empty() {
-            return true;
-        }
-        let records = async {
-            Ok::<_, anyhow::Error>((
-                self.load_managed_orders(symbol).await?,
-                self.load_pair_intent_map(symbol, mode).await?,
-                self.load_remainder_plan().await?,
-            ))
-        }
-        .await;
-        let (managed, intents, remainder) = match records {
-            Ok(records) => records,
-            Err(error) => {
-                error!(
-                    "Could not restore provisional orders before cancellation: {}",
-                    error
-                );
-                self.last_orders_sync = None;
-                self.report_reconciliation_state(true).await;
-                return false;
-            }
-        };
-        let mut conflict = false;
-        {
-            let state = self.state.clone();
-            let mut active = state.active_orders.write().await;
-            for id in ids {
-                let key = (account, id.clone());
-                let Some(current) = active
-                    .get(&id)
-                    .cloned()
-                    .or_else(|| self.evidence.order_identity_conflicts.get(&key).cloned())
-                else {
-                    continue;
-                };
-                let durable =
-                    reconciliation::find_durable_order(&id, &managed, &intents, remainder.as_ref());
-                let Some(durable) = durable else {
-                    if let Some(expected) = self.evidence.order_identity_conflicts.get(&key) {
-                        active.entry(id).or_insert_with(|| expected.clone());
-                        conflict = true;
-                    }
-                    continue;
-                };
-                let expected = self.evidence.order_identity_conflicts.get(&key).cloned();
-                let identities_agree = durable.has_compatible_identity(&current)
-                    && expected.as_ref().is_none_or(|expected| {
-                        durable.has_compatible_identity(expected)
-                            && current.has_compatible_identity(expected)
-                    });
-                let mut restored = durable.clone();
-                if identities_agree {
-                    restored.order_id = restored
-                        .order_id
-                        .or(current.order_id)
-                        .or_else(|| expected.as_ref().and_then(|order| order.order_id));
-                } else if let Some(expected) =
-                    expected.as_ref().filter(|order| order.order_id.is_some())
-                {
-                    self.record_differing_identity(&key, durable, expected);
-                    restored = expected.clone();
-                }
-                let durable = &restored;
-                if expected.is_some() || !identities_agree {
-                    self.record_differing_identity(&key, &current, durable);
-                    self.promote_provisional_observations(&key, durable);
-                    if let Some(old) = expected.as_ref() {
-                        self.record_differing_identity(&key, old, durable);
-                    }
-                    self.evidence
-                        .order_identity_conflicts
-                        .insert(key, durable.clone());
-                    active.insert(id, durable.clone());
-                    conflict = true;
-                    continue;
-                }
-                let mut restored = durable.clone();
-                restored.reserve_quantity(current.quantity);
-                active.insert(id, restored);
-                self.clear_provisional_order(&key);
-            }
-        }
-        if conflict {
-            self.last_orders_sync = None;
-            self.report_reconciliation_state(true).await;
-            self.persist_identity_observations(account, symbol).await;
-        }
-        !conflict
-    }
-
     async fn load_cancel_recovery_metadata(
         &mut self,
         paper: bool,
@@ -224,9 +130,19 @@ impl GridTradingEngine {
                 }
             }
         };
-        let metadata_ready = observations_ready
-            && recovery_sources.is_some()
-            && (paper || self.restore_provisional_before_cancel(symbol, mode).await);
+        let provisional_ready = match &recovery_sources {
+            Some((intents, remainder)) if !paper => self
+                .restore_provisional_orders(
+                    self.client.account_identity_key(),
+                    symbol,
+                    intents,
+                    remainder.as_ref(),
+                )
+                .await
+                .is_some_and(|(_, conflict)| !conflict),
+            _ => paper,
+        };
+        let metadata_ready = observations_ready && recovery_sources.is_some() && provisional_ready;
         if !metadata_ready {
             recovery_failed = true;
         } else if let Err(e) = self.cancel_remainder_plan().await {
@@ -364,10 +280,14 @@ impl GridTradingEngine {
     }
 
     pub(super) async fn cancel_all_orders_inner(&mut self, pause_already_persisted: bool) -> bool {
-        let config = self.state.config.read().await.clone();
-        let paper = config.exchange.is_paper();
-        let symbol = config.exchange.symbol.clone();
-        let mode = config.exchange.trading_mode();
+        let (paper, symbol, mode) = {
+            let config = self.state.config.read().await;
+            (
+                config.exchange.is_paper(),
+                config.exchange.symbol.clone(),
+                config.exchange.trading_mode(),
+            )
+        };
         let pause_epoch = self.state.pause_epoch();
         let was_running =
             !pause_already_persisted && *self.state.status.read().await == BotStatus::Running;
@@ -457,8 +377,7 @@ impl GridTradingEngine {
             if let Some(current) = &current {
                 retained.adopt_compatible_order_id(current);
             }
-            let identity_matches = order.symbol == symbol
-                && OrderSide::from_exchange_str(&order.side).is_some()
+            let identity_matches = order.has_valid_symbol_and_side(symbol)
                 && retained.matches_exchange_identity(order);
             let active_matches = current
                 .as_ref()
@@ -535,5 +454,65 @@ impl GridTradingEngine {
             .add_log("INFO", "Grid rebalance request processed")
             .await;
         Ok(())
+    }
+
+    pub(super) async fn cancel_misaligned_window_orders(
+        &mut self,
+        rules: &SymbolRules,
+        grid_interval: Decimal,
+    ) -> bool {
+        let misaligned: Vec<_> = self
+            .state
+            .active_orders
+            .read()
+            .await
+            .values()
+            .filter(|o| is_window_order(o) && !rules.is_grid_price(o.price, grid_interval))
+            .cloned()
+            .collect();
+        if misaligned.is_empty() {
+            return false;
+        }
+        for order in misaligned {
+            if *self.state.status.read().await != BotStatus::Running
+                || !self.cancel_single_order(&order).await
+            {
+                return true;
+            }
+        }
+        true
+    }
+
+    /// Keep closing orders within the directional position, nearest prices first.
+    pub(super) async fn trim_closing_orders_to_position(&mut self) -> bool {
+        let direction = self.state.config.read().await.grid.direction;
+        let mut closing_orders: Vec<GridOrder> = self
+            .state
+            .active_orders
+            .read()
+            .await
+            .values()
+            .filter(|order| order.side == direction.closing_side())
+            .cloned()
+            .collect();
+        closing_orders.sort_by(|a, b| {
+            direction
+                .closing_price_cmp(a.price, b.price)
+                .then_with(|| a.client_order_id.cmp(&b.client_order_id))
+        });
+        let mut remaining = direction.position_quantity(self.state.position.read().await.size);
+        let mut canceled_any = false;
+        for order in closing_orders {
+            if order.quantity <= remaining {
+                remaining = remaining
+                    .checked_sub(order.quantity)
+                    .unwrap_or(Decimal::ZERO);
+            } else if self.cancel_single_order(&order).await {
+                canceled_any = true;
+            } else {
+                remaining = Decimal::ZERO;
+            }
+        }
+        canceled_any
     }
 }

@@ -28,7 +28,7 @@ export function useUrlParams<const S extends Record<string, ParamSpec>>(spec: S)
       for (const [key, value] of Object.entries(patch) as [string, string | undefined][]) {
         if (value === undefined || !(key in specRef.current)) continue;
         const { fallback, allowed } = specRef.current[key];
-        if (value === fallback || value === '') next.delete(key);
+        if (value === fallback) next.delete(key);
         else if (!allowed || allowed.includes(value)) next.set(key, value);
       }
       return next;

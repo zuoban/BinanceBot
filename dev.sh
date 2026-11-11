@@ -11,15 +11,40 @@ for command in cargo node npm; do
 done
 
 has_password_arg=false
-for arg in "$@"; do
-  case "$arg" in
-    --admin-password|--admin-password=*) has_password_arg=true ;;
+backend_host=""
+backend_port=""
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+  case "${args[i]}" in
+    --admin-password)
+      if ((i + 1 < ${#args[@]})) && [[ -n "${args[i+1]}" ]]; then has_password_arg=true; fi
+      ;;
+    --admin-password=?*) has_password_arg=true ;;
+    --host) if ((i + 1 < ${#args[@]})); then backend_host="${args[i+1]}"; fi ;;
+    --host=*) backend_host="${args[i]#--host=}" ;;
+    --port|-p) if ((i + 1 < ${#args[@]})); then backend_port="${args[i+1]}"; fi ;;
+    --port=*) backend_port="${args[i]#--port=}" ;;
+    -p?*) backend_port="${args[i]#-p}" ;;
   esac
 done
+dev_host="${DEV_HOST:-127.0.0.1}"
+is_loopback_host() {
+  case "$1" in
+    ""|127.0.0.1|localhost|::1|"[::1]") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+extra_backend_args=()
 if [[ -z "${ADMIN_PASSWORD:-}" && "$has_password_arg" == false ]]; then
-  printf '未设置 ADMIN_PASSWORD，本次启动不启用管理员认证。\n'
+  if ! is_loopback_host "$dev_host" || ! is_loopback_host "$backend_host"; then
+    printf '拒绝在未设置 ADMIN_PASSWORD（或 --admin-password）时绑定非回环地址（DEV_HOST=%s, --host=%s）。\n' "$dev_host" "${backend_host:-127.0.0.1}" >&2
+    exit 1
+  fi
+  if [[ -z "$backend_host" ]]; then
+    extra_backend_args=(--host 127.0.0.1)
+  fi
+  printf '未设置 ADMIN_PASSWORD，本次强制绑定本机回环（127.0.0.1）访问。\n'
 fi
-
 if [[ ! -d "$ROOT_DIR/frontend/node_modules" ]]; then
   printf '正在安装前端依赖...\n'
   (cd "$ROOT_DIR/frontend" && npm ci)
@@ -47,22 +72,13 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 printf '正在启动后端；管理员认证由 ADMIN_PASSWORD 或 --admin-password 决定。\n'
-(cd "$ROOT_DIR" && exec cargo run --release -- "$@") &
+(cd "$ROOT_DIR" && exec cargo run --release -- ${extra_backend_args[@]+"${extra_backend_args[@]}"} "$@") &
 backend_pid=$!
-backend_port=""
-args=("$@")
-for ((i = 0; i < ${#args[@]}; i++)); do
-  case "${args[i]}" in
-    --port|-p) if ((i + 1 < ${#args[@]})); then backend_port="${args[i+1]}"; fi ;;
-    --port=*) backend_port="${args[i]#--port=}" ;;
-    -p?*) backend_port="${args[i]#-p}" ;;
-  esac
-done
 if [[ -n "$backend_port" && -z "${API_PROXY_TARGET:-}" ]]; then
   export API_PROXY_TARGET="http://127.0.0.1:$backend_port"
 fi
 printf '正在启动前端，请访问 Vite 输出的地址。按 Ctrl+C 停止。\n'
-(cd "$ROOT_DIR/frontend" && exec npm run dev -- --host "${DEV_HOST:-127.0.0.1}") &
+(cd "$ROOT_DIR/frontend" && exec npm run dev -- --host "$dev_host") &
 frontend_pid=$!
 
 while kill -0 "$backend_pid" 2>/dev/null && kill -0 "$frontend_pid" 2>/dev/null; do

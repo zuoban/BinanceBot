@@ -50,6 +50,32 @@ pub(super) fn build_grid_stats(
     stats
 }
 
+fn updated_stats_for_trade(
+    current: &GridStats,
+    trade: &TradeRecord,
+    cycle_profit: Option<Decimal>,
+) -> GridStats {
+    let mut updated = current.clone();
+    updated.total_trades = updated.total_trades.saturating_add(1);
+    updated.total_volume_usdc = updated
+        .total_volume_usdc
+        .checked_add(trade.amount_usdc)
+        .unwrap_or(Decimal::MAX);
+    if let Some(profit) = cycle_profit {
+        updated.completed_cycles = updated.completed_cycles.saturating_add(1);
+        updated.total_realized_profit = updated.total_realized_profit.saturating_add(profit);
+    }
+    if trade.pnl_verified {
+        updated.total_realized_pnl = updated
+            .total_realized_pnl
+            .saturating_add(trade.realized_pnl);
+        updated.total_commission = updated.total_commission.saturating_add(trade.commission);
+    } else {
+        updated.pending_pnl_trades = updated.pending_pnl_trades.saturating_add(1);
+    }
+    updated
+}
+
 impl AppState {
     pub(crate) fn account_view(
         &self,
@@ -162,6 +188,73 @@ impl AppState {
             .await
     }
 
+    async fn commit_trade_to_db_and_caches(
+        &self,
+        trade: &TradeRecord,
+        cycle_profit: Option<Decimal>,
+        pair_intent: Option<GridOrder>,
+        consumed_pair_source: Option<String>,
+        paper_state: Option<(PositionInfo, AccountInfo)>,
+        notify_trade: bool,
+    ) -> Result<(bool, Option<HourlyTradeStats>), ()> {
+        let _commit = self.trade_commit_lock.lock().await;
+        let updated = updated_stats_for_trade(&*self.stats.read().await, trade, cycle_profit);
+        let stored_trade = trade.clone();
+        let stored_stats = updated.clone();
+        let stored_paper_state = paper_state.clone();
+        let notification_stats = match self
+            .db
+            .run_blocking(move |db| {
+                let inserted = db.insert_trade_with_paper_recovery(
+                    &stored_trade,
+                    &stored_stats,
+                    pair_intent.as_ref(),
+                    consumed_pair_source.as_deref(),
+                    stored_paper_state.as_ref(),
+                )?;
+                let stats = if inserted && notify_trade {
+                    db.get_hourly_trade_stats(
+                        &stored_trade.symbol,
+                        stored_trade.mode,
+                        stored_trade.timestamp,
+                    )
+                    .map_err(|error| warn!("Could not load Telegram trade counts: {}", error))
+                    .ok()
+                } else {
+                    None
+                };
+                Ok((inserted, stats))
+            })
+            .await
+        {
+            Ok((true, stats)) => {
+                *self.stats.write().await = updated;
+                stats
+            }
+            Ok((false, _)) => return Ok((false, None)),
+            Err(e) => {
+                error!("Failed to persist trade and grid stats to SQLite database: {e}");
+                return Err(());
+            }
+        };
+        if let Some((position, account)) = paper_state {
+            let mut current_position = self.position.write().await;
+            let mut current_account = self.account.write().await;
+            *current_position = position;
+            *current_account = account;
+            self.account_view(
+                &trade.symbol,
+                trade.mode,
+                &current_position,
+                &current_account,
+            );
+        }
+        // Keep the cache update in the same critical section as persistence
+        // so cleanup cannot be followed by an old trade reappearing here.
+        cache_recent_trade(&mut *self.recent_trades.write().await, trade.clone());
+        Ok((true, notification_stats))
+    }
+
     async fn record_trade_inner(
         self: &Arc<Self>,
         trade: TradeRecord,
@@ -170,13 +263,15 @@ impl AppState {
         consumed_pair_source: Option<String>,
         paper_state: Option<(PositionInfo, AccountInfo)>,
     ) -> bool {
-        // Persist the trade and its cumulative statistics together.
-        let current_config = self.config.read().await;
-        let current_symbol = current_config.exchange.symbol.clone();
-        let current_mode = current_config.exchange.trading_mode();
-        let telegram = current_config.telegram.clone();
-        let direction = current_config.grid.direction;
-        drop(current_config);
+        let (current_symbol, current_mode, telegram, direction) = {
+            let cfg = self.config.read().await;
+            (
+                cfg.exchange.symbol.clone(),
+                cfg.exchange.trading_mode(),
+                cfg.telegram.clone(),
+                cfg.grid.direction,
+            )
+        };
         if trade.symbol != current_symbol || trade.mode != current_mode {
             error!(
                 "Trade scope differs from the active strategy: {}",
@@ -186,100 +281,27 @@ impl AppState {
         }
         let notify_trade =
             telegram.enabled && (trade.pnl_verified || trade.side != direction.closing_side());
-        let notification_stats;
-        {
-            let _commit = self.trade_commit_lock.lock().await;
-            let mut updated = self.stats.read().await.clone();
-            updated.total_trades = updated.total_trades.saturating_add(1);
-            updated.total_volume_usdc = updated
-                .total_volume_usdc
-                .checked_add(trade.amount_usdc)
-                .unwrap_or(Decimal::MAX);
-            if let Some(profit) = cycle_profit {
-                updated.completed_cycles = updated.completed_cycles.saturating_add(1);
-                updated.total_realized_profit =
-                    updated.total_realized_profit.saturating_add(profit);
-            }
-            if trade.pnl_verified {
-                updated.total_realized_pnl = updated
-                    .total_realized_pnl
-                    .saturating_add(trade.realized_pnl);
-                updated.total_commission =
-                    updated.total_commission.saturating_add(trade.commission);
-            } else {
-                updated.pending_pnl_trades = updated.pending_pnl_trades.saturating_add(1);
-            }
-            let stored_trade = trade.clone();
-            let stored_stats = updated.clone();
-            let stored_paper_state = paper_state.clone();
-            match self
-                .db
-                .run_blocking(move |db| {
-                    let inserted = db.insert_trade_with_paper_recovery(
-                        &stored_trade,
-                        &stored_stats,
-                        pair_intent.as_ref(),
-                        consumed_pair_source.as_deref(),
-                        stored_paper_state.as_ref(),
-                    )?;
-                    let stats = if inserted && notify_trade {
-                        match db.get_hourly_trade_stats(
-                            &stored_trade.symbol,
-                            stored_trade.mode,
-                            stored_trade.timestamp,
-                        ) {
-                            Ok(stats) => Some(stats),
-                            Err(error) => {
-                                warn!("Could not load Telegram trade counts: {}", error);
-                                None
-                            }
-                        }
-                    } else {
-                        None
-                    };
-                    Ok((inserted, stats))
-                })
-                .await
-            {
-                Ok((true, stats)) => {
-                    *self.stats.write().await = updated;
-                    notification_stats = stats;
-                }
-                Ok((false, _)) => return true,
-                Err(e) => {
-                    error!(
-                        "Failed to persist trade and grid stats to SQLite database: {}",
-                        e
-                    );
-                    return false;
-                }
-            }
-            if let Some((position, account)) = paper_state {
-                let mut current_position = self.position.write().await;
-                let mut current_account = self.account.write().await;
-                *current_position = position;
-                *current_account = account;
-                self.account_view(
-                    &current_symbol,
-                    current_mode,
-                    &current_position,
-                    &current_account,
-                );
-            }
-
-            // Keep the cache update in the same critical section as persistence
-            // so cleanup cannot be followed by an old trade reappearing here.
-            let mut trades = self.recent_trades.write().await;
-            cache_recent_trade(&mut trades, trade.clone());
+        let Ok((inserted, notification_stats)) = self
+            .commit_trade_to_db_and_caches(
+                &trade,
+                cycle_profit,
+                pair_intent,
+                consumed_pair_source,
+                paper_state,
+                notify_trade,
+            )
+            .await
+        else {
+            return false;
+        };
+        if !inserted {
+            return true;
         }
-
-        // Broadcast trade update event to WebSocket clients
         if self.ws_broadcast_tx.receiver_count() > 0 {
             if let Some(json) = crate::types::ws_frame_json("trade", &trade) {
                 let _ = self.ws_broadcast_tx.send(json);
             }
         }
-
         if notify_trade {
             self.spawn_trade_telegram_notification(telegram, trade, notification_stats, direction)
                 .await;
@@ -455,11 +477,11 @@ impl AppState {
         *self.recent_trades.write().await = recent_trade_cache(trades);
     }
 
-    pub async fn clear_trade_history(self: &Arc<Self>) -> anyhow::Result<usize> {
+    pub(crate) async fn clear_trade_history(self: &Arc<Self>) -> anyhow::Result<usize> {
         Self::clear_trade_history_for(std::slice::from_ref(self)).await
     }
 
-    pub async fn clear_symbol_trade_history(
+    pub(crate) async fn clear_symbol_trade_history(
         self: &Arc<Self>,
         symbol: String,
     ) -> anyhow::Result<(usize, BotSnapshot)> {
@@ -484,7 +506,7 @@ impl AppState {
         .await?
     }
 
-    pub async fn clear_trade_history_for(states: &[Arc<Self>]) -> anyhow::Result<usize> {
+    pub(crate) async fn clear_trade_history_for(states: &[Arc<Self>]) -> anyhow::Result<usize> {
         Ok(
             Self::clear_selected_database_inner(states, true, false, None, false)
                 .await?
@@ -492,7 +514,7 @@ impl AppState {
         )
     }
 
-    pub async fn clear_selected_database_for(
+    pub(crate) async fn clear_selected_database_for(
         states: &[Arc<Self>],
         trades: bool,
         snapshots: bool,

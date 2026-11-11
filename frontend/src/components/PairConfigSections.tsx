@@ -1,14 +1,14 @@
 import { useContext, useEffect, useLayoutEffect, useState } from 'react';
-import { Button, Card, Col, Form, InputNumber, Row, Switch, type FormInstance } from 'antd';
+import { Alert, Button, Card, Col, Form, Input, InputNumber, Row, Select, Switch, type FormInstance } from 'antd';
 import { describeNewGridConfig, diffGridConfig, type FieldChange } from '../lib/configDiff';
 import { positiveDecimalText } from '../lib/format';
-import { isPercentDecimal, isPositiveDecimal, priceRangeError } from '../lib/gridPreview';
+import { isPercentDecimal, isPositiveDecimal, orderAmountError, priceRangeError, tickSizeError } from '../lib/gridPreview';
 import { AccountsContext } from '../lib/session';
 import type { GridConfig, Mode } from '../lib/types';
 
 export type FormValues = Omit<GridConfig, 'post_only'>;
 export const defaults: FormValues = { symbol: '', direction: 'LONG', grid_interval: '0.1', order_amount_usdc: '100', buy_window: 3, sell_window: 3, min_price: null, max_price: null, max_position_usdc: '1000', pause_on_max_position: true, cancel_opening_on_max_position: false, min_liquidation_distance_pct: null };
-export const directionOptions = [{ value: 'LONG', label: '做多 · 买入开仓 / 卖出平仓' }, { value: 'SHORT', label: '做空 · 卖出开仓 / 买入平仓' }];
+const directionOptions = [{ value: 'LONG', label: '做多 · 买入开仓 / 卖出平仓' }, { value: 'SHORT', label: '做空 · 卖出开仓 / 买入平仓' }];
 
 export function AccountMarkBridge({ symbol, mode, onMark }: { symbol: string; mode: Mode | undefined; onMark: (mark: string | undefined) => void }) {
   const accounts = useContext(AccountsContext);
@@ -29,6 +29,90 @@ export function LiveConfigConfirmContent({ changes, values }: { changes: FieldCh
       </div>)}
     </dl>
   </div>;
+}
+
+export function PairBasicSection({
+  live,
+  adding,
+  formDisabled,
+  selectedSymbol,
+  latestPrice,
+  quote,
+  symbolOptions,
+  symbolsFetching,
+  symbolsError,
+  previewFetching,
+  onRetrySymbols,
+}: {
+  live: boolean;
+  adding: boolean;
+  formDisabled: boolean;
+  selectedSymbol: string | undefined;
+  latestPrice: string | null;
+  quote: string;
+  symbolOptions: { value: string; label: string }[];
+  symbolsFetching: boolean;
+  symbolsError: boolean;
+  previewFetching: boolean;
+  onRetrySymbols: () => void;
+}) {
+  return <Card title="基本设置">
+    {live && <Alert type="warning" showIcon className="config-live-alert" title="实盘使用真实资金，请核对交易方向和风险限制。" />}
+    <Row gutter={[20, 16]}>
+      <Col xs={24} md={12}>
+        <Form.Item
+          name="symbol"
+          label="合约交易对"
+          rules={[{ required: true, message: '请选择交易对' }]}
+          getValueProps={value => ({ value: value || undefined })}
+          extra={
+            adding && symbolsError ? <span>交易对加载失败 <Button type="link" onClick={onRetrySymbols}>重试</Button></span>
+            : adding && selectedSymbol ? (previewFetching ? '正在获取最新价格...' : latestPrice ? `最新价格：${latestPrice}${quote ? ` ${quote}` : ''}` : undefined)
+            : undefined
+          }
+        >
+          {adding ? (
+            <Select
+              className="symbol-field"
+              showSearch
+              optionFilterProp="label"
+              placeholder={symbolsFetching ? '正在加载交易对...' : '搜索并选择交易对'}
+              loading={symbolsFetching}
+              disabled={formDisabled || symbolsFetching || symbolsError}
+              notFoundContent="没有匹配的交易对"
+              options={symbolOptions}
+            />
+          ) : (
+            <Input className="symbol-field" disabled />
+          )}
+        </Form.Item>
+      </Col>
+      <Col xs={24} md={12}><Form.Item name="direction" label="交易方向" rules={[{ required: true }]}><Select options={directionOptions} /></Form.Item></Col>
+    </Row>
+  </Card>;
+}
+
+export function PairGridParamsSection({
+  effectiveMark,
+  tickSize,
+  stepSize,
+  minQty,
+  minNotional,
+}: {
+  effectiveMark: string | undefined;
+  tickSize: string | undefined;
+  stepSize: string | undefined;
+  minQty: string | undefined;
+  minNotional: string | undefined;
+}) {
+  return <Card title="网格参数">
+    <Row gutter={[20, 16]}>
+      <Col xs={24} md={12}><Form.Item name="grid_interval" label="网格间距" dependencies={['symbol']} extra="相邻网格价格的固定差值，单位为报价资产" rules={[{ required: true, message: '请输入网格间距' }, () => ({ validator: (_, value) => { if (value == null || value === '') return Promise.resolve(); if (!isPositiveDecimal(value)) return Promise.reject(new Error('网格间距必须大于 0')); const error = tickSize ? tickSizeError(value, tickSize) : null; return error ? Promise.reject(new Error(error)) : Promise.resolve(); } })]}><InputNumber stringMode min="0" className="full-width-input" /></Form.Item></Col>
+      <Col xs={24} md={12}><Form.Item name="order_amount_usdc" label="每格金额（报价资产）" dependencies={['symbol']} rules={[{ required: true, message: '请输入每格金额' }, () => ({ validator: (_, value) => { if (value == null || value === '') return Promise.resolve(); if (!isPositiveDecimal(value)) return Promise.reject(new Error('每格金额必须大于 0')); const error = orderAmountError(value, effectiveMark, { stepSize, minQty, minNotional }); return error ? Promise.reject(new Error(error)) : Promise.resolve(); } })]}><InputNumber stringMode min="0" className="full-width-input" /></Form.Item></Col>
+      <Col xs={24} md={12}><Form.Item name="buy_window" label="买单窗口" extra="当前价格下方预挂的买单数量，范围为 1–50" rules={[{ required: true }]}><InputNumber min={1} max={50} precision={0} className="full-width-input" /></Form.Item></Col>
+      <Col xs={24} md={12}><Form.Item name="sell_window" label="卖单窗口" extra="当前价格上方预挂的卖单数量，范围为 1–50" rules={[{ required: true }]}><InputNumber min={1} max={50} precision={0} className="full-width-input" /></Form.Item></Col>
+    </Row>
+  </Card>;
 }
 
 export function PairRiskAndRangeSection() {

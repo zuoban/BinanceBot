@@ -22,7 +22,7 @@ pub(super) fn new_pair_intent(
         side,
         price,
         quantity,
-        amount_usdc: price * quantity,
+        amount_usdc: price.checked_mul(quantity).unwrap_or(Decimal::MAX),
         status: OrderStatus::New,
         created_at: Utc::now(),
         updated_at: Utc::now(),
@@ -224,18 +224,11 @@ impl GridTradingEngine {
         original.reserve_quantity(found.orig_qty);
         if unresolved_filled_quantity(&found) {
             self.invalidate_account_and_position_caches().await;
-            self.state
-                .active_orders
-                .write()
-                .await
-                .entry(original.client_order_id.clone())
-                .or_insert(original.clone());
-            if let Err(error) = self.save_managed_order(&original).await {
+            if let Err(error) = self.retain_uncertain_active_order(&original).await {
                 error!(
                     "Could not persist uncertain pair order {}: {}",
                     original.client_order_id, error
                 );
-                self.pause_trading().await;
             }
             return false;
         }
@@ -267,11 +260,8 @@ impl GridTradingEngine {
             }
             return true;
         }
-        if !self.prepare_partial_adoption(&mut intent, &found).await {
-            return false;
-        }
         if !self
-            .adopt_open_exchange_order(&mut intent, original, &found)
+            .prepare_and_adopt_open_order(&mut intent, original, &found)
             .await
         {
             return false;

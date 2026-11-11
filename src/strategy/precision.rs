@@ -5,19 +5,19 @@ use rust_decimal_macros::dec;
 use tracing::{debug, warn};
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct SymbolRules {
-    pub symbol: String,
-    pub tick_size: Decimal,
-    pub price_scale: u32,
-    pub min_price: Decimal,
-    pub max_price: Decimal,
+pub(crate) struct SymbolRules {
+    pub(crate) symbol: String,
+    pub(crate) tick_size: Decimal,
+    pub(crate) price_scale: u32,
+    pub(crate) min_price: Decimal,
+    pub(crate) max_price: Decimal,
 
-    pub step_size: Decimal,
-    pub quantity_scale: u32,
-    pub min_qty: Decimal,
-    pub max_qty: Decimal,
+    pub(crate) step_size: Decimal,
+    pub(crate) quantity_scale: u32,
+    pub(crate) min_qty: Decimal,
+    pub(crate) max_qty: Decimal,
 
-    pub min_notional: Decimal,
+    pub(crate) min_notional: Decimal,
 }
 
 impl Default for SymbolRules {
@@ -38,14 +38,14 @@ impl Default for SymbolRules {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SymbolRulesError {
+pub(crate) enum SymbolRulesError {
     NotFound,
     NotTrading,
     MissingFilters,
 }
 
 impl SymbolRulesError {
-    pub fn into_chinese_error(self, symbol: &str) -> anyhow::Error {
+    pub(crate) fn into_chinese_error(self, symbol: &str) -> anyhow::Error {
         match self {
             Self::NotFound => anyhow::anyhow!("币安合约不存在交易对 {symbol}"),
             Self::NotTrading => anyhow::anyhow!("交易对 {symbol} 当前未处于可交易状态"),
@@ -53,7 +53,7 @@ impl SymbolRulesError {
         }
     }
 
-    pub fn preview_status_and_message(self) -> (axum::http::StatusCode, &'static str) {
+    pub(crate) fn preview_status_and_message(self) -> (axum::http::StatusCode, &'static str) {
         use axum::http::StatusCode;
         match self {
             Self::NotFound => (StatusCode::NOT_FOUND, "交易对不存在"),
@@ -64,7 +64,10 @@ impl SymbolRulesError {
 }
 
 impl SymbolRules {
-    pub fn from_exchange_info(info: &BinanceExchangeInfo, symbol_name: &str) -> Option<Self> {
+    pub(crate) fn from_exchange_info(
+        info: &BinanceExchangeInfo,
+        symbol_name: &str,
+    ) -> Option<Self> {
         let sym = info
             .symbols
             .iter()
@@ -72,7 +75,7 @@ impl SymbolRules {
         Self::from_symbol_info(sym)
     }
 
-    pub fn from_trading_exchange_info(
+    pub(crate) fn from_trading_exchange_info(
         info: &BinanceExchangeInfo,
         symbol_name: &str,
     ) -> std::result::Result<Self, SymbolRulesError> {
@@ -171,7 +174,7 @@ impl SymbolRules {
     }
 
     /// A fixed lattice must be exactly representable by the exchange price filter.
-    pub fn validate_grid_interval(&self, interval: Decimal) -> anyhow::Result<()> {
+    pub(crate) fn validate_grid_interval(&self, interval: Decimal) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.tick_size > Decimal::ZERO
                 && interval >= self.tick_size
@@ -188,7 +191,7 @@ impl SymbolRules {
     }
 
     /// Both directions share the same zero-anchored price lattice.
-    pub fn is_grid_price(&self, price: Decimal, interval: Decimal) -> bool {
+    pub(crate) fn is_grid_price(&self, price: Decimal, interval: Decimal) -> bool {
         interval > Decimal::ZERO
             && price > Decimal::ZERO
             && price
@@ -198,7 +201,7 @@ impl SymbolRules {
                 == Some(price)
     }
 
-    pub fn is_valid_maker_grid_price(
+    pub(crate) fn is_valid_maker_grid_price(
         &self,
         grid: &crate::config::GridConfig,
         side: OrderSide,
@@ -209,17 +212,13 @@ impl SymbolRules {
         {
             return false;
         }
-        let maker_ok = match side {
-            OrderSide::Buy => price < market,
-            OrderSide::Sell => price > market,
-        };
         let min_price = grid
             .min_price
             .unwrap_or(self.min_price)
             .max(self.min_price)
             .max(grid.grid_interval);
         let max_price = grid.max_price.unwrap_or(self.max_price).min(self.max_price);
-        maker_ok
+        side.is_maker_price(price, market)
             && price >= min_price
             && price <= max_price
             && self.checked_round_price(price) == Some(price)
@@ -229,7 +228,7 @@ impl SymbolRules {
     /// Zero-anchored levels survive market moves and restarts.
     /// Count eligible levels, skipping reservations without consuming window slots.
     /// At an exact level, neither side places an order at the current market price.
-    pub fn grid_window_prices(
+    pub(crate) fn grid_window_prices(
         &self,
         market: Decimal,
         interval: Decimal,
@@ -299,7 +298,7 @@ impl SymbolRules {
     }
 
     /// Round price to the nearest tick size
-    pub fn round_price(&self, price: Decimal) -> Decimal {
+    pub(crate) fn round_price(&self, price: Decimal) -> Decimal {
         self.checked_round_price(price).unwrap_or(Decimal::ZERO)
     }
 
@@ -316,12 +315,16 @@ impl SymbolRules {
     }
 
     /// Truncate quantity down to the nearest lot step size
-    pub fn round_quantity(&self, qty: Decimal) -> Decimal {
+    pub(crate) fn round_quantity(&self, qty: Decimal) -> Decimal {
         self.checked_round_quantity(qty).unwrap_or(Decimal::ZERO)
     }
 
     /// Calculate compliant order quantity given target USDC notional amount and price
-    pub fn calculate_quantity(&self, price: Decimal, amount_usdc: Decimal) -> Option<Decimal> {
+    pub(crate) fn calculate_quantity(
+        &self,
+        price: Decimal,
+        amount_usdc: Decimal,
+    ) -> Option<Decimal> {
         if price <= Decimal::ZERO || amount_usdc <= Decimal::ZERO {
             return None;
         }
@@ -357,7 +360,7 @@ impl SymbolRules {
     /// Plan a remainder/closing order quantity bounded by `available` and a single grid order's
     /// full quantity. Returns `(quantity, OrderPurpose)` when `quantity` meets `min_qty` and
     /// `min_notional`.
-    pub fn plan_remainder_quantity(
+    pub(crate) fn plan_remainder_quantity(
         &self,
         price: Decimal,
         order_amount_usdc: Decimal,
@@ -380,11 +383,11 @@ impl SymbolRules {
         Some((quantity, purpose))
     }
 
-    pub fn format_price(&self, price: Decimal) -> String {
+    pub(crate) fn format_price(&self, price: Decimal) -> String {
         format!("{:.*}", self.price_scale as usize, self.round_price(price))
     }
 
-    pub fn format_quantity(&self, qty: Decimal) -> String {
+    pub(crate) fn format_quantity(&self, qty: Decimal) -> String {
         format!(
             "{:.*}",
             self.quantity_scale as usize,

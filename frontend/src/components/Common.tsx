@@ -5,6 +5,7 @@ import { Link } from 'react-router-dom';
 import { EditContext } from '../lib/session';
 import { errorMessage } from '../lib/api';
 import { useAsyncLock } from '../lib/asyncGuard';
+import { useConfirmDialog } from '../lib/confirmDialog';
 import type { GridConfig, Mode, Status } from '../lib/types';
 type Direction = GridConfig['direction'];
 import { ageText, compactNumber, directionLabel, modeLabel, number, numeric, sig3Format, statusLabel } from '../lib/format';
@@ -89,24 +90,26 @@ export function useCenterElementScroll<T extends HTMLElement>(ref: RefObject<T |
     }
   }, deps);
 }
-export function isConfigConflict(error: Error | null | undefined, messageFragment: string): boolean {
-  return Boolean(error && (('status' in error && error.status === 409) || error.message.includes(messageFragment)));
+export function isConfigConflict(error: Error | null | undefined, ...messageFragments: string[]): boolean {
+  return Boolean(error && (('status' in error && error.status === 409) || messageFragments.some(fragment => error.message.includes(fragment))));
 }
-export function ConflictReloadButton<T>({ label, activeRef, refetch, onLoaded, onReset }: {
+export function ConflictReloadButton<T>({ label, activeRef, resetKey, refetch, onLoaded, onReset }: {
   label: string;
   activeRef: { current: unknown };
+  resetKey?: unknown;
   refetch: () => Promise<{ data?: T; error: unknown }>;
   onLoaded: (data: NonNullable<T>) => boolean | void;
   onReset: () => void;
 }) {
-  const { modal, message } = App.useApp();
+  const { message } = App.useApp();
+  const { confirm } = useConfirmDialog(resetKey);
   const edit = useContext(EditContext);
   const runReload = useAsyncLock();
   return <Button className="conflict-reload-btn" disabled={edit.saving} onClick={() => {
     const current = activeRef.current;
     if (edit.saving || !current) return;
     void runReload(async () => {
-      if (!await modal.confirm({ title: `重新加载${label}？`, content: '重新加载会放弃当前未保存的修改，请先记录需要保留的内容。', okText: '重新加载', cancelText: '继续编辑' })) return;
+      if (!await confirm({ title: `重新加载${label}？`, content: '重新加载会放弃当前未保存的修改，请先记录需要保留的内容。', okText: '重新加载', cancelText: '继续编辑' })) return;
       if (activeRef.current !== current) return;
       const result = await refetch();
       if (activeRef.current !== current) return;
@@ -117,19 +120,20 @@ export function ConflictReloadButton<T>({ label, activeRef, refetch, onLoaded, o
     });
   }}>重新加载{label}</Button>;
 }
-export function FormRevertButton({ activeRef, onRevert, onReset }: {
+export function FormRevertButton({ activeRef, resetKey, onRevert, onReset }: {
   activeRef: { current: unknown };
+  resetKey?: unknown;
   onRevert: () => void;
   onReset: () => void;
 }) {
-  const { modal } = App.useApp();
+  const { confirm } = useConfirmDialog(resetKey);
   const edit = useContext(EditContext);
   const runRevert = useAsyncLock();
   return <Button onClick={() => {
     const current = activeRef.current;
     if (!current) return;
     void runRevert(async () => {
-      if (edit.dirty && !await modal.confirm({ title: '放弃未保存的修改？', okText: '还原', cancelText: '继续编辑' })) return;
+      if (edit.dirty && !await confirm({ title: '放弃未保存的修改？', okText: '还原', cancelText: '继续编辑' })) return;
       if (activeRef.current !== current) return;
       onRevert();
       edit.setDirty(false);

@@ -1,16 +1,18 @@
-import { flushSync } from 'react-dom';
 import { Alert, App, Button, Card, Checkbox, Col, Form, Input, InputNumber, Row, Space, Switch } from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, post } from '../../lib/api';
 import { diffGlobalConfig } from '../../lib/configDiff';
+import { useConfirmDialog } from '../../lib/confirmDialog';
 import { isPercentDecimal, isPositiveDecimal } from '../../lib/gridPreview';
+import { invalidateStrategyQueries } from '../../lib/queries';
 import type { GlobalConfig } from '../../lib/types';
 import { ConflictReloadButton, ErrorNotice, FormRevertButton, isConfigConflict } from '../Common';
 import { ProbeButton, useSettingsFormLifecycle, type GlobalForm } from './settingsShared';
 
 export function GlobalSettings() {
   const [form] = Form.useForm<GlobalForm>();
-  const { message, modal } = App.useApp();
+  const { message } = App.useApp();
+  const { confirm } = useConfirmDialog();
   const client = useQueryClient();
   const query = useQuery({ queryKey: ['global-config'], queryFn: ({ signal }) => api<GlobalConfig>('/api/global/config', { signal }), refetchOnWindowFocus: false });
   const { edit, ready, baseline, mounted, submitting, fill } = useSettingsFormLifecycle(query.data, data => {
@@ -37,13 +39,12 @@ export function GlobalSettings() {
         edit.setDirty(false);
       }
       message.success('全局设置已保存，所有交易对立即生效');
-      if (values.api_key?.trim() || values.api_secret?.trim() || values.clear_api_credentials) {
-        void client.resetQueries({ queryKey: ['overview-history'] });
-      }
-      void client.invalidateQueries({ queryKey: ['pairs'] });
-      void client.invalidateQueries({ queryKey: ['overview'] });
-      void client.invalidateQueries({ queryKey: ['accounts'] });
-      void client.invalidateQueries({ queryKey: ['snapshot'] });
+      const credentialsChanged = Boolean(values.api_key?.trim() || values.api_secret?.trim() || values.clear_api_credentials);
+      void invalidateStrategyQueries(client, {
+        accounts: true,
+        snapshot: true,
+        history: credentialsChanged ? 'reset' : undefined,
+      });
     },
     onError: error => message.error(error.message),
     onSettled: () => {
@@ -54,23 +55,21 @@ export function GlobalSettings() {
   const submit = async (values: GlobalForm) => {
     if (submitting.current) return;
     submitting.current = true;
-    flushSync(() => edit.setSaving(true));
     const changes = diffGlobalConfig(baseline.current, values);
     try {
-      if (changes.length && !await modal.confirm({
+      if (changes.length && !await confirm({
         title: '确认保存全局设置？',
         content: <div className="confirm-changes"><p>以下变更保存后立即生效：</p><ul>{changes.map(change => <li key={change}>{change}</li>)}</ul></div>,
         okText: '确认保存', cancelText: '继续编辑',
       })) {
         submitting.current = false;
-        if (mounted.current) edit.setSaving(false);
         return;
       }
       if (!mounted.current) { submitting.current = false; return; }
+      edit.setSaving(true);
       mutation.mutate(values);
     } catch (error) {
       submitting.current = false;
-      if (mounted.current) edit.setSaving(false);
       throw error;
     }
   };
@@ -85,14 +84,14 @@ export function GlobalSettings() {
   return <>
     <ErrorNotice error={query.error} retry={() => void query.refetch()} />
     <ErrorNotice error={mutation.error} />
-    {(isConfigConflict(mutation.error, '全局设置已被其他请求修改') || isConfigConflict(mutation.error, '无法确认设置版本')) && <ConflictReloadButton label="全局设置" activeRef={mounted} refetch={query.refetch} onReset={mutation.reset} onLoaded={fill} />}
+    {isConfigConflict(mutation.error, '全局设置已被其他请求修改', '无法确认设置版本') && <ConflictReloadButton label="全局设置" activeRef={mounted} refetch={query.refetch} onReset={mutation.reset} onLoaded={fill} />}
     <Form form={form} layout="vertical" disabled={!ready || edit.saving} onValuesChange={() => edit.setDirty(true)} onFinish={v => void submit(v)}>
       <Card title="交易所连接" className="settings-card">
         <Alert type="info" showIcon title={`密钥不会回显，留空将保留已有值。${query.data?.has_api_key ? `当前 API Key：${query.data.api_key_preview}` : '尚未配置 API Key。'}运行模式由 API Key 决定：已配置以实盘运行，未配置以模拟盘运行。`} />
         <Row gutter={[20, 16]} className="settings-fields">
           <Col xs={24} md={12}><Form.Item name="api_key" label="API Key"><Input.Password autoComplete="off" placeholder="留空保留已保存的值" disabled={!ready || edit.saving || clearApi} /></Form.Item></Col>
           <Col xs={24} md={12}><Form.Item name="api_secret" label="API Secret"><Input.Password autoComplete="new-password" placeholder="留空保留已保存的值" disabled={!ready || edit.saving || clearApi} /></Form.Item></Col>
-          <Col xs={24} md={12}><Form.Item name="recv_window" label="请求有效窗口（毫秒）" extra="交易所接受已签名请求的时间窗口" rules={[{ required: true }]}><InputNumber min={1} precision={0} className="full-width-input" /></Form.Item></Col>
+          <Col xs={24} md={12}><Form.Item name="recv_window" label="请求有效窗口（毫秒）" extra="交易所接受已签名请求的时间窗口" rules={[{ required: true }]}><InputNumber min={1} max={60000} precision={0} className="full-width-input" /></Form.Item></Col>
           <Col xs={24} md={12}><Form.Item name="sync_interval_secs" label="同步间隔（秒）" extra="策略定期同步订单、账户和持仓的间隔" rules={[{ required: true }]}><InputNumber min={1} precision={0} className="full-width-input" /></Form.Item></Col>
         </Row>
         <div className="settings-card-footer">

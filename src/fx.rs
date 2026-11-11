@@ -26,7 +26,7 @@ struct CacheEntry {
     attempted_at: Option<Instant>,
 }
 
-pub struct CnyRateCache {
+pub(crate) struct CnyRateCache {
     client: reqwest::Client,
     endpoint: String,
     entries: Mutex<HashMap<String, CacheEntry>>,
@@ -44,7 +44,7 @@ struct CoinbaseRates {
 }
 
 impl CnyRateCache {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::with_endpoint(COINBASE_RATES_URL.to_string())
     }
 
@@ -60,7 +60,7 @@ impl CnyRateCache {
         }
     }
 
-    pub async fn get(&self, asset: &str) -> Option<CnyRate> {
+    pub(crate) async fn get(&self, asset: &str) -> Option<CnyRate> {
         let entries = self.entries.lock().await;
         let entry = entries.get(asset)?;
         if entry.fetched_at?.elapsed() > MAX_DISPLAY_AGE {
@@ -69,7 +69,7 @@ impl CnyRateCache {
         entry.rate.clone()
     }
 
-    pub async fn refresh_if_due(&self, asset: &str) -> Result<()> {
+    pub(crate) async fn refresh_if_due(&self, asset: &str) -> Result<()> {
         // These are the quote assets supported by the public rate endpoint.
         if !matches!(asset, "USDC" | "USDT") {
             return Ok(());

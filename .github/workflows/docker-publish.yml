@@ -17,6 +17,7 @@ env:
 jobs:
   checks:
     runs-on: ubuntu-24.04
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.1
@@ -67,6 +68,7 @@ jobs:
             component: frontend
             dockerfile: frontend/Dockerfile
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
     permissions:
       contents: read
       packages: write
@@ -138,6 +140,7 @@ jobs:
       matrix:
         component: [backend, frontend]
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: read
       packages: write

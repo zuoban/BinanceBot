@@ -1,7 +1,7 @@
 import { useRef } from 'react';
 import { Alert, Button, Form, Input, Typography } from 'antd';
 import { LockOutlined } from '@ant-design/icons';
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, post, tokenStore } from '../lib/api';
 import type { AuthStatus } from '../lib/types';
 import { ErrorNotice } from '../components/Common';
@@ -23,12 +23,18 @@ const buyLevels = [
 ] as const;
 
 export default function Login({ onLogin }: { onLogin: () => void }) {
+  const client = useQueryClient();
   const status = useQuery({ queryKey: ['auth-status'], queryFn: ({ signal }) => api<AuthStatus>('/api/auth/status', { signal }), retry: false });
   const configured = status.data?.initialized !== false;
   const submitting = useRef(false);
   const mutation = useMutation({
-    mutationFn: (values: { password: string }) => post<{ token: string }>('/api/auth/login', values),
-    onSuccess: data => { tokenStore.set(data.token); onLogin(); },
+    mutationFn: (values: { password: string }) => post<{ token: string }>('/api/auth/login', values, { readOnly: true }),
+    onSuccess: async data => {
+      tokenStore.set(data.token);
+      await client.cancelQueries({ queryKey: ['auth-status'] });
+      client.setQueryData(['auth-status'], { initialized: true, authenticated: true });
+      onLogin();
+    },
   });
   if (status.isPending) return <LoadingScreen label="正在连接控制台" />;
   return <main className="login-page">

@@ -1930,3 +1930,92 @@ async fn routers_attach_security_headers_without_touching_websocket_upgrades() {
     server.abort();
     let _ = runtime.shutdown(std::time::Duration::from_secs(2)).await;
 }
+
+#[tokio::test]
+async fn shared_proxy_ip_successful_login_preserves_prior_failed_attempts_and_disabled_auth_is_isolated(
+) {
+    use axum::{body::Body, http::Request};
+    let unconfigured_db = Arc::new(Database::open(":memory:").unwrap());
+    let (unconfigured_tx, _unconfigured_rx) = tokio::sync::mpsc::channel(1);
+    let unconfigured_state = AppState::new(AppConfig::default(), unconfigured_db, unconfigured_tx);
+    let unconfigured_app = create_router(unconfigured_state.clone()).layer(axum::Extension(
+        axum::extract::ConnectInfo(
+            "198.51.100.10:4000"
+                .parse::<std::net::SocketAddr>()
+                .unwrap(),
+        ),
+    ));
+    let disabled_probe = Request::builder()
+        .method("POST")
+        .uri("/api/auth/login")
+        .header("Content-Type", "application/json")
+        .body(Body::from(r#"{"password":"probe"}"#))
+        .unwrap();
+    assert_eq!(
+        unconfigured_app
+            .oneshot(disabled_probe)
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    {
+        let failures = unconfigured_state.auth.login_failures.lock().await;
+        assert!(failures.by_source.is_empty());
+        assert!(failures.global.is_empty());
+    }
+
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    let (tx, _rx) = tokio::sync::mpsc::channel(1);
+    let state = AppState::new_with_admin_auth(
+        AppConfig::default(),
+        db,
+        tx,
+        Some(Arc::new(
+            crate::auth::AdminAuth::from_password("admin-secret-pw").unwrap(),
+        )),
+    );
+    let proxy_addr: std::net::SocketAddr = "198.51.100.20:5000".parse().unwrap();
+    let proxy_ip = proxy_addr.ip();
+    let app =
+        create_router(state.clone()).layer(axum::Extension(axum::extract::ConnectInfo(proxy_addr)));
+    let login_req = |pw: &str| {
+        Request::builder()
+            .method("POST")
+            .uri("/api/auth/login")
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::json!({"password": pw}).to_string()))
+            .unwrap()
+    };
+
+    // 5 failed attempts behind shared proxy IP
+    for _ in 0..5 {
+        let res = app.clone().oneshot(login_req("wrong-pw")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+    assert_eq!(
+        state.auth.login_failures.lock().await.by_source[&proxy_ip].len(),
+        5
+    );
+
+    // 1 valid login behind the same shared proxy IP rolls back ONLY its own attempt
+    let ok_res = app
+        .clone()
+        .oneshot(login_req("admin-secret-pw"))
+        .await
+        .unwrap();
+    assert_eq!(ok_res.status(), StatusCode::OK);
+    {
+        let failures = state.auth.login_failures.lock().await;
+        assert_eq!(failures.by_source[&proxy_ip].len(), 5);
+        assert_eq!(failures.global.len(), 5);
+    }
+
+    // 5 more failed attempts hit the 10-attempt source cap (proving prior 5 were not wiped)
+    for _ in 0..5 {
+        let res = app.clone().oneshot(login_req("wrong-pw")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+    let blocked_res = app.oneshot(login_req("wrong-pw")).await.unwrap();
+    assert_eq!(blocked_res.status(), StatusCode::TOO_MANY_REQUESTS);
+}

@@ -74,6 +74,19 @@ pub(crate) fn parse_csv(text: &str) -> Result<Vec<Candle>> {
     Ok(candles)
 }
 
+pub(super) fn next_kline_page_start(
+    received: usize,
+    last: Option<&Candle>,
+    end_ms: i64,
+) -> Option<i64> {
+    match last {
+        Some(last) if received >= 1500 && last.time_ms < end_ms => {
+            Some(last.time_ms.saturating_add(1))
+        }
+        _ => None,
+    }
+}
+
 pub(crate) async fn fetch_klines(
     symbol: &str,
     interval: &str,
@@ -132,10 +145,10 @@ pub(crate) async fn fetch_klines(
                 close: price(4)?,
             });
         }
-        match candles.last() {
-            Some(last) if received >= 1500 => start = last.time_ms.saturating_add(1),
-            _ => break,
-        }
+        let Some(next_start) = next_kline_page_start(received, candles.last(), end_ms) else {
+            break;
+        };
+        start = next_start;
         tokio::time::sleep(Duration::from_millis(150)).await;
     }
     Ok(candles)

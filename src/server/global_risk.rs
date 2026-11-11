@@ -110,6 +110,35 @@ impl GlobalPositionLimit {
         })
     }
 
+    async fn resolve_risk_thresholds(
+        first: &AppState,
+        committed_ref: Option<&crate::config::GlobalConfig>,
+    ) -> (Option<Decimal>, Option<Decimal>, bool) {
+        let (
+            global_max_position_notional,
+            min_available_margin_pct,
+            pause_on_zero_available_margin,
+        ) = match committed_ref {
+            Some(committed) => (
+                committed.global_max_position_notional,
+                committed.min_available_margin_pct,
+                committed.pause_on_zero_available_margin,
+            ),
+            None => {
+                let config = first.config.read().await;
+                (
+                    config.global_max_position_notional,
+                    config.min_available_margin_pct,
+                    config.pause_on_zero_available_margin,
+                )
+            }
+        };
+        let limit = global_max_position_notional.filter(|v| *v > Decimal::ZERO);
+        let margin_pct = min_available_margin_pct.filter(|pct| *pct > Decimal::ZERO);
+        let margin_guard = pause_on_zero_available_margin || margin_pct.is_some();
+        (limit, margin_pct, margin_guard)
+    }
+
     pub(super) async fn check_locked(&self) -> bool {
         let fill_generation = self.fill_failure_generation.load(Ordering::SeqCst);
         let states = self.states.read().await.clone();
@@ -123,28 +152,8 @@ impl GlobalPositionLimit {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         let committed_ref = committed.as_ref();
-        let (
-            global_max_position_notional,
-            min_available_margin_pct,
-            pause_on_zero_available_margin,
-        ) = {
-            let config = first.config.read().await;
-            match committed_ref {
-                Some(committed) => (
-                    committed.global_max_position_notional,
-                    committed.min_available_margin_pct,
-                    committed.pause_on_zero_available_margin,
-                ),
-                None => (
-                    config.global_max_position_notional,
-                    config.min_available_margin_pct,
-                    config.pause_on_zero_available_margin,
-                ),
-            }
-        };
-        let limit = global_max_position_notional.filter(|v| *v > Decimal::ZERO);
-        let margin_pct = min_available_margin_pct.filter(|pct| *pct > Decimal::ZERO);
-        let margin_guard = pause_on_zero_available_margin || margin_pct.is_some();
+        let (limit, margin_pct, margin_guard) =
+            Self::resolve_risk_thresholds(first, committed_ref).await;
         if limit.is_none() && !margin_guard {
             self.enabled.store(false, Ordering::SeqCst);
             self.blocked.store(false, Ordering::SeqCst);
@@ -176,22 +185,11 @@ impl GlobalPositionLimit {
         }
         let position_limit_reached = limit.is_some_and(|limit| total >= limit);
         let unsafe_now = initialized_incomplete || position_limit_reached || zero_margin;
-        self.blocked.store(
-            incomplete || position_limit_reached || zero_margin,
-            Ordering::SeqCst,
-        );
+        let blocked = incomplete || position_limit_reached || zero_margin;
+        self.blocked.store(blocked, Ordering::SeqCst);
         if !incomplete {
             self.fill_recovered_generation
                 .store(fill_generation, Ordering::SeqCst);
-        }
-        let first_trigger = unsafe_now && !self.triggered.swap(true, Ordering::SeqCst);
-        if !unsafe_now {
-            self.triggered.store(false, Ordering::SeqCst);
-        }
-        if first_trigger {
-            for state in &states {
-                state.global_cancel_pending.store(true, Ordering::SeqCst);
-            }
         }
         let reason = if unsafe_now {
             Self::format_global_risk_reason(
@@ -204,7 +202,29 @@ impl GlobalPositionLimit {
         } else {
             String::new()
         };
-        for state in &states {
+        self.apply_risk_outcome(&states, first, committed_ref, unsafe_now, reason)
+            .await;
+        blocked
+    }
+
+    async fn apply_risk_outcome(
+        &self,
+        states: &[Arc<AppState>],
+        first: &Arc<AppState>,
+        committed_ref: Option<&crate::config::GlobalConfig>,
+        unsafe_now: bool,
+        reason: String,
+    ) {
+        let first_trigger = unsafe_now && !self.triggered.swap(true, Ordering::SeqCst);
+        if !unsafe_now {
+            self.triggered.store(false, Ordering::SeqCst);
+        }
+        if first_trigger {
+            for state in states {
+                state.global_cancel_pending.store(true, Ordering::SeqCst);
+            }
+        }
+        for state in states {
             if unsafe_now && (first_trigger || *state.status.read().await == BotStatus::Running) {
                 state.global_cancel_pending.store(true, Ordering::SeqCst);
                 if let Err(error) = Box::pin(state.pause_trading()).await {
@@ -219,7 +239,33 @@ impl GlobalPositionLimit {
         if first_trigger {
             Self::spawn_global_risk_notification(first, committed_ref, reason).await;
         }
-        incomplete || position_limit_reached || zero_margin
+    }
+
+    async fn evaluate_member_margin(
+        state: &AppState,
+        is_paper: bool,
+        fresh: impl Fn(chrono::DateTime<Utc>) -> bool,
+        margin_pct: Option<Decimal>,
+    ) -> (bool, bool) {
+        let account = state.current_account().await;
+        if account.asset.is_empty() || (!is_paper && !fresh(account.update_time)) {
+            return (true, false);
+        }
+        if account.available_balance <= Decimal::ZERO {
+            return (false, true);
+        }
+        if let Some(pct) = margin_pct {
+            if account.margin_balance > Decimal::ZERO {
+                return match (
+                    account.available_balance.checked_mul(Decimal::ONE_HUNDRED),
+                    pct.checked_mul(account.margin_balance),
+                ) {
+                    (Some(lhs), Some(rhs)) => (false, lhs <= rhs),
+                    _ => (true, false),
+                };
+            }
+        }
+        (false, false)
     }
 
     async fn evaluate_member_risk(
@@ -234,44 +280,28 @@ impl GlobalPositionLimit {
         let mut member_incomplete = !initialized
             || !state.global_position_ready.load(Ordering::SeqCst)
             || state.paper_restore_failed.load(Ordering::SeqCst);
-        let mut zero_margin = false;
-        let (sync_interval_secs, is_paper) = {
-            let config = state.config.read().await;
-            match committed_ref {
-                Some(committed) => (
-                    committed.sync_interval_secs,
-                    committed.api_key.trim().is_empty() && committed.api_secret.trim().is_empty(),
-                ),
-                None => (
+        let (sync_interval_secs, is_paper) = match committed_ref {
+            Some(committed) => (
+                committed.sync_interval_secs,
+                committed.api_key.trim().is_empty() && committed.api_secret.trim().is_empty(),
+            ),
+            None => {
+                let config = state.config.read().await;
+                (
                     config.exchange.sync_interval_secs,
                     config.exchange.is_paper(),
-                ),
+                )
             }
         };
         let max_age = crate::types::max_reconciliation_age_secs(sync_interval_secs);
         let now = Utc::now();
         let fresh = |time| crate::types::is_timestamp_fresh(time, now, max_age);
+        let mut zero_margin = false;
         if margin_guard {
-            let account = state.current_account().await;
-            if account.asset.is_empty() || (!is_paper && !fresh(account.update_time)) {
-                member_incomplete = true;
-            } else if account.available_balance <= Decimal::ZERO {
-                zero_margin = true;
-            } else if let Some(pct) = margin_pct {
-                if account.margin_balance > Decimal::ZERO {
-                    match (
-                        account.available_balance.checked_mul(Decimal::ONE_HUNDRED),
-                        pct.checked_mul(account.margin_balance),
-                    ) {
-                        (Some(lhs), Some(rhs)) => {
-                            if lhs <= rhs {
-                                zero_margin = true;
-                            }
-                        }
-                        _ => member_incomplete = true,
-                    }
-                }
-            }
+            let (margin_incomplete, margin_zero) =
+                Self::evaluate_member_margin(state, is_paper, fresh, margin_pct).await;
+            member_incomplete |= margin_incomplete;
+            zero_margin |= margin_zero;
         }
         if limit.is_none() {
             return (
@@ -282,13 +312,14 @@ impl GlobalPositionLimit {
         }
         let (position_size, price) = {
             let position = state.position.read().await;
-            let position_size = position.size;
             if !is_paper && !position.update_time.is_some_and(fresh) {
                 member_incomplete = true;
             }
             let ticker = state.ticker.read().await;
-            let price = position.fresh_market_valuation_price(&ticker, fresh);
-            (position_size, price)
+            (
+                position.size,
+                position.fresh_market_valuation_price(&ticker, fresh),
+            )
         };
         if !position_size.is_zero() && price <= Decimal::ZERO {
             member_incomplete = true;

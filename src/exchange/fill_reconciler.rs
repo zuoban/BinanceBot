@@ -1,5 +1,5 @@
 use super::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 #[derive(serde::Deserialize)]
 pub(super) struct ExecutionFill {
@@ -42,13 +42,20 @@ pub(super) struct FillCacheEntry {
 }
 
 type FillCacheMap = HashMap<(String, i64), FillCacheEntry>;
+#[derive(Default)]
+pub(super) struct FillReconcilerState {
+    pub(super) progress: FillCacheMap,
+    pub(super) waiters: VecDeque<((String, i64), Instant)>,
+    pub(super) generations: HashMap<String, u64>,
+}
+
 type FillProgressSlot = (
     Arc<tokio::sync::Mutex<FillProgress>>,
     tokio::sync::OwnedMutexGuard<FillProgress>,
 );
 
 pub(super) struct FillCacheCleanup<'a> {
-    pub(super) cache: &'a std::sync::Mutex<FillCacheMap>,
+    pub(super) reconciler: &'a std::sync::Mutex<FillReconcilerState>,
     pub(super) key: (String, i64),
     pub(super) shared: Arc<tokio::sync::Mutex<FillProgress>>,
     pub(super) progress: tokio::sync::OwnedMutexGuard<FillProgress>,
@@ -59,15 +66,15 @@ pub(super) struct FillCacheCleanup<'a> {
 impl Drop for FillCacheCleanup<'_> {
     fn drop(&mut self) {
         // Keep the progress lock until accounting and removal are complete.
-        // Acquisition also happens under the cache lock, so a concurrent caller
+        // Acquisition also happens under the reconciler lock, so a concurrent caller
         // cannot acquire an orphaned entry while it is being removed.
-        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(entry) = cache.get_mut(&self.key) {
+        let mut state = self.reconciler.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = state.progress.get_mut(&self.key) {
             if !Arc::ptr_eq(&entry.progress, &self.shared) {
                 return;
             }
             if self.progress.from_id.is_none() || self.progress.fills.is_empty() {
-                cache.remove(&self.key);
+                state.progress.remove(&self.key);
             } else if self.failed_query && self.progress.advances == self.initial_advances {
                 entry.stalled_attempts = entry.stalled_attempts.saturating_add(1);
             } else if self.progress.advances != self.initial_advances {
@@ -169,14 +176,11 @@ fn accumulate_fill_page(
 impl BinanceFuturesClient {
     pub(crate) fn note_pnl_reconcile_backlog(&self, pending: usize) {
         if pending == 0 {
-            let cache = self.fill_progress.lock().unwrap_or_else(|e| e.into_inner());
-            if cache.is_empty()
-                && self
-                    .fill_waiters
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .is_empty()
-            {
+            let state = self
+                .fill_reconciler
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if state.progress.is_empty() && state.waiters.is_empty() {
                 self.fill_retention_seconds.store(600, Ordering::Relaxed);
             }
             return;
@@ -192,19 +196,15 @@ impl BinanceFuturesClient {
     }
 
     fn sync_fill_clear_generation(
-        &self,
-        cache: &mut FillCacheMap,
+        state: &mut FillReconcilerState,
         symbol: &str,
         clear_revision: u64,
     ) -> Result<()> {
-        let mut generations = self
-            .fill_generations
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if !generations.contains_key(symbol) && generations.len() >= 1024 {
+        if !state.generations.contains_key(symbol) && state.generations.len() >= 1024 {
             return Err(anyhow!("Trade reconciliation symbol limit reached"));
         }
-        let generation = generations
+        let generation = state
+            .generations
             .entry(symbol.to_owned())
             .or_insert(clear_revision);
         if clear_revision < *generation {
@@ -212,10 +212,11 @@ impl BinanceFuturesClient {
         }
         if clear_revision > *generation {
             *generation = clear_revision;
-            cache.retain(|(cached_symbol, _), _| cached_symbol != symbol);
-            self.fill_waiters
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
+            state
+                .progress
+                .retain(|(cached_symbol, _), _| cached_symbol != symbol);
+            state
+                .waiters
                 .retain(|((waiting_symbol, _), _)| waiting_symbol != symbol);
         }
         Ok(())
@@ -223,46 +224,43 @@ impl BinanceFuturesClient {
 
     fn admit_or_evict_fill_slot(
         &self,
-        cache: &mut FillCacheMap,
+        state: &mut FillReconcilerState,
         order_id: i64,
         key: &(String, i64),
     ) -> Result<()> {
-        let mut waiters = self.fill_waiters.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
-        waiters.retain(|(_, last_seen)| {
-            now.duration_since(*last_seen)
-                < Duration::from_secs(self.fill_retention_seconds.load(Ordering::Relaxed))
+        let retention_secs = self.fill_retention_seconds.load(Ordering::Relaxed);
+        state.waiters.retain(|(_, last_seen)| {
+            now.duration_since(*last_seen) < Duration::from_secs(retention_secs)
         });
-        if let Some((_, last_seen)) = waiters.iter_mut().find(|(waiting, _)| waiting == key) {
+        if let Some((_, last_seen)) = state.waiters.iter_mut().find(|(waiting, _)| waiting == key) {
             *last_seen = now;
-        } else if cache.len() >= 8 || !waiters.is_empty() {
-            if waiters.len() >= 1024 {
-                if let Some(index) = waiters.iter().position(|(_, last_seen)| {
+        } else if state.progress.len() >= 8 || !state.waiters.is_empty() {
+            if state.waiters.len() >= 1024 {
+                if let Some(index) = state.waiters.iter().position(|(_, last_seen)| {
                     now.duration_since(*last_seen) >= FILL_WAITER_ACTIVE_LEASE
                 }) {
-                    waiters.remove(index);
+                    state.waiters.remove(index);
                 } else {
                     return Err(anyhow!("Trade reconciliation waiting queue is full"));
                 }
             }
-            waiters.push_back((key.clone(), now));
+            state.waiters.push_back((key.clone(), now));
         }
         // Keep FIFO positions for slow backlog scans, but let a recently
         // polled waiter pass an inactive head. Three minutes tolerates
         // normal one-minute reconciliation ticks and a missed tick.
-        let active = waiters
+        let active = state
+            .waiters
             .iter()
             .position(|(_, last_seen)| now.duration_since(*last_seen) < FILL_WAITER_ACTIVE_LEASE);
-        let turn = active.is_none_or(|index| &waiters[index].0 == key);
-        if turn && active.is_some() && cache.len() >= 8 {
+        let turn = active.is_none_or(|index| &state.waiters[index].0 == key);
+        if turn && active.is_some() && state.progress.len() >= 8 {
             // Preserve healthy cursors while releasing repeated failures
             // and cursors abandoned before the fill lookup can run.
-            let retention = Duration::from_secs(
-                self.fill_retention_seconds
-                    .load(Ordering::Relaxed)
-                    .max(2 * 60 * 60),
-            );
-            let victim = cache
+            let retention = Duration::from_secs(retention_secs.max(2 * 60 * 60));
+            let victim = state
+                .progress
                 .iter()
                 .filter(|(_, entry)| {
                     (entry.stalled_attempts >= 3 || entry.last_used.elapsed() >= retention)
@@ -271,17 +269,17 @@ impl BinanceFuturesClient {
                 .min_by_key(|(_, entry)| entry.last_used)
                 .map(|(victim_key, _)| victim_key.clone());
             if let Some(victim) = victim {
-                cache.remove(&victim);
+                state.progress.remove(&victim);
             }
         }
-        if cache.len() >= 8 || !turn {
+        if state.progress.len() >= 8 || !turn {
             return Err(anyhow!(
                 "Trade reconciliation for order {} is waiting for a progress slot",
                 order_id
             ));
         }
         if let Some(index) = active {
-            waiters.remove(index);
+            state.waiters.remove(index);
         }
         Ok(())
     }
@@ -294,16 +292,22 @@ impl BinanceFuturesClient {
         clear_revision: u64,
         key: &(String, i64),
     ) -> Result<FillProgressSlot> {
-        let mut cache = self.fill_progress.lock().unwrap_or_else(|e| e.into_inner());
-        self.sync_fill_clear_generation(&mut cache, symbol, clear_revision)?;
-        if !cache.contains_key(key) {
-            self.admit_or_evict_fill_slot(&mut cache, order_id, key)?;
+        let mut state = self
+            .fill_reconciler
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        Self::sync_fill_clear_generation(&mut state, symbol, clear_revision)?;
+        if !state.progress.contains_key(key) {
+            self.admit_or_evict_fill_slot(&mut state, order_id, key)?;
         }
-        let entry = cache.entry(key.clone()).or_insert_with(|| FillCacheEntry {
-            progress: Arc::new(tokio::sync::Mutex::new(FillProgress::new(expected_qty))),
-            last_used: Instant::now(),
-            stalled_attempts: 0,
-        });
+        let entry = state
+            .progress
+            .entry(key.clone())
+            .or_insert_with(|| FillCacheEntry {
+                progress: Arc::new(tokio::sync::Mutex::new(FillProgress::new(expected_qty))),
+                last_used: Instant::now(),
+                stalled_attempts: 0,
+            });
         let shared = Arc::clone(&entry.progress);
         let mut progress = Arc::clone(&shared).try_lock_owned().map_err(|_| {
             anyhow!(
@@ -317,8 +321,54 @@ impl BinanceFuturesClient {
         Ok((shared, progress))
     }
 
+    async fn fetch_user_trades_page(
+        &self,
+        symbol: &str,
+        order_id: i64,
+        from_id: Option<i64>,
+        failed_query: &mut bool,
+    ) -> Result<Vec<ExecutionFill>> {
+        self.reserve(5, RequestClass::PnlReconciliation)?;
+        let cursor = from_id
+            .map(|id| format!("&fromId={}", id))
+            .unwrap_or_default();
+        let url = self.signed_url(
+            "/fapi/v1/userTrades",
+            &format!(
+                "symbol={}&orderId={}&limit=1000{}",
+                symbol, order_id, cursor
+            ),
+        );
+        let resp = match self.send(self.client.get(&url)).await {
+            Ok(resp) => resp,
+            Err(error) => {
+                *failed_query = true;
+                return Err(error.into());
+            }
+        };
+        if !resp.status().is_success() {
+            *failed_query = true;
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            self.maybe_resync_on_invalid_timestamp(&body).await;
+            return Err(anyhow!(
+                "Failed to fetch trades for order {}: {} - {}",
+                order_id,
+                status,
+                body
+            ));
+        }
+        resp.json()
+            .await
+            .map_err(reqwest::Error::without_url)
+            .map_err(|error| {
+                *failed_query = true;
+                error.into()
+            })
+    }
+
     /// Binance execution records contain the exchange-calculated realized PnL and fee.
-    pub async fn get_user_trades(
+    pub(crate) async fn get_user_trades(
         &self,
         symbol: &str,
         order_id: i64,
@@ -333,7 +383,7 @@ impl BinanceFuturesClient {
             self.acquire_fill_progress_slot(symbol, order_id, expected_qty, clear_revision, &key)?;
         let initial_advances = progress.advances;
         let mut cleanup = FillCacheCleanup {
-            cache: &self.fill_progress,
+            reconciler: &self.fill_reconciler,
             key: key.clone(),
             shared: Arc::clone(&shared),
             progress,
@@ -343,50 +393,15 @@ impl BinanceFuturesClient {
         // Limit work on the live fill path. The reconciliation timer resumes the
         // saved cursor, including after a local budget or HTTP error.
         for _ in 0..3 {
-            self.reserve(5, RequestClass::PnlReconciliation)?;
-            let cursor = cleanup
-                .progress
-                .from_id
-                .map(|id| format!("&fromId={}", id))
-                .unwrap_or_default();
-            let url = self.signed_url(
-                "/fapi/v1/userTrades",
-                &format!(
-                    "symbol={}&orderId={}&limit=1000{}",
-                    symbol, order_id, cursor
-                ),
-            );
-            let resp = match self.send(self.client.get(&url)).await {
-                Ok(resp) => resp,
-                Err(error) => {
-                    cleanup.failed_query = true;
-                    return Err(error.into());
-                }
-            };
-            if !resp.status().is_success() {
-                cleanup.failed_query = true;
-                let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
-                self.maybe_resync_on_invalid_timestamp(&body).await;
-                return Err(anyhow!(
-                    "Failed to fetch trades for order {}: {} - {}",
-                    order_id,
-                    status,
-                    body
-                ));
-            }
-            let page: Vec<ExecutionFill> =
-                match resp.json().await.map_err(reqwest::Error::without_url) {
-                    Ok(page) => page,
-                    Err(error) => {
-                        cleanup.failed_query = true;
-                        return Err(error.into());
-                    }
-                };
+            let from_id = cleanup.progress.from_id;
+            let page = self
+                .fetch_user_trades_page(symbol, order_id, from_id, &mut cleanup.failed_query)
+                .await?;
             if self
-                .fill_generations
+                .fill_reconciler
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
+                .generations
                 .get(symbol)
                 .copied()
                 != Some(clear_revision)
@@ -398,20 +413,26 @@ impl BinanceFuturesClient {
             if let Some(trades) =
                 accumulate_fill_page(&mut cleanup.progress, order_id, expected_qty, page)?
             {
-                let mut cache = self.fill_progress.lock().unwrap_or_else(|e| e.into_inner());
-                if cache
+                let mut state = self
+                    .fill_reconciler
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                if state
+                    .progress
                     .get(&key)
                     .is_some_and(|entry| Arc::ptr_eq(&entry.progress, &shared))
                 {
-                    cache.remove(&key);
+                    state.progress.remove(&key);
                 }
+                drop(state);
                 return Ok(trades);
             }
             cleanup.failed_query = false;
             if let Some(entry) = self
-                .fill_progress
+                .fill_reconciler
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
+                .progress
                 .get_mut(&key)
             {
                 if Arc::ptr_eq(&entry.progress, &shared) {

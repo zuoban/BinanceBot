@@ -146,7 +146,7 @@ it('测试连接使用表单中尚未保存的凭据，且不保存设置', asyn
   await user.type(screen.getByLabelText('API Secret'), 'new-secret');
   mocks.post.mockResolvedValueOnce('连接成功：API Key 有效，可读取合约账户');
   await user.click(screen.getByRole('button', { name: '测试连接' }));
-  await waitFor(() => expect(mocks.post).toHaveBeenCalledWith('/api/global/test-exchange', expect.objectContaining({ api_key: 'new-key', api_secret: 'new-secret', recv_window: 5000 })));
+  await waitFor(() => expect(mocks.post).toHaveBeenCalledWith('/api/global/test-exchange', expect.objectContaining({ api_key: 'new-key', api_secret: 'new-secret', recv_window: 5000 }), { readOnly: true }));
   expect(await screen.findByText(/连接成功/)).toBeInTheDocument();
   expect(mocks.post).not.toHaveBeenCalledWith('/api/global/config', expect.anything());
 }, 40000);
@@ -159,7 +159,7 @@ it('测试失败时显示后端给出的原因', async () => {
   await user.type(token, '123:abc');
   mocks.post.mockRejectedValueOnce(new Error('请填写 Bot Token 和 Chat ID（或先保存后再测试）'));
   await user.click(screen.getByRole('button', { name: '发送测试消息' }));
-  await waitFor(() => expect(mocks.post).toHaveBeenCalledWith('/api/global/test-telegram', expect.objectContaining({ bot_token: '123:abc' })));
+  await waitFor(() => expect(mocks.post).toHaveBeenCalledWith('/api/global/test-telegram', expect.objectContaining({ bot_token: '123:abc' }), { readOnly: true }));
   expect(await screen.findByText(/请填写 Bot Token 和 Chat ID/)).toBeInTheDocument();
   expect(mocks.error).toHaveBeenCalled();
 }, 40000);

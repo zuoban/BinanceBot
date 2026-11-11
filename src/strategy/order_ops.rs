@@ -137,11 +137,7 @@ impl GridTradingEngine {
         if found.executed_qty <= Decimal::ZERO {
             return true;
         }
-        let remaining = found
-            .orig_qty
-            .checked_sub(found.executed_qty)
-            .unwrap_or(Decimal::ZERO)
-            .max(Decimal::ZERO);
+        let remaining = found.remaining_qty();
         let previous = self
             .state
             .active_orders
@@ -151,7 +147,7 @@ impl GridTradingEngine {
             .cloned();
         if self
             .last_account_sync
-            .is_some_and(|at| at.elapsed() < LIVE_SYNC_FRESHNESS)
+            .is_some_and(|at| at.elapsed() < self.sync_freshness())
             && previous.as_ref().is_some_and(|old| {
                 old.status == OrderStatus::PartiallyFilled && old.quantity == remaining
             })
@@ -202,11 +198,7 @@ impl GridTradingEngine {
         original: GridOrder,
         found: &BinanceOrderResponse,
     ) -> bool {
-        order.quantity = found
-            .orig_qty
-            .checked_sub(found.executed_qty)
-            .unwrap_or(Decimal::ZERO)
-            .max(Decimal::ZERO);
+        order.quantity = found.remaining_qty();
         order.amount_usdc = order
             .price
             .checked_mul(order.quantity)
@@ -237,6 +229,30 @@ impl GridTradingEngine {
             self.state.check_global_position_limit().await;
         }
         true
+    }
+
+    pub(super) async fn prepare_and_adopt_open_order(
+        &mut self,
+        order: &mut GridOrder,
+        original: GridOrder,
+        found: &BinanceOrderResponse,
+    ) -> bool {
+        self.prepare_partial_adoption(order, found).await
+            && self.adopt_open_exchange_order(order, original, found).await
+    }
+
+    pub(super) async fn retain_uncertain_active_order(&self, order: &GridOrder) -> Result<()> {
+        self.state
+            .active_orders
+            .write()
+            .await
+            .entry(order.client_order_id.clone())
+            .or_insert_with(|| order.clone());
+        if let Err(error) = self.save_managed_order(order).await {
+            self.pause_trading().await;
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Executed when an order is confirmed filled outside a batched observation.
@@ -481,12 +497,9 @@ impl GridTradingEngine {
                 order.apply_terminal_fill(&resp, exchange_fill_time(&resp));
                 self.on_order_filled(&mut order).await
             } else {
-                if !self.prepare_partial_adoption(&mut order, &resp).await {
-                    return false;
-                }
                 let original = order.clone();
                 if !self
-                    .adopt_open_exchange_order(&mut order, original, &resp)
+                    .prepare_and_adopt_open_order(&mut order, original, &resp)
                     .await
                 {
                     return false;

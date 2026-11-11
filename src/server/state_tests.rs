@@ -4,7 +4,7 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::net::IpAddr;
 use std::sync::atomic::Ordering;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[tokio::test]
 async fn login_global_limit_is_shared_and_expires_without_reset_on_success() {
@@ -1195,17 +1195,15 @@ async fn engine_start_and_position_limit_pause_do_not_notify() {
             ticker.update_time = Utc::now();
         }
         let config = fixture.state.config.read().await.clone();
-        let client = Arc::new(
-            crate::exchange::client::BinanceFuturesClient::with_base_url(
-                &config.exchange,
-                fixture.url.clone(),
-            ),
-        );
+        let client = Arc::new(crate::exchange::BinanceFuturesClient::with_base_url(
+            &config.exchange,
+            fixture.url.clone(),
+        ));
         let (_, ticker_rx) = broadcast::channel(1);
         // Keep the fixture usable while moving the real action receiver into the engine.
         let (_, unused_actions) = mpsc::channel(1);
         let action_rx = std::mem::replace(&mut fixture.actions, unused_actions);
-        let mut engine = crate::strategy::grid::GridTradingEngine::new(
+        let mut engine = crate::strategy::GridTradingEngine::new(
             fixture.state.clone(),
             client,
             action_rx,
@@ -1395,12 +1393,10 @@ async fn trade_notifications_capture_position_amount_after_buy_and_sell_fills() 
         ticker.update_time = Utc::now();
     }
     let config = fixture.state.config.read().await.clone();
-    let client = Arc::new(
-        crate::exchange::client::BinanceFuturesClient::with_base_url(
-            &config.exchange,
-            fixture.url.clone(),
-        ),
-    );
+    let client = Arc::new(crate::exchange::BinanceFuturesClient::with_base_url(
+        &config.exchange,
+        fixture.url.clone(),
+    ));
     let (ticker_tx, ticker_rx) = broadcast::channel(4);
     let (_, unused_actions) = mpsc::channel(1);
     let action_rx = std::mem::replace(&mut fixture.actions, unused_actions);

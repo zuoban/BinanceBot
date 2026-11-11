@@ -1,25 +1,16 @@
-use super::cache_entries::{ENTRY_WAIT, FAILURE_COOLDOWN};
+use super::cache_entries::CacheEntries;
 use super::BinanceFuturesClient;
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
 
 const DEMAND_WINDOW: Duration = Duration::from_secs(10);
 const BULK_THRESHOLD: usize = 10;
 const SNAPSHOT_MAX_AGE: Duration = Duration::from_secs(3);
 
-#[derive(Default)]
-struct MarketEntry {
-    demand: HashMap<String, Instant>,
-    snapshot: Option<Snapshot>,
-    failed_at: Option<Instant>,
-}
-
-struct Snapshot {
+struct MarketCacheSnapshot {
     requested: Instant,
     requested_at: DateTime<Utc>,
     prices: HashMap<String, Decimal>,
@@ -27,90 +18,72 @@ struct Snapshot {
 
 #[derive(Default)]
 pub(crate) struct MarketCache {
-    entries: std::sync::RwLock<HashMap<String, Arc<Mutex<MarketEntry>>>>,
+    demand: std::sync::Mutex<HashMap<String, HashMap<String, Instant>>>,
+    entries: CacheEntries<String, MarketCacheSnapshot>,
 }
 
 impl MarketCache {
-    pub async fn mark_price(
+    fn record_demand(&self, endpoint: &str, symbol: &str) -> usize {
+        let now = Instant::now();
+        let mut endpoints = self.demand.lock().unwrap_or_else(|e| e.into_inner());
+        if endpoints.len() > 64 && !endpoints.contains_key(endpoint) {
+            endpoints.retain(|_, symbols| {
+                symbols.retain(|_, at| now.duration_since(*at) < DEMAND_WINDOW);
+                !symbols.is_empty()
+            });
+        }
+        let symbols = if endpoints.contains_key(endpoint) {
+            endpoints.get_mut(endpoint).expect("checked key")
+        } else {
+            endpoints.entry(endpoint.to_owned()).or_default()
+        };
+        symbols.retain(|_, at| now.duration_since(*at) < DEMAND_WINDOW);
+        if let Some(at) = symbols.get_mut(symbol) {
+            *at = now;
+        } else {
+            symbols.insert(symbol.to_owned(), now);
+        }
+        symbols.len()
+    }
+
+    pub(crate) async fn mark_price(
         &self,
         client: &BinanceFuturesClient,
         symbol: &str,
     ) -> Result<(Decimal, DateTime<Utc>)> {
         let key = client.market_cache_key();
-        let existing = self
-            .entries
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(key)
-            .cloned();
-        let entry = existing.unwrap_or_else(|| {
-            let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
-            if entries.len() > 64 {
-                entries.retain(|k, v| k == key || Arc::strong_count(v) > 1);
-            }
-            entries.entry(key.to_owned()).or_default().clone()
-        });
-        // A slow shared HTTP request must not stall every engine's reconciliation.
-        let mut entry = tokio::time::timeout(ENTRY_WAIT, entry.lock())
-            .await
-            .map_err(|_| anyhow!("shared mark-price request is still in flight"))?;
-        let now = Instant::now();
-        entry
-            .demand
-            .retain(|_, at| now.duration_since(*at) < DEMAND_WINDOW);
-        if let Some(at) = entry.demand.get_mut(symbol) {
-            *at = now;
-        } else {
-            entry.demand.insert(symbol.to_owned(), now);
-        }
-        if entry.demand.len() < BULK_THRESHOLD {
-            drop(entry);
+        if self.record_demand(key, symbol) < BULK_THRESHOLD {
             let requested_at = Utc::now();
             return Ok((
                 client.get_mark_price_for_fallback(symbol).await?,
                 requested_at,
             ));
         }
-
-        if entry
-            .snapshot
-            .as_ref()
-            .is_none_or(|snapshot| snapshot.requested.elapsed() >= SNAPSHOT_MAX_AGE)
-        {
-            if entry
-                .failed_at
-                .is_some_and(|at| at.elapsed() < FAILURE_COOLDOWN)
-            {
-                return Err(anyhow!("shared mark-price request is cooling down"));
-            }
-            entry.snapshot = None;
-            let requested = Instant::now();
-            let requested_at = Utc::now();
-            match client.get_all_mark_prices_for_fallback().await {
-                Ok(prices) => {
-                    entry.failed_at = None;
-                    entry.snapshot = Some(Snapshot {
+        let (_, _, (price, requested_at)) = self
+            .entries
+            .get_or_fetch(
+                key,
+                "mark-price",
+                |snapshot| snapshot.requested.elapsed() < SNAPSHOT_MAX_AGE,
+                || async {
+                    let requested = Instant::now();
+                    let requested_at = Utc::now();
+                    let prices = client.get_all_mark_prices_for_fallback().await?;
+                    Ok(MarketCacheSnapshot {
                         requested,
                         requested_at,
                         prices: prices
                             .into_iter()
                             .map(|price| (price.symbol, price.mark_price))
                             .collect(),
-                    });
-                }
-                Err(error) => {
-                    entry.failed_at = Some(Instant::now());
-                    return Err(error);
-                }
-            }
+                    })
+                },
+                |snapshot| (snapshot.prices.get(symbol).copied(), snapshot.requested_at),
+            )
+            .await?;
+        if let Some(price) = price {
+            return Ok((price, requested_at));
         }
-        let Some(snapshot) = entry.snapshot.as_ref() else {
-            return Err(anyhow!("shared mark-price snapshot missing"));
-        };
-        if let Some(price) = snapshot.prices.get(symbol) {
-            return Ok((*price, snapshot.requested_at));
-        }
-        drop(entry);
         let requested_at = Utc::now();
         Ok((
             client.get_mark_price_for_fallback(symbol).await?,
@@ -125,6 +98,7 @@ mod tests {
     use crate::config::AppConfig;
     use axum::{extract::Query, routing::get, Json, Router};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn bulk_mark_requests_are_shared_and_failures_are_cooled_down() {
@@ -199,7 +173,7 @@ mod tests {
         );
         assert_eq!(single.load(Ordering::SeqCst), 11);
 
-        let entry = cache.entries.read().unwrap().get(&url).unwrap().clone();
+        let (_, entry) = cache.entries.entry(url.as_str()).await;
         entry.lock().await.snapshot = None;
         fail.store(true, Ordering::SeqCst);
         let failed = futures_util::future::join_all((0..10).map(|i| {

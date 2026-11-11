@@ -1,6 +1,6 @@
 use crate::types::TickerInfo;
 use chrono::{DateTime, Utc};
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use std::borrow::Cow;
@@ -8,8 +8,12 @@ use std::time::Duration;
 use tokio::sync::{broadcast, watch};
 use tokio::time::sleep;
 use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::Message;
 use tracing::{error, info, warn};
 
+const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const WS_READ_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
+const WS_PONG_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) struct BinanceWsStream {
     config_rx: watch::Receiver<String>,
     ticker_tx: broadcast::Sender<TickerInfo>,
@@ -184,7 +188,7 @@ fn local_observed_time(
 }
 
 impl BinanceWsStream {
-    pub fn new(
+    pub(crate) fn new(
         config_rx: watch::Receiver<String>,
         ticker_tx: broadcast::Sender<TickerInfo>,
     ) -> Self {
@@ -194,11 +198,21 @@ impl BinanceWsStream {
         }
     }
 
-    pub async fn run(self) {
-        self.run_with_url(stream_url).await;
+    pub(crate) async fn run(self) {
+        self.run_with_url_and_timeout(stream_url, WS_READ_IDLE_TIMEOUT)
+            .await;
     }
 
-    async fn run_with_url<F>(mut self, build_url: F)
+    #[cfg(test)]
+    async fn run_with_url<F>(self, build_url: F)
+    where
+        F: Fn(&str) -> String,
+    {
+        self.run_with_url_and_timeout(build_url, WS_READ_IDLE_TIMEOUT)
+            .await;
+    }
+
+    async fn run_with_url_and_timeout<F>(mut self, build_url: F, read_timeout: Duration)
     where
         F: Fn(&str) -> String,
     {
@@ -215,27 +229,56 @@ impl BinanceWsStream {
             info!("Starting Binance WebSocket stream for {}", ws_url);
 
             let connection = tokio::select! {
-                result = connect_async(&ws_url) => result,
+                result = tokio::time::timeout(WS_CONNECT_TIMEOUT, connect_async(&ws_url)) => result,
                 changed = self.config_rx.changed() => {
                     if changed.is_err() { return; }
                     continue 'connect;
                 }
             };
             match connection {
-                Ok((ws_stream, _)) => {
+                Ok(Ok((ws_stream, _))) => {
                     info!("Connected to Binance WebSocket: {}", ws_url);
                     backoff_secs = 1;
-                    let (_, mut read) = ws_stream.split();
+                    let (mut write, mut read) = ws_stream.split();
                     loop {
-                        let msg_res = tokio::select! {
-                            msg = read.next() => msg,
+                        let next_msg = tokio::select! {
+                            msg = tokio::time::timeout(read_timeout, read.next()) => msg,
                             changed = self.config_rx.changed() => {
                                 if changed.is_err() { return; }
                                 continue 'connect;
                             }
                         };
-                        let Some(msg_res) = msg_res else { break };
+                        let msg_res = match next_msg {
+                            Ok(Some(msg_res)) => msg_res,
+                            Ok(None) => break,
+                            Err(_) => {
+                                warn!(
+                                    "WebSocket read timed out after {:?} for {}; reconnecting",
+                                    read_timeout, ws_url
+                                );
+                                break;
+                            }
+                        };
                         match msg_res {
+                            Ok(Message::Ping(payload)) => {
+                                match tokio::time::timeout(
+                                    WS_PONG_WRITE_TIMEOUT,
+                                    write.send(Message::Pong(payload)),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(())) => {}
+                                    Ok(Err(e)) => {
+                                        warn!("WebSocket pong send error: {}", e);
+                                        break;
+                                    }
+                                    Err(_) => {
+                                        warn!("WebSocket pong send timed out for {}", ws_url);
+                                        break;
+                                    }
+                                }
+                            }
+                            Ok(Message::Close(_)) => break,
                             Ok(msg) if msg.is_text() => {
                                 if *self.config_rx.borrow() != symbol {
                                     continue 'connect;
@@ -279,7 +322,8 @@ impl BinanceWsStream {
                         }
                     }
                 }
-                Err(e) => error!("Failed to connect to Binance WebSocket: {}", e),
+                Ok(Err(e)) => error!("Failed to connect to Binance WebSocket: {}", e),
+                Err(_) => error!("Timed out connecting to Binance WebSocket: {}", ws_url),
             }
             warn!(
                 "WebSocket disconnected. Reconnecting in {} seconds...",
@@ -300,9 +344,7 @@ impl BinanceWsStream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures_util::SinkExt;
     use rust_decimal_macros::dec;
-    use tokio_tungstenite::tungstenite::Message;
 
     #[test]
     fn combined_streams_are_routed_and_decoded_independently() {
@@ -426,6 +468,57 @@ mod tests {
         config_tx.send("ETHUSDT".into()).unwrap();
         assert_eq!(receive(&mut ticker_rx).await.symbol, "ETHUSDT");
         assert!(ticker_rx.try_recv().is_err());
+        client.abort();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn replies_pong_to_ping_and_reconnects_after_idle_read_timeout() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (pong_tx, pong_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            // First connection: send Ping, expect Pong, then stay silent to trigger idle timeout.
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut first = tokio_tungstenite::accept_async(socket).await.unwrap();
+            first
+                .send(Message::Ping(b"heartbeat".to_vec()))
+                .await
+                .unwrap();
+            while let Some(Ok(frame)) = first.next().await {
+                if let Message::Pong(payload) = frame {
+                    let _ = pong_tx.send(payload);
+                    break;
+                }
+            }
+            // Second connection after idle watchdog reconnects: deliver fresh mark price.
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut second = tokio_tungstenite::accept_async(socket).await.unwrap();
+            let event = serde_json::json!({
+                "stream": "btcusdt@markPrice@1s",
+                "data": {"e": "markPriceUpdate", "E": Utc::now().timestamp_millis(), "s": "BTCUSDT", "p": "105"}
+            });
+            second.send(Message::Text(event.to_string())).await.unwrap();
+            while second.next().await.is_some() {}
+        });
+        let (_config_tx, config_rx) = watch::channel("BTCUSDT".to_string());
+        let (ticker_tx, mut ticker_rx) = broadcast::channel(8);
+        let client = tokio::spawn(
+            BinanceWsStream::new(config_rx, ticker_tx).run_with_url_and_timeout(
+                move |symbol| format!("ws://{address}/market/stream?symbol={symbol}"),
+                Duration::from_millis(80),
+            ),
+        );
+        let pong = tokio::time::timeout(Duration::from_secs(2), pong_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(pong, b"heartbeat");
+        let update = tokio::time::timeout(Duration::from_secs(4), ticker_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(update.mark_price, dec!(105));
         client.abort();
         server.abort();
     }

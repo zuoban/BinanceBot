@@ -1,6 +1,8 @@
 use anyhow::{anyhow, Result};
+use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::future::Future;
+use std::hash::Hash;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -26,13 +28,14 @@ impl<T> Default for CacheEntry<T> {
 }
 
 type Entry<T> = Arc<Mutex<CacheEntry<T>>>;
-type CacheEntryMap<T> = HashMap<[u8; 32], (u64, Entry<T>)>;
+type CacheEntryMap<K, T> = HashMap<K, (u64, Entry<T>)>;
 
-pub(super) struct CacheEntries<T> {
+pub(super) struct CacheEntries<K, T> {
     next_epoch: AtomicU64,
-    entries: std::sync::RwLock<CacheEntryMap<T>>,
+    entries: std::sync::RwLock<CacheEntryMap<K, T>>,
 }
-impl<T> Default for CacheEntries<T> {
+
+impl<K, T> Default for CacheEntries<K, T> {
     fn default() -> Self {
         Self {
             next_epoch: AtomicU64::new(0),
@@ -41,28 +44,36 @@ impl<T> Default for CacheEntries<T> {
     }
 }
 
-impl<T> CacheEntries<T> {
+impl<K: Eq + Hash, T> CacheEntries<K, T> {
     // A critical refresh detaches shared loaders without representing a fill.
     // Concurrent critical refreshes must not invalidate one another.
-    fn detach_sync(&self, key: [u8; 32]) -> u64 {
+    fn detach_sync<Q>(&self, key: &Q) -> u64
+    where
+        K: Borrow<Q>,
+        Q: ?Sized + Eq + Hash + ToOwned<Owned = K>,
+    {
         let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
-        let (epoch, entry) = entries.entry(key).or_insert_with(|| {
-            (
-                self.next_epoch.fetch_add(1, Ordering::Relaxed),
-                Default::default(),
-            )
-        });
-        *entry = Default::default();
-        let current_epoch = *epoch;
+        let current_epoch = if let Some((epoch, entry)) = entries.get_mut(key) {
+            *entry = Default::default();
+            *epoch
+        } else {
+            let epoch = self.next_epoch.fetch_add(1, Ordering::Relaxed);
+            entries.insert(key.to_owned(), (epoch, Default::default()));
+            epoch
+        };
         if entries.len() > 256 {
-            entries.retain(|k, (_, entry)| *k == key || Arc::strong_count(entry) > 1);
+            entries.retain(|k, (_, entry)| k.borrow() == key || Arc::strong_count(entry) > 1);
         }
         current_epoch
     }
 
-    fn detach_if_current_sync(&self, key: [u8; 32], expected: u64) -> bool {
+    fn detach_if_current_sync<Q>(&self, key: &Q, expected: u64) -> bool
+    where
+        K: Borrow<Q>,
+        Q: ?Sized + Eq + Hash,
+    {
         let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
-        let Some((epoch, entry)) = entries.get_mut(&key) else {
+        let Some((epoch, entry)) = entries.get_mut(key) else {
             return false;
         };
         if *epoch != expected {
@@ -71,8 +82,11 @@ impl<T> CacheEntries<T> {
         *entry = Default::default();
         true
     }
-    pub(super) async fn refresh_critical<R, F, Fut>(&self, key: [u8; 32], mut fetch: F) -> Result<R>
+
+    pub(super) async fn refresh_critical<Q, R, F, Fut>(&self, key: &Q, mut fetch: F) -> Result<R>
     where
+        K: Borrow<Q>,
+        Q: ?Sized + Eq + Hash + ToOwned<Owned = K>,
         F: FnMut() -> Fut,
         Fut: Future<Output = anyhow::Result<R>>,
     {
@@ -87,71 +101,94 @@ impl<T> CacheEntries<T> {
         }
     }
 
-    fn entry_sync(&self, key: [u8; 32]) -> (u64, Entry<T>) {
+    fn entry_sync<Q>(&self, key: &Q) -> (u64, Entry<T>)
+    where
+        K: Borrow<Q>,
+        Q: ?Sized + Eq + Hash + ToOwned<Owned = K>,
+    {
         if let Some((epoch, entry)) = self
             .entries
             .read()
             .unwrap_or_else(|e| e.into_inner())
-            .get(&key)
+            .get(key)
         {
             return (*epoch, entry.clone());
         }
         let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
-        let (epoch, entry) = entries.entry(key).or_insert_with(|| {
-            (
-                self.next_epoch.fetch_add(1, Ordering::Relaxed),
-                Default::default(),
-            )
-        });
-        let result = (*epoch, entry.clone());
+        let result = if let Some((epoch, entry)) = entries.get(key) {
+            (*epoch, entry.clone())
+        } else {
+            let epoch = self.next_epoch.fetch_add(1, Ordering::Relaxed);
+            let entry: Entry<T> = Default::default();
+            entries.insert(key.to_owned(), (epoch, entry.clone()));
+            (epoch, entry)
+        };
         if entries.len() > 256 {
-            entries.retain(|k, (_, entry)| *k == key || Arc::strong_count(entry) > 1);
+            entries.retain(|k, (_, entry)| k.borrow() == key || Arc::strong_count(entry) > 1);
         }
         result
     }
 
     #[cfg(test)]
-    pub(super) async fn entry(&self, key: [u8; 32]) -> (u64, Entry<T>) {
+    pub(super) async fn entry<Q>(&self, key: &Q) -> (u64, Entry<T>)
+    where
+        K: Borrow<Q>,
+        Q: ?Sized + Eq + Hash + ToOwned<Owned = K>,
+    {
         self.entry_sync(key)
     }
 
     // Retire the entry without waiting for an in-flight loader holding its lock.
-    pub(super) async fn retire(&self, key: [u8; 32]) -> u64 {
+    pub(super) async fn retire<Q>(&self, key: &Q) -> u64
+    where
+        K: Borrow<Q>,
+        Q: ?Sized + Eq + Hash + ToOwned<Owned = K>,
+    {
         let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
         let next = self.next_epoch.fetch_add(1, Ordering::Relaxed);
-        let (epoch, entry) = entries
-            .entry(key)
-            .or_insert_with(|| (next, Default::default()));
-        *epoch = next;
-        *entry = Default::default();
-        let retired_epoch = *epoch;
-        if entries.len() > 256 {
-            entries.retain(|k, (_, entry)| *k == key || Arc::strong_count(entry) > 1);
+        if let Some((epoch, entry)) = entries.get_mut(key) {
+            *epoch = next;
+            *entry = Default::default();
+        } else {
+            entries.insert(key.to_owned(), (next, Default::default()));
         }
-        retired_epoch
+        if entries.len() > 256 {
+            entries.retain(|k, (_, entry)| k.borrow() == key || Arc::strong_count(entry) > 1);
+        }
+        next
     }
 
-    fn is_current_sync(&self, key: [u8; 32], epoch: u64, entry: &Entry<T>) -> bool {
+    fn is_current_sync<Q>(&self, key: &Q, epoch: u64, entry: &Entry<T>) -> bool
+    where
+        K: Borrow<Q>,
+        Q: ?Sized + Eq + Hash,
+    {
         self.entries
             .read()
             .unwrap_or_else(|e| e.into_inner())
-            .get(&key)
+            .get(key)
             .is_some_and(|(e, current)| *e == epoch && Arc::ptr_eq(current, entry))
     }
 
-    pub(super) async fn is_current(&self, key: [u8; 32], epoch: u64, entry: &Entry<T>) -> bool {
+    pub(super) async fn is_current<Q>(&self, key: &Q, epoch: u64, entry: &Entry<T>) -> bool
+    where
+        K: Borrow<Q>,
+        Q: ?Sized + Eq + Hash,
+    {
         self.is_current_sync(key, epoch, entry)
     }
 
-    pub(super) async fn get_or_fetch<R, Fresh, Fetch, Fut, Project>(
+    pub(super) async fn get_or_fetch<Q, R, Fresh, Fetch, Fut, Project>(
         &self,
-        key: [u8; 32],
+        key: &Q,
         label: &str,
         mut is_fresh: Fresh,
         mut fetch: Fetch,
         mut project: Project,
     ) -> Result<(u64, Entry<T>, R)>
     where
+        K: Borrow<Q>,
+        Q: ?Sized + Eq + Hash + ToOwned<Owned = K>,
         Fresh: FnMut(&T) -> bool,
         Fetch: FnMut() -> Fut,
         Fut: Future<Output = Result<T>>,

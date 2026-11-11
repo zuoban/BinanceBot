@@ -7,7 +7,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use tracing::warn;
 
 impl Database {
-    pub fn load_bot_status(&self) -> Result<Option<BotStatus>> {
+    pub(crate) fn load_bot_status(&self) -> Result<Option<BotStatus>> {
         let conn = self.lock_connection("load_bot_status");
         let value: Option<String> = conn
             .query_row("SELECT status FROM bot_runtime WHERE id = 1;", [], |row| {
@@ -19,7 +19,8 @@ impl Database {
             .transpose()
     }
 
-    pub fn save_bot_status(&self, status: BotStatus) -> Result<()> {
+    #[cfg(test)]
+    pub(crate) fn save_bot_status(&self, status: BotStatus) -> Result<()> {
         save_bot_status_on(&self.lock_connection("save_bot_status"), status)
     }
 
@@ -45,7 +46,8 @@ impl Database {
         Ok(None)
     }
 
-    pub fn save_pair_status(
+    #[cfg(test)]
+    pub(crate) fn save_pair_status(
         &self,
         symbol: &str,
         mode: TradingMode,
@@ -78,7 +80,7 @@ impl Database {
         save_pair_config_on(&self.lock_connection("save_pair_config"), symbol, config)
     }
 
-    pub fn save_global_config(&self, global: &crate::config::GlobalConfig) -> Result<()> {
+    pub(crate) fn save_global_config(&self, global: &crate::config::GlobalConfig) -> Result<()> {
         let conn = self.lock_connection("save_global_config");
         let mut saved = load_required_config_on(&conn)?;
         saved.ensure_pair_list()?;
@@ -118,7 +120,7 @@ impl Database {
 
     /// Add a paused pair and arm its guard atomically; returns whether it was already dirty.
     /// The caller must use this result for startup recovery and must not arm it again.
-    pub fn add_pair_config(&self, config: &AppConfig) -> Result<bool> {
+    pub(crate) fn add_pair_config(&self, config: &AppConfig) -> Result<bool> {
         config.validate()?;
         let mut conn = self.lock_connection("add_pair_config");
         let tx = conn.transaction()?;
@@ -149,7 +151,7 @@ impl Database {
         Ok(was_dirty)
     }
 
-    pub fn remove_pair_config(&self, symbol: &str) -> Result<()> {
+    pub(crate) fn remove_pair_config(&self, symbol: &str) -> Result<()> {
         let conn = self.lock_connection("remove_pair_config");
         let mut saved = load_required_config_on(&conn)?;
         anyhow::ensure!(saved.pairs.len() > 1, "至少保留一个交易对");
@@ -170,7 +172,7 @@ impl Database {
         Ok(())
     }
 
-    pub fn save_server_config_checked(
+    pub(crate) fn save_server_config_checked(
         &self,
         server: &crate::config::ServerConfig,
         baseline_version: Option<&str>,
@@ -179,14 +181,17 @@ impl Database {
         let conn = self.lock_connection("save_server_config_checked");
         let mut saved = load_required_config_on(&conn)?;
         if baseline_version.is_some_and(|version| version != config_version(&saved.server)) {
-            anyhow::bail!("服务设置已被其他请求修改，请刷新后重试");
+            return Err(crate::config::ConfigVersionConflict(
+                "服务设置已被其他请求修改，请刷新后重试",
+            )
+            .into());
         }
         saved.server = server.clone();
         save_config_on(&conn, &saved)
     }
 
     /// A new configuration must never become durable without its current execution status.
-    pub fn save_runtime_config(
+    pub(crate) fn save_runtime_config(
         &self,
         config: &AppConfig,
         pair_scope: Option<&str>,
@@ -225,7 +230,7 @@ impl Database {
     }
 
     /// Legacy writers also update the scoped row so switching configuration formats is reversible.
-    pub fn save_runtime_status(
+    pub(crate) fn save_runtime_status(
         &self,
         symbol: &str,
         mode: TradingMode,
@@ -244,7 +249,7 @@ impl Database {
 
     /// Arm before starting an engine. An armed guard means the previous engine
     /// did not finish a clean shutdown, so its saved Running state is unsafe.
-    pub fn arm_execution_guard(&self, symbol: &str, mode: TradingMode) -> Result<bool> {
+    pub(crate) fn arm_execution_guard(&self, symbol: &str, mode: TradingMode) -> Result<bool> {
         let mut conn = self.lock_connection("arm_execution_guard");
         let tx = conn.transaction()?;
         let dirty = arm_execution_guard_on(&tx, symbol, mode)?;
@@ -252,7 +257,7 @@ impl Database {
         Ok(dirty)
     }
 
-    pub fn clear_execution_guard(&self, symbol: &str, mode: TradingMode) -> Result<()> {
+    pub(crate) fn clear_execution_guard(&self, symbol: &str, mode: TradingMode) -> Result<()> {
         let conn = self.lock_connection("clear_execution_guard");
         conn.prepare_cached(
             "UPDATE pair_execution_guard SET dirty = 0 WHERE symbol = ?1 AND mode = ?2",

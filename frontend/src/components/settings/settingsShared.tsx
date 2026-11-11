@@ -29,7 +29,7 @@ export function ProbeButton({ label, path, body, disabled, resetKey }: { label: 
       const key = activeKey.current;
       setBusy(true); setResult(null);
       try {
-        const text = await post<string>(path, body());
+        const text = await post<string>(path, body(), { readOnly: true });
         if (mounted.current && activeKey.current === key) setResult({ ok: true, text });
       } catch (error) {
         if (mounted.current && activeKey.current === key) {

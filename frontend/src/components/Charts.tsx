@@ -5,7 +5,7 @@ import type { Snapshot } from '../lib/types';
 import { numeric, price, quantity } from '../lib/format';
 import { todayCount } from '../lib/portfolio';
 import { priceDiffPercent } from '../lib/gridPreview';
-import { useExpired } from '../lib/useNow';
+import { useUtcHour } from '../lib/useNow';
 import { NoData, useCenterElementScroll } from './Common';
 export function todayHourlyData(stats: NonNullable<Snapshot['hourly_trade_stats']>, now = Date.now()) {
   const start = Date.parse(stats.window_start);
@@ -32,10 +32,10 @@ function sameHourlyStats(a: Snapshot['hourly_trade_stats'], b: Snapshot['hourly_
 }
 
 export const HourlyChart = memo(function HourlyChart({ snapshot, now: currentNow }: { snapshot: Snapshot; now?: number }) {
-  const liveHour = Math.floor(Date.now() / 3600_000);
-  useExpired(currentNow === undefined ? (liveHour + 1) * 3600_000 - 1 : Infinity);
+  const liveHour = useUtcHour(currentNow === undefined);
   const now = currentNow ?? Date.now();
-  return <HourlyChartContent stats={snapshot.hourly_trade_stats} hourBucket={Math.floor(now / 3600_000)} available={todayCount(snapshot, now) !== null} />;
+  const hourBucket = currentNow === undefined ? liveHour : Math.floor(currentNow / 3_600_000);
+  return <HourlyChartContent stats={snapshot.hourly_trade_stats} hourBucket={hourBucket} available={todayCount(snapshot, now) !== null} />;
 });
 
 const HourlyChartContent = memo(function HourlyChartContent({ stats, hourBucket, available }: { stats: Snapshot['hourly_trade_stats']; hourBucket: number; available: boolean }) {

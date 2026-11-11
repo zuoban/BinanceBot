@@ -7,32 +7,29 @@ use rusqlite::{params, Connection, OptionalExtension};
 impl Database {
     pub fn load_pair_intents(&self, symbol: &str, mode: TradingMode) -> Result<Vec<GridOrder>> {
         let conn = self.lock_connection("load_pair_intents");
-        let mut stmt = conn.prepare_cached(
+        super::query_json_vec(
+            &conn,
             "SELECT order_json FROM pair_intents WHERE symbol = ?1 AND mode = ?2 ORDER BY created_at;",
-        )?;
-        let rows = stmt.query_map(params![symbol, mode.as_str()], |row| {
-            row.get::<_, String>(0)
-        })?;
-        rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+            params![symbol, mode.as_str()],
+            "pair_intents",
+        )
     }
 
-    pub fn delete_pair_intent(&self, parent_client_order_id: &str) -> Result<()> {
+    pub(crate) fn delete_pair_intent(&self, parent_client_order_id: &str) -> Result<()> {
         let conn = self.lock_connection("delete_pair_intent");
         conn.prepare_cached("DELETE FROM pair_intents WHERE parent_client_order_id = ?1;")?
             .execute(params![parent_client_order_id])?;
         Ok(())
     }
 
-    pub fn clear_pair_intents(&self, symbol: &str, mode: TradingMode) -> Result<()> {
+    pub(crate) fn clear_pair_intents(&self, symbol: &str, mode: TradingMode) -> Result<()> {
         let conn = self.lock_connection("clear_pair_intents");
-        conn.execute(
-            "DELETE FROM pair_intents WHERE symbol = ?1 AND mode = ?2;",
-            params![symbol, mode.as_str()],
-        )?;
+        conn.prepare_cached("DELETE FROM pair_intents WHERE symbol = ?1 AND mode = ?2;")?
+            .execute(params![symbol, mode.as_str()])?;
         Ok(())
     }
 
-    pub fn save_remainder_plan(&self, plan: &RemainderPlan) -> Result<()> {
+    pub(crate) fn save_remainder_plan(&self, plan: &RemainderPlan) -> Result<()> {
         let active = matches!(
             plan.phase,
             crate::types::RemainderPhase::Canceling | crate::types::RemainderPhase::Submitting
@@ -62,7 +59,7 @@ impl Database {
         Ok(())
     }
 
-    pub fn load_remainder_plan(
+    pub(crate) fn load_remainder_plan(
         &self,
         symbol: &str,
         mode: TradingMode,
@@ -88,7 +85,7 @@ impl Database {
         Ok(())
     }
 
-    pub fn save_managed_orders(&self, orders: &[GridOrder]) -> Result<()> {
+    pub(crate) fn save_managed_orders(&self, orders: &[GridOrder]) -> Result<()> {
         let mut conn = self.lock_connection("save_managed_orders");
         let tx = conn.transaction()?;
         {
@@ -123,11 +120,13 @@ impl Database {
                     Utc::now().to_rfc3339(),
                 ])?;
                 if inserted == 0 {
-                    let (stored_symbol, stored_json): (String, String) = tx.query_row(
-                        "SELECT symbol, order_json FROM managed_orders WHERE client_order_id = ?1;",
-                        params![order.client_order_id],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
-                    )?;
+                    let (stored_symbol, stored_json): (String, String) = tx
+                        .prepare_cached(
+                            "SELECT symbol, order_json FROM managed_orders WHERE client_order_id = ?1;",
+                        )?
+                        .query_row(params![order.client_order_id], |row| {
+                            Ok((row.get(0)?, row.get(1)?))
+                        })?;
                     let stored: GridOrder = serde_json::from_str(&stored_json)?;
                     if stored.client_order_id != order.client_order_id
                         || stored_symbol != order.symbol
@@ -149,12 +148,12 @@ impl Database {
 
     pub fn load_managed_orders(&self, symbol: &str) -> Result<Vec<GridOrder>> {
         let conn = self.lock_connection("load_managed_orders");
-        let mut stmt =
-            conn.prepare_cached("SELECT order_json FROM managed_orders WHERE symbol = ?1;")?;
-        let json_rows = stmt.query_map(params![symbol], |row| row.get::<_, String>(0))?;
-        json_rows
-            .map(|row| Ok(serde_json::from_str(&row?)?))
-            .collect()
+        super::query_json_vec(
+            &conn,
+            "SELECT order_json FROM managed_orders WHERE symbol = ?1;",
+            params![symbol],
+            "managed_orders",
+        )
     }
 
     #[cfg(test)]
@@ -241,20 +240,27 @@ impl Database {
         let mut conn = self.lock_connection("save_initial_order_responses");
         let tx = conn.transaction()?;
         Self::save_identity_observation_rows(&tx, account, identities)?;
-        let observations: Vec<_> = observations.into_iter().collect();
+        let observations: Vec<_> = observations
+            .into_iter()
+            .map(|(client_id, obs_id, batch_id, resp)| {
+                Ok((
+                    client_id,
+                    obs_id,
+                    batch_id,
+                    resp,
+                    serde_json::to_string(resp)?,
+                ))
+            })
+            .collect::<Result<_>>()?;
         let duplicate_snapshot = deduplicate_snapshot
             && is_duplicate_response_snapshot(&tx, account, symbol, &observations)?;
         let duplicate_query = deduplicate_snapshot
             && is_duplicate_single_response_query(&tx, account, symbol, &observations)?;
-        {
-            let mut statement = tx.prepare(
-                "INSERT INTO initial_order_responses (account_key, expected_symbol, client_order_id, observed_client_order_id, observed_symbol, observed_side, observed_order_id, response_json, observation_id, batch_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(observation_id) DO NOTHING"
+        if !duplicate_snapshot && !duplicate_query {
+            let mut statement = tx.prepare_cached(
+                "INSERT INTO initial_order_responses (account_key, expected_symbol, client_order_id, observed_client_order_id, observed_symbol, observed_side, observed_order_id, response_json, observation_id, batch_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(observation_id) DO NOTHING",
             )?;
-            for (client_order_id, observation_id, batch_id, response) in observations
-                .into_iter()
-                .filter(|_| !duplicate_snapshot && !duplicate_query)
-            {
-                let json = serde_json::to_string(response)?;
+            for (client_order_id, observation_id, batch_id, response, json) in &observations {
                 let inserted = statement.execute(params![
                     &account[..],
                     symbol,
@@ -263,16 +269,19 @@ impl Database {
                     response.symbol,
                     response.side,
                     response.order_id,
-                    &json,
+                    json,
                     observation_id,
                     batch_id
                 ])?;
                 if inserted == 0 {
-                    let matches: bool = tx.query_row(
-                        "SELECT account_key=?1 AND expected_symbol=?2 AND client_order_id=?3 AND response_json=?4 AND batch_id=?5 FROM initial_order_responses WHERE observation_id=?6",
-                        params![&account[..], symbol, client_order_id, &json, batch_id, observation_id],
-                        |row| row.get(0),
-                    )?;
+                    let matches: bool = tx
+                        .prepare_cached(
+                            "SELECT account_key=?1 AND expected_symbol=?2 AND client_order_id=?3 AND response_json=?4 AND batch_id=?5 FROM initial_order_responses WHERE observation_id=?6",
+                        )?
+                        .query_row(
+                            params![&account[..], symbol, client_order_id, json, batch_id, observation_id],
+                            |row| row.get(0),
+                        )?;
                     anyhow::ensure!(
                         matches,
                         "initial order response observation ID reused with different data"
@@ -329,8 +338,8 @@ impl Database {
         let mut conn = self.lock_connection("delete_order_evidence_groups");
         let tx = conn.transaction()?;
         {
-            let mut initial = tx.prepare("DELETE FROM initial_order_responses WHERE account_key=?1 AND expected_symbol=?2 AND client_order_id=?3")?;
-            let mut observations = tx.prepare("DELETE FROM order_identity_observations WHERE account_key=?1 AND expected_symbol=?2 AND client_order_id=?3")?;
+            let mut initial = tx.prepare_cached("DELETE FROM initial_order_responses WHERE account_key=?1 AND expected_symbol=?2 AND client_order_id=?3")?;
+            let mut observations = tx.prepare_cached("DELETE FROM order_identity_observations WHERE account_key=?1 AND expected_symbol=?2 AND client_order_id=?3")?;
             for id in client_ids {
                 initial.execute(params![&account[..], symbol, id])?;
                 observations.execute(params![&account[..], symbol, id])?;
@@ -349,10 +358,16 @@ impl Database {
         conflicting: &crate::exchange::BinanceOrderResponse,
     ) -> Result<()> {
         let conn = self.lock_connection("save_terminal_order_disagreement");
-        conn.execute(
+        conn.prepare_cached(
             "INSERT INTO terminal_order_disagreements (account_key, expected_symbol, client_order_id, first_json, conflicting_json) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(account_key, expected_symbol, client_order_id, first_json, conflicting_json) DO NOTHING",
-            params![&account[..], symbol, client_order_id, serde_json::to_string(first)?, serde_json::to_string(conflicting)?],
-        )?;
+        )?
+        .execute(params![
+            &account[..],
+            symbol,
+            client_order_id,
+            serde_json::to_string(first)?,
+            serde_json::to_string(conflicting)?
+        ])?;
         Ok(())
     }
 
@@ -406,8 +421,8 @@ impl Database {
         records: &[(GridOrder, crate::types::ObservedOrderIdentity)],
     ) -> Result<()> {
         {
-            let mut statement = tx.prepare(
-                "INSERT INTO order_identity_observations (account_key, client_order_id, expected_symbol, observed_client_order_id, observed_symbol, observed_side, observed_order_id, expected_json, observed_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(account_key,client_order_id,expected_symbol,observed_client_order_id,observed_symbol,observed_side,observed_order_id) DO UPDATE SET expected_json=excluded.expected_json, observed_json=excluded.observed_json"
+            let mut statement = tx.prepare_cached(
+                "INSERT INTO order_identity_observations (account_key, client_order_id, expected_symbol, observed_client_order_id, observed_symbol, observed_side, observed_order_id, expected_json, observed_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(account_key,client_order_id,expected_symbol,observed_client_order_id,observed_symbol,observed_side,observed_order_id) DO UPDATE SET expected_json=excluded.expected_json, observed_json=excluded.observed_json",
             )?;
             for (expected, observed) in records {
                 statement.execute(params![
@@ -457,14 +472,14 @@ impl Database {
         Ok(observations)
     }
 
-    pub fn delete_managed_order(&self, client_order_id: &str) -> Result<()> {
+    pub(crate) fn delete_managed_order(&self, client_order_id: &str) -> Result<()> {
         let conn = self.lock_connection("delete_managed_order");
         conn.prepare_cached("DELETE FROM managed_orders WHERE client_order_id = ?1;")?
             .execute(params![client_order_id])?;
         Ok(())
     }
 
-    pub fn clear_managed_orders(&self, symbol: &str) -> Result<()> {
+    pub(crate) fn clear_managed_orders(&self, symbol: &str) -> Result<()> {
         let conn = self.lock_connection("clear_managed_orders");
         conn.prepare_cached("DELETE FROM managed_orders WHERE symbol = ?1;")?
             .execute(params![symbol])?;
@@ -472,13 +487,21 @@ impl Database {
     }
 }
 
+type SerializedObservation<'a> = (
+    &'a str,
+    &'a str,
+    &'a str,
+    &'a crate::exchange::BinanceOrderResponse,
+    String,
+);
+
 /// An earlier identical snapshot already precedes every later individual
 /// query, so it supplies the same comparison evidence.
 fn is_duplicate_response_snapshot(
     tx: &Connection,
     account: [u8; 32],
     symbol: &str,
-    observations: &[(&str, &str, &str, &crate::exchange::BinanceOrderResponse)],
+    observations: &[SerializedObservation<'_>],
 ) -> Result<bool> {
     if observations.is_empty()
         || !observations[0].2.starts_with("snapshot:")
@@ -487,18 +510,17 @@ fn is_duplicate_response_snapshot(
         return Ok(false);
     }
     let last_batch: Option<String> = tx
-        .query_row(
+        .prepare_cached(
             "SELECT batch_id FROM initial_order_responses WHERE account_key=?1 AND expected_symbol=?2 AND substr(batch_id,1,9)='snapshot:' ORDER BY rowid DESC LIMIT 1",
-            params![&account[..], symbol],
-            |row| row.get(0),
-        )
+        )?
+        .query_row(params![&account[..], symbol], |row| row.get(0))
         .optional()?;
     let Some(last_batch) = last_batch
         .filter(|batch| batch.starts_with("snapshot:") && batch.as_str() != observations[0].2)
     else {
         return Ok(false);
     };
-    let mut statement = tx.prepare(
+    let mut statement = tx.prepare_cached(
         "SELECT client_order_id, response_json FROM initial_order_responses WHERE account_key=?1 AND expected_symbol=?2 AND batch_id=?3 ORDER BY rowid",
     )?;
     let previous: Vec<(String, String)> = statement
@@ -509,8 +531,8 @@ fn is_duplicate_response_snapshot(
     if previous.len() != observations.len() {
         return Ok(false);
     }
-    for ((client, json), (new_client, _, _, response)) in previous.iter().zip(observations) {
-        if client.as_str() != *new_client || json.as_str() != serde_json::to_string(response)? {
+    for ((client, json), (new_client, _, _, _, new_json)) in previous.iter().zip(observations) {
+        if client.as_str() != *new_client || json.as_str() != new_json.as_str() {
             return Ok(false);
         }
     }
@@ -523,18 +545,20 @@ fn is_duplicate_single_response_query(
     tx: &Connection,
     account: [u8; 32],
     symbol: &str,
-    observations: &[(&str, &str, &str, &crate::exchange::BinanceOrderResponse)],
+    observations: &[SerializedObservation<'_>],
 ) -> Result<bool> {
     if observations.len() != 1 {
         return Ok(false);
     }
-    let (client, observation_id, batch_id, response) = observations[0];
+    let (client, observation_id, batch_id, response, new_json) = &observations[0];
     if uuid::Uuid::parse_str(observation_id).is_err() || uuid::Uuid::parse_str(batch_id).is_err() {
         return Ok(false);
     }
     let previous: Option<(String, String)> = tx
-        .query_row(
+        .prepare_cached(
             "SELECT batch_id, response_json FROM initial_order_responses WHERE account_key=?1 AND expected_symbol=?2 AND client_order_id=?3 AND observed_client_order_id=?4 AND observed_symbol=?5 AND observed_side=?6 AND observed_order_id=?7 ORDER BY rowid DESC LIMIT 1",
+        )?
+        .query_row(
             params![
                 &account[..],
                 symbol,
@@ -551,15 +575,18 @@ fn is_duplicate_single_response_query(
         return Ok(false);
     };
     if uuid::Uuid::parse_str(&previous_batch).is_err()
-        || previous_batch == batch_id
-        || previous_json != serde_json::to_string(response)?
+        || previous_batch == *batch_id
+        || previous_json != *new_json
     {
         return Ok(false);
     }
-    let safe: bool = tx.query_row(
-        "SELECT (SELECT count(*) FROM initial_order_responses WHERE account_key=?1 AND expected_symbol=?2 AND batch_id=?3)=1 AND NOT EXISTS(SELECT 1 FROM initial_order_responses WHERE observation_id=?4 OR (account_key=?1 AND expected_symbol=?2 AND batch_id=?5))",
-        params![&account[..], symbol, previous_batch, observation_id, batch_id],
-        |row| row.get(0),
-    )?;
+    let safe: bool = tx
+        .prepare_cached(
+            "SELECT (SELECT count(*) FROM initial_order_responses WHERE account_key=?1 AND expected_symbol=?2 AND batch_id=?3)=1 AND NOT EXISTS(SELECT 1 FROM initial_order_responses WHERE observation_id=?4 OR (account_key=?1 AND expected_symbol=?2 AND batch_id=?5))",
+        )?
+        .query_row(
+            params![&account[..], symbol, previous_batch, observation_id, batch_id],
+            |row| row.get(0),
+        )?;
     Ok(safe)
 }

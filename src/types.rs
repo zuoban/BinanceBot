@@ -31,6 +31,13 @@ impl OrderSide {
             _ => None,
         }
     }
+
+    pub(crate) fn is_maker_price(self, price: Decimal, market: Decimal) -> bool {
+        match self {
+            Self::Buy => price < market,
+            Self::Sell => price > market,
+        }
+    }
 }
 
 /// Strategy direction in Binance's one-way position mode.
@@ -121,7 +128,7 @@ pub(crate) struct ObservedOrderIdentity {
 }
 
 impl ObservedOrderIdentity {
-    pub(crate) fn from_response(resp: &crate::exchange::model::BinanceOrderResponse) -> Self {
+    pub(crate) fn from_response(resp: &crate::exchange::BinanceOrderResponse) -> Self {
         Self {
             client_order_id: resp.client_order_id.clone(),
             symbol: resp.symbol.clone(),
@@ -178,7 +185,7 @@ pub struct GridOrder {
 
 impl GridOrder {
     pub(crate) fn from_exchange_response(
-        found: &crate::exchange::model::BinanceOrderResponse,
+        found: &crate::exchange::BinanceOrderResponse,
         quantity: Decimal,
         purpose: OrderPurpose,
         timestamp: DateTime<Utc>,
@@ -204,7 +211,7 @@ impl GridOrder {
 
     pub(crate) fn apply_terminal_fill(
         &mut self,
-        response: &crate::exchange::model::BinanceOrderResponse,
+        response: &crate::exchange::BinanceOrderResponse,
         updated_at: DateTime<Utc>,
     ) {
         self.updated_at = updated_at;
@@ -224,7 +231,7 @@ impl GridOrder {
 
     pub(crate) fn matches_exchange_identity(
         &self,
-        resp: &crate::exchange::model::BinanceOrderResponse,
+        resp: &crate::exchange::BinanceOrderResponse,
     ) -> bool {
         self.client_order_id == resp.client_order_id
             && self.symbol == resp.symbol
@@ -295,32 +302,6 @@ pub struct OrderSource {
     pub client_order_id: String,
     pub price: Decimal,
     pub quantity: Decimal,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RemainderPhase {
-    Canceling,
-    Submitting,
-    Complete,
-    Abandoned,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RemainderPlan {
-    pub symbol: String,
-    pub mode: TradingMode,
-    pub sources: Vec<GridOrder>,
-    pub target: GridOrder,
-    pub phase: RemainderPhase,
-}
-
-impl RemainderPlan {
-    pub fn find_order(&self, client_order_id: &str) -> Option<&GridOrder> {
-        self.sources
-            .iter()
-            .chain(std::iter::once(&self.target))
-            .find(|order| order.client_order_id == client_order_id)
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -437,7 +418,7 @@ impl PositionInfo {
     }
 }
 
-pub fn apply_fill_to_position(
+pub(crate) fn apply_fill_to_position(
     size: Decimal,
     entry_price: Decimal,
     side: OrderSide,
@@ -448,23 +429,57 @@ pub fn apply_fill_to_position(
         OrderSide::Buy => qty,
         OrderSide::Sell => -qty,
     };
-    let new_size = size + signed_qty;
+    let new_size = size.saturating_add(signed_qty);
     let same_direction = size.is_zero() || size.is_sign_positive() == signed_qty.is_sign_positive();
     if same_direction {
-        let new_entry = if new_size.is_zero() {
+        let abs_new = new_size.abs();
+        let new_entry = if abs_new.is_zero() {
             Decimal::ZERO
         } else {
-            ((entry_price * size.abs()) + (price * qty)) / new_size.abs()
+            let abs_size = size.abs();
+            entry_price
+                .checked_mul(abs_size)
+                .zip(price.checked_mul(qty))
+                .and_then(|(a, b)| a.checked_add(b))
+                .and_then(|sum| sum.checked_div(abs_new))
+                .or_else(|| {
+                    abs_size
+                        .checked_div(abs_new)
+                        .and_then(|w1| w1.checked_mul(entry_price))
+                        .zip(
+                            qty.checked_div(abs_new)
+                                .and_then(|w2| w2.checked_mul(price)),
+                        )
+                        .and_then(|(a, b)| a.checked_add(b))
+                })
+                .unwrap_or(price)
         };
         (new_size, new_entry, Decimal::ZERO)
     } else {
         let closed_qty = qty.min(size.abs());
-        let direction_sign = if size > Decimal::ZERO {
-            Decimal::ONE
+        let (exit_price, open_price) = if size > Decimal::ZERO {
+            (price, entry_price)
         } else {
-            -Decimal::ONE
+            (entry_price, price)
         };
-        let realized = (price - entry_price) * closed_qty * direction_sign;
+        let realized = exit_price
+            .checked_sub(open_price)
+            .and_then(|diff| diff.checked_mul(closed_qty))
+            .or_else(|| {
+                exit_price
+                    .checked_mul(closed_qty)
+                    .zip(open_price.checked_mul(closed_qty))
+                    .and_then(|(a, b)| a.checked_sub(b))
+            })
+            .unwrap_or_else(|| {
+                if closed_qty.is_zero() || exit_price == open_price {
+                    Decimal::ZERO
+                } else if (exit_price > open_price) == (closed_qty > Decimal::ZERO) {
+                    Decimal::MAX
+                } else {
+                    Decimal::MIN
+                }
+            });
         let new_entry = if new_size.is_zero() {
             Decimal::ZERO
         } else if new_size.is_sign_positive() != size.is_sign_positive() {
@@ -476,9 +491,9 @@ pub fn apply_fill_to_position(
     }
 }
 
-pub const PAPER_INITIAL_BALANCE: Decimal = rust_decimal_macros::dec!(10000);
+pub(crate) const PAPER_INITIAL_BALANCE: Decimal = rust_decimal_macros::dec!(10000);
 
-pub fn quote_asset(symbol: &str) -> Option<&'static str> {
+pub(crate) fn quote_asset(symbol: &str) -> Option<&'static str> {
     ["FDUSD", "USDC", "USDT", "BUSD"]
         .into_iter()
         .find(|asset| symbol.ends_with(asset))
@@ -564,7 +579,7 @@ impl Default for GridStats {
     }
 }
 
-pub const MARKET_PRICE_MAX_AGE_SECS: i64 = 15;
+pub(crate) const MARKET_PRICE_MAX_AGE_SECS: i64 = 15;
 
 pub(crate) fn beijing_offset() -> chrono::FixedOffset {
     const OFFSET: chrono::FixedOffset = match chrono::FixedOffset::east_opt(8 * 3600) {
@@ -659,9 +674,14 @@ pub struct HourlyTradeStats {
 
 impl HourlyTradeStats {
     pub fn total_counts(&self) -> (u64, u64) {
-        self.buckets.iter().fold((0, 0), |(buy, sell), bucket| {
-            (buy + bucket.buy_count, sell + bucket.sell_count)
-        })
+        self.buckets
+            .iter()
+            .fold((0u64, 0u64), |(buy, sell), bucket| {
+                (
+                    buy.saturating_add(bucket.buy_count),
+                    sell.saturating_add(bucket.sell_count),
+                )
+            })
     }
 }
 
@@ -716,17 +736,7 @@ pub enum BotControlAction {
 
 #[path = "types/api.rs"]
 mod api;
-pub use api::*;
-
-pub(crate) fn ws_frame_json<T: Serialize + ?Sized>(kind: &'static str, data: &T) -> Option<String> {
-    #[derive(Serialize)]
-    struct WsFrame<'a, T: ?Sized> {
-        #[serde(rename = "type")]
-        kind: &'static str,
-        data: &'a T,
-    }
-    serde_json::to_string(&WsFrame { kind, data }).ok()
-}
+pub(crate) use api::*;
 
 #[cfg(test)]
 #[path = "types_tests.rs"]

@@ -1,12 +1,18 @@
 import { Component, type ReactNode } from 'react';
 import { Button } from 'antd';
-type Props = { children: ReactNode; label: string; onReload?: () => void };
+type Props = { children: ReactNode; label: string; resetKey?: unknown; onReload?: () => void };
 
 export class LoadErrorBoundary extends Component<Props, { failed: boolean }> {
   state = { failed: false };
 
   static getDerivedStateFromError() {
     return { failed: true };
+  }
+
+  componentDidUpdate(prevProps: Props) {
+    if (this.state.failed && !Object.is(prevProps.resetKey, this.props.resetKey)) {
+      this.setState({ failed: false });
+    }
   }
 
   componentDidCatch(error: unknown) {

@@ -1,9 +1,9 @@
 pub mod backtest;
-pub mod grid;
-pub mod precision;
+mod grid;
+pub(crate) mod precision;
 
 pub use grid::GridTradingEngine;
-pub use precision::SymbolRules;
+pub(crate) use precision::SymbolRules;
 
 #[cfg(test)]
 mod paper_db_tests;

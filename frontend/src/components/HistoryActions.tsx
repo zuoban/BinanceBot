@@ -2,26 +2,27 @@ import { Button, Space } from 'antd';
 import { DownloadOutlined } from '@ant-design/icons';
 import { useQueryClient } from '@tanstack/react-query';
 import { post } from '../lib/api';
-import { downloadDatabase, exportSnapshotNotice, exportSnapshotSuccess, refreshClearedQueries, useDatabaseAction } from '../lib/database';
+import { downloadDatabase, exportSnapshotNotice, exportSnapshotSuccess, useDatabaseAction } from '../lib/database';
+import { invalidateStrategyQueries } from '../lib/queries';
 
 export function HistoryActions({ symbol }: { symbol: string }) {
   const client = useQueryClient();
   const { busy, run } = useDatabaseAction<'export' | 'clear'>();
   const path = `/api/pairs/${encodeURIComponent(symbol)}`;
-  const download = () => run('export', async () => {
-    await downloadDatabase(`${path}/database/export`);
+  const download = () => run('export', async signal => {
+    await downloadDatabase(`${path}/database/export`, undefined, signal);
     return exportSnapshotSuccess(`${symbol} 全部模式的成交历史`);
   });
+  const refresh = () => invalidateStrategyQueries(client, { pairs: false, overview: true, snapshot: symbol, cancelFirst: true });
   const clear = () => run('clear', async () => {
-    const keys = [['snapshot', symbol], ['overview']];
     let started = false;
     try {
       started = true;
       const result = await post<{ deleted_trades: number }>(`${path}/trades/clear`, { confirm: true });
-      await refreshClearedQueries(client, keys);
+      await refresh();
       return `已清理 ${symbol} 的 ${result.deleted_trades} 笔历史成交`;
     } catch (err) {
-      if (started) void refreshClearedQueries(client, keys);
+      if (started) void refresh();
       throw err;
     }
   }, { title: `清理 ${symbol} 的成交历史？`, content: `将删除 ${symbol} 全部模式的历史成交并重置相关统计。持仓和挂单保留。此操作无法撤销，建议先导出。`, okText: '清理当前币种历史', okButtonProps: { danger: true }, cancelText: '取消' });

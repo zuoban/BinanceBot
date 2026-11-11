@@ -13,6 +13,10 @@ const MAX_SOURCE_LOGIN_ATTEMPTS: usize = 10;
 
 const MAX_COLD_SESSION_LOOKUPS: usize = 16;
 
+pub(crate) fn sanitize_session_token(raw: &str) -> Option<&str> {
+    let t = raw.trim();
+    (!t.is_empty() && t.len() <= 128 && t.bytes().all(|b| b.is_ascii_graphic())).then_some(t)
+}
 #[derive(Debug)]
 pub(crate) enum SessionCheckError {
     Busy,
@@ -30,8 +34,8 @@ impl std::fmt::Display for SessionCheckError {
 
 #[derive(Default)]
 pub(crate) struct LoginAttempts {
-    pub(super) by_source: HashMap<IpAddr, VecDeque<Instant>>,
-    pub(super) global: VecDeque<Instant>,
+    pub(crate) by_source: HashMap<IpAddr, VecDeque<Instant>>,
+    pub(crate) global: VecDeque<Instant>,
 }
 
 /// Process-wide authentication, session validation, and login rate-limiting state.
@@ -87,9 +91,9 @@ impl AuthContext {
         if !self.is_auth_configured() {
             return Ok(true);
         }
-        if token.is_empty() || token.len() > 128 || !token.bytes().all(|b| b.is_ascii_graphic()) {
+        let Some(token) = sanitize_session_token(token).filter(|t| *t == token) else {
             return Ok(false);
-        }
+        };
         if self.db.session_recently_validated(token) {
             return Ok(true);
         }
@@ -126,7 +130,7 @@ impl AuthContext {
             .map_err(SessionCheckError::Database)
     }
 
-    pub(crate) async fn begin_login_attempt(&self, source: IpAddr) -> bool {
+    pub(crate) async fn begin_login_attempt(&self, source: IpAddr) -> Option<Instant> {
         let mut failures = self.login_failures.lock().await;
         failures.by_source.retain(|_, attempts| {
             attempts.retain(|time| time.elapsed() < LOGIN_WINDOW);
@@ -134,24 +138,40 @@ impl AuthContext {
         });
         failures.global.retain(|time| time.elapsed() < LOGIN_WINDOW);
         if failures.global.len() >= MAX_GLOBAL_LOGIN_ATTEMPTS {
-            return false;
+            return None;
         }
         // Active windows must not be evicted by churn from other sources.
         if !failures.by_source.contains_key(&source)
             && failures.by_source.len() >= MAX_LOGIN_SOURCES
         {
-            return false;
+            return None;
         }
         let attempts = failures.by_source.entry(source).or_default();
         if attempts.len() >= MAX_SOURCE_LOGIN_ATTEMPTS {
-            return false;
+            return None;
         }
         let now = Instant::now();
         attempts.push_back(now);
         failures.global.push_back(now);
-        true
+        Some(now)
     }
 
+    pub(crate) async fn rollback_single_login_attempt(&self, source: IpAddr, attempt_at: Instant) {
+        let mut failures = self.login_failures.lock().await;
+        if let Some(attempts) = failures.by_source.get_mut(&source) {
+            if let Some(pos) = attempts.iter().rposition(|t| *t == attempt_at) {
+                attempts.remove(pos);
+            }
+            if attempts.is_empty() {
+                failures.by_source.remove(&source);
+            }
+        }
+        if let Some(pos) = failures.global.iter().rposition(|t| *t == attempt_at) {
+            failures.global.remove(pos);
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) async fn clear_login_attempts(&self, source: IpAddr) {
         self.login_failures.lock().await.by_source.remove(&source);
     }
@@ -177,7 +197,7 @@ impl AppState {
 
     #[cfg(test)]
     pub(crate) async fn begin_login_attempt(&self, source: IpAddr) -> bool {
-        self.auth.begin_login_attempt(source).await
+        self.auth.begin_login_attempt(source).await.is_some()
     }
 
     #[cfg(test)]

@@ -1,3 +1,4 @@
+/// <reference lib="es2024.promise" />
 import { useState } from 'react';
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -33,9 +34,12 @@ function setup() {
   return render(<Wrapper />);
 }
 
-it('等待风控确认时锁定表单和页签，卸载后不会提交', async () => {
-  let confirm!: (value: boolean) => void;
-  mocks.confirm.mockReturnValueOnce(new Promise<boolean>(resolve => { confirm = resolve; }));
+it('等待风控确认时不提前锁定表单，保留页签未保存拦截，并在卸载时销毁确认弹窗且不提交', async () => {
+  const { promise, resolve: confirm } = Promise.withResolvers<boolean>();
+  const destroy = vi.fn();
+  mocks.confirm
+    .mockReturnValueOnce(Object.assign(promise, { destroy }))
+    .mockResolvedValueOnce(false);
   const view = setup();
   const user = userEvent.setup();
   const toggle = await screen.findByRole('switch', { name: '可用保证金不足时暂停' });
@@ -43,15 +47,17 @@ it('等待风控确认时锁定表单和页签，卸载后不会提交', async (
   await user.click(toggle);
   await user.click(screen.getByRole('button', { name: '保存全局设置' }));
   await waitFor(() => expect(mocks.confirm).toHaveBeenCalledTimes(1));
-  expect(toggle).toBeDisabled();
+  expect(toggle).toBeEnabled();
   await user.click(screen.getByRole('tab', { name: '账户安全' }));
+  await waitFor(() => expect(mocks.confirm).toHaveBeenCalledTimes(2));
   expect(screen.getByRole('tab', { name: '连接与通知' })).toHaveAttribute('aria-selected', 'true');
   view.unmount();
+  expect(destroy).toHaveBeenCalledTimes(1);
   await act(async () => { confirm(true); });
   expect(mocks.post).not.toHaveBeenCalled();
 }, 40000);
 
-it('取消风控确认后恢复编辑', async () => {
+it('取消风控确认后保留输入且允许继续编辑', async () => {
   mocks.confirm.mockResolvedValueOnce(false);
   setup();
   const user = userEvent.setup();
@@ -59,7 +65,8 @@ it('取消风控确认后恢复编辑', async () => {
   await waitFor(() => expect(toggle).toBeEnabled());
   await user.click(toggle);
   await user.click(screen.getByRole('button', { name: '保存全局设置' }));
-  await waitFor(() => expect(toggle).toBeEnabled());
+  await waitFor(() => expect(mocks.confirm).toHaveBeenCalledTimes(1));
+  expect(toggle).toBeEnabled();
   expect(toggle).toBeChecked();
   expect(mocks.post).not.toHaveBeenCalled();
 }, 40000);

@@ -5,7 +5,7 @@ use super::control::{
 use super::{json_ok, ApiResponse};
 use crate::runtime::RuntimeHandle;
 use crate::server::state::snapshot::{AccountFrame, AccountMessage};
-use crate::server::state::{AppState, AuthContext};
+use crate::server::state::{sanitize_session_token, AppState, AuthContext};
 use crate::types::BotControlAction;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -21,7 +21,7 @@ const WS_CONTROL_QUEUE_CAPACITY: usize = 16;
 const WS_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 fn websocket_token(headers: &HeaderMap) -> &str {
-    let token = headers
+    headers
         .get(axum::http::header::SEC_WEBSOCKET_PROTOCOL)
         .and_then(|value| value.to_str().ok())
         .and_then(|protocols| {
@@ -29,12 +29,9 @@ fn websocket_token(headers: &HeaderMap) -> &str {
                 .split(',')
                 .find_map(|protocol| protocol.trim().strip_prefix("token."))
         })
-        .unwrap_or_default();
-    if token.len() > 128 || !token.bytes().all(|b| b.is_ascii_graphic()) {
-        ""
-    } else {
-        token
-    }
+        .filter(|raw| *raw == raw.trim())
+        .and_then(sanitize_session_token)
+        .unwrap_or_default()
 }
 
 fn ws_origin_allowed(headers: &HeaderMap) -> bool {
@@ -195,6 +192,33 @@ pub(super) async fn accounts_ws_handler(
     upgrade_accounts_socket(ws, headers, hub).await
 }
 
+async fn authorize_and_configure_ws(
+    ws: WebSocketUpgrade,
+    headers: &HeaderMap,
+    auth: &AuthContext,
+) -> Result<(WebSocketUpgrade, String), Response> {
+    if !ws_origin_allowed(headers) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Forbidden: Cross-origin WebSocket connection rejected",
+        )
+            .into_response());
+    }
+    let token = websocket_token(headers);
+    if !auth.is_token_valid(token).await {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "Unauthorized: Missing or invalid authentication token",
+        )
+            .into_response());
+    }
+    let configured = ws
+        .protocols(["auth"])
+        .max_message_size(WS_MAX_FRAME_BYTES)
+        .max_frame_size(WS_MAX_FRAME_BYTES);
+    Ok((configured, token.to_string()))
+}
+
 async fn upgrade_accounts_socket(
     ws: WebSocketUpgrade,
     headers: HeaderMap,
@@ -203,65 +227,63 @@ async fn upgrade_accounts_socket(
     if !ws_origin_allowed(&headers) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    let token = websocket_token(&headers);
-    let (Some(auth), Some(mut retired)) = (hub.source.auth(), hub.source.subscribe_retirement())
-    else {
+    let (Some(auth), Some(retired)) = (hub.source.auth(), hub.source.subscribe_retirement()) else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    if !auth.is_token_valid(token).await {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let (ws, token) = match authorize_and_configure_ws(ws, &headers, &auth).await {
+        Ok(ready) => ready,
+        Err(response) => return response,
+    };
+    ws.on_upgrade(move |socket| run_accounts_socket(socket, hub, auth, token, retired))
+}
+
+async fn run_accounts_socket(
+    socket: WebSocket,
+    hub: Arc<AccountHub>,
+    auth: Arc<AuthContext>,
+    token: String,
+    mut retired: tokio::sync::watch::Receiver<bool>,
+) {
+    if *retired.borrow() {
+        return;
     }
-    let token = token.to_string();
-    ws.protocols(["auth"])
-        .max_message_size(WS_MAX_FRAME_BYTES)
-        .max_frame_size(WS_MAX_FRAME_BYTES)
-        .on_upgrade(move |socket| async move {
-            if *retired.borrow() {
-                return;
+    let mut frames = hub.subscribe().await;
+    let (mut sender, mut receiver) = socket.split();
+    let mut check_auth = tokio::time::interval(std::time::Duration::from_secs(1));
+    loop {
+        let frame = frames.borrow_and_update().clone();
+        if let Some(frame) = frame {
+            if !auth.is_token_valid(&token).await {
+                break;
             }
-            let mut frames = hub.subscribe().await;
-            let (mut sender, mut receiver) = socket.split();
-            let mut check_auth = tokio::time::interval(std::time::Duration::from_secs(1));
-            loop {
-                let frame = frames.borrow_and_update().clone();
-                if let Some(frame) = frame {
-                    if !auth.is_token_valid(&token).await {
-                        break;
-                    }
-                    if !send_with_timeout(
-                        &mut sender,
-                        Message::Text((*frame).clone()),
-                        &mut retired,
-                    )
-                    .await
-                    {
-                        break;
-                    }
+            if !send_with_timeout(&mut sender, Message::Text((*frame).clone()), &mut retired).await
+            {
+                break;
+            }
+        }
+        loop {
+            tokio::select! {
+                biased;
+                _ = retired.changed() => return,
+                _ = check_auth.tick() => {
+                    if !auth.is_token_valid(&token).await { return; }
                 }
-                loop {
-                    tokio::select! {
-                        biased;
-                        _ = retired.changed() => return,
-                        _ = check_auth.tick() => {
-                            if !auth.is_token_valid(&token).await { return; }
+                changed = frames.changed() => {
+                    if changed.is_err() { return; }
+                    break;
+                }
+                message = receiver.next() => {
+                    match message {
+                        Some(Ok(Message::Ping(payload))) => {
+                            if !send_with_timeout(&mut sender, Message::Pong(payload), &mut retired).await { return; }
                         }
-                        changed = frames.changed() => {
-                            if changed.is_err() { return; }
-                            break;
-                        }
-                        message = receiver.next() => {
-                            match message {
-                                Some(Ok(Message::Ping(payload))) => {
-                                    if !send_with_timeout(&mut sender, Message::Pong(payload), &mut retired).await { return; }
-                                }
-                                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return,
-                                _ => {}
-                            }
-                        }
+                        Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return,
+                        _ => {}
                     }
                 }
             }
-        })
+        }
+    }
 }
 
 pub(super) async fn ws_handler(
@@ -269,27 +291,11 @@ pub(super) async fn ws_handler(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> Response {
-    if !ws_origin_allowed(&headers) {
-        return (
-            StatusCode::FORBIDDEN,
-            "Forbidden: Cross-origin WebSocket connection rejected",
-        )
-            .into_response();
-    }
-    let token = websocket_token(&headers);
-    if !state.is_token_valid(token).await {
-        return (
-            StatusCode::UNAUTHORIZED,
-            "Unauthorized: Missing or invalid authentication token",
-        )
-            .into_response();
-    }
-
-    let token = token.to_string();
-    ws.protocols(["auth"])
-        .max_message_size(WS_MAX_FRAME_BYTES)
-        .max_frame_size(WS_MAX_FRAME_BYTES)
-        .on_upgrade(move |socket| handle_socket(socket, state, token))
+    let (ws, token) = match authorize_and_configure_ws(ws, &headers, &state.auth).await {
+        Ok(ready) => ready,
+        Err(response) => return response,
+    };
+    ws.on_upgrade(move |socket| handle_socket(socket, state, token))
 }
 
 pub(super) async fn send_until_retired<S>(

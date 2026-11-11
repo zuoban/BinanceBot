@@ -105,7 +105,7 @@ impl RuntimeHandle {
         }
     }
 
-    pub async fn update_global_config(
+    pub(crate) async fn update_global_config(
         &self,
         payload: crate::types::UpdateGlobalConfigPayload,
     ) -> anyhow::Result<GlobalConfig> {
@@ -145,7 +145,10 @@ impl RuntimeHandle {
             .as_deref()
             .is_some_and(|version| version != crate::db::config_version(&config))
         {
-            anyhow::bail!("全局设置已被其他请求修改，请刷新后重试");
+            return Err(crate::config::ConfigVersionConflict(
+                "全局设置已被其他请求修改，请刷新后重试",
+            )
+            .into());
         }
         payload.apply_to(&mut config);
         // Retired members remain published for risk accounting, but their engines
@@ -247,7 +250,7 @@ impl RuntimeHandle {
             .map_err(anyhow::Error::msg)
     }
 
-    pub async fn add_pair(&self, config: AppConfig) -> anyhow::Result<()> {
+    pub(crate) async fn add_pair(&self, config: AppConfig) -> anyhow::Result<()> {
         self.send_command(
             |reply| RuntimeCommand::Add {
                 config: Box::new(config),
@@ -259,7 +262,7 @@ impl RuntimeHandle {
         .await
     }
 
-    pub async fn remove_pair(&self, symbol: String) -> anyhow::Result<()> {
+    pub(crate) async fn remove_pair(&self, symbol: String) -> anyhow::Result<()> {
         self.send_command(
             |reply| RuntimeCommand::Remove { symbol, reply },
             "程序正在退出，无法移除交易对",
@@ -267,4 +270,56 @@ impl RuntimeHandle {
         )
         .await
     }
+}
+
+pub(super) fn spawn_cny_rate_refresh_task(
+    states: Arc<RwLock<Vec<Arc<AppState>>>>,
+    cny_rates: Arc<crate::fx::CnyRateCache>,
+    mut stop: watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut timer = tokio::time::interval(Duration::from_secs(10));
+        timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                biased;
+                _ = stop.changed() => {
+                    if *stop.borrow_and_update() {
+                        break;
+                    }
+                }
+                _ = timer.tick() => {
+                    if *stop.borrow_and_update() {
+                        break;
+                    }
+                    let snapshot_states = states.read().await.clone();
+                    let mut assets = std::collections::BTreeSet::new();
+                    for state in snapshot_states {
+                        if state.is_retired() {
+                            continue;
+                        }
+                        let mut asset = state.account.read().await.asset.clone();
+                        if asset.is_empty() {
+                            asset = crate::types::quote_asset(
+                                &state.config.read().await.exchange.symbol,
+                            )
+                            .unwrap_or_default()
+                            .to_string();
+                        }
+                        if !asset.is_empty() {
+                            assets.insert(asset);
+                        }
+                    }
+                    for asset in assets {
+                        if *stop.borrow() {
+                            return;
+                        }
+                        if let Err(err) = cny_rates.refresh_if_due(&asset).await {
+                            tracing::warn!("Could not refresh {}/CNY exchange rate: {}", asset, err);
+                        }
+                    }
+                }
+            }
+        }
+    })
 }

@@ -9,16 +9,9 @@ use rusqlite::{params, Connection};
 use std::collections::HashMap;
 use tracing::warn;
 
-/// Testnet trading was removed. Credentials now select one global mode, so any
-/// saved testnet strategy moves all configured strategies to paused paper mode.
-/// Keep non-testnet recovery state intact for an operator to review.
-fn retire_legacy_testnet_config(conn: &Connection) -> Result<()> {
-    let Some(mut config) = load_raw_config_value_on(conn)? else {
-        return Ok(());
-    };
-    let Some(root) = config.as_object_mut() else {
-        return Ok(());
-    };
+fn strip_legacy_testnet_flags(
+    root: &mut serde_json::Map<String, serde_json::Value>,
+) -> (bool, bool) {
     let mut retired = false;
     let mut paper_required = false;
     if let Some(exchange) = root
@@ -50,47 +43,70 @@ fn retire_legacy_testnet_config(conn: &Connection) -> Result<()> {
             paper_required |= flag.unwrap_or(false);
         }
     }
-    if !retired {
-        return Ok(());
+    (retired, paper_required)
+}
+
+fn clear_testnet_credentials_and_collect_symbols(
+    root: &mut serde_json::Map<String, serde_json::Value>,
+) -> Vec<String> {
+    if let Some(exchange) = root
+        .get_mut("exchange")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        exchange.remove("api_key");
+        exchange.remove("api_secret");
     }
     let mut symbols = Vec::new();
-    if paper_required {
-        if let Some(exchange) = root
-            .get_mut("exchange")
-            .and_then(serde_json::Value::as_object_mut)
-        {
-            exchange.remove("api_key");
-            exchange.remove("api_secret");
-        }
-        if let Some(pairs) = root
-            .get_mut("pairs")
-            .and_then(serde_json::Value::as_array_mut)
-        {
-            for pair in pairs {
-                // Startup promotes the first pair's credentials to the global
-                // exchange. No legacy override may restore live mode.
-                if let Some(exchange) = pair
-                    .get_mut("exchange")
-                    .and_then(serde_json::Value::as_object_mut)
-                {
-                    exchange.remove("api_key");
-                    exchange.remove("api_secret");
-                }
-                if let Some(symbol) = pair.get("symbol").and_then(serde_json::Value::as_str) {
-                    symbols.push(symbol.to_ascii_uppercase());
-                }
-            }
-        }
-        if symbols.is_empty() {
-            if let Some(symbol) = root
-                .get("exchange")
-                .and_then(|exchange| exchange.get("symbol"))
-                .and_then(serde_json::Value::as_str)
+    if let Some(pairs) = root
+        .get_mut("pairs")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for pair in pairs {
+            // Startup promotes the first pair's credentials to the global
+            // exchange. No legacy override may restore live mode.
+            if let Some(exchange) = pair
+                .get_mut("exchange")
+                .and_then(serde_json::Value::as_object_mut)
             {
+                exchange.remove("api_key");
+                exchange.remove("api_secret");
+            }
+            if let Some(symbol) = pair.get("symbol").and_then(serde_json::Value::as_str) {
                 symbols.push(symbol.to_ascii_uppercase());
             }
         }
     }
+    if symbols.is_empty() {
+        if let Some(symbol) = root
+            .get("exchange")
+            .and_then(|exchange| exchange.get("symbol"))
+            .and_then(serde_json::Value::as_str)
+        {
+            symbols.push(symbol.to_ascii_uppercase());
+        }
+    }
+    symbols
+}
+
+/// Testnet trading was removed. Credentials now select one global mode, so any
+/// saved testnet strategy moves all configured strategies to paused paper mode.
+/// Keep non-testnet recovery state intact for an operator to review.
+fn retire_legacy_testnet_config(conn: &Connection) -> Result<()> {
+    let Some(mut config) = load_raw_config_value_on(conn)? else {
+        return Ok(());
+    };
+    let Some(root) = config.as_object_mut() else {
+        return Ok(());
+    };
+    let (retired, paper_required) = strip_legacy_testnet_flags(root);
+    if !retired {
+        return Ok(());
+    }
+    let mut symbols = if paper_required {
+        clear_testnet_credentials_and_collect_symbols(root)
+    } else {
+        Vec::new()
+    };
     save_raw_config_value_on(conn, &config)?;
     symbols.sort();
     symbols.dedup();
@@ -220,7 +236,7 @@ pub(super) fn has_legacy_paper_history_on(conn: &Connection, symbol: &str) -> Re
     )?)
 }
 
-pub(super) fn run_schema_migrations(conn: &mut Connection) -> Result<()> {
+fn remove_legacy_admin_auth(conn: &Connection) -> Result<()> {
     let has_legacy_admin_auth: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'admin_auth')",
         [],
@@ -239,9 +255,10 @@ pub(super) fn run_schema_migrations(conn: &mut Connection) -> Result<()> {
              set ADMIN_PASSWORD or --admin-password to require console authentication"
         );
     }
+    Ok(())
+}
 
-    // Rebuild the old key atomically, retaining the identities in the stored JSON.
-    let tx = conn.transaction()?;
+fn migrate_identity_observations_on(tx: &Connection) -> Result<()> {
     let has_observed_client_id: i64 = tx.query_row(
         "SELECT count(*) FROM pragma_table_info('order_identity_observations') WHERE name = 'observed_client_order_id'",
         [],
@@ -273,6 +290,10 @@ pub(super) fn run_schema_migrations(conn: &mut Connection) -> Result<()> {
             "#,
         )?;
     }
+    Ok(())
+}
+
+fn migrate_initial_responses_and_disagreements_on(tx: &Connection) -> Result<()> {
     // Older versions deduplicated by response content. Preserve the order
     // of surviving rows; observations already discarded cannot be restored.
     let has_observation_id: i64 = tx.query_row(
@@ -341,8 +362,10 @@ pub(super) fn run_schema_migrations(conn: &mut Connection) -> Result<()> {
             "#,
         )?;
     }
-    tx.commit()?;
+    Ok(())
+}
 
+fn migrate_trades_columns_and_scope_index(conn: &Connection) -> Result<()> {
     let has_pnl_verified: i64 = conn.query_row(
         "SELECT count(*) FROM pragma_table_info('trades') WHERE name = 'pnl_verified';",
         [],
@@ -354,7 +377,6 @@ pub(super) fn run_schema_migrations(conn: &mut Connection) -> Result<()> {
             [],
         )?;
     }
-
     let has_mode: i64 = conn.query_row(
         "SELECT count(*) FROM pragma_table_info('trades') WHERE name = 'mode';",
         [],
@@ -370,6 +392,10 @@ pub(super) fn run_schema_migrations(conn: &mut Connection) -> Result<()> {
         "CREATE INDEX IF NOT EXISTS idx_trades_scope ON trades (symbol, mode, timestamp DESC);",
         [],
     )?;
+    Ok(())
+}
+
+fn finalize_legacy_retirements_and_rollups(conn: &mut Connection) -> Result<()> {
     let tx = conn.transaction()?;
     retire_legacy_testnet_config(&tx)?;
     retire_legacy_dry_run_intent(&tx)?;
@@ -393,4 +419,17 @@ pub(super) fn run_schema_migrations(conn: &mut Connection) -> Result<()> {
     )?;
     tx.commit()?;
     Ok(())
+}
+
+pub(super) fn run_schema_migrations(conn: &mut Connection) -> Result<()> {
+    remove_legacy_admin_auth(conn)?;
+    {
+        // Rebuild old evidence keys atomically, retaining identities in the stored JSON.
+        let tx = conn.transaction()?;
+        migrate_identity_observations_on(&tx)?;
+        migrate_initial_responses_and_disagreements_on(&tx)?;
+        tx.commit()?;
+    }
+    migrate_trades_columns_and_scope_index(conn)?;
+    finalize_legacy_retirements_and_rollups(conn)
 }

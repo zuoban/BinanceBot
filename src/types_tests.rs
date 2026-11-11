@@ -70,7 +70,7 @@ fn terminal_fill_prefers_positive_avg_price_falls_back_to_response_price_and_upd
         purpose: OrderPurpose::Grid,
         merge_sources: Vec::new(),
     };
-    let mut response = crate::exchange::model::BinanceOrderResponse {
+    let mut response = crate::exchange::BinanceOrderResponse {
         order_id: 42,
         client_order_id: "gb_fill_1".into(),
         symbol: "SOLUSDC".into(),
@@ -153,4 +153,94 @@ fn config_payload_debug_redacts_secrets() {
         assert!(!rendered.contains(secret), "{rendered}");
     }
     assert!(rendered.contains("[REDACTED]"));
+}
+
+#[test]
+fn apply_fill_to_position_handles_extreme_quantities_and_prices_without_panicking() {
+    assert!(OrderSide::Buy.is_maker_price(dec!(99.9), dec!(100)));
+    assert!(!OrderSide::Buy.is_maker_price(dec!(100), dec!(100)));
+    assert!(OrderSide::Sell.is_maker_price(dec!(100.1), dec!(100)));
+    assert!(!OrderSide::Sell.is_maker_price(dec!(100), dec!(100)));
+
+    // Weighted entry fallback when entry_price * abs_size overflows Decimal::MAX.
+    let huge_qty = Decimal::MAX / dec!(4);
+    let (new_size, new_entry, realized) =
+        apply_fill_to_position(huge_qty, dec!(100), OrderSide::Buy, dec!(200), huge_qty);
+    assert_eq!(new_size, huge_qty + huge_qty);
+    assert_eq!(new_entry, dec!(150));
+    assert_eq!(realized, Decimal::ZERO);
+
+    // Saturation when adding to position exceeds Decimal::MAX / Decimal::MIN.
+    let (long_sat, long_entry, long_pnl) = apply_fill_to_position(
+        Decimal::MAX,
+        Decimal::MAX,
+        OrderSide::Buy,
+        Decimal::MAX,
+        Decimal::MAX,
+    );
+    assert_eq!(long_sat, Decimal::MAX);
+    assert!(long_entry > Decimal::ZERO);
+    assert_eq!(long_pnl, Decimal::ZERO);
+
+    let (short_sat, short_entry, short_pnl) = apply_fill_to_position(
+        Decimal::MIN,
+        Decimal::MAX,
+        OrderSide::Sell,
+        Decimal::MAX,
+        Decimal::MAX,
+    );
+    assert_eq!(short_sat, Decimal::MIN);
+    assert!(short_entry > Decimal::ZERO);
+    assert_eq!(short_pnl, Decimal::ZERO);
+
+    // Opposite-direction closing fills with extreme price differences and quantities.
+    let (closed_long, entry_after_long, max_gain) = apply_fill_to_position(
+        Decimal::MAX,
+        Decimal::MIN,
+        OrderSide::Sell,
+        Decimal::MAX,
+        Decimal::MAX,
+    );
+    assert_eq!(closed_long, Decimal::ZERO);
+    assert_eq!(entry_after_long, Decimal::ZERO);
+    assert_eq!(max_gain, Decimal::MAX);
+
+    let (_, _, max_loss) = apply_fill_to_position(
+        Decimal::MAX,
+        Decimal::MAX,
+        OrderSide::Sell,
+        Decimal::MIN,
+        Decimal::MAX,
+    );
+    assert_eq!(max_loss, Decimal::MIN);
+
+    // Short closing extreme gain & loss.
+    let (_, _, short_gain) = apply_fill_to_position(
+        Decimal::MIN,
+        Decimal::MAX,
+        OrderSide::Buy,
+        Decimal::MIN,
+        Decimal::MAX,
+    );
+    assert_eq!(short_gain, Decimal::MAX);
+
+    let stats = HourlyTradeStats {
+        window_start: Utc::now(),
+        window_end: Utc::now(),
+        buckets: vec![
+            HourlyTradeCount {
+                hour_start: Utc::now(),
+                buy_count: u64::MAX,
+                sell_count: u64::MAX - 2,
+            },
+            HourlyTradeCount {
+                hour_start: Utc::now(),
+                buy_count: 10,
+                sell_count: 10,
+            },
+        ],
+        realized_pnl: Decimal::ZERO,
+        pending_pnl_count: 0,
+    };
+    assert_eq!(stats.total_counts(), (u64::MAX, u64::MAX));
 }

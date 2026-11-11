@@ -87,12 +87,12 @@ export const componentColors = {
   dark: {
     elevated: palettes.dark['--bg-raised'], disabledText: '#686c76', disabledBg: '#1d1f24',
     border: '#34373f', borderSecondary: '#25272d',
-    hover: '#23252b', active: 'rgba(229, 169, 16, 0.14)', activeHover: 'rgba(229, 169, 16, 0.2)',
+    hover: '#23252b', active: palettes.dark['--accent-soft'], activeHover: 'rgba(229, 169, 16, 0.2)',
     tableHeader: '#151619', tableHover: '#1d1f24', segmentedTrack: '#141518',
     primaryBg: '#edeef0', primaryHover: '#ffffff', primaryActive: '#d6d8dd',
     buttonForeground: '#131416', dangerForeground: '#ffffff',
   },
 } as const;
 
-const declarations = (tokens: Readonly<Record<string, string>>) => Object.entries(tokens).map(([name, value]) => `${name}:${value};`).join('');
+const declarations = (tokens: Readonly<Record<string, string>>) => Object.entries(tokens).filter(([name]) => name !== '--accent-soft').map(([name, value]) => `${name}:${value};`).join('');
 export const designTokensCss = `:root{${declarations(sharedCssTokens)}${declarations(palettes.light)}}[data-theme="dark"]{${declarations(palettes.dark)}}`;

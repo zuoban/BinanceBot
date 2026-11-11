@@ -2,31 +2,31 @@
 name: Grid Console
 description: 币安合约网格策略的交易工作台，以分级信号呈现状态
 colors:
-  signal-blue: "#1d4ed8"
-  signal-blue-dark: "#6ea0ff"
-  rail: "#0b1424"
-  ground: "#f2f5f9"
+  accent-gold: "#9a6700"
+  accent-gold-dark: "#e5a910"
+  rail: "#141518"
+  ground: "#f7f7f8"
   surface: "#ffffff"
-  text: "#0f1a2b"
-  muted: "#44546a"
-  border: "#e1e7ef"
-  long: "#0f7a52"
-  short: "#b4382c"
-  warn-yellow: "#8a5a00"
-  warn-orange: "#b04a05"
-  dark-ground: "#0a1220"
-  dark-surface: "#101a2b"
-  dark-text: "#e6edf7"
+  text: "#17181c"
+  muted: "#52555d"
+  border: "rgba(23, 24, 28, 0.08)"
+  long: "#15803d"
+  short: "#dc2626"
+  warn-yellow: "#9a6700"
+  warn-orange: "#b45309"
+  dark-ground: "#131416"
+  dark-surface: "#18191c"
+  dark-text: "#edeef0"
 typography:
   body:
-    fontFamily: "system-ui, PingFang SC, Microsoft YaHei, sans-serif"
+    fontFamily: "Inter, IBM Plex Sans, system-ui, -apple-system, PingFang SC, Hiragino Sans GB, Microsoft YaHei, sans-serif"
   headline:
-    fontFamily: "system-ui, PingFang SC, Microsoft YaHei, sans-serif"
-    fontSize: "26px"
+    fontFamily: "Inter, IBM Plex Sans, system-ui, -apple-system, PingFang SC, Hiragino Sans GB, Microsoft YaHei, sans-serif"
+    fontSize: "28px"
     fontWeight: 600
     letterSpacing: "-0.02em"
   numeric:
-    fontFamily: "ui-monospace, SF Mono, Menlo, Consolas, monospace"
+    fontFamily: "JetBrains Mono, IBM Plex Mono, SF Mono, ui-monospace, Menlo, Consolas, monospace"
     fontWeight: 500
 rounded:
   control: "8px"
@@ -45,19 +45,19 @@ spacing:
 
 **Creative North Star: “市场天气预报”**
 
-平时安静，异常时分级。状态沿用气象预警的四级信号语法：蓝、黄、橙、红，每一级都带图标和文字，不单靠颜色。深海军蓝侧栏固定为深色，右侧是偏冷的浅灰蓝工作区；操作色只用信号蓝。
+平时安静，异常时分级。状态沿用气象预警的四级信号语法：中性灰蓝、琥珀黄、暖橙、警示红，加上正常的绿，每一级都带图标和文字，不单靠颜色。深炭黑侧栏固定为深色，右侧是克制的中性浅灰或深炭工作区；强调与焦点色统一使用高对比琥珀金。
 
 ## Colors
 
-- 侧栏 `rail` 始终为深色，工作区随主题切换，深色主题以 `#0a1220` 为底。
-- 信号蓝 `#1d4ed8`（深色 `#6ea0ff`）用于主要操作、当前选中和链接。
-- 分级信号：蓝＝信息或已暂停，黄＝数据过期或有未保存修改，橙＝实盘，红＝异常，绿＝正常运行。每级都有独立的底色、描边和前景色，浅色与深色主题各一套。
-- 做多用绿，做空与负值用砖红；方向同时配箭头和文字。
+- 侧栏 `rail` 始终为深炭色（浅色模式 `#141518`、深色模式 `#0f1012`），工作区随主题切换，浅色以 `#f7f7f8` 为底，深色以 `#131416` 为底。
+- 琥珀金 `#9a6700`（深色 `#e5a910`）用于强调焦点、侧栏选中态和权益趋势线；主要操作按钮使用高对比墨色/亮灰实心底色。
+- 分级信号：灰蓝＝信息或已暂停，黄＝数据过期或有未保存修改，橙＝实盘，红＝异常，绿＝正常运行。每级都有独立的底色、描边和前景色，浅色与深色主题各一套。
+- 做多用绿，做空与负值用红；方向同时配箭头和文字。
 - 颜色、字体与常用尺寸统一定义在 `frontend/src/lib/designTokens.ts`；Vite 在启动脚本前注入 CSS 变量，Ant Design 与启动屏共用同一来源。切换主题时同步浏览器 `theme-color`。
 
 ## Typography
 
-系统无衬线字体加苹方和微软雅黑，不加载外部字体。金额、价格、数量和交易对使用等宽数字并开启 tabular-nums。页面标题 26px、600 字重；区块标题 16px；辅助文字 12px。
+优先使用 Inter / IBM Plex Sans 与苹方、微软雅黑等系统无衬线字体，不加载外部网络字体。金额、价格、数量和交易对使用等宽数字并开启 tabular-nums。页面标题 28px、600 字重；区块标题 16px；辅助文字 12px。
 
 ## Layout
 

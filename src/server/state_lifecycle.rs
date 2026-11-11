@@ -14,7 +14,10 @@ impl Drop for PendingSafetyPause<'_> {
 }
 
 impl AppState {
-    pub async fn save_runtime_config(self: &Arc<Self>, config: AppConfig) -> anyhow::Result<()> {
+    pub(crate) async fn save_runtime_config(
+        self: &Arc<Self>,
+        config: AppConfig,
+    ) -> anyhow::Result<()> {
         let state = self.clone();
         tokio::spawn(async move { state.save_runtime_config_inner(config).await }).await?
     }
@@ -91,8 +94,7 @@ impl AppState {
         self.persist_status(BotStatus::Paused).await
     }
 
-    #[cfg(test)]
-    pub(crate) async fn resume_trading(self: &Arc<Self>) -> anyhow::Result<()> {
+    pub async fn resume_trading(self: &Arc<Self>) -> anyhow::Result<()> {
         self.set_trading_status(BotStatus::Running).await
     }
 
@@ -284,7 +286,7 @@ impl AppState {
         saved
     }
 
-    pub fn pause_epoch(&self) -> u64 {
+    pub(crate) fn pause_epoch(&self) -> u64 {
         self.pause_epoch.load(Ordering::SeqCst)
     }
 
@@ -300,12 +302,12 @@ impl AppState {
         *self.retired.borrow()
     }
 
-    pub fn request_shutdown(&self) {
+    pub(crate) fn request_shutdown(&self) {
         self.shutdown_requested.store(true, Ordering::SeqCst);
         self.pause_epoch.fetch_add(1, Ordering::SeqCst);
     }
 
-    pub fn is_shutting_down(&self) -> bool {
+    pub(crate) fn is_shutting_down(&self) -> bool {
         self.shutdown_requested.load(Ordering::SeqCst)
             || self
                 .global_limit()

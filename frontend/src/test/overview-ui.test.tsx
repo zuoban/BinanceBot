@@ -10,6 +10,7 @@ import type { Overview } from '../lib/types';
 import { AccountsContext } from '../lib/session';
 import { entryChange } from '../lib/portfolio';
 import type * as Portfolio from '../lib/portfolio';
+import type * as Queries from '../lib/queries';
 
 vi.mock('../lib/portfolio', async importOriginal => {
   const actual = await importOriginal<typeof Portfolio>();
@@ -27,7 +28,7 @@ beforeEach(() => {
   actions.clearResult.mockReset();
   vi.mocked(runBatchControls).mockReset().mockResolvedValue([]);
 });
-vi.mock('../lib/queries', () => ({ useOverview: () => overview, useOverviewHistory: () => ({ data: { snapshots: [], current_accounts: [] }, isPending: false, error: null }) }));
+vi.mock('../lib/queries', async importOriginal => { const actual = await importOriginal<typeof Queries>(); return { ...actual, useOverview: () => overview, useOverviewHistory: () => ({ data: { snapshots: [], current_accounts: [] }, isPending: false, error: null }) }; });
 const actions = vi.hoisted(() => ({ run: vi.fn(), clearResult: vi.fn(), results: {} as Record<string, string>, remove: vi.fn(), busy: new Set<string>(), pending: {} as Record<string, string>, deleting: false }));
 vi.mock('../components/DeleteStrategy', () => ({ useDeleteStrategy: () => ({ remove: actions.remove, busy: actions.deleting }) }));
 vi.mock('../components/Controls', () => ({ useControls: () => ({ busy: actions.busy, pending: actions.pending, results: actions.results, clearResult: actions.clearResult, run: actions.run }), runBatchControls: vi.fn(), pendingLabel: { pause: '暂停中…', resume: '恢复中…', cancel_all: '撤单中…', rebalance: '重建中…' } }));

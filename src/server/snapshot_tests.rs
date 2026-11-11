@@ -525,7 +525,7 @@ async fn publisher_skips_database_work_without_subscribers() {
 
 #[tokio::test]
 async fn snapshot_push_continues_while_the_trading_engine_waits_for_rest() {
-    use crate::exchange::client::BinanceFuturesClient;
+    use crate::exchange::BinanceFuturesClient;
     use crate::strategy::GridTradingEngine;
     use axum::{routing::get, Json, Router};
     use tokio::sync::Notify;

@@ -2,10 +2,14 @@ import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, expect, it, vi } from 'vitest';
 import { OverviewHistory } from '../components/OverviewHistory';
+import type * as Queries from '../lib/queries';
 import type { HistoryAccount, OverviewHistoryData } from '../lib/types';
 
 const history = vi.hoisted(() => ({ data: { snapshots: [], current_accounts: [] } as OverviewHistoryData | undefined, isPending: false, error: null as Error | null, refetch: vi.fn() }));
-vi.mock('../lib/queries', () => ({ useOverviewHistory: () => history }));
+vi.mock('../lib/queries', async importOriginal => {
+  const actual = await importOriginal<typeof Queries>();
+  return { ...actual, useOverviewHistory: () => history };
+});
 vi.mock('../components/OverviewHistoryChart', () => ({ default: ({ data }: { data: { equity: number | null }[] }) => <div data-testid="history-chart" data-equities={JSON.stringify(data.map(point => point.equity))}>权益图</div> }));
 
 const paper = { mode: 'PAPER' as const, asset: 'USDC', account_id: null };

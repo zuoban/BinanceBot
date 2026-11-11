@@ -1,49 +1,48 @@
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
+pub(super) const ONE_WAY_POSITION_ERROR: &str =
+    "策略仅支持币安单向持仓模式，请先将账户设置为单向持仓";
+
 #[derive(Debug, Deserialize)]
-pub struct BinanceServerTime {
+pub(crate) struct BinanceServerTime {
     #[serde(rename = "serverTime")]
-    pub server_time: i64,
+    pub(crate) server_time: i64,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct BinanceApiError {
-    pub code: i64,
-    pub msg: String,
+pub(crate) struct BinanceApiError {
+    pub(crate) code: i64,
+    pub(crate) msg: String,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct BinanceExchangeInfo {
-    pub symbols: Vec<BinanceSymbolInfo>,
+pub(crate) struct BinanceExchangeInfo {
+    pub(crate) symbols: Vec<BinanceSymbolInfo>,
     #[serde(rename = "rateLimits", default)]
-    pub rate_limits: Vec<BinanceRateLimit>,
+    pub(crate) rate_limits: Vec<BinanceRateLimit>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct BinanceRateLimit {
+pub(crate) struct BinanceRateLimit {
     #[serde(rename = "rateLimitType")]
-    pub rate_limit_type: String,
-    pub interval: String,
+    pub(crate) rate_limit_type: String,
+    pub(crate) interval: String,
     #[serde(rename = "intervalNum")]
-    pub interval_num: u64,
-    pub limit: u64,
+    pub(crate) interval_num: u64,
+    pub(crate) limit: u64,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct BinanceSymbolInfo {
-    pub symbol: String,
-    pub status: String,
-    #[serde(rename = "pricePrecision")]
-    pub price_precision: u32,
-    #[serde(rename = "quantityPrecision")]
-    pub quantity_precision: u32,
-    pub filters: Vec<BinanceFilter>,
+pub(crate) struct BinanceSymbolInfo {
+    pub(crate) symbol: String,
+    pub(crate) status: String,
+    pub(crate) filters: Vec<BinanceFilter>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "filterType")]
-pub enum BinanceFilter {
+pub(crate) enum BinanceFilter {
     #[serde(rename = "PRICE_FILTER")]
     PriceFilter {
         #[serde(rename = "minPrice")]
@@ -72,53 +71,53 @@ pub enum BinanceFilter {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
-pub struct BinanceOrderResponse {
+pub(crate) struct BinanceOrderResponse {
     #[serde(rename = "orderId")]
-    pub order_id: i64,
+    pub(crate) order_id: i64,
     #[serde(rename = "clientOrderId")]
-    pub client_order_id: String,
-    pub symbol: String,
-    pub status: String,
-    pub price: Decimal,
+    pub(crate) client_order_id: String,
+    pub(crate) symbol: String,
+    pub(crate) status: String,
+    pub(crate) price: Decimal,
     #[serde(rename = "avgPrice", default)]
-    pub avg_price: Option<Decimal>,
+    pub(crate) avg_price: Option<Decimal>,
     #[serde(rename = "origQty")]
-    pub orig_qty: Decimal,
+    pub(crate) orig_qty: Decimal,
     #[serde(rename = "executedQty")]
-    pub executed_qty: Decimal,
-    pub side: String,
+    pub(crate) executed_qty: Decimal,
+    pub(crate) side: String,
     #[serde(rename = "type")]
-    pub order_type: String,
+    pub(crate) order_type: String,
     #[serde(rename = "timeInForce")]
-    pub time_in_force: String,
+    pub(crate) time_in_force: String,
     #[serde(rename = "updateTime")]
-    pub update_time: Option<i64>,
+    pub(crate) update_time: Option<i64>,
 }
 
 impl BinanceOrderResponse {
-    pub fn is_terminal_status(status: &str) -> bool {
+    pub(crate) fn is_terminal_status(status: &str) -> bool {
         matches!(
             status,
             "FILLED" | "CANCELED" | "EXPIRED" | "EXPIRED_IN_MATCH" | "REJECTED"
         )
     }
 
-    pub fn is_terminal(&self) -> bool {
+    pub(crate) fn is_terminal(&self) -> bool {
         Self::is_terminal_status(&self.status)
     }
 
-    pub fn is_unfilled_terminal_status(status: &str) -> bool {
+    pub(crate) fn is_unfilled_terminal_status(status: &str) -> bool {
         matches!(
             status,
             "CANCELED" | "EXPIRED" | "EXPIRED_IN_MATCH" | "REJECTED"
         )
     }
 
-    pub fn is_unfilled_terminal(&self) -> bool {
+    pub(crate) fn is_unfilled_terminal(&self) -> bool {
         Self::is_unfilled_terminal_status(&self.status)
     }
 
-    pub fn is_known_status(status: &str) -> bool {
+    pub(crate) fn is_known_status(status: &str) -> bool {
         matches!(
             status,
             "NEW"
@@ -131,7 +130,7 @@ impl BinanceOrderResponse {
         )
     }
 
-    pub fn open_order_status(&self) -> crate::types::OrderStatus {
+    pub(crate) fn open_order_status(&self) -> crate::types::OrderStatus {
         if self.executed_qty > Decimal::ZERO {
             crate::types::OrderStatus::PartiallyFilled
         } else {
@@ -139,14 +138,25 @@ impl BinanceOrderResponse {
         }
     }
 
-    pub fn matches_identity(&self, other: &Self) -> bool {
+    pub(crate) fn remaining_qty(&self) -> Decimal {
+        self.orig_qty
+            .checked_sub(self.executed_qty)
+            .unwrap_or(Decimal::ZERO)
+            .max(Decimal::ZERO)
+    }
+
+    pub(crate) fn has_valid_symbol_and_side(&self, symbol: &str) -> bool {
+        self.symbol == symbol && crate::types::OrderSide::from_exchange_str(&self.side).is_some()
+    }
+
+    pub(crate) fn matches_identity(&self, other: &Self) -> bool {
         self.client_order_id == other.client_order_id
             && self.symbol == other.symbol
             && self.side == other.side
             && self.order_id == other.order_id
     }
 
-    pub fn matches_snapshot(&self, other: &Self) -> bool {
+    pub(crate) fn matches_snapshot(&self, other: &Self) -> bool {
         self.matches_identity(other)
             && self.status == other.status
             && self.executed_qty == other.executed_qty
@@ -158,73 +168,68 @@ impl BinanceOrderResponse {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct BinanceUserTrade {
+pub(crate) struct BinanceUserTrade {
     #[serde(rename = "realizedPnl")]
-    pub realized_pnl: Decimal,
-    pub commission: Decimal,
+    pub(crate) realized_pnl: Decimal,
+    pub(crate) commission: Decimal,
     #[serde(rename = "commissionAsset")]
-    pub commission_asset: String,
-    pub maker: bool,
+    pub(crate) commission_asset: String,
+    pub(crate) maker: bool,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct BinanceTickerPrice {
-    pub symbol: String,
-    pub price: Decimal,
-    pub time: i64,
+pub(crate) struct BinanceTickerPrice {
+    pub(crate) price: Decimal,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct BinanceMarkPrice {
+pub(crate) struct BinanceMarkPrice {
     #[serde(rename = "markPrice")]
-    pub mark_price: Decimal,
+    pub(crate) mark_price: Decimal,
 }
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct BinanceMarkPriceWithSymbol {
-    pub symbol: String,
+    pub(crate) symbol: String,
     #[serde(rename = "markPrice")]
-    pub mark_price: Decimal,
+    pub(crate) mark_price: Decimal,
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct Binance24hrTicker {
-    pub symbol: String,
+pub(crate) struct Binance24hrTicker {
     #[serde(rename = "lastPrice")]
-    pub last_price: Decimal,
+    pub(crate) last_price: Decimal,
     #[serde(rename = "priceChange")]
-    pub price_change: Decimal,
+    pub(crate) price_change: Decimal,
     #[serde(rename = "priceChangePercent")]
-    pub price_change_percent: Decimal,
+    pub(crate) price_change_percent: Decimal,
     #[serde(rename = "highPrice")]
-    pub high_price: Decimal,
+    pub(crate) high_price: Decimal,
     #[serde(rename = "lowPrice")]
-    pub low_price: Decimal,
-    pub volume: Decimal,
-    #[serde(rename = "quoteVolume")]
-    pub quote_volume: Decimal,
+    pub(crate) low_price: Decimal,
+    pub(crate) volume: Decimal,
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct BinancePositionRisk {
-    pub symbol: String,
+pub(crate) struct BinancePositionRisk {
+    pub(crate) symbol: String,
     #[serde(rename = "positionSide", default)]
-    pub position_side: Option<String>,
+    pub(crate) position_side: Option<String>,
     #[serde(rename = "positionAmt")]
-    pub position_amt: Decimal,
+    pub(crate) position_amt: Decimal,
     #[serde(rename = "entryPrice")]
-    pub entry_price: Decimal,
+    pub(crate) entry_price: Decimal,
     #[serde(rename = "markPrice")]
-    pub mark_price: Decimal,
+    pub(crate) mark_price: Decimal,
     #[serde(rename = "unRealizedProfit")]
-    pub un_realized_profit: Decimal,
+    pub(crate) un_realized_profit: Decimal,
     #[serde(rename = "liquidationPrice")]
-    pub liquidation_price: Decimal,
-    pub leverage: String,
+    pub(crate) liquidation_price: Decimal,
+    pub(crate) leverage: String,
 }
 
 impl BinancePositionRisk {
-    pub fn into_position_info(
+    pub(crate) fn into_position_info(
         self,
         update_time: Option<chrono::DateTime<chrono::Utc>>,
     ) -> crate::types::PositionInfo {
@@ -247,35 +252,27 @@ impl BinancePositionRisk {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct BinanceAccountAsset {
-    pub asset: String,
+pub(crate) struct BinanceAccountAsset {
+    pub(crate) asset: String,
     #[serde(rename = "walletBalance")]
-    pub wallet_balance: Decimal,
+    pub(crate) wallet_balance: Decimal,
     #[serde(rename = "unrealizedProfit")]
-    pub unrealized_profit: Decimal,
+    pub(crate) unrealized_profit: Decimal,
     #[serde(rename = "marginBalance")]
-    pub margin_balance: Decimal,
+    pub(crate) margin_balance: Decimal,
     #[serde(rename = "availableBalance")]
-    pub available_balance: Decimal,
+    pub(crate) available_balance: Decimal,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct BinanceAccountInfoResponse {
-    #[serde(rename = "totalWalletBalance")]
-    pub total_wallet_balance: Decimal,
-    #[serde(rename = "totalMarginBalance")]
-    pub total_margin_balance: Decimal,
-    #[serde(rename = "totalUnrealizedProfit")]
-    pub total_unrealized_profit: Decimal,
-    #[serde(rename = "availableBalance")]
-    pub available_balance: Decimal,
-    pub assets: Vec<BinanceAccountAsset>,
+pub(crate) struct BinanceAccountInfoResponse {
+    pub(crate) assets: Vec<BinanceAccountAsset>,
 }
 
 impl BinanceAccountInfoResponse {
     /// USDⓈ-M balances are reported per asset. The account-wide totals can be zero
     /// for a USDC-margined symbol even when its USDC balance is nonzero.
-    pub fn margin_asset_for_symbol(&self, symbol: &str) -> Option<&BinanceAccountAsset> {
+    pub(crate) fn margin_asset_for_symbol(&self, symbol: &str) -> Option<&BinanceAccountAsset> {
         self.assets
             .iter()
             .filter(|asset| symbol.ends_with(&asset.asset))
@@ -340,6 +337,27 @@ mod tests {
             "PENDING_CANCEL"
         ));
 
+        let mut order = super::BinanceOrderResponse {
+            order_id: 1,
+            client_order_id: "gb_b_1".into(),
+            symbol: "SOLUSDC".into(),
+            status: "PARTIALLY_FILLED".into(),
+            price: dec!(100),
+            avg_price: None,
+            orig_qty: dec!(2.5),
+            executed_qty: dec!(1.0),
+            side: "BUY".into(),
+            order_type: "LIMIT".into(),
+            time_in_force: "GTX".into(),
+            update_time: None,
+        };
+        assert_eq!(order.remaining_qty(), dec!(1.5));
+        assert!(order.has_valid_symbol_and_side("SOLUSDC"));
+        assert!(!order.has_valid_symbol_and_side("BTCUSDT"));
+        order.side = "INVALID".into();
+        assert!(!order.has_valid_symbol_and_side("SOLUSDC"));
+        order.executed_qty = dec!(3.0);
+        assert_eq!(order.remaining_qty(), dec!(0));
         let risk = super::BinancePositionRisk {
             symbol: "SOLUSDC".into(),
             position_side: None,

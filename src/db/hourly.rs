@@ -4,8 +4,14 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use rust_decimal::Decimal;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::str::FromStr;
+
+fn decimal_col(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<Decimal> {
+    Decimal::from_str(&row.get::<_, String>(index)?).map_err(|err| {
+        rusqlite::Error::FromSqlConversionFailure(index, rusqlite::types::Type::Text, Box::new(err))
+    })
+}
 
 #[derive(Default)]
 pub(super) struct Rollup {
@@ -18,12 +24,12 @@ pub(super) struct Rollup {
 
 impl Rollup {
     fn add(&mut self, timestamp: DateTime<Utc>, side: &str, pnl: Decimal, verified: bool) {
-        self.buys += i64::from(side == "BUY");
-        self.sells += i64::from(side == "SELL");
+        self.buys = self.buys.saturating_add(i64::from(side == "BUY"));
+        self.sells = self.sells.saturating_add(i64::from(side == "SELL"));
         if verified {
-            self.pnl += pnl;
+            self.pnl = self.pnl.saturating_add(pnl);
         } else {
-            self.pending += 1;
+            self.pending = self.pending.saturating_add(1);
         }
         self.latest = Some(
             self.latest
@@ -32,16 +38,12 @@ impl Rollup {
     }
 
     pub(super) fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, Self)> {
-        let pnl: String = row.get(3)?;
-        let pnl = Decimal::from_str(&pnl).map_err(|err| {
-            rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(err))
-        })?;
         Ok((
             row.get(0)?,
             Self {
                 buys: row.get(1)?,
                 sells: row.get(2)?,
-                pnl,
+                pnl: decimal_col(row, 3)?,
                 pending: row.get(4)?,
                 latest: Some(row.get(5)?),
             },
@@ -70,29 +72,12 @@ struct PnlRollup {
 fn load_pnl_on(conn: &Connection, symbol: &str, mode: &str) -> Result<PnlRollup> {
     Ok(conn
         .prepare_cached(
-            "SELECT realized_pnl, commission, pending_pnl_count
-             FROM trade_pnl_rollups WHERE symbol = ?1 AND mode = ?2",
+            "SELECT realized_pnl, commission, pending_pnl_count FROM trade_pnl_rollups WHERE symbol = ?1 AND mode = ?2",
         )?
         .query_row(params![symbol, mode], |row| {
-            let pnl_str: String = row.get(0)?;
-            let fee_str: String = row.get(1)?;
-            let pnl = Decimal::from_str(&pnl_str).map_err(|err| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    0,
-                    rusqlite::types::Type::Text,
-                    Box::new(err),
-                )
-            })?;
-            let commission = Decimal::from_str(&fee_str).map_err(|err| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    1,
-                    rusqlite::types::Type::Text,
-                    Box::new(err),
-                )
-            })?;
             Ok(PnlRollup {
-                pnl,
-                commission,
+                pnl: decimal_col(row, 0)?,
+                commission: decimal_col(row, 1)?,
                 pending: row.get(2)?,
             })
         })
@@ -101,45 +86,30 @@ fn load_pnl_on(conn: &Connection, symbol: &str, mode: &str) -> Result<PnlRollup>
 }
 
 fn save_pnl_on(conn: &Connection, symbol: &str, mode: &str, value: &PnlRollup) -> Result<()> {
+    let pnl = value.pnl.to_string();
+    let fee = value.commission.to_string();
     conn.prepare_cached(
-        "INSERT INTO trade_pnl_rollups
-         (symbol, mode, realized_pnl, commission, pending_pnl_count)
-         VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(symbol, mode) DO UPDATE SET
-             realized_pnl = excluded.realized_pnl,
-             commission = excluded.commission,
-             pending_pnl_count = excluded.pending_pnl_count",
+        "INSERT INTO trade_pnl_rollups (symbol, mode, realized_pnl, commission, pending_pnl_count)
+         VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(symbol, mode) DO UPDATE SET
+         realized_pnl = excluded.realized_pnl, commission = excluded.commission, pending_pnl_count = excluded.pending_pnl_count",
     )?
-    .execute(params![
-        symbol,
-        mode,
-        value.pnl.to_string(),
-        value.commission.to_string(),
-        value.pending,
-    ])?;
+    .execute(params![symbol, mode, pnl, fee, value.pending])?;
     Ok(())
 }
 
 fn migrate_pnl_on(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS trade_pnl_rollups (
-             symbol TEXT NOT NULL,
-             mode TEXT NOT NULL,
-             realized_pnl TEXT NOT NULL,
-             commission TEXT NOT NULL,
-             pending_pnl_count INTEGER NOT NULL,
-             PRIMARY KEY (symbol, mode)
+             symbol TEXT NOT NULL, mode TEXT NOT NULL, realized_pnl TEXT NOT NULL,
+             commission TEXT NOT NULL, pending_pnl_count INTEGER NOT NULL, PRIMARY KEY (symbol, mode)
          );
-         CREATE TABLE IF NOT EXISTS trade_pnl_rollup_state (
-             id INTEGER PRIMARY KEY CHECK (id = 1)
-         );",
+         CREATE TABLE IF NOT EXISTS trade_pnl_rollup_state (id INTEGER PRIMARY KEY CHECK (id = 1));",
     )?;
-    let initialized: bool = conn.query_row(
+    if conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM trade_pnl_rollup_state WHERE id = 1)",
         [],
-        |row| row.get(0),
-    )?;
-    if initialized {
+        |row| row.get::<_, bool>(0),
+    )? {
         return Ok(());
     }
     conn.execute("DELETE FROM trade_pnl_rollups", [])?;
@@ -154,10 +124,14 @@ fn migrate_pnl_on(conn: &Connection) -> Result<()> {
             let verified: bool = row.get(4)?;
             let entry = rollups.entry((symbol, mode)).or_default();
             if verified {
-                entry.pnl += Decimal::from_str(&row.get::<_, String>(2)?)?;
-                entry.commission += Decimal::from_str(&row.get::<_, String>(3)?)?;
+                entry.pnl = entry
+                    .pnl
+                    .saturating_add(Decimal::from_str(&row.get::<_, String>(2)?)?);
+                entry.commission = entry
+                    .commission
+                    .saturating_add(Decimal::from_str(&row.get::<_, String>(3)?)?);
             } else {
-                entry.pending += 1;
+                entry.pending = entry.pending.saturating_add(1);
             }
         }
     }
@@ -189,34 +163,25 @@ pub(super) fn hour(timestamp: DateTime<Utc>) -> i64 {
 pub(super) fn migrate_on(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS trade_hourly_rollups (
-             symbol TEXT NOT NULL,
-             mode TEXT NOT NULL,
-             hour INTEGER NOT NULL,
-             buy_count INTEGER NOT NULL,
-             sell_count INTEGER NOT NULL,
-             realized_pnl TEXT NOT NULL,
-             pending_pnl_count INTEGER NOT NULL,
-             latest_timestamp TEXT NOT NULL,
+             symbol TEXT NOT NULL, mode TEXT NOT NULL, hour INTEGER NOT NULL,
+             buy_count INTEGER NOT NULL, sell_count INTEGER NOT NULL, realized_pnl TEXT NOT NULL,
+             pending_pnl_count INTEGER NOT NULL, latest_timestamp TEXT NOT NULL,
              PRIMARY KEY (symbol, mode, hour)
          );
-         CREATE TABLE IF NOT EXISTS trade_hourly_rollup_state (
-             id INTEGER PRIMARY KEY CHECK (id = 1)
-         );",
+         CREATE TABLE IF NOT EXISTS trade_hourly_rollup_state (id INTEGER PRIMARY KEY CHECK (id = 1));",
     )?;
-    let initialized: bool = conn.query_row(
+    if conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM trade_hourly_rollup_state WHERE id = 1)",
         [],
-        |row| row.get(0),
-    )?;
-    if initialized {
+        |row| row.get::<_, bool>(0),
+    )? {
         return migrate_pnl_on(conn);
     }
-    let has_hour: bool = conn.query_row(
+    if !conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('trades') WHERE name = 'stats_hour')",
         [],
-        |row| row.get(0),
-    )?;
-    if !has_hour {
+        |row| row.get::<_, bool>(0),
+    )? {
         conn.execute_batch("ALTER TABLE trades ADD COLUMN stats_hour INTEGER;")?;
     }
     conn.execute("DELETE FROM trade_hourly_rollups", [])?;
@@ -260,27 +225,17 @@ fn load_on(conn: &Connection, symbol: &str, mode: &str, bucket: i64) -> Result<R
         .map_or_else(Rollup::default, |(_, rollup)| rollup))
 }
 
-fn save_on(conn: &Connection, symbol: &str, mode: &str, bucket: i64, value: &Rollup) -> Result<()> {
+fn save_on(conn: &Connection, symbol: &str, mode: &str, bucket: i64, v: &Rollup) -> Result<()> {
+    let latest = v.latest.context("Hourly rollup has no timestamp")?;
+    let pnl = v.pnl.to_string();
     conn.prepare_cached(
-        "INSERT INTO trade_hourly_rollups
-         (symbol, mode, hour, buy_count, sell_count, realized_pnl, pending_pnl_count, latest_timestamp)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-         ON CONFLICT(symbol, mode, hour) DO UPDATE SET
-             buy_count = excluded.buy_count, sell_count = excluded.sell_count,
-             realized_pnl = excluded.realized_pnl, pending_pnl_count = excluded.pending_pnl_count,
-             latest_timestamp = excluded.latest_timestamp",
+        "INSERT INTO trade_hourly_rollups (symbol, mode, hour, buy_count, sell_count, realized_pnl, pending_pnl_count, latest_timestamp)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) ON CONFLICT(symbol, mode, hour) DO UPDATE SET
+         buy_count = excluded.buy_count, sell_count = excluded.sell_count,
+         realized_pnl = excluded.realized_pnl, pending_pnl_count = excluded.pending_pnl_count,
+         latest_timestamp = excluded.latest_timestamp",
     )?
-    .execute(params![
-            symbol,
-            mode,
-            bucket,
-            value.buys,
-            value.sells,
-            value.pnl.to_string(),
-            value.pending,
-            value.latest.context("Hourly rollup has no timestamp")?,
-        ],
-    )?;
+    .execute(params![symbol, mode, bucket, v.buys, v.sells, pnl, v.pending, latest])?;
     Ok(())
 }
 
@@ -296,10 +251,10 @@ pub(super) fn insert_on(conn: &Connection, trade: &TradeRecord) -> Result<()> {
     save_on(conn, &trade.symbol, trade.mode.as_str(), bucket, &rollup)?;
     let mut pnl_rollup = load_pnl_on(conn, &trade.symbol, trade.mode.as_str())?;
     if trade.pnl_verified {
-        pnl_rollup.pnl += trade.realized_pnl;
-        pnl_rollup.commission += trade.commission;
+        pnl_rollup.pnl = pnl_rollup.pnl.saturating_add(trade.realized_pnl);
+        pnl_rollup.commission = pnl_rollup.commission.saturating_add(trade.commission);
     } else {
-        pnl_rollup.pending += 1;
+        pnl_rollup.pending = pnl_rollup.pending.saturating_add(1);
     }
     save_pnl_on(conn, &trade.symbol, trade.mode.as_str(), &pnl_rollup)
 }
@@ -316,7 +271,7 @@ pub(super) fn verify_on(
     let mut rollup = load_on(conn, symbol, mode.as_str(), bucket)?;
     anyhow::ensure!(rollup.pending > 0, "Missing pending trade in hourly rollup");
     rollup.pending -= 1;
-    rollup.pnl += pnl;
+    rollup.pnl = rollup.pnl.saturating_add(pnl);
     save_on(conn, symbol, mode.as_str(), bucket, &rollup)?;
     let mut pnl_rollup = load_pnl_on(conn, symbol, mode.as_str())?;
     anyhow::ensure!(
@@ -324,8 +279,8 @@ pub(super) fn verify_on(
         "Missing pending trade in PnL rollup"
     );
     pnl_rollup.pending -= 1;
-    pnl_rollup.pnl += pnl;
-    pnl_rollup.commission += commission;
+    pnl_rollup.pnl = pnl_rollup.pnl.saturating_add(pnl);
+    pnl_rollup.commission = pnl_rollup.commission.saturating_add(commission);
     save_pnl_on(conn, symbol, mode.as_str(), &pnl_rollup)
 }
 pub(super) fn stats_on(
@@ -381,50 +336,90 @@ pub(super) fn stats_on(
     Ok(result)
 }
 
+#[derive(Default)]
+pub(super) struct ScopedWindowRollup {
+    pub(super) buys: u64,
+    pub(super) sells: u64,
+    pub(super) realized_pnl: Decimal,
+    pub(super) pending_pnl_count: u64,
+}
+
+fn is_unaligned_hour(t: DateTime<Utc>) -> bool {
+    t.timestamp() % 3600 != 0 || t.timestamp_subsec_nanos() != 0
+}
+
+pub(super) fn scan_window_rollups_on(
+    conn: &Connection,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    inclusive_end: bool,
+) -> Result<BTreeMap<(String, String), ScopedWindowRollup>> {
+    if end < start || (!inclusive_end && end == start) {
+        return Ok(BTreeMap::new());
+    }
+    let (start_unaligned, end_unaligned) = (is_unaligned_hour(start), is_unaligned_hour(end));
+    let first_hour = hour(start);
+    let last_hour = if inclusive_end || end_unaligned {
+        hour(end)
+    } else {
+        hour(end).saturating_sub(3600)
+    };
+    let mut stmt = conn.prepare_cached(
+        "SELECT hour, buy_count, sell_count, realized_pnl, pending_pnl_count, latest_timestamp, symbol, mode
+         FROM trade_hourly_rollups WHERE hour >= ?1 AND hour <= ?2",
+    )?;
+    let mut rows = stmt.query(params![first_hour, last_hour])?;
+    let mut groups: BTreeMap<(String, String), ScopedWindowRollup> = BTreeMap::new();
+    while let Some(row) = rows.next()? {
+        let (bucket, stored) = Rollup::from_row(row)?;
+        let (symbol, mode): (String, String) = (row.get(6)?, row.get(7)?);
+        let latest_outside =
+            stored
+                .latest
+                .is_none_or(|t| if inclusive_end { t > end } else { t >= end });
+        let scan_boundary = (start_unaligned && bucket == first_hour)
+            || (!inclusive_end && end_unaligned && bucket == last_hour)
+            || latest_outside;
+        let v = if scan_boundary {
+            load_boundary_rollup_on(conn, &symbol, &mode, bucket, start, end, inclusive_end)?
+        } else {
+            stored
+        };
+        let (buys, sells, pending) = (
+            v.buys.max(0) as u64,
+            v.sells.max(0) as u64,
+            v.pending.max(0) as u64,
+        );
+        if buys == 0 && sells == 0 && pending == 0 && v.pnl.is_zero() {
+            continue;
+        }
+        let entry = groups.entry((mode, symbol)).or_default();
+        entry.buys = entry.buys.saturating_add(buys);
+        entry.sells = entry.sells.saturating_add(sells);
+        entry.realized_pnl = entry.realized_pnl.saturating_add(v.pnl);
+        entry.pending_pnl_count = entry.pending_pnl_count.saturating_add(pending);
+    }
+    Ok(groups)
+}
+
 pub(super) fn today_pnl_on(
     conn: &Connection,
     now: DateTime<Utc>,
 ) -> Result<crate::types::TodayPnl> {
     let window_start = beijing_midnight(now);
-    let first_hour = window_start.timestamp();
-    let last_hour = hour(now);
-    let mut statement = conn.prepare_cached(
-        "SELECT hour, buy_count, sell_count, realized_pnl, pending_pnl_count, latest_timestamp, symbol, mode
-         FROM trade_hourly_rollups
-         WHERE hour >= ?1 AND hour <= ?2",
-    )?;
-    let mut rows = statement.query(params![first_hour, last_hour])?;
-    let mut groups: std::collections::BTreeMap<(String, String), crate::types::TodayPnlGroup> =
-        std::collections::BTreeMap::new();
-    while let Some(row) = rows.next()? {
-        let (bucket, stored) = Rollup::from_row(row)?;
-        let symbol: String = row.get(6)?;
-        let mode: String = row.get(7)?;
-        let value = if stored.latest.is_some_and(|latest| latest <= now) {
-            stored
-        } else {
-            load_boundary_rollup_on(conn, &symbol, &mode, bucket, window_start, now, true)?
-        };
-        if value.buys == 0 && value.sells == 0 && value.pending == 0 && value.pnl.is_zero() {
-            continue;
-        }
-        let group = groups
-            .entry((mode, symbol))
-            .or_insert_with_key(|(mode, symbol)| crate::types::TodayPnlGroup {
-                symbol: symbol.clone(),
-                mode: TradingMode::from_db(mode),
-                realized_pnl: Decimal::ZERO,
-                pending_pnl_count: 0,
-            });
-        group.realized_pnl = group.realized_pnl.saturating_add(value.pnl);
-        group.pending_pnl_count = group
-            .pending_pnl_count
-            .saturating_add(value.pending.max(0) as u64);
-    }
+    let groups = scan_window_rollups_on(conn, window_start, now, true)?
+        .into_iter()
+        .map(|((mode, symbol), rollup)| crate::types::TodayPnlGroup {
+            symbol,
+            mode: TradingMode::from_db(&mode),
+            realized_pnl: rollup.realized_pnl,
+            pending_pnl_count: rollup.pending_pnl_count,
+        })
+        .collect();
     Ok(crate::types::TodayPnl {
         window_start,
         window_end: now,
-        groups: groups.into_values().collect(),
+        groups,
     })
 }
 
@@ -460,336 +455,5 @@ pub(super) fn load_boundary_rollup_on(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::db::Database;
-    use crate::types::{GridStats, OrderSide};
-    use chrono::Duration;
-    use rust_decimal_macros::dec;
-
-    fn timestamp(value: &str) -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339(value)
-            .unwrap()
-            .with_timezone(&Utc)
-    }
-
-    fn trade(id: &str, at: DateTime<Utc>, verified: bool) -> TradeRecord {
-        TradeRecord {
-            trade_id: id.into(),
-            client_order_id: format!("order-{id}"),
-            symbol: "SOLUSDC".into(),
-            mode: TradingMode::Paper,
-            side: OrderSide::Buy,
-            price: dec!(100),
-            quantity: dec!(1),
-            amount_usdc: dec!(100),
-            realized_pnl: dec!(0.0000000000000000000000000001),
-            commission: Decimal::ZERO,
-            pnl_verified: verified,
-            is_maker: true,
-            timestamp: at,
-            note: String::new(),
-        }
-    }
-
-    fn stats(db: &Database, now: DateTime<Utc>) -> HourlyTradeStats {
-        db.get_hourly_trade_stats("SOLUSDC", TradingMode::Paper, now)
-            .unwrap()
-    }
-
-    #[test]
-    fn backdated_fills_and_verification_keep_exact_upper_bounds_and_scope() {
-        let db = Database::open(":memory:").unwrap();
-        let now = timestamp("2026-10-10T00:30:00.123456789Z");
-        let future = trade("future", now + Duration::nanoseconds(1), true);
-        let mut pending = trade("pending", now - Duration::hours(2), false);
-        let at_bound = trade("bound", now, true);
-        assert!(db.insert_trade(&future).unwrap());
-        assert!(db
-            .insert_trade_with_stats(&pending, &GridStats::default())
-            .unwrap());
-        assert!(db.insert_trade(&at_bound).unwrap());
-        assert!(!db.insert_trade(&at_bound).unwrap());
-        let mut other = trade("live", now, true);
-        other.mode = TradingMode::Live;
-        db.insert_trade(&other).unwrap();
-        other.trade_id = "other-symbol".into();
-        other.symbol = "BTCUSDT".into();
-        db.insert_trade(&other).unwrap();
-
-        let before = stats(&db, now);
-        assert_eq!(before.realized_pnl, at_bound.realized_pnl);
-        assert_eq!(before.pending_pnl_count, 1);
-        assert_eq!(before.buckets.iter().map(|b| b.buy_count).sum::<u64>(), 2);
-        // The persisted timestamp and symbol determine the aggregate, even if
-        // the verifier supplies a newer timestamp and a different symbol.
-        pending.timestamp = now + Duration::days(1);
-        pending.symbol = "BTCUSDT".into();
-        pending.realized_pnl = dec!(-0.0000000000000000000000000002);
-        assert!(db.verify_trade_pnl(&pending, 0).unwrap());
-        assert!(!db.verify_trade_pnl(&pending, 0).unwrap());
-        let verified = stats(&db, now);
-        assert_eq!(verified.realized_pnl, -at_bound.realized_pnl);
-        assert_eq!(verified.pending_pnl_count, 0);
-        let inclusive = stats(&db, future.timestamp);
-        assert_eq!(inclusive.realized_pnl, Decimal::ZERO);
-        assert_eq!(
-            inclusive.buckets.iter().map(|b| b.buy_count).sum::<u64>(),
-            3
-        );
-
-        assert_eq!(db.clear_selected_database(false, true).unwrap(), (0, 0));
-        assert_eq!(stats(&db, now).realized_pnl, verified.realized_pnl);
-        assert_eq!(db.clear_trade_history_for_symbol("SOLUSDC").unwrap(), 4);
-        assert_eq!(stats(&db, future.timestamp).realized_pnl, Decimal::ZERO);
-        assert!(stats(&db, now).buckets.iter().all(|b| b.buy_count == 0));
-        assert_eq!(
-            db.get_recent_trades_for("BTCUSDT", TradingMode::Live, 10)
-                .unwrap()
-                .len(),
-            1
-        );
-        assert!(!db.insert_trade(&at_bound).unwrap());
-        assert!(!db.verify_trade_pnl(&pending, 0).unwrap());
-        assert_eq!(db.clear_selected_database(true, false).unwrap(), (1, 0));
-        assert_eq!(
-            db.conn
-                .lock()
-                .unwrap()
-                .query_row("SELECT COUNT(*) FROM trade_hourly_rollups", [], |row| row
-                    .get::<_, i64>(
-                    0
-                ))
-                .unwrap(),
-            0
-        );
-    }
-
-    #[test]
-    fn aggregate_write_failures_roll_back_trade_insert_verification_and_clear() {
-        let db = Database::open(":memory:").unwrap();
-        let now = timestamp("2026-10-10T00:30:00Z");
-        let pending = trade("pending", now, false);
-        db.conn
-            .lock()
-            .unwrap()
-            .execute_batch(
-                "CREATE TRIGGER reject_hourly BEFORE INSERT ON trade_hourly_rollups
-             BEGIN SELECT RAISE(ABORT, 'hourly failure'); END;",
-            )
-            .unwrap();
-        assert!(db.insert_trade(&pending).is_err());
-        assert!(db
-            .insert_trade_with_stats(&pending, &GridStats::default())
-            .is_err());
-        assert!(db.get_recent_trades(10).unwrap().is_empty());
-        assert_eq!(db.trade_data_revision(), 0);
-        db.conn
-            .lock()
-            .unwrap()
-            .execute_batch("DROP TRIGGER reject_hourly")
-            .unwrap();
-        assert!(db.insert_trade(&pending).unwrap());
-        db.conn
-            .lock()
-            .unwrap()
-            .execute_batch(
-                "CREATE TRIGGER reject_hourly BEFORE INSERT ON trade_hourly_rollups
-             BEGIN SELECT RAISE(ABORT, 'hourly failure'); END;",
-            )
-            .unwrap();
-        assert!(db.verify_trade_pnl(&pending, 0).is_err());
-        assert!(!db.get_recent_trades(1).unwrap()[0].pnl_verified);
-        assert_eq!(stats(&db, now).pending_pnl_count, 1);
-        db.conn
-            .lock()
-            .unwrap()
-            .execute_batch(
-                "DROP TRIGGER reject_hourly;
-             CREATE TRIGGER reject_hourly_clear BEFORE DELETE ON trade_hourly_rollups
-             BEGIN SELECT RAISE(ABORT, 'hourly clear failure'); END;",
-            )
-            .unwrap();
-        assert!(db.clear_trade_history_for_symbol("SOLUSDC").is_err());
-        assert!(db.clear_selected_database(true, false).is_err());
-        assert_eq!(db.get_recent_trades(10).unwrap().len(), 1);
-        assert_eq!(stats(&db, now).pending_pnl_count, 1);
-        assert_eq!(db.trade_data_revision(), 1);
-        assert_eq!(
-            db.conn
-                .lock()
-                .unwrap()
-                .query_row("SELECT COUNT(*) FROM cleared_trade_ids", [], |row| row
-                    .get::<_, i64>(0))
-                .unwrap(),
-            0
-        );
-    }
-
-    #[test]
-    fn old_history_backfills_atomically_once_and_reopens_without_rebuilding() {
-        let directory =
-            std::env::temp_dir().join(format!("hourly-migration-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir(&directory).unwrap();
-        let path = directory.join("history.db");
-        let db = Database::open(&path).unwrap();
-        db.conn.lock().unwrap().execute_batch(
-            "DROP TABLE trades;
-             DROP TABLE trade_hourly_rollups;
-             DROP TABLE trade_hourly_rollup_state;
-             CREATE TABLE trades (
-                 trade_id TEXT PRIMARY KEY, client_order_id TEXT NOT NULL, symbol TEXT NOT NULL,
-                 side TEXT NOT NULL, price TEXT NOT NULL, quantity TEXT NOT NULL,
-                 amount_usdc TEXT NOT NULL, realized_pnl TEXT NOT NULL, commission TEXT NOT NULL,
-                 pnl_verified INTEGER NOT NULL, is_maker INTEGER NOT NULL,
-                 timestamp TEXT NOT NULL, note TEXT NOT NULL
-             );
-             INSERT INTO trades VALUES
-                 ('before', 'before', 'SOLUSDC', 'BUY', '1', '1', '1', '999', '0', 1, 1,
-                  '2026-10-09T15:59:59.999999999Z', ''),
-                 ('start', 'start', 'SOLUSDC', 'BUY', '1', '1', '1', '0.0000000000000000000000000001', '0', 1, 1,
-                  '2026-10-10T00:00:00+08:00', ''),
-                 ('bound', 'bound', 'SOLUSDC', 'SELL', '1', '1', '1', '0.0000000000000000000000000002', '0', 1, 1,
-                  '2026-10-10 00:30:00.123456789+00:00', ''),
-                 ('future', 'future', 'SOLUSDC', 'BUY', '1', '1', '1', '123', '0', 0, 1,
-                  '2026-10-10T00:30:00.123456790Z', '');"
-        ).unwrap();
-        db.conn
-            .lock()
-            .unwrap()
-            .execute(
-                "UPDATE trades SET realized_pnl = 'invalid' WHERE trade_id = 'bound'",
-                [],
-            )
-            .unwrap();
-        drop(db);
-        assert!(Database::open(&path).is_err());
-        let recovery = Connection::open(&path).unwrap();
-        assert_eq!(
-            recovery
-                .query_row(
-                    "SELECT COUNT(*) FROM sqlite_master WHERE name IN
-             ('trade_hourly_rollups', 'trade_hourly_rollup_state', 'idx_trades_unverified_scope')",
-                    [],
-                    |row| row.get::<_, i64>(0)
-                )
-                .unwrap(),
-            0
-        );
-        assert_eq!(
-            recovery
-                .query_row(
-                    "SELECT COUNT(*) FROM pragma_table_info('trades') WHERE name = 'stats_hour'",
-                    [],
-                    |row| row.get::<_, i64>(0)
-                )
-                .unwrap(),
-            0
-        );
-        recovery.execute(
-            "UPDATE trades SET realized_pnl = '0.0000000000000000000000000002' WHERE trade_id = 'bound'", []
-        ).unwrap();
-        drop(recovery);
-        let db = Database::open(&path).unwrap();
-        let now = timestamp("2026-10-10T00:30:00.123456789Z");
-        let result = db
-            .get_hourly_trade_stats("SOLUSDC", TradingMode::Unknown, now)
-            .unwrap();
-        assert_eq!(result.realized_pnl, dec!(0.0000000000000000000000000003));
-        assert_eq!(result.pending_pnl_count, 0);
-        assert_eq!(result.buckets[0].buy_count, 1);
-        assert_eq!(result.buckets[8].sell_count, 1);
-        let later = db
-            .get_hourly_trade_stats(
-                "SOLUSDC",
-                TradingMode::Unknown,
-                now + Duration::nanoseconds(1),
-            )
-            .unwrap();
-        assert_eq!(later.pending_pnl_count, 1);
-        db.conn
-            .lock()
-            .unwrap()
-            .execute_batch(
-                "CREATE TRIGGER reject_rebuild BEFORE UPDATE OF stats_hour ON trades
-             BEGIN SELECT RAISE(ABORT, 'history rebuilt on reopen'); END;
-             CREATE TRIGGER reject_rollup_rebuild BEFORE DELETE ON trade_hourly_rollups
-             BEGIN SELECT RAISE(ABORT, 'rollups rebuilt on reopen'); END;",
-            )
-            .unwrap();
-        drop(db);
-        let db = Database::open(&path).unwrap();
-        assert_eq!(
-            db.get_hourly_trade_stats("SOLUSDC", TradingMode::Unknown, now)
-                .unwrap()
-                .realized_pnl,
-            result.realized_pnl
-        );
-        let conn = db.conn.lock().unwrap();
-        let index: String = conn
-            .query_row(
-                "SELECT sql FROM sqlite_master WHERE name = 'idx_trades_unverified_scope'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert!(index.contains("WHERE pnl_verified = 0"));
-        let plan: String = conn
-            .query_row(
-                "EXPLAIN QUERY PLAN SELECT trade_id FROM trades WHERE symbol = 'SOLUSDC'
-             AND mode = 'UNKNOWN' AND pnl_verified = 0 ORDER BY timestamp DESC LIMIT 10",
-                [],
-                |row| row.get(3),
-            )
-            .unwrap();
-        assert!(plan.contains("idx_trades_unverified_scope"), "{plan}");
-        drop(conn);
-        drop(db);
-        std::fs::remove_dir_all(directory).unwrap();
-    }
-    #[test]
-    fn stale_verification_cannot_change_new_history_or_its_rollup_after_clear() {
-        let db = Database::open(":memory:").unwrap();
-        let now = timestamp("2026-10-10T00:30:00Z");
-        let old_revision = db.symbol_trade_clear_revision("SOLUSDC");
-        db.insert_trade(&trade("before-clear", now, false)).unwrap();
-        db.clear_trade_history_for_symbol("SOLUSDC").unwrap();
-        let pending = trade("after-clear", now, false);
-        db.insert_trade(&pending).unwrap();
-        assert!(!db.verify_trade_pnl(&pending, old_revision).unwrap());
-        assert_eq!(stats(&db, now).pending_pnl_count, 1);
-        assert_eq!(stats(&db, now).realized_pnl, Decimal::ZERO);
-        assert!(!db.get_recent_trades(1).unwrap()[0].pnl_verified);
-        let current_revision = db.symbol_trade_clear_revision("SOLUSDC");
-        assert!(db.verify_trade_pnl(&pending, current_revision).unwrap());
-        assert_eq!(stats(&db, now).pending_pnl_count, 0);
-        assert_eq!(stats(&db, now).realized_pnl, pending.realized_pnl);
-    }
-
-    #[test]
-    fn every_public_export_rejects_an_in_progress_export_and_releases_its_guard() {
-        let db = Database::open(":memory:").unwrap();
-        let guard = db.analysis_export.lock().unwrap();
-        for result in [
-            db.export_analysis_snapshot(),
-            db.export_analysis_snapshot_for_symbol("SOLUSDC"),
-            db.export_selected_analysis_snapshot(true, true),
-        ] {
-            assert!(result.unwrap_err().to_string().contains("export is busy"));
-        }
-        // A different Database has its own budget.
-        assert!(Database::open(":memory:")
-            .unwrap()
-            .export_analysis_snapshot()
-            .is_ok());
-        drop(guard);
-        assert!(db.export_analysis_snapshot().is_ok());
-        assert!(db.export_analysis_snapshot_for_symbol("SOLUSDC").is_ok());
-        assert!(db.export_selected_analysis_snapshot(true, true).is_ok());
-        db.conn.lock().unwrap().execute(
-            "INSERT INTO app_config (id, symbol, config_json, updated_at) VALUES (1, 'SOLUSDC', 'bad-json', '')", []
-        ).unwrap();
-        assert!(db.export_analysis_snapshot().is_err());
-        assert!(db.export_selected_analysis_snapshot(false, false).is_ok());
-    }
-}
+#[path = "hourly_tests.rs"]
+mod tests;

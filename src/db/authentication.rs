@@ -46,7 +46,7 @@ impl SessionCache {
 
 impl Database {
     /// Lock-free of SQLite: answers only from recent in-process validations.
-    pub fn session_recently_validated(&self, token: &str) -> bool {
+    pub(crate) fn session_recently_validated(&self, token: &str) -> bool {
         self.session_cache.hit(token)
     }
 
@@ -66,7 +66,7 @@ impl Database {
         Ok(())
     }
 
-    pub fn is_session_valid(&self, token: &str) -> Result<bool> {
+    pub(crate) fn is_session_valid(&self, token: &str) -> Result<bool> {
         let conn = self.lock_connection("is_session_valid");
         let created: Option<String> = conn
             .prepare_cached("SELECT created_at FROM auth_sessions WHERE token = ?1;")?

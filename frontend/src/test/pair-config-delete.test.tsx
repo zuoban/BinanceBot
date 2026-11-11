@@ -10,6 +10,7 @@ import PairDetail from '../pages/PairDetail';
 import type * as Antd from 'antd';
 import { ApiError } from '../lib/api';
 import type * as Api from '../lib/api';
+import type * as Queries from '../lib/queries';
 import type { GridConfig } from '../lib/types';
 import { pair } from './fixtures';
 
@@ -26,11 +27,15 @@ vi.mock('../lib/api', async importOriginal => {
   return { ...actual, api: mocks.api, post: mocks.post };
 });
 const pairsState = vi.hoisted(() => ({ isFetching: false }));
-vi.mock('../lib/queries', () => ({
-  usePairs: () => ({ data: [pair('BTCUSDC'), pair('ETHUSDC')], isFetching: pairsState.isFetching, dataUpdatedAt: Date.now() }),
-  useLiveAccounts: () => ({ accounts: [], stale: false, error: null }),
-  usePairSnapshot: () => ({ data: undefined, isPending: false, refetch: vi.fn() }),
-}));
+vi.mock('../lib/queries', async importOriginal => {
+  const actual = await importOriginal<typeof Queries>();
+  return {
+    ...actual,
+    usePairs: () => ({ data: [pair('BTCUSDC'), pair('ETHUSDC')], isFetching: pairsState.isFetching, dataUpdatedAt: Date.now() }),
+    useLiveAccounts: () => ({ accounts: [], stale: false, error: null }),
+    usePairSnapshot: () => ({ data: undefined, isPending: false, refetch: vi.fn() }),
+  };
+});
 vi.mock('../components/Controls', () => ({ ControlProvider: ({ children }: { children: React.ReactNode }) => children, PairControls: () => null, useControls: () => ({ busy: new Set<string>(), pending: {}, results: {}, clearResult: vi.fn(), run: mocks.run }) }));
 vi.mock('../components/ThemeSwitch', () => ({ ThemeSwitch: () => null, ThemeSegmented: () => null, themeLabels: { system: '跟随系统', light: '浅色', dark: '深色' } }));
 
