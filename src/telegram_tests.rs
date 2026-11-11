@@ -87,6 +87,7 @@ fn context(trade: &TradeRecord) -> TradeNotificationContext {
         &account(trade.timestamp),
         Some(&rate),
         trade.timestamp,
+        3,
     )
     .with_position(
         trade,
@@ -267,7 +268,7 @@ fn stale_or_mismatched_account_does_not_display_balances() {
         },
     ] {
         let context =
-            TradeNotificationContext::for_trade(&trade, None, &account, None, trade.timestamp);
+            TradeNotificationContext::for_trade(&trade, None, &account, None, trade.timestamp, 3);
         assert_eq!(context.account_equity, None);
         assert_eq!(context.available_balance, None);
         let message = format_trade_message(&trade, &context);
@@ -287,9 +288,54 @@ fn stale_or_mismatched_account_does_not_display_balances() {
         &fallback_account,
         None,
         trade.timestamp,
+        3,
     );
     assert_eq!(context.available_balance, None);
     assert!(format_trade_message(&unknown_symbol, &context).contains("计价资产"));
+}
+
+#[test]
+fn live_trade_freshness_scales_with_sync_interval() {
+    let trade = trade(OrderSide::Buy);
+    let synced_45s_ago = account(trade.timestamp - Duration::seconds(45));
+    let stale_under_default = TradeNotificationContext::for_trade(
+        &trade,
+        None,
+        &synced_45s_ago,
+        None,
+        trade.timestamp,
+        3,
+    );
+    assert_eq!(stale_under_default.account_equity, None);
+    assert_eq!(stale_under_default.available_balance, None);
+
+    let fresh_under_30s = TradeNotificationContext::for_trade(
+        &trade,
+        None,
+        &synced_45s_ago,
+        None,
+        trade.timestamp,
+        30,
+    );
+    assert_eq!(
+        fresh_under_30s.account_equity,
+        Some(synced_45s_ago.margin_balance)
+    );
+    assert_eq!(
+        fresh_under_30s.available_balance,
+        Some(synced_45s_ago.available_balance)
+    );
+
+    let expired_at_90s = TradeNotificationContext::for_trade(
+        &trade,
+        None,
+        &account(trade.timestamp - Duration::seconds(90)),
+        None,
+        trade.timestamp,
+        30,
+    );
+    assert_eq!(expired_at_90s.account_equity, None);
+    assert_eq!(expired_at_90s.available_balance, None);
 }
 
 #[test]
@@ -297,7 +343,8 @@ fn paper_context_uses_shared_account_equity() {
     let mut trade = trade(OrderSide::Buy);
     trade.mode = TradingMode::Paper;
     let shared = account(trade.timestamp);
-    let context = TradeNotificationContext::for_trade(&trade, None, &shared, None, trade.timestamp);
+    let context =
+        TradeNotificationContext::for_trade(&trade, None, &shared, None, trade.timestamp, 3);
     assert_eq!(context.account_equity, Some(shared.margin_balance));
     assert_eq!(context.available_balance, Some(shared.available_balance));
     assert_eq!(context.wallet_balance, Some(shared.total_wallet_balance));
@@ -336,6 +383,7 @@ fn rate_must_match_the_account_asset_and_be_recent() {
             &account(trade.timestamp),
             Some(&rate),
             trade.timestamp,
+            3,
         );
         assert_eq!(context.cny_per_unit, None);
     }
@@ -406,6 +454,7 @@ fn ordinals_survive_restart_and_reset_at_beijing_hour_and_day_boundaries() {
             &account(timestamp),
             None,
             timestamp,
+            3,
         );
         assert_eq!(
             (context.today_count, context.hour_count),
@@ -441,6 +490,7 @@ fn ordinals_survive_restart_and_reset_at_beijing_hour_and_day_boundaries() {
         &account(fill.timestamp),
         None,
         fill.timestamp,
+        3,
     );
     assert_eq!(context.today_count, Some(5));
     assert_eq!(context.hour_count, Some(3));

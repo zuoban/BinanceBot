@@ -42,7 +42,7 @@ export function ServerSettings() {
         <div className={`settings-card-footer settings-card-actions${edit.dirty ? ' settings-card-actions-dirty' : ''}`}>
           <span className="muted" role="status">{edit.dirty ? '有未保存的修改' : '修改后需重启后端生效'}</span>
           <Space wrap>
-            <FormRevertButton activeRef={mounted} onReset={mutation.reset} onRevert={() => { if (baseline.current) fill(baseline.current); }} />
+            <FormRevertButton form={form} activeRef={mounted} onReset={mutation.reset} onRevert={() => { if (baseline.current) fill(baseline.current); }} />
             <Button type="primary" htmlType="submit" loading={mutation.isPending}>保存监听设置</Button>
           </Space>
         </div>

@@ -14,7 +14,7 @@ export default defineConfig({
       return [
         { tag: 'meta', attrs: { charset: 'UTF-8' }, injectTo: 'head-prepend' as const },
         { tag: 'style', attrs: { id: 'design-tokens' }, children: designTokensCss, injectTo: 'head-prepend' as const },
-        { tag: 'meta', attrs: { name: 'theme-color', content: palettes.light['--bg-page'], 'data-dark': palettes.dark['--bg-page'] }, injectTo: 'head-prepend' as const },
+        { tag: 'meta', attrs: { name: 'theme-color', content: palettes.light['--bg-page'], 'data-light': palettes.light['--bg-page'], 'data-dark': palettes.dark['--bg-page'] }, injectTo: 'head-prepend' as const },
       ];
     },
   }],
@@ -26,7 +26,9 @@ export default defineConfig({
           const normalized = id.replaceAll('\\', '/');
           if (!normalized.includes('/node_modules/')) return;
           if (normalized.includes('/@ant-design/icons') || normalized.includes('/@ant-design/cssinjs')) return 'antd-core';
-          if (normalized.includes('/recharts/') || normalized.includes('/d3-') || normalized.includes('/victory-vendor/')) return 'charts';
+          if (normalized.includes('/@rc-component/') || normalized.includes('/rc-')) return 'antd-rc';
+          if (normalized.includes('/d3-') || normalized.includes('/victory-vendor/')) return 'd3-vendor';
+          if (normalized.includes('/recharts/')) return 'charts';
           if (normalized.includes('/react/') || normalized.includes('/react-dom/') || normalized.includes('/scheduler/') || normalized.includes('/react-router') || normalized.includes('/@tanstack/')) return 'vendor';
         },
       },

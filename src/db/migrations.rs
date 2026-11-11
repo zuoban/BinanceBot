@@ -396,7 +396,7 @@ fn migrate_trades_columns_and_scope_index(conn: &Connection) -> Result<()> {
 }
 
 fn finalize_legacy_retirements_and_rollups(conn: &mut Connection) -> Result<()> {
-    let tx = conn.transaction()?;
+    let tx = super::immediate_tx(conn)?;
     retire_legacy_testnet_config(&tx)?;
     retire_legacy_dry_run_intent(&tx)?;
     retire_legacy_testnet_rows(&tx)?;
@@ -425,7 +425,7 @@ pub(super) fn run_schema_migrations(conn: &mut Connection) -> Result<()> {
     remove_legacy_admin_auth(conn)?;
     {
         // Rebuild old evidence keys atomically, retaining identities in the stored JSON.
-        let tx = conn.transaction()?;
+        let tx = super::immediate_tx(conn)?;
         migrate_identity_observations_on(&tx)?;
         migrate_initial_responses_and_disagreements_on(&tx)?;
         tx.commit()?;

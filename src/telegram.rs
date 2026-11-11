@@ -1,8 +1,8 @@
 use crate::config::TelegramConfig;
 use crate::fx::CnyRate;
 use crate::types::{
-    AccountInfo, GridDirection, HourlyTradeStats, OrderSide, PositionInfo, TickerInfo, TradeRecord,
-    TradingMode,
+    format_decimal_dp, AccountInfo, GridDirection, HourlyTradeStats, OrderSide, PositionInfo,
+    TickerInfo, TradeRecord, TradingMode,
 };
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Duration, Utc};
@@ -144,6 +144,7 @@ impl TradeNotificationContext {
         account: &AccountInfo,
         cny_rate: Option<&CnyRate>,
         now: DateTime<Utc>,
+        sync_interval_secs: u64,
     ) -> Self {
         let select_side = |(buy, sell): (u64, u64)| match trade.side {
             OrderSide::Buy => buy,
@@ -161,9 +162,9 @@ impl TradeNotificationContext {
             && account.margin_balance == account.available_balance
             && account.unrealized_profit.is_zero();
         let max_age = if trade.mode == TradingMode::Paper {
-            15
+            crate::types::MARKET_PRICE_MAX_AGE_SECS
         } else {
-            30
+            crate::types::max_reconciliation_age_secs(sync_interval_secs)
         };
         let fresh = flat_paper || (age >= Duration::zero() && age < Duration::seconds(max_age));
         let matching_asset =
@@ -221,34 +222,16 @@ impl TradeNotificationContext {
     }
 }
 
-fn format_decimal_dp(value: Decimal, dp: u32, force_sign: bool) -> String {
-    let mut rounded = value.round_dp(dp);
-    if rounded.is_zero() {
-        rounded = Decimal::ZERO;
-    }
-    let raw = rounded.to_string();
-    let (sign, unsigned) = match raw.strip_prefix('-') {
-        Some(rest) => ("-", rest),
-        None if force_sign => ("+", raw.as_str()),
-        None => ("", raw.as_str()),
-    };
-    let dp_usize = dp as usize;
-    if dp_usize == 0 {
-        return format!("{sign}{unsigned}");
-    }
-    match unsigned.split_once('.') {
-        Some((whole, frac)) if frac.len() >= dp_usize => {
-            format!("{sign}{whole}.{}", &frac[..dp_usize])
-        }
-        Some((whole, frac)) => {
-            let pad = "0".repeat(dp_usize - frac.len());
-            format!("{sign}{whole}.{frac}{pad}")
-        }
-        None => {
-            let pad = "0".repeat(dp_usize);
-            format!("{sign}{unsigned}.{pad}")
-        }
-    }
+fn format_available_ratio(available: Option<Decimal>, wallet: Option<Decimal>) -> String {
+    available
+        .zip(wallet)
+        .filter(|(_, wallet)| *wallet > Decimal::ZERO)
+        .and_then(|(available, wallet)| available.checked_div(wallet))
+        .and_then(|ratio| ratio.checked_mul(Decimal::ONE_HUNDRED))
+        .map_or_else(
+            || "--".to_string(),
+            |value| format!("{}%", format_decimal_dp(value, 2, false)),
+        )
 }
 
 pub(crate) fn format_trade_message(
@@ -276,16 +259,7 @@ pub(crate) fn format_trade_message(
             || "--".to_string(),
             |value| format!("≈ ¥{}", format_decimal_dp(value, 2, false)),
         );
-    let ratio = context
-        .available_balance
-        .zip(context.wallet_balance)
-        .filter(|(_, wallet)| *wallet > Decimal::ZERO)
-        .and_then(|(available, wallet)| available.checked_div(wallet))
-        .and_then(|ratio| ratio.checked_mul(Decimal::ONE_HUNDRED))
-        .map_or_else(
-            || "--".to_string(),
-            |value| format!("{}%", format_decimal_dp(value, 2, false)),
-        );
+    let ratio = format_available_ratio(context.available_balance, context.wallet_balance);
     let pnl_line = if trade.side == context.direction.closing_side() {
         if trade.pnl_verified {
             format!(
@@ -348,16 +322,7 @@ fn format_daily_account_lines(accounts: &[crate::snapshots::DailyAccountGroup]) 
         .iter()
         .map(|acc| {
             let asset = escape_html(&acc.asset);
-            let ratio = acc
-                .available
-                .zip(acc.wallet)
-                .filter(|(_, wallet)| *wallet > Decimal::ZERO)
-                .and_then(|(available, wallet)| available.checked_div(wallet))
-                .and_then(|ratio| ratio.checked_mul(Decimal::ONE_HUNDRED))
-                .map_or_else(
-                    || "--".to_string(),
-                    |value| format!("{}%", format_decimal_dp(value, 2, false)),
-                );
+            let ratio = format_available_ratio(acc.available, acc.wallet);
             format!(
                 "· {mode} {asset}：权益 {equity}｜可用 {available}（{ratio}）｜浮盈 {unrealized}",
                 mode = mode_label(acc.mode),

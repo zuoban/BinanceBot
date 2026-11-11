@@ -82,7 +82,7 @@ pub struct AppState {
     pub(crate) auth: Arc<AuthContext>,
 
     pub(crate) action_tx: mpsc::Sender<BotControlAction>,
-    pub ws_broadcast_tx: broadcast::Sender<String>,
+    pub ws_broadcast_tx: broadcast::Sender<Arc<str>>,
     pub(crate) managed_router: std::sync::OnceLock<axum::Router>,
     telegram_notifier: TelegramNotifier,
 }

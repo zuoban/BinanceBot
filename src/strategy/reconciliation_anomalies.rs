@@ -28,8 +28,7 @@ impl GridTradingEngine {
         remainder_plan: Option<&RemainderPlan>,
         active: &mut HashMap<String, GridOrder>,
     ) -> (bool, bool) {
-        let key = (account_key, id.to_owned());
-        if let Some(expected) = self.evidence.order_identity_conflicts.get(&key).cloned() {
+        if let Some(expected) = self.evidence.get_conflict(account_key, id).cloned() {
             // The conflict may have been recorded while durable metadata
             // was unavailable; the disk record is authoritative.
             let mut authoritative = find_durable_order(id, managed, pair_intents, remainder_plan)
@@ -43,19 +42,18 @@ impl GridTradingEngine {
             }
             if let Some(observed) = active.get(id).and_then(ObservedOrderIdentity::from_order) {
                 if !observed.matches_confirmed_order(&authoritative) {
-                    self.insert_identity_observation(key.clone(), observed);
+                    self.insert_identity_observation(account_key, id, observed);
                 }
             }
             active.insert(id.to_owned(), authoritative.clone());
             self.evidence
-                .order_identity_conflicts
-                .insert(key.clone(), authoritative.clone());
-            self.record_differing_identity(&key, &expected, &authoritative);
-            self.promote_provisional_observations(&key, &authoritative);
+                .insert_conflict(account_key, authoritative.clone());
+            self.record_differing_identity(account_key, id, &expected, &authoritative);
+            self.promote_provisional_observations(account_key, id, &authoritative);
             return (false, true);
         }
         let Some(current) = active.get(id).cloned() else {
-            self.clear_provisional_order(&key);
+            self.evidence.clear_provisional(account_key, id);
             return (false, false);
         };
         let Some(durable) = find_durable_order(id, managed, pair_intents, remainder_plan) else {
@@ -63,19 +61,17 @@ impl GridTradingEngine {
         };
         if !durable.has_compatible_identity(&current) {
             active.insert(id.to_owned(), durable.clone());
-            self.evidence
-                .order_identity_conflicts
-                .insert(key.clone(), durable.clone());
-            self.record_differing_identity(&key, &current, durable);
-            self.promote_provisional_observations(&key, durable);
+            self.evidence.insert_conflict(account_key, durable.clone());
+            self.record_differing_identity(account_key, id, &current, durable);
+            self.promote_provisional_observations(account_key, id, durable);
             return (true, true);
         }
         let mut restored = durable.clone();
         restored.order_id = durable.order_id.or(current.order_id);
         restored.reserve_quantity(current.quantity);
         active.insert(id.to_owned(), restored);
-        if !self.evidence.order_identity_conflicts.contains_key(&key) {
-            self.clear_provisional_order(&key);
+        if !self.evidence.has_conflict(account_key, id) {
+            self.evidence.clear_provisional(account_key, id);
         }
         (true, false)
     }
@@ -87,7 +83,7 @@ impl GridTradingEngine {
         pair_intents: &HashMap<String, GridOrder>,
         remainder_plan: Option<&RemainderPlan>,
     ) -> Option<(HashSet<String>, bool)> {
-        let pending_ids = self.provisional_order_ids_for(account_key);
+        let pending_ids = self.evidence.provisional_order_ids_for(account_key);
         let mut restored_ids = HashSet::new();
         if pending_ids.is_empty() {
             return Some((restored_ids, false));
@@ -147,8 +143,7 @@ impl GridTradingEngine {
             .iter()
             .filter(|order| {
                 self.evidence
-                    .provisional_order_ids
-                    .contains(&(account_key, order.client_order_id.clone()))
+                    .is_provisional(account_key, &order.client_order_id)
             })
             .map(|order| order.client_order_id.clone())
             .collect();
@@ -156,8 +151,8 @@ impl GridTradingEngine {
         let mut active = state.active_orders.write().await;
         for found in uncertain {
             if let Some(existing) = active.get(&found.client_order_id) {
-                let key = (account_key, found.client_order_id.clone());
-                self.evidence.provisional_order_ids.insert(key);
+                self.evidence
+                    .mark_provisional(account_key, &found.client_order_id);
                 if !existing.matches_exchange_identity(found) {
                     self.track_identity_conflict(existing, found);
                 }
@@ -191,96 +186,97 @@ impl GridTradingEngine {
             order.reserve_quantity(found.orig_qty);
             provisional_ids.insert(order.client_order_id.clone());
             self.evidence
-                .provisional_order_ids
-                .insert((account_key, order.client_order_id.clone()));
+                .mark_provisional(account_key, &order.client_order_id);
             active.insert(order.client_order_id.clone(), order);
         }
         provisional_ids
+    }
+
+    async fn stage_uncertain_against_managed(
+        &mut self,
+        ctx: &UncertainManagedReconciliation<'_>,
+    ) -> (bool, Vec<String>, Vec<GridOrder>) {
+        let mut identity_conflict = false;
+        let mut persisted_ids = Vec::new();
+        let mut to_persist = Vec::new();
+        let state = self.state.clone();
+        let mut active = state.active_orders.write().await;
+        for found in ctx.uncertain {
+            let candidates: Vec<_> = [
+                ctx.managed
+                    .iter()
+                    .find(|order| order.client_order_id == found.client_order_id),
+                active.get(&found.client_order_id),
+                ctx.pair_intents.get(&found.client_order_id),
+                ctx.remainder_plan
+                    .and_then(|plan| plan.find_order(&found.client_order_id)),
+            ]
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect();
+            let conflict = !found.has_valid_symbol_and_side(ctx.symbol)
+                || candidates
+                    .iter()
+                    .any(|order| !order.matches_exchange_identity(found));
+            if conflict {
+                identity_conflict = true;
+                if let Some(expected) = candidates.first() {
+                    self.track_identity_conflict(expected, found);
+                }
+                if ctx.provisional_ids.contains(&found.client_order_id) {
+                    if let Some(original) = ctx
+                        .managed
+                        .iter()
+                        .find(|order| order.client_order_id == found.client_order_id)
+                    {
+                        active.insert(original.client_order_id.clone(), original.clone());
+                    }
+                } else if let Some(original) = candidates.into_iter().next() {
+                    active
+                        .entry(original.client_order_id.clone())
+                        .or_insert(original);
+                }
+                error!(
+                    "Conflicting exchange identity for uncertain order {}",
+                    found.client_order_id
+                );
+                continue;
+            }
+            let mut order = candidates.into_iter().next().unwrap_or_else(|| {
+                GridOrder::from_exchange_response(
+                    found,
+                    found.orig_qty,
+                    OrderPurpose::Legacy,
+                    Utc::now(),
+                )
+            });
+            order.order_id = Some(found.order_id);
+            order.reserve_quantity(found.orig_qty);
+            active.insert(order.client_order_id.clone(), order.clone());
+            persisted_ids.push(order.client_order_id.clone());
+            to_persist.push(order);
+        }
+        (identity_conflict, persisted_ids, to_persist)
     }
 
     async fn reconcile_uncertain_against_managed(
         &mut self,
         ctx: UncertainManagedReconciliation<'_>,
     ) -> bool {
-        let UncertainManagedReconciliation {
-            account_key,
-            symbol,
-            uncertain,
-            managed,
-            provisional_ids,
-            pair_intents,
-            remainder_plan,
-        } = ctx;
-        // Reconcile staged uncertain fills against durable managed orders.
-        let mut identity_conflict = false;
-        let mut persisted_ids = Vec::new();
-        let mut to_persist = Vec::new();
-        {
-            let state = self.state.clone();
-            let mut active = state.active_orders.write().await;
-            for found in uncertain {
-                let candidates: Vec<_> = [
-                    managed
-                        .iter()
-                        .find(|order| order.client_order_id == found.client_order_id),
-                    active.get(&found.client_order_id),
-                    pair_intents.get(&found.client_order_id),
-                    remainder_plan.and_then(|plan| plan.find_order(&found.client_order_id)),
-                ]
-                .into_iter()
-                .flatten()
-                .cloned()
-                .collect();
-                let conflict = !found.has_valid_symbol_and_side(symbol)
-                    || candidates
-                        .iter()
-                        .any(|order| !order.matches_exchange_identity(found));
-                if conflict {
-                    identity_conflict = true;
-                    if let Some(expected) = candidates.first() {
-                        self.track_identity_conflict(expected, found);
-                    }
-                    if provisional_ids.contains(&found.client_order_id) {
-                        if let Some(original) = managed
-                            .iter()
-                            .find(|order| order.client_order_id == found.client_order_id)
-                        {
-                            active.insert(original.client_order_id.clone(), original.clone());
-                        }
-                    } else if let Some(original) = candidates.into_iter().next() {
-                        active
-                            .entry(original.client_order_id.clone())
-                            .or_insert(original);
-                    }
-                    error!(
-                        "Conflicting exchange identity for uncertain order {}",
-                        found.client_order_id
-                    );
-                    continue;
-                }
-                let mut order = candidates.into_iter().next().unwrap_or_else(|| {
-                    GridOrder::from_exchange_response(
-                        found,
-                        found.orig_qty,
-                        OrderPurpose::Legacy,
-                        Utc::now(),
-                    )
-                });
-                order.order_id = Some(found.order_id);
-                order.reserve_quantity(found.orig_qty);
-                active.insert(order.client_order_id.clone(), order.clone());
-                persisted_ids.push(order.client_order_id.clone());
-                to_persist.push(order);
-            }
-        }
-        for found in uncertain {
-            let key = (account_key, found.client_order_id.clone());
-            if !self.evidence.order_identity_conflicts.contains_key(&key)
-                && managed
+        let (identity_conflict, persisted_ids, to_persist) =
+            self.stage_uncertain_against_managed(&ctx).await;
+        for found in ctx.uncertain {
+            if !self
+                .evidence
+                .has_conflict(ctx.account_key, &found.client_order_id)
+                && ctx
+                    .managed
                     .iter()
                     .any(|order| order.client_order_id == found.client_order_id)
             {
-                self.evidence.provisional_order_ids.remove(&key);
+                self.evidence
+                    .remove_provisional_id(ctx.account_key, &found.client_order_id);
             }
         }
         if let Err(error) = self.save_managed_orders(to_persist).await {
@@ -292,11 +288,11 @@ impl GridTradingEngine {
             return false;
         }
         for id in persisted_ids {
-            self.clear_provisional_order(&(account_key, id));
+            self.evidence.clear_provisional(ctx.account_key, &id);
         }
         if identity_conflict {
             self.report_reconciliation_state(true).await;
-            self.persist_identity_observations(account_key, symbol)
+            self.persist_identity_observations(ctx.account_key, ctx.symbol)
                 .await;
             return false;
         }
@@ -422,9 +418,9 @@ impl GridTradingEngine {
         let state = self.state.clone();
         let mut active = state.active_orders.write().await;
         for found in live_ids.values() {
-            let key = (account_key, found.client_order_id.clone());
             if let Some(existing) = active.get(&found.client_order_id) {
-                self.evidence.provisional_order_ids.insert(key);
+                self.evidence
+                    .mark_provisional(account_key, &found.client_order_id);
                 if !existing.matches_exchange_identity(found) {
                     self.track_identity_conflict(existing, found);
                 } else {
@@ -447,7 +443,8 @@ impl GridTradingEngine {
                     order.order_id = Some(found.order_id);
                     order.reserve_max(found.price, found.orig_qty);
                 }
-                self.evidence.provisional_order_ids.insert(key);
+                self.evidence
+                    .mark_provisional(account_key, &found.client_order_id);
                 active.insert(order.client_order_id.clone(), order);
                 continue;
             }
@@ -458,13 +455,41 @@ impl GridTradingEngine {
                 Utc::now(),
             );
             self.evidence
-                .provisional_order_ids
-                .insert((account_key, order.client_order_id.clone()));
+                .mark_provisional(account_key, &order.client_order_id);
             active.insert(order.client_order_id.clone(), order);
         }
         drop(active);
         self.persist_identity_observations(account_key, symbol)
             .await;
+    }
+
+    async fn restore_verified_snapshot_orders(
+        &self,
+        live_ids: &HashMap<String, BinanceOrderResponse>,
+        managed_by_id: &HashMap<String, GridOrder>,
+        pair_intents: &HashMap<String, GridOrder>,
+        remainder_plan: Option<&RemainderPlan>,
+        restored_ids: &mut HashSet<String>,
+    ) {
+        let mut active = self.state.active_orders.write().await;
+        for found in live_ids.values() {
+            if let Some(durable) = managed_by_id
+                .get(&found.client_order_id)
+                .or_else(|| pair_intents.get(&found.client_order_id))
+                .or_else(|| remainder_plan.and_then(|plan| plan.find_order(&found.client_order_id)))
+            {
+                let mut restored = durable.clone();
+                if let Some(current) = active.get(&found.client_order_id) {
+                    if current.has_compatible_identity(durable) {
+                        restored.order_id = durable.order_id.or(current.order_id);
+                        restored.reserve_max(current.price, current.quantity);
+                    }
+                }
+                restored.reserve_max(found.price, restored.quantity);
+                active.insert(restored.client_order_id.clone(), restored);
+                restored_ids.insert(found.client_order_id.clone());
+            }
+        }
     }
 
     pub(super) async fn verify_live_snapshot_identities(
@@ -498,6 +523,52 @@ impl GridTradingEngine {
             .into_iter()
             .map(|order| (order.client_order_id.clone(), order))
             .collect();
+        let (conflicts, invalid_live_identity) = self
+            .collect_snapshot_identity_conflicts(
+                symbol,
+                live_ids,
+                &managed_by_id,
+                pair_intents,
+                remainder_plan,
+            )
+            .await;
+        if invalid_live_identity && conflicts.is_empty() {
+            self.report_reconciliation_state(true).await;
+            return None;
+        }
+        if !conflicts.is_empty() {
+            self.report_reconciliation_state(true).await;
+            {
+                let state = self.state.clone();
+                let mut active = state.active_orders.write().await;
+                for (durable, found) in conflicts {
+                    self.track_identity_conflict(&durable, &found);
+                    active.insert(durable.client_order_id.clone(), durable);
+                }
+            }
+            self.persist_identity_observations(account_key, symbol)
+                .await;
+            return None;
+        }
+        self.restore_verified_snapshot_orders(
+            live_ids,
+            &managed_by_id,
+            pair_intents,
+            remainder_plan,
+            restored_ids,
+        )
+        .await;
+        Some(managed_by_id)
+    }
+
+    async fn collect_snapshot_identity_conflicts(
+        &mut self,
+        symbol: &str,
+        live_ids: &HashMap<String, BinanceOrderResponse>,
+        managed_by_id: &HashMap<String, GridOrder>,
+        pair_intents: &HashMap<String, GridOrder>,
+        remainder_plan: Option<&RemainderPlan>,
+    ) -> (Vec<(GridOrder, BinanceOrderResponse)>, bool) {
         let mut conflicts = Vec::new();
         let mut invalid_live_identity = false;
         let state = self.state.clone();
@@ -521,44 +592,6 @@ impl GridTradingEngine {
                 conflicts.push((expected.clone(), found.clone()));
             }
         }
-        drop(active);
-        if invalid_live_identity && conflicts.is_empty() {
-            self.report_reconciliation_state(true).await;
-            return None;
-        }
-        if !conflicts.is_empty() {
-            self.report_reconciliation_state(true).await;
-            {
-                let state = self.state.clone();
-                let mut active = state.active_orders.write().await;
-                for (durable, found) in conflicts {
-                    self.track_identity_conflict(&durable, &found);
-                    active.insert(durable.client_order_id.clone(), durable);
-                }
-            }
-            self.persist_identity_observations(account_key, symbol)
-                .await;
-            return None;
-        }
-        let mut active = self.state.active_orders.write().await;
-        for found in live_ids.values() {
-            if let Some(durable) = managed_by_id
-                .get(&found.client_order_id)
-                .or_else(|| pair_intents.get(&found.client_order_id))
-                .or_else(|| remainder_plan.and_then(|plan| plan.find_order(&found.client_order_id)))
-            {
-                let mut restored = durable.clone();
-                if let Some(current) = active.get(&found.client_order_id) {
-                    if current.has_compatible_identity(durable) {
-                        restored.order_id = durable.order_id.or(current.order_id);
-                        restored.reserve_max(current.price, current.quantity);
-                    }
-                }
-                restored.reserve_max(found.price, restored.quantity);
-                active.insert(restored.client_order_id.clone(), restored);
-                restored_ids.insert(found.client_order_id.clone());
-            }
-        }
-        Some(managed_by_id)
+        (conflicts, invalid_live_identity)
     }
 }

@@ -112,3 +112,15 @@ it('caps the card list but keeps the export complete', async () => {
   await userEvent.setup().click(screen.getByRole('button', { name: /导出 CSV/ }));
   expect(String(exported.download.mock.calls[0][1]).split('\r\n')).toHaveLength(121);
 });
+
+it('exposes SUCCESS instead of DEBUG in the log level filter and styles success badges', async () => {
+  view(<LogsTable logs={[log('INFO', '常规同步'), log('SUCCESS', '止盈成交并补挂网格')]} />);
+  const group = screen.getByRole('radiogroup', { name: '按级别筛选' });
+  expect(within(group).queryByText('DEBUG')).not.toBeInTheDocument();
+  expect(within(group).getByText('SUCCESS')).toBeInTheDocument();
+  await userEvent.setup().click(within(group).getByText('SUCCESS'));
+  expect(screen.getByRole('status')).toHaveTextContent('显示 1 / 2 条');
+  const badges = screen.getAllByText('SUCCESS').filter(el => el.classList.contains('log-level'));
+  expect(badges.length).toBeGreaterThan(0);
+  for (const badge of badges) expect(badge).toHaveClass('log-level-success');
+});

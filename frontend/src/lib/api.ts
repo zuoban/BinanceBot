@@ -19,7 +19,7 @@ export const tokenStore = {
     try { sessionStorage.removeItem(TOKEN_KEY); } catch { /* Ignore unavailable Web Storage. */ }
   },
 };
-export const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
+export const errorMessage = (error: unknown): string => error instanceof Error || error instanceof DOMException ? error.message : String(error);
 export class ApiError extends Error {
   constructor(message: string, public status: number, public kind: 'rejection' | 'invalid-response' = 'rejection') { super(message); }
 }

@@ -674,7 +674,7 @@ async fn live_credential_switch_invalidates_old_balance_until_reconciled() {
         .unwrap();
     assert!(result.is_err());
     let snapshot = state.snapshot().await;
-    assert_eq!(snapshot.account.margin_balance, dec!(321));
+    assert_eq!(snapshot.account.margin_balance, Decimal::ZERO);
     assert_eq!(
         snapshot.account.update_time,
         chrono::DateTime::<Utc>::default()
@@ -1202,10 +1202,10 @@ async fn provisional_pair_uses_intent_metadata_for_normal_and_terminal_recovery(
             .write()
             .await
             .insert(placeholder.client_order_id.clone(), placeholder);
-        engine.evidence.provisional_order_ids.insert((
+        engine.evidence.mark_provisional(
             engine.client.account_identity_key(),
-            intent.client_order_id.clone(),
-        ));
+            &intent.client_order_id,
+        );
         assert!(engine.sync_live_orders().await);
         if terminal {
             let trades = db.get_recent_trades(10).unwrap();
@@ -1316,10 +1316,10 @@ async fn provisional_pair_uses_intent_metadata_before_cancel_retry() {
         .write()
         .await
         .insert(placeholder.client_order_id.clone(), placeholder);
-    engine.evidence.provisional_order_ids.insert((
+    engine.evidence.mark_provisional(
         engine.client.account_identity_key(),
-        intent.client_order_id.clone(),
-    ));
+        &intent.client_order_id,
+    );
     assert!(!engine.cancel_all_orders().await);
     let active = engine.state.active_orders.read().await;
     assert_eq!(
@@ -1466,9 +1466,12 @@ async fn conflicting_intent_and_remainder_identities_survive_failed_managed_read
             Some(123)
         );
         let account = first.client.account_identity_key();
-        let key = (account, intent.client_order_id.clone());
         assert_eq!(
-            first.evidence.order_identity_observations[&key][0].order_id,
+            first
+                .evidence
+                .get_observations(account, &intent.client_order_id)
+                .unwrap()[0]
+                .order_id,
             456
         );
         assert_eq!(
@@ -3577,4 +3580,202 @@ async fn paper_single_buy_window_places_closing_sell_immediately_on_fill_tick() 
         "expected immediate closing sell at 101, got: {:?}",
         active.values().collect::<Vec<_>>()
     );
+}
+
+#[derive(Clone, Default)]
+struct DualAccountExchange {
+    orders_a: Arc<Mutex<HashMap<String, BinanceOrderResponse>>>,
+    orders_b: Arc<Mutex<HashMap<String, BinanceOrderResponse>>>,
+    posts_a: Arc<Mutex<Vec<String>>>,
+    posts_b: Arc<Mutex<Vec<String>>>,
+    b_position_calls: Arc<AtomicUsize>,
+    fail_b_second_position: Arc<AtomicUsize>,
+}
+
+async fn dual_account_server(fake: DualAccountExchange) -> (String, tokio::task::JoinHandle<()>) {
+    let api_key = |headers: &axum::http::HeaderMap| {
+        headers
+            .get("x-mbx-apikey")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let app = Router::new()
+        .route("/fapi/v1/time", get(|| async {
+            Json(serde_json::json!({"serverTime": Utc::now().timestamp_millis()}))
+        }))
+        .route("/fapi/v1/exchangeInfo", get(|| async {
+            Json(serde_json::json!({"symbols":[{"symbol":"SOLUSDC","status":"TRADING","contractType":"PERPETUAL","filters":[{"filterType":"PRICE_FILTER","minPrice":"0.01","maxPrice":"100000","tickSize":"0.01"},{"filterType":"LOT_SIZE","minQty":"0.01","maxQty":"100000","stepSize":"0.01"},{"filterType":"MIN_NOTIONAL","notional":"5"}]}]}))
+        }))
+        .route("/fapi/v1/ticker/price", get(|| async {
+            Json(serde_json::json!({"symbol":"SOLUSDC","price":"100.5"}))
+        }))
+        .route("/fapi/v1/premiumIndex", get(|| async {
+            Json(serde_json::json!({"symbol":"SOLUSDC","markPrice":"100.5"}))
+        }))
+        .route("/fapi/v1/ticker/24hr", get(|| async {
+            Json(serde_json::json!({"lastPrice":"100.5","priceChange":"0","priceChangePercent":"0","highPrice":"101","lowPrice":"100","volume":"10"}))
+        }))
+        .route("/fapi/v2/positionRisk", get(move |headers: axum::http::HeaderMap, State(fake): State<DualAccountExchange>| async move {
+            if api_key(&headers) == "account-b-key" {
+                let call = fake.b_position_calls.fetch_add(1, Ordering::SeqCst);
+                if call >= 1 && consume_failure(&fake.fail_b_second_position) {
+                    return (axum::http::StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({})));
+                }
+                (axum::http::StatusCode::OK, Json(serde_json::json!([{"symbol":"SOLUSDC","positionAmt":"0","entryPrice":"0","markPrice":"100.5","unRealizedProfit":"0","liquidationPrice":"0","leverage":"5"}])))
+            } else {
+                (axum::http::StatusCode::OK, Json(serde_json::json!([{"symbol":"SOLUSDC","positionAmt":"3","entryPrice":"95","markPrice":"100.5","unRealizedProfit":"16.5","liquidationPrice":"50","leverage":"5"}])))
+            }
+        }))
+        .route("/fapi/v2/account", get(move |headers: axum::http::HeaderMap| async move {
+            let bal = if api_key(&headers) == "account-b-key" { "250" } else { "5000" };
+            Json(serde_json::json!({"assets":[{"asset":"USDC","walletBalance":bal,"marginBalance":bal,"availableBalance":bal,"unrealizedProfit":"0"}]}))
+        }))
+        .route("/fapi/v1/openOrders", get(move |headers: axum::http::HeaderMap, State(fake): State<DualAccountExchange>| async move {
+            let book = if api_key(&headers) == "account-b-key" { &fake.orders_b } else { &fake.orders_a };
+            let open: Vec<_> = book.lock().unwrap().values().filter(|o| o.status == "NEW").cloned().collect();
+            Json(serde_json::to_value(open).unwrap())
+        }))
+        .route("/fapi/v1/order", get(move |headers: axum::http::HeaderMap, State(fake): State<DualAccountExchange>, Query(query): Query<HashMap<String, String>>| async move {
+            let book = if api_key(&headers) == "account-b-key" { &fake.orders_b } else { &fake.orders_a };
+            let orders = book.lock().unwrap();
+            let found = if let Some(cid) = query.get("origClientOrderId") {
+                orders.get(cid).cloned()
+            } else {
+                query.get("orderId").and_then(|id| id.parse::<i64>().ok()).and_then(|id| orders.values().find(|o| o.order_id == id).cloned())
+            };
+            match found {
+                Some(o) => (axum::http::StatusCode::OK, Json(serde_json::to_value(o).unwrap())),
+                None => (axum::http::StatusCode::BAD_REQUEST, Json(serde_json::json!({"code": -2013, "msg": "Order does not exist"}))),
+            }
+        }).delete(move |headers: axum::http::HeaderMap, State(fake): State<DualAccountExchange>, Query(query): Query<HashMap<String, String>>| async move {
+            let book = if api_key(&headers) == "account-b-key" { &fake.orders_b } else { &fake.orders_a };
+            let mut orders = book.lock().unwrap();
+            let id: i64 = query["orderId"].parse().unwrap();
+            let order = orders.values_mut().find(|o| o.order_id == id).unwrap();
+            order.status = "CANCELED".into();
+            Json(serde_json::to_value(order.clone()).unwrap())
+        }).post(move |headers: axum::http::HeaderMap, State(fake): State<DualAccountExchange>, Query(query): Query<HashMap<String, String>>| async move {
+            let is_b = api_key(&headers) == "account-b-key";
+            let (book, posts) = if is_b { (&fake.orders_b, &fake.posts_b) } else { (&fake.orders_a, &fake.posts_a) };
+            let cid = query["newClientOrderId"].clone();
+            posts.lock().unwrap().push(cid.clone());
+            let mut orders = book.lock().unwrap();
+            let next_id = orders.values().map(|o| o.order_id).max().unwrap_or(100) + 1;
+            let order = BinanceOrderResponse {
+                order_id: next_id,
+                client_order_id: cid.clone(),
+                symbol: query["symbol"].clone(),
+                status: "NEW".into(),
+                price: query["price"].parse().unwrap(),
+                avg_price: None,
+                orig_qty: query["quantity"].parse().unwrap(),
+                executed_qty: dec!(0),
+                side: query["side"].clone(),
+                order_type: "LIMIT".into(),
+                time_in_force: "GTX".into(),
+                update_time: None,
+            };
+            orders.insert(cid, order.clone());
+            Json(serde_json::to_value(order).unwrap())
+        }))
+        .with_state(fake);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (url, server)
+}
+
+#[tokio::test]
+async fn live_credential_rotation_cancels_old_account_pauses_and_clears_cached_state() {
+    let fake = DualAccountExchange::default();
+    fake.orders_b.lock().unwrap().insert(
+        "gb_b_preexisting_b".into(),
+        BinanceOrderResponse {
+            order_id: 900,
+            client_order_id: "gb_b_preexisting_b".into(),
+            symbol: "SOLUSDC".into(),
+            status: "NEW".into(),
+            price: dec!(99),
+            avg_price: None,
+            orig_qty: dec!(1),
+            executed_qty: dec!(0),
+            side: "BUY".into(),
+            order_type: "LIMIT".into(),
+            time_in_force: "GTX".into(),
+            update_time: None,
+        },
+    );
+    let (url, server) = dual_account_server(fake.clone()).await;
+    let mut config_a = AppConfig::default();
+    config_a.exchange.api_key = "account-a-key".into();
+    config_a.exchange.api_secret = "live-secret".into();
+    config_a.grid.grid_interval = dec!(1);
+    config_a.grid.buy_window = 1;
+    config_a.grid.sell_window = 1;
+
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    db.save_runtime_status("SOLUSDC", TradingMode::Live, BotStatus::Running, true)
+        .unwrap();
+    let (action_tx, action_rx) = mpsc::channel(4);
+    let (_ticker_tx, ticker_rx) = broadcast::channel(4);
+    let state = AppState::new(config_a.clone(), db, action_tx);
+    let client = Arc::new(BinanceFuturesClient::with_base_url(
+        &config_a.exchange,
+        url.clone(),
+    ));
+    let mut engine = GridTradingEngine::new(state.clone(), client, action_rx, ticker_rx);
+    engine.initialize().await.unwrap();
+    engine.maintain_grid_window().await;
+    assert_eq!(*state.status.read().await, BotStatus::Running);
+    assert_eq!(state.position.read().await.size, dec!(3));
+    assert_eq!(state.account.read().await.total_wallet_balance, dec!(5000));
+    assert!(!fake.posts_a.lock().unwrap().is_empty());
+
+    let mut config_b = config_a.clone();
+    config_b.exchange.api_key = "account-b-key".into();
+    config_b.exchange.api_secret = "test-secret".into();
+    engine.apply_config(config_b.clone()).await.unwrap();
+
+    assert!(fake
+        .orders_a
+        .lock()
+        .unwrap()
+        .values()
+        .all(|o| o.status == "CANCELED"));
+    assert_eq!(
+        fake.orders_b.lock().unwrap()["gb_b_preexisting_b"].status,
+        "CANCELED"
+    );
+    assert_eq!(*state.status.read().await, BotStatus::Paused);
+    assert_eq!(state.position.read().await.size, Decimal::ZERO);
+    assert_eq!(state.account.read().await.total_wallet_balance, dec!(250));
+    assert!(fake.posts_b.lock().unwrap().is_empty());
+
+    engine.maintain_grid_window().await;
+    assert!(fake.posts_b.lock().unwrap().is_empty());
+
+    let (reply, rx) = tokio::sync::oneshot::channel();
+    engine
+        .handle_control_action(BotControlAction::Resume {
+            expected_mode: TradingMode::Live,
+            expected_epoch: state.pause_epoch(),
+            reply,
+        })
+        .await;
+    rx.await.unwrap().unwrap();
+    assert_eq!(*state.status.read().await, BotStatus::Running);
+    assert!(!fake.posts_b.lock().unwrap().is_empty());
+
+    // Rotating back to Account A and then to Account B with a failing post-commit sync
+    // must still wipe Account A's cached position and balance rather than leaking them.
+    engine.apply_config(config_a).await.unwrap();
+    assert_eq!(state.position.read().await.size, dec!(3));
+    fake.b_position_calls.store(0, Ordering::SeqCst);
+    fake.fail_b_second_position.store(1, Ordering::SeqCst);
+    assert!(engine.apply_config(config_b).await.is_err());
+    assert_eq!(*state.status.read().await, BotStatus::Paused);
+    assert_eq!(state.position.read().await.size, Decimal::ZERO);
+    assert_eq!(state.account.read().await.total_wallet_balance, dec!(250));
+    server.abort();
 }

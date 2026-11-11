@@ -4,65 +4,25 @@
   "title": "Design System: Grid Console",
   "extensions": {
     "colorMeta": {
-      "signal-blue": {
+      "accent-gold": {
         "role": "primary",
-        "displayName": "信号蓝",
-        "canonical": "#1d4ed8",
-        "tonalRamp": [
-          "oklch(15% 0.110 264.4)",
-          "oklch(25% 0.200 264.4)",
-          "oklch(35% 0.200 264.4)",
-          "oklch(45% 0.200 264.4)",
-          "oklch(58% 0.200 264.4)",
-          "oklch(70% 0.200 264.4)",
-          "oklch(82% 0.200 264.4)",
-          "oklch(95% 0.110 264.4)"
-        ]
+        "displayName": "琥珀金",
+        "canonical": "#9a6700"
       },
-      "signal-blue-dark": {
+      "accent-gold-dark": {
         "role": "primary",
-        "displayName": "信号蓝（深色主题）",
-        "canonical": "#6ea0ff",
-        "tonalRamp": [
-          "oklch(15% 0.082 262.2)",
-          "oklch(25% 0.149 262.2)",
-          "oklch(35% 0.149 262.2)",
-          "oklch(45% 0.149 262.2)",
-          "oklch(58% 0.149 262.2)",
-          "oklch(70% 0.149 262.2)",
-          "oklch(82% 0.149 262.2)",
-          "oklch(95% 0.082 262.2)"
-        ]
+        "displayName": "琥珀金（深色主题）",
+        "canonical": "#e5a910"
       },
       "rail": {
         "role": "neutral",
-        "displayName": "深海军蓝侧栏",
-        "canonical": "#0b1424",
-        "tonalRamp": [
-          "oklch(15% 0.019 261.3)",
-          "oklch(25% 0.035 261.3)",
-          "oklch(35% 0.035 261.3)",
-          "oklch(45% 0.035 261.3)",
-          "oklch(58% 0.035 261.3)",
-          "oklch(70% 0.035 261.3)",
-          "oklch(82% 0.035 261.3)",
-          "oklch(95% 0.019 261.3)"
-        ]
+        "displayName": "深炭黑侧栏",
+        "canonical": "#141518"
       },
       "ground": {
         "role": "neutral",
-        "displayName": "冷灰蓝工作区",
-        "canonical": "#f2f5f9",
-        "tonalRamp": [
-          "oklch(15% 0.003 255.5)",
-          "oklch(25% 0.006 255.5)",
-          "oklch(35% 0.006 255.5)",
-          "oklch(45% 0.006 255.5)",
-          "oklch(58% 0.006 255.5)",
-          "oklch(70% 0.006 255.5)",
-          "oklch(82% 0.006 255.5)",
-          "oklch(95% 0.003 255.5)"
-        ]
+        "displayName": "中性浅灰工作区",
+        "canonical": "#f7f7f8"
       },
       "surface": {
         "role": "neutral",
@@ -237,7 +197,7 @@
       },
       "headline": {
         "displayName": "页面标题",
-        "purpose": "26px、600 字重，每页一个。"
+        "purpose": "28px、600 字重，每页一个。"
       },
       "numeric": {
         "displayName": "数值",
@@ -303,9 +263,9 @@
       "name": "主按钮",
       "kind": "button",
       "refersTo": "button-primary",
-      "description": "信号蓝填充，8px 圆角，36px 高；深色主题使用深色文字以保证对比度。",
+      "description": "高对比深墨/亮灰填充，8px 圆角，36px 高；深色主题使用深色文字以保证对比度。",
       "html": "<button class=\"ds-btn\">保存并立即生效</button>",
-      "css": ".ds-btn{height:36px;padding:0 16px;border:0;border-radius:8px;background:#1d4ed8;color:#fff;font:500 14px system-ui}"
+      "css": ".ds-btn{height:36px;padding:0 16px;border:0;border-radius:8px;background:#17181c;color:#fff;font:500 14px system-ui}"
     },
     {
       "name": "策略指标带",
@@ -350,7 +310,7 @@
   ],
   "narrative": {
     "northStar": "市场天气预报",
-    "overview": "平时安静，异常时分级。状态沿用气象预警的四级信号语法（蓝、黄、橙、红），每一级都带图标和文字，不单靠颜色。深海军蓝侧栏固定为深色，右侧是偏冷的浅灰蓝工作区，操作色只用信号蓝。",
+    "overview": "平时安静，异常时分级。状态沿用气象预警的四级信号语法（灰蓝、琥珀黄、暖橙、警示红，加上正常的绿），每一级都带图标和文字，不单靠颜色。深炭黑侧栏固定为深色，右侧是克制的中性工作区，强调与焦点色统一使用琥珀金。",
     "keyCharacteristics": [
       "左侧固定侧栏加 ⌘K 命令面板",
       "五级信号标签统一表达状态",

@@ -1903,7 +1903,8 @@ fn a_failed_runtime_status_write_rolls_back_the_configuration_too() {
             &candidate,
             Some("SOLUSDC"),
             BotStatus::Paused,
-            ("SOLUSDC", TradingMode::Paper)
+            ("SOLUSDC", TradingMode::Paper),
+            false,
         )
         .is_err());
     assert_eq!(
@@ -1942,7 +1943,8 @@ fn switching_modes_clears_only_the_previous_guard_and_rolls_back_on_failure() {
             &live,
             None,
             BotStatus::Running,
-            (symbol, TradingMode::Paper)
+            (symbol, TradingMode::Paper),
+            false,
         )
         .is_err());
     assert!(db.load_config().unwrap().unwrap().exchange.is_paper());
@@ -1959,7 +1961,8 @@ fn switching_modes_clears_only_the_previous_guard_and_rolls_back_on_failure() {
             &live,
             None,
             BotStatus::Running,
-            (symbol, TradingMode::Paper)
+            (symbol, TradingMode::Paper),
+            false,
         )
         .unwrap(),
         (BotStatus::Paused, true)
@@ -1977,7 +1980,8 @@ fn switching_modes_clears_only_the_previous_guard_and_rolls_back_on_failure() {
             &paper,
             None,
             BotStatus::Running,
-            (symbol, TradingMode::Live)
+            (symbol, TradingMode::Live),
+            false,
         )
         .unwrap(),
         (BotStatus::Paused, true)
@@ -1988,6 +1992,23 @@ fn switching_modes_clears_only_the_previous_guard_and_rolls_back_on_failure() {
     );
     assert!(!db.arm_execution_guard(symbol, TradingMode::Live).unwrap());
     assert!(db.arm_execution_guard(symbol, TradingMode::Paper).unwrap());
+    let mut live_rotated = live.clone();
+    live_rotated.exchange.api_key = "live-key-b".into();
+    assert_eq!(
+        db.save_runtime_config(
+            &live_rotated,
+            None,
+            BotStatus::Running,
+            (symbol, TradingMode::Live),
+            true,
+        )
+        .unwrap(),
+        (BotStatus::Paused, true)
+    );
+    assert_eq!(
+        db.load_pair_status(symbol, TradingMode::Live).unwrap(),
+        Some(BotStatus::Paused)
+    );
 }
 
 #[test]
@@ -2622,7 +2643,8 @@ fn first_exchange_mode_switch_persists_pause_across_reopen() {
                     &candidate,
                     scoped.then_some("SOLUSDC"),
                     BotStatus::Running,
-                    ("SOLUSDC", TradingMode::Paper)
+                    ("SOLUSDC", TradingMode::Paper),
+                    false,
                 )
                 .unwrap(),
                 (BotStatus::Paused, true)

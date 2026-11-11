@@ -145,7 +145,10 @@ async fn revocation_scenario(multi: bool) {
     // Exercise the actual broadcast path before revocation, including both pair scopes.
     for (index, state) in states.iter().enumerate() {
         let payload = json!({"type":"log", "data":{"message":format!("before-{index}")}});
-        state.ws_broadcast_tx.send(payload.to_string()).unwrap();
+        state
+            .ws_broadcast_tx
+            .send(payload.to_string().into())
+            .unwrap();
     }
     for (index, path) in paths.iter().enumerate() {
         if *path == "/api/accounts/ws" {
@@ -184,7 +187,10 @@ async fn revocation_scenario(multi: bool) {
 
     for (index, state) in states.iter().enumerate() {
         let payload = json!({"type":"log", "data":{"message":format!("after-{index}")}});
-        state.ws_broadcast_tx.send(payload.to_string()).unwrap();
+        state
+            .ws_broadcast_tx
+            .send(payload.to_string().into())
+            .unwrap();
     }
     for (index, path) in paths.iter().enumerate() {
         if *path == "/api/accounts/ws" {

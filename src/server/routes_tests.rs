@@ -1,12 +1,12 @@
-use super::config_probes::{
-    apply_config_payload, mask_api_key_preview, pair_config_version, resolve_exchange_probe,
-    PROBE_COOLDOWN,
-};
+use super::config_probes::{apply_config_payload, mask_api_key_preview, pair_config_version};
 use super::control::{
     control_action, dispatch_prepared_control, prepare_control, PendingControlPause,
 };
-use super::exchange_preview::{fetch_exchange_symbol_preview, fetch_exchange_symbols};
-use super::ws::send_until_retired;
+use super::exchange_preview::{
+    fetch_exchange_symbol_preview, fetch_exchange_symbols, ExchangePreviewService,
+};
+use super::probes::{resolve_exchange_probe, PROBE_COOLDOWN};
+use super::ws::{send_until_retired, ws_origin_allowed};
 use super::*;
 use crate::config::AppConfig;
 use crate::db::Database;
@@ -2018,4 +2018,213 @@ async fn shared_proxy_ip_successful_login_preserves_prior_failed_attempts_and_di
     }
     let blocked_res = app.oneshot(login_req("wrong-pw")).await.unwrap();
     assert_eq!(blocked_res.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[test]
+fn ws_origin_allowed_enforces_forwarded_proto_and_host_syntax() {
+    use axum::http::{HeaderMap, HeaderValue};
+
+    let build_headers = |host: &str, origin: Option<&str>, proto: Option<&str>| {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", HeaderValue::from_str(host).unwrap());
+        if let Some(origin) = origin {
+            headers.insert("origin", HeaderValue::from_str(origin).unwrap());
+        }
+        if let Some(proto) = proto {
+            headers.insert("x-forwarded-proto", HeaderValue::from_str(proto).unwrap());
+        }
+        headers
+    };
+
+    assert!(ws_origin_allowed(&build_headers(
+        "bot.example.com",
+        Some("https://bot.example.com"),
+        Some("https"),
+    )));
+    assert!(ws_origin_allowed(&build_headers(
+        "bot.example.com",
+        Some("https://bot.example.com"),
+        Some("HTTPS, http"),
+    )));
+    assert!(!ws_origin_allowed(&build_headers(
+        "bot.example.com",
+        Some("http://bot.example.com"),
+        Some("https"),
+    )));
+    assert!(!ws_origin_allowed(&build_headers(
+        "bot.example.com",
+        Some("https://bot.example.com"),
+        Some("http"),
+    )));
+    assert!(!ws_origin_allowed(&build_headers(
+        "bot.example.com",
+        Some("https://bot.example.com"),
+        Some("ws"),
+    )));
+    assert!(!ws_origin_allowed(&build_headers(
+        "bot.example.com:80",
+        Some("https://bot.example.com"),
+        None,
+    )));
+
+    for bad_host in [
+        "",
+        "evil@localhost:8080",
+        "localhost:8080/path",
+        "localhost:8080?x=1",
+        "localhost:8080#frag",
+        "localhost:8080\\evil",
+        "local host:8080",
+    ] {
+        assert!(
+            !ws_origin_allowed(&build_headers(
+                bad_host,
+                Some("http://localhost:8080"),
+                None
+            )),
+            "expected host {bad_host:?} to be rejected"
+        );
+    }
+}
+
+#[tokio::test]
+async fn websocket_lagged_receiver_resyncs_snapshot_without_disconnecting() {
+    use rust_decimal_macros::dec;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    let (tx, _rx) = tokio::sync::mpsc::channel(1);
+    let state = AppState::new(AppConfig::default(), db, tx);
+    let router = create_router(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+    let mut req = format!("ws://{address}/ws").into_client_request().unwrap();
+    req.headers_mut()
+        .insert("Sec-WebSocket-Protocol", "auth".parse().unwrap());
+    let (mut socket, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+
+    let initial = tokio::time::timeout(std::time::Duration::from_secs(2), socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let initial_json: serde_json::Value = serde_json::from_str(initial.to_text().unwrap()).unwrap();
+    assert_eq!(initial_json["type"], "snapshot");
+
+    state.ticker.write().await.last_price = dec!(777.77);
+    for index in 0..150 {
+        let payload = serde_json::json!({
+            "type": "log",
+            "data": {"message": format!("burst-{index}")}
+        });
+        state
+            .ws_broadcast_tx
+            .send(Arc::<str>::from(payload.to_string()))
+            .unwrap();
+    }
+    let sentinel = serde_json::json!({
+        "type": "log",
+        "data": {"message": "after-lag-resync"}
+    });
+    state
+        .ws_broadcast_tx
+        .send(Arc::<str>::from(sentinel.to_string()))
+        .unwrap();
+
+    let mut saw_resync_snapshot = false;
+    let mut saw_sentinel = false;
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while !(saw_resync_snapshot && saw_sentinel) {
+            let msg = socket
+                .next()
+                .await
+                .expect("socket must remain connected across Lagged resync")
+                .expect("frame must succeed");
+            if let tokio_tungstenite::tungstenite::Message::Text(text) = msg {
+                let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+                if value["type"] == "snapshot"
+                    && value["data"]["ticker"]["last_price"] == serde_json::json!(dec!(777.77))
+                {
+                    saw_resync_snapshot = true;
+                }
+                if value["type"] == "log" && value["data"]["message"] == "after-lag-resync" {
+                    saw_sentinel = true;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
+
+    let _ = socket.close(None).await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn exchange_catalog_filters_perpetuals_coalesces_concurrent_loads_and_cools_down_failures() {
+    use axum::{routing::get, Json, Router};
+    use serde_json::json;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let fail_mode = Arc::new(AtomicBool::new(false));
+    let calls_handler = calls.clone();
+    let fail_handler = fail_mode.clone();
+    let app = Router::new().route(
+        "/fapi/v1/exchangeInfo",
+        get(move || {
+            let calls = calls_handler.clone();
+            let fail = fail_handler.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                if fail.load(Ordering::SeqCst) {
+                    return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({})));
+                }
+                (
+                    StatusCode::OK,
+                    Json(json!({"symbols": [
+                        {"symbol": "ETHUSDT", "status": "TRADING", "contractType": "PERPETUAL", "filters": []},
+                        {"symbol": "SOLUSDC", "status": "TRADING", "filters": []},
+                        {"symbol": "BTCUSDT_261225", "status": "TRADING", "contractType": "CURRENT_QUARTER", "filters": []},
+                        {"symbol": "BTCUSDT", "status": "TRADING", "contractType": "CURRENT_QUARTER", "filters": []},
+                        {"symbol": "币安人生USDT", "status": "TRADING", "contractType": "PERPETUAL", "filters": []},
+                        {"symbol": "BTCETH", "status": "TRADING", "contractType": "PERPETUAL", "filters": []},
+                        {"symbol": "XRPUSDT", "status": "BREAK", "contractType": "PERPETUAL", "filters": []}
+                    ]})),
+                )
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let service = ExchangePreviewService::with_client(BinanceFuturesClient::with_base_url(
+        &AppConfig::default().exchange,
+        url.clone(),
+    ));
+    let tasks: Vec<_> = (0..6)
+        .map(|_| {
+            let svc = service.clone();
+            tokio::spawn(async move { svc.load_or_fetch_catalog().await.unwrap().1 })
+        })
+        .collect();
+    for task in tasks {
+        assert_eq!(task.await.unwrap(), vec!["ETHUSDT", "SOLUSDC"]);
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    fail_mode.store(true, Ordering::SeqCst);
+    let failing_service = ExchangePreviewService::with_client(BinanceFuturesClient::with_base_url(
+        &AppConfig::default().exchange,
+        url,
+    ));
+    assert!(failing_service.load_or_fetch_catalog().await.is_err());
+    assert!(failing_service.load_or_fetch_catalog().await.is_err());
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+    server.abort();
 }

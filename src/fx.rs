@@ -40,7 +40,13 @@ struct CoinbaseResponse {
 #[derive(Deserialize)]
 struct CoinbaseRates {
     currency: String,
-    rates: HashMap<String, String>,
+    rates: CoinbaseRateMap,
+}
+
+#[derive(Deserialize)]
+struct CoinbaseRateMap {
+    #[serde(rename = "CNY")]
+    cny: Option<String>,
 }
 
 impl CnyRateCache {
@@ -101,17 +107,21 @@ impl CnyRateCache {
             .query(&[("currency", asset)])
             .timeout(Duration::from_secs(5))
             .send()
-            .await?
-            .error_for_status()?
+            .await
+            .map_err(reqwest::Error::without_url)?
+            .error_for_status()
+            .map_err(reqwest::Error::without_url)?
             .json::<CoinbaseResponse>()
-            .await?;
+            .await
+            .map_err(reqwest::Error::without_url)?;
         if response.data.currency != asset {
             bail!("Exchange-rate response currency does not match {}", asset);
         }
         let raw = response
             .data
             .rates
-            .get("CNY")
+            .cny
+            .as_deref()
             .ok_or_else(|| anyhow!("CNY rate is missing for {}", asset))?;
         let rate = Decimal::from_str(raw).context("Invalid CNY exchange rate")?;
         if rate <= Decimal::ZERO {
@@ -141,60 +151,5 @@ impl Default for CnyRateCache {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use axum::{extract::State, routing::get, Json, Router};
-    use rust_decimal_macros::dec;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
-
-    #[tokio::test]
-    async fn fetches_rate_once_and_reuses_cache() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let app = Router::new()
-            .route(
-                "/rates",
-                get(|State(calls): State<Arc<AtomicUsize>>| async move {
-                    calls.fetch_add(1, Ordering::SeqCst);
-                    Json(serde_json::json!({
-                        "data": {"currency": "USDC", "rates": {"CNY": "6.710078"}}
-                    }))
-                }),
-            )
-            .with_state(calls.clone());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let endpoint = format!("http://{}/rates", listener.local_addr().unwrap());
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-
-        let cache = CnyRateCache::with_endpoint(endpoint);
-        cache.refresh_if_due("USDC").await.unwrap();
-        cache.refresh_if_due("USDC").await.unwrap();
-        cache.refresh_if_due("FDUSD").await.unwrap();
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            cache.get("USDC").await.unwrap().cny_per_unit,
-            dec!(6.710078)
-        );
-        assert!(cache.get("FDUSD").await.is_none());
-
-        {
-            let mut entries = cache.entries.lock().await;
-            let entry = entries.get_mut("USDC").unwrap();
-            entry.fetched_at = Some(Instant::now() - CACHE_TTL - Duration::from_secs(1));
-            entry.attempted_at = Some(Instant::now() - RETRY_DELAY - Duration::from_secs(1));
-        }
-        cache.refresh_if_due("USDC").await.unwrap();
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
-
-        cache
-            .entries
-            .lock()
-            .await
-            .get_mut("USDC")
-            .unwrap()
-            .fetched_at = Some(Instant::now() - MAX_DISPLAY_AGE - Duration::from_secs(1));
-        assert!(cache.get("USDC").await.is_none());
-
-        server.abort();
-    }
-}
+#[path = "fx_tests.rs"]
+mod tests;

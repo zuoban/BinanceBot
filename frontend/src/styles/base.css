@@ -94,6 +94,7 @@ kbd {
 .log-level { font: 500 11px/1 var(--font-mono); color: var(--text-muted); }
 .log-level-error { color: var(--sig-red); font-weight: 500; }
 .log-level-warn { color: var(--sig-yellow); font-weight: 500; }
+.log-level-success { color: var(--sig-calm); font-weight: 500; }
 .ant-table-wrapper .ant-table-tbody > tr.log-row-error > td { background: var(--sig-red-bg); }
 .ant-table-wrapper .ant-table-tbody > tr.log-row-error .log-message, .log-item-error .log-message { color: var(--sig-red); }
 .ant-table-wrapper .ant-table-tbody > tr.log-row-warn .log-message, .log-item-warn .log-message { color: var(--sig-yellow); }

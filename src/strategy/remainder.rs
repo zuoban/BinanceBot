@@ -27,7 +27,7 @@ impl GridTradingEngine {
             .await
     }
 
-    async fn persist_remainder_plan(&self, plan: &RemainderPlan) -> Result<()> {
+    pub(super) async fn persist_remainder_plan(&self, plan: &RemainderPlan) -> Result<()> {
         let saved = plan.clone();
         self.state
             .db
@@ -46,23 +46,54 @@ impl GridTradingEngine {
         Ok(plan.phase != RemainderPhase::Abandoned)
     }
 
-    pub(super) async fn reconcile_remainder(&mut self, desired_prices: &[Decimal]) -> Result<()> {
-        let config = self.state.config.read().await.clone();
+    fn build_remainder_target_order(
+        symbol: &str,
+        closing_side: OrderSide,
+        price: Decimal,
+        quantity: Decimal,
+        purpose: OrderPurpose,
+        sources: &[GridOrder],
+    ) -> Option<GridOrder> {
+        let amount_usdc = price.checked_mul(quantity)?;
+        let now = Utc::now();
+        Some(GridOrder {
+            client_order_id: new_grid_client_order_id(closing_side),
+            order_id: None,
+            symbol: symbol.to_owned(),
+            side: closing_side,
+            price,
+            quantity,
+            amount_usdc,
+            status: OrderStatus::New,
+            created_at: now,
+            updated_at: now,
+            grid_level: if closing_side == OrderSide::Buy {
+                -1
+            } else {
+                1
+            },
+            paired_client_order_id: None,
+            is_take_profit: false,
+            purpose,
+            merge_sources: sources
+                .iter()
+                .map(|o| OrderSource {
+                    client_order_id: o.client_order_id.clone(),
+                    price: o.price,
+                    quantity: o.quantity,
+                })
+                .collect(),
+        })
+    }
+
+    async fn plan_remainder_target(
+        &self,
+        config: &crate::config::AppConfig,
+        rules: &SymbolRules,
+        desired_prices: &[Decimal],
+    ) -> Option<(Vec<GridOrder>, GridOrder)> {
         let direction = config.grid.direction;
         let closing_side = direction.closing_side();
-        let closing_window = if closing_side == OrderSide::Buy {
-            config.grid.buy_window
-        } else {
-            config.grid.sell_window
-        };
-        if self.state.is_shutting_down()
-            || closing_window == 0
-            || *self.state.status.read().await != BotStatus::Running
-            || !self.state.ticker.read().await.prices_are_fresh(Utc::now())
-        {
-            return Ok(());
-        }
-        let rules = self.state.rules.read().await.clone();
         let (mut sources, other_orders): (Vec<_>, Vec<_>) = self
             .state
             .active_orders
@@ -90,67 +121,61 @@ impl GridTradingEngine {
                 config.grid.grid_interval,
                 rules.tick_size,
             )
-        });
-        let Some(price) = price else { return Ok(()) };
+        })?;
         let market = self.state.ticker.read().await.last_price;
         if !rules.is_valid_maker_grid_price(&config.grid, closing_side, price, market) {
-            return Ok(());
+            return None;
         }
         let position = self.state.position.read().await.size;
         let available = closing_quantity_available(direction, position, &other_orders);
-        // Once a full grid unit can be funded, promote it; later cycles allocate
-        // further whole units first and leave at most one final remainder.
-        let Some((quantity, purpose)) =
-            rules.plan_remainder_quantity(price, config.grid.order_amount_usdc, available)
-        else {
-            return Ok(());
-        };
+        let (quantity, purpose) =
+            rules.plan_remainder_quantity(price, config.grid.order_amount_usdc, available)?;
         if sources.len() == 1 {
             let source = &sources[0];
             if source.price == price && source.quantity == quantity && purpose == source.purpose {
-                return Ok(());
+                return None;
             }
-            // Coalesce small top-ups rather than repeatedly losing queue priority.
             if quantity > source.quantity
                 && purpose == OrderPurpose::Remainder
                 && self
                     .last_remainder_change
                     .is_some_and(|at| at.elapsed() < Duration::from_secs(30))
             {
-                return Ok(());
+                return None;
             }
         }
-        let Some(amount_usdc) = price.checked_mul(quantity) else {
-            return Ok(());
-        };
-        let now = Utc::now();
-        let target = GridOrder {
-            client_order_id: new_grid_client_order_id(closing_side),
-            order_id: None,
-            symbol: config.exchange.symbol.clone(),
-            side: closing_side,
+        let target = Self::build_remainder_target_order(
+            &config.exchange.symbol,
+            closing_side,
             price,
             quantity,
-            amount_usdc,
-            status: OrderStatus::New,
-            created_at: now,
-            updated_at: now,
-            grid_level: if closing_side == OrderSide::Buy {
-                -1
-            } else {
-                1
-            },
-            paired_client_order_id: None,
-            is_take_profit: false,
             purpose,
-            merge_sources: sources
-                .iter()
-                .map(|o| OrderSource {
-                    client_order_id: o.client_order_id.clone(),
-                    price: o.price,
-                    quantity: o.quantity,
-                })
-                .collect(),
+            &sources,
+        )?;
+        Some((sources, target))
+    }
+
+    pub(super) async fn reconcile_remainder(&mut self, desired_prices: &[Decimal]) -> Result<()> {
+        let config = self.state.config.read().await.clone();
+        let closing_side = config.grid.direction.closing_side();
+        let closing_window = if closing_side == OrderSide::Buy {
+            config.grid.buy_window
+        } else {
+            config.grid.sell_window
+        };
+        if self.state.is_shutting_down()
+            || closing_window == 0
+            || *self.state.status.read().await != BotStatus::Running
+            || !self.state.ticker.read().await.prices_are_fresh(Utc::now())
+        {
+            return Ok(());
+        }
+        let rules = self.state.rules.read().await.clone();
+        let Some((sources, target)) = self
+            .plan_remainder_target(&config, &rules, desired_prices)
+            .await
+        else {
+            return Ok(());
         };
         let mut plan = RemainderPlan {
             mode: config.exchange.trading_mode(),
@@ -162,6 +187,73 @@ impl GridTradingEngine {
         // No cancellation or submission can precede this durable intent.
         self.persist_remainder_plan(&plan).await?;
         self.execute_remainder_plan(&mut plan).await
+    }
+
+    async fn validate_remainder_submission_window(
+        &self,
+        config: &crate::config::AppConfig,
+        rules: &SymbolRules,
+        plan: &mut RemainderPlan,
+    ) -> Result<Option<(OrderSide, Decimal, Decimal)>> {
+        let ticker = self.state.ticker.read().await.clone();
+        if !ticker.prices_are_fresh(Utc::now()) || ticker.last_price <= Decimal::ZERO {
+            return Ok(None);
+        }
+        let market = ticker.last_price;
+        let price = plan.target.price;
+        let direction = config.grid.direction;
+        let closing_side = direction.closing_side();
+        let (buys, sells) = self
+            .window_prices(config, rules, ticker.grid_reference_price())
+            .await?;
+        let window = if closing_side == OrderSide::Buy {
+            buys
+        } else {
+            sells
+        };
+        if plan.target.side != closing_side
+            || !window.contains(&price)
+            || !rules.is_valid_maker_grid_price(&config.grid, plan.target.side, price, market)
+        {
+            plan.phase = RemainderPhase::Abandoned;
+            self.persist_remainder_plan(plan).await?;
+            self.state.add_log("WARN", format!(
+                "Stale unsubmitted remainder plan {} retired (target {}, market {}); normal grid replenishment resumed",
+                plan.target.client_order_id, price, market,
+            )).await;
+            return Ok(None);
+        }
+        let orders: Vec<_> = self
+            .state
+            .active_orders
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect();
+        if orders
+            .iter()
+            .any(|o| o.side == closing_side && o.price == price)
+        {
+            plan.phase = RemainderPhase::Abandoned;
+            self.persist_remainder_plan(plan).await?;
+            return Ok(None);
+        }
+        let available =
+            closing_quantity_available(direction, self.state.position.read().await.size, &orders);
+        let quantity = rules
+            .round_quantity(available.min(plan.target.quantity))
+            .min(rules.max_qty);
+        if quantity < rules.min_qty
+            || quantity
+                .checked_mul(price)
+                .is_none_or(|notional| notional < rules.min_notional)
+        {
+            plan.phase = RemainderPhase::Complete;
+            self.persist_remainder_plan(plan).await?;
+            return Ok(None);
+        }
+        Ok(Some((closing_side, price, quantity)))
     }
 
     async fn execute_remainder_plan(&mut self, plan: &mut RemainderPlan) -> Result<()> {
@@ -206,71 +298,12 @@ impl GridTradingEngine {
             return Ok(());
         }
         let rules = self.state.rules.read().await.clone();
-        let ticker = self.state.ticker.read().await.clone();
-        if !ticker.prices_are_fresh(Utc::now()) {
+        let Some((closing_side, price, quantity)) = self
+            .validate_remainder_submission_window(&config, &rules, plan)
+            .await?
+        else {
             return Ok(());
-        }
-        let market = ticker.last_price;
-        let price = plan.target.price;
-        if market <= Decimal::ZERO {
-            return Ok(());
-        }
-        let direction = config.grid.direction;
-        let closing_side = direction.closing_side();
-        let (buys, sells) = self
-            .window_prices(&config, &rules, ticker.grid_reference_price())
-            .await?;
-        let window = if closing_side == OrderSide::Buy {
-            buys
-        } else {
-            sells
         };
-        if plan.target.side != closing_side
-            || !window.contains(&price)
-            || !rules.is_valid_maker_grid_price(&config.grid, plan.target.side, price, market)
-        {
-            // Sources are terminal and the target lookup above confirmed that
-            // no order was accepted. Keeping this plan active would freeze both
-            // windows indefinitely after a GTX rejection followed by a price rise.
-            // Retire it durably; ordinary orders use fresh prices and new IDs.
-            // Unknown lookups and accepted targets never reach this branch.
-            plan.phase = RemainderPhase::Abandoned;
-            self.persist_remainder_plan(plan).await?;
-            self.state.add_log("WARN", format!(
-                "Stale unsubmitted remainder plan {} retired (target {}, market {}); normal grid replenishment resumed",
-                plan.target.client_order_id, price, market,
-            )).await;
-            return Ok(());
-        }
-        let orders: Vec<_> = self
-            .state
-            .active_orders
-            .read()
-            .await
-            .values()
-            .cloned()
-            .collect();
-        if orders
-            .iter()
-            .any(|o| o.side == closing_side && o.price == price)
-        {
-            plan.phase = RemainderPhase::Abandoned;
-            return self.persist_remainder_plan(plan).await;
-        }
-        let available =
-            closing_quantity_available(direction, self.state.position.read().await.size, &orders);
-        // Never grow beyond the planned allocation when fills arrive during cancellation.
-        let quantity = rules
-            .round_quantity(available.min(plan.target.quantity))
-            .min(rules.max_qty);
-        if quantity < rules.min_qty
-            || quantity
-                .checked_mul(price)
-                .is_none_or(|notional| notional < rules.min_notional)
-        {
-            plan.phase = RemainderPhase::Complete;
-            return self.persist_remainder_plan(plan).await;
-        }
         self.submit_remainder_plan_target(RemainderTargetSubmission {
             config: &config,
             rules: &rules,
@@ -321,6 +354,42 @@ impl GridTradingEngine {
         Ok(true)
     }
 
+    async fn place_live_remainder_target(
+        &mut self,
+        rules: &SymbolRules,
+        plan: &mut RemainderPlan,
+        closing_side: OrderSide,
+        price: Decimal,
+        quantity: Decimal,
+    ) -> Result<bool> {
+        let formatted_price = rules.format_price(price);
+        let formatted_qty = rules.format_quantity(quantity);
+        let Some(exchange_guard) = self.state.try_exchange_submission() else {
+            return Ok(false);
+        };
+        let (found, mut fill_guard) = self
+            .submit_exchange_order(
+                exchange_guard,
+                NewOrderRequest {
+                    symbol: &plan.symbol,
+                    side: closing_side.as_str(),
+                    price: &formatted_price,
+                    quantity: &formatted_qty,
+                    client_order_id: &plan.target.client_order_id,
+                    post_only: true,
+                    reduce_only: true,
+                },
+            )
+            .await;
+        let found = found?;
+        self.settle_remainder_order(plan.target.clone(), found, Some(&mut *plan))
+            .await?;
+        if let Some(guard) = &mut fill_guard {
+            guard.resolve();
+        }
+        Ok(true)
+    }
+
     async fn submit_remainder_plan_target(
         &mut self,
         target: RemainderTargetSubmission<'_>,
@@ -358,32 +427,11 @@ impl GridTradingEngine {
             if !self.insert_paper_order(&mut plan.target).await {
                 return Ok(());
             }
-        } else {
-            let price = rules.format_price(price);
-            let quantity = rules.format_quantity(quantity);
-            let Some(exchange_guard) = self.state.try_exchange_submission() else {
-                return Ok(());
-            };
-            let (found, mut fill_guard) = self
-                .submit_exchange_order(
-                    exchange_guard,
-                    NewOrderRequest {
-                        symbol: &plan.symbol,
-                        side: closing_side.as_str(),
-                        price: &price,
-                        quantity: &quantity,
-                        client_order_id: &plan.target.client_order_id,
-                        post_only: true,
-                        reduce_only: true,
-                    },
-                )
-                .await;
-            let found = found?;
-            self.settle_remainder_order(plan.target.clone(), found, Some(&mut *plan))
-                .await?;
-            if let Some(guard) = &mut fill_guard {
-                guard.resolve();
-            }
+        } else if !self
+            .place_live_remainder_target(rules, plan, closing_side, price, quantity)
+            .await?
+        {
+            return Ok(());
         }
         plan.phase = RemainderPhase::Complete;
         self.persist_remainder_plan(plan).await?;
@@ -402,216 +450,6 @@ impl GridTradingEngine {
             )
             .await;
         Ok(())
-    }
-
-    /// Also used before draining paired exits: an uncertain accepted target must
-    /// reserve its inventory even when absent from an open-orders snapshot.
-    pub(super) async fn adopt_remainder_target(
-        &mut self,
-        plan: &mut RemainderPlan,
-    ) -> Result<bool> {
-        let mut guard = self.state.begin_fill_reconciliation().await;
-        let result = self.adopt_remainder_target_under_gate(plan).await;
-        if result.is_ok() {
-            guard.resolve();
-        }
-        result
-    }
-
-    pub(super) async fn adopt_remainder_target_under_gate(
-        &mut self,
-        plan: &mut RemainderPlan,
-    ) -> Result<bool> {
-        let Some(found) = self
-            .client
-            .lookup_order_by_client_id(&plan.symbol, &plan.target.client_order_id)
-            .await?
-        else {
-            return Ok(false);
-        };
-        self.settle_remainder_order(plan.target.clone(), found, Some(&mut *plan))
-            .await?;
-        plan.phase = RemainderPhase::Complete;
-        self.persist_remainder_plan(plan).await?;
-        self.last_remainder_change = Some(Instant::now());
-        Ok(true)
-    }
-
-    async fn confirm_remainder_identity(
-        &mut self,
-        order: &GridOrder,
-        found: &BinanceOrderResponse,
-        plan: Option<&mut RemainderPlan>,
-    ) -> Result<()> {
-        let active = self
-            .state
-            .active_orders
-            .read()
-            .await
-            .get(&order.client_order_id)
-            .cloned();
-        let key = (
-            self.client.account_identity_key(),
-            order.client_order_id.clone(),
-        );
-        let trusted = self
-            .evidence
-            .order_identity_conflicts
-            .get(&key)
-            .filter(|item| item.order_id.is_some_and(|id| id != found.order_id))
-            .cloned()
-            .or_else(|| {
-                order
-                    .order_id
-                    .filter(|id| *id != found.order_id)
-                    .map(|_| order.clone())
-            })
-            .or_else(|| {
-                active
-                    .as_ref()
-                    .filter(|item| item.order_id.is_some_and(|id| id != found.order_id))
-                    .cloned()
-            })
-            .or_else(|| {
-                self.evidence
-                    .order_identity_conflicts
-                    .get(&key)
-                    .filter(|item| item.order_id.is_some())
-                    .cloned()
-            })
-            .or_else(|| active.filter(|item| item.order_id.is_some()))
-            .unwrap_or_else(|| order.clone());
-        let id_conflict = trusted.order_id.is_some_and(|id| id != found.order_id);
-        if id_conflict {
-            self.block_reconciliation_and_invalidate_caches().await;
-            self.track_identity_conflict(&trusted, found);
-            self.state
-                .active_orders
-                .write()
-                .await
-                .insert(trusted.client_order_id.clone(), trusted.clone());
-            self.persist_identity_observations(self.client.account_identity_key(), &trusted.symbol)
-                .await;
-            return Err(anyhow!(
-                "Remainder exchange order ID conflicts with recovery metadata"
-            ));
-        }
-        if found.client_order_id != order.client_order_id
-            || found.symbol != order.symbol
-            || found.side != order.side.as_str()
-        {
-            return Err(anyhow!("Remainder exchange identity mismatch"));
-        }
-        if self.evidence.order_identity_observations.contains_key(&key)
-            && !self
-                .persist_identity_observations(key.0, &order.symbol)
-                .await
-        {
-            return Err(anyhow!("Could not persist remainder identity observations"));
-        }
-        if let Some(plan) = plan {
-            plan.target.order_id = Some(found.order_id);
-            if let Err(error) = self.persist_remainder_plan(plan).await {
-                let mut confirmed = order.clone();
-                confirmed.order_id = Some(found.order_id);
-                self.track_identity_conflict(&confirmed, found);
-                self.state
-                    .active_orders
-                    .write()
-                    .await
-                    .insert(confirmed.client_order_id.clone(), confirmed);
-                self.block_reconciliation_and_invalidate_caches().await;
-                self.persist_identity_observations(key.0, &order.symbol)
-                    .await;
-                return Err(error);
-            }
-        }
-        Ok(())
-    }
-
-    async fn settle_remainder_order(
-        &mut self,
-        mut order: GridOrder,
-        found: BinanceOrderResponse,
-        plan: Option<&mut RemainderPlan>,
-    ) -> Result<()> {
-        let inconsistent_fill = unresolved_filled_quantity(&found);
-        if inconsistent_fill {
-            self.block_reconciliation_and_invalidate_caches().await;
-        }
-        self.confirm_remainder_identity(&order, &found, plan)
-            .await?;
-        order.order_id = Some(found.order_id);
-        if inconsistent_fill {
-            order.reserve_quantity(found.orig_qty);
-            self.retain_uncertain_active_order(&order).await?;
-            return Err(anyhow!("Remainder fill quantity remains unresolved"));
-        }
-        if found.is_terminal() {
-            if found.executed_qty > Decimal::ZERO {
-                order.apply_terminal_fill(&found, exchange_fill_time(&found));
-                if !self.on_order_filled(&mut order).await {
-                    return Err(anyhow!("Could not record remainder fill"));
-                }
-            } else {
-                self.remove_managed_and_active_order(&order.client_order_id)
-                    .await?;
-            }
-        } else {
-            let mut original = order.clone();
-            original.reserve_quantity(found.orig_qty);
-            order.price = found.price;
-            if !self
-                .prepare_and_adopt_open_order(&mut order, original, &found)
-                .await
-            {
-                return Err(anyhow!("Could not persist remainder order"));
-            }
-        }
-        Ok(())
-    }
-
-    async fn cancel_and_settle_remainder_order(
-        &mut self,
-        order: GridOrder,
-        mut found: BinanceOrderResponse,
-        mut plan: Option<&mut RemainderPlan>,
-    ) -> Result<()> {
-        self.confirm_remainder_identity(&order, &found, plan.as_deref_mut())
-            .await?;
-        if !found.is_terminal() {
-            self.client
-                .cancel_order(&order.symbol, None, Some(&order.client_order_id))
-                .await?;
-            found = self
-                .client
-                .get_order_by_client_id(&order.symbol, &order.client_order_id)
-                .await?;
-        }
-        if !found.is_terminal() {
-            return Err(anyhow!("Remainder order cancellation is not terminal"));
-        }
-        self.settle_remainder_order(order, found, plan).await
-    }
-
-    /// Called by cancel-all while trading is paused; resolves a possibly accepted
-    /// target that has not yet appeared in the open-orders snapshot.
-    pub(super) async fn cancel_remainder_plan(&mut self) -> Result<()> {
-        let Some(mut plan) = self.load_remainder_plan().await? else {
-            return Ok(());
-        };
-        if plan.mode != TradingMode::Paper && plan.phase == RemainderPhase::Submitting {
-            if let Some(found) = self
-                .client
-                .lookup_order_by_client_id(&plan.symbol, &plan.target.client_order_id)
-                .await?
-            {
-                self.cancel_and_settle_remainder_order(plan.target.clone(), found, Some(&mut plan))
-                    .await?;
-            }
-        }
-        plan.phase = RemainderPhase::Abandoned;
-        self.persist_remainder_plan(&plan).await
     }
 }
 

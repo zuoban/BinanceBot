@@ -80,11 +80,7 @@ export function useControls(): ControlState {
   if (!context) throw new Error('useControls must be used within ControlProvider');
   return context;
 }
-export function ControlProvider({ pairs, children }: { pairs?: Pair[]; children: React.ReactNode }) {
-  const { message } = App.useApp();
-  const { confirm } = useConfirmDialog();
-  const client = useQueryClient();
-  const locked = useRef(new Set<string>());
+function useAbortableSleep() {
   const wakeups = useRef(new Set<() => void>());
   const abortRef = useRef<AbortController | null>(null);
   if (!abortRef.current || abortRef.current.signal.aborted) abortRef.current = new AbortController();
@@ -97,22 +93,29 @@ export function ControlProvider({ pairs, children }: { pairs?: Pair[]; children:
     for (const wake of wakeups.current) wake();
     wakeups.current.clear();
   });
+  const sleep = useCallback((ms: number) => new Promise<boolean>(resolve => {
+    if (!mounted.current) { resolve(false); return; }
+    const wake = () => { window.clearTimeout(timer); wakeups.current.delete(wake); resolve(false); };
+    const timer = window.setTimeout(() => { wakeups.current.delete(wake); resolve(mounted.current); }, ms);
+    wakeups.current.add(wake);
+  }), []);
+  return { mounted, abortRef, sleep };
+}
+
+function formatControlFailure(submitted: boolean, text: string): { resultText: string; outcome: 'request_unconfirmed' | 'failed'; warn: boolean } {
+  if (submitted) {
+    return { resultText: `请求结果不明，操作可能已生效：${text}；请刷新状态并核对交易所挂单及日志后再操作`, outcome: 'request_unconfirmed', warn: true };
+  }
+  return { resultText: `未提交：${text}`, outcome: 'failed', warn: false };
+}
+
+export function ControlProvider({ pairs, children }: { pairs?: Pair[]; children: React.ReactNode }) {
+  const { message } = App.useApp(), { confirm } = useConfirmDialog(), client = useQueryClient();
+  const locked = useRef(new Set<string>());
+  const { mounted, abortRef, sleep } = useAbortableSleep();
   const [busy, setBusy] = useState<Set<string>>(new Set());
   const [pending, setPending] = useState<Record<string, Action>>({});
   const [results, setResults] = useState<Record<string, string>>({});
-  const sleep = useCallback((ms: number) => new Promise<boolean>(resolve => {
-    if (!mounted.current) { resolve(false); return; }
-    const wake = () => {
-      window.clearTimeout(timer);
-      wakeups.current.delete(wake);
-      resolve(false);
-    };
-    const timer = window.setTimeout(() => {
-      wakeups.current.delete(wake);
-      resolve(mounted.current);
-    }, ms);
-    wakeups.current.add(wake);
-  }), []);
   const clearResult = useCallback((symbol: string) => {
     setResults(current => {
       if (!(symbol in current)) return current;
@@ -137,8 +140,7 @@ export function ControlProvider({ pairs, children }: { pairs?: Pair[]; children:
       const dangerous = action === 'rebalance' || action === 'cancel_all' || (action === 'resume' && pair.mode === 'LIVE');
       if (dangerous && !confirmed) {
         const { title, content } = controlConfirmCopy(pair, action);
-        const accepted = await confirm({ title, content, okText: '确认执行', cancelText: '取消' });
-        if (!accepted || !mounted.current) return 'not_submitted';
+        if (!await confirm({ title, content, okText: '确认执行', cancelText: '取消' }) || !mounted.current) return 'not_submitted';
       }
       if (!mounted.current) return 'not_submitted';
       setResults(r => ({ ...r, [pair.symbol]: '正在提交…' }));
@@ -155,30 +157,22 @@ export function ControlProvider({ pairs, children }: { pairs?: Pair[]; children:
       return outcome;
     } catch (error) {
       const text = errorMessage(error);
-      if (submitted) {
-        const result = `请求结果不明，操作可能已生效：${text}；请刷新状态并核对交易所挂单及日志后再操作`;
-        if (mounted.current) {
-          setResults(r => ({ ...r, [pair.symbol]: result }));
-          message.warning(`${pair.symbol}：${result}`);
-        }
-        return 'request_unconfirmed';
-      }
+      const { resultText, outcome, warn } = formatControlFailure(submitted, text);
       if (mounted.current) {
-        setResults(r => ({ ...r, [pair.symbol]: `未提交：${text}` }));
-        message.error(`${pair.symbol}：${text}`);
+        setResults(r => ({ ...r, [pair.symbol]: resultText }));
+        if (warn) message.warning(`${pair.symbol}：${resultText}`);
+        else message.error(`${pair.symbol}：${text}`);
       }
-      return 'failed';
+      return outcome;
     } finally {
       locked.current.delete(pair.symbol);
       if (mounted.current) {
         setBusy(new Set(locked.current));
         setPending(p => { const { [pair.symbol]: _done, ...rest } = p; return rest; });
       }
-      if (submitted) {
-        void invalidateStrategyQueries(client, { snapshot: pair.symbol });
-      }
+      if (submitted) void invalidateStrategyQueries(client, { snapshot: pair.symbol });
     }
-  }, [client, confirm, message, sleep]);
+  }, [abortRef, client, confirm, message, mounted, sleep]);
   const value = useMemo(() => ({ busy, pending, results, clearResult, run }), [busy, pending, results, clearResult, run]);
   return <Context.Provider value={value}>{children}</Context.Provider>;
 }

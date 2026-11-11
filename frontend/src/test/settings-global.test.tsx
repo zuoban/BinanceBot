@@ -163,3 +163,17 @@ it('测试失败时显示后端给出的原因', async () => {
   expect(await screen.findByText(/请填写 Bot Token 和 Chat ID/)).toBeInTheDocument();
   expect(mocks.error).toHaveBeenCalled();
 }, 40000);
+
+it('还原修改时一并清除字段校验错误', async () => {
+  setup();
+  const user = userEvent.setup();
+  const input = await screen.findByLabelText('全局最大持仓金额');
+  await waitFor(() => expect(input).toHaveValue('123.45'));
+  await user.clear(input);
+  await user.type(input, '0');
+  await user.click(screen.getByRole('button', { name: '保存全局设置' }));
+  expect(await screen.findByText('请输入大于 0 的金额')).toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: /还\s*原/ }));
+  await waitFor(() => expect(input).toHaveValue('123.45'));
+  await waitFor(() => expect(screen.queryByText('请输入大于 0 的金额')).not.toBeInTheDocument());
+});

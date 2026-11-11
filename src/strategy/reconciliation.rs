@@ -1,6 +1,7 @@
 #[cfg(test)]
-pub(super) use super::evidence::terminal_responses_disagree;
+pub(super) use super::evidence_book::terminal_responses_disagree;
 use super::reconciliation_anomalies::invalid_snapshot_price;
+use super::reconciliation_settlement::LiveSyncSettlement;
 use super::snapshot_conflicts::SnapshotConflictScan;
 use super::*;
 
@@ -15,29 +16,11 @@ struct OpenLiveOrderAdoption<'a> {
     persisted_managed: &'a HashMap<String, GridOrder>,
 }
 
-struct LiveSyncSettlement<'a> {
-    account_key: [u8; 32],
-    symbol: &'a str,
-    mode: TradingMode,
-    pause_epoch: u64,
-    terminal_orders: Vec<(GridOrder, BinanceOrderResponse)>,
-    remainder_plan: &'a mut Option<RemainderPlan>,
-    has_fill_guard: bool,
-    resolved_conflict_keys: &'a [([u8; 32], String)],
-}
-
 type LiveSyncPreflight = (
     HashMap<String, GridOrder>,
     Option<RemainderPlan>,
     HashSet<String>,
 );
-
-enum MissingOrderOutcome {
-    Terminal(Box<(GridOrder, BinanceOrderResponse)>),
-    Retired,
-    Unresolved,
-    PersistenceFailed,
-}
 
 struct LiveSnapshotValidation<'a> {
     priority: ReconciliationPriority,
@@ -47,7 +30,6 @@ struct LiveSnapshotValidation<'a> {
     mode: TradingMode,
     live_orders: Vec<BinanceOrderResponse>,
     pair_intents: &'a HashMap<String, GridOrder>,
-    remainder_plan: Option<&'a RemainderPlan>,
     restored_ids: HashSet<String>,
 }
 
@@ -130,175 +112,28 @@ impl GridTradingEngine {
         Some((pair_intents, remainder_plan, restored_ids))
     }
 
-    async fn settle_terminal_and_pending_workflows(
-        &mut self,
-        settlement: LiveSyncSettlement<'_>,
-    ) -> Option<bool> {
-        let LiveSyncSettlement {
-            account_key,
-            symbol,
-            mode,
-            pause_epoch,
-            mut terminal_orders,
-            remainder_plan,
-            has_fill_guard,
-            resolved_conflict_keys,
-        } = settlement;
-        let mut persistence_ok = true;
-        self.last_orders_sync = Some(Instant::now());
-        terminal_orders.sort_by_key(|(_, response)| (response.update_time, response.order_id));
-        if terminal_orders
-            .iter()
-            .any(|(_, response)| response.executed_qty > Decimal::ZERO)
-        {
-            // One refresh covers every execution observed before this
-            // point. Keep all reservations and the global submission
-            // barrier until fresh risk inputs and durable commits exist.
-            self.invalidate_account_and_position_caches().await;
-            if !self.sync_account_and_position().await {
-                self.last_orders_sync = None;
-                self.report_reconciliation_state(true).await;
-                return None;
-            }
-        }
-        for (mut order, exchange_order) in terminal_orders {
-            if exchange_order.executed_qty > Decimal::ZERO {
-                order.apply_terminal_fill(&exchange_order, exchange_fill_time(&exchange_order));
-                if !self.commit_order_fill(&mut order).await {
-                    persistence_ok = false;
-                }
-            } else {
-                if let Err(e) = self
-                    .remove_managed_and_active_order(&order.client_order_id)
-                    .await
-                {
-                    error!(
-                        "Could not delete closed order {}: {}",
-                        order.client_order_id, e
-                    );
-                    persistence_ok = false;
-                }
-                debug!(
-                    "Order {} closed without a fill ({})",
-                    order.client_order_id, exchange_order.status
-                );
-            }
-        }
-        if persistence_ok {
-            if let Some(plan) = remainder_plan {
-                if plan.phase == RemainderPhase::Submitting {
-                    if let Err(e) = self.adopt_remainder_target_under_gate(plan).await {
-                        warn!("Remainder submission remains unresolved: {}", e);
-                        persistence_ok = false;
-                    }
-                }
-            }
-        }
-        if !persistence_ok {
-            self.last_orders_sync = None;
-        } else if !(if has_fill_guard {
-            self.drain_pair_intents_under_gate(symbol, mode).await
-        } else {
-            self.drain_pair_intents(symbol, mode).await
-        }) {
-            persistence_ok = false;
-            self.last_orders_sync = None;
-        }
-        if self.state.pause_epoch() != pause_epoch {
-            self.last_orders_sync = None;
-            self.report_reconciliation_state(true).await;
-            return None;
-        }
-        if persistence_ok {
-            let client_ids: Vec<_> = resolved_conflict_keys
-                .iter()
-                .map(|key| key.1.clone())
-                .collect();
-            if !self
-                .clear_order_evidence_groups(account_key, symbol, &client_ids)
-                .await
-            {
-                self.last_orders_sync = None;
-                persistence_ok = false;
-            }
-        }
-        Some(persistence_ok)
-    }
-
     /// Reconcile open orders from Binance in Live mode
     pub(super) async fn sync_live_orders(&mut self) -> bool {
         self.sync_live_orders_with_priority(ReconciliationPriority::Critical)
             .await
     }
 
-    async fn validate_and_adopt_live_snapshot(
+    async fn verify_and_adopt_open_snapshot(
         &mut self,
-        input: LiveSnapshotValidation<'_>,
-    ) -> Option<(
-        HashMap<String, BinanceOrderResponse>,
-        HashMap<String, BinanceOrderResponse>,
-        Vec<([u8; 32], String)>,
-    )> {
-        let LiveSnapshotValidation {
-            priority,
-            pause_epoch,
-            account_key,
-            symbol,
-            mode,
-            mut live_orders,
-            pair_intents,
-            remainder_plan,
-            mut restored_ids,
-        } = input;
-        if live_orders
-            .iter()
-            .any(|order| is_grid_order(&order.client_order_id) && unresolved_filled_quantity(order))
-        {
-            self.set_global_reconciliation_ready(false).await;
-        }
-        if !self
-            .detect_and_persist_snapshot_conflicts(SnapshotConflictScan {
-                account_key,
-                symbol,
-                live_orders: &live_orders,
-                pair_intents,
-                remainder_plan,
-                restored_ids: &restored_ids,
-            })
-            .await
-        {
-            return None;
-        }
-        let (mut corrected_terminal, resolved_conflict_keys) = self
-            .resolve_order_identity_conflicts(
-                account_key,
-                symbol,
-                &mut live_orders,
-                &mut restored_ids,
-            )
-            .await?;
-        let mut live_ids: HashMap<String, BinanceOrderResponse> = live_orders
-            .into_iter()
-            .filter(|order| is_grid_order(&order.client_order_id))
-            .map(|o| (o.client_order_id.clone(), o))
-            .collect();
-        let uncertain_ids = self
-            .reconcile_uncertain_zero_fills(
-                account_key,
-                symbol,
-                &mut live_ids,
-                pair_intents,
-                remainder_plan,
-                &mut corrected_terminal,
-            )
-            .await?;
+        priority: ReconciliationPriority,
+        pause_epoch: u64,
+        account_key: [u8; 32],
+        symbol: &str,
+        input: (&HashMap<String, GridOrder>, Option<&RemainderPlan>),
+        state: (
+            HashMap<String, BinanceOrderResponse>,
+            HashSet<String>,
+            HashSet<String>,
+        ),
+    ) -> Option<HashMap<String, BinanceOrderResponse>> {
+        let (pair_intents, remainder_plan) = input;
+        let (live_ids, uncertain_ids, mut restored_ids) = state;
         let inconsistent_fill = live_ids.values().any(unresolved_filled_quantity);
-        if live_ids.values().any(invalid_snapshot_price) {
-            let snapshot: Vec<_> = live_ids.values().cloned().collect();
-            self.retain_invalid_price_snapshot(account_key, symbol, mode, &snapshot)
-                .await;
-            return None;
-        }
         // Every live snapshot is checked against durable identities;
         // in-memory conflict barriers do not survive a process restart.
         let persisted_managed = self
@@ -336,13 +171,132 @@ impl GridTradingEngine {
         if needs_position_refresh {
             self.state.check_global_position_limit().await;
         }
-        if self.state.pause_epoch() != pause_epoch {
+        (self.state.pause_epoch() == pause_epoch).then_some(live_ids)
+    }
+
+    async fn validate_and_adopt_live_snapshot(
+        &mut self,
+        input: LiveSnapshotValidation<'_>,
+        remainder_plan: Option<&RemainderPlan>,
+    ) -> Option<(
+        HashMap<String, BinanceOrderResponse>,
+        HashMap<String, BinanceOrderResponse>,
+        Vec<String>,
+    )> {
+        let LiveSnapshotValidation {
+            priority,
+            pause_epoch,
+            account_key,
+            symbol,
+            mode,
+            mut live_orders,
+            pair_intents,
+            mut restored_ids,
+        } = input;
+        if live_orders
+            .iter()
+            .any(|order| is_grid_order(&order.client_order_id) && unresolved_filled_quantity(order))
+        {
+            self.set_global_reconciliation_ready(false).await;
+        }
+        if !self
+            .detect_and_persist_snapshot_conflicts(SnapshotConflictScan {
+                account_key,
+                symbol,
+                live_orders: &live_orders,
+                pair_intents,
+                remainder_plan,
+                restored_ids: &restored_ids,
+            })
+            .await
+        {
             return None;
         }
+        let (mut corrected_terminal, resolved_conflict_ids) = self
+            .resolve_order_identity_conflicts(
+                account_key,
+                symbol,
+                &mut live_orders,
+                &mut restored_ids,
+            )
+            .await?;
+        let live_ids: HashMap<String, BinanceOrderResponse> = live_orders
+            .into_iter()
+            .filter(|order| is_grid_order(&order.client_order_id))
+            .map(|o| (o.client_order_id.clone(), o))
+            .collect();
+        let mut live_ids = self
+            .adopt_conflict_free_snapshot(
+                (priority, pause_epoch, account_key, symbol, mode),
+                (pair_intents, remainder_plan),
+                live_ids,
+                restored_ids,
+                &mut corrected_terminal,
+            )
+            .await?;
         for id in corrected_terminal.keys() {
             live_ids.remove(id);
         }
-        Some((live_ids, corrected_terminal, resolved_conflict_keys))
+        Some((live_ids, corrected_terminal, resolved_conflict_ids))
+    }
+
+    async fn adopt_conflict_free_snapshot(
+        &mut self,
+        scope: (ReconciliationPriority, u64, [u8; 32], &str, TradingMode),
+        recovery: (&HashMap<String, GridOrder>, Option<&RemainderPlan>),
+        mut live_ids: HashMap<String, BinanceOrderResponse>,
+        restored_ids: HashSet<String>,
+        corrected_terminal: &mut HashMap<String, BinanceOrderResponse>,
+    ) -> Option<HashMap<String, BinanceOrderResponse>> {
+        let (priority, pause_epoch, account_key, symbol, mode) = scope;
+        let (pair_intents, remainder_plan) = recovery;
+        let uncertain_ids = self
+            .reconcile_uncertain_zero_fills(
+                account_key,
+                symbol,
+                &mut live_ids,
+                pair_intents,
+                remainder_plan,
+                corrected_terminal,
+            )
+            .await?;
+        if live_ids.values().any(invalid_snapshot_price) {
+            let snapshot: Vec<_> = live_ids.values().cloned().collect();
+            self.retain_invalid_price_snapshot(account_key, symbol, mode, &snapshot)
+                .await;
+            return None;
+        }
+        self.verify_and_adopt_open_snapshot(
+            priority,
+            pause_epoch,
+            account_key,
+            symbol,
+            (pair_intents, remainder_plan),
+            (live_ids, uncertain_ids, restored_ids),
+        )
+        .await
+    }
+
+    async fn fetch_open_orders_for_sync(
+        &mut self,
+        priority: ReconciliationPriority,
+        symbol: &str,
+    ) -> Option<Vec<BinanceOrderResponse>> {
+        let open_orders = match priority {
+            ReconciliationPriority::Periodic => {
+                self.client.get_open_orders_for_periodic_sync(symbol).await
+            }
+            ReconciliationPriority::Critical => self.client.get_open_orders(symbol).await,
+        };
+        match open_orders {
+            Ok(orders) => Some(orders),
+            Err(e) => {
+                warn!("Error during live orders sync: {}", e);
+                self.last_orders_sync = None;
+                self.report_reconciliation_state(true).await;
+                None
+            }
+        }
     }
 
     pub(super) async fn sync_live_orders_with_priority(
@@ -358,34 +312,24 @@ impl GridTradingEngine {
             )
         };
         let account_key = self.client.account_identity_key();
-        let Some((pair_intents, mut remainder_plan, restored_ids)) = self
+        let Some((pair_intents, remainder_plan, restored_ids)) = self
             .prepare_live_orders_sync(account_key, &symbol, mode)
             .await
         else {
             return false;
         };
-        let open_orders = match priority {
-            ReconciliationPriority::Periodic => {
-                self.client.get_open_orders_for_periodic_sync(&symbol).await
-            }
-            ReconciliationPriority::Critical => self.client.get_open_orders(&symbol).await,
-        };
-        let live_orders = match open_orders {
-            Ok(orders) => orders,
-            Err(e) => {
-                warn!("Error during live orders sync: {}", e);
-                self.last_orders_sync = None;
-                self.report_reconciliation_state(true).await;
-                return false;
-            }
+        let Some(live_orders) = self.fetch_open_orders_for_sync(priority, &symbol).await else {
+            return false;
         };
 
         self.last_orders_sync = None;
         let invalid_price = live_orders
             .iter()
             .any(|order| is_grid_order(&order.client_order_id) && invalid_snapshot_price(order));
-        let mut fill_guard = self
+        let fill_guard = self
             .acquire_live_sync_fill_guard(
+                account_key,
+                &symbol,
                 invalid_price,
                 &live_orders,
                 &pair_intents,
@@ -397,8 +341,8 @@ impl GridTradingEngine {
                 .await;
             return false;
         }
-        let Some((live_ids, mut corrected_terminal, resolved_conflict_keys)) = self
-            .validate_and_adopt_live_snapshot(LiveSnapshotValidation {
+        self.reconcile_fetched_live_orders(
+            LiveSnapshotValidation {
                 priority,
                 pause_epoch,
                 account_key,
@@ -406,9 +350,26 @@ impl GridTradingEngine {
                 mode,
                 live_orders,
                 pair_intents: &pair_intents,
-                remainder_plan: remainder_plan.as_ref(),
                 restored_ids,
-            })
+            },
+            remainder_plan,
+            fill_guard,
+        )
+        .await
+    }
+
+    async fn reconcile_fetched_live_orders(
+        &mut self,
+        validation: LiveSnapshotValidation<'_>,
+        mut remainder_plan: Option<RemainderPlan>,
+        mut fill_guard: Option<crate::server::state::PendingFillReconciliation>,
+    ) -> bool {
+        let account_key = validation.account_key;
+        let symbol = validation.symbol;
+        let mode = validation.mode;
+        let pause_epoch = validation.pause_epoch;
+        let Some((live_ids, mut corrected_terminal, resolved_conflict_ids)) = self
+            .validate_and_adopt_live_snapshot(validation, remainder_plan.as_ref())
             .await
         else {
             return false;
@@ -416,7 +377,7 @@ impl GridTradingEngine {
         let Some(terminal_orders) = self
             .collect_missing_terminal_orders(
                 account_key,
-                &symbol,
+                symbol,
                 pause_epoch,
                 &live_ids,
                 &mut corrected_terminal,
@@ -428,13 +389,13 @@ impl GridTradingEngine {
         let Some(persistence_ok) = self
             .settle_terminal_and_pending_workflows(LiveSyncSettlement {
                 account_key,
-                symbol: &symbol,
+                symbol,
                 mode,
                 pause_epoch,
                 terminal_orders,
                 remainder_plan: &mut remainder_plan,
                 has_fill_guard: fill_guard.is_some(),
-                resolved_conflict_keys: &resolved_conflict_keys,
+                resolved_conflict_ids: &resolved_conflict_ids,
             })
             .await
         else {
@@ -524,153 +485,5 @@ impl GridTradingEngine {
             }
         }
         true
-    }
-    async fn inspect_missing_active_order(
-        &mut self,
-        account_key: [u8; 32],
-        symbol: &str,
-        pause_epoch: u64,
-        mut order: GridOrder,
-        corrected_terminal: &mut HashMap<String, BinanceOrderResponse>,
-    ) -> Option<MissingOrderOutcome> {
-        if self.state.pause_epoch() != pause_epoch {
-            return None;
-        }
-        let exchange_result =
-            if let Some(corrected) = corrected_terminal.remove(&order.client_order_id) {
-                Ok(Some(corrected))
-            } else {
-                self.lookup_order(&order).await
-            };
-        let inconsistent = exchange_result
-            .as_ref()
-            .is_ok_and(|found| found.as_ref().is_some_and(unresolved_filled_quantity));
-        if inconsistent {
-            self.report_reconciliation_state(true).await;
-            self.invalidate_account_and_position_caches().await;
-        }
-        if self.state.pause_epoch() != pause_epoch {
-            return None;
-        }
-        match exchange_result {
-            Ok(None)
-                if (Utc::now() - order.created_at).num_seconds()
-                    >= UNKNOWN_SUBMISSION_GRACE_SECS =>
-            {
-                if let Err(error) = self
-                    .remove_managed_and_active_order(&order.client_order_id)
-                    .await
-                {
-                    error!(
-                        "Could not retire absent order intent {}: {}",
-                        order.client_order_id, error
-                    );
-                    Some(MissingOrderOutcome::PersistenceFailed)
-                } else {
-                    self.state
-                        .add_log(
-                            "WARN",
-                            format!(
-                                "Unaccepted order intent {} retired after confirmed absence",
-                                order.client_order_id
-                            ),
-                        )
-                        .await;
-                    Some(MissingOrderOutcome::Retired)
-                }
-            }
-            Ok(None) => Some(MissingOrderOutcome::Unresolved),
-            Ok(Some(exchange_order)) => {
-                if !order.matches_exchange_identity(&exchange_order) {
-                    self.track_identity_conflict(&order, &exchange_order);
-                    self.report_reconciliation_state(true).await;
-                    self.persist_identity_observations(account_key, symbol)
-                        .await;
-                    return Some(MissingOrderOutcome::Unresolved);
-                }
-                // A query may confirm acceptance before the open-orders snapshot catches up.
-                // Persist it before a later lookup or restart can lose that distinction.
-                if order.order_id.is_none() {
-                    order.order_id = Some(exchange_order.order_id);
-                    if let Err(error) = self.save_managed_order(&order).await {
-                        error!(
-                            "Could not persist confirmed order {}: {}",
-                            order.client_order_id, error
-                        );
-                        return Some(MissingOrderOutcome::PersistenceFailed);
-                    }
-                    self.state
-                        .active_orders
-                        .write()
-                        .await
-                        .insert(order.client_order_id.clone(), order.clone());
-                }
-                if inconsistent
-                    || !exchange_order.is_terminal()
-                    || (exchange_order.executed_qty > Decimal::ZERO
-                        && exchange_order.price <= Decimal::ZERO
-                        && exchange_order
-                            .avg_price
-                            .is_none_or(|price| price <= Decimal::ZERO))
-                {
-                    return Some(MissingOrderOutcome::Unresolved);
-                }
-                Some(MissingOrderOutcome::Terminal(Box::new((
-                    order,
-                    exchange_order,
-                ))))
-            }
-            Err(e) => {
-                warn!(
-                    "Could not verify order {} status: {}",
-                    order.client_order_id, e
-                );
-                Some(MissingOrderOutcome::Unresolved)
-            }
-        }
-    }
-
-    async fn collect_missing_terminal_orders(
-        &mut self,
-        account_key: [u8; 32],
-        symbol: &str,
-        pause_epoch: u64,
-        live_ids: &HashMap<String, BinanceOrderResponse>,
-        corrected_terminal: &mut HashMap<String, BinanceOrderResponse>,
-    ) -> Option<Vec<(GridOrder, BinanceOrderResponse)>> {
-        let filled_or_closed: Vec<_> = self
-            .state
-            .active_orders
-            .read()
-            .await
-            .iter()
-            .filter(|(client_id, _)| !live_ids.contains_key(*client_id))
-            .map(|(_, order)| order.clone())
-            .collect();
-        let mut terminal_orders = Vec::new();
-        let mut unresolved_orders = false;
-        let mut persistence_ok = true;
-        for order in filled_or_closed {
-            match self
-                .inspect_missing_active_order(
-                    account_key,
-                    symbol,
-                    pause_epoch,
-                    order,
-                    corrected_terminal,
-                )
-                .await?
-            {
-                MissingOrderOutcome::Terminal(pair) => terminal_orders.push(*pair),
-                MissingOrderOutcome::Retired => {}
-                MissingOrderOutcome::Unresolved => unresolved_orders = true,
-                MissingOrderOutcome::PersistenceFailed => persistence_ok = false,
-            }
-        }
-        if !persistence_ok || unresolved_orders {
-            self.report_reconciliation_state(true).await;
-            return None;
-        }
-        Some(terminal_orders)
     }
 }

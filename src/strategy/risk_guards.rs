@@ -1,5 +1,21 @@
 use super::*;
 
+#[derive(Clone, Copy)]
+pub(super) struct RiskConfigSnapshot {
+    pub(super) is_paper: bool,
+    pub(super) sync_interval_secs: u64,
+    pub(super) grid: crate::config::GridConfig,
+}
+
+impl RiskConfigSnapshot {
+    pub(super) fn from_config(config: &crate::config::AppConfig) -> Self {
+        Self {
+            is_paper: config.exchange.is_paper(),
+            sync_interval_secs: config.exchange.sync_interval_secs,
+            grid: config.grid,
+        }
+    }
+}
 pub(super) fn opening_exposure_usdc<'a>(
     direction: GridDirection,
     position_size: Decimal,
@@ -77,10 +93,10 @@ impl GridTradingEngine {
 
     pub(super) fn position_mark_is_fresh(
         &self,
-        config: &crate::config::AppConfig,
+        sync_interval_secs: u64,
         position: &PositionInfo,
     ) -> bool {
-        let max_age = max_reconciliation_age_secs(config.exchange.sync_interval_secs);
+        let max_age = max_reconciliation_age_secs(sync_interval_secs);
         position.mark_price > Decimal::ZERO
             && position
                 .update_time
@@ -89,14 +105,14 @@ impl GridTradingEngine {
 
     pub(super) fn position_valuation_price(
         &self,
-        config: &crate::config::AppConfig,
+        sync_interval_secs: u64,
         position: &PositionInfo,
         ticker: &TickerInfo,
     ) -> Decimal {
         position.valuation_price_with_freshness(
             ticker,
             Self::mark_price_is_fresh(ticker),
-            self.position_mark_is_fresh(config, position),
+            self.position_mark_is_fresh(sync_interval_secs, position),
         )
     }
 
@@ -134,13 +150,14 @@ impl GridTradingEngine {
         else {
             return false;
         };
+        let sync_interval_secs = config.exchange.sync_interval_secs;
+        drop(config);
         let position = self.state.position.read().await;
         let ticker = self.state.ticker.read().await;
-        let valuation_price = self.position_valuation_price(&config, &position, &ticker);
+        let valuation_price = self.position_valuation_price(sync_interval_secs, &position, &ticker);
         let position_size = position.size;
         drop(ticker);
         drop(position);
-        drop(config);
         if valuation_price <= Decimal::ZERO {
             return false;
         }
@@ -163,23 +180,20 @@ impl GridTradingEngine {
     /// True while opening must be suspended without pausing the strategy: the filled position
     /// value is at the cap in cancel-opening mode, or the mark price is within the configured
     /// distance of the liquidation price.
-    pub(super) async fn opening_suspended_at_limit(
-        &self,
-        config: &crate::config::AppConfig,
-    ) -> bool {
-        let cap = config.grid.max_position_usdc.filter(|limit| {
+    pub(super) async fn opening_suspended_at_limit(&self, risk: RiskConfigSnapshot) -> bool {
+        let cap = risk.grid.max_position_usdc.filter(|limit| {
             *limit > Decimal::ZERO
-                && config.grid.cancel_opening_on_max_position
-                && !config.grid.pause_on_max_position
+                && risk.grid.cancel_opening_on_max_position
+                && !risk.grid.pause_on_max_position
         });
-        if cap.is_none() && config.grid.min_liquidation_distance_pct.is_none() {
+        if cap.is_none() && risk.grid.min_liquidation_distance_pct.is_none() {
             return false;
         }
         let position = self.state.position.read().await;
         let size = position.size;
         let liquidation_price = position.liquidation_price;
         let liquidation_guard =
-            config.grid.min_liquidation_distance_pct.is_some() && liquidation_price > Decimal::ZERO;
+            risk.grid.min_liquidation_distance_pct.is_some() && liquidation_price > Decimal::ZERO;
         if size.is_zero() || (cap.is_none() && !liquidation_guard) {
             return false;
         }
@@ -188,7 +202,7 @@ impl GridTradingEngine {
         // Position marks follow the account reconciliation freshness allowance.
         let price = if Self::mark_price_is_fresh(&ticker) {
             ticker.mark_price
-        } else if self.position_mark_is_fresh(config, &position) {
+        } else if self.position_mark_is_fresh(risk.sync_interval_secs, &position) {
             position.mark_price
         } else {
             // Last trades cannot establish liquidation distance. Keep openings
@@ -208,7 +222,7 @@ impl GridTradingEngine {
             size,
             price,
             liquidation_price,
-            config.grid.min_liquidation_distance_pct,
+            risk.grid.min_liquidation_distance_pct,
         )
     }
 
@@ -216,12 +230,12 @@ impl GridTradingEngine {
     /// Keep this outside fill recording so cancellation cannot recurse through another fill.
     pub(super) async fn cancel_suspended_opening_orders(
         &mut self,
-        config: &crate::config::AppConfig,
+        risk: RiskConfigSnapshot,
     ) -> bool {
         if self.state.is_shutting_down() || *self.state.status.read().await != BotStatus::Running {
             return true;
         }
-        if !self.opening_suspended_at_limit(config).await {
+        if !self.opening_suspended_at_limit(risk).await {
             return true;
         }
         let mut openings: Vec<_> = self
@@ -231,7 +245,7 @@ impl GridTradingEngine {
             .await
             .values()
             .filter(|order| {
-                order.side == config.grid.direction.opening_side() && is_window_order(order)
+                order.side == risk.grid.direction.opening_side() && is_window_order(order)
             })
             .cloned()
             .collect();
@@ -248,9 +262,9 @@ impl GridTradingEngine {
 
     pub(super) async fn protect_openings_and_check_limits(
         &mut self,
-        config: &crate::config::AppConfig,
+        risk: RiskConfigSnapshot,
     ) -> bool {
-        let protected = self.cancel_suspended_opening_orders(config).await;
+        let protected = self.cancel_suspended_opening_orders(risk).await;
         let paused = self.pause_if_position_limit_reached().await;
         protected && !paused
     }

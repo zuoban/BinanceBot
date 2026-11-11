@@ -34,7 +34,7 @@ fn websocket_token(headers: &HeaderMap) -> &str {
         .unwrap_or_default()
 }
 
-fn ws_origin_allowed(headers: &HeaderMap) -> bool {
+pub(super) fn ws_origin_allowed(headers: &HeaderMap) -> bool {
     let Some(origin_header) = headers.get(axum::http::header::ORIGIN) else {
         return true;
     };
@@ -44,28 +44,50 @@ fn ws_origin_allowed(headers: &HeaderMap) -> bool {
     let Ok(origin) = url::Url::parse(origin_str) else {
         return false;
     };
-    if !matches!(origin.scheme(), "http" | "https") {
+    if !matches!(origin.scheme(), "http" | "https") || origin.host().is_none() {
         return false;
     }
-    let Some(origin_host) = origin.host_str() else {
-        return false;
-    };
     let Some(host_str) = headers
         .get(axum::http::header::HOST)
         .and_then(|value| value.to_str().ok())
     else {
         return false;
     };
-    let Ok(req_url) = url::Url::parse(&format!("http://{host_str}")) else {
+    if host_str.is_empty()
+        || host_str.chars().any(|ch| {
+            matches!(ch, '@' | '/' | '?' | '#' | '\\')
+                || ch.is_ascii_whitespace()
+                || ch.is_ascii_control()
+        })
+    {
+        return false;
+    }
+    let effective_scheme = if let Some(proto_header) = headers.get("x-forwarded-proto") {
+        let Ok(raw_proto) = proto_header.to_str() else {
+            return false;
+        };
+        let first = raw_proto.split(',').next().unwrap_or("").trim();
+        if first.eq_ignore_ascii_case("https") {
+            if origin.scheme() != "https" {
+                return false;
+            }
+            "https"
+        } else if first.eq_ignore_ascii_case("http") {
+            if origin.scheme() != "http" {
+                return false;
+            }
+            "http"
+        } else {
+            return false;
+        }
+    } else {
+        origin.scheme()
+    };
+    let Ok(req_url) = url::Url::parse(&format!("{effective_scheme}://{host_str}")) else {
         return false;
     };
-    if req_url.host_str() != Some(origin_host) {
-        return false;
-    }
-    match req_url.port() {
-        Some(req_port) => origin.port_or_known_default() == Some(req_port),
-        None => origin.port().is_none(),
-    }
+    origin.host() == req_url.host()
+        && origin.port_or_known_default() == req_url.port_or_known_default()
 }
 
 #[derive(Clone)]
@@ -109,7 +131,7 @@ impl AccountSource {
     }
 }
 
-pub(super) type AccountFrameSender = tokio::sync::watch::Sender<Option<Arc<String>>>;
+pub(super) type AccountFrameSender = tokio::sync::watch::Sender<Option<Arc<str>>>;
 
 // Router-owned: clients of this registry share collection and JSON encoding.
 // The sender retains no receiver, so the sampler exits when the last client leaves.
@@ -126,7 +148,7 @@ impl AccountHub {
         })
     }
 
-    pub(super) async fn subscribe(&self) -> tokio::sync::watch::Receiver<Option<Arc<String>>> {
+    pub(super) async fn subscribe(&self) -> tokio::sync::watch::Receiver<Option<Arc<str>>> {
         let mut sampler = self.sampler.lock().await;
         if let Some(sender) = sampler.as_ref() {
             return sender.subscribe();
@@ -169,7 +191,7 @@ impl AccountHub {
                         };
                         // If the last subscriber left during collection, the
                         // closed branch performs the synchronized shutdown.
-                        let _ = sender.send(Some(Arc::new(message)));
+                        let _ = sender.send(Some(Arc::<str>::from(message)));
                     }
                 }
             }
@@ -224,9 +246,6 @@ async fn upgrade_accounts_socket(
     headers: HeaderMap,
     hub: Arc<AccountHub>,
 ) -> Response {
-    if !ws_origin_allowed(&headers) {
-        return StatusCode::FORBIDDEN.into_response();
-    }
     let (Some(auth), Some(retired)) = (hub.source.auth(), hub.source.subscribe_retirement()) else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
@@ -256,7 +275,12 @@ async fn run_accounts_socket(
             if !auth.is_token_valid(&token).await {
                 break;
             }
-            if !send_with_timeout(&mut sender, Message::Text((*frame).clone()), &mut retired).await
+            if !send_with_timeout(
+                &mut sender,
+                Message::Text(frame.as_ref().to_owned()),
+                &mut retired,
+            )
+            .await
             {
                 break;
             }
@@ -359,7 +383,13 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, token: String) {
         return;
     }
     if let Some(json) = crate::types::ws_frame_json("snapshot", &initial_snapshot) {
-        if !send_with_timeout(&mut sender, Message::Text(json), &mut retired).await {
+        if !send_with_timeout(
+            &mut sender,
+            Message::Text(json.as_ref().to_owned()),
+            &mut retired,
+        )
+        .await
+        {
             return;
         }
     }
@@ -422,7 +452,7 @@ fn spawn_socket_send_task(
     send_token: String,
     mut retired: tokio::sync::watch::Receiver<bool>,
     mut result_rx: tokio::sync::mpsc::Receiver<String>,
-    mut rx: tokio::sync::broadcast::Receiver<String>,
+    mut rx: tokio::sync::broadcast::Receiver<Arc<str>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut check_auth = tokio::time::interval(std::time::Duration::from_secs(1));
@@ -440,11 +470,33 @@ fn spawn_socket_send_task(
                     match message {
                         Ok(msg) => {
                             if !send_state.is_token_valid(&send_token).await { break; }
-                            if !send_with_timeout(&mut sender, Message::Text(msg), &mut retired).await {
+                            if !send_with_timeout(
+                                &mut sender,
+                                Message::Text(msg.as_ref().to_owned()),
+                                &mut retired,
+                            )
+                            .await
+                            {
                                 break;
                             }
                         }
-                        Err(_) => break,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            if !send_state.is_token_valid(&send_token).await { break; }
+                            if let Some(json) =
+                                crate::types::ws_frame_json("snapshot", &send_state.snapshot().await)
+                            {
+                                if !send_with_timeout(
+                                    &mut sender,
+                                    Message::Text(json.as_ref().to_owned()),
+                                    &mut retired,
+                                )
+                                .await
+                                {
+                                    break;
+                                }
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
                 }
             }

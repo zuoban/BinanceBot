@@ -1,8 +1,11 @@
-use super::Database;
-use crate::types::{AccountInfo, PositionInfo, PAPER_INITIAL_BALANCE};
+use super::{
+    config_runtime::save_pair_status_on, immediate_tx, migrations::has_legacy_paper_history_on,
+    Database,
+};
+use crate::types::{AccountInfo, BotStatus, PositionInfo, TradingMode, PAPER_INITIAL_BALANCE};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use rusqlite::Connection;
+use rusqlite::{params, Connection, OptionalExtension};
 use rust_decimal::Decimal;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -380,5 +383,74 @@ impl Database {
                 *ledger = Some(loaded);
             }
         }
+    }
+
+    pub(crate) fn load_paper_state(
+        &self,
+        symbol: &str,
+    ) -> Result<Option<(PositionInfo, AccountInfo)>> {
+        let conn = self.lock_connection("load_paper_state");
+        let saved: Option<(String, String)> = conn
+            .query_row(
+                "SELECT position_json, account_json FROM paper_accounts WHERE symbol = ?1",
+                params![symbol],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if let Some((position, account)) = saved {
+            return Ok(Some((
+                serde_json::from_str(&position)?,
+                serde_json::from_str(&account)?,
+            )));
+        }
+        // Older versions never stored the account. Cleared history and earlier
+        // restarts make replay ambiguous, so do not invent a balance or position.
+        let legacy = has_legacy_paper_history_on(&conn, symbol)?;
+        anyhow::ensure!(
+            !legacy,
+            "旧模拟盘状态无法从成交历史可靠恢复：{}，请先人工核对并迁移仓位和余额",
+            symbol
+        );
+        Ok(None)
+    }
+
+    /// Explicitly establish a new paper baseline; this cannot recover old holdings.
+    pub fn initialize_legacy_paper_account(&self, symbol: &str) -> Result<()> {
+        let mut conn = self.lock_connection("initialize_legacy_paper_account");
+        let tx = immediate_tx(&mut conn)?;
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM paper_accounts WHERE symbol = ?1)",
+            params![symbol],
+            |row| row.get(0),
+        )?;
+        anyhow::ensure!(!exists, "该交易对已有模拟盘状态，拒绝覆盖");
+        anyhow::ensure!(
+            has_legacy_paper_history_on(&tx, symbol)?,
+            "该交易对没有需要迁移的旧模拟盘记录"
+        );
+        let position = PositionInfo {
+            symbol: symbol.to_string(),
+            ..PositionInfo::default()
+        };
+        let account = AccountInfo::initial_paper(symbol, Some(Utc::now()));
+        tx.execute(
+            "INSERT INTO paper_accounts (symbol, position_json, account_json) VALUES (?1, ?2, ?3)",
+            params![
+                symbol,
+                serde_json::to_string(&position)?,
+                serde_json::to_string(&account)?
+            ],
+        )?;
+        save_pair_status_on(&tx, symbol, TradingMode::Paper, BotStatus::Paused)?;
+        tx.commit()?;
+        if let Some(ledger) = self
+            .paper_ledger
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
+            ledger.commit(symbol, &position, &account);
+        }
+        Ok(())
     }
 }

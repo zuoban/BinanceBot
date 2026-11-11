@@ -55,20 +55,7 @@ impl GridTradingEngine {
                 expected_mode,
                 reply,
             } => {
-                let current_mode = self.state.config.read().await.exchange.trading_mode();
-                let result =
-                    if expected_mode == TradingMode::Unknown || expected_mode != current_mode {
-                        Err("策略运行模式已改变，无法重建网格".into())
-                    } else if *self.state.status.read().await != BotStatus::Running {
-                        Err("策略未运行，无法重建网格".into())
-                    } else {
-                        info!("Grid rebalance requested");
-                        self.state
-                            .add_log("INFO", "Manual grid rebalance triggered")
-                            .await;
-                        self.rebalance_grid().await
-                    };
-                let _ = reply.send(result);
+                self.handle_rebalance_action(expected_mode, reply).await;
             }
             BotControlAction::UpdateConfig { config, reply } => {
                 self.apply_and_reply_config(*config, "Configuration update rejected", reply)
@@ -81,6 +68,26 @@ impl GridTradingEngine {
                     .await;
             }
         }
+    }
+
+    async fn handle_rebalance_action(
+        &mut self,
+        expected_mode: TradingMode,
+        reply: tokio::sync::oneshot::Sender<std::result::Result<(), String>>,
+    ) {
+        let current_mode = self.state.config.read().await.exchange.trading_mode();
+        let result = if expected_mode == TradingMode::Unknown || expected_mode != current_mode {
+            Err("策略运行模式已改变，无法重建网格".into())
+        } else if *self.state.status.read().await != BotStatus::Running {
+            Err("策略未运行，无法重建网格".into())
+        } else {
+            info!("Grid rebalance requested");
+            self.state
+                .add_log("INFO", "Manual grid rebalance triggered")
+                .await;
+            self.rebalance_grid().await
+        };
+        let _ = reply.send(result);
     }
 
     async fn handle_pause_or_cancel_action(&mut self, action: BotControlAction) {

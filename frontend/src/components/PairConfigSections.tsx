@@ -42,7 +42,9 @@ export function PairBasicSection({
   symbolsFetching,
   symbolsError,
   previewFetching,
+  previewError,
   onRetrySymbols,
+  onRetryPreview,
 }: {
   live: boolean;
   adding: boolean;
@@ -54,7 +56,9 @@ export function PairBasicSection({
   symbolsFetching: boolean;
   symbolsError: boolean;
   previewFetching: boolean;
+  previewError?: Error | null;
   onRetrySymbols: () => void;
+  onRetryPreview?: () => void;
 }) {
   return <Card title="基本设置">
     {live && <Alert type="warning" showIcon className="config-live-alert" title="实盘使用真实资金，请核对交易方向和风险限制。" />}
@@ -67,7 +71,11 @@ export function PairBasicSection({
           getValueProps={value => ({ value: value || undefined })}
           extra={
             adding && symbolsError ? <span>交易对加载失败 <Button type="link" onClick={onRetrySymbols}>重试</Button></span>
-            : adding && selectedSymbol ? (previewFetching ? '正在获取最新价格...' : latestPrice ? `最新价格：${latestPrice}${quote ? ` ${quote}` : ''}` : undefined)
+            : adding && selectedSymbol ? (
+              previewFetching ? '正在获取最新价格...'
+              : previewError ? <span className="negative">行情与交易规则加载失败{previewError.message ? `：${previewError.message}` : ''} {onRetryPreview && <Button type="link" onClick={onRetryPreview}>重试</Button>}</span>
+              : latestPrice ? `最新价格：${latestPrice}${quote ? ` ${quote}` : ''}` : undefined
+            )
             : undefined
           }
         >

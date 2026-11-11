@@ -474,12 +474,17 @@ impl RemainderPlan {
     }
 }
 
-pub(crate) fn ws_frame_json<T: Serialize + ?Sized>(kind: &'static str, data: &T) -> Option<String> {
+pub(crate) fn ws_frame_json<T: Serialize + ?Sized>(
+    kind: &'static str,
+    data: &T,
+) -> Option<std::sync::Arc<str>> {
     #[derive(Serialize)]
     struct WsFrame<'a, T: ?Sized> {
         #[serde(rename = "type")]
         kind: &'static str,
         data: &'a T,
     }
-    serde_json::to_string(&WsFrame { kind, data }).ok()
+    serde_json::to_string(&WsFrame { kind, data })
+        .ok()
+        .map(std::sync::Arc::<str>::from)
 }

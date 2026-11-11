@@ -77,99 +77,114 @@ impl GridTradingEngine {
         None
     }
 
+    fn log_sync_finished(started: Option<Instant>, result: &'static str) {
+        if let Some(started) = started {
+            debug!(
+                result,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "Periodic sync finished"
+            );
+        }
+    }
+
+    async fn reconcile_sync_cycle_live(
+        &mut self,
+        pause_epoch: u64,
+        started: Option<Instant>,
+    ) -> std::result::Result<bool, &'static str> {
+        let orders_ready = self
+            .sync_live_orders_with_priority(ReconciliationPriority::Periodic)
+            .await;
+        if let Some(started) = started {
+            debug!(
+                stage = "orders",
+                ready = orders_ready,
+                cycle_elapsed_ms = started.elapsed().as_millis() as u64,
+                "Periodic sync stage finished"
+            );
+        }
+        if !orders_ready {
+            self.last_orders_sync = None;
+        }
+        if self.state.pause_epoch() != pause_epoch {
+            return Err("paused_after_orders");
+        }
+        let account_ready = self.sync_account_and_position_inner(true).await;
+        if let Some(started) = started {
+            debug!(
+                stage = "account_position",
+                ready = account_ready,
+                cycle_elapsed_ms = started.elapsed().as_millis() as u64,
+                "Periodic sync stage finished"
+            );
+        }
+        let ready = orders_ready && account_ready;
+        self.set_global_reconciliation_ready(ready).await;
+        Ok(ready)
+    }
+
+    async fn maybe_sync_server_time(&mut self) {
+        if Instant::now() < self.next_time_sync_at {
+            return;
+        }
+        match self.client.sync_server_time().await {
+            Ok(_) => self.next_time_sync_at = Instant::now() + PERIODIC_TIME_SYNC_INTERVAL,
+            Err(error) => {
+                warn!("Periodic Binance server time sync failed: {}", error);
+                self.next_time_sync_at = Instant::now() + TIME_SYNC_RETRY_INTERVAL;
+            }
+        }
+    }
+
     /// Periodic sync cycle
     pub(super) async fn sync_cycle(&mut self, wait_for_market: bool) {
         let started = tracing::enabled!(tracing::Level::DEBUG).then(Instant::now);
-        macro_rules! finish_sync {
-            ($result:expr) => {
-                if let Some(started) = started {
-                    debug!(
-                        result = $result,
-                        elapsed_ms = started.elapsed().as_millis() as u64,
-                        "Periodic sync finished"
-                    );
-                }
-            };
-        }
         let pause_epoch = self.state.pause_epoch();
-        let config = self.state.config.read().await.clone();
-        self.sync_interval_secs = config.exchange.sync_interval_secs.max(1);
-        let paper = config.exchange.is_paper();
-
-        if Instant::now() >= self.next_time_sync_at {
-            match self.client.sync_server_time().await {
-                Ok(_) => self.next_time_sync_at = Instant::now() + PERIODIC_TIME_SYNC_INTERVAL,
-                Err(error) => {
-                    warn!("Periodic Binance server time sync failed: {}", error);
-                    self.next_time_sync_at = Instant::now() + TIME_SYNC_RETRY_INTERVAL;
-                }
-            }
-        }
-
-        if let Some(reason) = self
-            .refresh_sync_cycle_market(
-                &config.exchange.symbol,
-                wait_for_market,
-                pause_epoch,
-                started,
+        let (symbol, risk) = {
+            let config = self.state.config.read().await;
+            (
+                config.exchange.symbol.clone(),
+                RiskConfigSnapshot::from_config(&config),
             )
+        };
+        self.sync_interval_secs = risk.sync_interval_secs.max(1);
+        self.maybe_sync_server_time().await;
+        if let Some(reason) = self
+            .refresh_sync_cycle_market(&symbol, wait_for_market, pause_epoch, started)
             .await
         {
-            finish_sync!(reason);
+            Self::log_sync_finished(started, reason);
             return;
         }
         // Cancellation remains available when the following reconciliation cannot
         // establish replenishment readiness, including the sync performed on resume.
-        self.cancel_suspended_opening_orders(&config).await;
+        self.cancel_suspended_opening_orders(risk).await;
         if self.state.pause_epoch() != pause_epoch {
-            finish_sync!("paused_after_opening_protection");
+            Self::log_sync_finished(started, "paused_after_opening_protection");
             return;
         }
 
-        let account_ready = if !paper {
-            let orders_ready = self
-                .sync_live_orders_with_priority(ReconciliationPriority::Periodic)
-                .await;
-            if let Some(started) = started {
-                debug!(
-                    stage = "orders",
-                    ready = orders_ready,
-                    cycle_elapsed_ms = started.elapsed().as_millis() as u64,
-                    "Periodic sync stage finished"
-                );
+        let account_ready = if !risk.is_paper {
+            match self.reconcile_sync_cycle_live(pause_epoch, started).await {
+                Ok(ready) => ready,
+                Err(reason) => {
+                    Self::log_sync_finished(started, reason);
+                    return;
+                }
             }
-            if !orders_ready {
-                self.last_orders_sync = None;
-            }
-            if self.state.pause_epoch() != pause_epoch {
-                finish_sync!("paused_after_orders");
-                return;
-            }
-            let account_ready = self.sync_account_and_position_inner(true).await;
-            if let Some(started) = started {
-                debug!(
-                    stage = "account_position",
-                    ready = account_ready,
-                    cycle_elapsed_ms = started.elapsed().as_millis() as u64,
-                    "Periodic sync stage finished"
-                );
-            }
-            let ready = orders_ready && account_ready;
-            self.set_global_reconciliation_ready(ready).await;
-            ready
         } else {
             self.set_global_reconciliation_ready(true).await;
             true
         };
 
         if self.state.pause_epoch() != pause_epoch {
-            finish_sync!("paused_after_reconciliation");
+            Self::log_sync_finished(started, "paused_after_reconciliation");
             return;
         }
 
-        let openings_protected = self.cancel_suspended_opening_orders(&config).await;
+        let openings_protected = self.cancel_suspended_opening_orders(risk).await;
         if self.pause_if_position_limit_reached().await {
-            finish_sync!("position_limit");
+            Self::log_sync_finished(started, "position_limit");
             return;
         }
         self.trim_closing_orders_to_position().await;
@@ -297,6 +312,8 @@ impl GridTradingEngine {
 
     pub(super) async fn acquire_live_sync_fill_guard(
         &self,
+        account_key: [u8; 32],
+        symbol: &str,
         invalid_price: bool,
         live_orders: &[BinanceOrderResponse],
         pair_intents: &HashMap<String, GridOrder>,
@@ -309,7 +326,7 @@ impl GridTradingEngine {
             })
             || !pair_intents.is_empty()
             || remainder_plan.is_some_and(|plan| plan.phase == RemainderPhase::Submitting)
-            || !self.evidence.order_identity_conflicts.is_empty();
+            || self.evidence.has_conflicts_for_scope(account_key, symbol);
         let mut fill_guard = known_risk.then(|| self.state.publish_fill_reconciliation());
         if fill_guard.is_none() {
             let active = match self.state.active_orders.try_read() {

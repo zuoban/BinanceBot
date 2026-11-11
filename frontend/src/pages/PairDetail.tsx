@@ -1,12 +1,14 @@
-import { useMemo } from 'react';
+import { useContext, useMemo } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { Alert, Button, Card, Col, Descriptions, Row, Statistic, Tabs } from 'antd';
 import { SettingOutlined } from '@ant-design/icons';
-import { pairRoute } from '../lib/api';
+import { QueryClient, QueryClientContext, useQuery } from '@tanstack/react-query';
+import { api, pairPath, pairRoute } from '../lib/api';
 import { usePairSnapshot, usePairs } from '../lib/queries';
 import { signedDecimalToNumber, subSignedDecimals } from '../lib/decimal';
 import { beijingClockFormat, cnyText, number, positivePrice, quantity, ratioText, trimFractionZeros } from '../lib/format';
 import { entryPriceText, quoteAsset, todayTradeCounts } from '../lib/portfolio';
+import type { LogItem, Pair, Snapshot, Trade } from '../lib/types';
 import { ControlResultBanner, DirectionTag, DirectionText, ErrorNotice, FreshnessText, ModeTag, PageBreadcrumb, PageTitle, Pnl, SignalChip, StatusTag } from '../components/Common';
 import { PairControls, useControls } from '../components/Controls';
 import { DepthChart, HourlyChart } from '../components/Charts';
@@ -16,17 +18,61 @@ import { DetailLoading } from '../components/Loading';
 import { useDocumentTitle } from '../lib/documentTitle';
 import { useUrlParam } from '../lib/urlState';
 import { useAccountGroups, useBeijingDay } from '../lib/useNow';
+
 const detailTabs = ['monitor', 'orders', 'trades', 'logs'] as const;
+const fallbackClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+function resolveTrades(snapshot: Snapshot | undefined, fetched: Trade[] | undefined, isError: boolean, fetchedAt: number, snapshotAt: number): Trade[] {
+  const recent = snapshot?.recent_trades ?? [];
+  if (!snapshot || isError || !Array.isArray(fetched) || !fetchedAt) return recent;
+  if (snapshot.stats.total_trades === 0 && !recent.length && snapshotAt > fetchedAt) return recent;
+  const scoped = fetched.filter(trade => trade.mode === snapshot.mode);
+  if (fetchedAt >= snapshotAt) return scoped;
+  const byId = new Map(recent.map(trade => [trade.trade_id, trade]));
+  const seen = new Set(scoped.map(trade => trade.trade_id));
+  return [...recent.filter(trade => !seen.has(trade.trade_id)), ...scoped.map(trade => byId.get(trade.trade_id) ?? trade)];
+}
+
+function resolveLogs(snapshot: Snapshot | undefined, fetched: LogItem[] | undefined, isError: boolean, fetchedAt: number, snapshotAt: number): LogItem[] {
+  const recent = snapshot?.recent_logs ?? [];
+  if (!snapshot || isError || !Array.isArray(fetched) || !fetchedAt) return recent;
+  if (!fetched.length) return snapshotAt > fetchedAt ? recent : fetched;
+  const firstTs = Date.parse(fetched[0].timestamp), lastTs = Date.parse(fetched[fetched.length - 1].timestamp);
+  const chronological = fetched.length > 1 && !(firstTs > lastTs);
+  const ordered = chronological ? [...fetched].reverse() : fetched;
+  if (fetchedAt >= snapshotAt || !recent.length) return ordered;
+  const head = ordered[0];
+  const overlap = recent.findIndex(item => item.timestamp === head.timestamp && item.level === head.level && item.message === head.message);
+  return overlap > 0 ? [...recent.slice(0, overlap), ...ordered] : overlap === 0 ? ordered : ordered.length >= recent.length ? ordered : recent;
+}
+
+function usePairTabHistory(pair: Pair | undefined, tab: (typeof detailTabs)[number], snapshot: Snapshot | undefined, snapshotUpdatedAt = 0) {
+  const client = useContext(QueryClientContext) ?? fallbackClient;
+  const activeMode = snapshot?.mode ?? pair?.mode;
+  const tradesQuery = useQuery({
+    queryKey: ['snapshot', pair?.symbol, pair?.scoped, 'trades', activeMode],
+    queryFn: ({ signal }) => { if (!pair) throw new Error('该交易对不存在或已移除'); return api<Trade[]>(pairPath(pair, 'trades'), { signal }); },
+    enabled: !!pair && tab === 'trades',
+    refetchInterval: 5_000,
+  }, client);
+  const logsQuery = useQuery({
+    queryKey: ['snapshot', pair?.symbol, pair?.scoped, 'logs', activeMode],
+    queryFn: ({ signal }) => { if (!pair) throw new Error('该交易对不存在或已移除'); return api<LogItem[]>(pairPath(pair, 'logs'), { signal }); },
+    enabled: !!pair && tab === 'logs',
+    refetchInterval: 5_000,
+  }, client);
+  const trades = useMemo(() => resolveTrades(snapshot, tradesQuery.data, tradesQuery.isError, tradesQuery.dataUpdatedAt, snapshotUpdatedAt), [snapshot, tradesQuery.data, tradesQuery.isError, tradesQuery.dataUpdatedAt, snapshotUpdatedAt]);
+  const logs = useMemo(() => resolveLogs(snapshot, logsQuery.data, logsQuery.isError, logsQuery.dataUpdatedAt, snapshotUpdatedAt), [snapshot, logsQuery.data, logsQuery.isError, logsQuery.dataUpdatedAt, snapshotUpdatedAt]);
+  return { trades, logs };
+}
+
 export default function PairDetail() {
-  const { symbol } = useParams();
-  const navigate = useNavigate();
-  const pairs = usePairs();
-  const pair = pairs.data?.find(p => p.symbol === symbol);
-  const query = usePairSnapshot(pair);
-  const controls = useControls();
-  const dayNow = useBeijingDay();
+  const { symbol } = useParams(), navigate = useNavigate();
+  const pairs = usePairs(), pair = pairs.data?.find(p => p.symbol === symbol);
+  const query = usePairSnapshot(pair), controls = useControls(), dayNow = useBeijingDay();
   const [tab, setTab] = useUrlParam('tab', 'monitor', detailTabs);
   const s = query.data, asset = quoteAsset(symbol ?? '');
+  const { trades, logs } = usePairTabHistory(pair, tab, s, query.dataUpdatedAt);
   const accountEntries = useMemo(() => s && pair ? [{ snapshot: s, mode: s.mode, account_observation_stale: query.stale }] : [], [s, pair, query.stale]);
   const account = useAccountGroups(accountEntries, !!s && !!pair)[0];
   const today = useMemo(() => s ? todayTradeCounts(s, dayNow) : null, [s, dayNow]);
@@ -38,7 +84,7 @@ export default function PairDetail() {
     <PageBreadcrumb items={[{ label: '策略总览', to: '/' }, { label: symbol ?? '策略详情' }]} />
     <PageTitle title={symbol ?? '策略详情'} description="行情、网格与成交，随策略实时更新"
       extra={<div className="detail-actions">{currentPair && <PairControls pair={currentPair} stale={query.stale || !!query.error} />}<Button icon={<SettingOutlined />} disabled={!symbol} onClick={() => { if (symbol) navigate(pairRoute(symbol, true)); }}>策略参数</Button></div>} />
-    <ErrorNotice error={pairs.error || query.error} retry={() => { void pairs.refetch(); void query.refetch(); }} />
+    <ErrorNotice error={pairs.error || query.error} retry={() => { if (pairs.error) void pairs.refetch(); if (pair) void query.refetch(); }} />
     {pairs.data && !pair && !pairs.isFetching && <Alert type="warning" title="该交易对不存在或已移除" />}
     {symbol && <ControlResultBanner symbol={symbol} results={controls.results} clearResult={controls.clearResult} variant="alert" />}
     {pair && <div className="detail-status signal-strip"><StatusTag status={currentPair!.status} /><DirectionTag direction={currentPair!.grid_config.direction} /><ModeTag mode={currentPair!.mode} /><SignalChip tier={query.live ? 'calm' : 'yellow'}>{query.live ? '实时连接' : 'HTTP 自动刷新'}</SignalChip><span className="muted freshness" title={query.dataUpdatedAt ? `最近同步 ${beijingClockFormat.format(query.dataUpdatedAt)}` : undefined}>{query.dataUpdatedAt ? <FreshnessText updatedAt={query.dataUpdatedAt} prefix="更新于 " /> : '等待首次快照'}</span></div>}
@@ -76,8 +122,8 @@ export default function PairDetail() {
           ]} /></Card>
         </> },
         { key: 'orders', label: `挂单 (${s.active_orders.length})`, children: <Card><OrdersTable key={symbol} orders={s.active_orders} mark={s.ticker.mark_price} /></Card> },
-        { key: 'trades', label: '成交历史', children: <Card title="最近成交" extra={pair ? <HistoryActions key={pair.symbol} symbol={pair.symbol} /> : null}><Alert type="info" title={`此处展示当前模式的最近成交；导出和清理作用于 ${symbol ?? ''} 的全部模式。`} /><TradesTable key={symbol} trades={s.recent_trades} /></Card> },
-        { key: 'logs', label: '运行日志', children: <Card><LogsTable key={symbol} logs={s.recent_logs} /></Card> },
+        { key: 'trades', label: '成交历史', children: <Card title="最近成交" extra={pair ? <HistoryActions key={pair.symbol} symbol={pair.symbol} /> : null}><Alert type="info" title={`此处展示当前模式的最近成交；导出和清理作用于 ${symbol ?? ''} 的全部模式。`} /><TradesTable key={symbol} trades={trades} /></Card> },
+        { key: 'logs', label: '运行日志', children: <Card><LogsTable key={symbol} logs={logs} /></Card> },
       ]} />
     </>}
   </div>;

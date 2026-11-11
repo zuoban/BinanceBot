@@ -1,5 +1,5 @@
 import { useContext, useLayoutEffect, type DependencyList, type RefObject } from 'react';
-import { Alert, App, Button, Empty, Space } from 'antd';
+import { Alert, App, Button, Empty, Space, type FormInstance } from 'antd';
 import { ArrowDownOutlined, ArrowUpOutlined, CheckCircleOutlined, CloseCircleOutlined, CloseOutlined, ExclamationCircleOutlined, InfoCircleOutlined, ReloadOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { Link } from 'react-router-dom';
 import { EditContext } from '../lib/session';
@@ -120,7 +120,14 @@ export function ConflictReloadButton<T>({ label, activeRef, resetKey, refetch, o
     });
   }}>重新加载{label}</Button>;
 }
-export function FormRevertButton({ activeRef, resetKey, onRevert, onReset }: {
+export function clearFormErrors(form: FormInstance) {
+  const fields = form.getFieldsError().filter(item => item.errors.length > 0 || item.warnings.length > 0);
+  if (fields.length > 0) {
+    form.setFields(fields.map(item => ({ name: item.name, errors: [], warnings: [] })));
+  }
+}
+export function FormRevertButton({ form, activeRef, resetKey, onRevert, onReset }: {
+  form?: FormInstance;
   activeRef: { current: unknown };
   resetKey?: unknown;
   onRevert: () => void;
@@ -136,6 +143,7 @@ export function FormRevertButton({ activeRef, resetKey, onRevert, onReset }: {
       if (edit.dirty && !await confirm({ title: '放弃未保存的修改？', okText: '还原', cancelText: '继续编辑' })) return;
       if (activeRef.current !== current) return;
       onRevert();
+      if (form) clearFormErrors(form);
       edit.setDirty(false);
       onReset();
     });

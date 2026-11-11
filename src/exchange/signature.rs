@@ -8,27 +8,24 @@ pub(crate) fn new_hmac_key(secret: &str) -> HmacSha256 {
     HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC can take key of any size")
 }
 
-pub(super) fn build_signed_url(
+pub(super) fn build_signed_url_fmt(
     base_url: &str,
     hmac_key: &HmacSha256,
     recv_window: u64,
     ts: i64,
     path: &str,
-    params: &str,
+    query: std::fmt::Arguments<'_>,
 ) -> String {
-    let mut url = String::with_capacity(base_url.len() + path.len() + params.len() + 128);
+    let mut url = String::with_capacity(base_url.len() + path.len() + 256);
     url.push_str(base_url);
     url.push_str(path);
     url.push('?');
     let query_start = url.len();
-    if params.is_empty() {
+    let _ = url.write_fmt(query);
+    if url.len() == query_start {
         let _ = write!(url, "recvWindow={}&timestamp={}", recv_window, ts);
     } else {
-        let _ = write!(
-            url,
-            "{}&recvWindow={}&timestamp={}",
-            params, recv_window, ts
-        );
+        let _ = write!(url, "&recvWindow={}&timestamp={}", recv_window, ts);
     }
     let mut mac = hmac_key.clone();
     mac.update(&url.as_bytes()[query_start..]);
@@ -68,24 +65,5 @@ pub(super) fn identity_key(base_url: &str, api_key: &str) -> [u8; 32] {
 }
 
 #[cfg(test)]
-fn sign_query(secret: &str, query: &str) -> String {
-    let mut mac = new_hmac_key(secret);
-    mac.update(query.as_bytes());
-    hex::encode(mac.finalize().into_bytes())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_signature() {
-        let secret = "NhqPtMDaFdflRRPLUhsc8nvRhgLtDxbiqNob0aQgRUrKIT2MTvmUXOy6AZcDU0RJ";
-        let query = "symbol=LTCBTC&side=BUY&type=LIMIT&timeInForce=GTC&quantity=1&price=0.1&recvWindow=5000&timestamp=1499827319559";
-        let signature = sign_query(secret, query);
-        assert_eq!(
-            signature,
-            "9b97f1a66e9e323ecb322bc4c16241fe01f3afab58cc80b67f9ddc68548944a1"
-        );
-    }
-}
+#[path = "signature_tests.rs"]
+mod tests;

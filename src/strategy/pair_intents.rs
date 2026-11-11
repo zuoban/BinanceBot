@@ -136,11 +136,7 @@ impl GridTradingEngine {
             };
             let conflict = self
                 .evidence
-                .order_identity_conflicts
-                .get(&(
-                    self.client.account_identity_key(),
-                    intent.client_order_id.clone(),
-                ))
+                .get_conflict(self.client.account_identity_key(), &intent.client_order_id)
                 .cloned();
             if let Some(found) = exchange_order {
                 if !self
@@ -169,6 +165,84 @@ impl GridTradingEngine {
         }
     }
 
+    async fn verify_found_pair_identity(
+        &mut self,
+        intent: &GridOrder,
+        conflict: Option<&GridOrder>,
+        found: &BinanceOrderResponse,
+    ) -> bool {
+        let active = self
+            .state
+            .active_orders
+            .read()
+            .await
+            .get(&intent.client_order_id)
+            .cloned();
+        let mismatch = [
+            intent,
+            active.as_ref().unwrap_or(intent),
+            conflict.unwrap_or(intent),
+        ]
+        .into_iter()
+        .find(|expected| !expected.matches_exchange_identity(found));
+        if let Some(expected) = mismatch {
+            error!(
+                "Pair order {} has mismatched exchange identity",
+                intent.client_order_id
+            );
+            self.track_identity_conflict(expected, found);
+            self.last_orders_sync = None;
+            self.report_reconciliation_state(true).await;
+            if !self
+                .persist_identity_observations(self.client.account_identity_key(), &intent.symbol)
+                .await
+            {
+                self.pause_trading().await;
+            }
+            return false;
+        }
+        if conflict.is_some_and(|order| order.order_id.is_none()) {
+            self.last_orders_sync = None;
+            self.report_reconciliation_state(true).await;
+            return false;
+        }
+        true
+    }
+
+    async fn settle_terminal_pair_intent(
+        &mut self,
+        intent: &mut GridOrder,
+        parent_id: &str,
+        found: &BinanceOrderResponse,
+    ) -> bool {
+        if found.executed_qty > Decimal::ZERO {
+            intent.apply_terminal_fill(found, exchange_fill_time(found));
+            if !self.on_order_filled(intent).await {
+                return false;
+            }
+            // A reused destination may have been journaled by normal
+            // reconciliation already. Retire its parent intent even
+            // when the fill callback takes the idempotent path.
+            if let Err(error) = self.delete_pair_intent(parent_id).await {
+                error!("Could not retire filled counter-order intent: {}", error);
+                return false;
+            }
+            return true;
+        }
+        if let Err(e) = self
+            .remove_managed_and_active_order(&intent.client_order_id)
+            .await
+        {
+            error!("Could not clear closed pair order: {}", e);
+            return false;
+        }
+        if let Err(e) = self.delete_pair_intent(parent_id).await {
+            error!("Could not clear closed pair intent: {}", e);
+            return false;
+        }
+        true
+    }
+
     async fn reconcile_found_pair_intent(
         &mut self,
         mut intent: GridOrder,
@@ -181,42 +255,10 @@ impl GridTradingEngine {
             self.last_orders_sync = None;
             self.report_reconciliation_state(true).await;
         }
-        let active = self
-            .state
-            .active_orders
-            .read()
+        if !self
+            .verify_found_pair_identity(&intent, conflict.as_ref(), &found)
             .await
-            .get(&intent.client_order_id)
-            .cloned();
-        let mismatch = [
-            &intent,
-            active.as_ref().unwrap_or(&intent),
-            conflict.as_ref().unwrap_or(&intent),
-        ]
-        .into_iter()
-        .find(|expected| !expected.matches_exchange_identity(&found));
-        if let Some(expected) = mismatch {
-            error!(
-                "Pair order {} has mismatched exchange identity",
-                intent.client_order_id
-            );
-            self.track_identity_conflict(expected, &found);
-            self.last_orders_sync = None;
-            self.report_reconciliation_state(true).await;
-            if !self
-                .persist_identity_observations(self.client.account_identity_key(), &intent.symbol)
-                .await
-            {
-                self.pause_trading().await;
-            }
-            return false;
-        }
-        if conflict
-            .as_ref()
-            .is_some_and(|order| order.order_id.is_none())
         {
-            self.last_orders_sync = None;
-            self.report_reconciliation_state(true).await;
             return false;
         }
         intent.order_id = Some(found.order_id);
@@ -233,32 +275,9 @@ impl GridTradingEngine {
             return false;
         }
         if found.is_terminal() {
-            if found.executed_qty > Decimal::ZERO {
-                intent.apply_terminal_fill(&found, exchange_fill_time(&found));
-                if !self.on_order_filled(&mut intent).await {
-                    return false;
-                }
-                // A reused destination may have been journaled by normal
-                // reconciliation already. Retire its parent intent even
-                // when the fill callback takes the idempotent path.
-                if let Err(error) = self.delete_pair_intent(parent_id).await {
-                    error!("Could not retire filled counter-order intent: {}", error);
-                    return false;
-                }
-            } else {
-                if let Err(e) = self
-                    .remove_managed_and_active_order(&intent.client_order_id)
-                    .await
-                {
-                    error!("Could not clear closed pair order: {}", e);
-                    return false;
-                }
-                if let Err(e) = self.delete_pair_intent(parent_id).await {
-                    error!("Could not clear closed pair intent: {}", e);
-                    return false;
-                }
-            }
-            return true;
+            return self
+                .settle_terminal_pair_intent(&mut intent, parent_id, &found)
+                .await;
         }
         if !self
             .prepare_and_adopt_open_order(&mut intent, original, &found)

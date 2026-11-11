@@ -20,6 +20,8 @@ mod control;
 mod database;
 #[path = "routes/exchange_preview.rs"]
 mod exchange_preview;
+#[path = "routes/probes.rs"]
+mod probes;
 #[path = "routes/queries.rs"]
 mod queries;
 #[path = "routes/ws.rs"]
@@ -31,11 +33,11 @@ mod tests;
 
 pub(crate) use crate::types::ApiResponse;
 #[cfg(test)]
-pub(crate) use config_probes::ProbeGate;
-pub(crate) use config_probes::ProbeGates;
-#[cfg(test)]
 pub(crate) use control::ControlRequest;
 pub(crate) use database::ClearTradeHistoryRequest;
+#[cfg(test)]
+pub(crate) use probes::ProbeGate;
+pub(crate) use probes::ProbeGates;
 
 use auth::{
     get_auth_status_handler, post_auth_login_handler, post_auth_logout_handler,
@@ -44,7 +46,7 @@ use auth::{
 use config_probes::{
     add_pair_handler, get_config_handler, get_global_config_handler, get_server_config_handler,
     post_config_handler, post_global_config_handler, post_managed_config_handler,
-    post_server_config_handler, remove_pair_handler, test_exchange_handler, test_telegram_handler,
+    post_server_config_handler, remove_pair_handler,
 };
 use control::post_control_handler;
 use database::{
@@ -57,6 +59,7 @@ use database::{
 use exchange_preview::{
     exchange_symbol_preview_handler, exchange_symbols_handler, ExchangePreviewService,
 };
+use probes::{test_exchange_handler, test_telegram_handler};
 use queries::{
     get_logs_handler, get_managed_overview_handler, get_managed_pairs_handler, get_orders_handler,
     get_overview_handler, get_overview_history_handler, get_pairs_handler,

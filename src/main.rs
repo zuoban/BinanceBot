@@ -6,7 +6,9 @@ use binance_grid_bot::lifecycle::ShutdownSignals;
 use binance_grid_bot::runtime::TradingRuntime;
 use binance_grid_bot::server::create_managed_router;
 use clap::{Parser, Subcommand};
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
@@ -66,7 +68,10 @@ fn load_saved_config(db: &Database) -> anyhow::Result<AppConfig> {
     config.ensure_pair_list()?;
     if loaded
         .as_ref()
-        .is_none_or(|saved| serde_json::to_value(saved).ok() != serde_json::to_value(&config).ok())
+        .map(serde_json::to_value)
+        .transpose()?
+        .as_ref()
+        != Some(&serde_json::to_value(&config)?)
     {
         db.save_config(&config)?;
     }
@@ -121,8 +126,7 @@ fn resolve_admin_auth(
     }
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn init_tracing() {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -130,41 +134,15 @@ async fn main() -> anyhow::Result<()> {
         )
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
-    let args = CliArgs::parse();
-    if let Some(Command::Backtest(backtest)) = &args.command {
-        return binance_grid_bot::strategy::backtest::run_cli(backtest).await;
-    }
-    if let Some(Command::MigrateLegacyPaper {
-        db,
-        symbol,
-        confirm,
-    }) = args.command
-    {
-        return run_migrate_legacy_paper(db, symbol, confirm);
-    }
-    let mut signals = ShutdownSignals::register().await?;
-    let signal = signals.wait();
-    tokio::pin!(signal);
-    let admin_auth = resolve_admin_auth(args.admin_password)?;
-    let _process_lock = database_process_lock::DatabaseProcessLock::acquire(&args.db)?;
-    let db = Arc::new(Database::open(&args.db)?);
-    db.clear_all_sessions()
-        .map_err(|error| error.context("Failed to clear persisted login sessions"))?;
-    let mut config = load_saved_config(&db)?;
-    // These options only select the listening address for this process (e.g. recovery).
-    if let Some(host) = args.host {
-        config.server.host = host;
-    }
-    if let Some(port) = args.port {
-        config.server.port = port;
-    }
-    let strategies = config.strategy_configs()?;
+}
+
+fn log_startup_summary(db_path: &std::path::Path, strategies: &[AppConfig], auth_enabled: bool) {
     info!(
         "Binance Futures Grid Bot — SQLite {:?}, {} trading pair(s)",
-        args.db,
+        db_path,
         strategies.len()
     );
-    if admin_auth.is_some() {
+    if auth_enabled {
         info!("Admin authentication: enabled (password from startup configuration)");
     } else {
         warn!(
@@ -172,7 +150,7 @@ async fn main() -> anyhow::Result<()> {
              the console and trading APIs are open to anyone who can reach this port"
         );
     }
-    for strategy in &strategies {
+    for strategy in strategies {
         info!(
             "{}: interval {}, amount {}, window {} buy / {} sell, mode {}",
             strategy.exchange.symbol,
@@ -183,43 +161,50 @@ async fn main() -> anyhow::Result<()> {
             strategy.exchange.trading_mode().as_str()
         );
     }
-    let addr = config.server.socket_addr()?;
-    // Bind before starting any engine, including initialization-time reconciliation.
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+}
+
+async fn start_runtime_until_ready<F>(
+    config: &AppConfig,
+    db: Arc<Database>,
+    admin_auth: Option<Arc<binance_grid_bot::auth::AdminAuth>>,
+    mut signal: Pin<&mut F>,
+) -> anyhow::Result<TradingRuntime>
+where
+    F: Future<Output = anyhow::Result<&'static str>>,
+{
     let (startup_stop, startup_stop_rx) = watch::channel(false);
-    let mut runtime = {
-        let startup = TradingRuntime::start_interruptible(&config, db, startup_stop_rx, admin_auth);
-        tokio::pin!(startup);
-        tokio::select! {
-            biased;
-            reason = &mut signal => {
-                let _ = startup_stop.send(true);
-                let reason = match reason {
-                    Ok(reason) => format!("Startup interrupted by {reason}"),
-                    Err(error) => format!("Shutdown signal failed during startup: {error:#}"),
-                };
-                match startup.await {
-                    Ok(mut runtime) => {
-                        runtime.shutdown(Duration::from_secs(30)).await
-                            .map_err(|error| error.context(reason.clone()))?;
-                        return Err(anyhow::anyhow!(reason));
-                    }
-                    Err(error) => return Err(error.context(reason)),
+    let startup = TradingRuntime::start_interruptible(config, db, startup_stop_rx, admin_auth);
+    tokio::pin!(startup);
+    tokio::select! {
+        biased;
+        reason = &mut signal => {
+            let _ = startup_stop.send(true);
+            let reason = match reason {
+                Ok(reason) => format!("Startup interrupted by {reason}"),
+                Err(error) => format!("Shutdown signal failed during startup: {error:#}"),
+            };
+            match startup.await {
+                Ok(mut runtime) => {
+                    runtime.shutdown(Duration::from_secs(30)).await
+                        .map_err(|error| error.context(reason.clone()))?;
+                    Err(anyhow::anyhow!(reason))
                 }
+                Err(error) => Err(error.context(reason)),
             }
-            result = &mut startup => result?,
         }
-    };
-    let snapshot_task = tokio::spawn(binance_grid_bot::snapshots::run_hourly_snapshots(
-        runtime.handle(),
-    ));
-    let app = create_managed_router(runtime.handle()).await;
-    info!(
-        "API server running at http://{} (local: http://127.0.0.1:{})",
-        addr, config.server.port
-    );
+        result = &mut startup => result,
+    }
+}
+
+fn spawn_web_server(
+    listener: tokio::net::TcpListener,
+    app: axum::Router,
+) -> (
+    watch::Sender<bool>,
+    tokio::task::JoinHandle<std::io::Result<()>>,
+) {
     let (web_stop, mut web_stop_rx) = watch::channel(false);
-    let mut web_task = tokio::spawn(async move {
+    let web_task = tokio::spawn(async move {
         axum::serve(
             listener,
             app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
@@ -233,6 +218,19 @@ async fn main() -> anyhow::Result<()> {
         })
         .await
     });
+    (web_stop, web_task)
+}
+
+async fn supervise_and_shutdown<F>(
+    mut runtime: TradingRuntime,
+    snapshot_task: tokio::task::JoinHandle<()>,
+    web_stop: watch::Sender<bool>,
+    mut web_task: tokio::task::JoinHandle<std::io::Result<()>>,
+    mut signal: Pin<&mut F>,
+) -> anyhow::Result<()>
+where
+    F: Future<Output = anyhow::Result<&'static str>>,
+{
     let handle = runtime.handle();
     let reason = {
         let running = runtime.run();
@@ -275,63 +273,55 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use rust_decimal_macros::dec;
-
-    #[test]
-    fn startup_preserves_saved_settings_and_upgrades_single_pair() {
-        let db = Database::open(":memory:").unwrap();
-        let mut saved = AppConfig::default();
-        saved.exchange.symbol = "BTCUSDT".into();
-        saved.exchange.api_key = "saved-key".into();
-        saved.grid.grid_interval = dec!(10);
-        saved.server.host = "0.0.0.0".into();
-        db.save_config(&saved).unwrap();
-        let config = load_saved_config(&db).unwrap();
-        let strategies = config.strategy_configs().unwrap();
-        assert_eq!(strategies.len(), 1);
-        assert_eq!(strategies[0].exchange.symbol, "BTCUSDT");
-        assert_eq!(strategies[0].exchange.api_key, "saved-key");
-        assert_eq!(config.server.host, "0.0.0.0");
-        assert_eq!(strategies[0].grid.grid_interval, dec!(10));
-        assert_eq!(
-            serde_json::to_value(&config).unwrap(),
-            serde_json::to_value(load_saved_config(&db).unwrap()).unwrap()
-        );
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    init_tracing();
+    let args = CliArgs::parse();
+    if let Some(Command::Backtest(backtest)) = &args.command {
+        return binance_grid_bot::strategy::backtest::run_cli(backtest).await;
     }
-
-    #[test]
-    fn fresh_database_uses_defaults_without_credentials() {
-        let db = Database::open(":memory:").unwrap();
-        let config = load_saved_config(&db).unwrap();
-        config.validate().unwrap();
-        assert_eq!(config.server.host, "127.0.0.1");
-        assert_eq!(load_saved_config(&db).unwrap().server.host, "127.0.0.1");
-        assert_eq!(config.pairs.len(), 1);
-        let strategy = &config.strategy_configs().unwrap()[0];
-        assert_eq!(
-            strategy.exchange.trading_mode(),
-            binance_grid_bot::types::TradingMode::Paper
-        );
-        assert!(strategy.exchange.api_key.is_empty());
-        assert!(strategy.exchange.api_secret.is_empty());
+    if let Some(Command::MigrateLegacyPaper {
+        db,
+        symbol,
+        confirm,
+    }) = args.command
+    {
+        return run_migrate_legacy_paper(db, symbol, confirm);
     }
-
-    #[test]
-    fn file_and_strategy_cli_options_are_no_longer_supported() {
-        for option in [
-            "--config",
-            "--symbol",
-            "--interval",
-            "--amount",
-            "--live",
-            "--testnet",
-            "--buy-window",
-            "--sell-window",
-        ] {
-            assert!(CliArgs::try_parse_from(["bot", option, "value"]).is_err());
-        }
+    let mut signals = ShutdownSignals::register().await?;
+    let signal = signals.wait();
+    tokio::pin!(signal);
+    let admin_auth = resolve_admin_auth(args.admin_password)?;
+    let _process_lock = database_process_lock::DatabaseProcessLock::acquire(&args.db)?;
+    let db = Arc::new(Database::open(&args.db)?);
+    db.clear_all_sessions()
+        .map_err(|error| error.context("Failed to clear persisted login sessions"))?;
+    let mut config = load_saved_config(&db)?;
+    // These options only select the listening address for this process (e.g. recovery).
+    if let Some(host) = args.host {
+        config.server.host = host;
     }
+    if let Some(port) = args.port {
+        config.server.port = port;
+    }
+    let strategies = config.strategy_configs()?;
+    log_startup_summary(&args.db, &strategies, admin_auth.is_some());
+    let addr = config.server.socket_addr()?;
+    // Bind before starting any engine, including initialization-time reconciliation.
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let runtime = start_runtime_until_ready(&config, db, admin_auth, signal.as_mut()).await?;
+    let snapshot_task = tokio::spawn(binance_grid_bot::snapshots::run_hourly_snapshots(
+        runtime.handle(),
+    ));
+    let app = create_managed_router(runtime.handle()).await;
+    info!(
+        "API server running at http://{} (local: http://127.0.0.1:{})",
+        addr, config.server.port
+    );
+    let (web_stop, web_task) = spawn_web_server(listener, app);
+    supervise_and_shutdown(runtime, snapshot_task, web_stop, web_task, signal.as_mut()).await
 }
+
+#[cfg(test)]
+#[path = "main_tests.rs"]
+mod tests;

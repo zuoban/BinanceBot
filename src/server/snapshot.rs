@@ -123,7 +123,7 @@ pub(super) struct SnapshotCache {
 pub(super) struct LastSnapshotBroadcast {
     sent_at: Instant,
     receivers: usize,
-    frame: String,
+    frame: Arc<str>,
 }
 
 fn snapshot_frame_unchanged(previous: &str, current: &str) -> bool {
@@ -525,7 +525,7 @@ impl AppState {
                         && snapshot_frame_unchanged(&prev.frame, &json)
                 });
             if !skip {
-                let _ = self.ws_broadcast_tx.send(json.clone());
+                let _ = self.ws_broadcast_tx.send(Arc::clone(&json));
                 *last = Some(LastSnapshotBroadcast {
                     sent_at: Instant::now(),
                     receivers,

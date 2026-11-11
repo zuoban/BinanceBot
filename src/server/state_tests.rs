@@ -635,6 +635,57 @@ async fn dirty_target_mode_pauses_until_manual_resume_without_self_guarding() {
     }
 }
 
+#[tokio::test]
+async fn rotating_live_credentials_pauses_running_strategy_and_bumps_pause_epoch() {
+    for legacy in [false, true] {
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let mut base = AppConfig::default();
+        base.exchange.api_key = "live-account-a".into();
+        base.exchange.api_secret = "live-secret".into();
+        if !legacy {
+            base.pairs = vec![crate::config::TradingPairConfig::new("SOLUSDC".into())];
+        }
+        db.save_config(&base).unwrap();
+        let account_a = if legacy {
+            base.clone()
+        } else {
+            base.strategy_configs().unwrap().remove(0)
+        };
+        let (tx, _) = mpsc::channel(8);
+        let state = if legacy {
+            AppState::new(account_a.clone(), db.clone(), tx)
+        } else {
+            AppState::new_for_pair(account_a.clone(), db.clone(), tx, Arc::new(Mutex::new(())))
+        };
+        state.resume_trading().await.unwrap();
+        assert_eq!(*state.status.read().await, BotStatus::Running);
+        let epoch_before = state.pause_epoch();
+
+        // Saving identical Live credentials preserves Running and pause_epoch.
+        state.save_runtime_config(account_a.clone()).await.unwrap();
+        assert_eq!(*state.status.read().await, BotStatus::Running);
+        assert_eq!(state.pause_epoch(), epoch_before);
+
+        // Rotating from Live Account A to Live Account B forces Paused, arms guard, and bumps epoch.
+        let mut account_b = account_a;
+        account_b.exchange.api_key = "live-account-b".into();
+        state.save_runtime_config(account_b).await.unwrap();
+        assert_eq!(*state.status.read().await, BotStatus::Paused);
+        assert!(state.pause_epoch() > epoch_before);
+        assert!(state.resume_trading_silently(epoch_before).await.is_err());
+        assert_eq!(
+            db.load_pair_status("SOLUSDC", TradingMode::Live).unwrap(),
+            Some(BotStatus::Paused)
+        );
+        if legacy {
+            assert_eq!(db.load_bot_status().unwrap(), Some(BotStatus::Paused));
+        }
+        assert!(db
+            .arm_execution_guard("SOLUSDC", TradingMode::Live)
+            .unwrap());
+    }
+}
+
 struct NotificationFixture {
     state: Arc<AppState>,
     requests: mpsc::UnboundedReceiver<serde_json::Value>,
@@ -1866,4 +1917,33 @@ async fn record_trade_saturates_counters_and_volume_on_extreme_stats() {
     assert_eq!(stats.completed_cycles, usize::MAX);
     assert_eq!(stats.pending_pnl_trades, usize::MAX);
     assert_eq!(stats.total_volume_usdc, Decimal::MAX);
+}
+
+#[tokio::test]
+async fn live_trade_notification_uses_configured_sync_interval_for_account_freshness() {
+    let mut fixture = live_notification_fixture(GridDirection::Long).await;
+    fixture
+        .state
+        .config
+        .write()
+        .await
+        .exchange
+        .sync_interval_secs = 30;
+    {
+        let mut account = fixture.state.account.write().await;
+        account.asset = "USDC".into();
+        account.total_wallet_balance = dec!(10000);
+        account.margin_balance = dec!(10123.45);
+        account.available_balance = dec!(8000);
+        account.update_time = Utc::now() - chrono::Duration::seconds(45);
+    }
+    let mut buy = cache_test_trade("long-sync-interval-buy", 1, TradingMode::Live);
+    buy.side = OrderSide::Buy;
+    buy.pnl_verified = true;
+    assert!(fixture.state.record_trade(buy, None, None, None).await);
+    let message = next_notification(&mut fixture).await;
+    let text = message["text"].as_str().unwrap();
+    assert!(text.contains("账户权益：10123.45 USDC"), "{text}");
+    assert!(text.contains("可用余额：8000.00 USDC｜80.00%"), "{text}");
+    fixture.server.abort();
 }

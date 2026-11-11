@@ -51,13 +51,15 @@ beforeEach(() => {
     : Promise.resolve({ ...pair(path.includes('ETHUSDC') ? 'ETHUSDC' : 'BTCUSDC').grid_config, config_version: 'version-1' }));
 });
 
-function setup() {
+function setup(initialPath = '/pairs/BTCUSDC/config') {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const router = createMemoryRouter([{ element: <Shell />, children: [
     { path: '/', element: <div>总览页面</div> },
+    { path: '/settings', element: <div>设置页面</div> },
+    { path: '/pairs/new', element: <PairConfig /> },
     { path: '/pairs/:symbol', element: <div>策略详情</div> },
     { path: '/pairs/:symbol/config', element: <PairConfig /> },
-  ] }], { initialEntries: ['/pairs/BTCUSDC/config'] });
+  ] }], { initialEntries: [initialPath] });
   render(<QueryClientProvider client={client}><RouterProvider router={router} /></QueryClientProvider>);
   return router;
 }
@@ -138,4 +140,58 @@ it('disables the form and delete button cleanly without crashing when the pair d
   expect(interval).toBeDisabled();
   expect(saveButton).toBeDisabled();
   expect(deleteButton).toBeDisabled();
+});
+
+it('surfaces symbol-preview errors inline with a retry button on /pairs/new', async () => {
+  let previewAttempts = 0;
+  mocks.api.mockImplementation((path: string) => {
+    if (path.startsWith('/api/exchange/symbols?')) return Promise.resolve(['SOLUSDC']);
+    if (path.startsWith('/api/exchange/symbol-preview?')) {
+      previewAttempts++;
+      if (previewAttempts === 1) return Promise.reject(new Error('预览超时'));
+      return Promise.resolve({ symbol: 'SOLUSDC', last_price: '145.2', mark_price: '145.1', tick_size: '0.1', step_size: '0.01', min_qty: '0.01', min_notional: '5' });
+    }
+    return Promise.resolve({ version: 'global-version', has_api_key: false, has_api_secret: false });
+  });
+  setup('/pairs/new');
+  const user = userEvent.setup();
+  const symbolInput = screen.getByLabelText('合约交易对');
+  await waitFor(() => expect(symbolInput).toBeEnabled());
+  await user.click(symbolInput);
+  await user.type(symbolInput, 'SOLUSDC');
+  await user.click(await screen.findByTitle('SOLUSDC'));
+  expect(await screen.findByText(/行情与交易规则加载失败：预览超时/)).toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: '重试' }));
+  expect(await screen.findByText('最新价格：145.2 USDC')).toBeInTheDocument();
+  expect(previewAttempts).toBe(2);
+});
+
+it('clears red validation errors when reverting dirty fields on PairConfig', async () => {
+  mocks.confirm.mockResolvedValue(true);
+  setup();
+  const user = await prepareLive();
+  const interval = await screen.findByLabelText('网格间距');
+  await waitFor(() => expect(interval).toBeEnabled());
+  await user.clear(interval);
+  await user.type(interval, '0');
+  await user.click(screen.getByRole('button', { name: '保存并立即生效' }));
+  expect(await screen.findByText('网格间距必须大于 0')).toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: /还\s*原/ }));
+  await waitFor(() => expect(interval).toHaveValue('0.1'));
+  await waitFor(() => expect(screen.queryByText('网格间距必须大于 0')).not.toBeInTheDocument());
+});
+
+it('ignores global shortcuts during IME composition and skips redundant same-route navigations', async () => {
+  const router = setup('/settings');
+  const navigateSpy = vi.spyOn(router, 'navigate');
+  await screen.findByText('设置页面');
+  fireEvent.keyDown(window, { key: '?', isComposing: true });
+  fireEvent.keyDown(window, { key: '?', keyCode: 229 });
+  expect(screen.queryByRole('dialog', { name: '键盘快捷键' })).not.toBeInTheDocument();
+  fireEvent.keyDown(window, { key: 'g' });
+  fireEvent.keyDown(window, { key: 's' });
+  expect(navigateSpy).not.toHaveBeenCalled();
+  fireEvent.keyDown(window, { key: 'g' });
+  fireEvent.keyDown(window, { key: 'o' });
+  await waitFor(() => expect(router.state.location.pathname).toBe('/'));
 });

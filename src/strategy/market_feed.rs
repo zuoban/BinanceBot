@@ -88,10 +88,16 @@ impl GridTradingEngine {
     }
 
     pub(super) async fn handle_ticker_update(&mut self, ticker_update: TickerInfo) {
-        if ticker_update.symbol != self.state.config.read().await.exchange.symbol {
+        let (symbol_matches, risk) = {
+            let config = self.state.config.read().await;
+            (
+                ticker_update.symbol == config.exchange.symbol,
+                RiskConfigSnapshot::from_config(&config),
+            )
+        };
+        if !symbol_matches {
             return;
         }
-
         let (last_updated, mark_updated) = {
             let mut ticker = self.state.ticker.write().await;
             let now = Utc::now();
@@ -132,20 +138,18 @@ impl GridTradingEngine {
         }
 
         // Update unrealized PnL for current position
-        let config = self.state.config.read().await.clone();
-        let paper = config.exchange.is_paper();
-        if paper {
+        if risk.is_paper {
             self.update_paper_valuation().await;
         }
 
-        if !self.protect_openings_and_check_limits(&config).await {
+        if !self.protect_openings_and_check_limits(risk).await {
             return;
         }
         let is_running = *self.state.status.read().await == BotStatus::Running;
 
         // In paper mode, match simulated orders against live market price
         if is_running
-            && paper
+            && risk.is_paper
             && last_updated
             && self.state.ticker.read().await.prices_are_fresh(Utc::now())
         {
@@ -340,8 +344,8 @@ impl GridTradingEngine {
                 if completion.scope.mode == TradingMode::Paper {
                     self.update_paper_valuation().await;
                 }
-                let config = self.state.config.read().await.clone();
-                if self.protect_openings_and_check_limits(&config).await
+                let risk = RiskConfigSnapshot::from_config(&*self.state.config.read().await);
+                if self.protect_openings_and_check_limits(risk).await
                     && self.state.pause_epoch() == pause_epoch
                 {
                     self.match_pending_paper_ticker().await;
@@ -491,10 +495,10 @@ impl GridTradingEngine {
         }
         drop(ticker);
         self.pending_paper_ticker = None;
-        let config = self.state.config.read().await.clone();
-        if config.exchange.is_paper()
+        let risk = RiskConfigSnapshot::from_config(&*self.state.config.read().await);
+        if risk.is_paper
             && *self.state.status.read().await == BotStatus::Running
-            && self.protect_openings_and_check_limits(&config).await
+            && self.protect_openings_and_check_limits(risk).await
         {
             self.simulate_order_fills(price).await;
         }

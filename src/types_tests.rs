@@ -244,3 +244,29 @@ fn apply_fill_to_position_handles_extreme_quantities_and_prices_without_panickin
     };
     assert_eq!(stats.total_counts(), (u64::MAX, u64::MAX));
 }
+
+#[test]
+fn decimal_formatters_handle_rounding_truncation_negative_zero_and_extreme_digits() {
+    assert_eq!(format_decimal_dp(dec!(1.236), 2, false), "1.24");
+    assert_eq!(format_truncated_decimal_dp(dec!(1.236), 2, false), "1.23");
+    assert_eq!(format_decimal_dp(dec!(1.236), 2, true), "+1.24");
+    assert_eq!(format_truncated_decimal_dp(dec!(-1.239), 2, true), "-1.23");
+    assert_eq!(format_decimal_dp(dec!(-0.001), 2, false), "0.00");
+    assert_eq!(format_decimal_dp(dec!(-0.001), 2, true), "+0.00");
+    assert_eq!(format_truncated_decimal_dp(dec!(-0.009), 2, false), "0.00");
+    assert_eq!(format_truncated_decimal_dp(dec!(-0.9), 0, false), "0");
+
+    for extreme in [Decimal::MAX, Decimal::MIN] {
+        for dp in [0, 2, 8, 28, 30] {
+            let rounded = format_decimal_dp(extreme, dp, true);
+            let truncated = format_truncated_decimal_dp(extreme, dp, false);
+            if dp == 0 {
+                assert!(!rounded.contains('.'));
+                assert!(!truncated.contains('.'));
+            } else {
+                assert_eq!(rounded.split_once('.').unwrap().1.len(), dp as usize);
+                assert_eq!(truncated.split_once('.').unwrap().1.len(), dp as usize);
+            }
+        }
+    }
+}

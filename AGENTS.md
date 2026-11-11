@@ -13,7 +13,7 @@ and `PRODUCT.md`.
 
 ## Build, Test, and Development Commands
 
-Use Rust 1.88+ and Node.js 22.12+.
+Use Rust 1.88+ and Node.js 22.22.2+ (or 24.15.0+ / 26+).
 
 - `cargo run --release`: start the backend with its default SQLite database.
 - `cargo test`: run Rust unit and integration tests.

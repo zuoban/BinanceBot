@@ -1,18 +1,12 @@
-use super::{
-    config_runtime::save_pair_status_on, hourly, migrations::has_legacy_paper_history_on, Database,
-};
+use super::{decimal_col, grid_stats::save_scoped_stats_on, hourly, immediate_tx, Database};
 use crate::types::{
-    AccountInfo, BotStatus, GridOrder, GridStats, HourlyTradeStats, OrderSide, PositionInfo,
-    TradeRecord, TradingMode,
+    AccountInfo, GridOrder, GridStats, OrderSide, PositionInfo, TradeRecord, TradingMode,
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use rust_decimal::Decimal;
 use std::str::FromStr;
-#[cfg(test)]
-use std::sync::atomic::Ordering;
-
 impl Database {
     pub(crate) fn trade_data_revision(&self) -> u64 {
         self.trade_revisions.current()
@@ -37,16 +31,11 @@ impl Database {
     }
 
     #[cfg(test)]
-    pub(crate) fn hourly_stats_query_count(&self) -> u64 {
-        self.hourly_stats_queries.load(Ordering::Relaxed)
-    }
-
-    #[cfg(test)]
     pub(crate) fn insert_trade(&self, trade: &TradeRecord) -> Result<bool> {
         let mut conn = self.lock_connection("insert_trade");
         // Acquire write intent before deduplication reads so contention can use
         // SQLite's busy handler instead of failing a deferred lock upgrade.
-        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let tx = immediate_tx(&mut conn)?;
         let inserted = insert_trade_on(&tx, trade)?;
         tx.commit()?;
         if inserted {
@@ -78,7 +67,7 @@ impl Database {
         snapshots: bool,
     ) -> Result<(usize, usize)> {
         let mut conn = self.lock_connection("clear_selected_database");
-        let tx = conn.transaction()?;
+        let tx = immediate_tx(&mut conn)?;
         let deleted_trades = if trades {
             clear_trades_on(&tx, None)?
         } else {
@@ -104,7 +93,7 @@ impl Database {
     /// Clear every mode for one symbol while retaining recovery metadata.
     pub(crate) fn clear_trade_history_for_symbol(&self, symbol: &str) -> Result<usize> {
         let mut conn = self.lock_connection("clear_trade_history_for_symbol");
-        let tx = conn.transaction()?;
+        let tx = immediate_tx(&mut conn)?;
         let deleted = clear_trades_on(&tx, Some(symbol))?;
         tx.commit()?;
         self.publish_trade_revision(symbol);
@@ -140,7 +129,7 @@ impl Database {
             "Paper state requires a paper trade"
         );
         let mut conn = self.lock_connection("insert_trade_with_recovery");
-        let tx = conn.transaction()?;
+        let tx = immediate_tx(&mut conn)?;
         let inserted = insert_trade_on(&tx, trade)?;
         if inserted {
             save_scoped_stats_on(&tx, &trade.symbol, trade.mode, stats)?;
@@ -196,75 +185,6 @@ impl Database {
             self.publish_trade_revision(&trade.symbol);
         }
         Ok(inserted)
-    }
-
-    pub(crate) fn load_paper_state(
-        &self,
-        symbol: &str,
-    ) -> Result<Option<(PositionInfo, AccountInfo)>> {
-        let conn = self.lock_connection("load_paper_state");
-        let saved: Option<(String, String)> = conn
-            .query_row(
-                "SELECT position_json, account_json FROM paper_accounts WHERE symbol = ?1",
-                params![symbol],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        if let Some((position, account)) = saved {
-            return Ok(Some((
-                serde_json::from_str(&position)?,
-                serde_json::from_str(&account)?,
-            )));
-        }
-        // Older versions never stored the account. Cleared history and earlier
-        // restarts make replay ambiguous, so do not invent a balance or position.
-        let legacy = has_legacy_paper_history_on(&conn, symbol)?;
-        anyhow::ensure!(
-            !legacy,
-            "旧模拟盘状态无法从成交历史可靠恢复：{}，请先人工核对并迁移仓位和余额",
-            symbol
-        );
-        Ok(None)
-    }
-
-    /// Explicitly establish a new paper baseline; this cannot recover old holdings.
-    pub fn initialize_legacy_paper_account(&self, symbol: &str) -> Result<()> {
-        let mut conn = self.lock_connection("initialize_legacy_paper_account");
-        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let exists: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM paper_accounts WHERE symbol = ?1)",
-            params![symbol],
-            |row| row.get(0),
-        )?;
-        anyhow::ensure!(!exists, "该交易对已有模拟盘状态，拒绝覆盖");
-        anyhow::ensure!(
-            has_legacy_paper_history_on(&tx, symbol)?,
-            "该交易对没有需要迁移的旧模拟盘记录"
-        );
-        let position = PositionInfo {
-            symbol: symbol.to_string(),
-            ..PositionInfo::default()
-        };
-        let account = AccountInfo::initial_paper(symbol, Some(Utc::now()));
-        tx.execute(
-            "INSERT INTO paper_accounts (symbol, position_json, account_json) VALUES (?1, ?2, ?3)",
-            params![
-                symbol,
-                serde_json::to_string(&position)?,
-                serde_json::to_string(&account)?
-            ],
-        )?;
-        save_pair_status_on(&tx, symbol, TradingMode::Paper, BotStatus::Paused)?;
-        tx.commit()?;
-        if let Some(ledger) = self
-            .paper_ledger
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_mut()
-        {
-            ledger.commit(symbol, &position, &account);
-        }
-        Ok(())
     }
 
     #[cfg(test)]
@@ -388,7 +308,7 @@ impl Database {
         if self.trade_clear_revisions.for_symbol(&saved_symbol) != expected_clear_revision {
             return Ok(false);
         }
-        let tx = conn.transaction()?;
+        let tx = immediate_tx(&mut conn)?;
         let updated_trade: Option<(String, DateTime<Utc>)> = {
             let mut statement = tx.prepare_cached(
                 "UPDATE trades SET realized_pnl = ?1, commission = ?2, is_maker = ?3, pnl_verified = 1 WHERE trade_id = ?4 AND mode = ?5 AND pnl_verified = 0 RETURNING symbol, timestamp;",
@@ -453,19 +373,6 @@ impl Database {
             .map_err(Into::into)
     }
 
-    /// Count today's persisted orders from Beijing midnight to now, including empty hours.
-    pub(crate) fn get_hourly_trade_stats(
-        &self,
-        symbol: &str,
-        mode: TradingMode,
-        now: DateTime<Utc>,
-    ) -> Result<HourlyTradeStats> {
-        #[cfg(test)]
-        self.hourly_stats_queries.fetch_add(1, Ordering::Relaxed);
-        let conn = self.lock_connection("get_hourly_trade_stats");
-        hourly::stats_on(&conn, symbol, mode, now)
-    }
-
     #[cfg(test)]
     pub(crate) fn get_unverified_trades(
         &self,
@@ -502,82 +409,10 @@ impl Database {
         let _conn = self.lock_connection("symbol_trade_clear_revision");
         self.trade_clear_revisions.for_symbol(symbol)
     }
-
-    pub fn get_pnl_totals(
-        &self,
-        symbol: &str,
-        mode: TradingMode,
-    ) -> Result<(Decimal, Decimal, usize)> {
-        let conn = self.lock_connection("get_pnl_totals");
-        hourly::pnl_totals_on(&conn, symbol, mode)
-    }
-
-    pub(crate) fn load_scoped_stats(
-        &self,
-        symbol: &str,
-        mode: TradingMode,
-    ) -> Result<Option<(usize, usize, Decimal, Decimal)>> {
-        let conn = self.lock_connection("load_scoped_stats");
-        let mut stmt = conn.prepare_cached(
-            "SELECT total_trades, completed_cycles, total_realized_profit, total_volume_usdc FROM scoped_grid_stats WHERE symbol = ?1 AND mode = ?2;",
-        )?;
-        let row = stmt
-            .query_row(params![symbol, mode.as_str()], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-            })
-            .optional()?;
-        row.map(parse_stats_row).transpose()
-    }
-
-    /// Legacy un-scoped grid stats accessor retained for backward-compatibility tests.
-    pub fn load_stats(&self) -> Result<Option<(usize, usize, Decimal, Decimal)>> {
-        let conn = self.lock_connection("load_stats");
-        conn.query_row(
-            "SELECT total_trades, completed_cycles, total_realized_profit, total_volume_usdc FROM grid_stats WHERE id = 1;",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )
-        .optional()?
-        .map(parse_stats_row)
-        .transpose()
-    }
-
-    /// Legacy un-scoped grid stats writer retained for backward-compatibility tests.
-    pub fn save_stats(&self, stats: &GridStats) -> Result<()> {
-        let conn = self.lock_connection("save_stats");
-        conn.execute(
-            "INSERT INTO grid_stats (id, total_trades, completed_cycles, total_realized_profit, total_volume_usdc, updated_at)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(id) DO UPDATE SET
-                 total_trades = excluded.total_trades, completed_cycles = excluded.completed_cycles,
-                 total_realized_profit = excluded.total_realized_profit,
-                 total_volume_usdc = excluded.total_volume_usdc, updated_at = excluded.updated_at;",
-            params![
-                stats.total_trades as i64,
-                stats.completed_cycles as i64,
-                stats.total_realized_profit.to_string(),
-                stats.total_volume_usdc.to_string(),
-                Utc::now().to_rfc3339(),
-            ],
-        )
-        .context("Failed to save stats to SQLite database")?;
-        Ok(())
-    }
 }
 
 fn parse_order_side(side: &str) -> Result<OrderSide> {
     OrderSide::from_exchange_str(side).with_context(|| format!("Invalid order side: {}", side))
-}
-
-fn parse_stats_row(
-    (trades, cycles, profit, volume): (i64, i64, String, String),
-) -> Result<(usize, usize, Decimal, Decimal)> {
-    Ok((
-        trades as usize,
-        cycles as usize,
-        Decimal::from_str(&profit)?,
-        Decimal::from_str(&volume)?,
-    ))
 }
 
 fn clear_trades_on(tx: &Connection, symbol: Option<&str>) -> Result<usize> {
@@ -682,34 +517,6 @@ fn insert_trade_on(conn: &Connection, trade: &TradeRecord) -> Result<bool> {
         hourly::insert_on(conn, trade)?;
     }
     Ok(inserted == 1)
-}
-
-fn save_scoped_stats_on(
-    conn: &Connection,
-    symbol: &str,
-    mode: TradingMode,
-    stats: &GridStats,
-) -> Result<()> {
-    conn.prepare_cached(
-        "INSERT INTO scoped_grid_stats (symbol, mode, total_trades, completed_cycles, total_realized_profit, total_volume_usdc, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT(symbol, mode) DO UPDATE SET total_trades = excluded.total_trades, completed_cycles = excluded.completed_cycles, total_realized_profit = excluded.total_realized_profit, total_volume_usdc = excluded.total_volume_usdc, updated_at = excluded.updated_at;",
-    )?
-    .execute(params![
-        symbol,
-        mode.as_str(),
-        stats.total_trades as i64,
-        stats.completed_cycles as i64,
-        stats.total_realized_profit.to_string(),
-        stats.total_volume_usdc.to_string(),
-        Utc::now().to_rfc3339()
-    ])?;
-    Ok(())
-}
-
-fn decimal_col(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<Decimal> {
-    let raw: String = row.get(index)?;
-    Decimal::from_str(&raw).map_err(|err| {
-        rusqlite::Error::FromSqlConversionFailure(index, rusqlite::types::Type::Text, Box::new(err))
-    })
 }
 
 fn trade_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TradeRecord> {

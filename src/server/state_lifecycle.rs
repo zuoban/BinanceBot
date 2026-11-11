@@ -34,6 +34,8 @@ impl AppState {
         let previous = self.config.read().await;
         let previous_symbol = previous.exchange.symbol.clone();
         let previous_mode = previous.exchange.trading_mode();
+        let credentials_changed = previous.exchange.api_key != config.exchange.api_key
+            || previous.exchange.api_secret != config.exchange.api_secret;
         drop(previous);
         let scope = self.pair_scope.clone();
         let saved = config.clone();
@@ -45,6 +47,7 @@ impl AppState {
                     scope.as_deref(),
                     status,
                     (&previous_symbol, previous_mode),
+                    credentials_changed,
                 )
             })
             .await?;

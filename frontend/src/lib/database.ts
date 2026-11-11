@@ -60,7 +60,7 @@ export function useDatabaseAction<T extends string>() {
         const text = await task(controller.signal);
         if (mounted.current && !controller.signal.aborted && text) message.success(text);
       } catch (error) {
-        if (controller.signal.aborted || (error instanceof DOMException && error.name === 'AbortError')) return;
+        if (controller.signal.aborted || ((error instanceof Error || error instanceof DOMException) && error.name === 'AbortError')) return;
         if (mounted.current) message.error(errorMessage(error));
       } finally {
         if (abortRef.current === controller) abortRef.current = null;

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { memo, useMemo, useState } from 'react';
 import { Button, Card } from 'antd';
 import { modeLabel } from '../lib/format';
 import { comparePositionAmount, groupTradePnl } from '../lib/portfolio';
@@ -82,7 +82,7 @@ export function OverviewBanner({
   </section>;
 }
 
-export function OverviewTradesCard({ recentTrades }: { recentTrades: Trade[] }) {
+export const OverviewTradesCard = memo(function OverviewTradesCard({ recentTrades }: { recentTrades: Trade[] }) {
   const [tradesExpanded, setTradesExpanded] = useState(false);
   const displayedTrades = useMemo(() => recentTrades.slice(0, tradesExpanded ? 20 : 5), [recentTrades, tradesExpanded]);
   const { buyTrades, sellTrades } = useMemo(() => {
@@ -104,4 +104,4 @@ export function OverviewTradesCard({ recentTrades }: { recentTrades: Trade[] }) 
     <div id="recent-trades-list"><TradesTable overview trades={displayedTrades} /></div>
     {recentTrades.length > 5 && <div className="overview-trades-toggle"><Button type="text" aria-expanded={tradesExpanded} aria-controls="recent-trades-list" onClick={() => setTradesExpanded(value => !value)}>{tradesExpanded ? '收起' : '展开最近 20 条'}</Button></div>}
   </Card>;
-}
+});

@@ -24,17 +24,13 @@ function ShellTitle({ accounts, alert, active }: { accounts: AccountObservation[
   return null;
 }
 
-export default function Shell() {
-  const location = useLocation();
-  const pairs = usePairs();
-  const liveAccounts = useLiveAccounts();
-  const accounts = liveAccounts.accounts;
+function useLivePairStatuses(pairsData: Pair[] | undefined, accounts: AccountObservation[]) {
   const accountPairs = useMemo(() => new Map(accounts.map(entry => [entry.snapshot.symbol, entry])), [accounts]);
   const pairCache = useRef<{ overrides: WeakMap<Pair, Pair>; current?: Pair[] }>({ overrides: new WeakMap() });
   const currentPairs = useMemo(() => {
-    if (!pairs.data) return undefined;
+    if (!pairsData) return undefined;
     let changed = false;
-    const mapped = pairs.data.map(pair => {
+    const mapped = pairsData.map(pair => {
       const observation = accountPairs.get(pair.symbol);
       if (observation?.mode === pair.mode && !observation.account_observation_stale && observation.snapshot.status !== pair.status) {
         changed = true;
@@ -47,29 +43,27 @@ export default function Shell() {
       return pair;
     });
     const previous = pairCache.current.current;
-    const result = !changed ? pairs.data : previous?.length === mapped.length && mapped.every((pair, index) => pair === previous[index]) ? previous : mapped;
+    const result = !changed ? pairsData : previous?.length === mapped.length && mapped.every((pair, index) => pair === previous[index]) ? previous : mapped;
     pairCache.current.current = result;
     return result;
-  }, [pairs.data, accountPairs]);
-  const pairModeChanged = useMemo(() => pairs.data?.some(pair => {
+  }, [pairsData, accountPairs]);
+  const pairModeChanged = useMemo(() => pairsData?.some(pair => {
     const observation = accountPairs.get(pair.symbol);
     return observation && observation.mode !== pair.mode;
-  }), [pairs.data, accountPairs]);
-  const [dirty, setDirty] = useState(false), [saving, setSaving] = useState(false);
-  const savingRef = useRef(false);
-  savingRef.current = saving;
-  const updateSaving = useCallback((value: boolean) => {
-    savingRef.current = value;
-    setSaving(value);
-  }, []);
-  const runLogout = useAsyncLock();
-  const { message } = App.useApp();
+  }), [pairsData, accountPairs]);
+  const mode = useMemo<Mode | undefined>(() => {
+    const pairModes = currentPairs?.map(pair => accountPairs.get(pair.symbol)?.mode ?? pair.mode) ?? [];
+    const observed = accounts.length ? [...accounts.map(entry => entry.mode), ...pairModes] : pairModes;
+    if (!observed.length) return undefined;
+    if (observed.includes('LIVE')) return 'LIVE';
+    if (observed.includes('UNKNOWN')) return 'UNKNOWN';
+    return 'PAPER';
+  }, [accounts, accountPairs, currentPairs]);
+  return { currentPairs, pairModeChanged, mode };
+}
+
+function useDirtyNavigationBlocker(dirty: boolean, saving: boolean, setDirty: (value: boolean) => void) {
   const blockerDialog = useConfirmDialog();
-  const logoutDialog = useConfirmDialog();
-  const { logout, authEnabled } = useSession();
-  const pairsStale = useExpired(pairs.dataUpdatedAt + SNAPSHOT_STALE_MS);
-  const alert = !!liveAccounts.error || liveAccounts.stale || accounts.some(entry => entry.account_observation_stale || entry.snapshot.status === 'ERROR');
-  const symbol = routeSymbol(location.pathname);
   const blocker = useBlocker(({ currentLocation, nextLocation }) => (dirty || saving) && currentLocation.pathname !== nextLocation.pathname);
   useEffect(() => {
     if (blocker.state !== 'blocked') return;
@@ -80,34 +74,38 @@ export default function Shell() {
       if (!active) return;
       if (confirmed) { setDirty(false); blocker.proceed(); } else blocker.reset();
     })();
-    return () => {
-      active = false;
-      blockerDialog.destroyAll();
-    };
-  }, [blocker, saving, blockerDialog.confirm, blockerDialog.destroyAll]);
+    return () => { active = false; blockerDialog.destroyAll(); };
+  }, [blocker, saving, setDirty, blockerDialog.confirm, blockerDialog.destroyAll]);
   useEffect(() => {
     if (!dirty && !saving) return;
     const beforeUnload = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = ''; };
     window.addEventListener('beforeunload', beforeUnload);
     return () => window.removeEventListener('beforeunload', beforeUnload);
   }, [dirty, saving]);
+}
+
+export default function Shell() {
+  const location = useLocation(), pairs = usePairs(), liveAccounts = useLiveAccounts();
+  const accounts = liveAccounts.accounts;
+  const { currentPairs, pairModeChanged, mode } = useLivePairStatuses(pairs.data, accounts);
+  const [dirty, setDirty] = useState(false), [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
+  savingRef.current = saving;
+  const updateSaving = useCallback((value: boolean) => { savingRef.current = value; setSaving(value); }, []);
+  useDirtyNavigationBlocker(dirty, saving, setDirty);
   const context = useMemo(() => ({ dirty, setDirty, saving, setSaving: updateSaving }), [dirty, saving, updateSaving]);
+  const runLogout = useAsyncLock(), { message } = App.useApp(), logoutDialog = useConfirmDialog(), { logout, authEnabled } = useSession();
   const logOut = useCallback(() => runLogout(async () => {
     if (savingRef.current) return;
     if (dirty && !await logoutDialog.confirm({ title: '放弃未保存的修改并退出？', okText: '退出', cancelText: '继续编辑' })) return;
     if (savingRef.current) return;
     try { await logout(); } catch { message.error('退出失败，会话可能仍然有效，请重试'); }
   }), [dirty, logout, logoutDialog.confirm, message, runLogout]);
+  const pairsStale = useExpired(pairs.dataUpdatedAt + SNAPSHOT_STALE_MS);
+  const alert = !!liveAccounts.error || liveAccounts.stale || accounts.some(entry => entry.account_observation_stale || entry.snapshot.status === 'ERROR');
+  const symbol = routeSymbol(location.pathname);
   const [drawer, setDrawer] = useState(false), [palette, setPalette] = useState(false);
   useEffect(() => { setDrawer(false); }, [location.pathname]);
-  const mode = useMemo<Mode | undefined>(() => {
-    const pairModes = currentPairs?.map(pair => accountPairs.get(pair.symbol)?.mode ?? pair.mode) ?? [];
-    const observed = accounts.length ? [...accounts.map(entry => entry.mode), ...pairModes] : pairModes;
-    if (!observed.length) return undefined;
-    if (observed.includes('LIVE')) return 'LIVE';
-    if (observed.includes('UNKNOWN')) return 'UNKNOWN';
-    return 'PAPER';
-  }, [accounts, accountPairs, currentPairs]);
   const page: SidebarProps['page'] = location.pathname.startsWith('/settings') ? 'settings' : location.pathname.startsWith('/pairs/') ? 'pair' : 'overview';
   const closeDrawer = useCallback(() => setDrawer(false), []);
   const openPalette = useCallback(() => { if (saving) return; setDrawer(false); setPalette(true); }, [saving]);
@@ -121,11 +119,11 @@ export default function Shell() {
       <Link className="sidebar-brand" to="/" aria-label="Grid Console 首页"><img className="sidebar-logo" src="/logo.svg" alt="" /><span>Grid Console</span></Link>
       <div className="mobilebar-actions">
         {mode && <ModeTag mode={mode} />}
-        <Button type="text" icon={<SearchOutlined />} aria-label="打开命令面板" disabled={saving} onClick={() => { if (!saving) setPalette(true); }} />
+        <Button type="text" icon={<SearchOutlined />} aria-label="打开命令面板" disabled={saving} onClick={openPalette} />
         <Button type="text" icon={<MenuOutlined />} aria-label="打开主导航" aria-expanded={drawer} onClick={() => setDrawer(true)} />
       </div>
     </header>
-    <Drawer open={drawer} onClose={() => setDrawer(false)} placement="left" size={280} closable={false} className="sidebar-drawer" title={null} styles={{ body: { padding: 0 } }} aria-label="主导航"><SidebarBody idPrefix="drawer" {...sidebarProps} /></Drawer>
+    <Drawer open={drawer} onClose={closeDrawer} placement="left" size={280} closable={false} className="sidebar-drawer" title={null} styles={{ body: { padding: 0 } }} aria-label="主导航"><SidebarBody idPrefix="drawer" {...sidebarProps} /></Drawer>
     <main className="content" id="main"><Outlet /></main>
     <nav className="bottombar" aria-label="底部导航">
       <Link to="/" className={`bottombar-item${page === 'overview' ? ' bottombar-item-active' : ''}`} aria-current={page === 'overview' ? 'page' : undefined}><AppstoreOutlined aria-hidden="true" /><span>总览</span></Link>

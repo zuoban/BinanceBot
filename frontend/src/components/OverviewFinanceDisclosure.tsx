@@ -1,24 +1,27 @@
+import { memo, useContext } from 'react';
 import { Card, Col, Row, Statistic } from 'antd';
 import { ArrowRightOutlined } from '@ant-design/icons';
 import { cnyText, compactNumber as number, ratioText } from '../lib/format';
-import type { AccountGroup, PositionGroup } from '../lib/portfolio';
+import type { PositionGroup } from '../lib/portfolio';
+import { AccountsContext } from '../lib/session';
+import { useAccountGroups } from '../lib/useNow';
 import { Pnl } from './Common';
 
-export function OverviewFinanceDisclosure({
-  accountList,
+export const OverviewFinanceDisclosure = memo(function OverviewFinanceDisclosure({
   positionList,
   stale,
   compactFinance,
   financesExpanded,
   setFinancesExpanded,
 }: {
-  accountList: AccountGroup[];
   positionList: PositionGroup[];
   stale: boolean;
   compactFinance: boolean;
   financesExpanded: boolean;
   setFinancesExpanded: (open: boolean) => void;
 }) {
+  const accounts = useContext(AccountsContext);
+  const accountList = useAccountGroups(accounts);
   if (!accountList.length && !positionList.length) return null;
   return <details className="finance-disclosure" open={!compactFinance || financesExpanded} onToggle={event => { if (compactFinance) setFinancesExpanded(event.currentTarget.open); }}>
     <summary className="finance-disclosure-summary">
@@ -73,4 +76,4 @@ export function OverviewFinanceDisclosure({
       </section>}
     </div>
   </details>;
-}
+});

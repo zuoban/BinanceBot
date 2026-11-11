@@ -109,7 +109,7 @@ fn legacy_configs_default_long_and_pairs_keep_independent_directions() {
     config.pairs = ["SOLUSDC", "BTCUSDT"]
         .map(|symbol| super::TradingPairConfig::new(symbol.into()))
         .to_vec();
-    let mut short = config.grid.clone();
+    let mut short = config.grid;
     short.direction = GridDirection::Short;
     config.pairs[1].grid = Some(short);
     let configs = config.strategy_configs().unwrap();

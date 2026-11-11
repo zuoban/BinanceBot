@@ -107,14 +107,13 @@ impl PnlVerificationBatch<'_> {
 }
 
 impl GridTradingEngine {
-    /// Bounded compensation runs independently of order admission and risk refreshes.
-    pub(super) async fn reconcile_unverified_trades(&mut self) {
+    async fn poll_pnl_reconcile_ready(&mut self) -> bool {
         if self
             .pnl_reconcile_task
             .as_ref()
             .is_some_and(|task| !task.is_finished())
         {
-            return;
+            return false;
         }
         if let Some(task) = self.pnl_reconcile_task.take() {
             if let Ok(Some(retry_at)) = task.await {
@@ -125,9 +124,17 @@ impl GridTradingEngine {
             .pnl_retry_at
             .is_some_and(|retry_at| Instant::now() < retry_at)
         {
-            return;
+            return false;
         }
         self.pnl_retry_at = None;
+        true
+    }
+
+    /// Bounded compensation runs independently of order admission and risk refreshes.
+    pub(super) async fn reconcile_unverified_trades(&mut self) {
+        if !self.poll_pnl_reconcile_ready().await {
+            return;
+        }
         let (is_paper, mode) = {
             let config = self.state.config.read().await;
             (config.exchange.is_paper(), config.exchange.trading_mode())

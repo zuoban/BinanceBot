@@ -6,7 +6,9 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { useLiveAccounts, usePairSnapshot, useSocket } from '../lib/queries';
 import { tokenStore } from '../lib/api';
 import { pair, snapshot } from './fixtures';
-import { useExpired } from '../lib/useNow';
+import { beijingDay } from '../lib/format';
+import { todayTradeCounts } from '../lib/portfolio';
+import { useBeijingDay, useExpired } from '../lib/useNow';
 
 class FakeSocket {
   static instances: FakeSocket[] = [];
@@ -346,6 +348,29 @@ it('omits malformed sessionStorage tokens from WebSocket subprotocols and surviv
   } finally {
     second.unmount();
     tokenStore.clear();
+    vi.useRealTimers();
+  }
+});
+
+it('returns a stable Beijing-day start timestamp across renders until Beijing midnight rolls over', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-11-10T15:55:00Z')); // 23:55:00 Beijing time (2026-11-10)
+  const snap = snapshot('SOLUSDC');
+  snap.hourly_trade_stats!.window_end = '2026-11-10T12:00:00Z';
+  const { result, rerender, unmount } = renderHook(() => useBeijingDay());
+  try {
+    const initial = result.current;
+    expect(beijingDay(initial)).toBe('2026-11-10');
+    expect(todayTradeCounts(snap, initial)).toEqual({ buy: 2, sell: 3 });
+    await act(async () => { await vi.advanceTimersByTimeAsync(4 * 60_000); });
+    rerender();
+    expect(result.current).toBe(initial);
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000 + 1); });
+    expect(result.current).toBe(initial + 86_400_000);
+    expect(beijingDay(result.current)).toBe('2026-11-11');
+    expect(todayTradeCounts(snap, result.current)).toBeNull();
+  } finally {
+    unmount();
     vi.useRealTimers();
   }
 });

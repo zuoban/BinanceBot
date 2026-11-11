@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useState } from 'react';
 import { ConfigProvider, theme as antdTheme } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import { componentColors, dimensions, fonts, palettes } from './designTokens';
@@ -12,7 +12,9 @@ const readPreference = (): ThemePreference => {
     return isPreference(value) ? value : 'system';
   } catch { return 'system'; }
 };
-const systemDark = () => typeof window.matchMedia === 'function' && window.matchMedia('(prefers-color-scheme: dark)').matches;
+const systemDark = () => {
+  try { return typeof window.matchMedia === 'function' && window.matchMedia('(prefers-color-scheme: dark)').matches; } catch { return false; }
+};
 
 const ThemeContext = createContext<{ preference: ThemePreference; setPreference: (value: ThemePreference) => void }>({
   preference: 'system', setPreference: () => {},
@@ -121,7 +123,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     window.addEventListener('storage', update);
     return () => window.removeEventListener('storage', update);
   }, []);
-  useEffect(() => {
+  useLayoutEffect(() => {
     document.documentElement.dataset.theme = dark ? 'dark' : 'light';
     document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
     document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')?.setAttribute('content', palette['--bg-page']);

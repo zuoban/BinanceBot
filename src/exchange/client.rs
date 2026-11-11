@@ -2,7 +2,7 @@ use crate::config::ExchangeConfig;
 use crate::exchange::model::*;
 use crate::exchange::rate_limit::{RateLimiter, RequestClass};
 use crate::exchange::signature::{
-    build_signed_url, compute_account_cache_key, identity_key, new_hmac_key, HmacSha256,
+    build_signed_url_fmt, compute_account_cache_key, identity_key, new_hmac_key, HmacSha256,
 };
 use anyhow::{anyhow, Result};
 use chrono::Utc;
@@ -64,7 +64,7 @@ impl ExchangeError {
     }
 }
 
-fn order_response_error(status: reqwest::StatusCode, body: String) -> ExchangeError {
+pub(super) fn order_response_error(status: reqwest::StatusCode, body: String) -> ExchangeError {
     let api_error = serde_json::from_str::<BinanceApiError>(&body).ok();
     let code = api_error.as_ref().map(|error| error.code);
     let msg = api_error
@@ -119,23 +119,17 @@ async fn checked_response(response: reqwest::Response) -> Result<reqwest::Respon
     Err(parse_api_error_body(status, body))
 }
 
-pub(crate) struct NewOrderRequest<'a> {
-    pub(crate) symbol: &'a str,
-    pub(crate) side: &'a str,
-    pub(crate) price: &'a str,
-    pub(crate) quantity: &'a str,
-    pub(crate) client_order_id: &'a str,
-    pub(crate) post_only: bool,
-    pub(crate) reduce_only: bool,
-}
-
+#[path = "endpoints.rs"]
+mod endpoints;
 #[path = "fill_reconciler.rs"]
 mod fill_reconciler;
 
+#[cfg(test)]
+use endpoints::one_way_position;
+pub(crate) use endpoints::NewOrderRequest;
 use fill_reconciler::FillReconcilerState;
 #[cfg(test)]
 use fill_reconciler::{ExecutionFill, FillCacheCleanup, FillCacheEntry, FillProgress};
-
 pub(crate) fn shared_http_client() -> Client {
     static CLIENT: std::sync::LazyLock<Client> = std::sync::LazyLock::new(|| {
         Client::builder()
@@ -147,38 +141,25 @@ pub(crate) fn shared_http_client() -> Client {
 }
 
 pub struct BinanceFuturesClient {
-    base_url: String,
+    pub(super) base_url: String,
     api_key_header: Option<HeaderValue>,
     hmac_key: HmacSha256,
-    client: Client,
+    pub(super) client: Client,
     recv_window: u64,
     account_cache_key: [u8; 32],
     account_identity_key: [u8; 32],
     rate_account_key: [u8; 32],
     time_offset_ms: AtomicI64,
     last_time_sync_ms: AtomicU64,
-    limiter: Arc<RateLimiter>,
+    pub(super) limiter: Arc<RateLimiter>,
     fill_reconciler: std::sync::Mutex<FillReconcilerState>,
-    fill_retention_seconds: AtomicU64,
+    pub(super) fill_retention_seconds: AtomicU64,
 }
 
 impl BinanceFuturesClient {
     pub(crate) fn market_cache_key(&self) -> &str {
         &self.base_url
     }
-
-    pub(crate) async fn get_all_mark_prices_for_fallback(
-        &self,
-    ) -> Result<Vec<BinanceMarkPriceWithSymbol>> {
-        self.get_public_json(
-            10,
-            RequestClass::MarketFallback,
-            "/fapi/v1/premiumIndex",
-            &[],
-        )
-        .await
-    }
-
     pub fn new(config: &ExchangeConfig) -> Self {
         Self::new_with_limiter(config, Arc::new(RateLimiter::default()))
     }
@@ -301,7 +282,7 @@ impl BinanceFuturesClient {
         }
     }
 
-    async fn checked_signed_response(
+    pub(super) async fn checked_signed_response(
         &self,
         response: reqwest::Response,
     ) -> Result<reqwest::Response> {
@@ -314,7 +295,7 @@ impl BinanceFuturesClient {
         Err(parse_api_error_body(status, body))
     }
 
-    async fn ensure_signed_success(
+    pub(super) async fn ensure_signed_success(
         &self,
         resp: reqwest::Response,
         context: &str,
@@ -339,14 +320,14 @@ impl BinanceFuturesClient {
             .saturating_add(self.time_offset_ms.load(Ordering::SeqCst))
     }
 
-    fn signed_url(&self, path: &str, params: &str) -> String {
-        build_signed_url(
+    pub(super) fn signed_url_fmt(&self, endpoint: &str, query: std::fmt::Arguments<'_>) -> String {
+        build_signed_url_fmt(
             &self.base_url,
             &self.hmac_key,
             self.recv_window,
             self.current_timestamp(),
-            path,
-            params,
+            endpoint,
+            query,
         )
     }
 
@@ -369,7 +350,7 @@ impl BinanceFuturesClient {
         self.limiter.clone()
     }
 
-    fn reserve(&self, weight: u64, class: RequestClass) -> Result<()> {
+    pub(super) fn reserve(&self, weight: u64, class: RequestClass) -> Result<()> {
         self.limiter
             .reserve(&self.base_url, self.rate_account_key, weight, class)
             .map_err(|error| {
@@ -378,7 +359,7 @@ impl BinanceFuturesClient {
             })
     }
 
-    async fn send(
+    pub(super) async fn send(
         &self,
         mut request: reqwest::RequestBuilder,
     ) -> Result<reqwest::Response, reqwest::Error> {
@@ -424,7 +405,7 @@ impl BinanceFuturesClient {
         Ok(response)
     }
 
-    async fn get_public_json<T: serde::de::DeserializeOwned>(
+    pub(super) async fn get_public_json<T: serde::de::DeserializeOwned>(
         &self,
         weight: u64,
         class: RequestClass,
@@ -441,381 +422,32 @@ impl BinanceFuturesClient {
         Ok(resp.json().await.map_err(reqwest::Error::without_url)?)
     }
 
-    async fn get_signed_json<T: serde::de::DeserializeOwned>(
+    pub(super) fn prepare_signed_get_url(
         &self,
         weight: u64,
         class: RequestClass,
         path: &str,
-        query: &str,
+        query: std::fmt::Arguments<'_>,
+    ) -> Result<String> {
+        self.reserve(weight, class)?;
+        Ok(self.signed_url_fmt(path, query))
+    }
+
+    pub(super) async fn get_signed_json_url<T: serde::de::DeserializeOwned>(
+        &self,
+        url: &str,
         context: &str,
         include_status: bool,
     ) -> Result<T> {
-        self.reserve(weight, class)?;
-        let url = self.signed_url(path, query);
         let resp = self
             .ensure_signed_success(
-                self.send(self.client.get(&url)).await?,
+                self.send(self.client.get(url)).await?,
                 context,
                 include_status,
             )
             .await?;
         Ok(resp.json().await.map_err(reqwest::Error::without_url)?)
     }
-
-    /// Fetch exchange info (symbol filters)
-    pub(crate) async fn get_exchange_info(
-        &self,
-        symbol: Option<&str>,
-    ) -> Result<BinanceExchangeInfo> {
-        let query: &[(&str, &str)] = match symbol {
-            Some(sym) => &[("symbol", sym)],
-            None => &[],
-        };
-        let info: BinanceExchangeInfo = self
-            .get_public_json(1, RequestClass::Normal, "/fapi/v1/exchangeInfo", query)
-            .await?;
-        self.limiter
-            .update_exchange_limits(&self.base_url, &info.rate_limits);
-        Ok(info)
-    }
-
-    async fn get_symbol_public<T: serde::de::DeserializeOwned>(
-        &self,
-        class: RequestClass,
-        path: &str,
-        symbol: &str,
-    ) -> Result<T> {
-        self.get_public_json(1, class, path, &[("symbol", symbol)])
-            .await
-    }
-
-    /// Fetch the latest traded price.
-    pub(crate) async fn get_ticker_price(&self, symbol: &str) -> Result<Decimal> {
-        let ticker: BinanceTickerPrice = self
-            .get_symbol_public(RequestClass::Normal, "/fapi/v1/ticker/price", symbol)
-            .await?;
-        Ok(ticker.price)
-    }
-
-    pub(crate) async fn get_ticker_price_for_fallback(&self, symbol: &str) -> Result<Decimal> {
-        let ticker: BinanceTickerPrice = self
-            .get_symbol_public(
-                RequestClass::MarketFallback,
-                "/fapi/v1/ticker/price",
-                symbol,
-            )
-            .await?;
-        Ok(ticker.price)
-    }
-
-    /// Fetch the futures mark price, which differs from the latest traded price.
-    pub(crate) async fn get_mark_price(&self, symbol: &str) -> Result<Decimal> {
-        let mark: BinanceMarkPrice = self
-            .get_symbol_public(RequestClass::Normal, "/fapi/v1/premiumIndex", symbol)
-            .await?;
-        Ok(mark.mark_price)
-    }
-
-    pub(crate) async fn get_mark_price_for_fallback(&self, symbol: &str) -> Result<Decimal> {
-        let mark: BinanceMarkPrice = self
-            .get_symbol_public(
-                RequestClass::MarketFallback,
-                "/fapi/v1/premiumIndex",
-                symbol,
-            )
-            .await?;
-        Ok(mark.mark_price)
-    }
-
-    /// Fetch 24-hour ticker statistics
-    pub(crate) async fn get_24hr_ticker(&self, symbol: &str) -> Result<Binance24hrTicker> {
-        self.get_symbol_public(RequestClass::Normal, "/fapi/v1/ticker/24hr", symbol)
-            .await
-    }
-
-    pub(crate) async fn get_24hr_ticker_for_fallback(
-        &self,
-        symbol: &str,
-    ) -> Result<Binance24hrTicker> {
-        self.get_symbol_public(RequestClass::MarketFallback, "/fapi/v1/ticker/24hr", symbol)
-            .await
-    }
-    /// Fetch open orders for symbol
-    pub(crate) async fn get_open_orders(&self, symbol: &str) -> Result<Vec<BinanceOrderResponse>> {
-        self.get_open_orders_with_class(symbol, RequestClass::Critical)
-            .await
-    }
-
-    pub(crate) async fn get_open_orders_for_periodic_sync(
-        &self,
-        symbol: &str,
-    ) -> Result<Vec<BinanceOrderResponse>> {
-        self.get_open_orders_with_class(symbol, RequestClass::Normal)
-            .await
-    }
-
-    async fn get_open_orders_with_class(
-        &self,
-        symbol: &str,
-        class: RequestClass,
-    ) -> Result<Vec<BinanceOrderResponse>> {
-        self.reserve(1, class)?;
-        let url = self.signed_url("/fapi/v1/openOrders", &format!("symbol={}", symbol));
-
-        let resp = self
-            .checked_signed_response(self.send(self.client.get(&url)).await?)
-            .await?;
-
-        let orders: Vec<BinanceOrderResponse> =
-            resp.json().await.map_err(reqwest::Error::without_url)?;
-        Ok(orders)
-    }
-
-    /// Fetch an order's final status before treating it as a fill.
-    pub(crate) async fn get_order(
-        &self,
-        symbol: &str,
-        order_id: i64,
-    ) -> Result<BinanceOrderResponse> {
-        self.get_signed_json(
-            1,
-            RequestClass::Critical,
-            "/fapi/v1/order",
-            &format!("symbol={}&orderId={}", symbol, order_id),
-            "Failed to get order",
-            true,
-        )
-        .await
-    }
-
-    /// Resolve a persisted client order ID after a restart.
-    pub(crate) async fn get_order_by_client_id(
-        &self,
-        symbol: &str,
-        client_order_id: &str,
-    ) -> Result<BinanceOrderResponse> {
-        self.require_order_by_client_id(symbol, client_order_id, RequestClass::Critical)
-            .await
-    }
-
-    /// Restore a historical order ID without consuming emergency request capacity.
-    pub(crate) async fn get_order_by_client_id_for_pnl(
-        &self,
-        symbol: &str,
-        client_order_id: &str,
-    ) -> Result<BinanceOrderResponse> {
-        self.require_order_by_client_id(symbol, client_order_id, RequestClass::PnlReconciliation)
-            .await
-    }
-
-    async fn require_order_by_client_id(
-        &self,
-        symbol: &str,
-        client_order_id: &str,
-        class: RequestClass,
-    ) -> Result<BinanceOrderResponse> {
-        self.lookup_order_by_client_id_with_class(symbol, client_order_id, class)
-            .await?
-            .ok_or_else(|| anyhow!("Order {} was not found on Binance", client_order_id))
-    }
-
-    /// Only Binance's explicit unknown-order code means it is safe to submit this ID.
-    pub(crate) async fn lookup_order_by_client_id(
-        &self,
-        symbol: &str,
-        client_order_id: &str,
-    ) -> Result<Option<BinanceOrderResponse>> {
-        self.lookup_order_by_client_id_with_class(symbol, client_order_id, RequestClass::Critical)
-            .await
-    }
-
-    async fn lookup_order_by_client_id_with_class(
-        &self,
-        symbol: &str,
-        client_order_id: &str,
-        class: RequestClass,
-    ) -> Result<Option<BinanceOrderResponse>> {
-        self.reserve(1, class)?;
-        let url = self.signed_url(
-            "/fapi/v1/order",
-            &format!("symbol={}&origClientOrderId={}", symbol, client_order_id),
-        );
-        let resp = self.send(self.client.get(&url)).await?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            if status == reqwest::StatusCode::BAD_REQUEST
-                && serde_json::from_str::<BinanceApiError>(&body)
-                    .is_ok_and(|error| error.code == -2013)
-            {
-                return Ok(None);
-            }
-            self.maybe_resync_on_invalid_timestamp(&body).await;
-            return Err(anyhow!(
-                "Failed to resolve order {}: {} - {}",
-                client_order_id,
-                status,
-                body
-            ));
-        }
-        Ok(Some(
-            resp.json().await.map_err(reqwest::Error::without_url)?,
-        ))
-    }
-
-    /// Place an order. If post_only is true, timeInForce is set to GTX (Maker Only).
-    /// reduce_only prevents a closing order from opening the opposite position.
-    pub(crate) async fn place_order(
-        &self,
-        order: NewOrderRequest<'_>,
-    ) -> std::result::Result<BinanceOrderResponse, ExchangeError> {
-        self.reserve(
-            0,
-            if order.reduce_only {
-                RequestClass::ClosingOrder
-            } else {
-                RequestClass::OpeningOrder
-            },
-        )
-        .map_err(|error| ExchangeError::RequestRejected(error.to_string()))?;
-        let tif = if order.post_only { "GTX" } else { "GTC" };
-
-        let reduce_only_param = if order.reduce_only {
-            "&reduceOnly=true"
-        } else {
-            ""
-        };
-        let url = self.signed_url(
-            "/fapi/v1/order",
-            &format!(
-                "symbol={}&side={}&type=LIMIT&timeInForce={}&price={}&quantity={}&newClientOrderId={}{}",
-                order.symbol,
-                order.side,
-                tif,
-                order.price,
-                order.quantity,
-                order.client_order_id,
-                reduce_only_param
-            ),
-        );
-
-        debug!(
-            "Sending Binance order request: side={}, price={}, qty={}, tif={}",
-            order.side, order.price, order.quantity, tif
-        );
-        let resp = self.send(self.client.post(&url)).await?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            self.maybe_resync_on_invalid_timestamp(&body).await;
-            return Err(order_response_error(status, body));
-        }
-
-        let order: BinanceOrderResponse = resp
-            .json()
-            .await
-            .map_err(reqwest::Error::without_url)
-            .map_err(|e| ExchangeError::Other(format!("Failed to parse order response: {}", e)))?;
-        Ok(order)
-    }
-
-    /// Cancel a single order by orderId or origClientOrderId
-    pub(crate) async fn cancel_order(
-        &self,
-        symbol: &str,
-        order_id: Option<i64>,
-        client_order_id: Option<&str>,
-    ) -> Result<()> {
-        self.reserve(1, RequestClass::Critical)?;
-        let mut params = format!("symbol={}", symbol);
-        if let Some(id) = order_id {
-            params.push_str(&format!("&orderId={}", id));
-        } else if let Some(cid) = client_order_id {
-            params.push_str(&format!("&origClientOrderId={}", cid));
-        }
-
-        let url = self.signed_url("/fapi/v1/order", &params);
-
-        self.ensure_signed_success(
-            self.send(self.client.delete(&url)).await?,
-            "Failed to cancel order",
-            false,
-        )
-        .await?;
-        Ok(())
-    }
-
-    /// Fetch position risk information for symbol
-    pub(crate) async fn get_position(&self, symbol: &str) -> Result<Option<BinancePositionRisk>> {
-        let positions: Vec<BinancePositionRisk> = self
-            .get_signed_json(
-                5,
-                RequestClass::Critical,
-                "/fapi/v2/positionRisk",
-                &format!("symbol={}", symbol),
-                "Failed to get position risk",
-                false,
-            )
-            .await?;
-        one_way_position(positions, symbol)
-    }
-
-    /// Fetch position risk for all symbols on the account.
-    pub(crate) async fn get_all_positions(&self) -> Result<Vec<BinancePositionRisk>> {
-        self.get_signed_json(
-            5,
-            RequestClass::Normal,
-            "/fapi/v2/positionRisk",
-            "",
-            "Failed to get position risk",
-            false,
-        )
-        .await
-    }
-
-    /// Fetch account balance summary
-    pub(crate) async fn get_account(&self) -> Result<BinanceAccountInfoResponse> {
-        self.get_account_with_class(RequestClass::Normal).await
-    }
-
-    pub(crate) async fn get_account_critical(&self) -> Result<BinanceAccountInfoResponse> {
-        self.get_account_with_class(RequestClass::Critical).await
-    }
-
-    async fn get_account_with_class(
-        &self,
-        class: RequestClass,
-    ) -> Result<BinanceAccountInfoResponse> {
-        self.get_signed_json(
-            5,
-            class,
-            "/fapi/v2/account",
-            "",
-            "Failed to get account info",
-            false,
-        )
-        .await
-    }
-}
-
-fn one_way_position(
-    positions: Vec<BinancePositionRisk>,
-    symbol: &str,
-) -> Result<Option<BinancePositionRisk>> {
-    let mut matching = positions
-        .into_iter()
-        .filter(|position| position.symbol.eq_ignore_ascii_case(symbol));
-    let position = matching.next();
-    anyhow::ensure!(
-        position.as_ref().is_none_or(|position| position
-            .position_side
-            .as_deref()
-            .is_none_or(|side| side == "BOTH"))
-            && matching.next().is_none(),
-        ONE_WAY_POSITION_ERROR
-    );
-    Ok(position)
 }
 
 #[cfg(test)]

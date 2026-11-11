@@ -1,29 +1,42 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { beforeEach, expect, it, vi } from 'vitest';
 import PairDetail from '../pages/PairDetail';
 import { Pnl } from '../components/Common';
 import { pair, snapshot } from './fixtures';
+import type * as Api from '../lib/api';
 import type * as Queries from '../lib/queries';
-import type { Pair, Snapshot } from '../lib/types';
+import type { LogItem, Pair, Snapshot, Trade } from '../lib/types';
 
 const state = vi.hoisted(() => ({
   data: undefined as Snapshot | undefined,
   pairs: [] as Pair[] | undefined,
   pairsPending: false,
   pairsFetching: false,
+  pairsError: null as Error | null,
+  queryError: null as Error | null,
+  refetchPairs: vi.fn(),
+  refetchQuery: vi.fn(),
+  api: vi.fn(),
 }));
+vi.mock('../lib/api', async importOriginal => ({ ...await importOriginal<typeof Api>(), api: state.api }));
 vi.mock('../lib/queries', async importOriginal => {
   const actual = await importOriginal<typeof Queries>();
   return {
     ...actual,
-    usePairs: () => ({ data: state.pairs, isPending: state.pairsPending, isFetching: state.pairsFetching }),
-    usePairSnapshot: () => ({ data: state.data, live: true, stale: false, isPending: false }),
+    usePairs: () => ({ data: state.pairs, error: state.pairsError, isPending: state.pairsPending, isFetching: state.pairsFetching, refetch: state.refetchPairs }),
+    usePairSnapshot: () => ({ data: state.data, error: state.queryError, live: true, stale: false, isPending: false, refetch: state.refetchQuery }),
   };
 });
 vi.mock('../components/Controls', () => ({ PairControls: () => null, useControls: () => ({ busy: new Set<string>(), pending: {}, results: {}, clearResult: vi.fn(), run: vi.fn() }) }));
 vi.mock('../components/Charts', () => ({ DepthChart: () => null, HourlyChart: () => null }));
-vi.mock('../components/DataTables', () => ({ LogsTable: () => null, OrdersTable: () => null, TradesTable: () => null }));
+vi.mock('../components/DataTables', () => ({
+  OrdersTable: () => null,
+  TradesTable: ({ trades }: { trades: Trade[] }) => <div data-testid="trades-ids">{trades.map(t => t.trade_id).join(',')}</div>,
+  LogsTable: ({ logs }: { logs: LogItem[] }) => <div data-testid="logs-msgs">{logs.map(l => l.message).join(',')}</div>,
+}));
 vi.mock('../components/HistoryActions', () => ({ HistoryActions: () => null }));
 
 beforeEach(() => {
@@ -31,10 +44,15 @@ beforeEach(() => {
   state.pairs = [pair()];
   state.pairsPending = false;
   state.pairsFetching = false;
+  state.pairsError = null;
+  state.queryError = null;
+  state.refetchPairs.mockReset();
+  state.refetchQuery.mockReset();
+  state.api.mockReset();
 });
 
-function view() {
-  return <MemoryRouter initialEntries={['/pairs/SOLUSDC']}><Routes><Route path="/pairs/:symbol" element={<PairDetail />} /></Routes></MemoryRouter>;
+function view(initialEntry = '/pairs/SOLUSDC') {
+  return <MemoryRouter initialEntries={[initialEntry]}><Routes><Route path="/pairs/:symbol" element={<PairDetail />} /></Routes></MemoryRouter>;
 }
 
 it('updates the net realized profit only after pending trades are verified', () => {
@@ -113,4 +131,61 @@ it('shows detail loading instead of a missing-pair warning while pairs are still
   state.pairsFetching = false;
   rerender(view());
   expect(screen.getByText('该交易对不存在或已移除')).toBeInTheDocument();
+});
+
+it('guards ErrorNotice retry so missing-pair errors do not force-refetch disabled snapshot query', async () => {
+  state.data = undefined;
+  state.pairs = undefined;
+  state.pairsError = new Error('列表加载失败');
+  const user = userEvent.setup();
+  const { unmount } = render(view());
+  await user.click(screen.getByRole('button', { name: /重\s*试/ }));
+  expect(state.refetchPairs).toHaveBeenCalledOnce();
+  expect(state.refetchQuery).not.toHaveBeenCalled();
+  unmount();
+
+  state.pairs = [pair()];
+  state.pairsError = null;
+  state.queryError = new Error('快照加载失败');
+  render(view());
+  await user.click(screen.getByRole('button', { name: /重\s*试/ }));
+  expect(state.refetchPairs).toHaveBeenCalledOnce();
+  expect(state.refetchQuery).toHaveBeenCalledOnce();
+});
+
+it('lazily fetches full buffered trades and logs on tab activation and falls back cleanly on failure', async () => {
+  state.data!.recent_trades = [{ trade_id: 'snap-t1', symbol: 'SOLUSDC', mode: 'PAPER', side: 'BUY', price: '100', quantity: '1', amount_usdc: '100', realized_pnl: '0', commission: '0', pnl_verified: true, is_maker: true, timestamp: '2026-11-05T01:00:00Z', note: '' }];
+  state.data!.recent_logs = [{ timestamp: '2026-11-05T01:01:00Z', level: 'INFO', message: 'snap-log' }];
+  state.api.mockImplementation((path: string) => {
+    if (path === '/api/pairs/SOLUSDC/trades') {
+      return Promise.resolve([
+        { trade_id: 'full-t2', symbol: 'SOLUSDC', mode: 'PAPER', side: 'SELL', price: '101', quantity: '1', amount_usdc: '101', realized_pnl: '1', commission: '0', pnl_verified: true, is_maker: true, timestamp: '2026-11-05T01:02:00Z', note: '' },
+        { trade_id: 'snap-t1', symbol: 'SOLUSDC', mode: 'PAPER', side: 'BUY', price: '100', quantity: '1', amount_usdc: '100', realized_pnl: '0', commission: '0', pnl_verified: true, is_maker: true, timestamp: '2026-11-05T01:00:00Z', note: '' },
+      ]);
+    }
+    if (path === '/api/pairs/SOLUSDC/logs') {
+      return Promise.resolve([
+        { timestamp: '2026-11-05T01:00:00Z', level: 'INFO', message: 'older-log' },
+        { timestamp: '2026-11-05T01:01:00Z', level: 'SUCCESS', message: 'newer-log' },
+      ]);
+    }
+    return Promise.reject(new Error('unexpected path'));
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const user = userEvent.setup();
+  const { unmount } = render(<QueryClientProvider client={client}>{view()}</QueryClientProvider>);
+  expect(state.api).not.toHaveBeenCalled();
+
+  await user.click(screen.getByRole('tab', { name: '成交历史' }));
+  await waitFor(() => expect(screen.getByTestId('trades-ids')).toHaveTextContent('full-t2,snap-t1'));
+
+  await user.click(screen.getByRole('tab', { name: '运行日志' }));
+  await waitFor(() => expect(screen.getByTestId('logs-msgs')).toHaveTextContent('newer-log,older-log'));
+  unmount();
+
+  const failingClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  state.api.mockRejectedValue(new Error('接口不可用'));
+  render(<QueryClientProvider client={failingClient}>{view('/pairs/SOLUSDC?tab=trades')}</QueryClientProvider>);
+  await waitFor(() => expect(state.api).toHaveBeenCalledWith('/api/pairs/SOLUSDC/trades', expect.anything()));
+  expect(screen.getByTestId('trades-ids')).toHaveTextContent('snap-t1');
 });

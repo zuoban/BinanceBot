@@ -94,3 +94,18 @@ it('keeps the original values and version together when a background refresh ret
   await waitFor(() => expect(mocks.post).toHaveBeenCalledWith('/api/server/config', { host: '127.0.0.1', port: 8081, baseline_version: 'v1' }));
   expect(await screen.findByText('服务设置已被其他请求修改，请刷新后重试')).toBeInTheDocument();
 }, 40000);
+
+it('clears validation errors when reverting dirty server settings', async () => {
+  mocks.api.mockImplementation((path: string) => path === '/api/server/config' ? Promise.resolve(initial) : Promise.resolve(globalConfig));
+  setup();
+  const user = userEvent.setup();
+  await user.click(screen.getByRole('tab', { name: '服务设置' }));
+  const host = await screen.findByLabelText('监听地址');
+  await waitFor(() => expect(host).toHaveValue('127.0.0.1'));
+  await user.clear(host);
+  await user.click(screen.getByRole('button', { name: '保存监听设置' }));
+  await waitFor(() => expect(host).toHaveAttribute('aria-invalid', 'true'));
+  await user.click(screen.getByRole('button', { name: /还\s*原/ }));
+  await waitFor(() => expect(host).toHaveValue('127.0.0.1'));
+  await waitFor(() => expect(host).not.toHaveAttribute('aria-invalid', 'true'));
+});

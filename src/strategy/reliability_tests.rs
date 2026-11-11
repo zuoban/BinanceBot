@@ -3774,7 +3774,7 @@ async fn bulk_cancel_identity_conflict_remains_blocked_after_list_disappears_and
         first.client.account_identity_key(),
         original.client_order_id.clone(),
     );
-    assert!(first.evidence.order_identity_conflicts.contains_key(&key));
+    assert!(first.evidence.has_conflict(key.0, &key.1));
     assert_eq!(
         db.load_identity_observations(key.0, "SOLUSDC")
             .unwrap()
@@ -3792,7 +3792,7 @@ async fn bulk_cancel_identity_conflict_remains_blocked_after_list_disappears_and
         .unwrap()
         .status = "FILLED".into();
     assert!(!first.sync_live_orders().await);
-    assert!(first.evidence.order_identity_conflicts.contains_key(&key));
+    assert!(first.evidence.has_conflict(key.0, &key.1));
     assert_eq!(
         first.state.active_orders.read().await["gb_bulk_identity"].order_id,
         Some(123)
@@ -3878,7 +3878,7 @@ async fn bulk_cancel_keeps_provisional_order_when_managed_read_or_write_fails() 
             engine.client.account_identity_key(),
             order.client_order_id.clone(),
         );
-        assert!(engine.evidence.provisional_order_ids.contains(&key));
+        assert!(engine.evidence.is_provisional(key.0, &key.1));
         assert_eq!(
             engine.state.active_orders.read().await[&order.client_order_id].order_id,
             Some(123)
@@ -4330,8 +4330,8 @@ async fn existing_identity_barrier_is_rebased_to_restored_disk_identity() {
         engine.client.account_identity_key(),
         memory.client_order_id.clone(),
     );
-    engine.evidence.provisional_order_ids.insert(key.clone());
-    engine.evidence.order_identity_conflicts.insert(key, memory);
+    engine.evidence.mark_provisional(key.0, &key.1);
+    engine.evidence.insert_conflict(key.0, memory);
     fake.orders.lock().unwrap().insert(
         disk.client_order_id.clone(),
         BinanceOrderResponse {
@@ -4485,13 +4485,9 @@ async fn resolved_identity_groups_cleanup_is_atomic_across_both_tables() {
         let mut first_responses = HashMap::new();
         let mut first_observations = HashMap::new();
         for client in ["gb_cleanup_a", "gb_cleanup_b"] {
-            let key = (account, client.to_string());
-            assert!(first.evidence.order_identity_conflicts.contains_key(&key));
-            assert!(first
-                .evidence
-                .order_identity_observations
-                .contains_key(&key));
-            assert!(first.evidence.provisional_order_ids.contains(&key));
+            assert!(first.evidence.has_conflict(account, client));
+            assert!(first.evidence.has_observations(account, client));
+            assert!(first.evidence.is_provisional(account, client));
             let responses = db
                 .load_initial_order_responses(account, "SOLUSDC", client)
                 .unwrap();
@@ -4532,15 +4528,8 @@ async fn resolved_identity_groups_cleanup_is_atomic_across_both_tables() {
         assert!(!restarted.sync_live_orders().await);
         assert!(restarted.reconciliation_blocked);
         for client in ["gb_cleanup_a", "gb_cleanup_b"] {
-            let key = (account, client.to_string());
-            assert!(restarted
-                .evidence
-                .order_identity_conflicts
-                .contains_key(&key));
-            assert!(restarted
-                .evidence
-                .order_identity_observations
-                .contains_key(&key));
+            assert!(restarted.evidence.has_conflict(account, client));
+            assert!(restarted.evidence.has_observations(account, client));
             let responses = db
                 .load_initial_order_responses(account, "SOLUSDC", client)
                 .unwrap();
@@ -4578,10 +4567,7 @@ async fn resolved_identity_groups_cleanup_is_atomic_across_both_tables() {
                 .load_initial_order_responses(account, "SOLUSDC", client)
                 .unwrap()
                 .is_empty());
-            assert!(!restarted
-                .evidence
-                .order_identity_conflicts
-                .contains_key(&(account, client.to_string())));
+            assert!(!restarted.evidence.has_conflict(account, client));
         }
         server.abort();
         drop(connection);
@@ -4661,6 +4647,7 @@ async fn all_conflict_groups_record_new_observations_before_any_lookup_can_block
             .evidence
             .order_identity_observations
             .values()
+            .flat_map(|obs| obs.values())
             .map(Vec::len)
             .sum::<usize>(),
         4
@@ -4988,11 +4975,8 @@ async fn identity_conflict_can_resolve_through_confirmed_terminal_lookup() {
             engine.client.account_identity_key(),
             order.client_order_id.clone(),
         );
-        engine.evidence.provisional_order_ids.insert(key.clone());
-        engine
-            .evidence
-            .order_identity_conflicts
-            .insert(key, order.clone());
+        engine.evidence.mark_provisional(key.0, &key.1);
+        engine.evidence.insert_conflict(key.0, order.clone());
         fake.orders.lock().unwrap().insert(
             order.client_order_id.clone(),
             BinanceOrderResponse {
@@ -5410,11 +5394,10 @@ async fn duplicate_snapshot_responses_are_written_as_one_transaction() {
         .load_identity_observations(account, "SOLUSDC")
         .unwrap()
         .is_empty());
-    assert!(first.evidence.order_identity_conflicts.contains_key(&key));
+    assert!(first.evidence.has_conflict(key.0, &key.1));
     assert!(first
         .evidence
-        .order_identity_observations
-        .get(&key)
+        .get_observations(key.0, &key.1)
         .unwrap()
         .iter()
         .any(|observed| observed.order_id == 123));
@@ -5432,11 +5415,10 @@ async fn duplicate_snapshot_responses_are_written_as_one_transaction() {
         .load_identity_observations(account, "SOLUSDC")
         .unwrap()
         .is_empty());
-    assert!(first.evidence.order_identity_conflicts.contains_key(&key));
+    assert!(first.evidence.has_conflict(key.0, &key.1));
     assert!(first
         .evidence
-        .order_identity_observations
-        .get(&key)
+        .get_observations(key.0, &key.1)
         .unwrap()
         .iter()
         .any(|observed| observed.order_id == 123));
@@ -5476,10 +5458,7 @@ async fn duplicate_snapshot_responses_are_written_as_one_transaction() {
     assert!(responses.iter().any(
         |response| response.status == "PARTIALLY_FILLED" && response.executed_qty == dec!(0.5)
     ));
-    assert!(restarted
-        .evidence
-        .order_identity_conflicts
-        .contains_key(&key));
+    assert!(restarted.evidence.has_conflict(key.0, &key.1));
     assert!(db
         .load_identity_observations(account, "SOLUSDC")
         .unwrap()
@@ -5866,7 +5845,7 @@ async fn failed_snapshot_batch_retries_atomically_and_only_once() {
                 .await
         );
         assert_eq!(
-            first.evidence.initial_order_responses[&(account, "SOLUSDC".to_string())].len(),
+            first.evidence.initial_order_responses[&account]["SOLUSDC"].len(),
             1
         );
         assert!(db
@@ -5884,8 +5863,7 @@ async fn failed_snapshot_batch_retries_atomically_and_only_once() {
     );
     assert!(!first
         .evidence
-        .initial_order_responses
-        .contains_key(&(account, "SOLUSDC".to_string())));
+        .has_pending_initial_responses(account, "SOLUSDC"));
     assert!(
         first
             .record_initial_order_response_snapshot(
@@ -5921,7 +5899,6 @@ async fn terminal_disagreement_queue_retries_failures_and_removes_successes() {
     let mut first = engine(db.clone(), &url).await;
     let account = first.client.account_identity_key();
     let client = "gb_evidence_timeline";
-    let key = (account, "SOLUSDC".to_string(), client.to_string());
     let filled = evidence_test_response("FILLED", dec!(2), 2000);
     let canceled = evidence_test_response("CANCELED", dec!(0), 3000);
     let expired = evidence_test_response("EXPIRED", dec!(0), 4000);
@@ -5935,13 +5912,19 @@ async fn terminal_disagreement_queue_retries_failures_and_removes_successes() {
             .record_terminal_disagreement(account, "SOLUSDC", client, &filled, &expired)
             .await
     );
-    assert_eq!(first.evidence.terminal_order_disagreements[&key].len(), 2);
+    assert_eq!(
+        first.evidence.terminal_order_disagreements[&account]["SOLUSDC"][client].len(),
+        2
+    );
     assert!(
         first
             .terminal_disagreement_blocked(account, "SOLUSDC")
             .await
     );
-    assert_eq!(first.evidence.terminal_order_disagreements[&key].len(), 2);
+    assert_eq!(
+        first.evidence.terminal_order_disagreements[&account]["SOLUSDC"][client].len(),
+        2
+    );
     assert!(db
         .load_terminal_order_disagreements(account, "SOLUSDC")
         .unwrap()
@@ -5953,9 +5936,12 @@ async fn terminal_disagreement_queue_retries_failures_and_removes_successes() {
             .terminal_disagreement_blocked(account, "SOLUSDC")
             .await
     );
-    assert_eq!(first.evidence.terminal_order_disagreements[&key].len(), 1);
     assert_eq!(
-        first.evidence.terminal_order_disagreements[&key][0]
+        first.evidence.terminal_order_disagreements[&account]["SOLUSDC"][client].len(),
+        1
+    );
+    assert_eq!(
+        first.evidence.terminal_order_disagreements[&account]["SOLUSDC"][client][0]
             .1
             .status,
         "EXPIRED"
@@ -5976,8 +5962,7 @@ async fn terminal_disagreement_queue_retries_failures_and_removes_successes() {
     );
     assert!(!first
         .evidence
-        .terminal_order_disagreements
-        .contains_key(&key));
+        .has_terminal_disagreements(account, "SOLUSDC"));
     assert_eq!(
         db.load_terminal_order_disagreements(account, "SOLUSDC")
             .unwrap()
@@ -5991,8 +5976,7 @@ async fn terminal_disagreement_queue_retries_failures_and_removes_successes() {
     );
     assert!(!first
         .evidence
-        .terminal_order_disagreements
-        .contains_key(&key));
+        .has_terminal_disagreements(account, "SOLUSDC"));
     assert!(
         first
             .record_terminal_disagreement(account, "SOLUSDC", client, &canceled, &expired)
@@ -6000,8 +5984,7 @@ async fn terminal_disagreement_queue_retries_failures_and_removes_successes() {
     );
     assert!(!first
         .evidence
-        .terminal_order_disagreements
-        .contains_key(&key));
+        .has_terminal_disagreements(account, "SOLUSDC"));
     assert_eq!(
         db.load_terminal_order_disagreements(account, "SOLUSDC")
             .unwrap()
@@ -7776,15 +7759,14 @@ async fn cancellation_recovery_preserves_all_same_exchange_id_observations() {
     };
     db.save_identity_observation(account, &expected, &existing)
         .unwrap();
-    first
-        .evidence
-        .order_identity_conflicts
-        .insert(key.clone(), expected.clone());
-    first.evidence.provisional_order_ids.insert(key.clone());
+    first.evidence.insert_conflict(key.0, expected.clone());
+    first.evidence.mark_provisional(key.0, &key.1);
     first
         .evidence
         .provisional_order_observations
-        .insert(key, vec![pending]);
+        .entry(key.0)
+        .or_default()
+        .insert(key.1, vec![pending]);
     assert!(!first.cancel_all_orders().await);
     let observations = db.load_identity_observations(account, "SOLUSDC").unwrap();
     for (client, side) in [("gb_observed_a", "BUY"), ("gb_observed_b", "SELL")] {

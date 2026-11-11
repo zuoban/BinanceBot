@@ -37,7 +37,7 @@ impl Database {
         let plan_json = serde_json::to_string(plan)?;
         let updated_at = Utc::now().to_rfc3339();
         let mut conn = self.lock_connection("save_remainder_plan");
-        let tx = conn.transaction()?;
+        let tx = super::immediate_tx(&mut conn)?;
         tx.prepare_cached(
             "INSERT INTO remainder_plans (target_client_order_id, symbol, mode, active, plan_json, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(target_client_order_id) DO UPDATE SET active = excluded.active, plan_json = excluded.plan_json, updated_at = excluded.updated_at;",
         )?
@@ -87,7 +87,7 @@ impl Database {
 
     pub(crate) fn save_managed_orders(&self, orders: &[GridOrder]) -> Result<()> {
         let mut conn = self.lock_connection("save_managed_orders");
-        let tx = conn.transaction()?;
+        let tx = super::immediate_tx(&mut conn)?;
         {
             let mut statement = tx.prepare_cached(
                 "INSERT INTO managed_orders (client_order_id, symbol, order_json, updated_at) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(client_order_id) DO UPDATE SET symbol = excluded.symbol, order_json = excluded.order_json, updated_at = excluded.updated_at;",
@@ -107,7 +107,7 @@ impl Database {
 
     pub(crate) fn save_managed_orders_if_absent(&self, orders: &[GridOrder]) -> Result<()> {
         let mut conn = self.lock_connection("save_managed_orders_if_absent");
-        let tx = conn.transaction()?;
+        let tx = super::immediate_tx(&mut conn)?;
         {
             let mut statement = tx.prepare_cached(
                 "INSERT INTO managed_orders (client_order_id, symbol, order_json, updated_at) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(client_order_id) DO NOTHING;",
@@ -238,7 +238,7 @@ impl Database {
         >,
     ) -> Result<()> {
         let mut conn = self.lock_connection("save_initial_order_responses");
-        let tx = conn.transaction()?;
+        let tx = super::immediate_tx(&mut conn)?;
         Self::save_identity_observation_rows(&tx, account, identities)?;
         let observations: Vec<_> = observations
             .into_iter()
@@ -336,7 +336,7 @@ impl Database {
             return Ok(());
         }
         let mut conn = self.lock_connection("delete_order_evidence_groups");
-        let tx = conn.transaction()?;
+        let tx = super::immediate_tx(&mut conn)?;
         {
             let mut initial = tx.prepare_cached("DELETE FROM initial_order_responses WHERE account_key=?1 AND expected_symbol=?2 AND client_order_id=?3")?;
             let mut observations = tx.prepare_cached("DELETE FROM order_identity_observations WHERE account_key=?1 AND expected_symbol=?2 AND client_order_id=?3")?;
@@ -409,7 +409,7 @@ impl Database {
         records: &[(GridOrder, crate::types::ObservedOrderIdentity)],
     ) -> Result<()> {
         let mut conn = self.lock_connection("save_identity_observations");
-        let tx = conn.transaction()?;
+        let tx = super::immediate_tx(&mut conn)?;
         Self::save_identity_observation_rows(&tx, account, records)?;
         tx.commit()?;
         Ok(())

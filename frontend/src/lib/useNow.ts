@@ -29,19 +29,22 @@ export function useExpired(deadline: number) {
   return expired;
 }
 
-/** Re-render only when Beijing midnight (00:00 UTC+8) passes. */
+const BEIJING_OFFSET_MS = 8 * 3_600_000;
+const DAY_MS = 86_400_000;
+
+/** Re-render only when Beijing midnight (00:00 UTC+8) passes, returning that day's start timestamp. */
 export function useBeijingDay() {
-  const now = Date.now();
-  const day = Math.floor((now + 8 * 3600_000) / 86_400_000);
-  useExpired((day + 1) * 86_400_000 - 8 * 3600_000 - 1);
-  return Date.now();
+  const day = Math.floor((Date.now() + BEIJING_OFFSET_MS) / DAY_MS);
+  const startMs = day * DAY_MS - BEIJING_OFFSET_MS;
+  useExpired(startMs + DAY_MS - 1);
+  return startMs;
 }
 
 /** Return the current UTC hour index, re-rendering only when the hour turns over. */
 export function useUtcHour(enabled = true) {
   const hour = Math.floor(Date.now() / 3_600_000);
   useExpired(enabled ? (hour + 1) * 3_600_000 - 1 : Infinity);
-  return Math.floor(Date.now() / 3_600_000);
+  return hour;
 }
 
 /** Recompute `accountGroups` on data changes and exact freshness threshold expiries without a 1 Hz clock. */

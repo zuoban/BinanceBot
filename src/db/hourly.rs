@@ -1,4 +1,4 @@
-use super::beijing_midnight;
+use super::{beijing_midnight, decimal_col};
 use crate::types::{HourlyTradeCount, HourlyTradeStats, TradeRecord, TradingMode};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -6,13 +6,6 @@ use rusqlite::{params, Connection, OptionalExtension};
 use rust_decimal::Decimal;
 use std::collections::{BTreeMap, HashMap};
 use std::str::FromStr;
-
-fn decimal_col(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<Decimal> {
-    Decimal::from_str(&row.get::<_, String>(index)?).map_err(|err| {
-        rusqlite::Error::FromSqlConversionFailure(index, rusqlite::types::Type::Text, Box::new(err))
-    })
-}
-
 #[derive(Default)]
 pub(super) struct Rollup {
     pub(super) buys: i64,

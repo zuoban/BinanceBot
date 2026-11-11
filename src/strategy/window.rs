@@ -121,7 +121,10 @@ impl GridTradingEngine {
         }
         // Risk cancellation needs a valuation price, not a fresh last-trade price or
         // a completed replenishment workflow. Never reprice orders through this path.
-        if !self.cancel_suspended_opening_orders(config).await {
+        if !self
+            .cancel_suspended_opening_orders(RiskConfigSnapshot::from_config(config))
+            .await
+        {
             return false;
         }
         if self.state.try_order_submission().is_none() {
@@ -164,7 +167,7 @@ impl GridTradingEngine {
         };
         Some(PaperWindowInputs {
             symbol: config.exchange.symbol.clone(),
-            grid: config.grid.clone(),
+            grid: config.grid,
             rules: self.state.rules.read().await.clone(),
             reference_band: price_band(ticker.grid_reference_price()),
             maker_band: price_band(ticker.last_price),
@@ -265,11 +268,15 @@ impl GridTradingEngine {
                     let client_id = new_grid_client_order_id(side);
                     if self
                         .place_grid_order_in_window(
-                            side,
-                            target_price,
-                            client_id,
-                            grid_level,
-                            None,
+                            config,
+                            rules,
+                            GridOrderSpec {
+                                side,
+                                price: target_price,
+                                client_order_id: client_id,
+                                grid_level,
+                                paired_client_order_id: None,
+                            },
                             Some(WindowPlacementContext {
                                 last_fill: window.last_fill,
                                 precomputed: Some((current_price, desired_prices)),
@@ -441,7 +448,10 @@ impl GridTradingEngine {
         });
         // At the cap in cancel-opening mode, an empty opening band makes the prune
         // cancel opening-side window orders while exits stay on the book.
-        if self.opening_suspended_at_limit(config).await {
+        if self
+            .opening_suspended_at_limit(RiskConfigSnapshot::from_config(config))
+            .await
+        {
             if config.grid.direction == GridDirection::Long {
                 desired_buy_prices.clear();
             } else {

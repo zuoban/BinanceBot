@@ -449,10 +449,10 @@ async fn provisional_remainder_uses_recovery_plan_metadata_without_managed_row()
         .write()
         .await
         .insert(placeholder.client_order_id.clone(), placeholder);
-    engine.evidence.provisional_order_ids.insert((
+    engine.evidence.mark_provisional(
         engine.client.account_identity_key(),
-        plan.target.client_order_id.clone(),
-    ));
+        &plan.target.client_order_id,
+    );
     assert!(engine.sync_live_orders().await);
     let active = engine.state.active_orders.read().await;
     let target = &active[&plan.target.client_order_id];
@@ -524,10 +524,10 @@ async fn cancel_retry_restores_provisional_remainder_from_plan() {
         .write()
         .await
         .insert(placeholder.client_order_id.clone(), placeholder);
-    engine.evidence.provisional_order_ids.insert((
+    engine.evidence.mark_provisional(
         engine.client.account_identity_key(),
-        plan.target.client_order_id.clone(),
-    ));
+        &plan.target.client_order_id,
+    );
     fake.lose_cancel.store(1, Ordering::SeqCst);
     assert!(!engine.cancel_all_orders().await);
     let active = engine.state.active_orders.read().await;

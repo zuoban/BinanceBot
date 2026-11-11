@@ -54,6 +54,10 @@ mod conflict_resolution;
 mod control_actions;
 #[path = "evidence.rs"]
 mod evidence;
+#[path = "evidence_book.rs"]
+mod evidence_book;
+#[path = "live_submission.rs"]
+mod live_submission;
 #[path = "market_feed.rs"]
 mod market_feed;
 #[path = "order_cancel.rs"]
@@ -70,8 +74,12 @@ mod pnl_reconcile;
 mod reconciliation;
 #[path = "reconciliation_anomalies.rs"]
 mod reconciliation_anomalies;
+#[path = "reconciliation_settlement.rs"]
+mod reconciliation_settlement;
 #[path = "remainder.rs"]
 mod remainder;
+#[path = "remainder_settlement.rs"]
+mod remainder_settlement;
 #[path = "risk_guards.rs"]
 mod risk_guards;
 #[path = "snapshot_conflicts.rs"]
@@ -79,21 +87,21 @@ mod snapshot_conflicts;
 #[path = "window.rs"]
 mod window;
 
-use evidence::OrderEvidenceBook;
-use market_feed::{market_completion, MarkPriceCompletion, MarketRetry, TickerCompletion};
-use order_sizing::WindowPlacementContext;
-use pnl_reconcile::exchange_fill_time;
-use risk_guards::opening_exposure_usdc;
-use window::{LastFillSnapshot, PaperWindowCache};
-
 #[cfg(test)]
 use account_sync::live_sync_freshness;
+use evidence_book::OrderEvidenceBook;
+use live_submission::LiveGridOrderSubmission;
+use market_feed::{market_completion, MarkPriceCompletion, MarketRetry, TickerCompletion};
+use order_sizing::{GridOrderSpec, WindowPlacementContext};
 #[cfg(test)]
 use pair_intents::{new_pair_intent, paired_grid_client_order_id, PairPlacementDecision};
 #[cfg(test)]
 use pnl_reconcile::aggregate_execution_pnl;
+use pnl_reconcile::exchange_fill_time;
 #[cfg(test)]
 use risk_guards::{buy_exposure_usdc, liquidation_too_close};
+use risk_guards::{opening_exposure_usdc, RiskConfigSnapshot};
+use window::{LastFillSnapshot, PaperWindowCache};
 
 const GRID_ORDER_PREFIX: &str = "gb_";
 
@@ -520,6 +528,7 @@ impl GridTradingEngine {
             self.maintain_grid_window().await;
         }
 
+        let mut ticker_open = true;
         loop {
             tokio::select! {
                 biased;
@@ -546,10 +555,13 @@ impl GridTradingEngine {
                 }
 
                 // Live price updates from Binance WebSocket
-                Ok(ticker_update) = self.ticker_rx.recv() => {
-                    self.handle_ticker_update(ticker_update).await;
+                ticker_res = self.ticker_rx.recv(), if ticker_open => {
+                    match ticker_res {
+                        Ok(ticker_update) => self.handle_ticker_update(ticker_update).await,
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(broadcast::error::RecvError::Closed) => ticker_open = false,
+                    }
                 }
-
                 // Regular synchronization timer
                 _ = sync_timer.tick() => {
                     self.sync_cycle(false).await;

@@ -1,6 +1,8 @@
+import { readFileSync } from 'node:fs';
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { ThemeProvider, useTheme } from '../lib/theme';
+import { palettes } from '../lib/designTokens';
 
 function Controls() {
   const { preference, setPreference } = useTheme();
@@ -27,6 +29,7 @@ afterEach(() => {
   localStorage.clear();
   delete document.documentElement.dataset.theme;
   document.documentElement.style.colorScheme = '';
+  document.head.querySelectorAll('meta[name="theme-color"]').forEach(node => node.remove());
 });
 
 it('follows system changes until a manual theme is selected', () => {
@@ -52,4 +55,30 @@ it('restores the saved preference and follows changes from other tabs', () => {
   act(() => window.dispatchEvent(new StorageEvent('storage', { key: 'binance_bot_theme' })));
   expect(screen.getByTestId('preference')).toHaveTextContent('light');
   expect(document.documentElement.dataset.theme).toBe('light');
+});
+
+it('updates theme-color meta symmetrically in theme-init.js and survives a throwing matchMedia', () => {
+  const script = readFileSync('public/theme-init.js', 'utf8');
+  const meta = document.createElement('meta');
+  meta.setAttribute('name', 'theme-color');
+  meta.setAttribute('content', '#000000');
+  meta.setAttribute('data-light', palettes.light['--bg-page']);
+  meta.setAttribute('data-dark', palettes.dark['--bg-page']);
+  document.head.appendChild(meta);
+
+  localStorage.setItem('binance_bot_theme', 'dark');
+  (0, eval)(script);
+  expect(document.documentElement.dataset.theme).toBe('dark');
+  expect(meta.getAttribute('content')).toBe(palettes.dark['--bg-page']);
+
+  localStorage.setItem('binance_bot_theme', 'light');
+  (0, eval)(script);
+  expect(document.documentElement.dataset.theme).toBe('light');
+  expect(meta.getAttribute('content')).toBe(palettes.light['--bg-page']);
+
+  localStorage.removeItem('binance_bot_theme');
+  vi.stubGlobal('matchMedia', () => { throw new Error('matchMedia blocked'); });
+  expect(() => (0, eval)(script)).not.toThrow();
+  expect(document.documentElement.dataset.theme).toBe('light');
+  expect(meta.getAttribute('content')).toBe(palettes.light['--bg-page']);
 });

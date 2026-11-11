@@ -18,6 +18,7 @@ macro_rules! select_trades_sql {
 
 mod authentication;
 mod config_runtime;
+mod grid_stats;
 mod hourly;
 mod migrations;
 mod orders_evidence;
@@ -37,6 +38,20 @@ pub(crate) fn beijing_midnight(now: DateTime<Utc>) -> DateTime<Utc> {
         .and_hms_opt(0, 0, 0)
         .and_then(|midnight| midnight.and_local_timezone(beijing).single())
         .map_or(now, |midnight| midnight.with_timezone(&Utc))
+}
+
+pub(super) fn immediate_tx(conn: &mut Connection) -> rusqlite::Result<rusqlite::Transaction<'_>> {
+    conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+}
+
+pub(super) fn decimal_col(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+) -> rusqlite::Result<rust_decimal::Decimal> {
+    let raw: String = row.get(index)?;
+    std::str::FromStr::from_str(&raw).map_err(|err| {
+        rusqlite::Error::FromSqlConversionFailure(index, rusqlite::types::Type::Text, Box::new(err))
+    })
 }
 
 pub(super) fn query_json_vec<T, P>(

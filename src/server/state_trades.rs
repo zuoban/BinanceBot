@@ -263,13 +263,14 @@ impl AppState {
         consumed_pair_source: Option<String>,
         paper_state: Option<(PositionInfo, AccountInfo)>,
     ) -> bool {
-        let (current_symbol, current_mode, telegram, direction) = {
+        let (current_symbol, current_mode, telegram, direction, sync_interval_secs) = {
             let cfg = self.config.read().await;
             (
                 cfg.exchange.symbol.clone(),
                 cfg.exchange.trading_mode(),
                 cfg.telegram.clone(),
                 cfg.grid.direction,
+                cfg.exchange.sync_interval_secs,
             )
         };
         if trade.symbol != current_symbol || trade.mode != current_mode {
@@ -303,8 +304,14 @@ impl AppState {
             }
         }
         if notify_trade {
-            self.spawn_trade_telegram_notification(telegram, trade, notification_stats, direction)
-                .await;
+            self.spawn_trade_telegram_notification(
+                telegram,
+                trade,
+                notification_stats,
+                direction,
+                sync_interval_secs,
+            )
+            .await;
         }
         true
     }
@@ -332,6 +339,7 @@ impl AppState {
         trade: TradeRecord,
         notification_stats: Option<HourlyTradeStats>,
         direction: GridDirection,
+        sync_interval_secs: u64,
     ) {
         let account = self.current_account().await;
         let position = self.position.read().await.clone();
@@ -343,6 +351,7 @@ impl AppState {
             &account,
             cny_rate.as_ref(),
             Utc::now(),
+            sync_interval_secs,
         )
         .with_position(&trade, &position, &ticker)
         .with_direction(direction);
@@ -386,11 +395,17 @@ impl AppState {
                     && trade.symbol == config.exchange.symbol
                     && trade.mode == config.exchange.trading_mode()
                     && trade.side == config.grid.direction.closing_side())
-                .then(|| (config.telegram.clone(), config.grid.direction))
+                .then(|| {
+                    (
+                        config.telegram.clone(),
+                        config.grid.direction,
+                        config.exchange.sync_interval_secs,
+                    )
+                })
             };
             // Account capture takes the same lock; finish publication before preparing it.
             drop(commit);
-            if let Some((telegram, direction)) = notification {
+            if let Some((telegram, direction, sync_interval_secs)) = notification {
                 let notification_stats = state.trade_notification_stats(&trade).await;
                 let mut trade = trade;
                 trade.pnl_verified = true;
@@ -400,6 +415,7 @@ impl AppState {
                         trade,
                         notification_stats,
                         direction,
+                        sync_interval_secs,
                     )
                     .await;
             }

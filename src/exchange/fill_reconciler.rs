@@ -84,25 +84,21 @@ impl Drop for FillCacheCleanup<'_> {
     }
 }
 
-fn accumulate_fill_page(
-    progress: &mut FillProgress,
+fn collect_unique_page_fills(
+    existing_fills: &HashMap<i64, ExecutionFill>,
+    initial_qty: Decimal,
     order_id: i64,
-    expected_qty: Decimal,
     page: Vec<ExecutionFill>,
-) -> Result<Option<Vec<BinanceUserTrade>>> {
-    let page_len = page.len();
-    if page_len > 1000 {
-        return Err(anyhow!("Unexpected trade page size for order {}", order_id));
-    }
+) -> Result<(HashMap<i64, ExecutionFill>, Decimal, Option<i64>)> {
     let mut max_id = None;
     let mut added = HashMap::<i64, ExecutionFill>::new();
-    let mut quantity = progress.quantity;
+    let mut quantity = initial_qty;
     for fill in page {
         if fill.order_id != order_id || fill.id < 0 || fill.qty <= Decimal::ZERO {
             return Err(anyhow!("Invalid trade returned for order {}", order_id));
         }
         max_id = Some(max_id.map_or(fill.id, |id: i64| id.max(fill.id)));
-        if let Some(existing) = progress.fills.get(&fill.id).or_else(|| added.get(&fill.id)) {
+        if let Some(existing) = existing_fills.get(&fill.id).or_else(|| added.get(&fill.id)) {
             if existing.qty != fill.qty
                 || existing.trade.realized_pnl != fill.trade.realized_pnl
                 || existing.trade.commission != fill.trade.commission
@@ -122,6 +118,21 @@ fn accumulate_fill_page(
             added.insert(fill.id, fill);
         }
     }
+    Ok((added, quantity, max_id))
+}
+
+fn accumulate_fill_page(
+    progress: &mut FillProgress,
+    order_id: i64,
+    expected_qty: Decimal,
+    page: Vec<ExecutionFill>,
+) -> Result<Option<Vec<BinanceUserTrade>>> {
+    let page_len = page.len();
+    if page_len > 1000 {
+        return Err(anyhow!("Unexpected trade page size for order {}", order_id));
+    }
+    let (added, quantity, max_id) =
+        collect_unique_page_fills(&progress.fills, progress.quantity, order_id, page)?;
     if quantity > expected_qty {
         return Err(anyhow!(
             "Trade quantity exceeds executed quantity for order {}",
@@ -329,16 +340,19 @@ impl BinanceFuturesClient {
         failed_query: &mut bool,
     ) -> Result<Vec<ExecutionFill>> {
         self.reserve(5, RequestClass::PnlReconciliation)?;
-        let cursor = from_id
-            .map(|id| format!("&fromId={}", id))
-            .unwrap_or_default();
-        let url = self.signed_url(
-            "/fapi/v1/userTrades",
-            &format!(
-                "symbol={}&orderId={}&limit=1000{}",
-                symbol, order_id, cursor
+        let url = match from_id {
+            Some(id) => self.signed_url_fmt(
+                "/fapi/v1/userTrades",
+                format_args!(
+                    "symbol={}&orderId={}&limit=1000&fromId={}",
+                    symbol, order_id, id
+                ),
             ),
-        );
+            None => self.signed_url_fmt(
+                "/fapi/v1/userTrades",
+                format_args!("symbol={}&orderId={}&limit=1000", symbol, order_id),
+            ),
+        };
         let resp = match self.send(self.client.get(&url)).await {
             Ok(resp) => resp,
             Err(error) => {

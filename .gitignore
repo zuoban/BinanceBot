@@ -17,5 +17,7 @@ frontend/*.tsbuildinfo
 /.impeccable/hook.pending.json
 /.impeccable/config.local.json
 /frontend/.impeccable/
+/.impeccable/questions/
+/.claude/
 .DS_Store
 ._*

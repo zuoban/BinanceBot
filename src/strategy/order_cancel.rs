@@ -188,6 +188,50 @@ impl GridTradingEngine {
         }
     }
 
+    async fn cancel_open_grid_order(
+        &mut self,
+        symbol: &str,
+        order: BinanceOrderResponse,
+        managed_sources: &HashMap<String, GridOrder>,
+        recovery: &CancelRecoveryMetadata,
+        managed_read_failed: bool,
+    ) -> bool {
+        let Err(e) = self
+            .client
+            .cancel_order(symbol, Some(order.order_id), None)
+            .await
+        else {
+            return true;
+        };
+        let confirmation = self.client.get_order(symbol, order.order_id).await;
+        if confirmation.as_ref().is_ok_and(unresolved_filled_quantity) {
+            self.retain_uncertain_canceled_order(UncertainCanceledOrder {
+                symbol,
+                order: &order,
+                confirmation: confirmation.as_ref().ok(),
+                managed_sources,
+                recovery_sources: recovery.recovery_sources.as_ref(),
+                managed_read_failed,
+                metadata_ready: recovery.metadata_ready,
+            })
+            .await;
+            return false;
+        }
+        if confirmation.is_ok_and(|confirmed| confirmed.is_terminal()) {
+            warn!(
+                "Cancellation response failed for {}, but its terminal state was confirmed",
+                order.client_order_id
+            );
+            return true;
+        }
+        error!(
+            "Failed to cancel managed order {}: {}",
+            order.client_order_id, e
+        );
+        self.pause_trading().await;
+        false
+    }
+
     async fn cancel_live_exchange_orders(
         &mut self,
         symbol: &str,
@@ -226,38 +270,16 @@ impl GridTradingEngine {
             .into_iter()
             .filter(|order| is_grid_order(&order.client_order_id))
         {
-            if let Err(e) = self
-                .client
-                .cancel_order(symbol, Some(order.order_id), None)
+            if !self
+                .cancel_open_grid_order(
+                    symbol,
+                    order,
+                    &managed_sources,
+                    recovery,
+                    managed_read_failed,
+                )
                 .await
             {
-                let confirmation = self.client.get_order(symbol, order.order_id).await;
-                if confirmation.as_ref().is_ok_and(unresolved_filled_quantity) {
-                    self.retain_uncertain_canceled_order(UncertainCanceledOrder {
-                        symbol,
-                        order: &order,
-                        confirmation: confirmation.as_ref().ok(),
-                        managed_sources: &managed_sources,
-                        recovery_sources: recovery.recovery_sources.as_ref(),
-                        managed_read_failed,
-                        metadata_ready: recovery.metadata_ready,
-                    })
-                    .await;
-                    cancellation_failed = true;
-                    continue;
-                }
-                if confirmation.is_ok_and(|confirmed| confirmed.is_terminal()) {
-                    warn!(
-                        "Cancellation response failed for {}, but its terminal state was confirmed",
-                        order.client_order_id
-                    );
-                    continue;
-                }
-                error!(
-                    "Failed to cancel managed order {}: {}",
-                    order.client_order_id, e
-                );
-                self.pause_trading().await;
                 cancellation_failed = true;
             }
         }
@@ -335,25 +357,18 @@ impl GridTradingEngine {
         true
     }
 
-    async fn retain_uncertain_canceled_order(&mut self, ctx: UncertainCanceledOrder<'_>) {
-        let UncertainCanceledOrder {
-            symbol,
-            order,
-            confirmation,
-            managed_sources,
-            recovery_sources,
-            managed_read_failed,
-            metadata_ready,
-        } = ctx;
-        self.block_reconciliation_and_invalidate_caches().await;
-        // A managed exchange order can be absent from local
-        // metadata. Keep it recoverable before the list changes.
-        let source = managed_sources
-            .get(&order.client_order_id)
+    async fn stage_uncertain_canceled_order(
+        &self,
+        ctx: &UncertainCanceledOrder<'_>,
+        confirmation_conflict: bool,
+    ) -> (GridOrder, bool, Option<GridOrder>) {
+        let source = ctx
+            .managed_sources
+            .get(&ctx.order.client_order_id)
             .or_else(|| {
-                recovery_sources.and_then(|(intents, plan)| {
+                ctx.recovery_sources.and_then(|(intents, plan)| {
                     reconciliation::find_durable_order(
-                        &order.client_order_id,
+                        &ctx.order.client_order_id,
                         &[],
                         intents,
                         plan.as_ref(),
@@ -361,56 +376,59 @@ impl GridTradingEngine {
                 })
             })
             .cloned();
-        let confirmation_conflict =
-            confirmation.is_some_and(|found| !found.matches_identity(order));
-        let (retained, identity_conflict, previous) = {
-            let mut active = self.state.active_orders.write().await;
-            let current = active.get(&order.client_order_id).cloned();
-            let mut retained = source.or_else(|| current.clone()).unwrap_or_else(|| {
-                GridOrder::from_exchange_response(
-                    order,
-                    order.orig_qty,
-                    OrderPurpose::Legacy,
-                    Utc::now(),
-                )
-            });
-            if let Some(current) = &current {
-                retained.adopt_compatible_order_id(current);
-            }
-            let identity_matches = order.has_valid_symbol_and_side(symbol)
-                && retained.matches_exchange_identity(order);
-            let active_matches = current
-                .as_ref()
-                .is_none_or(|current| current.has_compatible_identity(&retained));
-            let active_list_matches = current
-                .as_ref()
-                .is_none_or(|current| current.matches_exchange_identity(order));
-            if identity_matches && active_matches && active_list_matches && !confirmation_conflict {
-                retained.order_id = Some(order.order_id);
-                retained.reserve_quantity(order.orig_qty);
-                if let Some(current) = &current {
-                    retained.reserve_quantity(current.quantity);
-                }
-            }
-            active.insert(retained.client_order_id.clone(), retained.clone());
-            (
-                retained,
-                !identity_matches
-                    || !active_matches
-                    || !active_list_matches
-                    || confirmation_conflict,
-                current,
+        let mut active = self.state.active_orders.write().await;
+        let current = active.get(&ctx.order.client_order_id).cloned();
+        let mut retained = source.or_else(|| current.clone()).unwrap_or_else(|| {
+            GridOrder::from_exchange_response(
+                ctx.order,
+                ctx.order.orig_qty,
+                OrderPurpose::Legacy,
+                Utc::now(),
             )
-        };
+        });
+        if let Some(current) = &current {
+            retained.adopt_compatible_order_id(current);
+        }
+        let identity_matches = ctx.order.has_valid_symbol_and_side(ctx.symbol)
+            && retained.matches_exchange_identity(ctx.order);
+        let active_matches = current
+            .as_ref()
+            .is_none_or(|current| current.has_compatible_identity(&retained));
+        let active_list_matches = current
+            .as_ref()
+            .is_none_or(|current| current.matches_exchange_identity(ctx.order));
+        if identity_matches && active_matches && active_list_matches && !confirmation_conflict {
+            retained.order_id = Some(ctx.order.order_id);
+            retained.reserve_quantity(ctx.order.orig_qty);
+            if let Some(current) = &current {
+                retained.reserve_quantity(current.quantity);
+            }
+        }
+        active.insert(retained.client_order_id.clone(), retained.clone());
+        (
+            retained,
+            !identity_matches || !active_matches || !active_list_matches || confirmation_conflict,
+            current,
+        )
+    }
+
+    async fn retain_uncertain_canceled_order(&mut self, ctx: UncertainCanceledOrder<'_>) {
+        self.block_reconciliation_and_invalidate_caches().await;
+        let confirmation_conflict = ctx
+            .confirmation
+            .is_some_and(|found| !found.matches_identity(ctx.order));
+        let (retained, identity_conflict, previous) = self
+            .stage_uncertain_canceled_order(&ctx, confirmation_conflict)
+            .await;
         let account = self.client.account_identity_key();
         if identity_conflict {
             if confirmation_conflict {
-                if let Some(found) = confirmation {
+                if let Some(found) = ctx.confirmation {
                     self.track_identity_conflict(&retained, found);
                 }
             }
-            if !retained.matches_exchange_identity(order) {
-                self.track_identity_conflict(&retained, order);
+            if !retained.matches_exchange_identity(ctx.order) {
+                self.track_identity_conflict(&retained, ctx.order);
             }
             if let Some(observed) = previous
                 .as_ref()
@@ -421,10 +439,10 @@ impl GridTradingEngine {
                 }
             }
         }
-        if managed_read_failed || !metadata_ready {
-            self.track_provisional_observation(order);
+        if ctx.managed_read_failed || !ctx.metadata_ready {
+            self.track_provisional_observation(ctx.order);
         } else if let Err(error) = self.save_managed_order(&retained).await {
-            self.track_provisional_observation(order);
+            self.track_provisional_observation(ctx.order);
             error!(
                 "Could not persist uncertain canceled order {}: {}",
                 retained.client_order_id, error
@@ -432,7 +450,8 @@ impl GridTradingEngine {
             self.pause_trading().await;
         }
         if identity_conflict {
-            self.persist_identity_observations(account, symbol).await;
+            self.persist_identity_observations(account, ctx.symbol)
+                .await;
         }
     }
 

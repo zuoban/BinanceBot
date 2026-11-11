@@ -64,10 +64,11 @@ export function useConfirmDialog(resetKey?: unknown) {
         currentHandle = raw;
         entry = { handle: raw, cancel: () => finish(false) };
         activeRef.current.add(entry);
-        Promise.resolve(raw).then(
-          value => finish(Boolean(value)),
-          () => finish(false),
-        );
+        if (typeof raw.then === 'function') {
+          raw.then(value => finish(Boolean(value)), () => finish(false));
+        } else {
+          finish(Boolean(raw));
+        }
       }),
     [],
   );

@@ -91,13 +91,9 @@ struct WsRawFrame<'a> {
     price_field: Option<Decimal>,
 }
 
-fn parse_market_update(
-    text: &str,
-    symbol: &str,
-    now: DateTime<Utc>,
-    times: &mut EventTimes,
-) -> Option<TickerInfo> {
-    let raw: WsRawFrame<'_> = serde_json::from_str(text).ok()?;
+fn extract_ws_market_fields(
+    raw: WsRawFrame<'_>,
+) -> Option<(Option<Cow<'_, str>>, WsMarketFields<'_>)> {
     let stream = raw.stream;
     let fields = if stream.is_some() {
         raw.data?
@@ -115,6 +111,17 @@ fn parse_market_update(
             price_field: raw.price_field,
         }
     };
+    Some((stream, fields))
+}
+
+fn parse_market_update(
+    text: &str,
+    symbol: &str,
+    now: DateTime<Utc>,
+    times: &mut EventTimes,
+) -> Option<TickerInfo> {
+    let raw: WsRawFrame<'_> = serde_json::from_str(text).ok()?;
+    let (stream, fields) = extract_ws_market_fields(raw)?;
     if !fields.symbol.eq_ignore_ascii_case(symbol) {
         return None;
     }
@@ -212,6 +219,95 @@ impl BinanceWsStream {
             .await;
     }
 
+    fn forward_ws_text_frame(&self, text: &str, symbol: &str, event_times: &mut EventTimes) {
+        let local_now = Utc::now();
+        let exchange_now = local_now
+            .checked_add_signed(chrono::Duration::milliseconds(
+                super::client::mainnet_time_offset_ms(),
+            ))
+            .unwrap_or(local_now);
+        let Some(mut update) = parse_market_update(text, symbol, exchange_now, event_times) else {
+            return;
+        };
+        if update.last_price > Decimal::ZERO {
+            update.update_time = local_observed_time(local_now, exchange_now, update.update_time);
+        }
+        if update.mark_price > Decimal::ZERO {
+            update.mark_update_time =
+                local_observed_time(local_now, exchange_now, update.mark_update_time);
+        }
+        let _ = self.ticker_tx.send(update);
+    }
+
+    async fn read_ws_session<S>(
+        &mut self,
+        ws_stream: S,
+        ws_url: &str,
+        symbol: &str,
+        read_timeout: Duration,
+        event_times: &mut EventTimes,
+    ) -> WsSessionExit
+    where
+        S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
+            + futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
+            + Unpin,
+    {
+        let (mut write, mut read) = ws_stream.split();
+        loop {
+            let next_msg = tokio::select! {
+                msg = tokio::time::timeout(read_timeout, read.next()) => msg,
+                changed = self.config_rx.changed() => {
+                    return if changed.is_err() { WsSessionExit::Shutdown } else { WsSessionExit::ConfigChanged };
+                }
+            };
+            let msg_res = match next_msg {
+                Ok(Some(msg_res)) => msg_res,
+                Ok(None) => return WsSessionExit::Reconnect,
+                Err(_) => {
+                    warn!(
+                        "WebSocket read timed out after {:?} for {}; reconnecting",
+                        read_timeout, ws_url
+                    );
+                    return WsSessionExit::Reconnect;
+                }
+            };
+            match msg_res {
+                Ok(Message::Ping(payload)) => {
+                    match tokio::time::timeout(
+                        WS_PONG_WRITE_TIMEOUT,
+                        write.send(Message::Pong(payload)),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => {
+                            warn!("WebSocket pong send error: {}", e);
+                            return WsSessionExit::Reconnect;
+                        }
+                        Err(_) => {
+                            warn!("WebSocket pong send timed out for {}", ws_url);
+                            return WsSessionExit::Reconnect;
+                        }
+                    }
+                }
+                Ok(Message::Close(_)) => return WsSessionExit::Reconnect,
+                Ok(msg) if msg.is_text() => {
+                    if *self.config_rx.borrow() != symbol {
+                        return WsSessionExit::ConfigChanged;
+                    }
+                    if let Ok(text) = msg.to_text() {
+                        self.forward_ws_text_frame(text, symbol, event_times);
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    warn!("WebSocket read error: {}", e);
+                    return WsSessionExit::Reconnect;
+                }
+            }
+        }
+    }
+
     async fn run_with_url_and_timeout<F>(mut self, build_url: F, read_timeout: Duration)
     where
         F: Fn(&str) -> String,
@@ -239,87 +335,19 @@ impl BinanceWsStream {
                 Ok(Ok((ws_stream, _))) => {
                     info!("Connected to Binance WebSocket: {}", ws_url);
                     backoff_secs = 1;
-                    let (mut write, mut read) = ws_stream.split();
-                    loop {
-                        let next_msg = tokio::select! {
-                            msg = tokio::time::timeout(read_timeout, read.next()) => msg,
-                            changed = self.config_rx.changed() => {
-                                if changed.is_err() { return; }
-                                continue 'connect;
-                            }
-                        };
-                        let msg_res = match next_msg {
-                            Ok(Some(msg_res)) => msg_res,
-                            Ok(None) => break,
-                            Err(_) => {
-                                warn!(
-                                    "WebSocket read timed out after {:?} for {}; reconnecting",
-                                    read_timeout, ws_url
-                                );
-                                break;
-                            }
-                        };
-                        match msg_res {
-                            Ok(Message::Ping(payload)) => {
-                                match tokio::time::timeout(
-                                    WS_PONG_WRITE_TIMEOUT,
-                                    write.send(Message::Pong(payload)),
-                                )
-                                .await
-                                {
-                                    Ok(Ok(())) => {}
-                                    Ok(Err(e)) => {
-                                        warn!("WebSocket pong send error: {}", e);
-                                        break;
-                                    }
-                                    Err(_) => {
-                                        warn!("WebSocket pong send timed out for {}", ws_url);
-                                        break;
-                                    }
-                                }
-                            }
-                            Ok(Message::Close(_)) => break,
-                            Ok(msg) if msg.is_text() => {
-                                if *self.config_rx.borrow() != symbol {
-                                    continue 'connect;
-                                }
-                                if let Ok(text) = msg.to_text() {
-                                    let local_now = Utc::now();
-                                    let exchange_now = local_now
-                                        .checked_add_signed(chrono::Duration::milliseconds(
-                                            super::client::mainnet_time_offset_ms(),
-                                        ))
-                                        .unwrap_or(local_now);
-                                    if let Some(mut update) = parse_market_update(
-                                        text,
-                                        &symbol,
-                                        exchange_now,
-                                        &mut event_times,
-                                    ) {
-                                        if update.last_price > Decimal::ZERO {
-                                            update.update_time = local_observed_time(
-                                                local_now,
-                                                exchange_now,
-                                                update.update_time,
-                                            );
-                                        }
-                                        if update.mark_price > Decimal::ZERO {
-                                            update.mark_update_time = local_observed_time(
-                                                local_now,
-                                                exchange_now,
-                                                update.mark_update_time,
-                                            );
-                                        }
-                                        let _ = self.ticker_tx.send(update);
-                                    }
-                                }
-                            }
-                            Ok(_) => {}
-                            Err(e) => {
-                                warn!("WebSocket read error: {}", e);
-                                break;
-                            }
-                        }
+                    match self
+                        .read_ws_session(
+                            ws_stream,
+                            &ws_url,
+                            &symbol,
+                            read_timeout,
+                            &mut event_times,
+                        )
+                        .await
+                    {
+                        WsSessionExit::Reconnect => {}
+                        WsSessionExit::ConfigChanged => continue 'connect,
+                        WsSessionExit::Shutdown => return,
                     }
                 }
                 Ok(Err(e)) => error!("Failed to connect to Binance WebSocket: {}", e),
@@ -341,214 +369,12 @@ impl BinanceWsStream {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use rust_decimal_macros::dec;
-
-    #[test]
-    fn combined_streams_are_routed_and_decoded_independently() {
-        assert_eq!(
-            stream_url("BTCUSDT"),
-            "wss://fstream.binance.com/market/stream?streams=btcusdt@ticker/btcusdt@markPrice@1s"
-        );
-        let now = Utc::now();
-        let mut times = EventTimes::default();
-        let mark = format!(
-            r#"{{"stream":"btcusdt@markPrice@1s","data":{{"e":"markPriceUpdate","E":{},"s":"BTCUSDT","p":"100.5"}}}}"#,
-            now.timestamp_millis()
-        );
-        let update = parse_market_update(&mark, "BTCUSDT", now, &mut times).unwrap();
-        assert_eq!(update.mark_price, dec!(100.5));
-        assert_eq!(update.last_price, Decimal::ZERO);
-        let ticker = format!(
-            r#"{{"stream":"btcusdt@ticker","data":{{"e":"24hrTicker","E":{},"s":"BTCUSDT","c":"101","o":"100","h":"102","l":"99","v":"3","q":"300"}}}}"#,
-            now.timestamp_millis()
-        );
-        let update = parse_market_update(&ticker, "BTCUSDT", now, &mut times).unwrap();
-        assert_eq!(update.last_price, dec!(101));
-        assert_eq!(update.mark_price, Decimal::ZERO);
-    }
-
-    #[test]
-    fn rejects_wrong_symbol_stream_invalid_price_and_old_or_future_events() {
-        let now = Utc::now();
-        let mut times = EventTimes::default();
-        let event = |stream: &str, symbol: &str, price: &str, ms: i64| {
-            format!(
-                r#"{{"stream":"{stream}","data":{{"e":"markPriceUpdate","E":{ms},"s":"{symbol}","p":"{price}"}}}}"#
-            )
-        };
-        let ms = now.timestamp_millis();
-        assert!(parse_market_update(
-            &event("ethusdt@markPrice@1s", "BTCUSDT", "1", ms),
-            "BTCUSDT",
-            now,
-            &mut times
-        )
-        .is_none());
-        assert!(parse_market_update(
-            &event("btcusdt@markPrice@1s", "ETHUSDT", "1", ms),
-            "BTCUSDT",
-            now,
-            &mut times
-        )
-        .is_none());
-        assert!(parse_market_update(
-            &event("btcusdt@markPrice@1s", "BTCUSDT", "0", ms),
-            "BTCUSDT",
-            now,
-            &mut times
-        )
-        .is_none());
-        assert!(parse_market_update(
-            &event("btcusdt@markPrice@1s", "BTCUSDT", "1", ms - 16000),
-            "BTCUSDT",
-            now,
-            &mut times
-        )
-        .is_none());
-        assert!(parse_market_update(
-            &event("btcusdt@markPrice@1s", "BTCUSDT", "1", ms + 3000),
-            "BTCUSDT",
-            now,
-            &mut times
-        )
-        .is_none());
-        assert!(parse_market_update(
-            &event("btcusdt@markPrice@1s", "BTCUSDT", "1", ms),
-            "BTCUSDT",
-            now,
-            &mut times
-        )
-        .is_some());
-        assert!(parse_market_update(
-            &event("btcusdt@markPrice@1s", "BTCUSDT", "2", ms - 1),
-            "BTCUSDT",
-            now,
-            &mut times
-        )
-        .is_none());
-    }
-
-    #[tokio::test]
-    async fn reconnects_and_switches_symbol_without_delivering_old_market_updates() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            for (index, symbol) in ["BTCUSDT", "BTCUSDT", "ETHUSDT"].iter().enumerate() {
-                let (socket, _) = listener.accept().await.unwrap();
-                let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
-                if index == 2 {
-                    let wrong = serde_json::json!({"stream": "btcusdt@markPrice@1s", "data": {"e": "markPriceUpdate", "E": Utc::now().timestamp_millis(), "s": "BTCUSDT", "p": "1"}});
-                    socket.send(Message::Text(wrong.to_string())).await.unwrap();
-                }
-                let event = serde_json::json!({"stream": format!("{}@markPrice@1s", symbol.to_lowercase()), "data": {"e": "markPriceUpdate", "E": Utc::now().timestamp_millis(), "s": symbol, "p": "100"}});
-                socket.send(Message::Text(event.to_string())).await.unwrap();
-                if index == 1 {
-                    while socket.next().await.is_some() {}
-                }
-            }
-        });
-        let (config_tx, config_rx) = watch::channel("BTCUSDT".to_string());
-        let (ticker_tx, mut ticker_rx) = broadcast::channel(8);
-        let client = tokio::spawn(
-            BinanceWsStream::new(config_rx, ticker_tx).run_with_url(move |symbol| {
-                format!("ws://{address}/market/stream?symbol={symbol}")
-            }),
-        );
-        async fn receive(receiver: &mut broadcast::Receiver<TickerInfo>) -> TickerInfo {
-            tokio::time::timeout(Duration::from_secs(4), receiver.recv())
-                .await
-                .unwrap()
-                .unwrap()
-        }
-        assert_eq!(receive(&mut ticker_rx).await.symbol, "BTCUSDT");
-        assert_eq!(receive(&mut ticker_rx).await.symbol, "BTCUSDT");
-        config_tx.send("ETHUSDT".into()).unwrap();
-        assert_eq!(receive(&mut ticker_rx).await.symbol, "ETHUSDT");
-        assert!(ticker_rx.try_recv().is_err());
-        client.abort();
-        server.abort();
-    }
-
-    #[tokio::test]
-    async fn replies_pong_to_ping_and_reconnects_after_idle_read_timeout() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let (pong_tx, pong_rx) = tokio::sync::oneshot::channel();
-        let server = tokio::spawn(async move {
-            // First connection: send Ping, expect Pong, then stay silent to trigger idle timeout.
-            let (socket, _) = listener.accept().await.unwrap();
-            let mut first = tokio_tungstenite::accept_async(socket).await.unwrap();
-            first
-                .send(Message::Ping(b"heartbeat".to_vec()))
-                .await
-                .unwrap();
-            while let Some(Ok(frame)) = first.next().await {
-                if let Message::Pong(payload) = frame {
-                    let _ = pong_tx.send(payload);
-                    break;
-                }
-            }
-            // Second connection after idle watchdog reconnects: deliver fresh mark price.
-            let (socket, _) = listener.accept().await.unwrap();
-            let mut second = tokio_tungstenite::accept_async(socket).await.unwrap();
-            let event = serde_json::json!({
-                "stream": "btcusdt@markPrice@1s",
-                "data": {"e": "markPriceUpdate", "E": Utc::now().timestamp_millis(), "s": "BTCUSDT", "p": "105"}
-            });
-            second.send(Message::Text(event.to_string())).await.unwrap();
-            while second.next().await.is_some() {}
-        });
-        let (_config_tx, config_rx) = watch::channel("BTCUSDT".to_string());
-        let (ticker_tx, mut ticker_rx) = broadcast::channel(8);
-        let client = tokio::spawn(
-            BinanceWsStream::new(config_rx, ticker_tx).run_with_url_and_timeout(
-                move |symbol| format!("ws://{address}/market/stream?symbol={symbol}"),
-                Duration::from_millis(80),
-            ),
-        );
-        let pong = tokio::time::timeout(Duration::from_secs(2), pong_rx)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(pong, b"heartbeat");
-        let update = tokio::time::timeout(Duration::from_secs(4), ticker_rx.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(update.mark_price, dec!(105));
-        client.abort();
-        server.abort();
-    }
-
-    #[test]
-    fn ticker_extreme_decimal_values_do_not_overflow() {
-        let now = Utc::now();
-        let mut times = EventTimes::default();
-        let frame = format!(
-            r#"{{"stream":"btcusdt@ticker","data":{{"e":"24hrTicker","E":{},"s":"BTCUSDT","c":"{}","o":"0.0000000000000000000000000001","h":"{}","l":"1","v":"1","q":"1"}}}}"#,
-            now.timestamp_millis(),
-            Decimal::MAX,
-            Decimal::MAX,
-        );
-        let update = parse_market_update(&frame, "BTCUSDT", now, &mut times).unwrap();
-        assert_eq!(update.last_price, Decimal::MAX);
-        assert_eq!(update.change_percent_24h, Decimal::ZERO);
-    }
-
-    #[test]
-    fn local_observed_time_preserves_event_age_across_clock_skew() {
-        let local_now = DateTime::from_timestamp_millis(1_700_000_000_000).unwrap();
-        let exchange_now = local_now + chrono::Duration::seconds(5);
-        let event_ms = (exchange_now - chrono::Duration::seconds(12)).timestamp_millis();
-        let mut times = EventTimes::default();
-        let frame = format!(
-            r#"{{"stream":"btcusdt@markPrice@1s","data":{{"e":"markPriceUpdate","E":{event_ms},"s":"BTCUSDT","p":"100"}}}}"#
-        );
-        let update = parse_market_update(&frame, "BTCUSDT", exchange_now, &mut times).unwrap();
-        let translated = local_observed_time(local_now, exchange_now, update.mark_update_time);
-        assert_eq!(translated, local_now - chrono::Duration::seconds(12));
-    }
+enum WsSessionExit {
+    Reconnect,
+    ConfigChanged,
+    Shutdown,
 }
+
+#[cfg(test)]
+#[path = "ws_tests.rs"]
+mod tests;

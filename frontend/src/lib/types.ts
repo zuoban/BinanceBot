@@ -32,6 +32,7 @@ export interface Trade {
   pnl_verified: boolean; is_maker: boolean; timestamp: string; note: string;
 }
 export interface Log { timestamp: string; level: string; message: string }
+export type LogItem = Log;
 interface Account {
   asset: string; total_wallet_balance: Decimal; available_balance: Decimal;
   margin_balance: Decimal; unrealized_profit: Decimal; update_time: string;

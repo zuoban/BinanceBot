@@ -1,10 +1,7 @@
-use super::evidence::terminal_responses_disagree;
+use super::evidence_book::terminal_responses_disagree;
 use super::*;
 
-type ConflictKey = ([u8; 32], String);
-type ConflictEntry = (ConflictKey, GridOrder);
-type ResolvedConflicts = (HashMap<String, BinanceOrderResponse>, Vec<ConflictKey>);
-
+type ResolvedConflicts = (HashMap<String, BinanceOrderResponse>, Vec<String>);
 struct VerifiedConflictObservations {
     corrected_expected: Option<BinanceOrderResponse>,
     harmless_identities: HashSet<(String, String, i64)>,
@@ -15,11 +12,11 @@ impl GridTradingEngine {
         &mut self,
         account_key: [u8; 32],
         symbol: &str,
-        conflicts: &[ConflictEntry],
+        conflicts: &[GridOrder],
         live_orders: &[BinanceOrderResponse],
     ) -> bool {
         let mut discovered = false;
-        for (_, expected) in conflicts {
+        for expected in conflicts {
             for found in live_orders {
                 if found.client_order_id == expected.client_order_id
                     && (expected.order_id.is_none() || !expected.matches_exchange_identity(found))
@@ -33,6 +30,50 @@ impl GridTradingEngine {
             || self
                 .persist_identity_observations(account_key, symbol)
                 .await
+    }
+
+    async fn record_queried_conflict_order(
+        &mut self,
+        account_key: [u8; 32],
+        symbol: &str,
+        expected: &GridOrder,
+        found: &BinanceOrderResponse,
+        queried_orders: &mut HashMap<(String, String, i64), BinanceOrderResponse>,
+    ) -> bool {
+        let query_key = (
+            found.client_order_id.clone(),
+            found.symbol.clone(),
+            found.order_id,
+        );
+        if let Some(previous) = queried_orders.get(&query_key) {
+            if previous.side != found.side {
+                self.track_identity_conflict(expected, previous);
+                self.track_identity_conflict(expected, found);
+                self.persist_identity_observations(account_key, symbol)
+                    .await;
+                self.report_reconciliation_state(true).await;
+                return false;
+            }
+            if terminal_responses_disagree(previous, found) {
+                self.record_terminal_disagreement(
+                    account_key,
+                    symbol,
+                    &expected.client_order_id,
+                    previous,
+                    found,
+                )
+                .await;
+                self.report_reconciliation_state(true).await;
+                return false;
+            }
+            if !previous.matches_snapshot(found) {
+                self.report_reconciliation_state(true).await;
+                return false;
+            }
+        } else {
+            queried_orders.insert(query_key, found.clone());
+        }
+        true
     }
 
     async fn verify_single_conflict_observation(
@@ -61,41 +102,17 @@ impl GridTradingEngine {
                 initial_responses,
             )
             .await
-        {
-            return None;
-        }
-        let query_key = (
-            found.client_order_id.clone(),
-            found.symbol.clone(),
-            found.order_id,
-        );
-        if let Some(previous) = queried_orders.get(&query_key) {
-            if previous.side != found.side {
-                self.track_identity_conflict(expected, previous);
-                self.track_identity_conflict(expected, &found);
-                self.persist_identity_observations(account_key, symbol)
-                    .await;
-                self.report_reconciliation_state(true).await;
-                return None;
-            }
-            if terminal_responses_disagree(previous, &found) {
-                self.record_terminal_disagreement(
+            || !self
+                .record_queried_conflict_order(
                     account_key,
                     symbol,
-                    &expected.client_order_id,
-                    previous,
+                    expected,
                     &found,
+                    queried_orders,
                 )
-                .await;
-                self.report_reconciliation_state(true).await;
-                return None;
-            }
-            if !previous.matches_snapshot(&found) {
-                self.report_reconciliation_state(true).await;
-                return None;
-            }
-        } else {
-            queried_orders.insert(query_key, found.clone());
+                .await
+        {
+            return None;
         }
         let same_order = found.order_id == observed.order_id
             && found.symbol == observed.symbol
@@ -121,7 +138,6 @@ impl GridTradingEngine {
         &mut self,
         account_key: [u8; 32],
         symbol: &str,
-        key: &ConflictKey,
         expected: &GridOrder,
         initial_responses: &[BinanceOrderResponse],
     ) -> Option<VerifiedConflictObservations> {
@@ -133,9 +149,8 @@ impl GridTradingEngine {
         let mut queried_orders = HashMap::new();
         let observations = self
             .evidence
-            .order_identity_observations
-            .get(key)
-            .cloned()
+            .get_observations(account_key, &expected.client_order_id)
+            .map(|items| items.to_vec())
             .unwrap_or_default();
         for observed in observations {
             let (found, harmless_terminal, corrected_to_expected) = self
@@ -195,11 +210,65 @@ impl GridTradingEngine {
         })
     }
 
+    async fn adopt_confirmed_unique_candidate(
+        &mut self,
+        account_key: [u8; 32],
+        symbol: &str,
+        expected: &mut GridOrder,
+        unique: BinanceOrderResponse,
+    ) -> Option<BinanceOrderResponse> {
+        let compatible = self
+            .state
+            .active_orders
+            .read()
+            .await
+            .get(&expected.client_order_id)
+            .is_none_or(|order| order.order_id.is_none_or(|id| id == unique.order_id));
+        if !compatible {
+            self.report_reconciliation_state(true).await;
+            return None;
+        }
+        if expected.purpose == OrderPurpose::Unverified {
+            let Some(side) = OrderSide::from_exchange_str(&unique.side) else {
+                self.report_reconciliation_state(true).await;
+                return None;
+            };
+            expected.side = side;
+            expected.price = unique.price;
+            expected.amount_usdc = expected
+                .price
+                .checked_mul(expected.quantity)
+                .unwrap_or(Decimal::MAX);
+            expected.purpose = OrderPurpose::Legacy;
+        }
+        expected.order_id = Some(unique.order_id);
+        self.evidence.insert_conflict(account_key, expected.clone());
+        if !self
+            .persist_identity_observations(account_key, symbol)
+            .await
+        {
+            return None;
+        }
+        if let Some(order) = self
+            .state
+            .active_orders
+            .write()
+            .await
+            .get_mut(&expected.client_order_id)
+        {
+            order.order_id = expected.order_id;
+            order.side = expected.side;
+            order.price = expected.price;
+            order.amount_usdc = expected.amount_usdc;
+            order.purpose = expected.purpose;
+        }
+        Some(unique)
+    }
+
     async fn confirm_unique_client_id_candidate(
         &mut self,
         account_key: [u8; 32],
         symbol: &str,
-        key: &ConflictKey,
         expected: &mut GridOrder,
         candidate: &BinanceOrderResponse,
     ) -> Option<BinanceOrderResponse> {
@@ -253,34 +322,54 @@ impl GridTradingEngine {
                 return None;
             }
         };
+        self.adopt_confirmed_unique_candidate(account_key, symbol, expected, unique)
+            .await
+    }
+
+    async fn verify_unknown_id_absent_conflict(
+        &mut self,
+        account_key: [u8; 32],
+        symbol: &str,
+        expected: &mut GridOrder,
+        found: &BinanceOrderResponse,
+    ) -> Option<BinanceOrderResponse> {
+        let Ok(verified) = self.client.get_order(&found.symbol, found.order_id).await else {
+            self.report_reconciliation_state(true).await;
+            return None;
+        };
+        if !self
+            .verify_consistent_terminal_followup(account_key, symbol, expected, found, &verified)
+            .await
+        {
+            return None;
+        }
+        let Ok(Some(unique)) = self
+            .client
+            .lookup_order_by_client_id(&expected.symbol, &expected.client_order_id)
+            .await
+        else {
+            self.report_reconciliation_state(true).await;
+            return None;
+        };
+        if !self
+            .verify_consistent_terminal_followup(account_key, symbol, expected, &verified, &unique)
+            .await
+        {
+            return None;
+        }
         let compatible = self
             .state
             .active_orders
             .read()
             .await
             .get(&expected.client_order_id)
-            .is_none_or(|order| order.order_id.is_none_or(|id| id == unique.order_id));
+            .is_none_or(|order| order.matches_exchange_identity(&verified));
         if !compatible {
             self.report_reconciliation_state(true).await;
             return None;
         }
-        if expected.purpose == OrderPurpose::Unverified {
-            let Some(side) = OrderSide::from_exchange_str(&unique.side) else {
-                self.report_reconciliation_state(true).await;
-                return None;
-            };
-            expected.side = side;
-            expected.price = unique.price;
-            expected.amount_usdc = expected
-                .price
-                .checked_mul(expected.quantity)
-                .unwrap_or(Decimal::MAX);
-            expected.purpose = OrderPurpose::Legacy;
-        }
-        expected.order_id = Some(unique.order_id);
-        self.evidence
-            .order_identity_conflicts
-            .insert(key.clone(), expected.clone());
+        expected.order_id = Some(verified.order_id);
+        self.evidence.insert_conflict(account_key, expected.clone());
         if !self
             .persist_identity_observations(account_key, symbol)
             .await
@@ -295,19 +384,14 @@ impl GridTradingEngine {
             .get_mut(&expected.client_order_id)
         {
             order.order_id = expected.order_id;
-            order.side = expected.side;
-            order.price = expected.price;
-            order.amount_usdc = expected.amount_usdc;
-            order.purpose = expected.purpose;
         }
-        Some(unique)
+        Some(verified)
     }
 
     async fn resolve_absent_conflict_order(
         &mut self,
         account_key: [u8; 32],
         symbol: &str,
-        key: &ConflictKey,
         expected: &mut GridOrder,
         initial_responses: &[BinanceOrderResponse],
     ) -> Option<BinanceOrderResponse> {
@@ -348,61 +432,90 @@ impl GridTradingEngine {
         if !unknown_id {
             return Some(found);
         }
-        let Ok(verified) = self.client.get_order(&found.symbol, found.order_id).await else {
+        self.verify_unknown_id_absent_conflict(account_key, symbol, expected, &found)
+            .await
+    }
+
+    async fn resolve_single_identity_conflict(
+        &mut self,
+        account_key: [u8; 32],
+        symbol: &str,
+        mut expected: GridOrder,
+        live_orders: &mut Vec<BinanceOrderResponse>,
+        corrected_terminal: &mut HashMap<String, BinanceOrderResponse>,
+    ) -> Option<String> {
+        let initial_responses = self
+            .load_verified_conflict_timeline(account_key, symbol, &expected.client_order_id)
+            .await?;
+        let mut verified = self
+            .verify_conflict_observations(account_key, symbol, &expected, &initial_responses)
+            .await?;
+        if expected.order_id.is_none()
+            || expected.purpose == OrderPurpose::Unverified
+            || verified.corrected_expected.is_some()
+        {
+            if let Some(candidate) = &verified.corrected_expected {
+                verified.corrected_expected = Some(
+                    self.confirm_unique_client_id_candidate(
+                        account_key,
+                        symbol,
+                        &mut expected,
+                        candidate,
+                    )
+                    .await?,
+                );
+            }
+        }
+        if expected.purpose == OrderPurpose::Unverified {
             self.report_reconciliation_state(true).await;
             return None;
-        };
-        if !self
-            .verify_consistent_terminal_followup(account_key, symbol, expected, &found, &verified)
-            .await
-        {
-            return None;
         }
-        let Ok(Some(unique)) = self
-            .client
-            .lookup_order_by_client_id(&expected.symbol, &expected.client_order_id)
-            .await
-        else {
+        live_orders.retain(|order| {
+            !verified.harmless_identities.contains(&(
+                order.client_order_id.clone(),
+                order.symbol.clone(),
+                order.order_id,
+            ))
+        });
+        if let Some(corrected) = verified.corrected_expected {
+            // A single-order query is authoritative for this same
+            // exchange ID even if the list still has the old side.
+            live_orders.retain(|order| {
+                !(order.client_order_id == corrected.client_order_id
+                    && order.symbol == corrected.symbol
+                    && order.order_id == corrected.order_id)
+            });
+            if corrected.is_terminal() {
+                corrected_terminal.insert(corrected.client_order_id.clone(), corrected);
+            } else {
+                live_orders.push(corrected);
+            }
+        }
+        let (seen, matching) = live_orders
+            .iter()
+            .filter(|order| order.client_order_id == expected.client_order_id)
+            .fold((false, true), |(_, consistent), order| {
+                (
+                    true,
+                    consistent && expected.matches_exchange_identity(order),
+                )
+            });
+        if !matching {
             self.report_reconciliation_state(true).await;
             return None;
-        };
-        if !self
-            .verify_consistent_terminal_followup(account_key, symbol, expected, &verified, &unique)
-            .await
-        {
-            return None;
         }
-        let compatible = self
-            .state
-            .active_orders
-            .read()
-            .await
-            .get(&expected.client_order_id)
-            .is_none_or(|order| order.matches_exchange_identity(&verified));
-        if !compatible {
-            self.report_reconciliation_state(true).await;
-            return None;
+        if !seen && !corrected_terminal.contains_key(&expected.client_order_id) {
+            let found = self
+                .resolve_absent_conflict_order(
+                    account_key,
+                    symbol,
+                    &mut expected,
+                    &initial_responses,
+                )
+                .await?;
+            corrected_terminal.insert(found.client_order_id.clone(), found);
         }
-        expected.order_id = Some(verified.order_id);
-        self.evidence
-            .order_identity_conflicts
-            .insert(key.clone(), expected.clone());
-        if !self
-            .persist_identity_observations(account_key, symbol)
-            .await
-        {
-            return None;
-        }
-        if let Some(order) = self
-            .state
-            .active_orders
-            .write()
-            .await
-            .get_mut(&expected.client_order_id)
-        {
-            order.order_id = expected.order_id;
-        }
-        Some(verified)
+        Some(expected.client_order_id)
     }
 
     pub(super) async fn resolve_order_identity_conflicts(
@@ -412,13 +525,7 @@ impl GridTradingEngine {
         live_orders: &mut Vec<BinanceOrderResponse>,
         restored_ids: &mut HashSet<String>,
     ) -> Option<ResolvedConflicts> {
-        let conflicts: Vec<ConflictEntry> = self
-            .evidence
-            .order_identity_conflicts
-            .iter()
-            .filter(|((account, _), order)| *account == account_key && order.symbol == symbol)
-            .map(|(key, order)| (key.clone(), order.clone()))
-            .collect();
+        let conflicts = self.evidence.conflicts_for_scope(account_key, symbol);
         if !self
             .discover_live_conflict_observations(account_key, symbol, &conflicts, live_orders)
             .await
@@ -426,90 +533,20 @@ impl GridTradingEngine {
             return None;
         }
         let mut corrected_terminal = HashMap::new();
-        let mut resolved_conflict_keys = Vec::new();
-        for (key, mut expected) in conflicts {
-            let initial_responses = self
-                .load_verified_conflict_timeline(account_key, symbol, &expected.client_order_id)
-                .await?;
-            let mut verified = self
-                .verify_conflict_observations(
+        let mut resolved_conflict_ids = Vec::with_capacity(conflicts.len());
+        for expected in conflicts {
+            let resolved_id = self
+                .resolve_single_identity_conflict(
                     account_key,
                     symbol,
-                    &key,
-                    &expected,
-                    &initial_responses,
+                    expected,
+                    live_orders,
+                    &mut corrected_terminal,
                 )
                 .await?;
-            if expected.order_id.is_none()
-                || expected.purpose == OrderPurpose::Unverified
-                || verified.corrected_expected.is_some()
-            {
-                if let Some(candidate) = &verified.corrected_expected {
-                    verified.corrected_expected = Some(
-                        self.confirm_unique_client_id_candidate(
-                            account_key,
-                            symbol,
-                            &key,
-                            &mut expected,
-                            candidate,
-                        )
-                        .await?,
-                    );
-                }
-            }
-            if expected.purpose == OrderPurpose::Unverified {
-                self.report_reconciliation_state(true).await;
-                return None;
-            }
-            live_orders.retain(|order| {
-                !verified.harmless_identities.contains(&(
-                    order.client_order_id.clone(),
-                    order.symbol.clone(),
-                    order.order_id,
-                ))
-            });
-            if let Some(corrected) = verified.corrected_expected {
-                // A single-order query is authoritative for this same
-                // exchange ID even if the list still has the old side.
-                live_orders.retain(|order| {
-                    !(order.client_order_id == corrected.client_order_id
-                        && order.symbol == corrected.symbol
-                        && order.order_id == corrected.order_id)
-                });
-                if corrected.is_terminal() {
-                    corrected_terminal.insert(corrected.client_order_id.clone(), corrected);
-                } else {
-                    live_orders.push(corrected);
-                }
-            }
-            let (seen, matching) = live_orders
-                .iter()
-                .filter(|order| order.client_order_id == expected.client_order_id)
-                .fold((false, true), |(_, consistent), order| {
-                    (
-                        true,
-                        consistent && expected.matches_exchange_identity(order),
-                    )
-                });
-            if !matching {
-                self.report_reconciliation_state(true).await;
-                return None;
-            }
-            if !seen && !corrected_terminal.contains_key(&expected.client_order_id) {
-                let found = self
-                    .resolve_absent_conflict_order(
-                        account_key,
-                        symbol,
-                        &key,
-                        &mut expected,
-                        &initial_responses,
-                    )
-                    .await?;
-                corrected_terminal.insert(found.client_order_id.clone(), found);
-            }
-            resolved_conflict_keys.push(key);
-            restored_ids.insert(expected.client_order_id);
+            restored_ids.insert(resolved_id.clone());
+            resolved_conflict_ids.push(resolved_id);
         }
-        Some((corrected_terminal, resolved_conflict_keys))
+        Some((corrected_terminal, resolved_conflict_ids))
     }
 }

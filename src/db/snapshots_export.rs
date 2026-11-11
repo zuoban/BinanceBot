@@ -72,7 +72,7 @@ impl Database {
     ) -> Result<()> {
         let payload = serde_json::to_string(groups)?;
         let mut conn = self.lock_connection("save_hourly_account_snapshot");
-        let tx = conn.transaction()?;
+        let tx = super::immediate_tx(&mut conn)?;
         tx.execute(
             "INSERT OR IGNORE INTO account_hourly_snapshots (hour, payload) VALUES (?1, ?2)",
             params![hour, payload],
@@ -152,7 +152,7 @@ impl Database {
                 (date - ChronoDuration::days(Self::DAILY_SNAPSHOT_RETENTION_DAYS)).to_string()
             });
         let mut conn = self.lock_connection("save_daily_snapshot");
-        let tx = conn.transaction()?;
+        let tx = super::immediate_tx(&mut conn)?;
         let inserted = tx.execute(
             "INSERT OR IGNORE INTO daily_snapshots (date, payload) VALUES (?1, ?2)",
             params![snapshot.date, payload],

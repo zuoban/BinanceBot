@@ -197,7 +197,7 @@ export const TradesTable = memo(function TradesTable({ trades: allTrades, overvi
   </div>, [overview, filter, trades, allTrades.length, exportRows, columns]);
   return <NowProvider currentNow={currentNow} enabled={trades.length > 0 && (overview || isNarrow)}>{body}</NowProvider>;
 });
-const levels = ['ALL', 'ERROR', 'WARN', 'INFO', 'DEBUG'] as const;
+const levels = ['ALL', 'ERROR', 'WARN', 'SUCCESS', 'INFO'] as const;
 type LevelFilter = typeof levels[number];
 const levelOptions: { value: LevelFilter; label: string }[] = levels.map(value => ({ value, label: value === 'ALL' ? '全部' : value }));
 const logColumns: ColumnsType<Log> = [

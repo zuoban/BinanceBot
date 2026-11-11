@@ -123,7 +123,7 @@ impl Database {
     pub(crate) fn add_pair_config(&self, config: &AppConfig) -> Result<bool> {
         config.validate()?;
         let mut conn = self.lock_connection("add_pair_config");
-        let tx = conn.transaction()?;
+        let tx = super::immediate_tx(&mut conn)?;
         let mut saved = load_required_config_on(&tx)?;
         saved.ensure_pair_list()?;
         anyhow::ensure!(
@@ -197,9 +197,10 @@ impl Database {
         pair_scope: Option<&str>,
         status: BotStatus,
         previous_scope: (&str, TradingMode),
+        credentials_changed: bool,
     ) -> Result<(BotStatus, bool)> {
         let mut conn = self.lock_connection("save_runtime_config");
-        let tx = conn.transaction()?;
+        let tx = super::immediate_tx(&mut conn)?;
         match pair_scope {
             Some(symbol) => save_pair_config_on(&tx, symbol, config)?,
             None => save_config_on(&tx, config)?,
@@ -207,9 +208,9 @@ impl Database {
         let mode = config.exchange.trading_mode();
         let switching = previous_scope != (config.exchange.symbol.as_str(), mode);
         arm_execution_guard_on(&tx, &config.exchange.symbol, mode)?;
-        // A different account scope always requires a fresh manual resume, even
-        // when its execution guard has never been armed before.
-        let guarded = switching;
+        // A different account scope or rotated API credentials always requires a fresh
+        // manual resume, even when its execution guard has never been armed before.
+        let guarded = switching || credentials_changed;
         if switching {
             // Never let the abandoned mode keep a Running status: the mode now
             // derives from globally persisted credentials, so a crash between
@@ -238,7 +239,7 @@ impl Database {
         legacy: bool,
     ) -> Result<()> {
         let mut conn = self.lock_connection("save_runtime_status");
-        let tx = conn.transaction()?;
+        let tx = super::immediate_tx(&mut conn)?;
         save_pair_status_on(&tx, symbol, mode, status)?;
         if legacy {
             save_bot_status_on(&tx, status)?;
@@ -251,7 +252,7 @@ impl Database {
     /// did not finish a clean shutdown, so its saved Running state is unsafe.
     pub(crate) fn arm_execution_guard(&self, symbol: &str, mode: TradingMode) -> Result<bool> {
         let mut conn = self.lock_connection("arm_execution_guard");
-        let tx = conn.transaction()?;
+        let tx = super::immediate_tx(&mut conn)?;
         let dirty = arm_execution_guard_on(&tx, symbol, mode)?;
         tx.commit()?;
         Ok(dirty)
