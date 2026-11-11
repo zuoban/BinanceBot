@@ -499,3 +499,77 @@ fn account_scope_is_deterministic_trimmed_and_isolates_modes_and_credentials() {
     );
     assert!(!live_a.account_scope().contains("alpha"));
 }
+
+#[test]
+fn api_key_and_secret_enforce_ascii_graphic_and_length_bounds() {
+    let mut config = AppConfig::default();
+    config.exchange.api_key = "k".repeat(256);
+    config.exchange.api_secret = "s".repeat(256);
+    config.ensure_pair_list().unwrap();
+    assert!(config.validate().is_ok());
+
+    config.exchange.api_key = "k".repeat(257);
+    config.ensure_pair_list().unwrap();
+    let key_err = format!("{:#}", config.validate().unwrap_err());
+    assert!(key_err.contains("API Key 格式无效"));
+    config.exchange.api_key = "valid-key".into();
+
+    for invalid_secret in [
+        " leading",
+        "trailing ",
+        "sec ret",
+        "sec\nret",
+        "sec\x00ret",
+        "密钥secret",
+        &"s".repeat(257),
+    ] {
+        config.exchange.api_secret = invalid_secret.into();
+        config.ensure_pair_list().unwrap();
+        let err = format!("{:#}", config.validate().unwrap_err());
+        assert!(
+            err.contains("API Secret 格式无效"),
+            "{invalid_secret:?}: {err}"
+        );
+    }
+}
+
+#[test]
+fn telegram_bot_token_and_chat_id_enforce_format_and_length_bounds() {
+    let mut config = AppConfig::default();
+    config.telegram.enabled = true;
+    config.telegram.bot_token = "t".repeat(256);
+    for valid_chat in ["@channel_name", "-100123456", &"1".repeat(128)] {
+        config.telegram.chat_id = valid_chat.into();
+        assert!(config.validate().is_ok(), "{valid_chat}");
+    }
+
+    for invalid_token in ["123:abc%2f", "123:abc@evil.test", &"t".repeat(257)] {
+        config.telegram.bot_token = invalid_token.into();
+        config.telegram.chat_id = "-100123456".into();
+        let err = format!("{:#}", config.validate().unwrap_err());
+        assert!(
+            err.contains("Telegram Bot Token 格式无效"),
+            "{invalid_token:?}: {err}"
+        );
+    }
+
+    config.telegram.bot_token = "123456:ABC-DEF_valid".into();
+    for invalid_chat in [
+        " @channel_name",
+        "-100123456 ",
+        "123\n456",
+        "123\x00456",
+        "123\u{0085}456",
+        &"c".repeat(129),
+    ] {
+        for enabled in [true, false] {
+            config.telegram.enabled = enabled;
+            config.telegram.chat_id = invalid_chat.into();
+            let err = format!("{:#}", config.validate().unwrap_err());
+            assert!(
+                err.contains("Telegram Chat ID 格式无效"),
+                "enabled={enabled}, chat={invalid_chat:?}: {err}"
+            );
+        }
+    }
+}

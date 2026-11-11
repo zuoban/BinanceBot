@@ -365,18 +365,20 @@ impl AppState {
             level: level.to_string(),
             message: message.into(),
         };
+        let frame = (self.ws_broadcast_tx.receiver_count() > 0)
+            .then(|| crate::types::ws_frame_json("log", &entry))
+            .flatten();
 
-        let mut logs = self.recent_logs.write().await;
-        if logs.len() >= MAX_RECENT_LOGS {
-            logs.pop_front();
-        }
-        logs.push_back(entry.clone());
-
-        // Also broadcast log event to WebSocket clients
-        if self.ws_broadcast_tx.receiver_count() > 0 {
-            if let Some(json) = crate::types::ws_frame_json("log", &entry) {
-                let _ = self.ws_broadcast_tx.send(json);
+        {
+            let mut logs = self.recent_logs.write().await;
+            if logs.len() >= MAX_RECENT_LOGS {
+                logs.pop_front();
             }
+            logs.push_back(entry);
+        }
+
+        if let Some(json) = frame {
+            let _ = self.ws_broadcast_tx.send(json);
         }
     }
 

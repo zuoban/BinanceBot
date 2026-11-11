@@ -616,60 +616,75 @@ fn daily_snapshot_message_saturates_extreme_trade_counts_and_pnl() {
     )));
 }
 
-#[tokio::test]
-async fn send_message_rejects_malformed_bot_token_before_http_request() {
-    let notifier = TelegramNotifier::with_base_url(
-        crate::exchange::client::shared_http_client(),
-        "http://127.0.0.1:1".into(),
-    );
-    for invalid in [
-        "123:abc/../../getMe",
-        "123:abc?foo=1",
-        "123:abc#frag",
-        "123:abc\\x",
-    ] {
-        let config = TelegramConfig {
-            enabled: true,
-            bot_token: invalid.into(),
-            chat_id: "12345".into(),
-        };
-        let err = notifier.send_test_message(&config).await.unwrap_err();
-        assert!(
-            err.to_string().contains("Telegram Bot Token 格式无效"),
-            "{invalid}: {err}"
-        );
+fn tg_cfg(bot_token: &str, chat_id: &str) -> TelegramConfig {
+    TelegramConfig {
+        enabled: true,
+        bot_token: bot_token.into(),
+        chat_id: chat_id.into(),
     }
 }
 
 #[tokio::test]
-async fn send_message_rejects_oversized_gateway_response_without_unbounded_buffering() {
-    use axum::{http::StatusCode, routing::post, Router};
+async fn send_message_validates_trims_bounds_gateway_responses_and_summarizes_errors() {
+    use axum::{http::StatusCode, routing::post, Json, Router};
 
-    let oversized_html = format!("<html><body>{}</body></html>", "x".repeat(16 * 1024));
+    let offline = TelegramNotifier::with_base_url(
+        crate::exchange::client::shared_http_client(),
+        "http://127.0.0.1:1".into(),
+    );
+    for (tok, chat, expected) in [
+        (
+            "123:abc/../../getMe",
+            "12345",
+            "Telegram Bot Token 格式无效",
+        ),
+        ("123:abc?foo=1", "12345", "Telegram Bot Token 格式无效"),
+        ("123:abc#frag", "12345", "Telegram Bot Token 格式无效"),
+        ("123:abc\\x", "12345", "Telegram Bot Token 格式无效"),
+        (
+            "123456:valid-token",
+            "123\n456",
+            "Telegram Chat ID 格式无效",
+        ),
+    ] {
+        let err = offline
+            .send_test_message(&tg_cfg(tok, chat))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains(expected), "{err}");
+    }
+
+    let route = format!("/bot{}/sendMessage", "123456:valid-token");
     let app = Router::new().route(
-        "/bot123456:valid-token/sendMessage",
-        post(move || {
-            let body = oversized_html.clone();
-            async move { (StatusCode::BAD_GATEWAY, body) }
+        &route,
+        post(|Json(body): Json<serde_json::Value>| async move {
+            let html = "<!DOCTYPE html><html><body>502 Bad Gateway</body></html>";
+            let payload = if body["chat_id"] == "999" {
+                format!("<html><body>{}</body></html>", "x".repeat(16 * 1024))
+            } else {
+                serde_json::json!({ "ok": false, "description": html }).to_string()
+            };
+            (StatusCode::BAD_GATEWAY, payload)
         }),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-
     let notifier =
         TelegramNotifier::with_base_url(crate::exchange::client::shared_http_client(), url);
-    let config = TelegramConfig {
-        enabled: true,
-        bot_token: "123456:valid-token".into(),
-        chat_id: "999".into(),
-    };
-    let err = notifier.send_test_message(&config).await.unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("Telegram returned an invalid response (HTTP 502"),
-        "{err}"
-    );
+    let err_502 = notifier
+        .send_test_message(&tg_cfg("123456:valid-token", "999"))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err_502.contains("Telegram returned an invalid response (HTTP 502"));
+    let padded_token = format!("  {}  ", "123456:valid-token");
+    let summary_err = notifier
+        .send_test_message(&tg_cfg(&padded_token, "  987654  "))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(!summary_err.contains("<html") && summary_err.contains("upstream HTML error response"));
     server.abort();
 }
 
@@ -710,4 +725,68 @@ fn trade_context_rejects_future_dated_cny_rate_and_live_account_timestamps() {
     assert_eq!(future_acc_ctx.account_equity, None);
     assert_eq!(future_acc_ctx.available_balance, None);
     assert_eq!(future_acc_ctx.cny_per_unit, Some(dec!(7.12)));
+}
+
+fn rendered_utf16_units_and_balanced_bold(html: &str) -> (usize, bool) {
+    let (mut idx, mut units, mut depth) = (0usize, 0usize, 0usize);
+    while idx < html.len() {
+        let rest = &html[idx..];
+        if rest.starts_with("<b>") {
+            depth += 1;
+            idx += 3;
+        } else if rest.starts_with("</b>") {
+            if depth == 0 {
+                return (units, false);
+            }
+            depth -= 1;
+            idx += 4;
+        } else if let Some(entity) = ["&amp;", "&lt;", "&gt;", "&quot;"]
+            .into_iter()
+            .find(|e| rest.starts_with(e))
+        {
+            units += 1;
+            idx += entity.len();
+        } else {
+            if rest.starts_with('&') || rest.starts_with('<') {
+                return (units, false);
+            }
+            let ch = rest.chars().next().unwrap();
+            units += ch.len_utf16();
+            idx += ch.len_utf8();
+        }
+    }
+    (units, depth == 0)
+}
+
+#[test]
+fn truncate_telegram_html_preserves_within_limit_and_truncates_entities_bold_and_surrogates() {
+    // 4096 rendered UTF-16 units with <b>...</b>, &amp;, and emojis passes unchanged.
+    let exact = format!("<b>📊🟢{}</b>{}", "&amp;".repeat(100), "a".repeat(3992));
+    let (exact_units, exact_balanced) = rendered_utf16_units_and_balanced_bold(&exact);
+    assert_eq!(exact_units, 4096);
+    assert!(exact_balanced);
+    assert_eq!(truncate_telegram_html(exact.clone()), exact);
+
+    // Oversized inside open <b> with &amp; and surrogate-pair emojis truncates <= 4096 with balanced <b>...</b>.
+    let oversized_bold = format!(
+        "<b>📊 每日快照 🟢 {}</b>",
+        "&amp;📊🟢&lt;&gt;&quot;".repeat(700)
+    );
+    let truncated = truncate_telegram_html(oversized_bold);
+    assert!(truncated.ends_with("</b>\n…（已截断）"), "{truncated}");
+    let (units, balanced) = rendered_utf16_units_and_balanced_bold(&truncated);
+    assert!(units <= 4096, "rendered UTF-16 units {units} > 4096");
+    assert!(balanced, "unbalanced HTML or split entity: {truncated}");
+
+    // Boundary check right on &amp; and emoji surrogate pair at unit 4089.
+    for filler_len in [4087, 4088, 4089] {
+        let tricky = format!(
+            "{}<b>&amp;🟢📊</b>{}",
+            "x".repeat(filler_len),
+            "y".repeat(20)
+        );
+        let out = truncate_telegram_html(tricky);
+        let (u, ok) = rendered_utf16_units_and_balanced_bold(&out);
+        assert!(u <= 4096 && ok, "filler={filler_len}, units={u}, out={out}");
+    }
 }

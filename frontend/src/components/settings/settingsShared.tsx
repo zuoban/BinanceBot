@@ -52,7 +52,7 @@ export function useSettingsFormLifecycle<T>(data: T | undefined, apply: (data: T
   const edit = useContext(EditContext);
   const [ready, setReady] = useState(false);
   const baseline = useRef<T | null>(null);
-  const submitting = useRef(false);
+  const submitting = useRef<object | null>(null);
   const applyRef = useRef(apply);
   applyRef.current = apply;
   const mounted = useMountedRef(() => {
@@ -60,6 +60,7 @@ export function useSettingsFormLifecycle<T>(data: T | undefined, apply: (data: T
     edit.setSaving(false);
   });
   const fill = (next: T) => {
+    submitting.current = null;
     baseline.current = next;
     applyRef.current(next);
   };

@@ -378,3 +378,104 @@ async fn global_margin_guard_fails_closed_on_decimal_overflow_without_panicking(
     global.membership_ready.store(true, Ordering::SeqCst);
     assert!(global.check().await);
 }
+
+#[tokio::test]
+async fn margin_ratio_guard_triggers_when_margin_balance_is_non_positive_even_with_positive_available(
+) {
+    let fixture = notification_fixture(false, false).await;
+    {
+        let mut config = fixture.state.config.write().await;
+        config.min_available_margin_pct = Some(dec!(10));
+        config.exchange.api_key = "key".into();
+        config.exchange.api_secret = "secret".into();
+    }
+    fixture
+        .state
+        .global_position_initialized
+        .store(true, Ordering::SeqCst);
+    fixture
+        .state
+        .global_position_ready
+        .store(true, Ordering::SeqCst);
+    let global = GlobalPositionLimit::new(Arc::new(RwLock::new(vec![fixture.state.clone()])));
+    global.membership_ready.store(true, Ordering::SeqCst);
+    for margin_balance in [Decimal::ZERO, dec!(-50)] {
+        *fixture.state.status.write().await = BotStatus::Running;
+        fixture
+            .state
+            .global_cancel_pending
+            .store(false, Ordering::SeqCst);
+        {
+            let mut account = fixture.state.account.write().await;
+            account.asset = "USDC".into();
+            account.margin_balance = margin_balance;
+            account.available_balance = dec!(10);
+            account.update_time = Utc::now();
+        }
+        assert!(global.check().await);
+        assert_eq!(*fixture.state.status.read().await, BotStatus::Paused);
+    }
+    fixture.server.abort();
+}
+
+#[tokio::test]
+async fn retired_recovery_failed_member_stays_fail_closed_without_queueing_cancel_or_logging_to_retired_state(
+) {
+    let retired = notification_fixture(false, false).await;
+    let mut active = notification_fixture(true, true).await;
+    for state in [&retired.state, &active.state] {
+        state.config.write().await.global_max_position_notional = Some(dec!(500));
+    }
+    retired.state.pause_trading().await.unwrap();
+    retired.state.retire();
+    retired.state.recent_logs.write().await.clear();
+    drop(retired.actions);
+    retired
+        .state
+        .global_position_initialized
+        .store(true, Ordering::SeqCst);
+    retired
+        .state
+        .global_position_ready
+        .store(false, Ordering::SeqCst);
+    active
+        .state
+        .global_position_initialized
+        .store(true, Ordering::SeqCst);
+    active
+        .state
+        .global_position_ready
+        .store(true, Ordering::SeqCst);
+
+    let global = GlobalPositionLimit::new(Arc::new(RwLock::new(vec![
+        retired.state.clone(),
+        active.state.clone(),
+    ])));
+    global.membership_ready.store(true, Ordering::SeqCst);
+    let _ = active
+        .state
+        .global_position_limit
+        .set(Arc::downgrade(&global));
+
+    assert!(global.check().await);
+    assert!(global.check().await);
+    assert!(!retired.state.global_cancel_queued.load(Ordering::SeqCst));
+    assert!(!retired.state.global_cancel_pending.load(Ordering::SeqCst));
+    assert!(retired.state.recent_logs.read().await.is_empty());
+    assert_eq!(*active.state.status.read().await, BotStatus::Paused);
+    assert!(active.state.try_order_submission().is_none());
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(1), active.actions.recv())
+            .await
+            .unwrap(),
+        Some(BotControlAction::GlobalRiskCancel)
+    ));
+    let payload = tokio::time::timeout(Duration::from_secs(1), active.requests.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(payload["text"].as_str().unwrap().contains("全局风控已触发"));
+
+    retired.server.abort();
+    active.server.abort();
+}

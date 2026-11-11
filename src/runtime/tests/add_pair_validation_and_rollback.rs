@@ -18,7 +18,7 @@ async fn adding_pair_rolls_back_when_guard_write_fails_and_can_be_retried() {
         mock_exchange(StatusCode::OK, exchange_info("TRADING", valid_filters())).await;
     runtime.test_exchange_url = Some(url);
     let handle = runtime.handle();
-    let router = create_managed_router(handle.clone()).await;
+    let router = create_managed_router(handle.clone());
     let connection = rusqlite::Connection::open(&path).unwrap();
     connection.execute_batch("CREATE TRIGGER reject_new_guard BEFORE INSERT ON pair_execution_guard WHEN NEW.symbol = 'ETHUSDT' BEGIN SELECT RAISE(ABORT, 'guard write failed'); END;").unwrap();
     let manager = tokio::spawn(async move { runtime.run().await });
@@ -149,7 +149,7 @@ async fn adding_pairs_requires_valid_exchange_rules_before_saving() {
         let mut runtime = fixture();
         runtime.test_exchange_url = Some(url);
         let handle = runtime.handle();
-        let router = create_managed_router(handle.clone()).await;
+        let router = create_managed_router(handle.clone());
         let manager = tokio::spawn(async move { runtime.run().await });
         let (_, response) = request(&router, "/api/pairs", "POST", payload("ETHUSDT"), true).await;
         assert_eq!(response["success"], false, "{name}: {response}");
@@ -186,7 +186,7 @@ async fn adding_pair_rejects_network_failure_without_saving() {
     let mut runtime = fixture();
     runtime.test_exchange_url = Some(url);
     let handle = runtime.handle();
-    let router = create_managed_router(handle.clone()).await;
+    let router = create_managed_router(handle.clone());
     let manager = tokio::spawn(async move { runtime.run().await });
     let (_, response) = request(&router, "/api/pairs", "POST", payload("ETHUSDT"), true).await;
     assert_eq!(response["success"], false);

@@ -82,7 +82,10 @@ impl TradingRuntime {
                 ) {
                     anyhow::anyhow!("币安交易对 {} 不存在", symbol)
                 } else {
-                    anyhow::anyhow!("暂时无法验证交易对 {}: {}", symbol, error)
+                    anyhow::Error::msg(crate::server::routes::sanitized_probe_error(
+                        &format!("暂时无法验证交易对 {symbol}"),
+                        &error,
+                    ))
                 }
             })?;
         SymbolRules::parse_and_validate_interval(&info, symbol, config.grid.grid_interval)
@@ -305,6 +308,10 @@ impl TradingRuntime {
                 Err(error)
             }
             Err(restart_error) => {
+                tracing::error!(
+                    error = %format_args!("{restart_error:#}"),
+                    "Failed to restart strategy after failed pair removal"
+                );
                 self.pairs[index].recovery_failed = true;
                 // Keep the retired member in the risk set. Its position can
                 // still exist, but its stopped engine can no longer refresh it.
@@ -317,7 +324,7 @@ impl TradingRuntime {
                     .global_position_ready
                     .store(false, std::sync::atomic::Ordering::SeqCst);
                 self.global_position_limit.check().await;
-                Err(error.context(format!("删除失败后无法重启策略: {restart_error:#}")))
+                Err(error.context("删除失败后无法重启策略，请查看服务器日志"))
             }
         }
     }

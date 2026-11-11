@@ -11,6 +11,9 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 const MAX_TELEGRAM_RESPONSE_BYTES: usize = 8 * 1024;
+const MAX_TELEGRAM_UTF16_UNITS: usize = 4096;
+const TRUNCATION_SUFFIX: &str = "\n…（已截断）";
+const TRUNCATION_SUFFIX_UTF16_UNITS: usize = 7;
 
 #[derive(Serialize)]
 struct SendMessage<'a> {
@@ -80,31 +83,33 @@ impl TelegramNotifier {
     }
 
     async fn send_message(&self, config: &TelegramConfig, text: String) -> Result<()> {
-        if config.bot_token.trim().is_empty() || config.chat_id.trim().is_empty() {
+        let bot_token = config.bot_token.trim();
+        let chat_id = config.chat_id.trim();
+        if bot_token.is_empty() || chat_id.is_empty() {
             return Err(anyhow!("Bot Token or Chat ID is empty"));
         }
-        TelegramConfig::validate_bot_token(&config.bot_token)?;
-        let endpoint = format!("{}/bot{}/sendMessage", self.api_base_url, config.bot_token);
+        TelegramConfig::validate_bot_token(bot_token)?;
+        TelegramConfig::validate_chat_id(chat_id)?;
+        let text = truncate_telegram_html(text);
+        let endpoint = format!("{}/bot{}/sendMessage", self.api_base_url, bot_token);
         let response = self
             .client
             .post(endpoint)
             .timeout(std::time::Duration::from_secs(10))
             .json(&SendMessage {
-                chat_id: &config.chat_id,
+                chat_id,
                 text,
                 parse_mode: "HTML",
             })
             .send()
             .await
             .map_err(|err| {
-                anyhow!(
-                    "Telegram request failed ({})",
-                    if err.is_timeout() {
-                        "timeout"
-                    } else {
-                        "network error"
-                    }
-                )
+                let kind = if err.is_timeout() {
+                    "timeout"
+                } else {
+                    "network error"
+                };
+                anyhow!("Telegram request failed ({kind})")
             })?;
         let status = response.status();
         let bytes =
@@ -118,11 +123,14 @@ impl TelegramNotifier {
         let body: TelegramResponse = serde_json::from_slice(&bytes)
             .map_err(|_| anyhow!("Telegram returned an invalid response (HTTP {})", status))?;
         if !status.is_success() || !body.ok {
+            let detail = body.description.map_or_else(
+                || "unknown error".to_string(),
+                |desc| crate::exchange::client::summarize_non_json_body(&desc),
+            );
             return Err(anyhow!(
                 "Telegram rejected notification (HTTP {}): {}",
                 status,
-                body.description
-                    .unwrap_or_else(|| "unknown error".to_string())
+                detail
             ));
         }
         Ok(())
@@ -249,12 +257,7 @@ pub(crate) fn format_trade_message(
     let quote = crate::types::quote_asset(&trade.symbol).unwrap_or("计价资产");
     let average_price = trade.price.normalize();
     let count = |value: Option<u64>| value.map_or_else(|| "--".to_string(), |n| n.to_string());
-    let money = |value: Option<Decimal>| {
-        value.map_or_else(
-            || format!("-- {quote}"),
-            |n| format!("{} {quote}", format_decimal_dp(n, 2, false)),
-        )
-    };
+    let money = |value: Option<Decimal>| format_optional_money(value, quote, false);
     let cny = context
         .account_equity
         .zip(context.cny_per_unit)
@@ -264,17 +267,16 @@ pub(crate) fn format_trade_message(
             |value| format!("≈ ¥{}", format_decimal_dp(value, 2, false)),
         );
     let ratio = format_available_ratio(context.available_balance, context.wallet_balance);
-    let pnl_line = if trade.side == context.direction.closing_side() {
-        if trade.pnl_verified {
-            format!(
-                "\n已实现盈亏：{} {quote}",
-                format_decimal_dp(trade.realized_pnl, 4, true)
-            )
-        } else {
-            "\n已实现盈亏：待同步".to_string()
-        }
-    } else {
-        String::new()
+    let pnl_line = match (
+        trade.side == context.direction.closing_side(),
+        trade.pnl_verified,
+    ) {
+        (true, true) => format!(
+            "\n已实现盈亏：{} {quote}",
+            format_decimal_dp(trade.realized_pnl, 4, true)
+        ),
+        (true, false) => "\n已实现盈亏：待同步".to_string(),
+        (false, _) => String::new(),
     };
     format!(
         "<b>{icon} {direction}｜{symbol}｜{average_price}｜{amount} {quote}｜{today}D｜{hour}H</b>\n<b>账户权益：{equity}｜</b>{cny}\n持仓金额：{position_amount}\n可用余额：{available}｜{ratio}{pnl_line}",
@@ -340,16 +342,13 @@ fn format_daily_account_lines(accounts: &[crate::snapshots::DailyAccountGroup]) 
 }
 
 fn format_daily_pnl_lines(trades: &[crate::snapshots::DailyTradeGroup]) -> String {
-    let mut pnl_groups: std::collections::BTreeMap<
-        (&'static str, &str),
-        (TradingMode, Decimal, u64),
-    > = std::collections::BTreeMap::new();
+    let mut pnl_groups = std::collections::BTreeMap::new();
     for trade in trades {
         let asset = crate::types::quote_asset(&trade.symbol).unwrap_or(&trade.symbol);
         let entry = pnl_groups.entry((trade.mode.as_str(), asset)).or_insert((
             trade.mode,
             Decimal::ZERO,
-            0,
+            0u64,
         ));
         entry.1 = entry.1.saturating_add(trade.realized_pnl);
         entry.2 = entry.2.saturating_add(trade.pending_pnl_count);
@@ -362,16 +361,11 @@ fn format_daily_pnl_lines(trades: &[crate::snapshots::DailyTradeGroup]) -> Strin
         .map(|((_, asset), (mode, pnl, pending))| {
             let asset = escape_html(asset);
             let formatted_pnl = format_decimal_dp(pnl, 4, true);
+            let mode = mode_label(mode);
             if pending > 0 {
-                format!(
-                    "· {mode} {asset}：{formatted_pnl} {asset}（{pending} 笔待同步）",
-                    mode = mode_label(mode),
-                )
+                format!("· {mode} {asset}：{formatted_pnl} {asset}（{pending} 笔待同步）")
             } else {
-                format!(
-                    "· {mode} {asset}：{formatted_pnl} {asset}",
-                    mode = mode_label(mode)
-                )
+                format!("· {mode} {asset}：{formatted_pnl} {asset}")
             }
         })
         .collect::<Vec<_>>()
@@ -446,6 +440,46 @@ fn escape_html(value: &str) -> String {
         .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+}
+
+pub(crate) fn truncate_telegram_html(text: String) -> String {
+    let budget = MAX_TELEGRAM_UTF16_UNITS - TRUNCATION_SUFFIX_UTF16_UNITS;
+    let (mut idx, mut units, mut bold_depth) = (0usize, 0usize, 0usize);
+    let (mut cut_idx, mut cut_bold_depth) = (0usize, 0usize);
+    while idx < text.len() {
+        let rest = &text[idx..];
+        let (step, delta, open_bold) = if rest.starts_with("<b>") {
+            bold_depth += 1;
+            (3, 0, true)
+        } else if rest.starts_with("</b>") {
+            bold_depth = bold_depth.saturating_sub(1);
+            (4, 0, false)
+        } else if let Some(entity) = ["&amp;", "&lt;", "&gt;", "&quot;"]
+            .into_iter()
+            .find(|entity| rest.starts_with(entity))
+        {
+            (entity.len(), 1, false)
+        } else {
+            let ch = rest.chars().next().expect("non-empty slice");
+            (ch.len_utf8(), ch.len_utf16(), false)
+        };
+        idx += step;
+        units += delta;
+        if units <= budget && !open_bold {
+            cut_idx = idx;
+            cut_bold_depth = bold_depth;
+        }
+    }
+    if units <= MAX_TELEGRAM_UTF16_UNITS {
+        return text;
+    }
+    let mut out = String::with_capacity(cut_idx + cut_bold_depth * 4 + TRUNCATION_SUFFIX.len());
+    out.push_str(&text[..cut_idx]);
+    for _ in 0..cut_bold_depth {
+        out.push_str("</b>");
+    }
+    out.push_str(TRUNCATION_SUFFIX);
+    out
 }
 
 #[cfg(test)]

@@ -23,8 +23,9 @@ function Harness({ mode = 'PAPER' }: { mode?: 'PAPER' | 'LIVE' }) {
 function setup(mode: 'PAPER' | 'LIVE' = 'PAPER') {
   const client = new QueryClient();
   const invalidate = vi.spyOn(client, 'invalidateQueries');
+  const reset = vi.spyOn(client, 'resetQueries');
   render(<QueryClientProvider client={client}><ControlProvider><Harness mode={mode} /></ControlProvider></QueryClientProvider>);
-  return invalidate;
+  return Object.assign(invalidate, { reset });
 }
 
 it('deletes only after confirmation and refreshes strategy data', async () => {
@@ -37,6 +38,8 @@ it('deletes only after confirmation and refreshes strategy data', async () => {
   expect(mocks.confirm.mock.invocationCallOrder[0]).toBeLessThan(mocks.api.mock.invocationCallOrder[0]);
   expect(invalidate).toHaveBeenCalledWith({ queryKey: ['pairs'] });
   expect(invalidate).toHaveBeenCalledWith({ queryKey: ['overview'] });
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ['accounts'] });
+  expect(invalidate.reset).toHaveBeenCalledWith({ queryKey: ['overview-history'] });
 });
 
 it('does not delete when cancelled and displays server errors', async () => {

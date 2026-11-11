@@ -21,31 +21,27 @@ impl Database {
             return Ok(cached.clone());
         }
         let id: String = {
-            let conn = self.lock_connection("history_account_id");
-            let existing: Option<String> = {
-                let mut stmt = conn.prepare_cached(
-                    "SELECT account_id FROM history_account_ids WHERE identity = ?1",
-                )?;
-                stmt.query_row(params![identity.as_slice()], |row| row.get(0))
-                    .optional()?
-            };
-            if let Some(id) = existing {
+            let mut conn = self.lock_connection("history_account_id");
+            let tx = super::immediate_tx(&mut conn)?;
+            let existing: Option<String> = tx
+                .prepare_cached("SELECT account_id FROM history_account_ids WHERE identity = ?1")?
+                .query_row(params![identity.as_slice()], |row| row.get(0))
+                .optional()?;
+            let id = if let Some(id) = existing {
                 id
             } else {
-                {
-                    let mut insert = conn.prepare_cached(
-                        "INSERT OR IGNORE INTO history_account_ids (identity, account_id) VALUES (?1, ?2)",
-                    )?;
-                    insert.execute(params![
-                        identity.as_slice(),
-                        uuid::Uuid::new_v4().to_string()
-                    ])?;
-                }
-                let mut stmt = conn.prepare_cached(
-                    "SELECT account_id FROM history_account_ids WHERE identity = ?1",
-                )?;
-                stmt.query_row(params![identity.as_slice()], |row| row.get(0))?
-            }
+                tx.prepare_cached(
+                    "INSERT OR IGNORE INTO history_account_ids (identity, account_id) VALUES (?1, ?2)",
+                )?
+                .execute(params![
+                    identity.as_slice(),
+                    uuid::Uuid::new_v4().to_string()
+                ])?;
+                tx.prepare_cached("SELECT account_id FROM history_account_ids WHERE identity = ?1")?
+                    .query_row(params![identity.as_slice()], |row| row.get(0))?
+            };
+            tx.commit()?;
+            id
         };
         let mut cache = self.history_account_ids.lock_unpoisoned();
         if cache.len() >= 256 {
@@ -137,7 +133,7 @@ impl Database {
         let cutoff = chrono::NaiveDate::parse_from_str(&snapshot.date, "%Y-%m-%d")
             .ok()
             .map(|date| {
-                (date - ChronoDuration::days(Self::DAILY_SNAPSHOT_RETENTION_DAYS)).to_string()
+                (date - ChronoDuration::days(Self::DAILY_SNAPSHOT_RETENTION_DAYS - 1)).to_string()
             });
         let mut conn = self.lock_connection("save_daily_snapshot");
         let tx = super::immediate_tx(&mut conn)?;
@@ -265,8 +261,9 @@ impl Database {
                 params![serde_json::to_string(&config)?],
             )?;
         }
-        snapshot
-            .execute_batch("DELETE FROM auth_sessions; DELETE FROM history_account_ids; VACUUM;")?;
+        snapshot.execute_batch(
+            "DELETE FROM app_config WHERE id != 1; DELETE FROM auth_sessions; DELETE FROM history_account_ids; VACUUM;",
+        )?;
         Ok(snapshot.serialize(rusqlite::DatabaseName::Main)?.to_vec())
     }
 
@@ -330,10 +327,17 @@ impl Database {
     }
 
     fn backup_to_memory(&self) -> Result<Connection> {
+        const MAX_ANALYSIS_EXPORT_DB_BYTES: u64 = 256 * 1024 * 1024;
         let mut snapshot = Connection::open_in_memory()?;
         if self.path != ":memory:" {
             #[cfg(unix)]
             self.verify_on_disk_identity()?;
+            if let Ok(meta) = std::fs::metadata(&self.path) {
+                anyhow::ensure!(
+                    meta.len() <= MAX_ANALYSIS_EXPORT_DB_BYTES,
+                    "SQLite database exceeds 256 MiB analysis export limit"
+                );
+            }
             let reader = Connection::open_with_flags(
                 &self.path,
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE

@@ -2,7 +2,7 @@ import { memo, useMemo, useState } from 'react';
 import { Button, Card } from 'antd';
 import { modeLabel } from '../lib/format';
 import { comparePositionAmount, groupTradePnl } from '../lib/portfolio';
-import type { Overview, Status, Trade } from '../lib/types';
+import type { Mode, Overview, Status, Trade } from '../lib/types';
 import { FreshnessText, Pnl, SignalButton, SignalChip, type Signal } from './Common';
 import { TradesTable } from './DataTables';
 
@@ -53,8 +53,13 @@ export function OverviewBanner({
   onToggleStatus: (value: Exclude<StatusFilter, 'all'>) => void;
   counts: { total: number; running: number; paused: number; stopped: number; error: number; live: number };
   today: { buy: number; sell: number } | null;
-  pnlGroups: { key: string; asset: string; pending: number; total: number | null }[] | null;
+  pnlGroups: { key: string; mode: Mode; asset: string; pending: number; total: number | null }[] | null;
 }) {
+  const dupPnlAssets = new Set<string>();
+  if (pnlGroups && pnlGroups.length > 1) {
+    const seen = new Set<string>();
+    for (const g of pnlGroups) { if (seen.has(g.asset)) dupPnlAssets.add(g.asset); else seen.add(g.asset); }
+  }
   const renderStatusButton = (value: Exclude<StatusFilter, 'all'>, tier: Signal, label: string, count: number) =>
     hasData && count > 0 ? <SignalButton tier={tier} active={statusFilter === value} onClick={() => onToggleStatus(value)}>{label} {count}</SignalButton> : null;
   return <section className={`overview-banner${stale ? ' is-stale' : ''}`} aria-label="策略运行概览">
@@ -74,7 +79,7 @@ export function OverviewBanner({
       <div className="overview-stat" aria-label="今日已实现盈亏">
         <span>今日已实现盈亏</span>
         {!pnlGroups ? <strong>--</strong> : !pnlGroups.length ? <strong>0</strong> : pnlGroups.map(group => <div className="overview-pnl-group" key={group.key}>
-          <strong><Pnl value={group.total} compact /><small>{group.asset}</small></strong>
+          <strong><Pnl value={group.total} compact /><small>{dupPnlAssets.has(group.asset) ? `${modeLabel[group.mode]} ${group.asset}` : group.asset}</small></strong>
           {group.pending > 0 && <span>盈亏待同步</span>}
         </div>)}
       </div>

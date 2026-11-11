@@ -97,23 +97,24 @@ interface PaletteHostProps {
   onLogout: () => void | Promise<void>;
 }
 
-function useGlobalShortcuts({ symbols, current, pathname, saving, navigate, setOpen, setHelp }: {
+function useGlobalShortcuts({ symbols, current, pathname, currentUrl, saving, navigate, setOpen, setHelp }: {
   symbols: string[];
   current: string | undefined;
   pathname: string;
+  currentUrl: string;
   saving: boolean;
   navigate: NavigateFunction;
   setOpen: PaletteHostProps['setOpen'];
   setHelp: (open: boolean) => void;
 }) {
   const lead = useRef(0);
-  const shortcutState = useRef({ symbols, current, pathname, saving });
-  shortcutState.current = { symbols, current, pathname, saving };
+  const shortcutState = useRef({ symbols, current, pathname, currentUrl, saving });
+  shortcutState.current = { symbols, current, pathname, currentUrl, saving };
   useEffect(() => { if (saving) setOpen(false); }, [saving, setOpen]);
   useEffect(() => {
     const typing = (target: EventTarget | null) => target instanceof HTMLElement && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) || Boolean(target.closest('[role="menu"], [role="listbox"]')));
     const go = (target: string) => {
-      if (shortcutState.current.pathname !== target) navigate(target);
+      if (shortcutState.current.currentUrl !== target) navigate(target);
     };
     const onKey = (event: KeyboardEvent) => {
       if (event.isComposing || event.keyCode === 229 || event.defaultPrevented) return;
@@ -163,7 +164,8 @@ function ShortcutHelpModal({ open, onClose }: { open: boolean; onClose: () => vo
 
 /** Owns the command list, the global shortcuts and the recently-used order. Lives inside ControlProvider to reuse its guarded actions. */
 export const PaletteHost = memo(function PaletteHost({ open, setOpen, pairs, stale, authEnabled, saving, onLogout }: PaletteHostProps) {
-  const navigate = useNavigate(), { pathname } = useLocation();
+  const navigate = useNavigate(), { pathname, search } = useLocation();
+  const currentUrl = `${pathname}${search}`;
   const { busy, run } = useControls(), { preference, setPreference } = useTheme();
   const [recent, setRecent] = useState<string[]>(readRecent), [help, setHelp] = useState(false);
   const remember = useCallback((key: string) => {
@@ -175,12 +177,12 @@ export const PaletteHost = memo(function PaletteHost({ open, setOpen, pairs, sta
   }, []);
   const symbols = useMemo(() => pairs?.map(pair => pair.symbol) ?? [], [pairs]);
   const current = routeSymbol(pathname);
-  useGlobalShortcuts({ symbols, current, pathname, saving, navigate, setOpen, setHelp });
+  useGlobalShortcuts({ symbols, current, pathname, currentUrl, saving, navigate, setOpen, setHelp });
   const closePalette = useCallback(() => setOpen(false), [setOpen]);
   const closeHelp = useCallback(() => setHelp(false), []);
   const commands = useMemo<Command[]>(() => {
     if (!open) return [];
-    const go = (target: string) => { if (pathname !== target) navigate(target); };
+    const go = (target: string) => { if (currentUrl !== target) navigate(target); };
     const all: Command[] = [
       { key: 'go-overview', group: '页面', label: '策略总览', hint: 'g o', keywords: 'overview home 总览 首页', icon: <AppstoreOutlined />, run: () => go('/') },
       { key: 'go-settings', group: '页面', label: '全局设置', hint: 'g s', keywords: 'settings 设置 api telegram', icon: <SettingOutlined />, run: () => go('/settings') },
@@ -203,7 +205,7 @@ export const PaletteHost = memo(function PaletteHost({ open, setOpen, pairs, sta
     const byKey = new Map(wrapped.map(command => [command.key, command]));
     const recents = recent.flatMap(key => { const command = byKey.get(key); return command && !command.disabled ? [{ ...command, group: '最近使用', key: `recent-${command.key}` }] : []; });
     return [...recents, ...wrapped];
-  }, [open, pathname, pairs, navigate, busy, run, preference, setPreference, authEnabled, saving, onLogout, stale, recent, remember]);
+  }, [open, currentUrl, pairs, navigate, busy, run, preference, setPreference, authEnabled, saving, onLogout, stale, recent, remember]);
   return <>
     <CommandPalette open={open} onClose={closePalette} commands={commands} />
     <ShortcutHelpModal open={help} onClose={closeHelp} />

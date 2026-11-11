@@ -115,8 +115,12 @@ impl GridConfig {
 impl ServerConfig {
     pub fn socket_addr(&self) -> anyhow::Result<std::net::SocketAddr> {
         anyhow::ensure!(self.port > 0, "监听端口必须在 1-65535 之间");
-        let host = self
-            .host
+        let trimmed = self.host.trim();
+        let raw = trimmed
+            .strip_prefix('[')
+            .and_then(|h| h.strip_suffix(']'))
+            .unwrap_or(trimmed);
+        let host = raw
             .parse::<std::net::IpAddr>()
             .context("监听地址必须是有效的 IPv4 或 IPv6 地址")?;
         Ok(std::net::SocketAddr::new(host, self.port))
@@ -124,12 +128,25 @@ impl ServerConfig {
 }
 
 impl ExchangeConfig {
-    pub(crate) fn validate_api_key(api_key: &str) -> anyhow::Result<()> {
+    pub fn validate_api_key(api_key: &str) -> anyhow::Result<()> {
         anyhow::ensure!(
             !api_key.is_empty()
+                && api_key.trim() == api_key
+                && api_key.len() <= 256
                 && api_key.chars().all(|ch| ch.is_ascii_graphic())
                 && reqwest::header::HeaderValue::from_str(api_key).is_ok(),
             "API Key 格式无效（仅允许可见 ASCII 字符，不能包含空白或控制字符）"
+        );
+        Ok(())
+    }
+
+    pub fn validate_api_secret(api_secret: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !api_secret.is_empty()
+                && api_secret.trim() == api_secret
+                && api_secret.len() <= 256
+                && api_secret.chars().all(|ch| ch.is_ascii_graphic()),
+            "API Secret 格式无效"
         );
         Ok(())
     }
@@ -143,27 +160,39 @@ impl ExchangeConfig {
             (1..=60_000).contains(&self.recv_window),
             "请求有效窗口必须在 1-60000 毫秒之间"
         );
-        anyhow::ensure!(
-            self.api_key.trim().is_empty() == self.api_secret.trim().is_empty(),
-            "API Key 和 Secret 必须同时配置：配置后以实盘运行，全部清空后以模拟盘运行"
-        );
-        if !self.api_key.trim().is_empty() {
+        if !self.api_key.is_empty() || !self.api_secret.is_empty() {
+            anyhow::ensure!(
+                !self.api_key.trim().is_empty() && !self.api_secret.trim().is_empty(),
+                "API Key 和 Secret 必须同时配置：配置后以实盘运行，全部清空后以模拟盘运行"
+            );
             Self::validate_api_key(&self.api_key)?;
+            Self::validate_api_secret(&self.api_secret)?;
         }
         Ok(())
     }
 }
 
 impl TelegramConfig {
-    pub(crate) fn validate_bot_token(token: &str) -> anyhow::Result<()> {
+    pub fn validate_bot_token(token: &str) -> anyhow::Result<()> {
         anyhow::ensure!(
             !token.is_empty()
-                && !token.chars().any(|ch| {
-                    matches!(ch, '/' | '?' | '#' | '\\')
-                        || ch.is_whitespace()
-                        || ch.is_ascii_control()
+                && token.trim() == token
+                && token.len() <= 256
+                && token.chars().all(|ch| {
+                    ch.is_ascii_graphic() && !matches!(ch, '/' | '?' | '#' | '\\' | '%' | '@')
                 }),
             "Telegram Bot Token 格式无效"
+        );
+        Ok(())
+    }
+
+    pub fn validate_chat_id(chat_id: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !chat_id.is_empty()
+                && chat_id.trim() == chat_id
+                && chat_id.len() <= 128
+                && !chat_id.chars().any(|ch| ch.is_control()),
+            "Telegram Chat ID 格式无效"
         );
         Ok(())
     }
@@ -175,6 +204,9 @@ impl TelegramConfig {
         );
         if self.enabled || !self.bot_token.is_empty() {
             Self::validate_bot_token(&self.bot_token)?;
+        }
+        if self.enabled || !self.chat_id.is_empty() {
+            Self::validate_chat_id(&self.chat_id)?;
         }
         Ok(())
     }

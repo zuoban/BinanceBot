@@ -317,11 +317,10 @@ impl RateLimiter {
                 .unwrap_or(default)
                 .clamp(1, MAX_RETRY_AFTER_SECS);
             let duration = Duration::from_secs(seconds);
-            let until = now
-                .checked_add(duration)
-                .unwrap_or(now + Duration::from_secs(MAX_RETRY_AFTER_SECS));
-            endpoint.blocked_until =
-                Some(endpoint.blocked_until.map_or(until, |old| old.max(until)));
+            if let Some(until) = now.checked_add(duration) {
+                endpoint.blocked_until =
+                    Some(endpoint.blocked_until.map_or(until, |old| old.max(until)));
+            }
             warn!(
                 "Binance returned HTTP {}; requests suspended for {} seconds",
                 status, seconds

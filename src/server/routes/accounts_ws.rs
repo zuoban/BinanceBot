@@ -186,7 +186,7 @@ async fn run_accounts_socket(
                         Some(Ok(Message::Ping(payload))) => {
                             if !send_with_timeout(&mut sender, Message::Pong(payload), &mut retired).await { return; }
                         }
-                        Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return,
+                        Some(Ok(Message::Close(_)) | Err(_)) | None => return,
                         _ => {}
                     }
                 }

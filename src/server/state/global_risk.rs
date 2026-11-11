@@ -80,13 +80,14 @@ impl GlobalPositionLimit {
         };
         let committed = self.committed_config.read_unpoisoned().clone();
         let committed_ref = committed.as_ref();
+        let active_or_first = states.iter().find(|s| !s.is_retired()).unwrap_or(first);
         let (limit, margin_pct, margin_guard) =
-            Self::resolve_risk_thresholds(first, committed_ref).await;
+            Self::resolve_risk_thresholds(active_or_first, committed_ref).await;
         if limit.is_none() && !margin_guard {
             self.enabled.store(false, Ordering::SeqCst);
             self.blocked.store(false, Ordering::SeqCst);
             self.triggered.store(false, Ordering::SeqCst);
-            for state in &states {
+            for state in states.iter().filter(|state| !state.is_retired()) {
                 state.queue_global_cancel();
             }
             return false;
@@ -103,7 +104,7 @@ impl GlobalPositionLimit {
             self.fill_recovered_generation
                 .store(fill_generation, Ordering::SeqCst);
         }
-        let reason = if unsafe_now {
+        let build_reason = || {
             Self::format_global_risk_reason(
                 zero_margin,
                 incomplete,
@@ -111,11 +112,15 @@ impl GlobalPositionLimit {
                 total,
                 limit,
             )
-        } else {
-            String::new()
         };
-        self.apply_risk_outcome(&states, first, committed_ref, unsafe_now, reason)
-            .await;
+        self.apply_risk_outcome(
+            &states,
+            active_or_first,
+            committed_ref,
+            unsafe_now,
+            build_reason,
+        )
+        .await;
         blocked
     }
 
@@ -152,21 +157,17 @@ impl GlobalPositionLimit {
     async fn apply_risk_outcome(
         &self,
         states: &[Arc<AppState>],
-        first: &Arc<AppState>,
+        notify_target: &Arc<AppState>,
         committed_ref: Option<&crate::config::GlobalConfig>,
         unsafe_now: bool,
-        reason: String,
+        build_reason: impl Fn() -> String,
     ) {
         let first_trigger = unsafe_now && !self.triggered.swap(true, Ordering::SeqCst);
         if !unsafe_now {
             self.triggered.store(false, Ordering::SeqCst);
         }
-        if first_trigger {
-            for state in states {
-                state.global_cancel_pending.store(true, Ordering::SeqCst);
-            }
-        }
-        for state in states {
+        let mut reason: Option<String> = None;
+        for state in states.iter().filter(|state| !state.is_retired()) {
             if unsafe_now && (first_trigger || *state.status.read().await == BotStatus::Running) {
                 state.global_cancel_pending.store(true, Ordering::SeqCst);
                 if let Err(error) = Box::pin(state.pause_trading()).await {
@@ -174,12 +175,14 @@ impl GlobalPositionLimit {
                         .add_log("ERROR", format!("全局风控暂停状态保存失败: {}", error))
                         .await;
                 }
-                state.add_log("WARN", &reason).await;
+                let msg = reason.get_or_insert_with(&build_reason);
+                state.add_log("WARN", msg.as_str()).await;
             }
             state.queue_global_cancel();
         }
         if first_trigger {
-            Self::spawn_global_risk_notification(first, committed_ref, reason).await;
+            let msg = reason.unwrap_or_else(&build_reason);
+            Self::spawn_global_risk_notification(notify_target, committed_ref, msg).await;
         }
     }
 
@@ -197,15 +200,16 @@ impl GlobalPositionLimit {
             return (false, true);
         }
         if let Some(pct) = margin_pct {
-            if account.margin_balance > Decimal::ZERO {
-                return match (
-                    account.available_balance.checked_mul(Decimal::ONE_HUNDRED),
-                    pct.checked_mul(account.margin_balance),
-                ) {
-                    (Some(lhs), Some(rhs)) => (false, lhs <= rhs),
-                    _ => (true, false),
-                };
+            if account.margin_balance <= Decimal::ZERO {
+                return (false, true);
             }
+            return match (
+                account.available_balance.checked_mul(Decimal::ONE_HUNDRED),
+                pct.checked_mul(account.margin_balance),
+            ) {
+                (Some(lhs), Some(rhs)) => (false, lhs <= rhs),
+                _ => (true, false),
+            };
         }
         (false, false)
     }
@@ -404,7 +408,8 @@ impl AppState {
     }
 
     fn queue_global_cancel(self: &Arc<Self>) {
-        if !self.global_cancel_pending.load(Ordering::SeqCst)
+        if self.is_retired()
+            || !self.global_cancel_pending.load(Ordering::SeqCst)
             || self.global_cancel_queued.swap(true, Ordering::SeqCst)
         {
             return;

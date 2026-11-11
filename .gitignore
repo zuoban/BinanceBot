@@ -3,6 +3,8 @@ data/
 *.db
 *.db-shm
 *.db-wal
+*.db-listen
+*.db.process-lock
 config.toml
 *.log
 .env

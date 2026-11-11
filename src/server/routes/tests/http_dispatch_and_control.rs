@@ -30,7 +30,7 @@ async fn dispatch_pair_preserves_query_strings_for_unscoped_and_scoped_routes() 
             .is_ok(),
         "managed_router should be unset before first dispatch"
     );
-    let router = create_managed_router(handle).await;
+    let router = create_managed_router(handle);
 
     for (request_uri, expected_dispatched_uri) in [
         (

@@ -76,3 +76,27 @@ fn delete_session_skips_write_when_token_is_absent() {
     db.delete_session("absent").unwrap();
     assert!(db.delete_session("present").is_err());
 }
+
+#[test]
+fn create_session_caps_active_sessions_at_128_and_bounds_session_cache() {
+    let db = Database::open(":memory:").unwrap();
+    for i in 0..135 {
+        let tok = format!("tok-{i:03}");
+        db.create_session(&tok).unwrap();
+        assert!(db.is_session_valid(&tok).unwrap());
+        assert!(db.session_cache.0.lock().unwrap().len() <= SESSION_CACHE_PRUNE_AT);
+    }
+    let remaining: i64 = db
+        .conn
+        .lock()
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM auth_sessions", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(remaining, 128);
+    for evicted_idx in 0..7 {
+        let tok = format!("tok-{evicted_idx:03}");
+        assert!(!db.session_recently_validated(&tok));
+        assert!(!db.is_session_valid(&tok).unwrap());
+    }
+    assert!(db.is_session_valid("tok-134").unwrap());
+}

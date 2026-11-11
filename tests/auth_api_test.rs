@@ -15,19 +15,16 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::client::IntoClientRequest};
 use tower::ServiceExt;
 
-fn state_with_password(
-    db: Arc<Database>,
-    action_tx: mpsc::Sender<BotControlAction>,
-    password: &str,
-) -> Arc<AppState> {
-    auth::auth_state(AppConfig::default(), db, action_tx, password)
-}
-
 #[tokio::test]
 async fn test_full_auth_lifecycle() {
     let db = Arc::new(Database::open(":memory:").unwrap());
     let (action_tx, mut action_rx) = mpsc::channel(16);
-    let state = state_with_password(db.clone(), action_tx, "correct-password");
+    let state = auth::auth_state(
+        AppConfig::default(),
+        db.clone(),
+        action_tx,
+        "correct-password",
+    );
     let config_state = state.clone();
     tokio::spawn(async move {
         while let Some(action) = action_rx.recv().await {
@@ -298,7 +295,7 @@ fn auth_request(path: &str, body: serde_json::Value, token: Option<&str>) -> Req
 async fn saturated_password_workers_reject_without_consuming_source_limit() {
     let db = Arc::new(Database::open(":memory:").unwrap());
     let (tx, _rx) = mpsc::channel(1);
-    let state = state_with_password(db, tx, "correct-password");
+    let state = auth::auth_state(AppConfig::default(), db, tx, "correct-password");
     let app = create_router(state.clone());
     let permits: Vec<_> = (0..4)
         .map(|_| state.try_begin_auth_work().unwrap())
@@ -328,7 +325,12 @@ async fn saturated_password_workers_reject_without_consuming_source_limit() {
 async fn login_limit_is_scoped_to_socket_ip_and_ignores_forwarded_headers() {
     let db = Arc::new(Database::open(":memory:").unwrap());
     let (action_tx, _action_rx) = mpsc::channel(16);
-    let app = create_router(state_with_password(db, action_tx, "correct-password"));
+    let app = create_router(auth::auth_state(
+        AppConfig::default(),
+        db,
+        action_tx,
+        "correct-password",
+    ));
     let request = |address: &str, forwarded: &str, password: &str| {
         Request::builder()
             .method("POST")
@@ -390,7 +392,12 @@ async fn auth_status_reports_database_errors_instead_of_false_state() {
     let fixture = AuthTestDatabase::new();
     fixture.db.create_session("valid-token").unwrap();
     let (action_tx, _action_rx) = mpsc::channel(16);
-    let state = state_with_password(fixture.db.clone(), action_tx, "correct-password");
+    let state = auth::auth_state(
+        AppConfig::default(),
+        fixture.db.clone(),
+        action_tx,
+        "correct-password",
+    );
     let app = create_router(state);
 
     let request = || {
@@ -425,7 +432,12 @@ async fn protected_route_reports_session_read_failure_without_treating_it_as_exp
     // Never validated before the table disappears, so the session cache cannot answer for it.
     fixture.db.create_session("cold-token").unwrap();
     let (action_tx, _action_rx) = mpsc::channel(16);
-    let state = state_with_password(fixture.db.clone(), action_tx, "correct-password");
+    let state = auth::auth_state(
+        AppConfig::default(),
+        fixture.db.clone(),
+        action_tx,
+        "correct-password",
+    );
     let app = create_router(state);
     let request = |token: &str| {
         Request::builder()
@@ -476,7 +488,12 @@ async fn expired_session_cleanup_failure_still_allows_reauthentication() {
         .unwrap();
     fixture.fail_session_writes("DELETE");
     let (action_tx, _action_rx) = mpsc::channel(16);
-    let state = state_with_password(fixture.db.clone(), action_tx, "correct-password");
+    let state = auth::auth_state(
+        AppConfig::default(),
+        fixture.db.clone(),
+        action_tx,
+        "correct-password",
+    );
     let app = create_router(state);
     let request = |path: &str| {
         Request::builder()
@@ -521,27 +538,31 @@ async fn expired_session_cleanup_failure_still_allows_reauthentication() {
 async fn login_session_insert_failure_returns_error_without_token() {
     let fixture = AuthTestDatabase::new();
     let (action_tx, _action_rx) = mpsc::channel(16);
-    let app = create_router(state_with_password(
+    let app = create_router(auth::auth_state(
+        AppConfig::default(),
         fixture.db.clone(),
         action_tx,
         "correct-password",
     ));
     fixture.fail_session_writes("INSERT");
 
-    let response = app
-        .oneshot(auth_request(
-            "/api/auth/login",
-            serde_json::json!({
-                "password": "correct-password"
-            }),
-            None,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    let json = http::body_json(response).await;
-    assert!(json.get("token").is_none());
-    assert!(json["data"].get("token").is_none());
+    for _ in 0..12 {
+        let response = app
+            .clone()
+            .oneshot(auth_request(
+                "/api/auth/login",
+                serde_json::json!({
+                    "password": "correct-password"
+                }),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let json = http::body_json(response).await;
+        assert!(json.get("token").is_none());
+        assert!(json["data"].get("token").is_none());
+    }
     assert_eq!(fixture.session_count(), 0);
 }
 
@@ -570,7 +591,8 @@ async fn logout_session_delete_failure_returns_error() {
     let fixture = AuthTestDatabase::new();
     fixture.db.create_session("valid-token").unwrap();
     let (action_tx, _action_rx) = mpsc::channel(16);
-    let app = create_router(state_with_password(
+    let app = create_router(auth::auth_state(
+        AppConfig::default(),
         fixture.db.clone(),
         action_tx,
         "correct-password",
@@ -673,7 +695,12 @@ async fn websocket_authenticates_without_a_query_token() {
     let token = "web-socket-session-token";
     db.create_session(token).unwrap();
     let (action_tx, mut action_rx) = mpsc::channel(1);
-    let state = state_with_password(db.clone(), action_tx, "correct-password");
+    let state = auth::auth_state(
+        AppConfig::default(),
+        db.clone(),
+        action_tx,
+        "correct-password",
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server =

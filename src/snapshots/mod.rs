@@ -301,6 +301,57 @@ pub(super) fn within_capture_window(hour: i64, now: DateTime<Utc>) -> bool {
     now.timestamp() >= hour && now.timestamp() - hour < 60
 }
 
+pub(crate) async fn try_capture_hour(handle: &RuntimeHandle, hour: i64) -> bool {
+    let now = Utc::now();
+    // Never attach observations collected outside the first minute to this hour.
+    if !within_capture_window(hour, now) {
+        return false;
+    }
+    let Some(deadline) = DateTime::from_timestamp(hour + 60, 0) else {
+        return false;
+    };
+    let remaining = (deadline - now).to_std().unwrap_or_default();
+    let snapshots = match tokio::time::timeout(remaining, collect_hourly(handle)).await {
+        Ok(Ok(Some(snapshots))) => snapshots,
+        Ok(Ok(None)) | Err(_) => return false,
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "Could not identify account snapshots");
+            return false;
+        }
+    };
+    let now = Utc::now();
+    if !within_capture_window(hour, now) {
+        return false;
+    }
+    let groups = aggregate(&snapshots, now);
+    if !within_capture_window(hour, Utc::now()) {
+        return false;
+    }
+    if let Err(error) = handle
+        .db
+        .run_blocking(move |db| db.save_hourly_account_snapshot(hour, &groups))
+        .await
+    {
+        tracing::warn!(%error, "Could not save account snapshot");
+        return false;
+    }
+    if is_beijing_midnight_hour(hour) {
+        match capture_daily_snapshot_at_midnight(handle, hour, now, &snapshots).await {
+            Ok(Some(daily)) => notify_daily_snapshot(handle, &daily).await,
+            Ok(None) => {
+                if !within_capture_window(hour, Utc::now()) {
+                    return false;
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "Could not save daily snapshot");
+                return false;
+            }
+        }
+    }
+    true
+}
+
 pub async fn run_hourly_snapshots(handle: RuntimeHandle) {
     if let Err(error) = handle
         .db
@@ -313,52 +364,33 @@ pub async fn run_hourly_snapshots(handle: RuntimeHandle) {
     {
         tracing::warn!(%error, "Could not clean up account snapshots");
     }
+    let mut completed_hour: Option<i64> = None;
     loop {
-        let now = Utc::now().timestamp();
-        let next = (now.div_euclid(3600) + 1) * 3600;
-        let delay = u64::try_from(next - now).unwrap_or(1).max(1);
-        tokio::time::sleep(Duration::from_secs(delay)).await;
         let now = Utc::now();
-        // Never attach observations collected outside the first minute to this hour.
-        if !within_capture_window(next, now) {
-            continue;
-        }
-        let Some(deadline) = DateTime::from_timestamp(next + 60, 0) else {
-            continue;
-        };
-        let remaining = (deadline - now).to_std().unwrap_or_default();
-        let snapshots = match tokio::time::timeout(remaining, collect_hourly(&handle)).await {
-            Ok(Ok(Some(snapshots))) => snapshots,
-            Ok(Ok(None)) | Err(_) => continue,
-            Ok(Err(error)) => {
-                tracing::warn!(%error, "Could not identify account snapshots");
+        let current_hour = now.timestamp().div_euclid(3600) * 3600;
+        if completed_hour != Some(current_hour) && within_capture_window(current_hour, now) {
+            if try_capture_hour(&handle, current_hour).await {
+                completed_hour = Some(current_hour);
+            } else {
+                let after = Utc::now();
+                if within_capture_window(current_hour, after) {
+                    let retry_delay = DateTime::from_timestamp(current_hour + 60, 0)
+                        .and_then(|deadline| (deadline - after).to_std().ok())
+                        .unwrap_or(Duration::from_secs(1))
+                        .min(Duration::from_secs(1))
+                        .max(Duration::from_millis(50));
+                    tokio::time::sleep(retry_delay).await;
+                }
                 continue;
             }
-        };
+        }
         let now = Utc::now();
-        if !within_capture_window(next, now) {
-            continue;
-        }
-        let groups = aggregate(&snapshots, now);
-        if !within_capture_window(next, Utc::now()) {
-            continue;
-        }
-        if let Err(error) = handle
-            .db
-            .run_blocking(move |db| db.save_hourly_account_snapshot(next, &groups))
-            .await
-        {
-            tracing::warn!(%error, "Could not save account snapshot");
-        }
-        if is_beijing_midnight_hour(next) {
-            match capture_daily_snapshot_at_midnight(&handle, next, now, &snapshots).await {
-                Ok(Some(daily)) => notify_daily_snapshot(&handle, &daily).await,
-                Ok(None) => {}
-                Err(error) => {
-                    tracing::warn!(%error, "Could not save daily snapshot");
-                }
-            }
-        }
+        let next = (now.timestamp().div_euclid(3600) + 1) * 3600;
+        let delay = DateTime::from_timestamp(next, 0)
+            .and_then(|target| (target - now).to_std().ok())
+            .unwrap_or(Duration::from_millis(50))
+            .max(Duration::from_millis(50));
+        tokio::time::sleep(delay).await;
     }
 }
 

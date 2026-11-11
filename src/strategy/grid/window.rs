@@ -234,6 +234,14 @@ impl GridTradingEngine {
         if skip_unchanged_paper && self.paper_window_matches_cache(paper_inputs.as_ref()).await {
             return;
         }
+        Box::pin(self.rebuild_grid_window(config, paper_inputs)).await;
+    }
+
+    async fn rebuild_grid_window(
+        &mut self,
+        config: crate::config::AppConfig,
+        paper_inputs: Option<PaperWindowInputs>,
+    ) {
         self.paper_window_cache = None;
         if !self.prepare_window_recovery_and_inventory(&config).await {
             return;

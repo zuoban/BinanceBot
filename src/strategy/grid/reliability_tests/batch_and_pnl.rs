@@ -463,3 +463,19 @@ async fn depleted_pnl_quota_stops_batch_dispatch_and_cools_down_without_blocking
         .all(|trade| trade.pnl_verified));
     server.abort();
 }
+
+#[tokio::test]
+async fn empty_unverified_pnl_query_resets_offset_without_spawning_batch() {
+    let fake = Exchange::default();
+    let (url, server) = exchange_server(fake).await;
+    let db = database();
+    let mut first = engine(db, &url).await;
+    first.state.stats.write().await.pending_pnl_trades = 4;
+    first.pnl_reconcile_offset = 3;
+
+    first.reconcile_unverified_trades().await;
+
+    assert_eq!(first.pnl_reconcile_offset, 0);
+    assert!(first.pnl_reconcile_task.is_none());
+    server.abort();
+}

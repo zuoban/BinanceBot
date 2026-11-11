@@ -16,27 +16,49 @@ backend_port=""
 args=("$@")
 for ((i = 0; i < ${#args[@]}; i++)); do
   case "${args[i]}" in
+    --)
+      break
+      ;;
     --admin-password)
-      if ((i + 1 < ${#args[@]})) && [[ -n "${args[i+1]}" ]]; then has_password_arg=true; fi
+      if ((i + 1 < ${#args[@]})) && [[ "${args[i+1]}" != -* ]]; then
+        if [[ -n "${args[i+1]}" ]]; then has_password_arg=true; fi
+        i=$((i + 1))
+      fi
       ;;
     --admin-password=?*) has_password_arg=true ;;
-    --host) if ((i + 1 < ${#args[@]})); then backend_host="${args[i+1]}"; fi ;;
+    --host)
+      if ((i + 1 < ${#args[@]})) && [[ "${args[i+1]}" != -* ]]; then
+        backend_host="${args[i+1]}"
+        i=$((i + 1))
+      fi
+      ;;
     --host=*) backend_host="${args[i]#--host=}" ;;
-    --port|-p) if ((i + 1 < ${#args[@]})); then backend_port="${args[i+1]}"; fi ;;
+    --port|-p)
+      if ((i + 1 < ${#args[@]})) && [[ "${args[i+1]}" != -* ]]; then
+        backend_port="${args[i+1]}"
+        i=$((i + 1))
+      fi
+      ;;
     --port=*) backend_port="${args[i]#--port=}" ;;
+    -p=*) backend_port="${args[i]#-p=}" ;;
     -p?*) backend_port="${args[i]#-p}" ;;
+    --db|-d)
+      if ((i + 1 < ${#args[@]})) && [[ "${args[i+1]}" != -* ]]; then
+        i=$((i + 1))
+      fi
+      ;;
   esac
 done
 dev_host="${DEV_HOST:-127.0.0.1}"
-is_loopback_host() {
+is_loopback_ip() {
   case "$1" in
-    ""|127.0.0.1|localhost|::1|"[::1]") return 0 ;;
+    ""|127.0.0.1|::1|"[::1]") return 0 ;;
     *) return 1 ;;
   esac
 }
 extra_backend_args=()
 if [[ -z "${ADMIN_PASSWORD:-}" && "$has_password_arg" == false ]]; then
-  if ! is_loopback_host "$dev_host" || ! is_loopback_host "$backend_host"; then
+  if { [[ "$dev_host" != "localhost" ]] && ! is_loopback_ip "$dev_host"; } || ! is_loopback_ip "$backend_host"; then
     printf '拒绝在未设置 ADMIN_PASSWORD（或 --admin-password）时绑定非回环地址（DEV_HOST=%s, --host=%s）。\n' "$dev_host" "${backend_host:-127.0.0.1}" >&2
     exit 1
   fi
@@ -47,7 +69,7 @@ if [[ -z "${ADMIN_PASSWORD:-}" && "$has_password_arg" == false ]]; then
 fi
 if [[ ! -d "$ROOT_DIR/frontend/node_modules" ]]; then
   printf '正在安装前端依赖...\n'
-  (cd "$ROOT_DIR/frontend" && npm ci)
+  (cd "$ROOT_DIR/frontend" && npm ci --ignore-scripts)
 fi
 
 # 独立进程组确保 npm 启动的 Vite 等子进程也能收到退出信号。
@@ -74,8 +96,18 @@ trap 'exit 143' TERM
 printf '正在启动后端；管理员认证由 ADMIN_PASSWORD 或 --admin-password 决定。\n'
 (cd "$ROOT_DIR" && exec cargo run --release -- ${extra_backend_args[@]+"${extra_backend_args[@]}"} "$@") &
 backend_pid=$!
-if [[ -n "$backend_port" && -z "${API_PROXY_TARGET:-}" ]]; then
-  export API_PROXY_TARGET="http://127.0.0.1:$backend_port"
+if [[ -z "${API_PROXY_TARGET:-}" && ( -n "$backend_host" || -n "$backend_port" ) ]]; then
+  proxy_host="${backend_host:-127.0.0.1}"
+  case "$proxy_host" in
+    0.0.0.0) proxy_host="127.0.0.1" ;;
+    ::|"[::]"|::1|"[::1]") proxy_host="[::1]" ;;
+    *:*)
+      if [[ "$proxy_host" != \[*\] ]]; then
+        proxy_host="[$proxy_host]"
+      fi
+      ;;
+  esac
+  export API_PROXY_TARGET="http://${proxy_host}:${backend_port:-8080}"
 fi
 printf '正在启动前端，请访问 Vite 输出的地址。按 Ctrl+C 停止。\n'
 (cd "$ROOT_DIR/frontend" && exec npm run dev -- --host "$dev_host") &

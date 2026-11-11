@@ -13,7 +13,8 @@ import type * as Antd from 'antd';
 import type * as Api from '../lib/api';
 import type * as Queries from '../lib/queries';
 import { PAIRS_STALE_MS, SNAPSHOT_STALE_MS } from '../lib/portfolio';
-import { globalConfig, pair, serverConfig } from './fixtures';
+import type { AccountObservation, Pair } from '../lib/types';
+import { globalConfig, pair, serverConfig, snapshot } from './fixtures';
 
 const mocks = vi.hoisted(() => {
   const confirm = vi.fn(), success = vi.fn(), error = vi.fn();
@@ -29,9 +30,20 @@ vi.mock('../lib/api', async importOriginal => {
 });
 const pairsState = vi.hoisted(() => {
   const listeners = new Set<() => void>();
+  const defaultPairs = () => [pair('BTCUSDC'), pair('ETHUSDC')];
   return {
     dataUpdatedAt: Date.now(),
+    pairs: [] as Pair[],
+    accounts: [] as AccountObservation[],
+    reset() {
+      this.dataUpdatedAt = Date.now();
+      this.pairs = defaultPairs();
+      this.accounts = [];
+      for (const listener of listeners) listener();
+    },
     setUpdatedAt(next: number) { this.dataUpdatedAt = next; for (const listener of listeners) listener(); },
+    setPairs(next: Pair[]) { this.pairs = next; for (const listener of listeners) listener(); },
+    setAccounts(next: AccountObservation[]) { this.accounts = next; for (const listener of listeners) listener(); },
     subscribe: (listener: () => void) => { listeners.add(listener); return () => listeners.delete(listener); },
   };
 });
@@ -39,8 +51,8 @@ vi.mock('../lib/queries', async importOriginal => {
   const actual = await importOriginal<typeof Queries>();
   return {
     ...actual,
-    usePairs: () => ({ data: [pair('BTCUSDC'), pair('ETHUSDC')], isPending: false, isFetching: false, error: null, dataUpdatedAt: useSyncExternalStore(pairsState.subscribe, () => pairsState.dataUpdatedAt) }),
-    useLiveAccounts: () => ({ accounts: [], stale: false, error: null }),
+    usePairs: () => ({ data: useSyncExternalStore(pairsState.subscribe, () => pairsState.pairs), isPending: false, isFetching: false, error: null, dataUpdatedAt: useSyncExternalStore(pairsState.subscribe, () => pairsState.dataUpdatedAt) }),
+    useLiveAccounts: () => ({ accounts: useSyncExternalStore(pairsState.subscribe, () => pairsState.accounts), stale: false, error: null }),
     usePairSnapshot: () => ({ data: undefined, isPending: false, refetch: vi.fn() }),
   };
 });
@@ -50,7 +62,7 @@ vi.mock('../components/ThemeSwitch', () => ({ ThemeSwitch: () => null, ThemeSegm
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.busy = new Set<string>();
-  pairsState.setUpdatedAt(Date.now());
+  pairsState.reset();
 });
 
 function setup(initialPath = '/pairs/BTCUSDC/config', configError?: Error) {
@@ -305,3 +317,68 @@ it('blocks dirty navigation across /settings?tab=... from sidebar link without d
   await waitFor(() => expect(router.state.location.search).toBe(''));
   expect(mocks.confirm).toHaveBeenCalledTimes(3);
 }, 40000);
+
+it('withholds LIVE status overrides and marks palette actions stale during LIVE (scope-a) -> LIVE (scope-b) rotation until scopes align', async () => {
+  const now = Date.now();
+  const liveSnapB = snapshot('ETHUSDC', 'LIVE');
+  liveSnapB.status = 'RUNNING';
+  liveSnapB.account_scope = 'scope-b';
+  const btcSnapA = snapshot('BTCUSDC', 'LIVE');
+  btcSnapA.status = 'PAUSED';
+  btcSnapA.account_scope = 'scope-a';
+  pairsState.setPairs([
+    { ...pair('BTCUSDC'), mode: 'LIVE', status: 'PAUSED', account_scope: 'scope-a' },
+    { ...pair('ETHUSDC'), mode: 'LIVE', status: 'PAUSED', account_scope: 'scope-a' },
+  ]);
+  pairsState.setAccounts([
+    { mode: 'LIVE', snapshot: btcSnapA, generated_at_ms: now, received_at_ms: now },
+    { mode: 'LIVE', snapshot: liveSnapB, generated_at_ms: now, received_at_ms: now },
+  ]);
+  setup('/');
+  const sidebarPairs = within(screen.getByRole('complementary')).getByRole('navigation', { name: '交易对' });
+  expect(within(sidebarPairs).getByRole('link', { name: /ETHUSDC/ })).toHaveAttribute('title', expect.stringContaining('已暂停'));
+  expect(document.title.startsWith('[!] ')).toBe(true);
+
+  const user = userEvent.setup();
+  await user.keyboard('{Control>}k{/Control}');
+  const search = await screen.findByRole('combobox', { name: '搜索命令' });
+  await user.type(search, 'ETHUSDC');
+  expect(screen.queryByRole('option', { name: /恢复 ETHUSDC/ })).not.toBeInTheDocument();
+  expect(screen.queryByRole('option', { name: /^暂停 ETHUSDC/ })).not.toBeInTheDocument();
+
+  const btcSnapB = { ...btcSnapA, account_scope: 'scope-b' };
+  act(() => {
+    pairsState.setPairs([
+      { ...pair('BTCUSDC'), mode: 'LIVE', status: 'PAUSED', account_scope: 'scope-b' },
+      { ...pair('ETHUSDC'), mode: 'LIVE', status: 'PAUSED', account_scope: 'scope-b' },
+    ]);
+    pairsState.setAccounts([
+      { mode: 'LIVE', snapshot: btcSnapB, generated_at_ms: now, received_at_ms: now },
+      { mode: 'LIVE', snapshot: liveSnapB, generated_at_ms: now, received_at_ms: now },
+    ]);
+  });
+  expect(within(sidebarPairs).getByRole('link', { name: /ETHUSDC/ })).toHaveAttribute('title', expect.stringContaining('运行中'));
+  expect(await screen.findByRole('option', { name: /^暂停 ETHUSDC/ })).toBeInTheDocument();
+  expect(document.title.startsWith('[!] ')).toBe(false);
+});
+
+it('navigates cleanly to /settings and / when current URL has query parameters, while no-oping at exact URL', async () => {
+  const router = setup('/settings?tab=database');
+  const navigateSpy = vi.spyOn(router, 'navigate');
+  const user = userEvent.setup();
+  await user.keyboard('gs');
+  await waitFor(() => expect(`${router.state.location.pathname}${router.state.location.search}`).toBe('/settings'));
+  expect(navigateSpy).toHaveBeenCalledTimes(1);
+
+  await user.keyboard('gs');
+  expect(navigateSpy).toHaveBeenCalledTimes(1);
+
+  await act(async () => { await router.navigate('/?status=ERROR'); });
+  navigateSpy.mockClear();
+  await user.keyboard('{Control>}k{/Control}');
+  const search = await screen.findByRole('combobox', { name: '搜索命令' });
+  await user.type(search, '策略总览');
+  await user.keyboard('{Enter}');
+  await waitFor(() => expect(`${router.state.location.pathname}${router.state.location.search}`).toBe('/'));
+  expect(navigateSpy).toHaveBeenCalledTimes(1);
+});

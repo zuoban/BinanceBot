@@ -78,6 +78,8 @@ pub(super) fn resolve_exchange_probe(
         return Err("请同时填写 API Key 和 Secret（或先保存后再测试）".into());
     }
     crate::config::ExchangeConfig::validate_api_key(&config.api_key).map_err(|e| e.to_string())?;
+    crate::config::ExchangeConfig::validate_api_secret(&config.api_secret)
+        .map_err(|e| e.to_string())?;
     if !(1..=60_000).contains(&config.recv_window) {
         return Err("请求有效窗口必须在 1-60000 毫秒之间".into());
     }
@@ -92,6 +94,13 @@ pub(super) fn resolve_telegram_probe(
     if let Some(token) = non_blank(payload.bot_token) {
         config.bot_token = token;
     }
+    if payload
+        .chat_id
+        .as_deref()
+        .is_some_and(|raw| !raw.trim().is_empty() && raw.chars().any(char::is_control))
+    {
+        return Err("Telegram Chat ID 格式无效".into());
+    }
     if let Some(chat_id) = non_blank(payload.chat_id) {
         config.chat_id = chat_id;
     }
@@ -100,6 +109,7 @@ pub(super) fn resolve_telegram_probe(
     }
     crate::config::TelegramConfig::validate_bot_token(&config.bot_token)
         .map_err(|e| e.to_string())?;
+    crate::config::TelegramConfig::validate_chat_id(&config.chat_id).map_err(|e| e.to_string())?;
     Ok(config)
 }
 
@@ -195,7 +205,7 @@ fn format_probe_detail(raw: &str) -> String {
     }
 }
 
-pub(super) fn sanitized_probe_error(prefix: &str, error: &anyhow::Error) -> String {
+pub(crate) fn sanitized_probe_error(prefix: &str, error: &anyhow::Error) -> String {
     if let Some(exchange_err) = error.downcast_ref::<crate::exchange::ExchangeError>() {
         return match exchange_err {
             crate::exchange::ExchangeError::ApiError { code, msg } => {

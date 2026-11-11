@@ -102,8 +102,8 @@ impl GridTradingEngine {
 
     /// Reconcile open orders from Binance in Live mode
     pub(super) async fn sync_live_orders(&mut self) -> bool {
-        self.sync_live_orders_with_priority(ReconciliationPriority::Critical)
-            .await
+        let fut = self.sync_live_orders_with_priority(ReconciliationPriority::Critical);
+        Box::pin(fut).await
     }
 
     async fn verify_and_adopt_open_snapshot(
@@ -328,21 +328,18 @@ impl GridTradingEngine {
                 .await;
             return false;
         }
-        self.reconcile_fetched_live_orders(
-            LiveSnapshotValidation {
-                priority,
-                pause_epoch,
-                account_key,
-                symbol: &symbol,
-                mode,
-                live_orders,
-                pair_intents: &pair_intents,
-                restored_ids,
-            },
-            remainder_plan,
-            fill_guard,
-        )
-        .await
+        let validation = LiveSnapshotValidation {
+            priority,
+            pause_epoch,
+            account_key,
+            symbol: &symbol,
+            mode,
+            live_orders,
+            pair_intents: &pair_intents,
+            restored_ids,
+        };
+        let fut = self.reconcile_fetched_live_orders(validation, remainder_plan, fill_guard);
+        Box::pin(fut).await
     }
 
     async fn reconcile_fetched_live_orders(
@@ -355,12 +352,11 @@ impl GridTradingEngine {
         let symbol = validation.symbol;
         let mode = validation.mode;
         let pause_epoch = validation.pause_epoch;
-        let Some((live_ids, mut corrected_terminal, resolved_conflict_ids)) = self
-            .validate_and_adopt_live_snapshot(validation, remainder_plan.as_ref())
-            .await
-        else {
+        let adopt_fut = self.validate_and_adopt_live_snapshot(validation, remainder_plan.as_ref());
+        let Some(adopted) = Box::pin(adopt_fut).await else {
             return false;
         };
+        let (live_ids, mut corrected_terminal, resolved_conflict_ids) = adopted;
         let Some(terminal_orders) = self
             .collect_missing_terminal_orders(
                 account_key,
@@ -373,19 +369,18 @@ impl GridTradingEngine {
         else {
             return false;
         };
-        let Some(persistence_ok) = self
-            .settle_terminal_and_pending_workflows(LiveSyncSettlement {
-                account_key,
-                symbol,
-                mode,
-                pause_epoch,
-                terminal_orders,
-                remainder_plan: &mut remainder_plan,
-                has_fill_guard: fill_guard.is_some(),
-                resolved_conflict_ids: &resolved_conflict_ids,
-            })
-            .await
-        else {
+        let settlement = LiveSyncSettlement {
+            account_key,
+            symbol,
+            mode,
+            pause_epoch,
+            terminal_orders,
+            remainder_plan: &mut remainder_plan,
+            has_fill_guard: fill_guard.is_some(),
+            resolved_conflict_ids: &resolved_conflict_ids,
+        };
+        let settle_fut = self.settle_terminal_and_pending_workflows(settlement);
+        let Some(persistence_ok) = Box::pin(settle_fut).await else {
             return false;
         };
         if persistence_ok {

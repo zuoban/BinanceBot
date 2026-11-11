@@ -1,4 +1,5 @@
-import { render, screen, waitFor } from '@testing-library/react';
+/// <reference lib="es2024.promise" />
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeEach, expect, it, vi } from 'vitest';
@@ -306,4 +307,35 @@ it('提交失败后在 API Secret 输入空白仍保留缺失提示，拒绝非�
   await waitFor(() => expect(screen.queryByText('请同时填写 API Key 和 API Secret')).not.toBeInTheDocument());
   await waitFor(() => expect(screen.queryByText('请填写 Chat ID')).not.toBeInTheDocument());
   expect(screen.getByRole('button', { name: '测试连接' })).toBeEnabled();
+}, 40000);
+
+it('拒绝含 %/@/非 ASCII 的 Bot Token、超长凭证与含控制字符的 Chat ID，并在编辑时废除旧保存确认', async () => {
+  const { promise: confirmPromise, resolve: resolveConfirm } = Promise.withResolvers<boolean>();
+  mocks.confirm.mockReturnValueOnce(confirmPromise);
+  setup();
+  const user = userEvent.setup();
+  const token = await screen.findByLabelText('Bot Token');
+  await waitFor(() => expect(token).toBeEnabled());
+  await user.type(token, '123%abc');
+  expect(await screen.findByText('Telegram Bot Token 格式无效')).toBeInTheDocument();
+  await user.clear(token);
+  await user.type(token, '123@abc');
+  expect(await screen.findByText('Telegram Bot Token 格式无效')).toBeInTheDocument();
+  await user.clear(token);
+
+  const chatId = screen.getByLabelText('Chat ID');
+  await user.type(chatId, 'x'.repeat(129));
+  expect(await screen.findByText('Telegram Chat ID 格式无效')).toBeInTheDocument();
+  await user.clear(chatId);
+
+  const toggle = screen.getByRole('switch', { name: '可用保证金不足时暂停' });
+  await user.click(toggle);
+  await user.click(screen.getByRole('button', { name: '保存全局设置' }));
+  await waitFor(() => expect(mocks.confirm).toHaveBeenCalledTimes(1));
+
+  const syncInput = screen.getByLabelText('同步间隔（秒）');
+  await user.clear(syncInput);
+  await user.type(syncInput, '45');
+  await act(async () => { resolveConfirm(true); });
+  expect(mocks.post).not.toHaveBeenCalled();
 }, 40000);

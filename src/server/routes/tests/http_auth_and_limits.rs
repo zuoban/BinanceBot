@@ -50,6 +50,24 @@ async fn body_limits_reject_oversized_login_and_protected_payloads() {
         .await
         .unwrap();
     assert_eq!(medium_res.status(), StatusCode::OK);
+    let too_many_targets = serde_json::json!({
+        "targets": ["trade_history", "account_hourly_snapshots", "trade_history"],
+    })
+    .to_string();
+    let bad_targets_res = router
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/database/export")
+                .header("authorization", "Bearer body-limit-token")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(too_many_targets))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(bad_targets_res.status(), StatusCode::BAD_REQUEST);
 
     let oversized_control = serde_json::json!({
         "action": format!("unknown_{}", "a".repeat(70 * 1024)),
@@ -183,6 +201,35 @@ async fn cold_token_lookups_are_bounded_and_malformed_tokens_skip_sqlite() {
         assert_eq!(body["data"]["authenticated"], false);
     }
 
+    // Duplicate Authorization or X-Auth-Token headers are rejected.
+    let mut dup_auth_req = Request::builder()
+        .uri("/api/status")
+        .body(Body::empty())
+        .unwrap();
+    dup_auth_req
+        .headers_mut()
+        .append("Authorization", "Bearer hot-valid-token".parse().unwrap());
+    dup_auth_req
+        .headers_mut()
+        .append("Authorization", "Bearer hot-valid-token".parse().unwrap());
+    assert_eq!(
+        app.clone().oneshot(dup_auth_req).await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let mut dup_x_req = Request::builder()
+        .uri("/api/status")
+        .body(Body::empty())
+        .unwrap();
+    dup_x_req
+        .headers_mut()
+        .append("X-Auth-Token", "hot-valid-token".parse().unwrap());
+    dup_x_req
+        .headers_mut()
+        .append("X-Auth-Token", "hot-valid-token".parse().unwrap());
+    assert_eq!(
+        app.clone().oneshot(dup_x_req).await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
     drop(permits);
     assert_eq!(
         app.oneshot(
@@ -218,7 +265,7 @@ async fn routers_attach_security_headers_without_touching_websocket_upgrades() {
     )
     .await
     .unwrap();
-    let managed = create_managed_router(runtime.handle()).await;
+    let managed = create_managed_router(runtime.handle());
     for router in [
         create_router(state.clone()),
         create_multi_router(vec![state.clone()]),
@@ -239,6 +286,10 @@ async fn routers_attach_security_headers_without_touching_websocket_upgrades() {
         assert_eq!(headers["X-Content-Type-Options"], "nosniff");
         assert_eq!(headers["X-Frame-Options"], "DENY");
         assert_eq!(headers["Referrer-Policy"], "same-origin");
+        assert_eq!(
+            headers["Permissions-Policy"],
+            "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()"
+        );
     }
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -21,7 +21,7 @@ async fn symbols_route_shares_runtime_limiter() {
         .rate_limiter
         .reserve(mainnet, [7; 32], 1800, RequestClass::Normal)
         .unwrap();
-    let router = create_managed_router(handle.clone()).await;
+    let router = create_managed_router(handle.clone());
     let (status, _) = request(
         &router,
         "/api/exchange/symbols?environment=mainnet",
@@ -36,7 +36,7 @@ async fn symbols_route_shares_runtime_limiter() {
 #[tokio::test]
 async fn management_authenticates_add_remove_server_settings_and_pair_resources() {
     let runtime = fixture();
-    let router = create_managed_router(runtime.handle()).await;
+    let router = create_managed_router(runtime.handle());
     for (path, method, body) in [
         ("/api/overview", "GET", Value::Null),
         ("/api/overview/history", "GET", Value::Null),
@@ -91,7 +91,7 @@ async fn overview_history_returns_saved_snapshots() {
             .save_hourly_account_snapshot(saved_hour, std::slice::from_ref(&group))
             .unwrap();
     }
-    let router = create_managed_router(runtime.handle()).await;
+    let router = create_managed_router(runtime.handle());
     let (status, body) = request(&router, "/api/overview/history", "GET", Value::Null, true).await;
     assert_eq!(status, StatusCode::OK);
     let snapshots = body["data"]["snapshots"].as_array().unwrap();
@@ -122,7 +122,7 @@ async fn history_waits_for_global_commit_and_lists_live_account_without_snapshot
     committed.exchange.api_key = "history-new-key".into();
     committed.exchange.api_secret = "history-new-secret".into();
     handle.db.save_config(&committed).unwrap();
-    let router = create_managed_router(handle.clone()).await;
+    let router = create_managed_router(handle.clone());
     let mut request_task = tokio::spawn(async move {
         request(&router, "/api/overview/history", "GET", Value::Null, true).await
     });
@@ -185,7 +185,7 @@ async fn history_api_ignores_pair_update_lock_and_hourly_capture_skips_it() {
         .await
         .unwrap()
         .is_none());
-    let router = create_managed_router(handle).await;
+    let router = create_managed_router(handle);
     let (_, body) = tokio::time::timeout(
         Duration::from_secs(1),
         request(&router, "/api/overview/history", "GET", Value::Null, true),
@@ -202,7 +202,7 @@ async fn history_api_ignores_pair_update_lock_and_hourly_capture_skips_it() {
 #[tokio::test]
 async fn overview_reads_current_managed_membership_without_restarting_router() {
     let mut runtime = fixture();
-    let router = create_managed_router(runtime.handle()).await;
+    let router = create_managed_router(runtime.handle());
     let (status, response) = request(&router, "/api/overview", "GET", Value::Null, true).await;
     assert_eq!(status, StatusCode::OK);
     let pairs = response["data"]["pairs"].as_array().unwrap();
@@ -226,7 +226,7 @@ async fn dashboard_membership_commands_update_routes_without_restarting_and_pres
     let mut runtime = fixture();
     runtime.test_exchange_url = Some(url);
     let handle = runtime.handle();
-    let router = create_managed_router(handle.clone()).await;
+    let router = create_managed_router(handle.clone());
     let manager = tokio::spawn(async move { runtime.run().await });
     let (_, added) = request(&router, "/api/pairs", "POST", payload("ETHUSDT"), true).await;
     assert_eq!(added["success"], true);
@@ -314,7 +314,7 @@ async fn dashboard_membership_commands_update_routes_without_restarting_and_pres
 async fn settings_validation_and_server_changes_preserve_independent_pair_updates() {
     let mut runtime = fixture();
     let handle = runtime.handle();
-    let router = create_managed_router(handle.clone()).await;
+    let router = create_managed_router(handle.clone());
     let manager = tokio::spawn(async move { runtime.run().await });
     let (_, rejected) = request(
         &router,
@@ -389,7 +389,7 @@ async fn settings_validation_and_server_changes_preserve_independent_pair_update
 #[tokio::test]
 async fn managed_pair_updates_require_a_current_version() {
     let runtime = fixture();
-    let router = create_managed_router(runtime.handle()).await;
+    let router = create_managed_router(runtime.handle());
     for path in ["/api/pairs/BTCUSDT/config", "/api/config"] {
         let symbol = if path == "/api/config" {
             "SOLUSDC"
@@ -421,7 +421,7 @@ async fn managed_pair_updates_require_a_current_version() {
 async fn configuration_versions_reject_concurrent_stale_forms() {
     let mut runtime = fixture();
     let handle = runtime.handle();
-    let router = create_managed_router(handle).await;
+    let router = create_managed_router(handle);
     let manager = tokio::spawn(async move { runtime.run().await });
     for (path, field, first, second) in [
         (
@@ -483,7 +483,7 @@ async fn managed_account_stream_tracks_current_pair_membership() {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     let runtime = fixture();
     let handle = runtime.handle();
-    let router = create_managed_router(handle.clone()).await;
+    let router = create_managed_router(handle.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
@@ -520,7 +520,7 @@ async fn managed_websockets_accept_protocol_tokens_without_bearer_headers() {
     use futures_util::StreamExt;
     use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
     let runtime = fixture();
-    let router = create_managed_router(runtime.handle()).await;
+    let router = create_managed_router(runtime.handle());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {

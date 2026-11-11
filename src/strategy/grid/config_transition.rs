@@ -112,7 +112,7 @@ impl GridTradingEngine {
         log_prefix: &str,
         reply: tokio::sync::oneshot::Sender<std::result::Result<(), String>>,
     ) {
-        let result = self.apply_config(config).await;
+        let result = Box::pin(self.apply_config(config)).await;
         if let Err(error) = &result {
             self.state
                 .add_log("ERROR", format!("{}: {}", log_prefix, error))
@@ -271,8 +271,8 @@ impl GridTradingEngine {
             self.pause_trading().await;
             return Err(error);
         }
-        self.reset_runtime_scope_after_config_change(new_config, prepared)
-            .await;
+        let reset_fut = self.reset_runtime_scope_after_config_change(new_config, prepared);
+        Box::pin(reset_fut).await;
         drop(scope_transition);
         Ok(flags)
     }
@@ -293,7 +293,7 @@ impl GridTradingEngine {
             self.update_paper_valuation().await;
             !self.state.paper_restore_failed.load(Ordering::SeqCst)
         } else {
-            self.sync_live_orders().await && self.sync_account_and_position().await
+            self.sync_live_orders().await && Box::pin(self.sync_account_and_position()).await
         };
         let ready = scope_ready && !self.state.is_stats_dirty();
         // A dirty target scope is installed paused, but reconciliation can have
@@ -321,7 +321,7 @@ impl GridTradingEngine {
             ));
         }
         if *self.state.status.read().await == BotStatus::Running {
-            self.maintain_grid_window().await;
+            Box::pin(self.maintain_grid_window()).await;
         }
         let msg = format!(
             "Strategy configuration updated for {}",
@@ -335,7 +335,7 @@ impl GridTradingEngine {
         &mut self,
         new_config: crate::config::AppConfig,
     ) -> Result<()> {
-        let Some(prepared) = self.prepare_config_transition(&new_config).await? else {
+        let Some(prepared) = Box::pin(self.prepare_config_transition(&new_config)).await? else {
             let sync_secs = new_config.exchange.sync_interval_secs.max(1);
             self.state.save_runtime_config(new_config).await?;
             self.sync_interval_secs = sync_secs;
@@ -344,14 +344,14 @@ impl GridTradingEngine {
                 .await;
             return Ok(());
         };
-        let flags = self.commit_config_transition(&new_config, prepared).await?;
-        self.reconcile_committed_config_transition(
+        let flags = Box::pin(self.commit_config_transition(&new_config, prepared)).await?;
+        let reconcile_fut = self.reconcile_committed_config_transition(
             &new_config,
             flags.market_changed,
             flags.mode_changed,
             flags.credentials_changed,
-        )
-        .await
+        );
+        Box::pin(reconcile_fut).await
     }
 
     async fn validate_live_config_target(

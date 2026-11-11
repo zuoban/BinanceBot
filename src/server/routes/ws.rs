@@ -18,31 +18,57 @@ const WS_RESULT_QUEUE_CAPACITY: usize = 32;
 const WS_CONTROL_QUEUE_CAPACITY: usize = 16;
 const WS_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-fn websocket_token(headers: &HeaderMap) -> &str {
-    headers
-        .get(axum::http::header::SEC_WEBSOCKET_PROTOCOL)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|protocols| {
-            protocols
-                .split(',')
-                .find_map(|protocol| protocol.trim().strip_prefix("token."))
-        })
+pub(super) fn websocket_token(headers: &HeaderMap) -> &str {
+    let mut found: Option<&str> = None;
+    for value in headers.get_all(axum::http::header::SEC_WEBSOCKET_PROTOCOL) {
+        let Ok(protocols) = value.to_str() else {
+            return "";
+        };
+        for protocol in protocols.split(',') {
+            if let Some(raw_token) = protocol.trim().strip_prefix("token.") {
+                if found.is_some() {
+                    return "";
+                }
+                found = Some(raw_token);
+            }
+        }
+    }
+    found
         .filter(|raw| *raw == raw.trim())
         .and_then(sanitize_session_token)
         .unwrap_or_default()
 }
 
 pub(super) fn ws_origin_allowed(headers: &HeaderMap) -> bool {
-    let Some(origin_header) = headers.get(axum::http::header::ORIGIN) else {
+    let mut origins = headers.get_all(axum::http::header::ORIGIN).iter();
+    let Some(origin_header) = origins.next() else {
         return true;
     };
+    if origins.next().is_some() {
+        return false;
+    }
+    if headers.get_all(axum::http::header::HOST).iter().count() != 1
+        || headers.get_all("x-forwarded-proto").iter().count() > 1
+    {
+        return false;
+    }
     let Ok(origin_str) = origin_header.to_str() else {
         return false;
     };
+    if origin_str.contains('@') {
+        return false;
+    }
     let Ok(origin) = url::Url::parse(origin_str) else {
         return false;
     };
-    if !matches!(origin.scheme(), "http" | "https") || origin.host().is_none() {
+    if !matches!(origin.scheme(), "http" | "https")
+        || origin.host().is_none()
+        || !origin.username().is_empty()
+        || origin.password().is_some()
+        || origin.path() != "/"
+        || origin.query().is_some()
+        || origin.fragment().is_some()
+    {
         return false;
     }
     let Some(host_str) = headers
@@ -180,7 +206,22 @@ where
     )
 }
 
+fn known_control_action(action: &str) -> Option<&'static str> {
+    if action.eq_ignore_ascii_case("pause") {
+        Some("pause")
+    } else if action.eq_ignore_ascii_case("cancel_all") {
+        Some("cancel_all")
+    } else if action.eq_ignore_ascii_case("resume") {
+        Some("resume")
+    } else if action.eq_ignore_ascii_case("rebalance") {
+        Some("rebalance")
+    } else {
+        None
+    }
+}
+
 fn control_ws_message(action: Option<&str>, response: &ApiResponse<String>) -> String {
+    let action = action.and_then(known_control_action);
     serde_json::json!({
         "type": "control",
         "action": action,
@@ -231,7 +272,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, token: String) {
 }
 
 type SocketControlEntry = (
-    String,
+    &'static str,
     (BotControlAction, Option<ControlReply>),
     Option<PendingControlPause>,
 );
@@ -260,7 +301,7 @@ fn spawn_socket_control_worker(
                 .await
                 .0;
                 let _ = results
-                    .send(control_ws_message(Some(&name), &response))
+                    .send(control_ws_message(Some(name), &response))
                     .await;
             });
             let _ = ready.await;
@@ -365,18 +406,15 @@ async fn handle_socket_control_text(
     let (name, action) = match serde_json::from_str::<ControlRequest>(text) {
         Ok(req) => {
             let action = control_action(&req, state.pause_epoch());
-            (Some(req.action), action)
+            (known_control_action(&req.action), action)
         }
-        Err(error) => (None, Err(format!("无效的控制请求: {}", error))),
+        Err(_) => (None, Err("无效的控制请求".into())),
     };
     let action = match action {
         Ok(action) => action,
         Err(message) => {
             return result_tx
-                .send(control_ws_message(
-                    name.as_deref(),
-                    &ApiResponse::err(message),
-                ))
+                .send(control_ws_message(name, &ApiResponse::err(message)))
                 .await
                 .is_ok();
         }
@@ -388,10 +426,7 @@ async fn handle_socket_control_text(
     tokio::spawn(async move {
         if let Err(message) = prepare_control(&prepare_state, &action.0).await {
             let _ = prepare_results
-                .send(control_ws_message(
-                    name.as_deref(),
-                    &ApiResponse::err(message),
-                ))
+                .send(control_ws_message(name, &ApiResponse::err(message)))
                 .await;
         } else if let Some(action_name) = name {
             let _ = prepare_queue

@@ -7,7 +7,7 @@ import { useAsyncLock } from '../lib/asyncGuard';
 import { useConfirmDialog } from '../lib/confirmDialog';
 import { useLiveAccounts, usePairs } from '../lib/queries';
 import { AccountsContext, EditContext, useSession } from '../lib/session';
-import { compactNumber, directionLabel, ratioText, statusLabel } from '../lib/format';
+import { compactNumber, directionLabel, modeLabel, ratioText, statusLabel } from '../lib/format';
 import { PAIRS_STALE_MS } from '../lib/portfolio';
 import type { AccountObservation, Mode, Pair } from '../lib/types';
 import { useAccountGroups, useExpired } from '../lib/useNow';
@@ -19,10 +19,23 @@ import { ModeTag } from './Common';
 
 function ShellTitle({ accounts, alert, active }: { accounts: AccountObservation[]; alert: boolean; active: boolean }) {
   const groups = useAccountGroups(accounts, active);
-  const title = groups.length ? groups.map(group => `${compactNumber(group.equity)} | ${ratioText(group.ratio, true)}`).join(' / ') : defaultTitle;
+  const dupAssets = useMemo(() => {
+    const seen = new Set<string>(), dup = new Set<string>();
+    for (const g of groups) { if (seen.has(g.asset)) dup.add(g.asset); else seen.add(g.asset); }
+    return dup;
+  }, [groups]);
+  const title = !groups.length
+    ? defaultTitle
+    : groups.length === 1
+      ? `${compactNumber(groups[0].equity)} | ${ratioText(groups[0].ratio, true)}`
+      : groups.map(group => `${dupAssets.has(group.asset) ? `${modeLabel[group.mode]} ` : ''}${group.asset} ${compactNumber(group.equity)} | ${ratioText(group.ratio, true)}`).join(' / ');
   useDocumentTitle(active ? `${alert ? '[!] ' : ''}${title}` : null);
   return null;
 }
+
+const samePairEpoch = (pair: Pair, observation: AccountObservation) =>
+  observation.mode === pair.mode
+  && (pair.account_scope === undefined || observation.snapshot.account_scope === undefined || pair.account_scope === observation.snapshot.account_scope);
 
 function useLivePairStatuses(pairsData: Pair[] | undefined, accounts: AccountObservation[]) {
   const accountPairs = useMemo(() => new Map(accounts.map(entry => [entry.snapshot.symbol, entry])), [accounts]);
@@ -32,7 +45,7 @@ function useLivePairStatuses(pairsData: Pair[] | undefined, accounts: AccountObs
     let changed = false;
     const mapped = pairsData.map(pair => {
       const observation = accountPairs.get(pair.symbol);
-      if (observation?.mode === pair.mode && !observation.account_observation_stale && observation.snapshot.status !== pair.status) {
+      if (observation && samePairEpoch(pair, observation) && !observation.account_observation_stale && observation.snapshot.status !== pair.status) {
         changed = true;
         const cached = pairCache.current.overrides.get(pair);
         if (cached?.status === observation.snapshot.status) return cached;
@@ -47,10 +60,21 @@ function useLivePairStatuses(pairsData: Pair[] | undefined, accounts: AccountObs
     pairCache.current.current = result;
     return result;
   }, [pairsData, accountPairs]);
-  const pairModeChanged = useMemo(() => pairsData?.some(pair => {
+  const mixedAccountScopes = useMemo(() => {
+    const scopesByMode = new Map<Mode, string>();
+    for (const entry of accounts) {
+      const scope = entry.snapshot.account_scope;
+      if (scope === undefined) continue;
+      const prev = scopesByMode.get(entry.mode);
+      if (prev === undefined) scopesByMode.set(entry.mode, scope);
+      else if (prev !== scope) return true;
+    }
+    return false;
+  }, [accounts]);
+  const pairModeChanged = useMemo(() => mixedAccountScopes || Boolean(pairsData?.some(pair => {
     const observation = accountPairs.get(pair.symbol);
-    return observation && observation.mode !== pair.mode;
-  }), [pairsData, accountPairs]);
+    return observation && !samePairEpoch(pair, observation);
+  })), [pairsData, accountPairs, mixedAccountScopes]);
   const mode = useMemo<Mode | undefined>(() => {
     const pairModes = currentPairs?.map(pair => accountPairs.get(pair.symbol)?.mode ?? pair.mode) ?? [];
     const observed = accounts.length ? [...accounts.map(entry => entry.mode), ...pairModes] : pairModes;
@@ -59,7 +83,7 @@ function useLivePairStatuses(pairsData: Pair[] | undefined, accounts: AccountObs
     if (observed.includes('UNKNOWN')) return 'UNKNOWN';
     return 'PAPER';
   }, [accounts, accountPairs, currentPairs]);
-  return { currentPairs, pairModeChanged, mode };
+  return { currentPairs, pairModeChanged, mixedAccountScopes, mode };
 }
 
 const settingsTab = (loc: { pathname: string; search: string }) => loc.pathname === '/settings' ? (new URLSearchParams(loc.search).get('tab') || 'global') : null;
@@ -89,7 +113,7 @@ function useDirtyNavigationBlocker(dirty: boolean, saving: boolean, setDirty: (v
 export default function Shell() {
   const location = useLocation(), pairs = usePairs(), liveAccounts = useLiveAccounts();
   const accounts = liveAccounts.accounts;
-  const { currentPairs, pairModeChanged, mode } = useLivePairStatuses(pairs.data, accounts);
+  const { currentPairs, pairModeChanged, mixedAccountScopes, mode } = useLivePairStatuses(pairs.data, accounts);
   const [dirty, setDirty] = useState(false), [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
   savingRef.current = saving;
@@ -104,7 +128,7 @@ export default function Shell() {
     try { await logout(); } catch { message.error('退出失败，会话可能仍然有效，请重试'); }
   }), [dirty, logout, logoutDialog.confirm, message, runLogout]);
   const pairsStale = useExpired(pairs.data ? pairs.dataUpdatedAt + PAIRS_STALE_MS : -Infinity);
-  const alert = !!liveAccounts.error || liveAccounts.stale || accounts.some(entry => entry.account_observation_stale || entry.snapshot.status === 'ERROR');
+  const alert = !!liveAccounts.error || liveAccounts.stale || mixedAccountScopes || accounts.some(entry => entry.account_observation_stale || entry.snapshot.status === 'ERROR');
   const symbol = routeSymbol(location.pathname);
   const [drawer, setDrawer] = useState(false), [palette, setPalette] = useState(false);
   useEffect(() => { setDrawer(false); }, [location.pathname]);

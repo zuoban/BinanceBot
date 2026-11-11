@@ -118,7 +118,8 @@ impl GridTradingEngine {
     pub(super) async fn refresh_mark_price(&mut self, symbol: &str) {
         self.start_mark_price_request(symbol).await;
         if let Some(task) = self.mark_price_task.take() {
-            self.finish_mark_price_task(task.await).await;
+            let completion = task.await;
+            Box::pin(self.finish_mark_price_task(completion)).await;
         }
     }
 
@@ -128,7 +129,7 @@ impl GridTradingEngine {
     ) {
         self.mark_price_task = None;
         match completion {
-            Ok(completion) => self.apply_mark_price_completion(completion).await,
+            Ok(completion) => Box::pin(self.apply_mark_price_completion(completion)).await,
             Err(error) => {
                 self.mark_retry.failed();
                 warn!(%error, "Mark-price fallback task failed");
@@ -164,12 +165,12 @@ impl GridTradingEngine {
                     self.update_paper_valuation().await;
                 }
                 let risk = RiskConfigSnapshot::from_config(&*self.state.config.read().await);
-                if self.protect_openings_and_check_limits(risk).await
+                if Box::pin(self.protect_openings_and_check_limits(risk)).await
                     && self.state.pause_epoch() == pause_epoch
                 {
-                    self.match_pending_paper_ticker().await;
+                    Box::pin(self.match_pending_paper_ticker()).await;
                     if self.state.pause_epoch() == pause_epoch {
-                        self.maintain_grid_window().await;
+                        Box::pin(self.maintain_grid_window()).await;
                     }
                 }
             }
@@ -236,7 +237,8 @@ impl GridTradingEngine {
     pub(super) async fn refresh_stale_ticker(&mut self, symbol: &str) {
         self.start_ticker_request(symbol).await;
         if let Some(task) = self.ticker_task.take() {
-            self.finish_ticker_task(task.await).await;
+            let completion = task.await;
+            Box::pin(self.finish_ticker_task(completion)).await;
         }
     }
 
@@ -246,7 +248,7 @@ impl GridTradingEngine {
     ) {
         self.ticker_task = None;
         match completion {
-            Ok(completion) => self.apply_ticker_completion(completion).await,
+            Ok(completion) => Box::pin(self.apply_ticker_completion(completion)).await,
             Err(error) => {
                 self.ticker_retry.failed();
                 warn!(%error, "Ticker fallback task failed");
@@ -263,7 +265,7 @@ impl GridTradingEngine {
                 let price = update.last_price;
                 let timestamp = update.update_time;
                 let pause_epoch = self.state.pause_epoch();
-                self.handle_ticker_update(update).await;
+                Box::pin(self.handle_ticker_update(update)).await;
                 let running = *self.state.status.read().await == BotStatus::Running;
                 let ticker = self.state.ticker.read().await;
                 if completion.scope.mode == TradingMode::Paper
@@ -283,7 +285,7 @@ impl GridTradingEngine {
                     let accepted = ticker.last_price == price && ticker.update_time == timestamp;
                     drop(ticker);
                     if accepted {
-                        self.maintain_grid_window().await;
+                        Box::pin(self.maintain_grid_window()).await;
                     }
                 }
             }

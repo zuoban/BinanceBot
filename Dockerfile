@@ -32,7 +32,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /usr/src/app/target/release/binance-grid-bot /app/binance-grid-bot
 
 # Ensure data directory for SQLite persistence
-RUN mkdir -p /app/data
+RUN install -d -m 0700 /app/data
 VOLUME ["/app/data"]
 
 # Expose web dashboard port
@@ -40,7 +40,7 @@ EXPOSE 8080
 
 ENV RUST_LOG="binance_grid_bot=info"
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD ["/app/binance-grid-bot", "healthcheck"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD ["/app/binance-grid-bot", "--db", "/app/data/bot.db", "healthcheck"]
 
 ENTRYPOINT ["/app/binance-grid-bot"]
 CMD ["--db", "/app/data/bot.db", "--host", "0.0.0.0"]

@@ -62,12 +62,13 @@ pub(super) async fn post_managed_config_handler(
 ) -> (StatusCode, Json<ApiResponse<WebConfigView>>) {
     spawn_config_update(async move {
         let _membership = handle.membership_lock.lock().await;
-        if !handle
-            .states
-            .read()
-            .await
-            .iter()
-            .any(|current| Arc::ptr_eq(current, &state))
+        if state.is_retired()
+            || !handle
+                .states
+                .read()
+                .await
+                .iter()
+                .any(|current| Arc::ptr_eq(current, &state))
         {
             return status_err(StatusCode::CONFLICT, "交易对已被删除或替换，请刷新后重试");
         }
@@ -427,12 +428,12 @@ async fn apply_pair_config(
     }
     (
         StatusCode::OK,
-        apply_pair_config_inner(state.clone(), current, payload).await,
+        apply_pair_config_inner(&state, current, payload).await,
     )
 }
 
 async fn apply_pair_config_inner(
-    state: Arc<AppState>,
+    state: &Arc<AppState>,
     current: AppConfig,
     payload: UpdateConfigPayload,
 ) -> Json<ApiResponse<WebConfigView>> {
@@ -455,21 +456,24 @@ async fn apply_pair_config_inner(
     if let Err(e) = state
         .action_tx
         .send(BotControlAction::UpdateConfig {
-            config: Box::new(current_config.clone()),
+            config: Box::new(current_config),
             reply: reply_tx,
         })
         .await
     {
         error!("Failed to notify strategy engine of config update: {}", e);
-        return json_err(format!("策略更新通知失败: {}", e));
+        return json_err("策略引擎已停止，无法更新设置");
     }
     match reply_rx.await {
         Ok(Ok(())) => info!("Configuration applied and saved to {}", state.db.path()),
         Ok(Err(error)) => return json_err(error),
-        Err(error) => return json_err(format!("策略未确认配置变更: {}", error)),
+        Err(error) => {
+            error!("Strategy engine dropped config update reply: {}", error);
+            return json_err("策略未确认配置变更");
+        }
     }
 
-    let mut response = get_config_handler(State(state)).await;
+    let mut response = get_config_handler(State(Arc::clone(state))).await;
     response.0.message = Some("配置已保存至 SQLite 数据库并立即生效".into());
     response
 }

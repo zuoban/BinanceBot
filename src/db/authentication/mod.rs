@@ -26,8 +26,17 @@ impl SessionCache {
 
     fn insert(&self, token: &str) {
         let mut entries = self.0.lock_unpoisoned();
-        if entries.len() >= SESSION_CACHE_PRUNE_AT {
+        if !entries.contains_key(token) && entries.len() >= SESSION_CACHE_PRUNE_AT {
             entries.retain(|_, validated| validated.elapsed() < SESSION_CACHE_TTL);
+            if entries.len() >= SESSION_CACHE_PRUNE_AT {
+                if let Some(oldest_key) = entries
+                    .iter()
+                    .min_by_key(|(_, validated)| **validated)
+                    .map(|(k, _)| k.clone())
+                {
+                    entries.remove(&oldest_key);
+                }
+            }
         }
         entries.insert(token.to_owned(), Instant::now());
     }
@@ -50,17 +59,31 @@ impl Database {
     pub fn create_session(&self, token: &str) -> Result<()> {
         let conn = self.lock_connection("create_session");
         self.session_cache.remove(token);
-        let cutoff = (Utc::now() - ChronoDuration::hours(24)).to_rfc3339();
-        if let Ok(mut stmt) =
-            conn.prepare_cached("DELETE FROM auth_sessions WHERE created_at <= ?1;")
-        {
-            let _ = stmt.execute(params![cutoff]);
-        }
+        let now = Utc::now();
         conn.prepare_cached(
             "INSERT OR REPLACE INTO auth_sessions (token, created_at) VALUES (?1, ?2);",
         )?
-        .execute(params![token, Utc::now().to_rfc3339()])
+        .execute(params![token, now.to_rfc3339()])
         .context("Failed to insert session token into SQLite database")?;
+        let cutoff = (now - ChronoDuration::hours(24)).to_rfc3339();
+        if let Ok(mut stmt) =
+            conn.prepare_cached("DELETE FROM auth_sessions WHERE created_at <= ?1 RETURNING token;")
+        {
+            if let Ok(rows) = stmt.query_map(params![cutoff], |row| row.get::<_, String>(0)) {
+                for evicted in rows.flatten() {
+                    self.session_cache.remove(&evicted);
+                }
+            }
+        }
+        if let Ok(mut stmt) = conn.prepare_cached(
+            "DELETE FROM auth_sessions WHERE token NOT IN (SELECT token FROM auth_sessions ORDER BY created_at DESC, rowid DESC LIMIT 128) RETURNING token;",
+        ) {
+            if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
+                for evicted in rows.flatten() {
+                    self.session_cache.remove(&evicted);
+                }
+            }
+        }
         Ok(())
     }
 

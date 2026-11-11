@@ -198,7 +198,7 @@ export default function PairConfig() {
     <PageTitle title={adding ? '新增交易对' : `${symbol} 策略参数`} description={adding ? '新策略创建后保持暂停，检查参数后手动恢复' : '参数保存后立即生效，请先核对策略设置'} />
     <ErrorNotice error={pairs.error || config.error} retry={() => { if (pairs.error) void pairs.refetch(); if (!adding && pair) void config.refetch(); }} />
     <ErrorNotice error={mutation.error} />
-    {!adding && isConfigConflict(mutation.error, '无法确认配置版本') && <ConflictReloadButton form={form} label="策略配置" activeRef={page} resetKey={symbol} refetch={config.refetch} onReset={mutation.reset} onLoaded={data => { if (!symbol || data.symbol !== symbol) return false; submission.current = null; editedFields.current.clear(); baseline.current = { symbol, config: data }; form.setFieldsValue(data); }} />}
+    {!adding && isConfigConflict(mutation.error, '交易对设置已被其他请求修改', '无法确认配置版本') && <ConflictReloadButton form={form} label="策略配置" activeRef={page} resetKey={symbol} refetch={config.refetch} onReset={mutation.reset} onLoaded={data => { if (!symbol || data.symbol !== symbol) return false; submission.current = null; editedFields.current.clear(); baseline.current = { symbol, config: data }; form.setFieldsValue(data); }} />}
     {pairs.data && !pair && !adding && !pairs.isFetching && <Alert type="warning" title="该交易对不存在或已移除" />}
     <Form<FormValues> className="config-form" form={form} layout="vertical" disabled={formDisabled} onFinish={values => void submit(values)} onValuesChange={changed => {
       submission.current = null;

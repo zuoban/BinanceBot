@@ -29,7 +29,7 @@ pub(crate) use control::ControlRequest;
 pub(crate) use database::ClearTradeHistoryRequest;
 #[cfg(test)]
 pub(crate) use probes::ProbeGate;
-pub(crate) use probes::ProbeGates;
+pub(crate) use probes::{sanitized_probe_error, ProbeGates};
 
 use accounts_ws::{accounts_ws_handler, get_accounts_handler, AccountHub, AccountSource};
 use auth::{
@@ -94,6 +94,13 @@ async fn apply_security_headers(mut response: Response) -> Response {
         headers
             .entry(axum::http::header::REFERRER_POLICY)
             .or_insert(axum::http::HeaderValue::from_static("same-origin"));
+        headers
+            .entry(axum::http::header::HeaderName::from_static(
+                "permissions-policy",
+            ))
+            .or_insert(axum::http::HeaderValue::from_static(
+                "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()",
+            ));
     }
     response
 }
@@ -249,7 +256,7 @@ pub fn create_multi_router(states: Vec<Arc<AppState>>) -> Router {
 }
 
 /// Dispatch through the current registry so newly added pairs are immediately addressable.
-pub async fn create_managed_router(handle: RuntimeHandle) -> Router {
+pub fn create_managed_router(handle: RuntimeHandle) -> Router {
     let auth = handle.auth.clone();
     let protected = exchange_routes(handle.rate_limiter.clone())
         .route(
@@ -341,7 +348,10 @@ async fn dispatch_pair(
             Some(symbol) => states
                 .iter()
                 .find(|state| state.pair_scope() == Some(symbol)),
-            None => states.first(),
+            None => states
+                .iter()
+                .find(|state| !state.is_retired())
+                .or_else(|| states.first()),
         }
         .cloned()
     };

@@ -215,7 +215,7 @@ impl TradingRuntime {
                         None
                     }
                     _ = shutdown_rx.changed() => None,
-                    result = engine.initialize() => Some(result),
+                    result = Box::pin(engine.initialize()) => Some(result),
                 }
             } else {
                 engine_state.request_shutdown();
@@ -244,7 +244,7 @@ impl TradingRuntime {
             );
             engine_state.check_global_position_limit().await;
             engine.reconcile_initial_pause().await;
-            engine.run().await;
+            Box::pin(engine.run()).await;
         })
     }
 }

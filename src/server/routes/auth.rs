@@ -11,6 +11,15 @@ use std::sync::Arc;
 use tracing::{error, info, warn};
 
 fn extract_token(headers: &HeaderMap) -> Option<&str> {
+    if headers
+        .get_all(axum::http::header::AUTHORIZATION)
+        .iter()
+        .count()
+        > 1
+        || headers.get_all("X-Auth-Token").iter().count() > 1
+    {
+        return None;
+    }
     if let Some(token) = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|val| val.to_str().ok())
@@ -144,11 +153,11 @@ pub(super) async fn post_auth_login_handler(
         warn!("Failed admin authentication attempt: incorrect password");
         return status_err(StatusCode::UNAUTHORIZED, "管理员密码错误，请重新输入");
     }
+    auth.rollback_single_login_attempt(source, attempt_at).await;
 
     let token = crate::auth::generate_session_token();
     match auth.create_session(&token).await {
         Ok(()) => {
-            auth.rollback_single_login_attempt(source, attempt_at).await;
             info!("Admin authentication successful");
             (
                 StatusCode::OK,

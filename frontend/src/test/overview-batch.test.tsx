@@ -231,6 +231,31 @@ it('shows grouped today pnl and pending trades across all strategies', () => {
   expect(within(section).getByText('USDT')).toBeInTheDocument();
 });
 
+
+it('decrements batch report total when retrying after a pair was removed from pairs', async () => {
+  const a = summarySnapshot('SOLUSDC'), b = summarySnapshot('BTCUSDC'), c = summarySnapshot('ETHUSDC');
+  a.status = 'RUNNING'; b.status = 'RUNNING'; c.status = 'RUNNING';
+  const initialPairs = [a, b, c].map(item => ({ snapshot: item, mode: 'PAPER' as const, scoped: true }));
+  overview.data = { generated_at: '', pairs: initialPairs, recent_trades: [] };
+  overview.refetch.mockResolvedValue({ data: overview.data, error: null });
+  vi.mocked(runBatchControls).mockResolvedValue([
+    { pair: { symbol: 'SOLUSDC', status: 'RUNNING', mode: 'PAPER', grid_config: a.grid_config, scoped: true }, result: 'failed' },
+    { pair: { symbol: 'BTCUSDC', status: 'RUNNING', mode: 'PAPER', grid_config: b.grid_config, scoped: true }, result: 'request_unconfirmed' },
+  ]);
+  const { rerender } = render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+  const user = userEvent.setup();
+  await user.click(screen.getByRole('button', { name: /全部策略操作/ }));
+  await user.click(screen.getByText('全部暂停'));
+  await user.click(await screen.findByRole('button', { name: '确认执行' }));
+  const drawer = await screen.findByLabelText('批量操作结果', { selector: '[role="dialog"]' });
+  expect(within(drawer).getByText('全部暂停：1/3 已暂停')).toBeInTheDocument();
+
+  overview.data = { generated_at: '', pairs: [b, c].map(item => ({ snapshot: item, mode: 'PAPER' as const, scoped: true })), recent_trades: [] };
+  rerender(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+  await user.click(within(drawer).getByRole('button', { name: '重试暂停' }));
+  expect(within(drawer).getByText('全部暂停：1/2 已暂停')).toBeInTheDocument();
+});
+
 it('shows unavailable trade counts when a strategy has no current-day statistics', () => {
   const s = summarySnapshot('BTCUSDC');
   s.today_trade_counts = null;

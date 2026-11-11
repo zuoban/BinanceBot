@@ -77,16 +77,23 @@ impl Database {
 
     /// Merge while holding the database mutex so simultaneous pair updates cannot lose changes.
     pub fn save_pair_config(&self, symbol: &str, config: &AppConfig) -> Result<()> {
-        save_pair_config_on(&self.lock_connection("save_pair_config"), symbol, config)
+        let mut conn = self.lock_connection("save_pair_config");
+        let tx = super::immediate_tx(&mut conn)?;
+        save_pair_config_on(&tx, symbol, config)?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub(crate) fn save_global_config(&self, global: &crate::config::GlobalConfig) -> Result<()> {
-        let conn = self.lock_connection("save_global_config");
-        let mut saved = load_required_config_on(&conn)?;
+        let mut conn = self.lock_connection("save_global_config");
+        let tx = super::immediate_tx(&mut conn)?;
+        let mut saved = load_required_config_on(&tx)?;
         saved.ensure_pair_list()?;
         global.apply_to(&mut saved);
         saved.validate()?;
-        save_config_on(&conn, &saved)
+        save_config_on(&tx, &saved)?;
+        tx.commit()?;
+        Ok(())
     }
 
     #[cfg(test)]
@@ -152,8 +159,9 @@ impl Database {
     }
 
     pub(crate) fn remove_pair_config(&self, symbol: &str) -> Result<()> {
-        let conn = self.lock_connection("remove_pair_config");
-        let mut saved = load_required_config_on(&conn)?;
+        let mut conn = self.lock_connection("remove_pair_config");
+        let tx = super::immediate_tx(&mut conn)?;
+        let mut saved = load_required_config_on(&tx)?;
         anyhow::ensure!(saved.pairs.len() > 1, "至少保留一个交易对");
         let index = saved
             .pairs
@@ -163,7 +171,8 @@ impl Database {
         saved.pairs.remove(index);
         #[cfg(test)]
         self.before_membership_commit("remove");
-        save_config_on(&conn, &saved)?;
+        save_config_on(&tx, &saved)?;
+        tx.commit()?;
         #[cfg(test)]
         {
             drop(conn);
@@ -178,8 +187,9 @@ impl Database {
         baseline_version: Option<&str>,
     ) -> Result<()> {
         server.socket_addr()?;
-        let conn = self.lock_connection("save_server_config_checked");
-        let mut saved = load_required_config_on(&conn)?;
+        let mut conn = self.lock_connection("save_server_config_checked");
+        let tx = super::immediate_tx(&mut conn)?;
+        let mut saved = load_required_config_on(&tx)?;
         if baseline_version.is_some_and(|version| version != config_version(&saved.server)) {
             return Err(crate::config::ConfigVersionConflict(
                 "服务设置已被其他请求修改，请刷新后重试",
@@ -187,7 +197,9 @@ impl Database {
             .into());
         }
         saved.server = server.clone();
-        save_config_on(&conn, &saved)
+        save_config_on(&tx, &saved)?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// A new configuration must never become durable without its current execution status.

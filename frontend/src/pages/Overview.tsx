@@ -73,8 +73,11 @@ function useOverviewBatchControls(pairs: Pair[], refetchOverview: () => Promise<
     const activeReportId = report.id, currentPair = pairs.find(p => p.symbol === pair.symbol);
     const applyReport = (update: (outcomes: BatchReport['outcomes'], liveSymbols: Set<string>) => BatchReport['outcomes']) => setReport(current => {
       if (!current || current.id !== activeReportId) return current;
-      const outcomes = update(current.outcomes, new Set(pairsRef.current.map(p => p.symbol)));
-      return outcomes.length ? { ...current, outcomes } : null;
+      const liveSymbols = new Set(pairsRef.current.map(p => p.symbol));
+      let removed = 0;
+      for (const item of current.outcomes) if (!liveSymbols.has(item.pair.symbol)) removed++;
+      const outcomes = update(current.outcomes, liveSymbols);
+      return outcomes.length ? { ...current, total: Math.max(outcomes.length, current.total - removed), outcomes } : null;
     });
     if (!currentPair) { applyReport((outcomes, liveSymbols) => outcomes.filter(item => liveSymbols.has(item.pair.symbol) && item.pair.symbol !== pair.symbol)); return; }
     void (async () => {

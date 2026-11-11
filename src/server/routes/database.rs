@@ -32,6 +32,9 @@ pub(super) struct DatabaseTargetsRequest {
 
 impl DatabaseTargetsRequest {
     fn selected_targets(&self) -> Option<(bool, bool)> {
+        if self.targets.len() > 2 {
+            return None;
+        }
         let mut trades = false;
         let mut snapshots = false;
         for target in &self.targets {

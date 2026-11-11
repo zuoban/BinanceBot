@@ -495,3 +495,44 @@ async fn builds_and_persists_daily_snapshot_with_previous_day_trades_and_positio
     let loaded = db.daily_snapshots(10).unwrap();
     assert_eq!(loaded, vec![snapshot]);
 }
+
+#[tokio::test]
+async fn try_capture_hour_retries_after_transient_config_update_lock_contention() {
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    let mut config = AppConfig::default();
+    config.pairs = vec![crate::config::TradingPairConfig::new("SOLUSDC".into())];
+    db.save_config(&config).unwrap();
+    db.save_pair_status(
+        "SOLUSDC",
+        TradingMode::Paper,
+        crate::types::BotStatus::Paused,
+    )
+    .unwrap();
+    let mut runtime = crate::runtime::TradingRuntime::start_with_test_exchange(
+        &config,
+        db.clone(),
+        "http://127.0.0.1:1".into(),
+    )
+    .await
+    .unwrap();
+    let handle = runtime.handle();
+    let state = handle.states.read().await[0].clone();
+    let now_ts = Utc::now().timestamp();
+    let hour = if is_beijing_midnight_hour(now_ts) {
+        now_ts - 1
+    } else {
+        now_ts
+    };
+
+    let lock_guard = state.config_update_lock.lock().await;
+    assert!(!try_capture_hour(&handle, hour).await);
+    assert!(db.hourly_account_snapshots(0).unwrap().is_empty());
+    drop(lock_guard);
+
+    assert!(try_capture_hour(&handle, hour).await);
+    let saved = db.hourly_account_snapshots(0).unwrap();
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0].hour, hour);
+
+    let _ = runtime.shutdown(Duration::from_secs(2)).await;
+}

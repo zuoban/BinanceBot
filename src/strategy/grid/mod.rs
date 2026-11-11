@@ -264,7 +264,7 @@ impl GridTradingEngine {
             }
         }
 
-        if let Err(e) = self.load_exchange_rules(&symbol).await {
+        if let Err(e) = Box::pin(self.load_exchange_rules(&symbol)).await {
             warn!("Could not load exchange rules for {}: {}", symbol, e);
             if !is_paper {
                 return Err(anyhow!(
@@ -281,7 +281,7 @@ impl GridTradingEngine {
             .await
             .validate_grid_interval(config.grid.grid_interval)?;
 
-        self.seed_initial_market_snapshot(&symbol, is_paper).await?;
+        Box::pin(self.seed_initial_market_snapshot(&symbol, is_paper)).await?;
 
         // Reconcile restored orders only after the exchange prerequisites are ready.
         if !is_paper && (!self.sync_account_and_position().await || !self.sync_live_orders().await)
@@ -371,7 +371,7 @@ impl GridTradingEngine {
             action,
             BotControlAction::UpdateConfig { .. } | BotControlAction::UpdateGlobalConfig { .. }
         );
-        self.handle_control_action(action).await;
+        Box::pin(self.handle_control_action(action)).await;
         if stopping {
             return false;
         }
@@ -410,7 +410,7 @@ impl GridTradingEngine {
         pnl_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         if *self.state.status.read().await == BotStatus::Running {
-            self.maintain_grid_window().await;
+            Box::pin(self.maintain_grid_window()).await;
         }
 
         let mut ticker_open = true;
@@ -418,7 +418,8 @@ impl GridTradingEngine {
             tokio::select! {
                 biased;
                 action = self.action_rx.recv() => {
-                    if !self.handle_loop_action(action, &mut sync_secs, &mut sync_timer).await {
+                    let fut = self.handle_loop_action(action, &mut sync_secs, &mut sync_timer);
+                    if !Box::pin(fut).await {
                         break;
                     }
                 }
@@ -430,17 +431,17 @@ impl GridTradingEngine {
                     }
                 }
                 _ = sync_timer.tick() => {
-                    self.sync_cycle(false).await;
+                    Box::pin(self.sync_cycle(false)).await;
                     self.reconcile_unverified_trades().await;
                 }
                 _ = pnl_timer.tick() => {
                     self.reconcile_unverified_trades().await;
                 }
                 completion = market_completion(&mut self.mark_price_task) => {
-                    self.finish_mark_price_task(completion).await;
+                    Box::pin(self.finish_mark_price_task(completion)).await;
                 }
                 completion = market_completion(&mut self.ticker_task) => {
-                    self.finish_ticker_task(completion).await;
+                    Box::pin(self.finish_ticker_task(completion)).await;
                 }
             }
         }

@@ -205,3 +205,45 @@ fn local_observed_time_preserves_event_age_across_clock_skew() {
     let translated = local_observed_time(local_now, exchange_now, update.mark_update_time);
     assert_eq!(translated, local_now - chrono::Duration::seconds(12));
 }
+
+#[tokio::test]
+async fn rejects_oversized_upstream_ws_frames_and_reconnects_cleanly() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut first = tokio_tungstenite::accept_async(socket).await.unwrap();
+        let _ = first
+            .send(Message::Text("x".repeat(WS_MAX_FRAME_BYTES + 1024)))
+            .await;
+        let poisoned = serde_json::json!({
+            "stream": "btcusdt@markPrice@1s",
+            "data": {"e": "markPriceUpdate", "E": Utc::now().timestamp_millis(), "s": "BTCUSDT", "p": "999"}
+        });
+        let _ = first.send(Message::Text(poisoned.to_string())).await;
+        while first.next().await.is_some() {}
+
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut second = tokio_tungstenite::accept_async(socket).await.unwrap();
+        let valid = serde_json::json!({
+            "stream": "btcusdt@markPrice@1s",
+            "data": {"e": "markPriceUpdate", "E": Utc::now().timestamp_millis(), "s": "BTCUSDT", "p": "108"}
+        });
+        second.send(Message::Text(valid.to_string())).await.unwrap();
+        while second.next().await.is_some() {}
+    });
+
+    let (_config_tx, config_rx) = watch::channel("BTCUSDT".to_string());
+    let (ticker_tx, mut ticker_rx) = broadcast::channel(8);
+    let client = tokio::spawn(
+        BinanceWsStream::new(config_rx, ticker_tx)
+            .run_with_url(move |symbol| format!("ws://{address}/market/stream?symbol={symbol}")),
+    );
+    let update = tokio::time::timeout(Duration::from_secs(4), ticker_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(update.mark_price, dec!(108));
+    client.abort();
+    server.abort();
+}

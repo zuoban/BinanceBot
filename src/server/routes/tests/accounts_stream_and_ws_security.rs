@@ -1,4 +1,4 @@
-use super::super::ws::ws_origin_allowed;
+use super::super::ws::{websocket_token, ws_origin_allowed};
 use super::super::*;
 use super::{auth_pair_state, auth_state};
 use crate::config::AppConfig;
@@ -119,6 +119,20 @@ async fn account_stream_authenticates_pushes_live_balances_and_rejects_revoked_s
         );
         let (mut socket, response) = tokio_tungstenite::connect_async(request).await.unwrap();
         assert_eq!(response.headers()["Sec-WebSocket-Protocol"], "auth");
+        let mut multi_hdr = format!("ws://{address}/api/accounts/ws")
+            .into_client_request()
+            .unwrap();
+        multi_hdr
+            .headers_mut()
+            .append("Sec-WebSocket-Protocol", "auth".parse().unwrap());
+        multi_hdr.headers_mut().append(
+            "Sec-WebSocket-Protocol",
+            "token.account-stream-token".parse().unwrap(),
+        );
+        let (mut multi_socket, multi_resp) =
+            tokio_tungstenite::connect_async(multi_hdr).await.unwrap();
+        assert_eq!(multi_resp.headers()["Sec-WebSocket-Protocol"], "auth");
+        let _ = multi_socket.close(None).await;
         let first = tokio::time::timeout(std::time::Duration::from_secs(3), socket.next())
             .await
             .unwrap()
@@ -240,7 +254,7 @@ async fn managed_accounts_ws_survives_removing_initial_pair() {
     .await
     .unwrap();
     let handle = runtime.handle();
-    let router = create_managed_router(handle.clone()).await;
+    let router = create_managed_router(handle.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
@@ -358,6 +372,56 @@ fn ws_origin_allowed_enforces_forwarded_proto_and_host_syntax() {
             "expected host {bad_host:?} to be rejected"
         );
     }
+
+    for bad_origin in [
+        "https://bot.example.com/extra",
+        "https://bot.example.com?x=1",
+        "https://bot.example.com#frag",
+        "https://user:pass@bot.example.com",
+        "https://:pass@bot.example.com",
+        "https://@bot.example.com",
+    ] {
+        assert!(
+            !ws_origin_allowed(&build_headers("bot.example.com", Some(bad_origin), None)),
+            "expected origin {bad_origin:?} to be rejected"
+        );
+    }
+
+    let mut dup_host = build_headers("bot.example.com", Some("https://bot.example.com"), None);
+    dup_host.append("host", HeaderValue::from_static("bot.example.com"));
+    assert!(!ws_origin_allowed(&dup_host));
+
+    let mut dup_origin = build_headers("bot.example.com", Some("https://bot.example.com"), None);
+    dup_origin.append(
+        "origin",
+        HeaderValue::from_static("https://bot.example.com"),
+    );
+    assert!(!ws_origin_allowed(&dup_origin));
+
+    let mut dup_proto = build_headers(
+        "bot.example.com",
+        Some("https://bot.example.com"),
+        Some("https"),
+    );
+    dup_proto.append("x-forwarded-proto", HeaderValue::from_static("https"));
+    assert!(!ws_origin_allowed(&dup_proto));
+
+    let mut split_proto = HeaderMap::new();
+    split_proto.append(
+        axum::http::header::SEC_WEBSOCKET_PROTOCOL,
+        HeaderValue::from_static("auth"),
+    );
+    split_proto.append(
+        axum::http::header::SEC_WEBSOCKET_PROTOCOL,
+        HeaderValue::from_static("token.abcdef0123456789"),
+    );
+    assert_eq!(websocket_token(&split_proto), "abcdef0123456789");
+
+    split_proto.append(
+        axum::http::header::SEC_WEBSOCKET_PROTOCOL,
+        HeaderValue::from_static("token.secondtoken999"),
+    );
+    assert_eq!(websocket_token(&split_proto), "");
 }
 
 #[tokio::test]

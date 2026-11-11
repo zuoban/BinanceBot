@@ -7,13 +7,24 @@ use std::borrow::Cow;
 use std::time::Duration;
 use tokio::sync::{broadcast, watch};
 use tokio::time::sleep;
-use tokio_tungstenite::connect_async;
+use tokio_tungstenite::connect_async_with_config;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{error, info, warn};
 
 const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const WS_READ_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
 const WS_PONG_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const WS_MAX_FRAME_BYTES: usize = 64 * 1024;
+
+#[allow(deprecated)]
+fn upstream_ws_config() -> WebSocketConfig {
+    WebSocketConfig {
+        max_message_size: Some(WS_MAX_FRAME_BYTES),
+        max_frame_size: Some(WS_MAX_FRAME_BYTES),
+        ..Default::default()
+    }
+}
 pub(crate) struct BinanceWsStream {
     config_rx: watch::Receiver<String>,
     ticker_tx: broadcast::Sender<TickerInfo>,
@@ -115,7 +126,7 @@ fn extract_ws_market_fields(
 }
 
 fn build_24hr_ticker(
-    fields: WsMarketFields<'_>,
+    fields: &WsMarketFields<'_>,
     symbol: &str,
     observed_at: DateTime<Utc>,
     times: &mut EventTimes,
@@ -171,7 +182,7 @@ fn parse_market_update(
     let observed_at = event_at.min(now);
     match fields.event_type.as_ref() {
         "24hrTicker" if stream_matches_symbol(stream.as_deref(), "@ticker", symbol) => {
-            build_24hr_ticker(fields, symbol, observed_at, times)
+            build_24hr_ticker(&fields, symbol, observed_at, times)
         }
         "markPriceUpdate" if stream_matches_symbol(stream.as_deref(), "@markPrice@1s", symbol) => {
             let mark_price = fields.price_field?;
@@ -330,13 +341,17 @@ impl BinanceWsStream {
             let symbol = self.config_rx.borrow_and_update().clone();
             if previous_config.as_ref() != Some(&symbol) {
                 event_times = EventTimes::default();
+                backoff_secs = 1;
                 previous_config = Some(symbol.clone());
             }
             let ws_url = build_url(&symbol);
             info!("Starting Binance WebSocket stream for {}", ws_url);
 
             let connection = tokio::select! {
-                result = tokio::time::timeout(WS_CONNECT_TIMEOUT, connect_async(&ws_url)) => result,
+                result = tokio::time::timeout(
+                    WS_CONNECT_TIMEOUT,
+                    connect_async_with_config(&ws_url, Some(upstream_ws_config()), false),
+                ) => result,
                 changed = self.config_rx.changed() => {
                     if changed.is_err() { return; }
                     continue 'connect;

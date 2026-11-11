@@ -146,14 +146,14 @@ fn build_daily_position_group(
     now: DateTime<Utc>,
 ) -> DailyPositionGroup {
     let count = items.len();
-    let group = aggregate_snapshot_bucket(mode, asset.clone(), None, items, now);
+    let group = aggregate_snapshot_bucket(mode, asset, None, items, now);
     let total = group
         .long
         .zip(group.short)
         .and_then(|(long, short)| long.checked_add(short));
     DailyPositionGroup {
         mode,
-        asset,
+        asset: group.asset,
         count,
         long: group.long,
         short: group.short,

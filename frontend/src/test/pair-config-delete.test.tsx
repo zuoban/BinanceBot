@@ -9,7 +9,6 @@ import Shell from '../components/Shell';
 import PairConfig from '../pages/PairConfig';
 import PairDetail from '../pages/PairDetail';
 import type * as Antd from 'antd';
-import { ApiError } from '../lib/api';
 import type * as Api from '../lib/api';
 import type * as Queries from '../lib/queries';
 import type { AccountObservation, GridConfig } from '../lib/types';
@@ -277,7 +276,7 @@ it('enables post-only when saving a legacy configuration', async () => {
 
 it('保留冲突时的输入，并在确认后重新加载版本', async () => {
   setup(Promise.resolve());
-  mocks.post.mockRejectedValueOnce(new ApiError('策略配置已被其他请求修改', 409));
+  mocks.post.mockRejectedValueOnce(new Error('交易对设置已被其他请求修改，请刷新后重试'));
   const user = userEvent.setup();
   const input = await screen.findByLabelText('网格间距');
   await waitFor(() => expect(input).toBeEnabled());

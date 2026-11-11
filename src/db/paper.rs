@@ -285,17 +285,25 @@ impl PaperLedger {
             }
             previous.asset.clone_from(&account.asset);
             previous.refresh(position, account, committed);
-            self.assets
-                .entry(account.asset.clone())
-                .or_default()
-                .add(previous);
+            if let Some(totals) = self.assets.get_mut(account.asset.as_str()) {
+                totals.add(previous);
+            } else {
+                self.assets
+                    .entry(account.asset.clone())
+                    .or_default()
+                    .add(previous);
+            }
             return;
         }
         let contribution = Contribution::new(position, account, committed);
-        self.assets
-            .entry(account.asset.clone())
-            .or_default()
-            .add(&contribution);
+        if let Some(totals) = self.assets.get_mut(account.asset.as_str()) {
+            totals.add(&contribution);
+        } else {
+            self.assets
+                .entry(account.asset.clone())
+                .or_default()
+                .add(&contribution);
+        }
         self.symbols.insert(symbol.to_owned(), contribution);
     }
 
@@ -319,7 +327,13 @@ impl PaperLedger {
             );
         }
         self.publish(symbol, position, account, false);
-        let totals = self.assets.entry(account.asset.clone()).or_default();
+        if !self.assets.contains_key(account.asset.as_str()) {
+            self.assets
+                .insert(account.asset.clone(), Default::default());
+        }
+        let Some(totals) = self.assets.get_mut(account.asset.as_str()) else {
+            unreachable!("asset entry initialized");
+        };
         if totals.saturated {
             totals.recompute(
                 self.symbols

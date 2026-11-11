@@ -110,8 +110,8 @@ impl GridTradingEngine {
             self.pending_paper_ticker = None;
             self.simulate_order_fills(ticker_update.last_price).await;
         }
-        if mark_updated {
-            self.match_pending_paper_ticker().await;
+        if mark_updated && self.pending_paper_ticker.is_some() {
+            Box::pin(self.match_pending_paper_ticker()).await;
         }
     }
 
@@ -174,7 +174,7 @@ impl GridTradingEngine {
                     .checked_mul(order.quantity)
                     .unwrap_or(Decimal::MAX);
             }
-            self.on_order_filled(&mut order).await;
+            Box::pin(self.on_order_filled(&mut order)).await;
             if self.pause_if_position_limit_reached().await {
                 break;
             }

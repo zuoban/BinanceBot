@@ -567,3 +567,102 @@ async fn place_order_oversized_200_response_preserves_unknown_execution_status()
 
     server.abort();
 }
+
+#[tokio::test]
+async fn http_client_refuses_redirects_and_never_leaks_api_key_cross_host() {
+    use axum::{http::StatusCode, routing::get, Router};
+    use std::sync::atomic::AtomicUsize;
+
+    let evil_hits = Arc::new(AtomicUsize::new(0));
+    let hits_clone = Arc::clone(&evil_hits);
+    let evil_app = Router::new().route(
+        "/steal",
+        get(move || {
+            let hits = Arc::clone(&hits_clone);
+            async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                "[]".to_owned()
+            }
+        }),
+    );
+    let evil_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let evil_target = format!("http://{}/steal", evil_listener.local_addr().unwrap());
+    let evil_server =
+        tokio::spawn(async move { axum::serve(evil_listener, evil_app).await.unwrap() });
+
+    let target_open = evil_target.clone();
+    let target_public = evil_target.clone();
+    let origin_app = Router::new()
+        .route(
+            "/fapi/v1/openOrders",
+            get(move || {
+                let loc = target_open.clone();
+                async move {
+                    (
+                        StatusCode::TEMPORARY_REDIRECT,
+                        [(axum::http::header::LOCATION, loc)],
+                        "redirect",
+                    )
+                }
+            }),
+        )
+        .route(
+            "/fapi/v1/ticker/price",
+            get(move || {
+                let loc = target_public.clone();
+                async move {
+                    (
+                        StatusCode::TEMPORARY_REDIRECT,
+                        [(axum::http::header::LOCATION, loc)],
+                        "redirect",
+                    )
+                }
+            }),
+        );
+    let origin_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin_url = format!("http://{}", origin_listener.local_addr().unwrap());
+    let origin_server =
+        tokio::spawn(async move { axum::serve(origin_listener, origin_app).await.unwrap() });
+
+    let mut config = crate::config::AppConfig::default().exchange;
+    config.api_key = "sensitive-key-must-not-follow".into();
+    config.api_secret = "sensitive-secret".into();
+    let client = BinanceFuturesClient::with_base_url(&config, origin_url);
+
+    assert!(client.get_open_orders("SOLUSDC").await.is_err());
+    assert!(client.get_ticker_price("SOLUSDC").await.is_err());
+    assert_eq!(evil_hits.load(Ordering::SeqCst), 0);
+
+    origin_server.abort();
+    evil_server.abort();
+}
+
+#[tokio::test]
+async fn sync_server_time_rejects_non_positive_timestamps_without_poisoning_offsets() {
+    use axum::{routing::get, Json, Router};
+    use serde_json::json;
+
+    let app = Router::new().route(
+        "/fapi/v1/time",
+        get(|| async { Json(json!({ "serverTime": 0 })) }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let config = crate::config::AppConfig::default().exchange;
+    let client = BinanceFuturesClient::with_base_url(&config, url);
+    client.time_offset_ms.store(4_321, Ordering::SeqCst);
+    let before_mainnet = MAINNET_TIME_OFFSET_MS.load(Ordering::SeqCst);
+
+    let err = client.sync_server_time().await.unwrap_err();
+    assert!(err.to_string().contains("Invalid Binance server time: 0"));
+    assert_eq!(client.time_offset_ms.load(Ordering::SeqCst), 4_321);
+    assert_eq!(client.last_time_sync_ms.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        MAINNET_TIME_OFFSET_MS.load(Ordering::SeqCst),
+        before_mainnet
+    );
+
+    server.abort();
+}

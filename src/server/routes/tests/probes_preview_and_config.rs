@@ -29,7 +29,7 @@ fn probe_gate_allows_one_call_per_cooldown_and_reports_the_wait() {
 }
 
 #[test]
-fn exchange_probe_rejects_malformed_api_keys() {
+fn exchange_probe_rejects_malformed_api_keys_and_secrets() {
     let saved = AppConfig::default().exchange;
     for bad_key in ["key with space", "key\ncontrol", "密钥非ASCII"] {
         let payload = serde_json::from_value(serde_json::json!({
@@ -39,6 +39,18 @@ fn exchange_probe_rejects_malformed_api_keys() {
         .unwrap();
         let error = resolve_exchange_probe(&saved, payload).unwrap_err();
         assert!(error.contains("API Key 格式无效"), "{bad_key}: {error}");
+    }
+    for bad_secret in ["secret with space", "secret\ncontrol", "密钥非ASCII"] {
+        let payload = serde_json::from_value(serde_json::json!({
+            "api_key": "validKey123",
+            "api_secret": bad_secret,
+        }))
+        .unwrap();
+        let error = resolve_exchange_probe(&saved, payload).unwrap_err();
+        assert!(
+            error.contains("API Secret 格式无效"),
+            "{bad_secret}: {error}"
+        );
     }
     let valid_payload = serde_json::from_value(serde_json::json!({
         "api_key": "validKey123",
@@ -99,6 +111,18 @@ fn exchange_and_telegram_probes_enforce_completeness_and_token_format_with_saved
         assert!(
             err.contains("Telegram Bot Token 格式无效"),
             "{bad_token}: {err}"
+        );
+    }
+    for bad_chat_id in ["10001\n10002", "10001\r", &"9".repeat(129)] {
+        let payload: probes::TestTelegramPayload = serde_json::from_value(serde_json::json!({
+            "bot_token": "123456:valid-token",
+            "chat_id": bad_chat_id
+        }))
+        .unwrap();
+        let err = resolve_telegram_probe(&saved_telegram, payload).unwrap_err();
+        assert!(
+            err.contains("Telegram Chat ID 格式无效"),
+            "{bad_chat_id}: {err}"
         );
     }
 }

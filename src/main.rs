@@ -1,14 +1,13 @@
-use binance_grid_bot::config::AppConfig;
-use binance_grid_bot::db::{Database, DatabaseProcessLock};
-use binance_grid_bot::lifecycle::ShutdownSignals;
-use binance_grid_bot::runtime::TradingRuntime;
-use binance_grid_bot::server::create_managed_router;
+use binance_grid_bot::{
+    config::{AppConfig, ServerConfig},
+    db::{Database, DatabaseProcessLock},
+    lifecycle::ShutdownSignals,
+    runtime::TradingRuntime,
+    server::create_managed_router,
+};
 use clap::{Parser, Subcommand};
-use std::future::Future;
-use std::path::PathBuf;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::time::Duration;
+use rusqlite::{Connection, OpenFlags};
+use std::{future::Future, path::PathBuf, pin::Pin, sync::Arc, time::Duration};
 use tokio::sync::watch;
 use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -23,19 +22,15 @@ struct CliArgs {
     /// Path to SQLite database file
     #[arg(short, long, default_value = "data/bot.db")]
     db: PathBuf,
-
     /// API server host (defaults to the saved setting, or 127.0.0.1 for a new database)
     #[arg(long)]
     host: Option<String>,
-
     /// API server port
     #[arg(short, long)]
     port: Option<u16>,
-
     /// Administrator password for the web console (prefer the ADMIN_PASSWORD environment variable)
     #[arg(long)]
     admin_password: Option<String>,
-
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -60,8 +55,8 @@ enum Command {
     },
     /// Probe the HTTP server health endpoint and exit non-zero on failure.
     Healthcheck {
-        #[arg(long, default_value = "http://127.0.0.1:8080/api/auth/status")]
-        url: String,
+        #[arg(long)]
+        url: Option<String>,
     },
 }
 
@@ -75,7 +70,87 @@ fn load_saved_config(db: &Database) -> anyhow::Result<AppConfig> {
     Ok(config)
 }
 
+fn listen_sidecar_path(db_path: &std::path::Path) -> PathBuf {
+    let mut os = db_path.as_os_str().to_os_string();
+    os.push("-listen");
+    PathBuf::from(os)
+}
+
+#[must_use = "dropping ActiveListenGuard unlinks the active listener sidecar"]
+struct ActiveListenGuard(PathBuf);
+
+impl ActiveListenGuard {
+    fn record(db_path: &std::path::Path, addr: std::net::SocketAddr) -> anyhow::Result<Self> {
+        let path = listen_sidecar_path(db_path);
+        if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+            anyhow::bail!("Active listener sidecar {path:?} must not be a symbolic link");
+        }
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        use std::io::Write;
+        opts.open(&path)?.write_all(addr.to_string().as_bytes())?;
+        Ok(Self(path))
+    }
+}
+
+impl Drop for ActiveListenGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn resolve_healthcheck_url(args: &CliArgs, url: Option<&str>) -> anyhow::Result<String> {
+    if let Some(url) = url {
+        return Ok(url.to_owned());
+    }
+    let sidecar = listen_sidecar_path(&args.db);
+    let active_server = std::fs::symlink_metadata(&sidecar)
+        .ok()
+        .filter(|m| m.file_type().is_file() && m.len() <= 128)
+        .and_then(|_| std::fs::read_to_string(&sidecar).ok())
+        .and_then(|raw| raw.trim().parse::<std::net::SocketAddr>().ok())
+        .map(|addr| ServerConfig {
+            host: addr.ip().to_string(),
+            port: addr.port(),
+        });
+    let mut server: ServerConfig = active_server.unwrap_or_else(|| {
+        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        Connection::open_with_flags(&args.db, flags)
+            .and_then(|conn| {
+                let _ = conn.busy_timeout(Duration::from_millis(500));
+                conn.query_row("SELECT config_json FROM app_config WHERE id = 1", [], |r| {
+                    r.get::<_, String>(0)
+                })
+            })
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|mut v| serde_json::from_value(v.get_mut("server")?.take()).ok())
+            .unwrap_or_default()
+    });
+    if let Some(host) = &args.host {
+        server.host.clone_from(host);
+    }
+    if let Some(port) = args.port {
+        server.port = port;
+    }
+    let mut addr = server.socket_addr()?;
+    if addr.ip().is_unspecified() {
+        addr.set_ip(if addr.is_ipv4() {
+            std::net::Ipv4Addr::LOCALHOST.into()
+        } else {
+            std::net::Ipv6Addr::LOCALHOST.into()
+        });
+    }
+    Ok(format!("http://{addr}/api/auth/status"))
+}
+
 async fn run_healthcheck(url: &str) -> anyhow::Result<()> {
+    const MAX_BODY: usize = 8 * 1024;
     let parsed =
         reqwest::Url::parse(url).map_err(|_| anyhow::anyhow!("Invalid healthcheck URL"))?;
     anyhow::ensure!(
@@ -83,19 +158,24 @@ async fn run_healthcheck(url: &str) -> anyhow::Result<()> {
         "Healthcheck URL must use http or https"
     );
     let client = reqwest::Client::builder()
+        .no_proxy()
         .timeout(Duration::from_secs(3))
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
-    let resp = client
+    let mut resp = client
         .get(parsed)
         .send()
         .await
         .map_err(reqwest::Error::without_url)?;
     let status = resp.status();
-    anyhow::ensure!(
-        status.is_success(),
-        "Healthcheck failed with HTTP status {status}"
-    );
+    anyhow::ensure!(status.is_success(), "Healthcheck failed: HTTP {status}");
+    let too_big = resp.content_length().is_some_and(|n| n > MAX_BODY as u64);
+    anyhow::ensure!(!too_big, "Healthcheck body exceeded {MAX_BODY} bytes");
+    let mut total = 0usize;
+    while let Some(chunk) = resp.chunk().await.map_err(reqwest::Error::without_url)? {
+        total = total.saturating_add(chunk.len());
+        anyhow::ensure!(total <= MAX_BODY, "Healthcheck body exceeded {MAX_BODY}");
+    }
     Ok(())
 }
 
@@ -302,7 +382,7 @@ async fn main() -> anyhow::Result<()> {
         return binance_grid_bot::strategy::backtest::run_cli(backtest).await;
     }
     if let Some(Command::Healthcheck { url }) = &args.command {
-        return run_healthcheck(url).await;
+        return run_healthcheck(&resolve_healthcheck_url(&args, url.as_deref())?).await;
     }
     if let Some(Command::MigrateLegacyPaper {
         db,
@@ -333,11 +413,12 @@ async fn main() -> anyhow::Result<()> {
     let addr = config.server.socket_addr()?;
     // Bind before starting any engine, including initialization-time reconciliation.
     let listener = tokio::net::TcpListener::bind(addr).await?;
+    let _listen_guard = ActiveListenGuard::record(&args.db, listener.local_addr()?)?;
     let runtime = start_runtime_until_ready(&config, db, admin_auth, signal.as_mut()).await?;
     let snapshot_task = tokio::spawn(binance_grid_bot::snapshots::run_hourly_snapshots(
         runtime.handle(),
     ));
-    let app = create_managed_router(runtime.handle()).await;
+    let app = create_managed_router(runtime.handle());
     info!(
         "API server running at http://{} (local: http://127.0.0.1:{})",
         addr, config.server.port
@@ -349,6 +430,7 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use binance_grid_bot::types::TradingMode;
     use rust_decimal_macros::dec;
 
     #[test]
@@ -379,50 +461,66 @@ mod tests {
         assert_eq!(load_saved_config(&db).unwrap().server.host, "127.0.0.1");
         assert_eq!(config.pairs.len(), 1);
         let strategy = &config.strategy_configs().unwrap()[0];
-        assert_eq!(
-            strategy.exchange.trading_mode(),
-            binance_grid_bot::types::TradingMode::Paper
-        );
+        assert_eq!(strategy.exchange.trading_mode(), TradingMode::Paper);
         assert!(strategy.exchange.api_key.is_empty());
         assert!(strategy.exchange.api_secret.is_empty());
     }
 
     #[test]
     fn file_and_strategy_cli_options_are_no_longer_supported() {
-        for option in [
-            "--config",
-            "--symbol",
-            "--interval",
-            "--amount",
-            "--live",
-            "--testnet",
-            "--buy-window",
-            "--sell-window",
-        ] {
-            assert!(CliArgs::try_parse_from(["bot", option, "value"]).is_err());
+        let opts =
+            "--config --symbol --interval --amount --live --testnet --buy-window --sell-window";
+        for opt in opts.split_whitespace() {
+            assert!(CliArgs::try_parse_from(["bot", opt, "value"]).is_err());
         }
     }
 
     #[tokio::test]
-    async fn healthcheck_command_defaults_and_verifies_http_status() {
+    async fn healthcheck_command_resolves_bind_addresses_and_verifies_http_status() {
         use axum::{http::StatusCode, routing::get, Router};
-        let Some(Command::Healthcheck { url }) = CliArgs::try_parse_from(["bot", "healthcheck"])
-            .unwrap()
-            .command
-        else {
-            panic!("expected healthcheck subcommand");
+        let check = |db: &str, extra: &str, addr: &str| {
+            let cmd = format!("bot --db {db} {extra} healthcheck");
+            let cli = CliArgs::try_parse_from(cmd.split_whitespace()).unwrap();
+            let is_hc = matches!(cli.command, Some(Command::Healthcheck { url: None }));
+            assert!(is_hc);
+            let got = resolve_healthcheck_url(&cli, None).unwrap();
+            assert_eq!(got, format!("http://{addr}/api/auth/status"));
         };
-        assert_eq!(url, "http://127.0.0.1:8080/api/auth/status");
+        check("no-such-hc.db", "", "127.0.0.1:8080");
+        check("no-such-hc.db", "--host 0.0.0.0 -p 9090", "127.0.0.1:9090");
+        check("no-such-hc.db", "--host [::] --port 9091", "[::1]:9091");
+        struct TempDir(PathBuf);
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let dir = TempDir(std::env::temp_dir().join(format!("hc-{}", uuid::Uuid::new_v4())));
+        std::fs::create_dir_all(&dir.0).unwrap();
+        let db_file = dir.0.join("bot.db");
+        let mut saved = AppConfig::default();
+        saved.server.host = "[::]".into();
+        saved.server.port = 9123;
+        let db = Database::open(&db_file).unwrap();
+        db.save_config(&saved).unwrap();
+        drop(db);
+        check(db_file.to_str().unwrap(), "", "[::1]:9123");
+        let guard = ActiveListenGuard::record(&db_file, "0.0.0.0:8080".parse().unwrap()).unwrap();
+        check(db_file.to_str().unwrap(), "", "127.0.0.1:8080");
+        drop(guard);
+        check(db_file.to_str().unwrap(), "", "[::1]:9123");
         let app = Router::new()
             .route("/ok", get(|| async { "ok" }))
+            .route("/big", get(|| async { "x".repeat(8 * 1024 + 1) }))
             .route("/fail", get(|| async { StatusCode::SERVICE_UNAVAILABLE }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         run_healthcheck(&format!("http://{addr}/ok")).await.unwrap();
-        assert!(run_healthcheck(&format!("http://{addr}/fail"))
-            .await
-            .is_err());
+        for path in ["big", "fail"] {
+            let bad = format!("http://{addr}/{path}");
+            assert!(run_healthcheck(&bad).await.is_err());
+        }
         server.abort();
     }
 }

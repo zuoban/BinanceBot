@@ -84,7 +84,7 @@ pub(super) fn control_action(
                 Some(receiver),
             ))
         }
-        other => Err(format!("未知操作指令: {}", other)),
+        _ => Err("未知操作指令".into()),
     }
 }
 

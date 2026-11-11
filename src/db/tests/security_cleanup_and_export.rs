@@ -583,6 +583,47 @@ fn analysis_export_removes_credentials_from_pair_overrides() {
 }
 
 #[test]
+fn analysis_export_strips_stray_app_config_rows_and_daily_retention_keeps_90_days() {
+    let db = Database::open(":memory:").unwrap();
+    let mut cfg = AppConfig::default();
+    cfg.exchange.api_key = "primary-key".into();
+    cfg.exchange.api_secret = "primary-secret".into();
+    db.save_config(&cfg).unwrap();
+    db.conn
+        .lock()
+        .unwrap()
+        .execute_batch(
+            "PRAGMA ignore_check_constraints = ON;
+             INSERT INTO app_config (id, symbol, config_json, updated_at)
+             VALUES (2, 'SOLUSDC', '{\"api_secret\":\"stray-row-secret\"}', '2026-10-01');
+             PRAGMA ignore_check_constraints = OFF;",
+        )
+        .unwrap();
+    let exported = db.export_analysis_snapshot().unwrap();
+    assert!(!String::from_utf8_lossy(&exported).contains("stray-row-secret"));
+
+    let base = chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+    for offset in 0..=90 {
+        let date = (base + ChronoDuration::days(offset)).to_string();
+        let snap = crate::snapshots::DailySnapshot {
+            date,
+            window_start: Utc::now(),
+            window_end: Utc::now(),
+            generated_at: Utc::now(),
+            accounts: Vec::new(),
+            positions: Vec::new(),
+            pair_positions: Vec::new(),
+            trades: Vec::new(),
+        };
+        assert!(db.save_daily_snapshot(&snap).unwrap());
+    }
+    let retained = db.daily_snapshots(200).unwrap();
+    assert_eq!(retained.len(), 90);
+    assert_eq!(retained.last().unwrap().date, "2026-01-02");
+    assert_eq!(retained.first().unwrap().date, "2026-04-01");
+}
+
+#[test]
 fn trade_from_row_surfaces_corrupted_decimal_and_side_values() {
     let db = Database::open(":memory:").unwrap();
     {

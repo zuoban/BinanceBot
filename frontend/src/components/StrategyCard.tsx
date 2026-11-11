@@ -16,6 +16,7 @@ export const toPair = (e: Overview['pairs'][number]): Pair => ({
   mode: e.mode,
   grid_config: e.snapshot.grid_config,
   scoped: e.scoped,
+  ...(e.snapshot.account_scope !== undefined && { account_scope: e.snapshot.account_scope }),
 });
 
 const StrategyConfigPopover = memo(function StrategyConfigPopover({ symbol, config, quoteUnit }: { symbol: string; config: GridConfig; quoteUnit: string }) {
@@ -81,7 +82,7 @@ export const StrategyCard = memo(function StrategyCard({
   const a = prev.entry, b = next.entry;
   if (a === b) return true;
   const sa = a.snapshot, sb = b.snapshot;
-  return a.mode === b.mode && a.scoped === b.scoped && sa.symbol === sb.symbol && sa.status === sb.status &&
+  return a.mode === b.mode && a.scoped === b.scoped && sa.account_scope === sb.account_scope && sa.symbol === sb.symbol && sa.status === sb.status &&
     sa.ticker.mark_price === sb.ticker.mark_price &&
     sa.position.size === sb.position.size && sa.position.entry_price === sb.position.entry_price &&
     sa.position.mark_price === sb.position.mark_price && sa.position.unrealized_pnl === sb.position.unrealized_pnl &&

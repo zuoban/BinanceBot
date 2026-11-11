@@ -361,3 +361,39 @@ it('updates finance disclosure from AccountsContext without re-rendering Overvie
   expect(screen.getByText('保证金余额').closest('.account-card')).toHaveTextContent('888.5');
   expect(entryChange).not.toHaveBeenCalled();
 });
+it('disambiguates multi-group labels when PAPER and LIVE share USDC while keeping single-group labels unchanged', () => {
+  const now = new Date().toISOString();
+  const paperSnap = summarySnapshot('BTCUSDC', 'PAPER');
+  paperSnap.account_scope = 'paper-shared-v1';
+  const liveSnap1 = summarySnapshot('ETHUSDC', 'LIVE');
+  liveSnap1.account_scope = 'scope-a';
+  const liveSnap2 = summarySnapshot('SOLUSDC', 'LIVE');
+  liveSnap2.account_scope = 'scope-b';
+  const pairs = [
+    { snapshot: paperSnap, mode: 'PAPER' as const, scoped: true },
+    { snapshot: liveSnap1, mode: 'LIVE' as const, scoped: true },
+    { snapshot: liveSnap2, mode: 'LIVE' as const, scoped: true },
+  ];
+  overview.data = {
+    generated_at: now,
+    pairs,
+    recent_trades: [],
+    today_pnl: {
+      window_start: now,
+      window_end: now,
+      groups: [
+        { symbol: 'BTCUSDC', mode: 'PAPER', realized_pnl: '4', pending_pnl_count: 0 },
+        { symbol: 'ETHUSDC', mode: 'LIVE', realized_pnl: '6', pending_pnl_count: 0 },
+      ],
+    },
+  };
+  render(<MemoryRouter><AccountsContext.Provider value={pairs}><App><OverviewPage /></App></AccountsContext.Provider></MemoryRouter>);
+  expect(screen.getByLabelText('模拟盘 USDC账户资产')).toBeInTheDocument();
+  expect(screen.getByLabelText('实盘 #1 USDC账户资产')).toBeInTheDocument();
+  expect(screen.getByLabelText('实盘 #2 USDC账户资产')).toBeInTheDocument();
+  expect(screen.getByText('总持仓金额 / 模拟盘 USDC')).toBeInTheDocument();
+  expect(screen.getByText('总持仓金额 / 实盘 USDC')).toBeInTheDocument();
+  const pnlSection = within(screen.getByLabelText('策略运行概览')).getByLabelText('今日已实现盈亏');
+  expect(within(pnlSection).getByText('模拟盘 USDC')).toBeInTheDocument();
+  expect(within(pnlSection).getByText('实盘 USDC')).toBeInTheDocument();
+});

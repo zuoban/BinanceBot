@@ -310,6 +310,12 @@ async fn socket_orders_pause_before_resume_and_reports_failures() {
         .await
         .unwrap();
     socket.send(Message::Text("not json".into())).await.unwrap();
+    socket
+        .send(Message::Text(
+            r#"{"action":"unexpected_secret_payload"}"#.into(),
+        ))
+        .await
+        .unwrap();
     let first = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
         .await
         .unwrap()
@@ -333,14 +339,21 @@ async fn socket_orders_pause_before_resume_and_reports_failures() {
     };
     reply.send(Err("恢复被拒绝".into())).unwrap();
     let mut parse_error = false;
+    let mut unknown_action_error = false;
     let mut resume_error = false;
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
-        while !parse_error || !resume_error {
+        while !parse_error || !unknown_action_error || !resume_error {
             let frame = socket.next().await.unwrap().unwrap();
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(frame.to_text().unwrap()) {
+            let raw = frame.to_text().unwrap();
+            assert!(!raw.contains("unexpected_secret_payload"), "{raw}");
+            assert!(!raw.contains("not json"), "{raw}");
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) {
                 if value["type"] == "control" && value["success"] == false {
-                    if value["action"].is_null() {
+                    if value["action"].is_null() && value["message"] == "无效的控制请求" {
                         parse_error = true;
+                    }
+                    if value["action"].is_null() && value["message"] == "未知操作指令" {
+                        unknown_action_error = true;
                     }
                     if value["action"] == "resume" && value["message"] == "恢复被拒绝" {
                         resume_error = true;

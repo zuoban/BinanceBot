@@ -169,11 +169,11 @@ impl GridTradingEngine {
             return false;
         }
 
-        self.pause_for_position_limit(format!(
+        let reason = format!(
             "持仓名义价值 {} 已达到最大持仓名义价值 {}",
             position_value, limit
-        ))
-        .await;
+        );
+        Box::pin(self.pause_for_position_limit(reason)).await;
         true
     }
 
@@ -255,7 +255,7 @@ impl GridTradingEngine {
             if *self.state.status.read().await != BotStatus::Running {
                 return false;
             }
-            canceled &= self.cancel_single_order(&order).await;
+            canceled &= Box::pin(self.cancel_single_order(&order)).await;
         }
         canceled
     }

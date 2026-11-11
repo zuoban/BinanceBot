@@ -363,7 +363,7 @@ impl GridTradingEngine {
         let symbol = &config.exchange.symbol;
         let now = Utc::now();
         let order = GridOrder {
-            client_order_id: client_order_id.clone(),
+            client_order_id,
             order_id: None,
             symbol: symbol.clone(),
             side,
@@ -409,7 +409,7 @@ impl GridTradingEngine {
         let formatted_qty = rules.format_quantity(order.quantity);
         let client_order_id = order.client_order_id.clone();
         let side = order.side;
-        self.submit_and_reconcile_live_grid_order(LiveGridOrderSubmission {
+        let submission = LiveGridOrderSubmission {
             config,
             symbol: &config.exchange.symbol,
             side,
@@ -417,7 +417,7 @@ impl GridTradingEngine {
             formatted_qty: &formatted_qty,
             client_order_id,
             order,
-        })
-        .await
+        };
+        Box::pin(self.submit_and_reconcile_live_grid_order(submission)).await
     }
 }

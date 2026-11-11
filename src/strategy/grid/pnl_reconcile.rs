@@ -175,6 +175,10 @@ impl GridTradingEngine {
             self.pnl_order_ids.clear();
             self.pnl_clear_revision = clear_revision;
         }
+        if pending.is_empty() {
+            self.pnl_reconcile_offset = 0;
+            return;
+        }
         self.pnl_reconcile_offset = (offset + pending.len()) % pending_count;
         let pending: Vec<_> = pending
             .into_iter()

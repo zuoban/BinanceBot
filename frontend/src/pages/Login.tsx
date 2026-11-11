@@ -22,7 +22,7 @@ const buyLevels = [
   { y: 220, bar: 158, step: '-2.0%' },
 ] as const;
 
-export default function Login({ onLogin }: { onLogin: () => void }) {
+export default function Login({ onLogin }: { onLogin: () => void | Promise<void> }) {
   const client = useQueryClient();
   const status = useQuery({ queryKey: ['auth-status'], queryFn: ({ signal }) => api<AuthStatus>('/api/auth/status', { signal }), retry: false });
   const configured = status.data?.initialized !== false;
@@ -33,7 +33,7 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
       tokenStore.set(data.token);
       await client.cancelQueries({ queryKey: ['auth-status'] });
       client.setQueryData(['auth-status'], { initialized: true, authenticated: true });
-      onLogin();
+      await onLogin();
     },
   });
   if (status.isPending) return <LoadingScreen label="正在连接控制台" />;
@@ -75,7 +75,7 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
         <Typography.Paragraph type="secondary">{configured ? '输入管理员密码，进入策略工作台' : '服务端未设置管理员密码，可直接进入控制台'}</Typography.Paragraph>
       </div>
       <ErrorNotice error={status.error} retry={() => void status.refetch()} /><ErrorNotice error={mutation.error} />
-      {!configured && <div className="login-unconfigured"><Alert type="info" showIcon title="未启用管理员密码认证，所有能访问该端口的人都可以操作。" /><Button type="primary" size="large" block autoFocus onClick={onLogin}>进入控制台</Button></div>}
+      {!configured && <div className="login-unconfigured"><Alert type="info" showIcon title="未启用管理员密码认证，所有能访问该端口的人都可以操作。" /><Button type="primary" size="large" block autoFocus onClick={() => void onLogin()}>进入控制台</Button></div>}
       {configured && <Form layout="vertical" requiredMark={false} onFinish={async values => {
         if (submitting.current) return;
         submitting.current = true;

@@ -58,7 +58,7 @@ impl GridTradingEngine {
         started: Option<Instant>,
     ) -> Option<&'static str> {
         if wait_for_market {
-            self.refresh_mark_price(symbol).await;
+            Box::pin(self.refresh_mark_price(symbol)).await;
         } else {
             self.start_mark_price_request(symbol).await;
         }
@@ -73,7 +73,7 @@ impl GridTradingEngine {
             return Some("paused_after_mark_price");
         }
         if wait_for_market {
-            self.refresh_stale_ticker(symbol).await;
+            Box::pin(self.refresh_stale_ticker(symbol)).await;
         } else {
             self.start_ticker_request(symbol).await;
         }
@@ -105,9 +105,8 @@ impl GridTradingEngine {
         pause_epoch: u64,
         started: Option<Instant>,
     ) -> std::result::Result<bool, &'static str> {
-        let orders_ready = self
-            .sync_live_orders_with_priority(ReconciliationPriority::Periodic)
-            .await;
+        let sync_fut = self.sync_live_orders_with_priority(ReconciliationPriority::Periodic);
+        let orders_ready = Box::pin(sync_fut).await;
         if let Some(started) = started {
             debug!(
                 stage = "orders",
@@ -122,7 +121,7 @@ impl GridTradingEngine {
         if self.state.pause_epoch() != pause_epoch {
             return Err("paused_after_orders");
         }
-        let account_ready = self.sync_account_and_position_inner(true).await;
+        let account_ready = Box::pin(self.sync_account_and_position_inner(true)).await;
         if let Some(started) = started {
             debug!(
                 stage = "account_position",
@@ -165,23 +164,21 @@ impl GridTradingEngine {
             self.state.refresh_current_scope().await;
         }
         self.maybe_sync_server_time().await;
-        if let Some(reason) = self
-            .refresh_sync_cycle_market(&symbol, wait_for_market, pause_epoch, started)
-            .await
-        {
+        let fut = self.refresh_sync_cycle_market(&symbol, wait_for_market, pause_epoch, started);
+        if let Some(reason) = Box::pin(fut).await {
             Self::log_sync_finished(started, reason);
             return;
         }
         // Cancellation remains available when the following reconciliation cannot
         // establish replenishment readiness, including the sync performed on resume.
-        self.cancel_suspended_opening_orders(risk).await;
+        Box::pin(self.cancel_suspended_opening_orders(risk)).await;
         if self.state.pause_epoch() != pause_epoch {
             Self::log_sync_finished(started, "paused_after_opening_protection");
             return;
         }
 
         let account_ready = if !risk.is_paper {
-            match self.reconcile_sync_cycle_live(pause_epoch, started).await {
+            match Box::pin(self.reconcile_sync_cycle_live(pause_epoch, started)).await {
                 Ok(ready) => ready,
                 Err(reason) => {
                     Self::log_sync_finished(started, reason);
@@ -199,8 +196,7 @@ impl GridTradingEngine {
             return;
         }
 
-        self.finish_sync_cycle_window(risk, account_ready, started)
-            .await;
+        Box::pin(self.finish_sync_cycle_window(risk, account_ready, started)).await;
     }
 
     async fn finish_sync_cycle_window(
@@ -220,7 +216,7 @@ impl GridTradingEngine {
             && account_ready
             && openings_protected;
         if maintain_window {
-            self.maintain_grid_window().await;
+            Box::pin(self.maintain_grid_window()).await;
         }
         if let Some(started) = started {
             debug!(

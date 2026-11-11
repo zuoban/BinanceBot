@@ -83,7 +83,7 @@ impl GridTradingEngine {
     pub(super) async fn cancel_single_order(&mut self, order: &GridOrder) -> bool {
         let paper = self.state.config.read().await.exchange.is_paper();
         if !paper {
-            if let Some(outcome) = self.confirm_live_order_canceled(order).await {
+            if let Some(outcome) = Box::pin(self.confirm_live_order_canceled(order)).await {
                 return outcome;
             }
         }
@@ -304,6 +304,10 @@ impl GridTradingEngine {
     }
 
     pub(super) async fn cancel_all_orders_inner(&mut self, pause_already_persisted: bool) -> bool {
+        Box::pin(self.cancel_all_orders_boxed(pause_already_persisted)).await
+    }
+
+    async fn cancel_all_orders_boxed(&mut self, pause_already_persisted: bool) -> bool {
         let (paper, symbol, mode) = {
             let config = self.state.config.read().await;
             (

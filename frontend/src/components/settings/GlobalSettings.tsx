@@ -10,8 +10,11 @@ import type { GlobalConfig } from '../../lib/types';
 import { ConflictReloadButton, ErrorNotice, FormRevertButton, isConfigConflict } from '../Common';
 import { ProbeButton, useSettingsFormLifecycle, type GlobalForm } from './settingsShared';
 
-const API_KEY_RE = /^[\x21-\x7E]+$/;
-const INVALID_BOT_TOKEN_RE = /[/\\?#\s\x00-\x1F\x7F]/;
+const API_KEY_RE = /^[\x21-\x7E]{1,256}$/;
+const INVALID_BOT_TOKEN_RE = /[^\x21-\x7E]|[/\\?#%@]/;
+const CONTROL_CHAR_RE = /[\x00-\x1F\x7F-\x9F]/;
+const validBotToken = (v: string) => v.length > 0 && v.length <= 256 && !INVALID_BOT_TOKEN_RE.test(v);
+const validChatId = (v: string) => v.length > 0 && new TextEncoder().encode(v).length <= 128 && !CONTROL_CHAR_RE.test(v);
 const CROSS_FIELDS: (keyof GlobalForm)[] = ['api_key', 'api_secret', 'telegram_bot_token', 'telegram_chat_id', 'clear_telegram_credentials'];
 
 function apiCredentialError(side: 'key' | 'secret', keyVal: string | undefined, secretVal: string | undefined, clearApi: boolean, data: GlobalConfig | undefined): string | null {
@@ -110,7 +113,7 @@ function TelegramSettingsCard({ form, hasBotToken, version, formDisabled, armed 
   const chatId = Form.useWatch('telegram_chat_id', form);
   const clearTelegram = !!Form.useWatch('clear_telegram_credentials', form);
   const credDisabled = formDisabled || clearTelegram;
-  const invalidToken = Boolean(botToken && (!botToken.trim() || INVALID_BOT_TOKEN_RE.test(botToken.trim())));
+  const invalidToken = Boolean((botToken && (!botToken.trim() || !validBotToken(botToken.trim()))) || (chatId?.trim() && !validChatId(chatId.trim())));
   return <Card title="Telegram 通知" className="settings-card settings-card-fill">
     <Row gutter={[16, 16]}>
       <Col span={24}><Form.Item name="telegram_enabled" label="通知开关" valuePropName="checked"><Switch checkedChildren="开启" unCheckedChildren="关闭" /></Form.Item></Col>
@@ -119,7 +122,7 @@ function TelegramSettingsCard({ form, hasBotToken, version, formDisabled, armed 
           validator: (_, value: string | undefined) => {
             if (getFieldValue('clear_telegram_credentials') || !value) return Promise.resolve();
             const trimmed = value.trim();
-            return trimmed && !INVALID_BOT_TOKEN_RE.test(trimmed) ? Promise.resolve() : Promise.reject(new Error('Telegram Bot Token 格式无效'));
+            return trimmed && validBotToken(trimmed) ? Promise.resolve() : Promise.reject(new Error('Telegram Bot Token 格式无效'));
           },
         }),
         ({ getFieldValue }) => ({
@@ -130,13 +133,22 @@ function TelegramSettingsCard({ form, hasBotToken, version, formDisabled, armed 
           },
         }),
       ]}><Input.Password autoComplete="new-password" disabled={credDisabled} /></Form.Item></Col>
-      <Col xs={24} sm={12}><Form.Item name="telegram_chat_id" label="Chat ID" extra="向机器人发送消息后，可通过 Telegram Bot API 的 getUpdates 获取会话 ID" rules={[({ getFieldValue }) => ({
-        validateTrigger: armed ? undefined : 'onSubmit',
-        validator: (_, value: string | undefined) => {
-          if (getFieldValue('clear_telegram_credentials') || !(getFieldValue('telegram_enabled') || Boolean(getFieldValue('telegram_bot_token')?.trim()))) return Promise.resolve();
-          return Boolean(value?.trim()) ? Promise.resolve() : Promise.reject(new Error('请填写 Chat ID'));
-        },
-      })]}><Input className="numeric" disabled={credDisabled} /></Form.Item></Col>
+      <Col xs={24} sm={12}><Form.Item name="telegram_chat_id" label="Chat ID" extra="向机器人发送消息后，可通过 Telegram Bot API 的 getUpdates 获取会话 ID" rules={[
+        ({ getFieldValue }) => ({
+          validator: (_, value: string | undefined) => {
+            const trimmed = value?.trim();
+            if (getFieldValue('clear_telegram_credentials') || !trimmed) return Promise.resolve();
+            return validChatId(trimmed) ? Promise.resolve() : Promise.reject(new Error('Telegram Chat ID 格式无效'));
+          },
+        }),
+        ({ getFieldValue }) => ({
+          validateTrigger: armed ? undefined : 'onSubmit',
+          validator: (_, value: string | undefined) => {
+            if (getFieldValue('clear_telegram_credentials') || !(getFieldValue('telegram_enabled') || Boolean(getFieldValue('telegram_bot_token')?.trim()))) return Promise.resolve();
+            return Boolean(value?.trim()) ? Promise.resolve() : Promise.reject(new Error('请填写 Chat ID'));
+          },
+        }),
+      ]}><Input className="numeric" disabled={credDisabled} /></Form.Item></Col>
     </Row>
     <div className="settings-card-footer">
       <ProbeButton label="发送测试消息" path="/api/global/test-telegram" disabled={credDisabled || invalidToken}
@@ -177,19 +189,24 @@ export function GlobalSettings() {
       void invalidateStrategyQueries(client, { accounts: true, snapshot: true, history: credentialsChanged ? 'reset' : undefined });
     },
     onError: error => message.error(error.message),
-    onSettled: () => { submitting.current = false; if (mounted.current) edit.setSaving(false); },
+    onSettled: () => { submitting.current = null; if (mounted.current) edit.setSaving(false); },
   });
   const submit = async (values: GlobalForm) => {
     if (submitting.current) return;
-    submitting.current = true;
+    const token = {};
+    submitting.current = token;
     const changes = diffGlobalConfig(baseline.current, values);
     try {
       if (changes.length && !await confirm({ title: '确认保存全局设置？', content: <div className="confirm-changes"><p>以下变更保存后立即生效：</p><ul>{changes.map(change => <li key={change}>{change}</li>)}</ul></div>, okText: '确认保存', cancelText: '继续编辑' })) {
-        submitting.current = false; return;
+        if (submitting.current === token) submitting.current = null;
+        return;
       }
-      if (!mounted.current) { submitting.current = false; return; }
+      if (!mounted.current || submitting.current !== token) {
+        if (submitting.current === token) submitting.current = null;
+        return;
+      }
       edit.setSaving(true); mutation.mutate(values);
-    } catch (error) { submitting.current = false; throw error; }
+    } catch (error) { if (submitting.current === token) submitting.current = null; throw error; }
   };
   const activeData = baseline.current ?? query.data;
   const formDisabled = !ready || edit.saving, version = activeData?.version ?? '';
@@ -198,6 +215,7 @@ export function GlobalSettings() {
     <ErrorNotice error={mutation.error} />
     {isConfigConflict(mutation.error, '全局设置已被其他请求修改', '无法确认设置版本') && <ConflictReloadButton form={form} label="全局设置" activeRef={mounted} refetch={query.refetch} onReset={mutation.reset} onLoaded={fill} />}
     <Form form={form} layout="vertical" disabled={formDisabled} onValuesChange={changed => {
+      submitting.current = null;
       const apiTouched = 'api_key' in changed || 'api_secret' in changed || 'clear_api_credentials' in changed;
       const telegramTouched = 'telegram_bot_token' in changed || 'telegram_chat_id' in changed || 'telegram_enabled' in changed || 'clear_telegram_credentials' in changed;
       const uncheckApi = 'clear_api_credentials' in changed && !changed.clear_api_credentials;
@@ -206,7 +224,8 @@ export function GlobalSettings() {
         const raw = form.getFieldValue(name) as string | undefined;
         if (name === 'api_key') return Boolean(raw && (!raw.trim() || !API_KEY_RE.test(raw.trim())));
         if (name === 'api_secret') return Boolean(raw?.trim() && !API_KEY_RE.test(raw.trim()));
-        if (name === 'telegram_bot_token') return Boolean(raw && (!raw.trim() || INVALID_BOT_TOKEN_RE.test(raw.trim())));
+        if (name === 'telegram_bot_token') return Boolean(raw && (!raw.trim() || !validBotToken(raw.trim())));
+        if (name === 'telegram_chat_id') return Boolean(raw?.trim() && !validChatId(raw.trim()));
         return false;
       };
       const revalidate = CROSS_FIELDS.filter(name => {
@@ -228,7 +247,7 @@ export function GlobalSettings() {
         <Col xs={24} xl={12} className="settings-grid-col"><GlobalRiskCard /></Col>
         <Col xs={24} xl={12} className="settings-grid-col"><TelegramSettingsCard form={form} hasBotToken={activeData?.has_telegram_bot_token} version={version} formDisabled={formDisabled} armed={armedCross.telegram} /></Col>
       </Row>
-      <div className={`save-bar${edit.dirty ? ' save-bar-dirty' : ''}`}><span className="muted" role="status">{edit.dirty ? '有未保存的修改' : '所有修改已保存'}</span><Space wrap><FormRevertButton form={form} activeRef={mounted} onReset={mutation.reset} onRevert={() => { setArmedCross({ api: false, telegram: false }); const source = baseline.current ?? query.data; if (source) fill(source); }} /><Button type="primary" htmlType="submit" loading={mutation.isPending}>保存全局设置</Button></Space></div>
+      <div className={`save-bar${edit.dirty ? ' save-bar-dirty' : ''}`}><span className="muted" role="status">{edit.dirty ? '有未保存的修改' : '所有修改已保存'}</span><Space wrap><FormRevertButton form={form} activeRef={mounted} onReset={mutation.reset} onRevert={() => { submitting.current = null; setArmedCross({ api: false, telegram: false }); const source = baseline.current ?? query.data; if (source) fill(source); }} /><Button type="primary" htmlType="submit" loading={mutation.isPending}>保存全局设置</Button></Space></div>
     </Form>
   </>;
 }

@@ -40,7 +40,7 @@ impl GridTradingEngine {
         let Some(mut plan) = self.load_remainder_plan().await? else {
             return Ok(false);
         };
-        self.execute_remainder_plan(&mut plan).await?;
+        Box::pin(self.execute_remainder_plan(&mut plan)).await?;
         // A stale, confirmed-unsubmitted target has no inventory reservation.
         // Let the ordinary window replenish immediately after retiring it.
         Ok(plan.phase != RemainderPhase::Abandoned)
@@ -186,7 +186,7 @@ impl GridTradingEngine {
         };
         // No cancellation or submission can precede this durable intent.
         self.persist_remainder_plan(&plan).await?;
-        self.execute_remainder_plan(&mut plan).await
+        Box::pin(self.execute_remainder_plan(&mut plan)).await
     }
 
     async fn validate_remainder_submission_window(

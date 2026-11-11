@@ -103,13 +103,14 @@ function buildDetailAccountEntries(s: Snapshot | undefined, pair: Pair | undefin
     : [];
   const targetAsset = s.account.asset || quoteAsset(pair.symbol);
   const siblingSymbols = new Set(siblings.map(entry => entry.snapshot.symbol));
-  const missingPaperSibling = s.mode === 'PAPER' && Boolean(pairs?.some(p =>
+  const pairsEpochStale = pair.mode !== s.mode || (pair.account_scope !== undefined && !sameScope(pair.account_scope, s.account_scope));
+  const missingPaperSibling = s.mode === 'PAPER' && (pairsEpochStale || Boolean(pairs?.some(p =>
     p.symbol !== pair.symbol
     && p.mode === 'PAPER'
     && quoteAsset(p.symbol) === targetAsset
     && (p.account_scope === undefined || sameScope(p.account_scope, s.account_scope))
     && !siblingSymbols.has(p.symbol),
-  ));
+  )));
   return [...siblings, { snapshot: s, mode: s.mode, account_observation_stale: missingPaperSibling, generated_at_ms: generatedAtMs, received_at_ms: receivedAtMs }];
 }
 
@@ -128,7 +129,7 @@ export default function PairDetail() {
   useDocumentTitle(`${positivePrice(s?.ticker.mark_price)} | ${today?.buy ?? '--'}B | ${today?.sell ?? '--'}S`);
   const todayPnl = today && s?.hourly_trade_stats && s.hourly_trade_stats.pending_pnl_count === 0 ? s.hourly_trade_stats.realized_pnl : null;
   const netPnl = s?.stats.pending_pnl_trades === 0 ? signedDecimalToNumber(subSignedDecimals(s.stats.total_realized_pnl, s.stats.total_commission)) : null;
-  const currentPair = pair && s ? { ...pair, status: s.status, grid_config: s.grid_config, mode: s.mode } : pair;
+  const currentPair = pair && s ? { ...pair, status: s.status, grid_config: s.grid_config, mode: s.mode, ...(s.account_scope !== undefined && { account_scope: s.account_scope }) } : pair;
   return <div>
     <PageBreadcrumb items={[{ label: '策略总览', to: '/' }, { label: symbol ?? '策略详情' }]} />
     <PageTitle title={symbol ?? '策略详情'} description="行情、网格与成交，随策略实时更新"

@@ -48,7 +48,9 @@ use fill_reconciler::{ExecutionFill, FillCacheCleanup, FillCacheEntry, FillProgr
 pub(crate) fn shared_http_client() -> Client {
     static CLIENT: std::sync::LazyLock<Client> = std::sync::LazyLock::new(|| {
         Client::builder()
+            .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("Failed to build HTTP client")
     });
@@ -158,6 +160,11 @@ impl BinanceFuturesClient {
         let server_time: BinanceServerTime = self
             .get_public_json(1, RequestClass::Normal, "/fapi/v1/time", &[])
             .await?;
+        anyhow::ensure!(
+            server_time.server_time > 0,
+            "Invalid Binance server time: {}",
+            server_time.server_time
+        );
         let after_ms = Utc::now().timestamp_millis();
         let midpoint = before_ms / 2 + after_ms / 2 + (before_ms & after_ms & 1);
         let offset = server_time.server_time.saturating_sub(midpoint);

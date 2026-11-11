@@ -29,20 +29,20 @@ export function ServerSettings() {
     },
     onError: error => message.error(error.message),
     onSettled: () => {
-      submitting.current = false;
+      submitting.current = null;
       if (mounted.current) edit.setSaving(false);
     },
   });
   return <><ErrorNotice error={query.error} retry={() => void query.refetch()} /><ErrorNotice error={mutation.error} />
     {isConfigConflict(mutation.error, '服务设置已被其他请求修改', '无法确认设置版本') && <ConflictReloadButton form={form} label="服务设置" activeRef={mounted} refetch={query.refetch} onReset={mutation.reset} onLoaded={fill} />}
     <Card title="监听设置" className="settings-card"><Alert type="info" showIcon title={`当前监听：${query.data?.active.host ?? '--'}:${query.data?.active.port ?? '--'}。修改后重启生效；使用 Docker 时请同时调整代理配置。`} />
-      <Form form={form} layout="vertical" className="settings-fields" disabled={!ready || edit.saving} onValuesChange={() => edit.setDirty(true)} onFinish={v => { if (submitting.current) return; submitting.current = true; mutation.mutate(v); }}>
+      <Form form={form} layout="vertical" className="settings-fields" disabled={!ready || edit.saving} onValuesChange={() => { submitting.current = null; edit.setDirty(true); }} onFinish={v => { if (submitting.current) return; submitting.current = {}; mutation.mutate(v); }}>
         <Row gutter={[20, 16]}><Col xs={24} md={12}><Form.Item name="host" label="监听地址" rules={[{ required: true, whitespace: true }]}><Input className="numeric" /></Form.Item></Col>
           <Col xs={24} md={12}><Form.Item name="port" label="端口" rules={[{ required: true }]}><InputNumber min={1} max={65535} precision={0} className="full-width-input" /></Form.Item></Col></Row>
         <div className={`settings-card-footer settings-card-actions${edit.dirty ? ' settings-card-actions-dirty' : ''}`}>
           <span className="muted" role="status">{edit.dirty ? '有未保存的修改' : '修改后需重启后端生效'}</span>
           <Space wrap>
-            <FormRevertButton form={form} activeRef={mounted} onReset={mutation.reset} onRevert={() => { if (baseline.current) fill(baseline.current); }} />
+            <FormRevertButton form={form} activeRef={mounted} onReset={mutation.reset} onRevert={() => { submitting.current = null; if (baseline.current) fill(baseline.current); }} />
             <Button type="primary" htmlType="submit" loading={mutation.isPending}>保存监听设置</Button>
           </Space>
         </div>

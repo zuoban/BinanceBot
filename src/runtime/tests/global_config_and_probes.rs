@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 async fn global_position_limit_api_persists_validates_and_supports_legacy_updates() {
     let mut runtime = fixture();
     let handle = runtime.handle();
-    let router = create_managed_router(handle.clone()).await;
+    let router = create_managed_router(handle.clone());
     let manager = tokio::spawn(async move { runtime.run().await });
     let path = "/api/global/config";
 
@@ -90,7 +90,7 @@ async fn global_position_limit_api_persists_validates_and_supports_legacy_update
 async fn zero_available_margin_pause_global_api_preserves_legacy_updates() {
     let mut runtime = fixture();
     let handle = runtime.handle();
-    let router = create_managed_router(handle.clone()).await;
+    let router = create_managed_router(handle.clone());
     let manager = tokio::spawn(async move { runtime.run().await });
     let path = "/api/global/config";
 
@@ -128,7 +128,7 @@ async fn global_settings_reach_every_engine_and_new_pairs_inherit_without_overri
     let mut runtime = fixture();
     runtime.test_exchange_url = Some(url);
     let handle = runtime.handle();
-    let router = create_managed_router(handle.clone()).await;
+    let router = create_managed_router(handle.clone());
     let manager = tokio::spawn(async move { runtime.run().await });
     let mut btc = versioned_payload(&router, "BTCUSDT").await;
     btc["grid_interval"] = json!("10");
@@ -225,7 +225,7 @@ async fn global_settings_reach_every_engine_and_new_pairs_inherit_without_overri
 async fn clearing_credentials_switches_every_pair_to_paper() {
     let mut runtime = fixture();
     let handle = runtime.handle();
-    let router = create_managed_router(handle.clone()).await;
+    let router = create_managed_router(handle.clone());
     let manager = tokio::spawn(async move { runtime.run().await });
     let (_, applied) = request(
         &router,
@@ -288,7 +288,7 @@ async fn clearing_credentials_switches_every_pair_to_paper() {
 async fn global_config_rejects_partial_credential_rotation_and_contradictory_clears_with_400() {
     let mut runtime = fixture();
     let handle = runtime.handle();
-    let router = create_managed_router(handle.clone()).await;
+    let router = create_managed_router(handle.clone());
     let manager = tokio::spawn(async move { runtime.run().await });
     let (status, seeded) = request(
         &router,
@@ -360,7 +360,7 @@ async fn global_config_rejects_partial_credential_rotation_and_contradictory_cle
 async fn global_reconciliation_failure_restores_both_changed_engines_and_saved_globals() {
     let runtime = fixture_with_failures(false, true);
     let handle = runtime.handle();
-    let router = create_managed_router(handle.clone()).await;
+    let router = create_managed_router(handle.clone());
     let (_, rejected) = request(
         &router,
         "/api/global/config",
@@ -529,7 +529,7 @@ async fn global_persistence_failure_rolls_back_before_allowing_new_submissions()
 async fn concurrent_global_patches_and_pair_updates_preserve_shared_and_independent_settings() {
     let runtime = fixture();
     let handle = runtime.handle();
-    let router = create_managed_router(handle.clone()).await;
+    let router = create_managed_router(handle.clone());
     let mut pair = versioned_payload(&router, "BTCUSDT").await;
     pair["buy_window"] = json!(3);
     let (recv, sync, pair) = tokio::join!(
@@ -599,7 +599,7 @@ async fn credential_probes_reject_incomplete_input_without_network_or_persistenc
     ] {
         // Each case gets a fresh runtime, so the per-kind cooldown never interferes.
         let runtime = fixture_with_database(db.clone(), false, false);
-        let router = create_managed_router(runtime.handle()).await;
+        let router = create_managed_router(runtime.handle());
         let (status, response) = request(&router, path, "POST", body, true).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(response["success"], false, "{path}");
@@ -616,7 +616,7 @@ async fn credential_probes_reject_incomplete_input_without_network_or_persistenc
 async fn credential_probes_are_throttled_per_kind_and_independently() {
     let runtime = fixture();
     let handle = runtime.handle();
-    let router = create_managed_router(handle.clone()).await;
+    let router = create_managed_router(handle.clone());
     let incomplete = json!({"api_key": "only-a-key"});
     let (_, first) = request(
         &router,

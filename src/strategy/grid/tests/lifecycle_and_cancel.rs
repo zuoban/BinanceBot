@@ -754,3 +754,26 @@ async fn unresolved_order_keeps_confirmed_fill_behind_reconciliation_barrier() {
         .any(|saved| saved.client_order_id == filled.client_order_id));
     server.abort();
 }
+
+#[test]
+fn per_pair_engine_futures_remain_compact() {
+    use std::mem::size_of_val;
+
+    let config = AppConfig::default();
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    let (action_tx, action_rx) = mpsc::channel(1);
+    let (_ticker_tx, ticker_rx) = broadcast::channel(1);
+    let state = AppState::new(config.clone(), db, action_tx);
+    let client = Arc::new(BinanceFuturesClient::with_base_url(
+        &config.exchange,
+        "http://127.0.0.1:1".into(),
+    ));
+    let mut engine = GridTradingEngine::new(state, client, action_rx, ticker_rx);
+
+    assert!(std::mem::size_of_val(&engine.run()) < 8_192);
+    assert!(size_of_val(&engine.handle_ticker_update(TickerInfo::default())) < 8_192);
+    assert!(size_of_val(&engine.initialize()) < 16_384);
+    assert!(size_of_val(&engine.sync_cycle(false)) < 16_384);
+    assert!(size_of_val(&engine.apply_config(config)) < 16_384);
+    assert!(size_of_val(&engine.handle_control_action(BotControlAction::Pause)) < 16_384);
+}

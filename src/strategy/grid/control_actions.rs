@@ -35,17 +35,14 @@ impl GridTradingEngine {
         }
         match action {
             BotControlAction::Shutdown { removing, reply } => {
-                let result = self
-                    .shutdown_inner(removing)
-                    .await
-                    .map_err(|error| error.to_string());
-                let _ = reply.send(result);
+                let result = Box::pin(self.shutdown_inner(removing)).await;
+                let _ = reply.send(result.map_err(|error| error.to_string()));
             }
             BotControlAction::Pause
             | BotControlAction::PauseAlreadyPersisted
             | BotControlAction::CancelAll
             | BotControlAction::CancelAllAlreadyPersisted => {
-                self.handle_pause_or_cancel_action(action).await;
+                Box::pin(self.handle_pause_or_cancel_action(action)).await;
             }
             BotControlAction::GlobalRiskCancel => self.handle_global_risk_cancel().await,
             BotControlAction::Resume {
@@ -53,14 +50,14 @@ impl GridTradingEngine {
                 expected_epoch,
                 reply,
             } => {
-                self.handle_resume_action(expected_mode, expected_epoch, reply)
-                    .await;
+                let fut = self.handle_resume_action(expected_mode, expected_epoch, reply);
+                Box::pin(fut).await;
             }
             BotControlAction::Rebalance {
                 expected_mode,
                 reply,
             } => {
-                self.handle_rebalance_action(expected_mode, reply).await;
+                Box::pin(self.handle_rebalance_action(expected_mode, reply)).await;
             }
             BotControlAction::UpdateConfig { config, reply } => {
                 self.apply_and_reply_config(*config, "Configuration update rejected", reply)
@@ -90,7 +87,7 @@ impl GridTradingEngine {
             self.state
                 .add_log("INFO", "Manual grid rebalance triggered")
                 .await;
-            self.rebalance_grid().await
+            Box::pin(self.rebalance_grid()).await
         };
         let _ = reply.send(result);
     }
@@ -179,7 +176,7 @@ impl GridTradingEngine {
             let _ = reply.send(Err("策略运行模式已改变，无法恢复策略".into()));
             return;
         }
-        if let Err(message) = self.ensure_resume_rules_ready(&config).await {
+        if let Err(message) = Box::pin(self.ensure_resume_rules_ready(&config)).await {
             let _ = reply.send(Err(message));
             return;
         }
@@ -199,7 +196,7 @@ impl GridTradingEngine {
             .add_log("INFO", "Trading bot resumed by user")
             .await;
         let _ = reply.send(Ok(()));
-        self.sync_cycle(false).await;
+        Box::pin(self.sync_cycle(false)).await;
     }
 
     #[cfg(test)]

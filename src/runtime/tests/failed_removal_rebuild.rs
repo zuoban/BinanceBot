@@ -407,13 +407,17 @@ async fn failed_removal_and_rebuild_keeps_member_in_global_risk() {
     let handle = runtime.handle();
     let global_limit = runtime.global_position_limit.clone();
     let other_engine = runtime.pairs[1].engine.abort_handle();
-    let router = create_managed_router(handle.clone()).await;
+    let router = create_managed_router(handle.clone());
     let manager = tokio::spawn(async move { runtime.run().await });
     let error = tokio::time::timeout(Duration::from_secs(2), handle.remove_pair("SOLUSDC".into()))
         .await
         .unwrap()
         .unwrap_err();
-    assert!(format!("{error:#}").contains("删除失败后无法重启策略"));
+    assert!(
+        format!("{error:#}").contains("删除失败后无法重启策略")
+            && !format!("{error:#}").contains("simulated guard failure"),
+        "{error:#}"
+    );
     let connection = rusqlite::Connection::open(&path).unwrap();
     connection
         .execute_batch("DROP TRIGGER reject_guard_insert; DROP TRIGGER reject_guard_update;")
@@ -469,6 +473,19 @@ async fn failed_removal_and_rebuild_keeps_member_in_global_risk() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["success"], true);
+    let (unscoped_status, unscoped_body) =
+        request(&router, "/api/status", "GET", Value::Null, true).await;
+    assert_eq!(unscoped_status, StatusCode::OK);
+    assert_eq!(unscoped_body["data"]["symbol"], "BTCUSDT");
+    let (retired_cfg_status, _) = request(
+        &router,
+        "/api/pairs/SOLUSDC/config",
+        "POST",
+        super::payload("SOLUSDC"),
+        true,
+    )
+    .await;
+    assert_eq!(retired_cfg_status, StatusCode::CONFLICT);
     let error = tokio::time::timeout(Duration::from_secs(2), handle.remove_pair("UNKNOWN".into()))
         .await
         .unwrap()

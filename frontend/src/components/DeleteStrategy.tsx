@@ -41,11 +41,11 @@ export function useDeleteStrategy(resetKey?: unknown) {
       controls.clearResult(pair.symbol);
       client.removeQueries({ queryKey: ['snapshot', pair.symbol] });
       client.removeQueries({ queryKey: ['config', pair.symbol] });
-      void invalidateStrategyQueries(client, { history: 'reset' });
+      void invalidateStrategyQueries(client, { accounts: true, history: 'reset' });
       return true;
     } catch (error) {
       if (deleteStarted) {
-        void invalidateStrategyQueries(client, { history: 'reset' });
+        void invalidateStrategyQueries(client, { accounts: true, history: 'reset' });
       }
       const uncertain = deleteStarted && error instanceof ApiError && error.kind === 'invalid-response';
       message.error(`${errorMessage(error)}${uncertain ? '；删除结果可能已生效，请刷新状态或查看日志后再操作' : ''}`);

@@ -35,7 +35,7 @@ jobs:
         with:
           node-version: '22.23.4'
       - name: Install frontend dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
         working-directory: frontend
       - name: Test and build frontend
         run: npm test && npm run build

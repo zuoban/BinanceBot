@@ -382,3 +382,24 @@ it('blanks LIVE equity to -- when PairDetail snapshot is stale even if a fresh L
   const card = screen.getByText('账户权益 / USDC').closest('.ant-card')!;
   expect(card.querySelector('.ant-statistic-content-value')).toHaveTextContent('--');
 });
+
+it('withholds shared PAPER equity during LIVE -> PAPER transition while /api/pairs still holds stale LIVE metadata', () => {
+  const now = Date.now();
+  const paperSelf = snapshot('SOLUSDC', 'PAPER');
+  paperSelf.account_scope = 'paper-shared-v1';
+  paperSelf.account = { ...paperSelf.account, margin_balance: '105', available_balance: '80', total_wallet_balance: '100', unrealized_profit: '5', update_time: new Date(now).toISOString() };
+  state.pairs = [{ ...pair('SOLUSDC'), mode: 'LIVE', account_scope: 'live-scope' }, { ...pair('BTCUSDC'), mode: 'LIVE', account_scope: 'live-scope' }];
+  state.data = paperSelf;
+  state.dataUpdatedAt = now;
+  const { rerender } = render(<AccountsContext.Provider value={[]}>{view()}</AccountsContext.Provider>);
+  const card = screen.getByText('账户权益 / USDC').closest('.ant-card')!;
+  expect(card.querySelector('.ant-statistic-content-value')).toHaveTextContent('--');
+
+  const paperSibling = snapshot('BTCUSDC', 'PAPER');
+  paperSibling.account_scope = 'paper-shared-v1';
+  paperSibling.account = { ...paperSelf.account };
+  paperSibling.ticker.mark_update_time = new Date(now).toISOString();
+  state.pairs = [{ ...pair('SOLUSDC'), mode: 'PAPER', account_scope: 'paper-shared-v1' }, { ...pair('BTCUSDC'), mode: 'PAPER', account_scope: 'paper-shared-v1' }];
+  rerender(<AccountsContext.Provider value={[{ mode: 'PAPER', snapshot: paperSibling, generated_at_ms: now, received_at_ms: now }]}>{view()}</AccountsContext.Provider>);
+  expect(card.querySelector('.ant-statistic-content-value')).toHaveTextContent('105.00');
+});
