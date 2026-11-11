@@ -65,11 +65,19 @@ export function positionGroups<T extends { mode: Mode; snapshot: ValuedPosition 
     return { key, mode: group.mode, asset: group.asset, count: group.snapshots.length, long: complete ? long : null, short: complete ? short : null, total: complete ? long + short : null };
   });
 }
+const numberFormatters = new Map<number, Intl.NumberFormat>();
+export const sig3Format = new Intl.NumberFormat('en-US', { maximumSignificantDigits: 3 });
+export const beijingClockFormat = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
 export function number(value: unknown, digits = 2) {
   const n = numeric(value);
   if (n === null) return '--';
-  const rounded = Math.abs(n) < 0.5 * 10 ** -digits ? 0 : n;
-  return rounded.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits });
+  const rounded = (Math.abs(n) < 0.5 * 10 ** -digits ? 0 : n) || 0;
+  let formatter = numberFormatters.get(digits);
+  if (!formatter) {
+    formatter = new Intl.NumberFormat('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits });
+    numberFormatters.set(digits, formatter);
+  }
+  return formatter.format(rounded);
 }
 export const price = (value: unknown) => number(value, Math.min(10, Math.max(4, 2 - Math.floor(Math.log10(Math.abs(Number(value)) || 1)))));
 export const trimFractionZeros = (value: string) => value.replace(/(\.\d*?[1-9])0+$|\.0+$/, '$1');
@@ -134,8 +142,11 @@ export function ageText(updatedAt: number, now = Date.now()) {
   return `${formatSeconds(seconds)}前`;
 }
 export const beijingDay = (value = Date.now()) => new Date(value + 8 * 3600_000).toISOString().slice(0, 10);
-const isSameBeijingDay = (windowEnd: string | undefined, now: number) =>
-  !!windowEnd && Number.isFinite(Date.parse(windowEnd)) && beijingDay(Date.parse(windowEnd)) === beijingDay(now);
+const isSameBeijingDay = (windowEnd: string | undefined, now: number) => {
+  if (!windowEnd) return false;
+  const endTs = Date.parse(windowEnd);
+  return Number.isFinite(endTs) && Math.floor((endTs + 8 * 3600_000) / 86_400_000) === Math.floor((now + 8 * 3600_000) / 86_400_000);
+};
 const normalizeFloatTotal = (total: number) => Math.abs(total) < 1e-12 ? 0 : Number(total.toPrecision(12));
 export function todayTradeCounts(s: Snapshot | PairSummary, now = Date.now()) {
   if ('today_trade_counts' in s) {
@@ -211,8 +222,17 @@ export function accountGroups<T extends AccountObservation>(entries: T[], now = 
       const age = now - Date.parse(timestamp);
       return age >= -5_000 && age < maxAge;
     };
-    const latest = [...observed].filter(s => recent(s.account.update_time, mode === 'PAPER' ? Infinity : 30_000))
-      .sort((a, b) => Date.parse(b.account.update_time) - Date.parse(a.account.update_time))[0];
+    let latest: AccountObservation['snapshot'] | undefined;
+    let latestTs = -Infinity;
+    const maxAge = mode === 'PAPER' ? Infinity : 30_000;
+    for (const s of observed) {
+      const ts = Date.parse(s.account.update_time);
+      const age = now - ts;
+      if (age >= -5_000 && age < maxAge && ts > latestTs) {
+        latestTs = ts;
+        latest = s;
+      }
+    }
     const account = latest ?? snapshots[0];
     const unavailable = !latest || (mode === 'PAPER' && observationStale);
     // A shared paper account can include positions outside this page's symbol.
@@ -233,4 +253,25 @@ export function accountGroups<T extends AccountObservation>(entries: T[], now = 
     const rate = account.account_cny_rate?.asset === asset ? numeric(account.account_cny_rate.cny_per_unit) : null;
     return { key: `${mode}:${asset}`, mode, asset, count: snapshots.length, equity, available, wallet, unrealized, ratio: availableRatio(available, wallet), cny: equity !== null && rate !== null && rate > 0 && Number.isFinite(equity * rate) ? equity * rate : null };
   });
+}
+
+const ACCOUNT_THRESHOLDS = [-5_000, 15_000, 30_000] as const;
+const MARK_THRESHOLDS = [-5_000, 15_000] as const;
+export function nextAccountExpiry(entries: readonly AccountObservation[], now = Date.now()): number {
+  let next = Infinity;
+  for (const { snapshot: s } of entries) {
+    const accTs = Date.parse(s.account.update_time);
+    if (Number.isFinite(accTs)) {
+      for (const offset of ACCOUNT_THRESHOLDS) {
+        if (accTs + offset > now && accTs + offset - 1 < next) next = accTs + offset - 1;
+      }
+    }
+    const markTs = Date.parse(s.ticker.mark_update_time);
+    if (Number.isFinite(markTs)) {
+      for (const offset of MARK_THRESHOLDS) {
+        if (markTs + offset > now && markTs + offset - 1 < next) next = markTs + offset - 1;
+      }
+    }
+  }
+  return next;
 }

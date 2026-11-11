@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { App, Button, Segmented, Table, Tag } from 'antd';
 import { CheckOutlined, CopyOutlined, DownloadOutlined } from '@ant-design/icons';
 import { Link, useInRouterContext } from 'react-router-dom';
@@ -16,10 +16,19 @@ function orderPurpose(o: Order) {
   return purposeLabel[o.purpose] ?? (o.is_take_profit ? '止盈' : '历史订单');
 }
 const NowContext = createContext(0);
+function NowProvider({ currentNow, enabled, children }: { currentNow?: number; enabled: boolean; children: React.ReactNode }) {
+  const fallbackNow = useNow(1000, currentNow === undefined && enabled);
+  return <NowContext.Provider value={currentNow ?? fallbackNow}>{children}</NowContext.Provider>;
+}
 function RelativeTime({ value, className }: { value: string; className?: string }) {
   const now = useContext(NowContext);
   const timestamp = Date.parse(value);
   return <span className={className} title={Number.isFinite(timestamp) ? `${time(timestamp)}（北京时间）` : undefined}>{relativeTime(timestamp, now)}</span>;
+}
+const MarkPriceContext = createContext<string | undefined>(undefined);
+function OrderMarkDiff({ orderPrice }: { orderPrice: string }) {
+  const mark = useContext(MarkPriceContext);
+  return <>{priceDiffPercent(orderPrice, mark) ?? '--'}</>;
 }
 /** Click-to-copy for a price or quantity. The visible text stays the formatted value; the raw value is what gets copied. */
 export function Copyable({ value, children }: { value: string; children: React.ReactNode }) {
@@ -74,56 +83,66 @@ function ResponsiveTableSection({ hint, desktop, mobileClassName = 'table-mobile
     </div>
   </>;
 }
-export function OrdersTable({ orders, mark }: { orders: Order[]; mark?: string }) {
+const orderColumns: ColumnsType<Order> = [
+  { title: '方向', dataIndex: 'side', render: side, width: 90, fixed: 'left' },
+  { title: '价格', align: 'right', className: 'table-numeric', dataIndex: 'price', render: (v: string) => <Copyable value={v}>{price(v)}</Copyable>, sorter: (a, b) => Number(a.price) - Number(b.price) },
+  { title: '距标记价格', align: 'right', className: 'table-numeric', render: (_, o) => <OrderMarkDiff orderPrice={o.price} /> },
+  { title: '数量', align: 'right', className: 'table-numeric', dataIndex: 'quantity', render: price },
+  { title: '金额', align: 'right', className: 'table-numeric', dataIndex: 'amount_usdc', render: (v: string) => number(v) },
+  { title: '用途', render: (_, o) => orderPurpose(o) },
+  { title: '状态', dataIndex: 'status' },
+  { title: '时间（北京）', className: 'table-numeric', dataIndex: 'created_at', render: time, width: 185 },
+];
+const orderPagination = { pageSize: 15, showSizeChanger: false, hideOnSinglePage: true } as const;
+const orderScroll = { x: 900 } as const;
+const orderExpandable = {
+  rowExpandable: (o: Order) => !!o.merge_sources?.length,
+  expandedRowRender: (o: Order) => <ul className="order-merge-sources">{o.merge_sources.map(source => <li key={source.client_order_id}>{source.client_order_id} · {price(source.price)} × {price(source.quantity)}</li>)}</ul>,
+};
+const OrderMobileItem = memo(function OrderMobileItem({ order: o }: { order: Order }) {
+  return <li className="trade-list-item">
+    <div className="trade-list-heading">{side(o.side)}<strong><Copyable value={o.price}>{price(o.price)}</Copyable></strong><span className="trade-list-time">{orderPurpose(o)}</span></div>
+    <dl>
+      <div><dt>数量</dt><dd>{price(o.quantity)}</dd></div>
+      <div><dt>金额</dt><dd>{number(o.amount_usdc)}</dd></div>
+      <div><dt>距标记价</dt><dd><OrderMarkDiff orderPrice={o.price} /></dd></div>
+    </dl>
+    {o.merge_sources?.length > 0 && <ul className="order-merge-sources order-merge-sources-mobile">{o.merge_sources.map(source => <li key={source.client_order_id}>{source.client_order_id} · {price(source.price)} × {price(source.quantity)}</li>)}</ul>}
+  </li>;
+});
+export const OrdersTable = memo(function OrdersTable({ orders, mark }: { orders: Order[]; mark?: string }) {
   const [filter, setFilter] = useState<SideFilter>('ALL');
   const rows = useMemo(() => filter === 'ALL' ? orders : orders.filter(order => order.side === filter), [orders, filter]);
-  const exportRows = () => downloadCsv(`orders-${beijingDay()}.csv`, toCsv(
+  const exportRows = useCallback(() => downloadCsv(`orders-${beijingDay()}.csv`, toCsv(
     ['方向', '价格', '数量', '金额', '用途', '状态', '时间（北京）'],
     rows.map(o => [o.side === 'BUY' ? '买入' : '卖出', o.price, o.quantity, o.amount_usdc, orderPurpose(o), o.status, time(o.created_at)]),
-  ));
-  const columns = useMemo<ColumnsType<Order>>(() => [
-    { title: '方向', dataIndex: 'side', render: side, width: 90, fixed: 'left' },
-    { title: '价格', align: 'right', className: 'table-numeric', dataIndex: 'price', render: (v: string) => <Copyable value={v}>{price(v)}</Copyable>, sorter: (a, b) => Number(a.price) - Number(b.price) },
-    { title: '距标记价格', align: 'right', className: 'table-numeric', render: (_, o) => priceDiffPercent(o.price, mark) ?? '--' },
-    { title: '数量', align: 'right', className: 'table-numeric', dataIndex: 'quantity', render: price },
-    { title: '金额', align: 'right', className: 'table-numeric', dataIndex: 'amount_usdc', render: (v: string) => number(v) },
-    { title: '用途', render: (_, o) => orderPurpose(o) },
-    { title: '状态', dataIndex: 'status' },
-    { title: '时间（北京）', className: 'table-numeric', dataIndex: 'created_at', render: time, width: 185 },
-  ], [mark]);
-  return <>
+  )), [rows]);
+  const body = useMemo(() => <>
     <TableFilterBar label="按方向筛选" value={filter} onChange={setFilter} options={sideOptions} shown={rows.length} total={orders.length} onExport={exportRows} />
     <ResponsiveTableSection
       hint="左右滑动查看完整挂单信息"
-      desktop={<Table<Order> rowKey="client_order_id" columns={columns} dataSource={rows} size="small" scroll={{ x: 900 }}
-        pagination={{ pageSize: 15, showSizeChanger: false, hideOnSinglePage: true }}
-        expandable={{ rowExpandable: o => !!o.merge_sources?.length, expandedRowRender: o => <ul className="order-merge-sources">{o.merge_sources.map(source => <li key={source.client_order_id}>{source.client_order_id} · {price(source.price)} × {price(source.quantity)}</li>)}</ul> }} />}
+      desktop={<Table<Order> rowKey="client_order_id" columns={orderColumns} dataSource={rows} size="small" scroll={orderScroll}
+        pagination={orderPagination}
+        expandable={orderExpandable} />}
       hasRows={rows.length > 0}
       totalCount={orders.length}
       emptyFilteredText="没有符合筛选条件的挂单"
       emptyAllText="暂无挂单"
       listLabel="挂单列表"
-      mobileRows={rows.map(o => <li className="trade-list-item" key={o.client_order_id}>
-        <div className="trade-list-heading">{side(o.side)}<strong><Copyable value={o.price}>{price(o.price)}</Copyable></strong><span className="trade-list-time">{orderPurpose(o)}</span></div>
-        <dl>
-          <div><dt>数量</dt><dd>{price(o.quantity)}</dd></div>
-          <div><dt>金额</dt><dd>{number(o.amount_usdc)}</dd></div>
-          <div><dt>距标记价</dt><dd>{priceDiffPercent(o.price, mark) ?? '--'}</dd></div>
-        </dl>
-        {o.merge_sources?.length > 0 && <ul className="order-merge-sources order-merge-sources-mobile">{o.merge_sources.map(source => <li key={source.client_order_id}>{source.client_order_id} · {price(source.price)} × {price(source.quantity)}</li>)}</ul>}
-      </li>)}
+      mobileRows={rows.map(o => <OrderMobileItem key={o.client_order_id} order={o} />)}
     />
-  </>;
-}
-export function TradesTable({ trades: allTrades, overview = false, now: currentNow }: { trades: Trade[]; overview?: boolean; now?: number }) {
+  </>, [filter, rows, orders.length, exportRows]);
+  return <MarkPriceContext.Provider value={mark}>{body}</MarkPriceContext.Provider>;
+});
+const tradePagination = { pageSize: 15, showSizeChanger: false, hideOnSinglePage: true } as const;
+const tradeScroll = { x: 1000 } as const;
+export const TradesTable = memo(function TradesTable({ trades: allTrades, overview = false, now: currentNow }: { trades: Trade[]; overview?: boolean; now?: number }) {
   const [filter, setFilter] = useState<SideFilter>('ALL');
   const trades = useMemo(() => overview || filter === 'ALL' ? allTrades : allTrades.filter(trade => trade.side === filter), [allTrades, filter, overview]);
-  const fallbackNow = useNow(1000, currentNow === undefined && trades.length > 0);
-  const now = currentNow ?? fallbackNow;
-  const exportRows = () => downloadCsv(`trades-${beijingDay()}.csv`, toCsv(
+  const exportRows = useCallback(() => downloadCsv(`trades-${beijingDay()}.csv`, toCsv(
     ['时间（北京）', '方向', '成交价格', '数量', '金额', '已实现盈亏', '手续费', '成交方式', '备注'],
     trades.map(t => [time(t.timestamp), t.side === 'BUY' ? '买入' : '卖出', t.price, t.quantity, t.amount_usdc, t.pnl_verified ? t.realized_pnl : '待同步', t.pnl_verified ? t.commission : '待同步', t.pnl_verified ? (t.is_maker ? 'Maker' : 'Taker') : '待同步', t.note]),
-  ));
+  )), [trades]);
   const columns = useMemo<ColumnsType<Trade>>(() => [
     ...(overview ? [{ title: '交易对', dataIndex: 'symbol', className: 'trade-symbol', width: 130, render: (symbol: string) => <SymbolCell symbol={symbol} /> }] : []),
     { title: '方向', dataIndex: 'side', render: side, width: 90, fixed: overview ? undefined : 'left' },
@@ -136,11 +155,11 @@ export function TradesTable({ trades: allTrades, overview = false, now: currentN
     { title: '成交方式', render: (_, t) => t.pnl_verified ? (t.is_maker ? 'Maker' : 'Taker') : <Tag>待同步</Tag> },
     { title: '备注', dataIndex: 'note', ellipsis: true },
   ], [overview]);
-  return <NowContext.Provider value={now}><div>
+  const body = useMemo(() => <div>
     {!overview && <TableFilterBar label="按方向筛选" value={filter} onChange={setFilter} options={sideOptions} shown={trades.length} total={allTrades.length} onExport={exportRows} />}
     <ResponsiveTableSection
       hint="左右滑动查看完整成交信息"
-      desktop={<Table<Trade> rowKey="trade_id" columns={columns} dataSource={trades} size="small" scroll={{ x: 1000 }} pagination={overview ? false : { pageSize: 15, showSizeChanger: false, hideOnSinglePage: true }} />}
+      desktop={<Table<Trade> rowKey="trade_id" columns={columns} dataSource={trades} size="small" scroll={tradeScroll} pagination={overview ? false : tradePagination} />}
       mobileClassName={overview ? 'overview-trades-mobile' : 'table-mobile'}
       hasRows={trades.length > 0}
       totalCount={overview ? 0 : allTrades.length}
@@ -158,8 +177,9 @@ export function TradesTable({ trades: allTrades, overview = false, now: currentN
         </dl>
       </li>)}
     />
-  </div></NowContext.Provider>;
-}
+  </div>, [overview, filter, trades, allTrades.length, exportRows, columns]);
+  return <NowProvider currentNow={currentNow} enabled={trades.length > 0}>{body}</NowProvider>;
+});
 const levels = ['ALL', 'ERROR', 'WARN', 'INFO', 'DEBUG'] as const;
 type LevelFilter = typeof levels[number];
 const levelOptions: { value: LevelFilter; label: string }[] = levels.map(value => ({ value, label: value === 'ALL' ? '全部' : value }));
@@ -168,7 +188,10 @@ const logColumns: ColumnsType<Log> = [
   { title: '级别', dataIndex: 'level', width: 90, render: v => <span className={`log-level log-level-${String(v).toLowerCase()}`}>{v}</span> },
   { title: '内容', dataIndex: 'message', className: 'log-message' },
 ];
-export function LogsTable({ logs }: { logs: Log[] }) {
+const logPagination = { pageSize: 30, showSizeChanger: false, hideOnSinglePage: true } as const;
+const logScroll = { x: 600 } as const;
+const logRowClassName = (l: Log) => l.level === 'ERROR' ? 'log-row-error' : l.level === 'WARN' ? 'log-row-warn' : '';
+export const LogsTable = memo(function LogsTable({ logs }: { logs: Log[] }) {
   const [level, setLevel] = useState<LevelFilter>('ALL');
   const rows = useMemo(() => {
     const filtered = level === 'ALL' ? logs : logs.filter(log => log.level === level);
@@ -176,7 +199,7 @@ export function LogsTable({ logs }: { logs: Log[] }) {
     const keyed = new Array<Log & { key: string }>(filtered.length);
     for (let i = filtered.length - 1; i >= 0; i--) {
       const log = filtered[i];
-      const base = JSON.stringify([log.timestamp, log.level, log.message]);
+      const base = `${log.timestamp}\0${log.level}\0${log.message}`;
       const sequence = counts.get(base) ?? 0;
       counts.set(base, sequence + 1);
       keyed[i] = { ...log, key: `${base}-${sequence}` };
@@ -188,7 +211,7 @@ export function LogsTable({ logs }: { logs: Log[] }) {
     <TableFilterBar label="按级别筛选" value={level} onChange={setLevel} options={levelOptions} shown={rows.length} total={logs.length} onExport={exportRows} />
     <ResponsiveTableSection
       hint="左右滑动查看完整日志"
-      desktop={<Table<Log> rowKey="key" rowClassName={l => l.level === 'ERROR' ? 'log-row-error' : l.level === 'WARN' ? 'log-row-warn' : ''} dataSource={rows} size="small" scroll={{ x: 600 }} pagination={{ pageSize: 30, showSizeChanger: false, hideOnSinglePage: true }} columns={logColumns} />}
+      desktop={<Table<Log> rowKey="key" rowClassName={logRowClassName} dataSource={rows} size="small" scroll={logScroll} pagination={logPagination} columns={logColumns} />}
       hasRows={rows.length > 0}
       totalCount={logs.length}
       emptyFilteredText="没有符合筛选条件的日志"
@@ -202,4 +225,4 @@ export function LogsTable({ logs }: { logs: Log[] }) {
       </li>)}
     />
   </>;
-}
+});

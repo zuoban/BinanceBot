@@ -135,9 +135,7 @@ export interface LevelOrderSizing { quantity: string; notional: string; error: s
  * Mirrors `SymbolRules::calculate_quantity`: truncates `amount / price` down to a multiple of `stepSize`
  * and checks `minQty` and `minNotional` on the truncated order.
  */
-export function orderSizing(price: unknown, amount: unknown, rules?: SymbolSizingRules): LevelOrderSizing | null {
-  const p = parse(price), a = parse(amount), step = parse(rules?.stepSize);
-  if (!p || !a || !step || p.n === 0n || a.n === 0n || step.n === 0n) return null;
+function computeOrderSizing(p: Fixed, a: Fixed, step: Fixed, minQty: Fixed | null, minNotional: Fixed | null, stepText: string, minQtyText: string | null, minNotionalText: string | null): LevelOrderSizing {
   const denomScale = p.s + step.s;
   const commonScale = Math.max(a.s, denomScale);
   const numerator = a.n * 10n ** BigInt(commonScale - a.s);
@@ -146,18 +144,45 @@ export function orderSizing(price: unknown, amount: unknown, rules?: SymbolSizin
   const qtyN = steps * step.n, qtyScale = step.s;
   const notionalN = qtyN * p.n, notionalScale = step.s + p.s;
   const quantity = format(qtyN, qtyScale), notional = format(notionalN, notionalScale);
-  const minQty = parse(rules?.minQty);
   const [qtyScaled, minQtyScaled] = minQty ? scalePair({ n: qtyN, s: qtyScale }, minQty) : [0n, 0n];
   if (steps === 0n || (minQty && minQty.n > 0n && qtyScaled < minQtyScaled)) {
-    const floorQty = minQty && minQty.n > 0n ? format(minQty.n, minQty.s) : format(step.n, step.s);
-    return { quantity, notional, error: `按数量步长 ${format(step.n, step.s)} 截断后数量为 ${quantity}，低于最小下单量 ${floorQty}，该档将无法挂单` };
+    const floorQty = minQtyText ?? stepText;
+    return { quantity, notional, error: `按数量步长 ${stepText} 截断后数量为 ${quantity}，低于最小下单量 ${floorQty}，该档将无法挂单` };
   }
-  const minNotional = parse(rules?.minNotional);
   const [notionalScaled, minNotionalScaled] = minNotional ? scalePair({ n: notionalN, s: notionalScale }, minNotional) : [0n, 0n];
-  if (minNotional && minNotional.n > 0n && notionalScaled < minNotionalScaled) {
-    return { quantity, notional, error: `按数量步长截断后实际金额为 ${notional}，低于最小名义金额 ${format(minNotional.n, minNotional.s)}，该档将无法挂单` };
+  if (notional && minNotional && minNotional.n > 0n && notionalScaled < minNotionalScaled) {
+    return { quantity, notional, error: `按数量步长截断后实际金额为 ${notional}，低于最小名义金额 ${minNotionalText}，该档将无法挂单` };
   }
   return { quantity, notional, error: null };
+}
+
+export function orderSizing(price: unknown, amount: unknown, rules?: SymbolSizingRules): LevelOrderSizing | null {
+  const p = parse(price), a = parse(amount), step = parse(rules?.stepSize);
+  if (!p || !a || !step || p.n === 0n || a.n === 0n || step.n === 0n) return null;
+  const minQty = parse(rules?.minQty), minNotional = parse(rules?.minNotional);
+  const stepText = format(step.n, step.s);
+  const minQtyText = minQty && minQty.n > 0n ? format(minQty.n, minQty.s) : null;
+  const minNotionalText = minNotional && minNotional.n > 0n ? format(minNotional.n, minNotional.s) : null;
+  return computeOrderSizing(p, a, step, minQty, minNotional, stepText, minQtyText, minNotionalText);
+}
+
+export function orderSizings(prices: readonly string[], amount: unknown, rules?: SymbolSizingRules): Map<string, LevelOrderSizing | null> {
+  const result = new Map<string, LevelOrderSizing | null>();
+  if (!prices.length) return result;
+  const a = parse(amount), step = parse(rules?.stepSize);
+  if (!a || !step || a.n === 0n || step.n === 0n) {
+    for (const price of prices) result.set(price, null);
+    return result;
+  }
+  const minQty = parse(rules?.minQty), minNotional = parse(rules?.minNotional);
+  const stepText = format(step.n, step.s);
+  const minQtyText = minQty && minQty.n > 0n ? format(minQty.n, minQty.s) : null;
+  const minNotionalText = minNotional && minNotional.n > 0n ? format(minNotional.n, minNotional.s) : null;
+  for (const price of prices) {
+    const p = parse(price);
+    result.set(price, p && p.n > 0n ? computeOrderSizing(p, a, step, minQty, minNotional, stepText, minQtyText, minNotionalText) : null);
+  }
+  return result;
 }
 
 /** Validates `order_amount_usdc` against `minNotional` and (when `referencePrice` is known) `stepSize` / `minQty` truncation. */

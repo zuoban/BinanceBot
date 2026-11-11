@@ -26,7 +26,8 @@ export default defineConfig({
           const normalized = id.replaceAll('\\', '/');
           if (!normalized.includes('/node_modules/')) return;
           if (normalized.includes('/@ant-design/icons') || normalized.includes('/@ant-design/cssinjs')) return 'antd-core';
-          if (normalized.includes('/react/') || normalized.includes('/react-dom/') || normalized.includes('/react-router') || normalized.includes('/@tanstack/')) return 'vendor';
+          if (normalized.includes('/recharts/') || normalized.includes('/d3-') || normalized.includes('/victory-vendor/')) return 'charts';
+          if (normalized.includes('/react/') || normalized.includes('/react-dom/') || normalized.includes('/scheduler/') || normalized.includes('/react-router') || normalized.includes('/@tanstack/')) return 'vendor';
         },
       },
     },

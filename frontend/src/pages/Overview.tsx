@@ -5,8 +5,8 @@ import { ArrowRightOutlined, EyeOutlined, PlusOutlined, SearchOutlined, Thunderb
 import { useOverview } from '../lib/queries';
 import { useUrlParams } from '../lib/urlState';
 import { AccountsContext } from '../lib/session';
-import { ageText, accountGroups, beijingDay, cnyText, compactNumber as number, compactPrice as price, comparePositionAmount, entryChange, entryPriceText, groupTradePnl, maxPositionPolicyLabel, modeLabel, positivePrice, positionAmount, positionGroups, quoteAsset, ratioText, SNAPSHOT_STALE_MS, todayPnlGroups, todayTradeCounts, trimFractionZeros, type AccountGroup, type PositionGroup } from '../lib/format';
-import { ControlResultBanner, DirectionTag, DirectionText, ErrorNotice, PageTitle, Pnl, SignalButton, SignalChip, StatusTag, type Signal } from '../components/Common';
+import { beijingDay, cnyText, compactNumber as number, compactPrice as price, comparePositionAmount, entryChange, entryPriceText, groupTradePnl, maxPositionPolicyLabel, modeLabel, positivePrice, positionAmount, positionGroups, quoteAsset, ratioText, SNAPSHOT_STALE_MS, todayPnlGroups, todayTradeCounts, trimFractionZeros, type AccountGroup, type PositionGroup } from '../lib/format';
+import { ControlResultBanner, DirectionTag, DirectionText, ErrorNotice, FreshnessText, PageTitle, Pnl, SignalButton, SignalChip, StatusTag, type Signal } from '../components/Common';
 import { runBatchControls, useControls } from '../components/Controls';
 import type { GridConfig, Overview, Pair, Trade } from '../lib/types';
 import { OverviewLoading } from '../components/Loading';
@@ -16,7 +16,7 @@ import { BatchResultDrawer, type BatchReport } from '../components/BatchResultDr
 import { PaperGuide } from '../components/PaperGuide';
 import { TradesTable } from '../components/DataTables';
 
-import { useNow } from '../lib/useNow';
+import { useAccountGroups, useBeijingDay, useExpired } from '../lib/useNow';
 const emptyPairs: Overview['pairs'] = [];
 const emptyTrades: Trade[] = [];
 const toPair = (e: Overview['pairs'][number]): Pair => ({ symbol: e.snapshot.symbol, status: e.snapshot.status, mode: e.mode, grid_config: e.snapshot.grid_config, scoped: e.scoped });
@@ -107,6 +107,22 @@ function OverviewFinanceDisclosure({
     </div>
   </details>;
 }
+function sameGridConfig(a: GridConfig, b: GridConfig) {
+  return a === b || (
+    a.direction === b.direction &&
+    a.grid_interval === b.grid_interval &&
+    a.order_amount_usdc === b.order_amount_usdc &&
+    a.buy_window === b.buy_window &&
+    a.sell_window === b.sell_window &&
+    a.min_price === b.min_price &&
+    a.max_price === b.max_price &&
+    a.max_position_usdc === b.max_position_usdc &&
+    a.pause_on_max_position === b.pause_on_max_position &&
+    a.cancel_opening_on_max_position === b.cancel_opening_on_max_position &&
+    a.min_liquidation_distance_pct === b.min_liquidation_distance_pct &&
+    a.post_only === b.post_only
+  );
+}
 const StrategyCard = memo(function StrategyCard({
   entry,
   stale,
@@ -147,6 +163,17 @@ const StrategyCard = memo(function StrategyCard({
     </div>
     <ControlResultBanner symbol={s.symbol} result={controlResult} clearResult={clearResult} variant="inline" />
   </Card>;
+}, (prev, next) => {
+  if (prev.stale !== next.stale || prev.buyCount !== next.buyCount || prev.sellCount !== next.sellCount || prev.controlResult !== next.controlResult || prev.clearResult !== next.clearResult) return false;
+  const a = prev.entry, b = next.entry;
+  if (a === b) return true;
+  const sa = a.snapshot, sb = b.snapshot;
+  return a.mode === b.mode && a.scoped === b.scoped && sa.symbol === sb.symbol && sa.status === sb.status &&
+    sa.ticker.mark_price === sb.ticker.mark_price &&
+    sa.position.size === sb.position.size && sa.position.entry_price === sb.position.entry_price &&
+    sa.position.mark_price === sb.position.mark_price && sa.position.unrealized_pnl === sb.position.unrealized_pnl &&
+    sa.stats.total_realized_pnl === sb.stats.total_realized_pnl &&
+    sameGridConfig(sa.grid_config, sb.grid_config);
 });
 export default function OverviewPage() {
   const overview = useOverview();
@@ -185,7 +212,8 @@ export default function OverviewPage() {
   const [tradesExpanded, setTradesExpanded] = useState(false);
   const compactFinance = Grid.useBreakpoint().md === false;
   const [financesExpanded, setFinancesExpanded] = useState(false);
-  const now = useNow();
+  const dayNow = useBeijingDay();
+  const dataExpired = useExpired(overview.data ? overview.dataUpdatedAt + SNAPSHOT_STALE_MS : Infinity);
   const batchLock = useRef(false);
   const mounted = useRef(true);
   useEffect(() => {
@@ -198,7 +226,7 @@ export default function OverviewPage() {
   const buyTrades = displayedTrades.filter(trade => trade.side === 'BUY').length;
   const sellTrades = displayedTrades.filter(trade => trade.side === 'SELL').length;
   const tradePnlGroups = useMemo(() => groupTradePnl(displayedTrades), [displayedTrades]);
-  const stale = !!overview.error || (!!overview.data && now - overview.dataUpdatedAt > SNAPSHOT_STALE_MS);
+  const stale = !!overview.error || (!!overview.data && dataExpired);
   const pairs = useMemo(() => entries.map(toPair), [entries]);
   let runningCount = 0, pausedCount = 0, stoppedCount = 0, errorCount = 0, liveCount = 0, allPaper = pairs.length > 0;
   for (const p of pairs) {
@@ -209,8 +237,8 @@ export default function OverviewPage() {
     if (p.mode === 'LIVE') liveCount++;
     if (p.mode !== 'PAPER') allPaper = false;
   }
-  const currentDay = beijingDay(now);
-  const tradeCountsBySymbol = useMemo(() => new Map(entries.map(e => [e.snapshot.symbol, todayTradeCounts(e.snapshot, now)])), [entries, currentDay]);
+  const currentDay = beijingDay(dayNow);
+  const tradeCountsBySymbol = useMemo(() => new Map(entries.map(e => [e.snapshot.symbol, todayTradeCounts(e.snapshot, dayNow)])), [entries, currentDay]);
   const batch = async (action: 'pause' | 'resume') => {
     if (batchLock.current) return;
     batchLock.current = true; setBatchBusy(true);
@@ -271,8 +299,8 @@ export default function OverviewPage() {
   const clearFilters = () => updateFilters({ q: '', sort: 'position', status: 'all' });
   const counts = [...tradeCountsBySymbol.values()];
   const today = counts.every(c => c !== null) ? counts.reduce<{ buy: number; sell: number }>((sum, c) => ({ buy: sum.buy + c.buy, sell: sum.sell + c.sell }), { buy: 0, sell: 0 }) : null;
-  const pnlGroups = useMemo(() => todayPnlGroups(overview.data?.today_pnl, now), [overview.data?.today_pnl, currentDay]);
-  const accountList = useMemo(() => accountGroups(accounts, now), [accounts, now]);
+  const pnlGroups = useMemo(() => todayPnlGroups(overview.data?.today_pnl, dayNow), [overview.data?.today_pnl, currentDay]);
+  const accountList = useAccountGroups(accounts);
   const positionList = useMemo(() => positionGroups(entries), [entries]);
   const renderStatusButton = (value: string, tier: Signal, label: string, count: number) =>
     overview.data && count > 0 ? <SignalButton tier={tier} active={statusFilter === value} onClick={() => setStatusFilter(statusFilter === value ? 'all' : value)}>{label} {count}</SignalButton> : null;
@@ -283,7 +311,7 @@ export default function OverviewPage() {
     <section className={`overview-banner${stale ? ' is-stale' : ''}`} aria-label="策略运行概览">
       <div className="signal-strip">
         {stale && <SignalChip tier="yellow">数据暂未更新，请检查连接</SignalChip>}
-        {stale && overview.dataUpdatedAt > 0 && <span className="muted freshness">上次更新于 {ageText(overview.dataUpdatedAt, now)}</span>}
+        {stale && overview.dataUpdatedAt > 0 && <span className="muted freshness"><FreshnessText updatedAt={overview.dataUpdatedAt} prefix="上次更新于 " /></span>}
         {renderStatusButton('LIVE', 'orange', '实盘策略', liveCount)}
         {renderStatusButton('ERROR', 'red', '异常', errorCount)}
         {renderStatusButton('PAUSED', 'blue', '已暂停', pausedCount)}
@@ -335,7 +363,7 @@ export default function OverviewPage() {
         <span>卖出 <strong>{sellTrades}</strong> 笔</span>
         <span>合计盈亏 {tradePnlGroups.size === 0 ? <strong>--</strong> : [...tradePnlGroups.entries()].map(([key, group]) => <span key={key}> {modeLabel[group.mode]} <strong>{group.available && Number.isFinite(group.total) ? <Pnl value={group.total} compact /> : <span className="pending-pnl-warn">待核实</span>}</strong> {group.asset}</span>)}</span>
       </div>
-      <div id="recent-trades-list"><TradesTable overview trades={displayedTrades} now={now} /></div>
+      <div id="recent-trades-list"><TradesTable overview trades={displayedTrades} /></div>
       {recentTrades.length > 5 && <div className="overview-trades-toggle"><Button type="text" aria-expanded={tradesExpanded} aria-controls="recent-trades-list" onClick={() => setTradesExpanded(value => !value)}>{tradesExpanded ? '收起' : '展开最近 20 条'}</Button></div>}
     </Card>
     <OverviewHistory />

@@ -20,12 +20,86 @@ const ThemeContext = createContext<{ preference: ThemePreference; setPreference:
 
 export const useTheme = () => useContext(ThemeContext);
 
+function buildAntdTheme(dark: boolean) {
+  const palette = palettes[dark ? 'dark' : 'light'];
+  const colors = componentColors[dark ? 'dark' : 'light'];
+  return {
+    algorithm: dark ? antdTheme.darkAlgorithm : antdTheme.defaultAlgorithm,
+    token: {
+      colorPrimary: palette['--accent'],
+      colorInfo: palette['--text-secondary'],
+      colorInfoBg: palette['--bg-raised'],
+      colorInfoBorder: colors.borderSecondary,
+      colorSuccess: palette['--positive'],
+      colorSuccessBg: palette['--sig-calm-bg'],
+      colorSuccessBorder: palette['--sig-calm-line'],
+      colorError: palette['--negative'],
+      colorErrorBg: palette['--sig-red-bg'],
+      colorErrorBorder: palette['--sig-red-line'],
+      colorWarning: palette['--sig-yellow'],
+      colorWarningBg: palette['--sig-yellow-bg'],
+      colorWarningBorder: palette['--sig-yellow-line'],
+      borderRadius: dimensions.radiusControl,
+      borderRadiusSM: dimensions.radiusChip,
+      borderRadiusLG: dimensions.radiusPanel,
+      controlHeight: dimensions.controlHeight,
+      controlHeightSM: dimensions.controlHeightSM,
+      controlHeightLG: dimensions.controlTouch,
+      fontSize: dimensions.textBase,
+      fontSizeSM: dimensions.textXs,
+      fontSizeLG: dimensions.textSection,
+      fontFamily: fonts.sans,
+      fontFamilyCode: fonts.mono,
+      colorBgLayout: palette['--bg-page'],
+      colorBgContainer: palette['--bg-card'],
+      colorBgElevated: colors.elevated,
+      colorBorder: colors.border,
+      colorBorderSecondary: colors.borderSecondary,
+      colorText: palette['--text-primary'],
+      colorTextSecondary: palette['--text-secondary'],
+      colorTextTertiary: palette['--text-muted'],
+      colorTextPlaceholder: palette['--text-muted'],
+      colorTextDisabled: colors.disabledText,
+      colorBgContainerDisabled: colors.disabledBg,
+      controlItemBgHover: colors.hover,
+      controlItemBgActive: colors.active,
+      controlItemBgActiveHover: colors.activeHover,
+    },
+    components: {
+      Card: { borderRadiusLG: dimensions.radiusPanel, headerFontSize: dimensions.textSection, headerHeight: 52 },
+      Table: {
+        headerBg: colors.tableHeader,
+        headerColor: palette['--text-secondary'],
+        headerSplitColor: 'transparent',
+        rowHoverBg: colors.tableHover,
+        borderColor: palette['--border-hairline'],
+      },
+      Dropdown: { paddingBlock: dimensions.radiusChip, borderRadiusLG: dimensions.radiusPanel, borderRadiusSM: dimensions.radiusChip },
+      Select: {
+        optionPadding: `${dimensions.space2}px ${dimensions.space3}px`,
+        optionSelectedFontWeight: 500,
+        optionSelectedColor: palette['--text-primary'],
+      },
+      // High-contrast neutral primary actions keep the chrome calm while accent marks selection and moments.
+      Button: {
+        colorPrimary: colors.primaryBg,
+        colorPrimaryHover: colors.primaryHover,
+        colorPrimaryActive: colors.primaryActive,
+        primaryColor: colors.buttonForeground,
+        dangerColor: colors.dangerForeground,
+      },
+      Tabs: { horizontalMargin: `0 0 ${dimensions.space5}px`, titleFontSize: dimensions.textBase },
+      Segmented: { trackBg: colors.segmentedTrack },
+    },
+  };
+}
+const antdThemes = { light: buildAntdTheme(false), dark: buildAntdTheme(true) };
+
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const [preference, setPreferenceState] = useState<ThemePreference>(readPreference);
   const [darkSystem, setDarkSystem] = useState(systemDark);
   const dark = preference === 'dark' || (preference === 'system' && darkSystem);
   const palette = palettes[dark ? 'dark' : 'light'];
-  const colors = componentColors[dark ? 'dark' : 'light'];
   const setPreference = useCallback((value: ThemePreference) => {
     setPreferenceState(value);
     try { localStorage.setItem(storageKey, value); } catch { /* Keep the choice for this session. */ }
@@ -54,74 +128,6 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   }, [dark, palette]);
 
   return <ThemeContext.Provider value={value}>
-    <ConfigProvider locale={zhCN} theme={{
-      algorithm: dark ? antdTheme.darkAlgorithm : antdTheme.defaultAlgorithm,
-      token: {
-        colorPrimary: palette['--accent'],
-        colorInfo: palette['--text-secondary'],
-        colorInfoBg: palette['--bg-raised'],
-        colorInfoBorder: colors.borderSecondary,
-        colorSuccess: palette['--positive'],
-        colorSuccessBg: palette['--sig-calm-bg'],
-        colorSuccessBorder: palette['--sig-calm-line'],
-        colorError: palette['--negative'],
-        colorErrorBg: palette['--sig-red-bg'],
-        colorErrorBorder: palette['--sig-red-line'],
-        colorWarning: palette['--sig-yellow'],
-        colorWarningBg: palette['--sig-yellow-bg'],
-        colorWarningBorder: palette['--sig-yellow-line'],
-        borderRadius: dimensions.radiusControl,
-        borderRadiusSM: dimensions.radiusChip,
-        borderRadiusLG: dimensions.radiusPanel,
-        controlHeight: dimensions.controlHeight,
-        controlHeightSM: dimensions.controlHeightSM,
-        controlHeightLG: dimensions.controlTouch,
-        fontSize: dimensions.textBase,
-        fontSizeSM: dimensions.textXs,
-        fontSizeLG: dimensions.textSection,
-        fontFamily: fonts.sans,
-        fontFamilyCode: fonts.mono,
-        colorBgLayout: palette['--bg-page'],
-        colorBgContainer: palette['--bg-card'],
-        colorBgElevated: colors.elevated,
-        colorBorder: colors.border,
-        colorBorderSecondary: colors.borderSecondary,
-        colorText: palette['--text-primary'],
-        colorTextSecondary: palette['--text-secondary'],
-        colorTextTertiary: palette['--text-muted'],
-        colorTextPlaceholder: palette['--text-muted'],
-        colorTextDisabled: colors.disabledText,
-        colorBgContainerDisabled: colors.disabledBg,
-        controlItemBgHover: colors.hover,
-        controlItemBgActive: colors.active,
-        controlItemBgActiveHover: colors.activeHover,
-      },
-      components: {
-        Card: { borderRadiusLG: dimensions.radiusPanel, headerFontSize: dimensions.textSection, headerHeight: 52 },
-        Table: {
-          headerBg: colors.tableHeader,
-          headerColor: palette['--text-secondary'],
-          headerSplitColor: 'transparent',
-          rowHoverBg: colors.tableHover,
-          borderColor: palette['--border-hairline'],
-        },
-        Dropdown: { paddingBlock: dimensions.radiusChip, borderRadiusLG: dimensions.radiusPanel, borderRadiusSM: dimensions.radiusChip },
-        Select: {
-          optionPadding: `${dimensions.space2}px ${dimensions.space3}px`,
-          optionSelectedFontWeight: 500,
-          optionSelectedColor: palette['--text-primary'],
-        },
-        // High-contrast neutral primary actions keep the chrome calm while accent marks selection and moments.
-        Button: {
-          colorPrimary: colors.primaryBg,
-          colorPrimaryHover: colors.primaryHover,
-          colorPrimaryActive: colors.primaryActive,
-          primaryColor: colors.buttonForeground,
-          dangerColor: colors.dangerForeground,
-        },
-        Tabs: { horizontalMargin: `0 0 ${dimensions.space5}px`, titleFontSize: dimensions.textBase },
-        Segmented: { trackBg: colors.segmentedTrack },
-      },
-    }}>{children}</ConfigProvider>
+    <ConfigProvider locale={zhCN} theme={antdThemes[dark ? 'dark' : 'light']}>{children}</ConfigProvider>
   </ThemeContext.Provider>;
 }

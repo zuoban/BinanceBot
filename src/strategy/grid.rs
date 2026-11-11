@@ -33,12 +33,18 @@ enum ReconciliationPriority {
 
 /// Binance Futures allows at most 36 characters for newClientOrderId.
 fn new_grid_client_order_id(side: OrderSide) -> String {
-    let uuid = Uuid::new_v4().simple().to_string();
+    let mut uuid_buf = [0u8; 32];
+    let uuid = Uuid::new_v4().simple().encode_lower(&mut uuid_buf);
     let side_code = match side {
         OrderSide::Buy => "b",
         OrderSide::Sell => "s",
     };
-    format!("gb_{}_{}", side_code, &uuid[..30])
+    let mut id = String::with_capacity(35);
+    id.push_str("gb_");
+    id.push_str(side_code);
+    id.push('_');
+    id.push_str(&uuid[..30]);
+    id
 }
 
 #[cfg(test)]
@@ -100,15 +106,15 @@ fn is_window_order(order: &GridOrder) -> bool {
     is_grid_order(&order.client_order_id) && order.status == OrderStatus::New
 }
 
-fn opening_exposure_usdc(
+fn opening_exposure_usdc<'a>(
     direction: GridDirection,
     position_size: Decimal,
     mark_price: Decimal,
-    orders: &[GridOrder],
+    orders: impl IntoIterator<Item = &'a GridOrder>,
 ) -> Decimal {
     direction.position_quantity(position_size) * mark_price
         + orders
-            .iter()
+            .into_iter()
             .filter(|order| order.side == direction.opening_side())
             .map(|order| order.price * order.quantity)
             .sum::<Decimal>()
@@ -179,30 +185,34 @@ fn has_nearby_grid_order(
 }
 
 /// Same-side active orders reserve their current price level.
-fn grid_level_occupied(
-    orders: &[GridOrder],
+fn grid_level_occupied<'a>(
+    orders: impl IntoIterator<Item = &'a GridOrder>,
     side: OrderSide,
     price: Decimal,
     interval: Decimal,
     tick_size: Decimal,
 ) -> bool {
+    let spacing = interval.max(tick_size);
     orders
-        .iter()
-        .any(|order| order.side == side && (order.price - price).abs() < interval.max(tick_size))
+        .into_iter()
+        .any(|order| order.side == side && (order.price - price).abs() < spacing)
 }
 
-fn reserved_closing_quantity(direction: GridDirection, orders: &[GridOrder]) -> Decimal {
+fn reserved_closing_quantity<'a>(
+    direction: GridDirection,
+    orders: impl IntoIterator<Item = &'a GridOrder>,
+) -> Decimal {
     orders
-        .iter()
+        .into_iter()
         .filter(|o| o.side == direction.closing_side())
         .map(|o| o.quantity)
         .sum()
 }
 
-fn closing_quantity_available(
+fn closing_quantity_available<'a>(
     direction: GridDirection,
     position_size: Decimal,
-    orders: &[GridOrder],
+    orders: impl IntoIterator<Item = &'a GridOrder>,
 ) -> Decimal {
     (direction.position_quantity(position_size) - reserved_closing_quantity(direction, orders))
         .max(Decimal::ZERO)
@@ -377,6 +387,7 @@ pub struct GridTradingEngine {
     market_data_blocked: bool,
     last_remainder_change: Option<Instant>,
     market_stream_tx: Option<watch::Sender<String>>,
+    last_fill_cache: std::sync::Mutex<Option<(String, TradingMode, LastFillSnapshot)>>,
 }
 
 impl Drop for GridTradingEngine {
@@ -448,6 +459,7 @@ impl GridTradingEngine {
             market_data_blocked: false,
             last_remainder_change: None,
             market_stream_tx: None,
+            last_fill_cache: std::sync::Mutex::new(None),
         }
     }
 
@@ -1221,17 +1233,31 @@ impl GridTradingEngine {
     }
 
     async fn load_last_fill(&self, config: &crate::config::AppConfig) -> Result<LastFillSnapshot> {
-        let symbol = config.exchange.symbol.clone();
+        let symbol = &config.exchange.symbol;
         let mode = config.exchange.trading_mode();
         // Capture before the read so a concurrent fill or history clear invalidates
         // this context even when it commits while the blocking query is pending.
-        let revision = self.state.db.symbol_trade_revision(&symbol);
+        let revision = self.state.db.symbol_trade_revision(symbol);
+        if let Some((_, _, cached)) = self
+            .last_fill_cache
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|(s, m, snap)| s == symbol && *m == mode && snap.revision == revision)
+        {
+            return Ok(*cached);
+        }
+        let query_symbol = symbol.clone();
         let fill = self
             .state
             .db
-            .run_blocking(move |db| db.last_fill_for(&symbol, mode))
+            .run_blocking(move |db| db.last_fill_for(&query_symbol, mode))
             .await?;
-        Ok(LastFillSnapshot { revision, fill })
+        let snapshot = LastFillSnapshot { revision, fill };
+        if self.state.db.symbol_trade_revision(symbol) == revision {
+            *self.last_fill_cache.lock().unwrap() = Some((symbol.clone(), mode, snapshot));
+        }
+        Ok(snapshot)
     }
 
     pub(super) async fn window_prices(
@@ -3009,11 +3035,13 @@ impl GridTradingEngine {
             return;
         }
         self.pnl_retry_at = None;
-        let config = self.state.config.read().await.clone();
-        if config.exchange.is_paper() {
+        let (is_paper, mode) = {
+            let config = self.state.config.read().await;
+            (config.exchange.is_paper(), config.exchange.trading_mode())
+        };
+        if is_paper {
             return;
         }
-        let mode = config.exchange.trading_mode();
         let pending_count = self.state.stats.read().await.pending_pnl_trades;
         self.client.note_pnl_reconcile_backlog(pending_count);
         if pending_count == 0 {
@@ -3022,7 +3050,7 @@ impl GridTradingEngine {
             return;
         }
         let offset = self.pnl_reconcile_offset % pending_count;
-        let pending_symbol = config.exchange.symbol.clone();
+        let pending_symbol = self.state.config.read().await.exchange.symbol.clone();
         let (pending, clear_revision) = match self
             .state
             .db
@@ -3957,26 +3985,36 @@ impl GridTradingEngine {
             }
         }
 
-        let orders: Vec<GridOrder> = self
-            .state
-            .active_orders
-            .read()
-            .await
-            .values()
-            .cloned()
-            .collect();
-        if grid_level_occupied(
-            &orders,
-            side,
-            price,
-            config.grid.grid_interval,
-            rules.tick_size,
-        ) {
-            return None;
-        }
         if side == config.grid.direction.opening_side() {
-            if let Some(limit) = config.grid.max_position_usdc {
-                let position = self.state.position.read().await.clone();
+            let (occupied, exposure) = {
+                let active_orders = self.state.active_orders.read().await;
+                if grid_level_occupied(
+                    active_orders.values(),
+                    side,
+                    price,
+                    config.grid.grid_interval,
+                    rules.tick_size,
+                ) {
+                    return None;
+                }
+                if config.grid.max_position_usdc.is_some() {
+                    let position = self.state.position.read().await;
+                    let valuation_price = reference_price.max(current_market_price).max(price);
+                    let exposure = opening_exposure_usdc(
+                        config.grid.direction,
+                        position.size,
+                        valuation_price,
+                        active_orders.values(),
+                    ) + price * full_quantity;
+                    (false, Some((position.clone(), exposure)))
+                } else {
+                    (false, None)
+                }
+            };
+            let _ = occupied;
+            if let (Some(limit), Some((position, exposure))) =
+                (config.grid.max_position_usdc, exposure)
+            {
                 let mark_price = self.position_valuation_price(config, &position, &ticker);
                 let position_value = position.size.abs() * mark_price;
                 let projected_position_value =
@@ -3996,13 +4034,6 @@ impl GridTradingEngine {
                     .await;
                     return None;
                 }
-                let valuation_price = reference_price.max(current_market_price).max(price);
-                let exposure = opening_exposure_usdc(
-                    config.grid.direction,
-                    position.size,
-                    valuation_price,
-                    &orders,
-                ) + price * full_quantity;
                 if exposure > limit {
                     debug!(
                         "Skipping {} at {}: projected exposure {} exceeds limit {}",
@@ -4016,11 +4047,23 @@ impl GridTradingEngine {
             }
             Some(full_quantity)
         } else {
-            let available = closing_quantity_available(
-                config.grid.direction,
-                self.state.position.read().await.size,
-                &orders,
-            );
+            let available = {
+                let active_orders = self.state.active_orders.read().await;
+                if grid_level_occupied(
+                    active_orders.values(),
+                    side,
+                    price,
+                    config.grid.grid_interval,
+                    rules.tick_size,
+                ) {
+                    return None;
+                }
+                closing_quantity_available(
+                    config.grid.direction,
+                    self.state.position.read().await.size,
+                    active_orders.values(),
+                )
+            };
             if available >= full_quantity {
                 Some(full_quantity)
             } else {

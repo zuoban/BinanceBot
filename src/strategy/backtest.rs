@@ -250,10 +250,20 @@ impl<'a> Sim<'a> {
                     self.record();
                 }
                 None => {
+                    let interval = self.p.grid.grid_interval;
+                    let same_cell = !self.orders.is_empty()
+                        && self.limit().is_none()
+                        && interval > Decimal::ZERO
+                        && current
+                            .checked_div(interval)
+                            .zip(target.checked_div(interval))
+                            .is_some_and(|(a, b)| a.floor() == b.floor() && a.ceil() == b.ceil());
                     self.market = target;
                     self.record();
-                    self.maintain();
-                    self.record();
+                    if !same_cell {
+                        self.maintain();
+                        self.record();
+                    }
                     break;
                 }
             }
@@ -301,16 +311,16 @@ impl<'a> Sim<'a> {
         }
         let opening = self.p.grid.direction.opening_side();
         let (buys, sells) = self.compute_window_prices();
-        let (opening_prices, closing_prices) = if opening == OrderSide::Buy {
-            (buys.clone(), sells.clone())
-        } else {
-            (sells.clone(), buys.clone())
-        };
         self.prune_and_trim_orders(&buys, &sells);
-        if !self.replenish_opening_orders(&opening_prices) {
+        let (opening_prices, closing_prices) = if opening == OrderSide::Buy {
+            (buys.as_slice(), sells.as_slice())
+        } else {
+            (sells.as_slice(), buys.as_slice())
+        };
+        if !self.replenish_opening_orders(opening_prices) {
             return;
         }
-        self.replenish_closing_and_remainder_orders(&closing_prices);
+        self.replenish_closing_and_remainder_orders(closing_prices);
     }
 
     fn compute_window_prices(&self) -> (Vec<Decimal>, Vec<Decimal>) {
@@ -356,15 +366,21 @@ impl<'a> Sim<'a> {
     fn prune_and_trim_orders(&mut self, buys: &[Decimal], sells: &[Decimal]) {
         let direction = self.p.grid.direction;
         let closing = direction.closing_side();
+        let mut position_qty = direction.position_quantity(self.size);
         self.orders.retain(|order| {
+            if order.side == closing && position_qty.is_zero() {
+                return false;
+            }
             if order.side == OrderSide::Buy {
                 buys.contains(&order.price)
             } else {
                 sells.contains(&order.price)
             }
         });
+        if position_qty.is_zero() {
+            return;
+        }
         // Keep closing orders within the position, nearest first.
-        let mut position_qty = direction.position_quantity(self.size);
         let mut closing_orders: Vec<usize> = (0..self.orders.len())
             .filter(|&i| self.orders[i].side == closing)
             .collect();
@@ -391,6 +407,13 @@ impl<'a> Sim<'a> {
         let market = self.market;
         let limit = self.limit();
         let position_value = self.size.abs() * market;
+        let mut opening_notional: Decimal = limit.map_or(Decimal::ZERO, |_| {
+            self.orders
+                .iter()
+                .filter(|o| o.side == opening)
+                .map(|o| o.price * o.qty)
+                .sum()
+        });
         for &price in opening_prices {
             if self
                 .orders
@@ -407,6 +430,7 @@ impl<'a> Sim<'a> {
             let Some(qty) = self.qty_at(price).filter(|_| maker_ok) else {
                 continue;
             };
+            let order_notional = price * qty;
             if let Some(limit) = limit {
                 if self.p.grid.pause_on_max_position {
                     let projected = (self.size + direction.sign() * qty).abs() * market;
@@ -417,17 +441,13 @@ impl<'a> Sim<'a> {
                 }
                 let valuation = market.max(price);
                 let exposure = direction.position_quantity(self.size) * valuation
-                    + self
-                        .orders
-                        .iter()
-                        .filter(|o| o.side == opening)
-                        .map(|o| o.price * o.qty)
-                        .sum::<Decimal>()
-                    + price * qty;
+                    + opening_notional
+                    + order_notional;
                 if exposure > limit {
                     continue;
                 }
             }
+            opening_notional += order_notional;
             self.orders.push(BtOrder {
                 side: opening,
                 price,
@@ -442,13 +462,16 @@ impl<'a> Sim<'a> {
         let direction = self.p.grid.direction;
         let closing = direction.closing_side();
         let market = self.market;
-        let reserved = |orders: &[BtOrder]| -> Decimal {
-            orders
-                .iter()
-                .filter(|o| o.side == closing)
-                .map(|o| o.qty)
-                .sum()
-        };
+        let position_qty = direction.position_quantity(self.size);
+        if position_qty.is_zero() {
+            return;
+        }
+        let mut reserved_qty: Decimal = self
+            .orders
+            .iter()
+            .filter(|o| o.side == closing)
+            .map(|o| o.qty)
+            .sum();
         for &price in closing_prices {
             if self
                 .orders
@@ -465,9 +488,9 @@ impl<'a> Sim<'a> {
             let Some(qty) = self.qty_at(price).filter(|_| maker_ok) else {
                 continue;
             };
-            let available = (direction.position_quantity(self.size) - reserved(&self.orders))
-                .max(Decimal::ZERO);
+            let available = (position_qty - reserved_qty).max(Decimal::ZERO);
             if available >= qty {
+                reserved_qty += qty;
                 self.orders.push(BtOrder {
                     side: closing,
                     price,
@@ -485,9 +508,7 @@ impl<'a> Sim<'a> {
             .filter(|o| o.side == closing && o.remainder)
             .map(|o| o.qty)
             .sum();
-        let available = (direction.position_quantity(self.size) - reserved(&self.orders)
-            + remainder_qty)
-            .max(Decimal::ZERO);
+        let available = (position_qty - reserved_qty + remainder_qty).max(Decimal::ZERO);
         if let Some(&price) = closing_prices.iter().find(|&&price| {
             !self
                 .orders
@@ -631,32 +652,47 @@ pub fn parse_csv(text: &str) -> Result<Vec<Candle>> {
         if line.is_empty() {
             continue;
         }
-        let fields: Vec<&str> = line.split(',').map(str::trim).collect();
-        if candles.is_empty() && fields[0].parse::<i64>().is_err() {
+        let mut cols = line.split(',').map(str::trim);
+        let first = cols.next().unwrap_or_default();
+        if candles.is_empty() && first.parse::<i64>().is_err() {
             continue;
         }
-        let time_ms: i64 = fields[0]
+        let time_ms: i64 = first
             .parse()
             .with_context(|| format!("第 {} 行：时间必须是毫秒时间戳", index + 1))?;
-        let number = |position: usize| -> Result<Decimal> {
-            Decimal::from_str(fields[position]).with_context(|| {
-                format!("第 {} 行：无法解析价格 {:?}", index + 1, fields[position])
-            })
+        let parse_price = |raw: &str| -> Result<Decimal> {
+            Decimal::from_str(raw)
+                .with_context(|| format!("第 {} 行：无法解析价格 {:?}", index + 1, raw))
         };
-        match fields.len() {
-            2 => candles.push(Candle::tick(time_ms, number(1)?)),
-            n if n >= 5 => candles.push(Candle {
-                time_ms,
-                open: number(1)?,
-                high: number(2)?,
-                low: number(3)?,
-                close: number(4)?,
-            }),
-            n => bail!(
-                "第 {} 行：需要 2 列（时间,价格）或至少 5 列（时间,开,高,低,收），实际 {} 列",
-                index + 1,
-                n
-            ),
+        let Some(c1) = cols.next() else {
+            bail!(
+                "第 {} 行：需要 2 列（时间,价格）或至少 5 列（时间,开,高,低,收），实际 1 列",
+                index + 1
+            );
+        };
+        match cols.next() {
+            None => candles.push(Candle::tick(time_ms, parse_price(c1)?)),
+            Some(c2) => {
+                let c3 = cols.next();
+                let c4 = cols.next();
+                match (c3, c4) {
+                    (Some(c3), Some(c4)) => candles.push(Candle {
+                        time_ms,
+                        open: parse_price(c1)?,
+                        high: parse_price(c2)?,
+                        low: parse_price(c3)?,
+                        close: parse_price(c4)?,
+                    }),
+                    (Some(_), None) => bail!(
+                        "第 {} 行：需要 2 列（时间,价格）或至少 5 列（时间,开,高,低,收），实际 4 列",
+                        index + 1
+                    ),
+                    (None, _) => bail!(
+                        "第 {} 行：需要 2 列（时间,价格）或至少 5 列（时间,开,高,低,收），实际 3 列",
+                        index + 1
+                    ),
+                }
+            }
         }
     }
     Ok(candles)

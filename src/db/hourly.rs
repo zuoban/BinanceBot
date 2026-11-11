@@ -131,18 +131,17 @@ pub(super) fn migrate_on(conn: &Connection) -> Result<()> {
 
 fn load_on(conn: &Connection, symbol: &str, mode: &str, bucket: i64) -> Result<Rollup> {
     Ok(conn
-        .query_row(
+        .prepare_cached(
             "SELECT hour, buy_count, sell_count, realized_pnl, pending_pnl_count, latest_timestamp
              FROM trade_hourly_rollups WHERE symbol = ?1 AND mode = ?2 AND hour = ?3",
-            params![symbol, mode, bucket],
-            Rollup::from_row,
-        )
+        )?
+        .query_row(params![symbol, mode, bucket], Rollup::from_row)
         .optional()?
         .map_or_else(Rollup::default, |(_, rollup)| rollup))
 }
 
 fn save_on(conn: &Connection, symbol: &str, mode: &str, bucket: i64, value: &Rollup) -> Result<()> {
-    conn.execute(
+    conn.prepare_cached(
         "INSERT INTO trade_hourly_rollups
          (symbol, mode, hour, buy_count, sell_count, realized_pnl, pending_pnl_count, latest_timestamp)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
@@ -150,7 +149,8 @@ fn save_on(conn: &Connection, symbol: &str, mode: &str, bucket: i64, value: &Rol
              buy_count = excluded.buy_count, sell_count = excluded.sell_count,
              realized_pnl = excluded.realized_pnl, pending_pnl_count = excluded.pending_pnl_count,
              latest_timestamp = excluded.latest_timestamp",
-        params![
+    )?
+    .execute(params![
             symbol,
             mode,
             bucket,
@@ -214,7 +214,7 @@ pub(super) fn stats_on(
         realized_pnl: Decimal::ZERO,
         pending_pnl_count: 0,
     };
-    let mut statement = conn.prepare(
+    let mut statement = conn.prepare_cached(
         "SELECT hour, buy_count, sell_count, realized_pnl, pending_pnl_count, latest_timestamp
          FROM trade_hourly_rollups
          WHERE symbol = ?1 AND mode = ?2 AND hour >= ?3 AND hour <= ?4 ORDER BY hour",
@@ -243,7 +243,7 @@ pub(super) fn today_pnl_on(
     let window_start = beijing_midnight(now);
     let first_hour = window_start.timestamp();
     let last_hour = hour(now);
-    let mut statement = conn.prepare(
+    let mut statement = conn.prepare_cached(
         "SELECT hour, buy_count, sell_count, realized_pnl, pending_pnl_count, latest_timestamp, symbol, mode
          FROM trade_hourly_rollups
          WHERE hour >= ?1 AND hour <= ?2",
@@ -291,7 +291,7 @@ fn load_boundary_rollup_on(
     window_start: DateTime<Utc>,
     now: DateTime<Utc>,
 ) -> Result<Rollup> {
-    let mut boundary = conn.prepare(
+    let mut boundary = conn.prepare_cached(
         "SELECT timestamp, side, realized_pnl, pnl_verified FROM trades
          WHERE symbol = ?1 AND mode = ?2 AND stats_hour = ?3",
     )?;

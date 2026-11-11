@@ -217,7 +217,7 @@ async fn fetch_exchange_symbol_preview(
     )
 }
 
-fn extract_token(headers: &HeaderMap) -> Option<String> {
+fn extract_token(headers: &HeaderMap) -> Option<&str> {
     if let Some(auth_val) = headers.get(axum::http::header::AUTHORIZATION) {
         if let Ok(auth_str) = auth_val.to_str() {
             if let Some(token) = auth_str
@@ -226,7 +226,7 @@ fn extract_token(headers: &HeaderMap) -> Option<String> {
             {
                 let t = token.trim();
                 if !t.is_empty() {
-                    return Some(t.to_string());
+                    return Some(t);
                 }
             }
         }
@@ -236,7 +236,7 @@ fn extract_token(headers: &HeaderMap) -> Option<String> {
         if let Ok(token_str) = token_val.to_str() {
             let t = token_str.trim();
             if !t.is_empty() {
-                return Some(t.to_string());
+                return Some(t);
             }
         }
     }
@@ -260,7 +260,7 @@ async fn require_auth_middleware(
         return Ok(next.run(req).await);
     }
     let is_valid = match extract_token(req.headers()) {
-        Some(token) => match state.check_token_valid(&token).await {
+        Some(token) => match state.check_token_valid(token).await {
             Ok(valid) => valid,
             Err(error) => {
                 error!("Failed to check session: {}", error);
@@ -702,43 +702,50 @@ async fn dispatch_pair(
     State(handle): State<RuntimeHandle>,
     mut req: axum::extract::Request,
 ) -> Response {
-    let path = req.uri().path().to_string();
-    let (symbol, resource) = if let Some(scoped) = path.strip_prefix("/api/pairs/") {
-        let Some((symbol, resource)) = scoped.split_once('/') else {
-            return StatusCode::NOT_FOUND.into_response();
+    let (symbol, uri) = {
+        let path = req.uri().path();
+        let (symbol, resource) = if let Some(scoped) = path.strip_prefix("/api/pairs/") {
+            let Some((symbol, resource)) = scoped.split_once('/') else {
+                return StatusCode::NOT_FOUND.into_response();
+            };
+            (Some(symbol), resource)
+        } else {
+            (None, path.strip_prefix("/api/").unwrap_or("ws"))
         };
-        (Some(symbol), resource)
-    } else {
-        (None, path.strip_prefix("/api/").unwrap_or("ws"))
+        let Ok(uri) = format!("/{}", resource).parse() else {
+            return StatusCode::BAD_REQUEST.into_response();
+        };
+        (symbol, uri)
     };
-    let states = handle.states.read().await;
-    let state = match symbol {
-        Some(symbol) => states
-            .iter()
-            .find(|state| state.pair_scope() == Some(symbol)),
-        None => states.first(),
-    }
-    .cloned();
-    drop(states);
+    let state = {
+        let states = handle.states.read().await;
+        match symbol {
+            Some(symbol) => states
+                .iter()
+                .find(|state| state.pair_scope() == Some(symbol)),
+            None => states.first(),
+        }
+        .cloned()
+    };
     let Some(state) = state else {
         return StatusCode::NOT_FOUND.into_response();
     };
     // The selected router enforces each resource's HTTP methods and WebSocket authentication.
-    let Ok(uri) = format!("/{}", resource).parse() else {
-        return StatusCode::BAD_REQUEST.into_response();
-    };
+    let router = state
+        .managed_router
+        .get_or_init(|| {
+            pair_resource_routes()
+                .route(
+                    "/config",
+                    get(get_config_handler).post(post_managed_config_handler),
+                )
+                .route("/ws", get(ws_handler))
+                .with_state(state.clone())
+        })
+        .clone();
     *req.uri_mut() = uri;
-    pair_resource_routes()
-        .route(
-            "/config",
-            get(get_config_handler).post(post_managed_config_handler),
-        )
-        .route("/ws", get(ws_handler))
-        .layer(Extension(handle))
-        .with_state(state)
-        .oneshot(req)
-        .await
-        .unwrap()
+    req.extensions_mut().insert(handle);
+    router.oneshot(req).await.unwrap()
 }
 
 async fn get_managed_pairs_handler(
@@ -1224,6 +1231,7 @@ async fn get_auth_status_handler(
     let result = if !initialized {
         Ok(true)
     } else if let Some(token) = extract_token(&headers) {
+        let token = token.to_owned();
         state
             .db
             .run_blocking(move |db| db.is_session_valid(&token))
@@ -1317,7 +1325,7 @@ async fn post_auth_logout_handler(
     headers: HeaderMap,
 ) -> (StatusCode, Json<ApiResponse<()>>) {
     if let Some(token) = extract_token(&headers) {
-        if let Err(error) = state.delete_session(&token).await {
+        if let Err(error) = state.delete_session(token).await {
             error!("Failed to delete session during logout: {}", error);
             return status_err(
                 StatusCode::INTERNAL_SERVER_ERROR,

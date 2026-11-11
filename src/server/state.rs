@@ -202,13 +202,17 @@ impl GlobalPositionLimit {
                 state.global_cancel_pending.store(true, Ordering::SeqCst);
             }
         }
-        let reason = Self::format_global_risk_reason(
-            zero_margin,
-            incomplete,
-            position_limit_reached,
-            total,
-            limit,
-        );
+        let reason = if unsafe_now {
+            Self::format_global_risk_reason(
+                zero_margin,
+                incomplete,
+                position_limit_reached,
+                total,
+                limit,
+            )
+        } else {
+            String::new()
+        };
         for state in &states {
             if unsafe_now && (first_trigger || *state.status.read().await == BotStatus::Running) {
                 state.global_cancel_pending.store(true, Ordering::SeqCst);
@@ -277,13 +281,16 @@ impl GlobalPositionLimit {
                 zero_margin,
             );
         }
-        let position = state.position.read().await.clone();
-        let position_size = position.size;
-        if !is_paper && !position.update_time.is_some_and(fresh) {
-            member_incomplete = true;
-        }
-        let ticker = state.ticker.read().await.clone();
-        let price = position.fresh_market_valuation_price(&ticker, fresh);
+        let (position_size, price) = {
+            let position = state.position.read().await;
+            let position_size = position.size;
+            if !is_paper && !position.update_time.is_some_and(fresh) {
+                member_incomplete = true;
+            }
+            let ticker = state.ticker.read().await;
+            let price = position.fresh_market_valuation_price(&ticker, fresh);
+            (position_size, price)
+        };
         if !position_size.is_zero() && price <= Decimal::ZERO {
             member_incomplete = true;
         }
@@ -516,6 +523,7 @@ pub struct AppState {
 
     pub action_tx: mpsc::Sender<BotControlAction>,
     pub ws_broadcast_tx: broadcast::Sender<String>,
+    pub(crate) managed_router: std::sync::OnceLock<axum::Router>,
     telegram_notifier: TelegramNotifier,
 }
 
@@ -734,12 +742,8 @@ impl AppState {
             admin_auth,
             action_tx,
             ws_broadcast_tx,
-            telegram_notifier: TelegramNotifier::new(
-                reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(10))
-                    .build()
-                    .expect("Failed to build Telegram HTTP client"),
-            ),
+            managed_router: std::sync::OnceLock::new(),
+            telegram_notifier: TelegramNotifier::new(TelegramNotifier::shared_client()),
         })
     }
 
@@ -959,8 +963,10 @@ impl AppState {
         }
 
         // Broadcast trade update event to WebSocket clients
-        if let Some(json) = crate::types::ws_frame_json("trade", &trade) {
-            let _ = self.ws_broadcast_tx.send(json);
+        if self.ws_broadcast_tx.receiver_count() > 0 {
+            if let Some(json) = crate::types::ws_frame_json("trade", &trade) {
+                let _ = self.ws_broadcast_tx.send(json);
+            }
         }
 
         if notify_trade {
@@ -1049,10 +1055,10 @@ impl AppState {
                     && trade.side == config.grid.direction.closing_side())
                 .then(|| (config.telegram.clone(), config.grid.direction))
             };
+            // Account capture takes the same lock; finish publication before preparing it.
+            drop(commit);
             if let Some((telegram, direction)) = notification {
                 let notification_stats = state.trade_notification_stats(&trade).await;
-                // Account capture takes the same lock; finish publication before preparing it.
-                drop(commit);
                 let mut trade = trade;
                 trade.pnl_verified = true;
                 state
@@ -1301,8 +1307,10 @@ impl AppState {
         logs.push_back(entry.clone());
 
         // Also broadcast log event to WebSocket clients
-        if let Some(json) = crate::types::ws_frame_json("log", &entry) {
-            let _ = self.ws_broadcast_tx.send(json);
+        if self.ws_broadcast_tx.receiver_count() > 0 {
+            if let Some(json) = crate::types::ws_frame_json("log", &entry) {
+                let _ = self.ws_broadcast_tx.send(json);
+            }
         }
     }
 

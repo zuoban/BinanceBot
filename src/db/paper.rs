@@ -64,6 +64,23 @@ impl Contribution {
                 position.update_time.unwrap_or(account.update_time) >= previous
             })
     }
+
+    fn is_unchanged(&self, position: &PositionInfo, account: &AccountInfo) -> bool {
+        let open_time = (!position.size.is_zero()).then(|| {
+            position
+                .update_time
+                .unwrap_or(account.update_time)
+                .min(account.update_time)
+        });
+        self.asset == account.asset
+            && self.wallet_delta == account.total_wallet_balance - PAPER_INITIAL_BALANCE
+            && self.unrealized_pnl == position.unrealized_pnl
+            && self.position_margin == position.position_margin()
+            && self.size == position.size
+            && self.entry_price == position.entry_price
+            && self.open_valuation_time == open_time
+            && self.update_time == account.update_time
+    }
 }
 
 #[derive(Default)]
@@ -189,7 +206,10 @@ impl PaperLedger {
         committed: bool,
     ) {
         if let Some(previous) = self.symbols.get_mut(symbol) {
-            if !committed && !previous.accepts_valuation(position, account) {
+            if !committed
+                && (!previous.accepts_valuation(position, account)
+                    || previous.is_unchanged(position, account))
+            {
                 return;
             }
             let totals = self.assets.get_mut(&previous.asset).unwrap();

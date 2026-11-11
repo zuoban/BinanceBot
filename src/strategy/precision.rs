@@ -258,7 +258,7 @@ impl SymbolRules {
             return (Vec::new(), Vec::new());
         };
         let collect = |side, mut price, count, step| {
-            let mut prices = Vec::new();
+            let mut prices = Vec::with_capacity(count);
             while prices.len() < count && price >= min && price <= max {
                 if self.is_grid_price(price, interval) && eligible(side, price) {
                     prices.push(price);

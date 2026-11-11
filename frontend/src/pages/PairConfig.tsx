@@ -1,4 +1,4 @@
-import { useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
 import { UNSAFE_DataRouterContext, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { Alert, App, Button, Card, Col, Form, Input, InputNumber, Row, Select, Space, Switch, type FormInstance } from 'antd';
@@ -6,7 +6,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, pairPath, post } from '../lib/api';
 import { usePairs } from '../lib/queries';
 import { AccountsContext, EditContext } from '../lib/session';
-import type { GlobalConfig, GridConfig } from '../lib/types';
+import type { GlobalConfig, GridConfig, Mode } from '../lib/types';
 import { ConflictReloadButton, ErrorNotice, FormRevertButton, isConfigConflict, PageBreadcrumb, PageTitle } from '../components/Common';
 import { useDeleteStrategy } from '../components/DeleteStrategy';
 import { GridPreview } from '../components/GridPreview';
@@ -16,6 +16,13 @@ import { describeNewGridConfig, diffGridConfig, type FieldChange } from '../lib/
 
 type FormValues = Omit<GridConfig, 'post_only'>;
 const defaults: FormValues = { symbol: '', direction: 'LONG', grid_interval: '0.1', order_amount_usdc: '100', buy_window: 3, sell_window: 3, min_price: null, max_price: null, max_position_usdc: '1000', pause_on_max_position: true, cancel_opening_on_max_position: false, min_liquidation_distance_pct: null };
+const directionOptions = [{ value: 'LONG', label: '做多 · 买入开仓 / 卖出平仓' }, { value: 'SHORT', label: '做空 · 卖出开仓 / 买入平仓' }];
+function AccountMarkBridge({ symbol, mode, onMark }: { symbol: string; mode: Mode | undefined; onMark: (mark: string | undefined) => void }) {
+  const accounts = useContext(AccountsContext);
+  const next = positiveDecimalText(accounts.find(entry => entry.snapshot.symbol === symbol && entry.mode === mode && !entry.account_observation_stale)?.snapshot.ticker.mark_price) ?? undefined;
+  useLayoutEffect(() => { onMark(next); }, [next, onMark]);
+  return null;
+}
 function LiveConfigConfirmContent({ changes, values }: { changes: FieldChange[] | null; values: FormValues }) {
   const items = changes ?? describeNewGridConfig(values).map(item => ({ key: item.label, label: item.label, before: '', after: item.value, risky: item.risky }));
   return <div className="confirm-changes">
@@ -59,9 +66,8 @@ export default function PairConfig() {
   const { pathname } = useLocation();
   const router = useContext(UNSAFE_DataRouterContext)?.router;
   const pairs = usePairs();
-  const accounts = useContext(AccountsContext);
   const pair = pairs.data?.find(p => p.symbol === symbol);
-  const markPrice = accounts.find(entry => entry.snapshot.symbol === symbol && entry.mode === pair?.mode && !entry.account_observation_stale)?.snapshot.ticker.mark_price;
+  const [liveMark, setLiveMark] = useState<string | undefined>(undefined);
   const [form] = Form.useForm<FormValues>();
   const edit = useContext(EditContext);
   const client = useQueryClient();
@@ -91,6 +97,7 @@ export default function PairConfig() {
   const config = useQuery({ queryKey: ['config', symbol, pair?.scoped], queryFn: ({ signal }) => api<GridConfig & { config_version: string; tick_size?: string; step_size?: string; min_qty?: string; min_notional?: string }>(pairPath(pair!, 'config'), { signal }), enabled: !!pair, refetchOnWindowFocus: false });
   useEffect(() => {
     setReady(adding);
+    setLiveMark(undefined);
     baseline.current = null;
     customInterval.current = false;
     appliedSymbol.current = undefined;
@@ -182,7 +189,8 @@ export default function PairConfig() {
   const previewLast = positiveDecimalText(symbolPreview.data?.last_price);
   const previewMark = positiveDecimalText(symbolPreview.data?.mark_price);
   const latestPrice = adding ? (previewLast ?? previewMark) : null;
-  const effectiveMark = (adding ? (previewMark ?? previewLast) : positiveDecimalText(markPrice)) ?? undefined;
+  const effectiveMark = (adding ? (previewMark ?? previewLast) : liveMark) ?? undefined;
+  const symbolOptions = useMemo(() => (symbols.data ?? []).map(value => ({ value, label: value })), [symbols.data]);
   const tickSize = adding ? symbolPreview.data?.tick_size : config.data?.tick_size;
   const stepSize = adding ? symbolPreview.data?.step_size : config.data?.step_size;
   const minQty = adding ? symbolPreview.data?.min_qty : config.data?.min_qty;
@@ -199,6 +207,7 @@ export default function PairConfig() {
   }, [adding, ready, edit.saving, selectedSymbol, effectiveMark, tickSize, form]);
   useEffect(() => { if ((tickSize || stepSize || minQty || minNotional) && ready) void form.validateFields(['grid_interval', 'order_amount_usdc']).catch(() => {}); }, [tickSize, stepSize, minQty, minNotional, effectiveMark, ready, form]);
   return <div className="config-page">
+    {!adding && symbol && <AccountMarkBridge symbol={symbol} mode={pair?.mode} onMark={setLiveMark} />}
     <PageBreadcrumb disabled={edit.saving} items={adding
       ? [{ label: '策略总览', to: '/' }, { label: '新增交易对' }]
       : [{ label: '策略总览', to: '/' }, { label: symbol, to: `/pairs/${symbol}` }, { label: '策略参数' }]} />
@@ -259,14 +268,14 @@ export default function PairConfig() {
                   loading={symbols.isFetching}
                   disabled={formDisabled || symbols.isFetching || symbols.isError}
                   notFoundContent="没有匹配的交易对"
-                  options={(symbols.data ?? []).map(value => ({ value, label: value }))}
+                  options={symbolOptions}
                 />
               ) : (
                 <Input className="symbol-field" disabled />
               )}
             </Form.Item>
           </Col>
-          <Col xs={24} md={12}><Form.Item name="direction" label="交易方向" rules={[{ required: true }]}><Select options={[{ value: 'LONG', label: '做多 · 买入开仓 / 卖出平仓' }, { value: 'SHORT', label: '做空 · 卖出开仓 / 买入平仓' }]} /></Form.Item></Col>
+          <Col xs={24} md={12}><Form.Item name="direction" label="交易方向" rules={[{ required: true }]}><Select options={directionOptions} /></Form.Item></Col>
         </Row>
       </Card>
       <div className="config-editor-grid">

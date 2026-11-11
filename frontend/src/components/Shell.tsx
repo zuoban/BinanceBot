@@ -1,12 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, Outlet, useBlocker, useLocation } from 'react-router-dom';
 import { App, Button, Drawer } from 'antd';
 import { AppstoreOutlined, ArrowDownOutlined, ArrowUpOutlined, LineChartOutlined, LogoutOutlined, MenuOutlined, PlusOutlined, SearchOutlined, SettingOutlined } from '@ant-design/icons';
 import { useLiveAccounts, usePairs } from '../lib/queries';
 import { AccountsContext, EditContext, useSession } from '../lib/session';
-import { accountGroups, compactNumber, directionLabel, ratioText, SNAPSHOT_STALE_MS, statusLabel } from '../lib/format';
+import { compactNumber, directionLabel, ratioText, SNAPSHOT_STALE_MS, statusLabel } from '../lib/format';
 import type { AccountObservation, Mode, Pair } from '../lib/types';
-import { useExpired, useNow } from '../lib/useNow';
+import { useAccountGroups, useExpired } from '../lib/useNow';
 import { ControlProvider } from './Controls';
 import { PaletteHost, routeSymbol } from './CommandPalette';
 import { ThemeSegmented } from './ThemeSwitch';
@@ -14,8 +14,7 @@ import { defaultTitle, useDocumentTitle } from '../lib/documentTitle';
 import { ModeTag } from './Common';
 
 function ShellTitle({ accounts, alert, active }: { accounts: AccountObservation[]; alert: boolean; active: boolean }) {
-  const now = useNow();
-  const groups = useMemo(() => accountGroups(accounts, now), [accounts, now]);
+  const groups = useAccountGroups(accounts, active);
   const title = groups.length ? groups.map(group => `${compactNumber(group.equity)} | ${ratioText(group.ratio, true)}`).join(' / ') : defaultTitle;
   useDocumentTitle(active ? `${alert ? '[!] ' : ''}${title}` : null);
   return null;
@@ -86,7 +85,10 @@ export default function Shell() {
   useEffect(() => { setDrawer(false); }, [location.pathname]);
   const mode = pairs.data?.[0]?.mode;
   const page: SidebarProps['page'] = location.pathname.startsWith('/settings') ? 'settings' : location.pathname.startsWith('/pairs/') ? 'pair' : 'overview';
-  const sidebarProps = { pairs: currentPairs, pending: pairs.isPending, symbol, page, pathname: location.pathname, mode, authEnabled, saving, onNavigate: () => setDrawer(false), onSearch: () => { if (saving) return; setDrawer(false); setPalette(true); }, onLogout: () => void logOut() };
+  const closeDrawer = useCallback(() => setDrawer(false), []);
+  const openPalette = useCallback(() => { if (saving) return; setDrawer(false); setPalette(true); }, [saving]);
+  const handleLogout = useCallback(() => void logOut(), [logOut]);
+  const sidebarProps = { pairs: currentPairs, pending: pairs.isPending, symbol, page, pathname: location.pathname, mode, authEnabled, saving, onNavigate: closeDrawer, onSearch: openPalette, onLogout: handleLogout };
   return <EditContext.Provider value={context}><AccountsContext.Provider value={accounts}><ControlProvider pairs={currentPairs}><div className="app-layout">
     <ShellTitle accounts={accounts} alert={alert} active={!symbol || location.pathname.endsWith('/config')} />
     <a className="skip-link" href="#main">跳到主内容</a>
@@ -112,7 +114,7 @@ export default function Shell() {
 
 interface SidebarProps { idPrefix: string; pairs: Pair[] | undefined; pending: boolean; symbol: string | undefined; page: 'overview' | 'pair' | 'settings'; pathname: string; mode: Mode | undefined; authEnabled: boolean; saving: boolean; onNavigate: () => void; onSearch: () => void; onLogout: () => void }
 
-function SidebarBody({ idPrefix, pairs, pending, symbol, page, pathname, mode, authEnabled, saving, onNavigate, onSearch, onLogout }: SidebarProps) {
+const SidebarBody = memo(function SidebarBody({ idPrefix, pairs, pending, symbol, page, pathname, mode, authEnabled, saving, onNavigate, onSearch, onLogout }: SidebarProps) {
   const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/i.test((navigator as Navigator & { userAgentData?: { platform?: string } }).userAgentData?.platform ?? navigator.platform);
   const pairsRef = useRef<HTMLElement>(null);
   useEffect(() => {
@@ -153,4 +155,4 @@ function SidebarBody({ idPrefix, pairs, pending, symbol, page, pathname, mode, a
       </div>
     </div>
   </div>;
-}
+});

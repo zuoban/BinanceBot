@@ -4,7 +4,7 @@ import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxi
 import type { Snapshot } from '../lib/types';
 import { numeric, price, todayCount } from '../lib/format';
 import { priceDiffPercent } from '../lib/gridPreview';
-import { useNow } from '../lib/useNow';
+import { useExpired } from '../lib/useNow';
 import { NoData, useCenterElementScroll } from './Common';
 export function todayHourlyData(stats: NonNullable<Snapshot['hourly_trade_stats']>, now = Date.now()) {
   const start = Date.parse(stats.window_start);
@@ -17,9 +17,23 @@ export function todayHourlyData(stats: NonNullable<Snapshot['hourly_trade_stats'
   });
 }
 
+const barChartMargin = { top: 12, right: 12, bottom: 4, left: -12 };
+const barRadius: [number, number, number, number] = [2, 2, 0, 0];
+
+function sameHourlyStats(a: Snapshot['hourly_trade_stats'], b: Snapshot['hourly_trade_stats']) {
+  if (a === b) return true;
+  if (!a || !b || a.window_start !== b.window_start || a.buckets.length !== b.buckets.length) return false;
+  for (let i = 0; i < a.buckets.length; i++) {
+    const left = a.buckets[i], right = b.buckets[i];
+    if (left.hour_start !== right.hour_start || left.buy_count !== right.buy_count || left.sell_count !== right.sell_count) return false;
+  }
+  return true;
+}
+
 export const HourlyChart = memo(function HourlyChart({ snapshot, now: currentNow }: { snapshot: Snapshot; now?: number }) {
-  const fallbackNow = useNow(1000, currentNow === undefined);
-  const now = currentNow ?? fallbackNow;
+  const liveHour = Math.floor(Date.now() / 3600_000);
+  useExpired(currentNow === undefined ? (liveHour + 1) * 3600_000 - 1 : Infinity);
+  const now = currentNow ?? Date.now();
   return <HourlyChartContent stats={snapshot.hourly_trade_stats} hourBucket={Math.floor(now / 3600_000)} available={todayCount(snapshot, now) !== null} />;
 });
 
@@ -27,6 +41,10 @@ const HourlyChartContent = memo(function HourlyChartContent({ stats, hourBucket,
   const { token } = theme.useToken();
   const data = useMemo(() => stats ? todayHourlyData(stats, hourBucket * 3600_000) : [], [stats, hourBucket]);
   const axisTick = useMemo(() => ({ fontSize: 12, fontFamily: 'var(--font-mono)', fill: token.colorTextTertiary }), [token.colorTextTertiary]);
+  const tooltipCursor = useMemo(() => ({ fill: token.colorFillSecondary }), [token.colorFillSecondary]);
+  const tooltipContentStyle = useMemo(() => ({ background: token.colorBgElevated, borderColor: token.colorBorder, borderRadius: 8, boxShadow: 'var(--overlay-shadow)', color: token.colorText, fontSize: 12 }), [token.colorBgElevated, token.colorBorder, token.colorText]);
+  const tooltipLabelStyle = useMemo(() => ({ color: token.colorText, fontFamily: 'var(--font-mono)', fontWeight: 500, marginBottom: 4 }), [token.colorText]);
+  const tooltipItemStyle = useMemo(() => ({ fontFamily: 'var(--font-mono)' }), []);
   if (!available) return <NoData />;
   return <>
     <div className="chart-caption-row">
@@ -34,16 +52,16 @@ const HourlyChartContent = memo(function HourlyChartContent({ stats, hourBucket,
       <span className="chart-legend" aria-hidden="true"><span className="chart-legend-item"><i className="chart-dot chart-dot-buy" />买入</span><span className="chart-legend-item"><i className="chart-dot chart-dot-sell" />卖出</span></span>
     </div>
     <div className="chart hourly-chart" role="region" aria-label="北京时间今日每小时成交笔数"><ResponsiveContainer width="100%" height={264}>
-      <BarChart accessibilityLayer data={data} barGap={2} maxBarSize={12} margin={{ top: 12, right: 12, bottom: 4, left: -12 }}>
+      <BarChart accessibilityLayer data={data} barGap={2} maxBarSize={12} margin={barChartMargin}>
         <CartesianGrid vertical={false} stroke={token.colorBorderSecondary} />
         <XAxis dataKey="hour" interval="preserveStartEnd" minTickGap={24} tickLine={false} axisLine={false} tick={axisTick} />
         <YAxis allowDecimals={false} axisLine={false} tickLine={false} tick={axisTick} />
-        <Tooltip cursor={{ fill: token.colorFillSecondary }} contentStyle={{ background: token.colorBgElevated, borderColor: token.colorBorder, borderRadius: 8, boxShadow: 'var(--overlay-shadow)', color: token.colorText, fontSize: 12 }} labelStyle={{ color: token.colorText, fontFamily: 'var(--font-mono)', fontWeight: 500, marginBottom: 4 }} itemStyle={{ fontFamily: 'var(--font-mono)' }} />
-        <Bar dataKey="买入" fill={token.colorSuccess} radius={[2, 2, 0, 0]} /><Bar dataKey="卖出" fill={token.colorError} radius={[2, 2, 0, 0]} />
+        <Tooltip cursor={tooltipCursor} contentStyle={tooltipContentStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle} />
+        <Bar dataKey="买入" fill={token.colorSuccess} radius={barRadius} isAnimationActive={false} /><Bar dataKey="卖出" fill={token.colorError} radius={barRadius} isAnimationActive={false} />
       </BarChart>
     </ResponsiveContainer></div>
   </>;
-});
+}, (prev, next) => prev.available === next.available && prev.hourBucket === next.hourBucket && sameHourlyStats(prev.stats, next.stats));
 export const DepthChart = memo(function DepthChart({ snapshot }: { snapshot: Snapshot }) {
   const orders = snapshot.active_orders;
   const containerRef = useRef<HTMLDivElement>(null);
@@ -57,13 +75,13 @@ export const DepthChart = memo(function DepthChart({ snapshot }: { snapshot: Sna
       else sell++;
     }
     const sorted = orders
-      .map(order => ({ kind: 'order' as const, value: numeric(order.price) ?? -Infinity, order }))
+      .map(order => ({ kind: 'order' as const, value: numeric(order.price) ?? -Infinity, order, priceText: price(order.price), qtyText: price(order.quantity) }))
       .sort((a, b) => b.value - a.value);
     return { buyCount: buy, sellCount: sell, orderRows: sorted };
   }, [orders]);
   const rows = useMemo(() => {
     if (!hasMark) return orderRows;
-    const result: ({ kind: 'order'; value: number; order: typeof orders[number] } | { kind: 'mark'; value: number })[] = [...orderRows];
+    const result: (typeof orderRows[number] | { kind: 'mark'; value: number })[] = [...orderRows];
     const insertIdx = result.findIndex(r => r.value < mark);
     if (insertIdx === -1) result.push({ kind: 'mark', value: mark });
     else result.splice(insertIdx, 0, { kind: 'mark', value: mark });
@@ -77,7 +95,7 @@ export const DepthChart = memo(function DepthChart({ snapshot }: { snapshot: Sna
         if (row.kind === 'mark') return <div className="grid-level grid-level-mark" key="mark"><span>标记价</span><span className="grid-level-line" /><strong>{price(row.value)}</strong></div>;
         const diff = hasMark ? priceDiffPercent(row.order.price, snapshot.ticker.mark_price) : null;
         return <div className={`grid-level grid-level-${row.order.side.toLowerCase()}`} key={row.order.client_order_id}>
-          <span>{row.order.side === 'BUY' ? '买单' : '卖单'} <span className="grid-level-quantity">{price(row.order.quantity)}</span></span><span className="grid-level-line" />{diff && <span className="grid-level-diff">{diff}</span>}<strong>{price(row.order.price)}</strong>
+          <span>{row.order.side === 'BUY' ? '买单' : '卖单'} <span className="grid-level-quantity">{row.qtyText}</span></span><span className="grid-level-line" />{diff && <span className="grid-level-diff">{diff}</span>}<strong>{row.priceText}</strong>
         </div>;
       })}
     </div>

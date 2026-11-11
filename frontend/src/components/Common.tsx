@@ -5,7 +5,8 @@ import { Link } from 'react-router-dom';
 import { EditContext } from '../lib/session';
 import type { GridConfig, Mode, Status } from '../lib/types';
 type Direction = GridConfig['direction'];
-import { compactNumber, directionLabel, modeLabel, number, numeric, statusLabel } from '../lib/format';
+import { ageText, compactNumber, directionLabel, modeLabel, number, numeric, sig3Format, statusLabel } from '../lib/format';
+import { useNow } from '../lib/useNow';
 export function ErrorNotice({ error, retry }: { error: Error | null; retry?: () => void }) {
   if (!error) return null;
   return <Alert type="error" showIcon title={error.message} action={retry && <Button size="small" onClick={retry} icon={<ReloadOutlined />}>重试</Button>} />;
@@ -61,7 +62,7 @@ export function DirectionText({ direction }: { direction: Direction }) {
 export function Pnl({ value, compact = false }: { value: unknown; compact?: boolean }) {
   const n = numeric(value);
   if (compact && n !== null && Math.abs(n) > 0 && Math.abs(n) < 0.01) {
-    return <span className={n < 0 ? 'negative numeric' : 'positive numeric'}>{n.toLocaleString('en-US', { maximumSignificantDigits: 3 })}</span>;
+    return <span className={n < 0 ? 'negative numeric' : 'positive numeric'}>{sig3Format.format(n)}</span>;
   }
   const text = compact ? compactNumber(value) : number(value);
   return <span className={text === '--' ? 'numeric' : text.startsWith('-') ? 'negative numeric' : 'positive numeric'}>{text}</span>;
@@ -138,4 +139,9 @@ export function FormRevertButton({ activeRef, onRevert, onReset }: {
       running.current = false;
     }
   }}>还原</Button>;
+}
+
+export function FreshnessText({ updatedAt, prefix }: { updatedAt: number; prefix: string }) {
+  const now = useNow(1000, updatedAt > 0);
+  return <>{prefix}{ageText(updatedAt, now)}</>;
 }

@@ -6,7 +6,7 @@ import { createBrowserRouter, RouterProvider } from 'react-router-dom';
 import { api, ApiError, post, tokenStore } from './lib/api';
 import type { AuthStatus } from './lib/types';
 import { SessionContext } from './lib/session';
-import Login from './pages/Login';
+const Login = lazy(() => import('./pages/Login'));
 import { DetailPageLoading, LoadingScreen, OverviewPageLoading, PageLoading } from './components/Loading';
 import { LoadErrorBoundary } from './components/LoadErrorBoundary';
 import { ThemeProvider } from './lib/theme';
@@ -50,7 +50,7 @@ function Root() {
   if (authStatus.isPending) return <LoadingScreen label={loggedIn ? '正在验证会话' : '正在连接控制台'} />;
   if (authStatus.error && !authStatus.data) return <div className="loading-screen" role="alert"><div className="loading-brand"><img className="brand-symbol" src="/logo.svg" alt="" /><span>Grid Console<small>Strategy Workspace</small></span></div><p>无法连接后端服务：{authStatus.error.message}</p><Button onClick={() => void authStatus.refetch()}>重试</Button></div>;
   if (!authEnabled) return <SessionContext.Provider value={session}><RouterProvider router={router} /></SessionContext.Provider>;
-  return <SessionContext.Provider value={session}>{loggedIn && authStatus.data?.authenticated ? <RouterProvider router={router} /> : <Login onLogin={() => { client.clear(); setLoggedIn(true); }} />}</SessionContext.Provider>;
+  return <SessionContext.Provider value={session}>{loggedIn && authStatus.data?.authenticated ? <RouterProvider router={router} /> : page(<Login onLogin={() => { client.clear(); setLoggedIn(true); }} />, '登录页', <LoadingScreen label="正在加载登录页" />)}</SessionContext.Provider>;
 }
 
 ReactDOM.createRoot(document.getElementById('root')!).render(

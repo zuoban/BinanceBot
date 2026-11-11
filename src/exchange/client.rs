@@ -1,7 +1,7 @@
 use crate::config::ExchangeConfig;
 use crate::exchange::model::*;
 use crate::exchange::rate_limit::{RateLimiter, RequestClass};
-use crate::exchange::signature::sign_query;
+use crate::exchange::signature::{new_hmac_key, HmacSha256};
 use anyhow::{anyhow, Result};
 use chrono::Utc;
 use reqwest::header::HeaderValue;
@@ -196,21 +196,19 @@ impl Drop for FillCacheCleanup<'_> {
 }
 
 fn shared_http_client() -> Client {
-    static CLIENT: std::sync::OnceLock<Client> = std::sync::OnceLock::new();
-    CLIENT
-        .get_or_init(|| {
-            Client::builder()
-                .timeout(Duration::from_secs(10))
-                .build()
-                .expect("Failed to build HTTP client")
-        })
-        .clone()
+    static CLIENT: std::sync::LazyLock<Client> = std::sync::LazyLock::new(|| {
+        Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .expect("Failed to build HTTP client")
+    });
+    CLIENT.clone()
 }
 
 pub struct BinanceFuturesClient {
     base_url: String,
     api_key_header: Option<HeaderValue>,
-    api_secret: String,
+    hmac_key: HmacSha256,
     client: Client,
     recv_window: u64,
     account_cache_key: [u8; 32],
@@ -281,7 +279,7 @@ impl BinanceFuturesClient {
         Self {
             base_url,
             api_key_header,
-            api_secret: config.api_secret.clone(),
+            hmac_key: new_hmac_key(&config.api_secret),
             client: shared_http_client(),
             recv_window: config.recv_window,
             account_cache_key,
@@ -326,22 +324,32 @@ impl BinanceFuturesClient {
         Utc::now().timestamp_millis() + self.time_offset_ms.load(Ordering::SeqCst)
     }
 
-    fn sign_params(&self, params: &str) -> String {
-        let signature = sign_query(&self.api_secret, params);
-        format!("{}&signature={}", params, signature)
-    }
-
     fn signed_url(&self, path: &str, params: &str) -> String {
+        use std::fmt::Write;
         let ts = self.current_timestamp();
-        let query = if params.is_empty() {
-            format!("recvWindow={}&timestamp={}", self.recv_window, ts)
+        let mut url = String::with_capacity(self.base_url.len() + path.len() + params.len() + 128);
+        url.push_str(&self.base_url);
+        url.push_str(path);
+        url.push('?');
+        let query_start = url.len();
+        if params.is_empty() {
+            let _ = write!(url, "recvWindow={}&timestamp={}", self.recv_window, ts);
         } else {
-            format!(
+            let _ = write!(
+                url,
                 "{}&recvWindow={}&timestamp={}",
                 params, self.recv_window, ts
-            )
-        };
-        format!("{}{}?{}", self.base_url, path, self.sign_params(&query))
+            );
+        }
+        let mut mac = self.hmac_key.clone();
+        use hmac::Mac;
+        mac.update(&url.as_bytes()[query_start..]);
+        let digest = mac.finalize().into_bytes();
+        let mut hex_buf = [0u8; 64];
+        hex::encode_to_slice(digest, &mut hex_buf).expect("SHA-256 digest is 32 bytes");
+        url.push_str("&signature=");
+        url.push_str(std::str::from_utf8(&hex_buf).expect("hex is valid ASCII"));
+        url
     }
 
     fn hash_length_prefixed(parts: &[&[u8]]) -> [u8; 32] {

@@ -1,9 +1,10 @@
+import { useMemo } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { Alert, Button, Card, Col, Descriptions, Row, Statistic, Tabs } from 'antd';
 import { SettingOutlined } from '@ant-design/icons';
 import { usePairSnapshot, usePairs } from '../lib/queries';
-import { accountGroups, cnyText, entryPriceText, number, numeric, positivePrice, price, quoteAsset, ageText, ratioText, todayTradeCounts, trimFractionZeros } from '../lib/format';
-import { ControlResultBanner, DirectionTag, DirectionText, ErrorNotice, ModeTag, PageBreadcrumb, PageTitle, Pnl, SignalChip, StatusTag } from '../components/Common';
+import { beijingClockFormat, cnyText, entryPriceText, number, numeric, positivePrice, price, quoteAsset, ratioText, todayTradeCounts, trimFractionZeros } from '../lib/format';
+import { ControlResultBanner, DirectionTag, DirectionText, ErrorNotice, FreshnessText, ModeTag, PageBreadcrumb, PageTitle, Pnl, SignalChip, StatusTag } from '../components/Common';
 import { PairControls, useControls } from '../components/Controls';
 import { DepthChart, HourlyChart } from '../components/Charts';
 import { LogsTable, OrdersTable, TradesTable } from '../components/DataTables';
@@ -11,7 +12,7 @@ import { HistoryActions } from '../components/HistoryActions';
 import { DetailLoading } from '../components/Loading';
 import { useDocumentTitle } from '../lib/documentTitle';
 import { useUrlParam } from '../lib/urlState';
-
+import { useAccountGroups, useBeijingDay } from '../lib/useNow';
 export default function PairDetail() {
   const { symbol } = useParams();
   const navigate = useNavigate();
@@ -19,11 +20,12 @@ export default function PairDetail() {
   const pair = pairs.data?.find(p => p.symbol === symbol);
   const query = usePairSnapshot(pair);
   const controls = useControls();
-  const now = query.now;
+  const dayNow = useBeijingDay();
   const [tab, setTab] = useUrlParam<string>('tab', 'monitor', ['monitor', 'orders', 'trades', 'logs']);
   const s = query.data, asset = quoteAsset(symbol ?? '');
-  const account = s && pair ? accountGroups([{ snapshot: s, mode: s.mode, account_observation_stale: query.stale }], now)[0] : undefined;
-  const today = s ? todayTradeCounts(s, now) : null;
+  const accountEntries = useMemo(() => s && pair ? [{ snapshot: s, mode: s.mode, account_observation_stale: query.stale }] : [], [s, pair, query.stale]);
+  const account = useAccountGroups(accountEntries, !!s && !!pair)[0];
+  const today = useMemo(() => s ? todayTradeCounts(s, dayNow) : null, [s, dayNow]);
   useDocumentTitle(`${positivePrice(s?.ticker.mark_price)} | ${today?.buy ?? '--'}B | ${today?.sell ?? '--'}S`);
   const todayPnl = today && s?.hourly_trade_stats && s.hourly_trade_stats.pending_pnl_count === 0 ? s.hourly_trade_stats.realized_pnl : null;
   const realizedPnl = numeric(s?.stats.total_realized_pnl), commission = numeric(s?.stats.total_commission);
@@ -36,7 +38,7 @@ export default function PairDetail() {
     <ErrorNotice error={pairs.error || query.error} retry={() => { void pairs.refetch(); void query.refetch(); }} />
     {pairs.data && !pair && <Alert type="warning" title="该交易对不存在或已移除" />}
     {symbol && <ControlResultBanner symbol={symbol} results={controls.results} clearResult={controls.clearResult} variant="alert" />}
-    {pair && <div className="detail-status signal-strip"><StatusTag status={currentPair!.status} /><DirectionTag direction={currentPair!.grid_config.direction} /><ModeTag mode={currentPair!.mode} /><SignalChip tier={query.live ? 'calm' : 'yellow'}>{query.live ? '实时连接' : 'HTTP 自动刷新'}</SignalChip><span className="muted freshness" title={query.dataUpdatedAt ? `最近同步 ${new Date(query.dataUpdatedAt).toLocaleTimeString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' })}` : undefined}>{query.dataUpdatedAt ? `更新于 ${ageText(query.dataUpdatedAt, now)}` : '等待首次快照'}</span></div>}
+    {pair && <div className="detail-status signal-strip"><StatusTag status={currentPair!.status} /><DirectionTag direction={currentPair!.grid_config.direction} /><ModeTag mode={currentPair!.mode} /><SignalChip tier={query.live ? 'calm' : 'yellow'}>{query.live ? '实时连接' : 'HTTP 自动刷新'}</SignalChip><span className="muted freshness" title={query.dataUpdatedAt ? `最近同步 ${beijingClockFormat.format(query.dataUpdatedAt)}` : undefined}>{query.dataUpdatedAt ? <FreshnessText updatedAt={query.dataUpdatedAt} prefix="更新于 " /> : '等待首次快照'}</span></div>}
     {query.stale && s && <Alert type="warning" showIcon title="快照暂未更新，数值可能已过期；仍可撤单并暂停。" />}
     {!s && (pairs.isPending || (pair && query.isPending)) && <DetailLoading />}
     {s && <>
@@ -53,7 +55,7 @@ export default function PairDetail() {
             <div><span>买入</span><strong>{today?.buy ?? '--'} <small>笔</small></strong></div>
             <div><span>卖出</span><strong>{today?.sell ?? '--'} <small>笔</small></strong></div>
             <div><span>已实现盈亏 / {asset}</span><strong><Pnl value={todayPnl} compact /></strong>{today && s.hourly_trade_stats!.pending_pnl_count > 0 && <small className="pending-pnl-warn">盈亏待同步</small>}</div>
-          </div><HourlyChart snapshot={s} now={now} /></Card></Col>
+          </div><HourlyChart snapshot={s} /></Card></Col>
             <Col xs={24} xl={10}><Card title="实时网格深度" extra={<span className="muted">价格 / {asset} · 数量</span>}><DepthChart snapshot={s} /></Card></Col></Row>
           <Card title="仓位与策略明细" className="detail-card"><Descriptions column={{ xs: 1, sm: 2, lg: 3 }} items={[
             { key: 'direction', label: '方向', children: <DirectionText direction={s.grid_config.direction} /> },
@@ -71,7 +73,7 @@ export default function PairDetail() {
           ]} /></Card>
         </> },
         { key: 'orders', label: `挂单 (${s.active_orders.length})`, children: <Card><OrdersTable key={symbol} orders={s.active_orders} mark={s.ticker.mark_price} /></Card> },
-        { key: 'trades', label: '成交历史', children: <Card title="最近成交" extra={pair ? <HistoryActions key={pair.symbol} symbol={pair.symbol} /> : null}><Alert type="info" title={`此处展示当前模式的最近成交；导出和清理作用于 ${symbol ?? ''} 的全部模式。`} /><TradesTable key={symbol} trades={s.recent_trades} now={now} /></Card> },
+        { key: 'trades', label: '成交历史', children: <Card title="最近成交" extra={pair ? <HistoryActions key={pair.symbol} symbol={pair.symbol} /> : null}><Alert type="info" title={`此处展示当前模式的最近成交；导出和清理作用于 ${symbol ?? ''} 的全部模式。`} /><TradesTable key={symbol} trades={s.recent_trades} /></Card> },
         { key: 'logs', label: '运行日志', children: <Card><LogsTable key={symbol} logs={s.recent_logs} /></Card> },
       ]} />
     </>}

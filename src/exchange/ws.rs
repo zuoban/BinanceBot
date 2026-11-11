@@ -1,9 +1,9 @@
-use crate::exchange::model::{BinanceWs24hrTicker, BinanceWsMarkPrice};
 use crate::types::TickerInfo;
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use rust_decimal::Decimal;
-use serde_json::Value;
+use serde::Deserialize;
+use std::borrow::Cow;
 use std::time::Duration;
 use tokio::sync::{broadcast, watch};
 use tokio::time::sleep;
@@ -35,51 +35,56 @@ fn stream_matches_symbol(stream: Option<&str>, suffix: &str, symbol: &str) -> bo
     })
 }
 
-fn decode_24hr_ticker_event(payload: Value, symbol: &str) -> Option<(i64, TickerInfo)> {
-    let msg: BinanceWs24hrTicker = serde_json::from_value(payload).ok()?;
-    if msg.event_type != "24hrTicker"
-        || !msg.symbol.eq_ignore_ascii_case(symbol)
-        || msg.close_price <= Decimal::ZERO
-    {
-        return None;
-    }
-    let change = msg.close_price - msg.open_price;
-    let change_pct = if msg.open_price.is_zero() {
-        Decimal::ZERO
-    } else {
-        change / msg.open_price * rust_decimal_macros::dec!(100)
-    };
-    Some((
-        msg.event_time,
-        TickerInfo {
-            symbol: symbol.to_string(),
-            last_price: msg.close_price,
-            high_24h: msg.high_price,
-            low_24h: msg.low_price,
-            change_24h: change,
-            change_percent_24h: change_pct,
-            volume_24h: msg.volume,
-            ..Default::default()
-        },
-    ))
+#[derive(Deserialize)]
+struct WsMarketFields<'a> {
+    #[serde(borrow, rename = "e")]
+    event_type: Cow<'a, str>,
+    #[serde(rename = "E")]
+    event_time: i64,
+    #[serde(borrow, rename = "s")]
+    symbol: Cow<'a, str>,
+    #[serde(default, rename = "c")]
+    close_price: Option<Decimal>,
+    #[serde(default, rename = "o")]
+    open_price: Option<Decimal>,
+    #[serde(default, rename = "h")]
+    high_price: Option<Decimal>,
+    #[serde(default, rename = "l")]
+    low_price: Option<Decimal>,
+    #[serde(default, rename = "v")]
+    volume: Option<Decimal>,
+    #[serde(default, rename = "q")]
+    quote_volume: Option<Decimal>,
+    #[serde(default, rename = "p")]
+    price_field: Option<Decimal>,
 }
 
-fn decode_mark_price_event(payload: Value, symbol: &str) -> Option<(i64, TickerInfo)> {
-    let msg: BinanceWsMarkPrice = serde_json::from_value(payload).ok()?;
-    if msg.event_type != "markPriceUpdate"
-        || !msg.symbol.eq_ignore_ascii_case(symbol)
-        || msg.mark_price <= Decimal::ZERO
-    {
-        return None;
-    }
-    Some((
-        msg.event_time,
-        TickerInfo {
-            symbol: symbol.to_string(),
-            mark_price: msg.mark_price,
-            ..Default::default()
-        },
-    ))
+#[derive(Deserialize)]
+struct WsRawFrame<'a> {
+    #[serde(borrow, default)]
+    stream: Option<Cow<'a, str>>,
+    #[serde(borrow, default)]
+    data: Option<WsMarketFields<'a>>,
+    #[serde(borrow, default, rename = "e")]
+    event_type: Option<Cow<'a, str>>,
+    #[serde(default, rename = "E")]
+    event_time: Option<i64>,
+    #[serde(borrow, default, rename = "s")]
+    symbol: Option<Cow<'a, str>>,
+    #[serde(default, rename = "c")]
+    close_price: Option<Decimal>,
+    #[serde(default, rename = "o")]
+    open_price: Option<Decimal>,
+    #[serde(default, rename = "h")]
+    high_price: Option<Decimal>,
+    #[serde(default, rename = "l")]
+    low_price: Option<Decimal>,
+    #[serde(default, rename = "v")]
+    volume: Option<Decimal>,
+    #[serde(default, rename = "q")]
+    quote_volume: Option<Decimal>,
+    #[serde(default, rename = "p")]
+    price_field: Option<Decimal>,
 }
 
 fn parse_market_update(
@@ -88,44 +93,82 @@ fn parse_market_update(
     now: DateTime<Utc>,
     times: &mut EventTimes,
 ) -> Option<TickerInfo> {
-    let mut payload: Value = serde_json::from_str(text).ok()?;
-    let stream = payload
-        .get("stream")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    if stream.is_some() {
-        payload = payload.get_mut("data").map(Value::take)?;
-    }
-    let event_type = payload.get("e")?.as_str()?;
-    let (event_time, info, last_time) = match event_type {
-        "24hrTicker" if stream_matches_symbol(stream.as_deref(), "@ticker", symbol) => {
-            let (event_time, info) = decode_24hr_ticker_event(payload, symbol)?;
-            (event_time, info, &mut times.ticker)
+    let raw: WsRawFrame<'_> = serde_json::from_str(text).ok()?;
+    let stream = raw.stream;
+    let fields = if stream.is_some() {
+        raw.data?
+    } else {
+        WsMarketFields {
+            event_type: raw.event_type?,
+            event_time: raw.event_time?,
+            symbol: raw.symbol?,
+            close_price: raw.close_price,
+            open_price: raw.open_price,
+            high_price: raw.high_price,
+            low_price: raw.low_price,
+            volume: raw.volume,
+            quote_volume: raw.quote_volume,
+            price_field: raw.price_field,
         }
-        "markPriceUpdate" if stream_matches_symbol(stream.as_deref(), "@markPrice@1s", symbol) => {
-            let (event_time, info) = decode_mark_price_event(payload, symbol)?;
-            (event_time, info, &mut times.mark)
-        }
-        _ => return None,
     };
-    let event_at = DateTime::from_timestamp_millis(event_time)?;
-    let age = now.signed_duration_since(event_at);
-    if age < chrono::Duration::seconds(-2)
-        || age >= chrono::Duration::seconds(15)
-        || last_time.is_some_and(|last| event_time <= last)
-    {
+    if !fields.symbol.eq_ignore_ascii_case(symbol) {
         return None;
     }
-    *last_time = Some(event_time);
-    let mut info = info;
+    let event_at = DateTime::from_timestamp_millis(fields.event_time)?;
+    let age = now.signed_duration_since(event_at);
+    if age < chrono::Duration::seconds(-2) || age >= chrono::Duration::seconds(15) {
+        return None;
+    }
     let observed_at = event_at.min(now);
-    if info.last_price > Decimal::ZERO {
-        info.update_time = observed_at;
+    match fields.event_type.as_ref() {
+        "24hrTicker" if stream_matches_symbol(stream.as_deref(), "@ticker", symbol) => {
+            let close_price = fields.close_price?;
+            let open_price = fields.open_price?;
+            let high_price = fields.high_price?;
+            let low_price = fields.low_price?;
+            let volume = fields.volume?;
+            let _ = fields.quote_volume?;
+            if close_price <= Decimal::ZERO
+                || times.ticker.is_some_and(|last| fields.event_time <= last)
+            {
+                return None;
+            }
+            times.ticker = Some(fields.event_time);
+            let change = close_price - open_price;
+            let change_pct = if open_price.is_zero() {
+                Decimal::ZERO
+            } else {
+                change / open_price * rust_decimal_macros::dec!(100)
+            };
+            Some(TickerInfo {
+                symbol: symbol.to_string(),
+                last_price: close_price,
+                high_24h: high_price,
+                low_24h: low_price,
+                change_24h: change,
+                change_percent_24h: change_pct,
+                volume_24h: volume,
+                update_time: observed_at,
+                ..Default::default()
+            })
+        }
+        "markPriceUpdate" if stream_matches_symbol(stream.as_deref(), "@markPrice@1s", symbol) => {
+            let mark_price = fields.price_field?;
+            if mark_price <= Decimal::ZERO
+                || times.mark.is_some_and(|last| fields.event_time <= last)
+            {
+                return None;
+            }
+            times.mark = Some(fields.event_time);
+            Some(TickerInfo {
+                symbol: symbol.to_string(),
+                mark_price,
+                mark_update_time: observed_at,
+                ..Default::default()
+            })
+        }
+        _ => None,
     }
-    if info.mark_price > Decimal::ZERO {
-        info.mark_update_time = observed_at;
-    }
-    Some(info)
 }
 
 impl BinanceWsStream {

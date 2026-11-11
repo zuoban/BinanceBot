@@ -30,6 +30,16 @@ pub struct TelegramNotifier {
 }
 
 impl TelegramNotifier {
+    pub fn shared_client() -> Client {
+        static CLIENT: std::sync::LazyLock<Client> = std::sync::LazyLock::new(|| {
+            Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .expect("Failed to build Telegram HTTP client")
+        });
+        CLIENT.clone()
+    }
+
     pub fn new(client: Client) -> Self {
         Self {
             client,

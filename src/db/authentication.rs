@@ -50,10 +50,10 @@ impl Database {
     pub fn create_session(&self, token: &str) -> Result<()> {
         let conn = self.lock_connection("create_session");
         self.session_cache.remove(token);
-        conn.execute(
+        conn.prepare_cached(
             "INSERT OR REPLACE INTO auth_sessions (token, created_at) VALUES (?1, ?2);",
-            params![token, Utc::now().to_rfc3339()],
-        )
+        )?
+        .execute(params![token, Utc::now().to_rfc3339()])
         .context("Failed to insert session token into SQLite database")?;
         Ok(())
     }
@@ -61,11 +61,8 @@ impl Database {
     pub fn is_session_valid(&self, token: &str) -> Result<bool> {
         let conn = self.lock_connection("is_session_valid");
         let created: Option<String> = conn
-            .query_row(
-                "SELECT created_at FROM auth_sessions WHERE token = ?1;",
-                params![token],
-                |row| row.get(0),
-            )
+            .prepare_cached("SELECT created_at FROM auth_sessions WHERE token = ?1;")?
+            .query_row(params![token], |row| row.get(0))
             .optional()?;
         let Some(created) = created else {
             self.session_cache.remove(token);
@@ -78,10 +75,10 @@ impl Database {
             self.session_cache.insert(token);
         } else {
             self.session_cache.remove(token);
-            if let Err(error) = conn.execute(
-                "DELETE FROM auth_sessions WHERE token = ?1;",
-                params![token],
-            ) {
+            if let Err(error) = conn
+                .prepare_cached("DELETE FROM auth_sessions WHERE token = ?1;")
+                .and_then(|mut stmt| stmt.execute(params![token]))
+            {
                 tracing::warn!(%error, "Failed to delete expired session");
             }
         }
@@ -91,11 +88,9 @@ impl Database {
     pub fn delete_session(&self, token: &str) -> Result<()> {
         let conn = self.lock_connection("delete_session");
         self.session_cache.remove(token);
-        conn.execute(
-            "DELETE FROM auth_sessions WHERE token = ?1;",
-            params![token],
-        )
-        .context("Failed to delete session token from SQLite database")?;
+        conn.prepare_cached("DELETE FROM auth_sessions WHERE token = ?1;")?
+            .execute(params![token])
+            .context("Failed to delete session token from SQLite database")?;
         Ok(())
     }
 

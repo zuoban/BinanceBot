@@ -320,13 +320,22 @@ impl Database {
             }),
             "SQLite journal mode is {journal_mode}, expected WAL"
         );
-        conn.execute_batch("PRAGMA synchronous = FULL;")
-            .context("Failed to configure SQLite synchronous mode")?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .context("Failed to configure SQLite busy timeout")?;
+        conn.set_prepared_statement_cache_capacity(64);
+        conn.execute_batch(
+            "PRAGMA synchronous = FULL;
+             PRAGMA temp_store = MEMORY;
+             PRAGMA cache_size = -16000;",
+        )
+        .context("Failed to configure SQLite synchronous mode")?;
+        if path_str != ":memory:" {
+            let _ = conn.execute_batch("PRAGMA mmap_size = 67108864;");
+        }
         let synchronous: i64 = conn
             .query_row("PRAGMA synchronous", [], |row| row.get(0))
             .context("Failed to read SQLite synchronous mode")?;
         anyhow::ensure!(synchronous == 2, "SQLite synchronous mode is not FULL");
-
         let db = Self {
             conn: Mutex::new(conn),
             path: path_str,
@@ -413,7 +422,7 @@ impl Database {
     ) -> Result<Vec<crate::snapshots::HourlySnapshot>> {
         let raw_rows: Vec<(i64, String)> = {
             let conn = self.lock_connection("hourly_account_snapshots");
-            let mut statement = conn.prepare(
+            let mut statement = conn.prepare_cached(
                 "SELECT hour, payload FROM account_hourly_snapshots WHERE hour >= ?1 ORDER BY hour",
             )?;
             let rows = statement.query_map(params![since], |row| {
@@ -473,8 +482,9 @@ impl Database {
     pub fn daily_snapshots(&self, limit: usize) -> Result<Vec<crate::snapshots::DailySnapshot>> {
         let raw_rows: Vec<String> = {
             let conn = self.lock_connection("daily_snapshots");
-            let mut statement =
-                conn.prepare("SELECT payload FROM daily_snapshots ORDER BY date DESC LIMIT ?1")?;
+            let mut statement = conn.prepare_cached(
+                "SELECT payload FROM daily_snapshots ORDER BY date DESC LIMIT ?1",
+            )?;
             let rows = statement.query_map(params![limit as i64], |row| row.get::<_, String>(0))?;
             rows.collect::<rusqlite::Result<_>>()?
         };
@@ -1118,10 +1128,10 @@ impl Database {
 
     pub fn clear_execution_guard(&self, symbol: &str, mode: TradingMode) -> Result<()> {
         let conn = self.lock_connection("clear_execution_guard");
-        conn.execute(
+        conn.prepare_cached(
             "UPDATE pair_execution_guard SET dirty = 0 WHERE symbol = ?1 AND mode = ?2",
-            params![symbol, mode.as_str()],
-        )?;
+        )?
+        .execute(params![symbol, mode.as_str()])?;
         Ok(())
     }
 
@@ -1335,7 +1345,7 @@ impl Database {
 
     pub fn load_pair_intents(&self, symbol: &str, mode: TradingMode) -> Result<Vec<GridOrder>> {
         let conn = self.lock_connection("load_pair_intents");
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT order_json FROM pair_intents WHERE symbol = ?1 AND mode = ?2 ORDER BY created_at;",
         )?;
         let rows = stmt.query_map(params![symbol, mode.as_str()], |row| {
@@ -1346,10 +1356,8 @@ impl Database {
 
     pub fn delete_pair_intent(&self, parent_client_order_id: &str) -> Result<()> {
         let conn = self.lock_connection("delete_pair_intent");
-        conn.execute(
-            "DELETE FROM pair_intents WHERE parent_client_order_id = ?1;",
-            params![parent_client_order_id],
-        )?;
+        conn.prepare_cached("DELETE FROM pair_intents WHERE parent_client_order_id = ?1;")?
+            .execute(params![parent_client_order_id])?;
         Ok(())
     }
 
@@ -1368,10 +1376,10 @@ impl Database {
             crate::types::RemainderPhase::Canceling | crate::types::RemainderPhase::Submitting
         );
         let conn = self.lock_connection("save_remainder_plan");
-        conn.execute(
+        conn.prepare_cached(
             "INSERT INTO remainder_plans (target_client_order_id, symbol, mode, active, plan_json, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(target_client_order_id) DO UPDATE SET active = excluded.active, plan_json = excluded.plan_json, updated_at = excluded.updated_at;",
-            params![plan.target.client_order_id, plan.symbol, plan.mode.as_str(), active, serde_json::to_string(plan)?, Utc::now().to_rfc3339()],
-        )?;
+        )?
+        .execute(params![plan.target.client_order_id, plan.symbol, plan.mode.as_str(), active, serde_json::to_string(plan)?, Utc::now().to_rfc3339()])?;
         Ok(())
     }
 
@@ -1381,10 +1389,12 @@ impl Database {
         mode: TradingMode,
     ) -> Result<Option<RemainderPlan>> {
         let conn = self.lock_connection("load_remainder_plan");
-        let json: Option<String> = conn.query_row(
-            "SELECT plan_json FROM remainder_plans WHERE symbol = ?1 AND mode = ?2 AND active = 1;",
-            params![symbol, mode.as_str()], |row| row.get(0),
-        ).optional()?;
+        let json: Option<String> = conn
+            .prepare_cached(
+                "SELECT plan_json FROM remainder_plans WHERE symbol = ?1 AND mode = ?2 AND active = 1;",
+            )?
+            .query_row(params![symbol, mode.as_str()], |row| row.get(0))
+            .optional()?;
         json.map(|json| serde_json::from_str(&json).map_err(Into::into))
             .transpose()
     }
@@ -1392,10 +1402,10 @@ impl Database {
     pub fn save_managed_order(&self, order: &GridOrder) -> Result<()> {
         let json = serde_json::to_string(order)?;
         let conn = self.lock_connection("save_managed_order");
-        conn.execute(
+        conn.prepare_cached(
             "INSERT INTO managed_orders (client_order_id, symbol, order_json, updated_at) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(client_order_id) DO UPDATE SET symbol = excluded.symbol, order_json = excluded.order_json, updated_at = excluded.updated_at;",
-            params![order.client_order_id, order.symbol, json, Utc::now().to_rfc3339()],
-        )?;
+        )?
+        .execute(params![order.client_order_id, order.symbol, json, Utc::now().to_rfc3339()])?;
         Ok(())
     }
 
@@ -1403,7 +1413,7 @@ impl Database {
         let mut conn = self.lock_connection("save_managed_orders");
         let tx = conn.transaction()?;
         {
-            let mut statement = tx.prepare(
+            let mut statement = tx.prepare_cached(
                 "INSERT INTO managed_orders (client_order_id, symbol, order_json, updated_at) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(client_order_id) DO UPDATE SET symbol = excluded.symbol, order_json = excluded.order_json, updated_at = excluded.updated_at;",
             )?;
             for order in orders {
@@ -1423,7 +1433,7 @@ impl Database {
         let mut conn = self.lock_connection("save_managed_orders_if_absent");
         let tx = conn.transaction()?;
         {
-            let mut statement = tx.prepare(
+            let mut statement = tx.prepare_cached(
                 "INSERT INTO managed_orders (client_order_id, symbol, order_json, updated_at) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(client_order_id) DO NOTHING;",
             )?;
             for order in orders {
@@ -1460,7 +1470,8 @@ impl Database {
 
     pub fn load_managed_orders(&self, symbol: &str) -> Result<Vec<GridOrder>> {
         let conn = self.lock_connection("load_managed_orders");
-        let mut stmt = conn.prepare("SELECT order_json FROM managed_orders WHERE symbol = ?1;")?;
+        let mut stmt =
+            conn.prepare_cached("SELECT order_json FROM managed_orders WHERE symbol = ?1;")?;
         let json_rows = stmt.query_map(params![symbol], |row| row.get::<_, String>(0))?;
         json_rows
             .map(|row| Ok(serde_json::from_str(&row?)?))
@@ -1614,7 +1625,7 @@ impl Database {
         client_order_id: &str,
     ) -> Result<Vec<(String, crate::exchange::BinanceOrderResponse)>> {
         let conn = self.lock_connection("load_initial_order_responses");
-        let mut statement = conn.prepare("SELECT batch_id, response_json FROM initial_order_responses WHERE account_key=?1 AND expected_symbol=?2 AND client_order_id=?3 ORDER BY rowid")?;
+        let mut statement = conn.prepare_cached("SELECT batch_id, response_json FROM initial_order_responses WHERE account_key=?1 AND expected_symbol=?2 AND client_order_id=?3 ORDER BY rowid")?;
         let rows = statement.query_map(params![&account[..], symbol, client_order_id], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
@@ -1677,7 +1688,7 @@ impl Database {
         )>,
     > {
         let conn = self.lock_connection("load_terminal_order_disagreements");
-        let mut stmt = conn.prepare("SELECT client_order_id, first_json, conflicting_json FROM terminal_order_disagreements WHERE account_key=?1 AND expected_symbol=?2")?;
+        let mut stmt = conn.prepare_cached("SELECT client_order_id, first_json, conflicting_json FROM terminal_order_disagreements WHERE account_key=?1 AND expected_symbol=?2")?;
         let rows = stmt.query_map(params![&account[..], symbol], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -1751,7 +1762,7 @@ impl Database {
         symbol: &str,
     ) -> Result<Vec<(GridOrder, crate::types::ObservedOrderIdentity)>> {
         let conn = self.lock_connection("load_identity_observations");
-        let mut stmt = conn.prepare("SELECT expected_json, observed_json FROM order_identity_observations WHERE account_key=?1 AND expected_symbol=?2")?;
+        let mut stmt = conn.prepare_cached("SELECT expected_json, observed_json FROM order_identity_observations WHERE account_key=?1 AND expected_symbol=?2")?;
         let rows = stmt.query_map(params![&account[..], symbol], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
@@ -1768,19 +1779,15 @@ impl Database {
 
     pub fn delete_managed_order(&self, client_order_id: &str) -> Result<()> {
         let conn = self.lock_connection("delete_managed_order");
-        conn.execute(
-            "DELETE FROM managed_orders WHERE client_order_id = ?1;",
-            params![client_order_id],
-        )?;
+        conn.prepare_cached("DELETE FROM managed_orders WHERE client_order_id = ?1;")?
+            .execute(params![client_order_id])?;
         Ok(())
     }
 
     pub fn clear_managed_orders(&self, symbol: &str) -> Result<()> {
         let conn = self.lock_connection("clear_managed_orders");
-        conn.execute(
-            "DELETE FROM managed_orders WHERE symbol = ?1;",
-            params![symbol],
-        )?;
+        conn.prepare_cached("DELETE FROM managed_orders WHERE symbol = ?1;")?
+            .execute(params![symbol])?;
         Ok(())
     }
 
@@ -1809,17 +1816,23 @@ impl Database {
         mode: TradingMode,
     ) -> Result<Option<(OrderSide, Decimal, Decimal)>> {
         let conn = self.lock_connection("get_pair_opening");
-        let value: Option<(String, String, String)> = conn.query_row(
-            "SELECT side, price, quantity FROM (
-                 SELECT side, price, quantity, 0 AS priority, timestamp FROM trades
-                 WHERE symbol = ?1 AND client_order_id = ?2 AND mode = ?3
-                 UNION ALL
-                 SELECT side, price, quantity, 1 AS priority, '' AS timestamp FROM cleared_pair_openings
-                 WHERE symbol = ?1 AND client_order_id = ?2 AND mode = ?3
-             ) ORDER BY priority, timestamp DESC LIMIT 1",
-            params![symbol, client_order_id, mode.as_str()],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        ).optional()?;
+        let value: Option<(String, String, String)> = conn
+            .prepare_cached(
+                "SELECT side, price, quantity FROM (
+                     SELECT * FROM (
+                         SELECT side, price, quantity, 0 AS priority, timestamp FROM trades
+                         WHERE symbol = ?1 AND client_order_id = ?2 AND mode = ?3
+                         ORDER BY timestamp DESC LIMIT 1
+                     )
+                     UNION ALL
+                     SELECT side, price, quantity, 1 AS priority, '' AS timestamp FROM cleared_pair_openings
+                     WHERE symbol = ?1 AND client_order_id = ?2 AND mode = ?3
+                 ) ORDER BY priority, timestamp DESC LIMIT 1",
+            )?
+            .query_row(params![symbol, client_order_id, mode.as_str()], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .optional()?;
         value
             .map(|(side, price, quantity)| {
                 Ok((
@@ -1833,12 +1846,11 @@ impl Database {
 
     pub fn has_recorded_order(&self, client_order_id: &str, mode: TradingMode) -> Result<bool> {
         let conn = self.lock_connection("has_recorded_order");
-        Ok(conn.query_row(
+        let mut stmt = conn.prepare_cached(
             "SELECT EXISTS(SELECT 1 FROM trades WHERE client_order_id = ?1 AND mode = ?2)
                  OR EXISTS(SELECT 1 FROM cleared_trade_ids WHERE client_order_id = ?1 AND mode = ?2);",
-            params![client_order_id, mode.as_str()],
-            |row| row.get(0),
-        )?)
+        )?;
+        Ok(stmt.query_row(params![client_order_id, mode.as_str()], |row| row.get(0))?)
     }
 
     /// Restore the execution frontier for this symbol and mode.
@@ -1848,11 +1860,16 @@ impl Database {
         mode: TradingMode,
     ) -> Result<Option<(OrderSide, Decimal)>> {
         let conn = self.lock_connection("last_fill_for");
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT side, price FROM (
-                 SELECT side, price, timestamp, rowid AS sequence FROM trades WHERE symbol = ?1 AND mode = ?2
+                 SELECT * FROM (
+                     SELECT side, price, timestamp, rowid AS sequence FROM trades
+                     WHERE symbol = ?1 AND mode = ?2
+                     ORDER BY timestamp DESC, rowid DESC LIMIT 1
+                 )
                  UNION ALL
-                 SELECT side, price, timestamp, 0 AS sequence FROM execution_frontiers WHERE symbol = ?1 AND mode = ?2
+                 SELECT side, price, timestamp, 0 AS sequence FROM execution_frontiers
+                 WHERE symbol = ?1 AND mode = ?2
              ) ORDER BY timestamp DESC, sequence DESC LIMIT 1;",
         )?;
         let value: Option<(String, String)> = stmt
@@ -1878,11 +1895,12 @@ impl Database {
     ) -> Result<bool> {
         let mut conn = self.lock_connection("verify_trade_pnl");
         let saved_symbol: Option<String> = conn
-            .query_row(
+            .prepare_cached(
                 "SELECT symbol FROM trades WHERE trade_id = ?1 AND mode = ?2 AND pnl_verified = 0",
-                params![trade.trade_id, trade.mode.as_str()],
-                |row| row.get(0),
-            )
+            )?
+            .query_row(params![trade.trade_id, trade.mode.as_str()], |row| {
+                row.get(0)
+            })
             .optional()?;
         let Some(saved_symbol) = saved_symbol else {
             return Ok(false);
@@ -1892,7 +1910,7 @@ impl Database {
         }
         let tx = conn.transaction()?;
         let updated_trade: Option<(String, DateTime<Utc>)> = {
-            let mut statement = tx.prepare(
+            let mut statement = tx.prepare_cached(
                 "UPDATE trades SET realized_pnl = ?1, commission = ?2, is_maker = ?3, pnl_verified = 1 WHERE trade_id = ?4 AND mode = ?5 AND pnl_verified = 0 RETURNING symbol, timestamp;",
             )?;
             let mut rows = statement.query(params![
@@ -1924,7 +1942,7 @@ impl Database {
 
     pub fn get_recent_trades(&self, limit: usize) -> Result<Vec<TradeRecord>> {
         let conn = self.lock_connection("get_recent_trades");
-        let mut stmt = conn.prepare(select_trades_sql!(
+        let mut stmt = conn.prepare_cached(select_trades_sql!(
             "ORDER BY timestamp DESC, rowid DESC LIMIT ?1;"
         ))?;
 
@@ -1940,7 +1958,7 @@ impl Database {
         limit: usize,
     ) -> Result<Vec<TradeRecord>> {
         let conn = self.lock_connection("get_recent_trades_for");
-        let mut stmt = conn.prepare(select_trades_sql!(
+        let mut stmt = conn.prepare_cached(select_trades_sql!(
             "WHERE symbol = ?1 AND mode = ?2 ORDER BY timestamp DESC, rowid DESC LIMIT ?3;"
         ))?;
         let rows = stmt.query_map(params![symbol, mode.as_str(), limit as i64], trade_from_row)?;
@@ -2017,7 +2035,7 @@ impl Database {
         offset: usize,
     ) -> Result<(Vec<TradeRecord>, u64)> {
         let conn = self.lock_connection("get_unverified_trades_with_clear_revision");
-        let mut stmt = conn.prepare(select_trades_sql!(
+        let mut stmt = conn.prepare_cached(select_trades_sql!(
             "WHERE symbol = ?1 AND mode = ?2 AND pnl_verified = 0 ORDER BY timestamp DESC LIMIT ?3 OFFSET ?4;"
         ))?;
         let rows = stmt.query_map(
@@ -2040,7 +2058,7 @@ impl Database {
         mode: TradingMode,
     ) -> Result<(Decimal, Decimal, usize)> {
         let conn = self.lock_connection("get_pnl_totals");
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT realized_pnl, commission FROM trades WHERE symbol = ?1 AND mode = ?2 AND pnl_verified != 0;",
         )?;
         let rows = stmt.query_map(params![symbol, mode.as_str()], |row| {
@@ -2052,11 +2070,11 @@ impl Database {
             pnl += Decimal::from_str(&gross)?;
             fees += Decimal::from_str(&commission)?;
         }
-        let pending: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM trades WHERE symbol = ?1 AND mode = ?2 AND pnl_verified = 0;",
-            params![symbol, mode.as_str()],
-            |row| row.get(0),
-        )?;
+        let pending: i64 = conn
+            .prepare_cached(
+                "SELECT COUNT(*) FROM trades WHERE symbol = ?1 AND mode = ?2 AND pnl_verified = 0;",
+            )?
+            .query_row(params![symbol, mode.as_str()], |row| row.get(0))?;
         Ok((pnl, fees, pending as usize))
     }
 
@@ -2066,14 +2084,15 @@ impl Database {
         mode: TradingMode,
     ) -> Result<Option<(usize, usize, Decimal, Decimal)>> {
         let conn = self.lock_connection("load_scoped_stats");
-        conn.query_row(
+        let mut stmt = conn.prepare_cached(
             "SELECT total_trades, completed_cycles, total_realized_profit, total_volume_usdc FROM scoped_grid_stats WHERE symbol = ?1 AND mode = ?2;",
-            params![symbol, mode.as_str()],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )
-        .optional()?
-        .map(parse_stats_row)
-        .transpose()
+        )?;
+        let row = stmt
+            .query_row(params![symbol, mode.as_str()], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .optional()?;
+        row.map(parse_stats_row).transpose()
     }
 
     /// Legacy un-scoped grid stats accessor retained for backward-compatibility tests.
@@ -2188,16 +2207,24 @@ pub(crate) fn config_version<T: serde::Serialize>(value: &T) -> String {
     use hmac::{Hmac, Mac};
     use rand::RngCore;
     use sha2::Sha256;
-    static KEY: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
-    let key = KEY.get_or_init(|| {
+    static KEY: std::sync::LazyLock<[u8; 32]> = std::sync::LazyLock::new(|| {
         let mut key = [0; 32];
         rand::rngs::OsRng.fill_bytes(&mut key);
         key
     });
-    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("valid HMAC key");
-    let serialized = serde_json::to_vec(value).unwrap_or_default();
-    mac.update(&serialized);
-    hex::encode(mac.finalize().into_bytes())
+    struct MacWriter(hmac::Hmac<sha2::Sha256>);
+    impl std::io::Write for MacWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.update(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut writer = MacWriter(Hmac::<Sha256>::new_from_slice(&*KEY).expect("valid HMAC key"));
+    let _ = serde_json::to_writer(&mut writer, value);
+    hex::encode(writer.0.finalize().into_bytes())
 }
 
 fn save_pair_config_on(conn: &Connection, symbol: &str, config: &AppConfig) -> Result<()> {
@@ -2522,17 +2549,20 @@ fn preserve_pair_openings_on(conn: &Connection, symbol: Option<&str>) -> Result<
 }
 
 fn insert_trade_on(conn: &Connection, trade: &TradeRecord) -> Result<bool> {
-    let cleared: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM cleared_trade_ids WHERE trade_id = ?1)
-             OR EXISTS(SELECT 1 FROM cleared_trade_ids WHERE client_order_id = ?2 AND mode = ?3);",
-        params![trade.trade_id, trade.client_order_id, trade.mode.as_str()],
-        |row| row.get(0),
-    )?;
+    let cleared: bool = conn
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM cleared_trade_ids WHERE trade_id = ?1)
+                 OR EXISTS(SELECT 1 FROM cleared_trade_ids WHERE client_order_id = ?2 AND mode = ?3);",
+        )?
+        .query_row(
+            params![trade.trade_id, trade.client_order_id, trade.mode.as_str()],
+            |row| row.get(0),
+        )?;
     if cleared {
         return Ok(false);
     }
     let inserted = conn
-        .execute(
+        .prepare_cached(
             r#"
             INSERT OR IGNORE INTO trades (
                 trade_id, client_order_id, symbol, mode, side, price, quantity,
@@ -2540,24 +2570,24 @@ fn insert_trade_on(conn: &Connection, trade: &TradeRecord) -> Result<bool> {
                 stats_hour
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15);
             "#,
-            params![
-                trade.trade_id,
-                trade.client_order_id,
-                trade.symbol,
-                trade.mode.as_str(),
-                trade.side.as_str(),
-                trade.price.to_string(),
-                trade.quantity.to_string(),
-                trade.amount_usdc.to_string(),
-                trade.realized_pnl.to_string(),
-                trade.commission.to_string(),
-                if trade.pnl_verified { 1 } else { 0 },
-                if trade.is_maker { 1 } else { 0 },
-                trade.timestamp,
-                trade.note,
-                hourly::hour(trade.timestamp),
-            ],
-        )
+        )?
+        .execute(params![
+            trade.trade_id,
+            trade.client_order_id,
+            trade.symbol,
+            trade.mode.as_str(),
+            trade.side.as_str(),
+            trade.price.to_string(),
+            trade.quantity.to_string(),
+            trade.amount_usdc.to_string(),
+            trade.realized_pnl.to_string(),
+            trade.commission.to_string(),
+            if trade.pnl_verified { 1 } else { 0 },
+            if trade.is_maker { 1 } else { 0 },
+            trade.timestamp,
+            trade.note,
+            hourly::hour(trade.timestamp),
+        ])
         .context("Failed to insert trade into SQLite database")?;
     if inserted == 1 {
         hourly::insert_on(conn, trade)?;
@@ -2571,10 +2601,10 @@ fn save_scoped_stats_on(
     mode: TradingMode,
     stats: &GridStats,
 ) -> Result<()> {
-    conn.execute(
+    conn.prepare_cached(
         "INSERT INTO scoped_grid_stats (symbol, mode, total_trades, completed_cycles, total_realized_profit, total_volume_usdc, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT(symbol, mode) DO UPDATE SET total_trades = excluded.total_trades, completed_cycles = excluded.completed_cycles, total_realized_profit = excluded.total_realized_profit, total_volume_usdc = excluded.total_volume_usdc, updated_at = excluded.updated_at;",
-        params![symbol, mode.as_str(), stats.total_trades as i64, stats.completed_cycles as i64, stats.total_realized_profit.to_string(), stats.total_volume_usdc.to_string(), Utc::now().to_rfc3339()],
-    )?;
+    )?
+    .execute(params![symbol, mode.as_str(), stats.total_trades as i64, stats.completed_cycles as i64, stats.total_realized_profit.to_string(), stats.total_volume_usdc.to_string(), Utc::now().to_rfc3339()])?;
     Ok(())
 }
 
@@ -2735,6 +2765,10 @@ fn run_schema_migrations(conn: &mut Connection) -> Result<()> {
     tx.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_trades_unverified_scope
          ON trades (symbol, mode, timestamp DESC) WHERE pnl_verified = 0;
+         CREATE INDEX IF NOT EXISTS idx_trades_client_order_mode
+         ON trades (client_order_id, mode, timestamp DESC);
+         CREATE INDEX IF NOT EXISTS idx_order_identity_observations_scope
+         ON order_identity_observations (account_key, expected_symbol, client_order_id);
          CREATE INDEX IF NOT EXISTS idx_initial_order_responses_order
          ON initial_order_responses (account_key, expected_symbol, client_order_id);
          CREATE INDEX IF NOT EXISTS idx_initial_order_responses_batch
