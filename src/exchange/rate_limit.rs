@@ -66,6 +66,10 @@ impl Counter {
         self.local_total
     }
 
+    fn is_empty(&self) -> bool {
+        self.events.is_empty() && self.external.is_empty()
+    }
+
     fn record(&mut self, now: Instant, weight: u64) {
         self.events.push_back((now, weight));
         self.local_total += weight;
@@ -141,10 +145,25 @@ impl RateLimiter {
         endpoints: &'a mut HashMap<String, EndpointLimits>,
         endpoint: &str,
     ) -> &'a mut EndpointLimits {
-        if !endpoints.contains_key(endpoint) {
-            return endpoints.entry(endpoint.to_owned()).or_default();
+        endpoints.entry(endpoint.to_owned()).or_default()
+    }
+
+    fn account_limits_mut(
+        accounts: &mut HashMap<[u8; 32], AccountLimits>,
+        account: [u8; 32],
+        now: Instant,
+    ) -> &mut AccountLimits {
+        if accounts.len() > 64 || (accounts.len() == 64 && !accounts.contains_key(&account)) {
+            accounts.retain(|key, limits| {
+                if *key == account {
+                    return true;
+                }
+                limits.orders_10s.prune(now, TEN_SECONDS);
+                limits.orders_1m.prune(now, MINUTE);
+                !limits.orders_10s.is_empty() || !limits.orders_1m.is_empty()
+            });
         }
-        endpoints.get_mut(endpoint).expect("checked above")
+        accounts.entry(account).or_default()
     }
 
     pub fn reserve(
@@ -154,7 +173,7 @@ impl RateLimiter {
         weight: u64,
         class: RequestClass,
     ) -> Result<(), String> {
-        let mut endpoints = self.endpoints.lock().unwrap();
+        let mut endpoints = self.endpoints.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
         let endpoint = Self::endpoint_mut(&mut endpoints, endpoint);
         if endpoint.blocked_until.is_some_and(|until| now < until) {
@@ -194,7 +213,7 @@ impl RateLimiter {
                 ));
             }
         }
-        let account = endpoint.accounts.entry(account).or_default();
+        let account = Self::account_limits_mut(&mut endpoint.accounts, account, now);
         account.orders_10s.prune(now, TEN_SECONDS);
         account.orders_1m.prune(now, MINUTE);
         if class.order() {
@@ -230,7 +249,7 @@ impl RateLimiter {
     }
 
     pub fn update_exchange_limits(&self, endpoint: &str, limits: &[BinanceRateLimit]) {
-        let mut endpoints = self.endpoints.lock().unwrap();
+        let mut endpoints = self.endpoints.lock().unwrap_or_else(|e| e.into_inner());
         let endpoint = Self::endpoint_mut(&mut endpoints, endpoint);
         for limit in limits.iter().filter(|limit| limit.limit > 0) {
             let slot = match (
@@ -254,7 +273,7 @@ impl RateLimiter {
         status: StatusCode,
         headers: &HeaderMap,
     ) {
-        let mut endpoints = self.endpoints.lock().unwrap();
+        let mut endpoints = self.endpoints.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
         let endpoint = Self::endpoint_mut(&mut endpoints, endpoint);
         let value = |name| {
@@ -266,7 +285,7 @@ impl RateLimiter {
         if let Some(weight) = value("x-mbx-used-weight-1m") {
             endpoint.weight.observe(weight, now, MINUTE);
         }
-        let limits = endpoint.accounts.entry(account).or_default();
+        let limits = Self::account_limits_mut(&mut endpoint.accounts, account, now);
         if let Some(count) = value("x-mbx-order-count-10s") {
             limits.orders_10s.observe(count, now, TEN_SECONDS);
         }
@@ -602,5 +621,23 @@ mod tests {
         assert!(limiter
             .reserve("main", [1; 32], 20, RequestClass::Critical)
             .is_ok());
+    }
+
+    #[test]
+    fn idle_account_limits_are_pruned_when_accounts_exceed_bound() {
+        let limiter = RateLimiter::default();
+        limiter
+            .reserve("main", [200; 32], 0, RequestClass::OpeningOrder)
+            .unwrap();
+        for id in 0..70u8 {
+            limiter
+                .reserve("main", [id; 32], 1, RequestClass::Normal)
+                .unwrap();
+        }
+        let endpoints = limiter.endpoints.lock().unwrap();
+        let accounts = &endpoints["main"].accounts;
+        assert!(accounts.len() <= 64, "accounts len: {}", accounts.len());
+        assert!(accounts.contains_key(&[200; 32]));
+        assert!(accounts.contains_key(&[69; 32]));
     }
 }

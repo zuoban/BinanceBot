@@ -342,10 +342,12 @@ pub(super) fn stats_on(
         window_end: now,
         buckets: (first_hour..=last_hour)
             .step_by(3600)
-            .map(|timestamp| HourlyTradeCount {
-                hour_start: DateTime::from_timestamp(timestamp, 0).unwrap(),
-                buy_count: 0,
-                sell_count: 0,
+            .filter_map(|timestamp| {
+                DateTime::from_timestamp(timestamp, 0).map(|hour_start| HourlyTradeCount {
+                    hour_start,
+                    buy_count: 0,
+                    sell_count: 0,
+                })
             })
             .collect(),
         realized_pnl: Decimal::ZERO,

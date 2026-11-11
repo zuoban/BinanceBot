@@ -7,7 +7,8 @@ pub(crate) fn new_hmac_key(secret: &str) -> HmacSha256 {
     HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC can take key of any size")
 }
 
-pub fn sign_query(secret: &str, query: &str) -> String {
+#[cfg(test)]
+fn sign_query(secret: &str, query: &str) -> String {
     let mut mac = new_hmac_key(secret);
     mac.update(query.as_bytes());
     hex::encode(mac.finalize().into_bytes())

@@ -2,10 +2,14 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeEach, expect, it, vi } from 'vitest';
+import type * as Api from '../lib/api';
 import Login from '../pages/Login';
 
 const mocks = vi.hoisted(() => ({ api: vi.fn(), post: vi.fn(), setToken: vi.fn() }));
-vi.mock('../lib/api', () => ({ api: mocks.api, post: mocks.post, tokenStore: { set: mocks.setToken } }));
+vi.mock('../lib/api', async importOriginal => {
+  const actual = await importOriginal<typeof Api>();
+  return { ...actual, api: mocks.api, post: mocks.post, tokenStore: { get: () => null, set: mocks.setToken, clear: vi.fn() } };
+});
 vi.mock('../components/ThemeSwitch', () => ({ ThemeSwitch: () => null }));
 
 beforeEach(() => {

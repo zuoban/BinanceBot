@@ -1,11 +1,25 @@
 import type { ApiResponse, Pair } from './types';
 
 const TOKEN_KEY = 'binance_bot_auth_token';
+let memoryToken: string | null = null;
 export const tokenStore = {
-  get: () => sessionStorage.getItem(TOKEN_KEY),
-  set: (token: string) => sessionStorage.setItem(TOKEN_KEY, token),
-  clear: () => sessionStorage.removeItem(TOKEN_KEY),
+  get: (): string | null => {
+    try { return sessionStorage.getItem(TOKEN_KEY) ?? memoryToken; } catch { return memoryToken; }
+  },
+  set: (token: string) => {
+    try {
+      sessionStorage.setItem(TOKEN_KEY, token);
+      memoryToken = null;
+    } catch {
+      memoryToken = token;
+    }
+  },
+  clear: () => {
+    memoryToken = null;
+    try { sessionStorage.removeItem(TOKEN_KEY); } catch { /* Ignore unavailable Web Storage. */ }
+  },
 };
+export const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
 export class ApiError extends Error {
   constructor(message: string, public status: number, public kind: 'rejection' | 'invalid-response' = 'rejection') { super(message); }
 }

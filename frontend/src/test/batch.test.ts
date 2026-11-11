@@ -1,3 +1,4 @@
+/// <reference lib="es2024.promise" />
 import { expect, it, vi } from 'vitest';
 import { runBatchControls } from '../components/Controls';
 import { pair } from './fixtures';
@@ -29,4 +30,35 @@ it('distinguishes failed submissions, unknown pause states, unverified cancellat
     { pair: targets[2], result: 'cancellation_unconfirmed' }, { pair: targets[3], result: 'not_submitted' },
   ]);
   expect(run).toHaveBeenCalledTimes(4);
+});
+
+it('caps concurrent pause fan-out to 6 in-flight pairs while preserving input result order', async () => {
+  const targets = Array.from({ length: 10 }, (_, i) => pair(`SYM${i}USDC`));
+  const gates = targets.map(() => Promise.withResolvers<'cancellation_unconfirmed' | 'confirmed'>());
+  let inFlight = 0;
+  let peakInFlight = 0;
+  const run = vi.fn().mockImplementation(async (target: { symbol: string }) => {
+    const idx = targets.findIndex(item => item.symbol === target.symbol);
+    inFlight++;
+    peakInFlight = Math.max(peakInFlight, inFlight);
+    try {
+      return await gates[idx].promise;
+    } finally {
+      inFlight--;
+    }
+  });
+  const pending = runBatchControls(targets, 'pause', run);
+  expect(run).toHaveBeenCalledTimes(6);
+  expect(peakInFlight).toBe(6);
+  // Resolve later items before earlier ones to verify output order matches input order.
+  for (let i = 5; i >= 0; i--) {
+    gates[i].resolve(i % 2 === 0 ? 'cancellation_unconfirmed' : 'confirmed');
+    await Promise.resolve();
+  }
+  for (let i = 9; i >= 6; i--) {
+    gates[i].resolve(i % 2 === 0 ? 'cancellation_unconfirmed' : 'confirmed');
+  }
+  const outcomes = await pending;
+  expect(peakInFlight).toBeLessThanOrEqual(6);
+  expect(outcomes.map(item => item.pair.symbol)).toEqual(['SYM0USDC', 'SYM2USDC', 'SYM4USDC', 'SYM6USDC', 'SYM8USDC']);
 });

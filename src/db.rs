@@ -29,14 +29,12 @@ macro_rules! select_trades_sql {
 
 pub(crate) fn beijing_midnight(now: DateTime<Utc>) -> DateTime<Utc> {
     let beijing = crate::types::beijing_offset();
-    now.with_timezone(&beijing)
+    let local = now.with_timezone(&beijing);
+    local
         .date_naive()
         .and_hms_opt(0, 0, 0)
-        .unwrap()
-        .and_local_timezone(beijing)
-        .single()
-        .unwrap()
-        .with_timezone(&Utc)
+        .and_then(|midnight| midnight.and_local_timezone(beijing).single())
+        .map_or(now, |midnight| midnight.with_timezone(&Utc))
 }
 
 type TodayPnlCacheEntry = (
@@ -79,17 +77,20 @@ impl RevisionTracker {
     }
 
     fn for_symbol(&self, symbol: &str) -> u64 {
-        self.by_symbol.lock().unwrap().for_symbol(symbol)
+        self.by_symbol
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .for_symbol(symbol)
     }
 
     fn publish(&self, symbol: &str) {
-        let mut revisions = self.by_symbol.lock().unwrap();
+        let mut revisions = self.by_symbol.lock().unwrap_or_else(|e| e.into_inner());
         let revision = self.revision.fetch_add(1, Ordering::Release) + 1;
         revisions.changed(symbol, revision);
     }
 
     fn clear_all(&self) {
-        let mut revisions = self.by_symbol.lock().unwrap();
+        let mut revisions = self.by_symbol.lock().unwrap_or_else(|e| e.into_inner());
         let revision = self.revision.fetch_add(1, Ordering::Release) + 1;
         revisions.clear_all(revision);
     }
@@ -271,7 +272,7 @@ impl Database {
             .benchmark_wait_samples
             .get()
             .map(|samples| (samples, std::time::Instant::now()));
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         #[cfg(test)]
         if let Some((samples, waiting_since)) = benchmark_wait {
             let elapsed = waiting_since.elapsed().as_secs_f64() * 1000.0;
@@ -380,12 +381,17 @@ impl Database {
     pub(crate) fn cached_history_account_id(&self, identity: &[u8; 32]) -> Option<String> {
         self.history_account_ids
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .get(identity)
             .cloned()
     }
     pub(crate) fn history_account_id(&self, identity: [u8; 32]) -> Result<String> {
-        if let Some(cached) = self.history_account_ids.lock().unwrap().get(&identity) {
+        if let Some(cached) = self
+            .history_account_ids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&identity)
+        {
             return Ok(cached.clone());
         }
         let id: String = {
@@ -415,10 +421,14 @@ impl Database {
                 stmt.query_row(params![identity.as_slice()], |row| row.get(0))?
             }
         };
-        self.history_account_ids
+        let mut cache = self
+            .history_account_ids
             .lock()
-            .unwrap()
-            .insert(identity, id.clone());
+            .unwrap_or_else(|e| e.into_inner());
+        if cache.len() >= 256 {
+            cache.clear();
+        }
+        cache.insert(identity, id.clone());
         Ok(id)
     }
 
@@ -453,21 +463,26 @@ impl Database {
         Ok(())
     }
 
+    fn query_hourly_snapshot_rows(
+        &self,
+        since: i64,
+        operation: &'static str,
+    ) -> Result<Vec<(i64, String)>> {
+        let conn = self.lock_connection(operation);
+        let mut statement = conn.prepare_cached(
+            "SELECT hour, payload FROM account_hourly_snapshots WHERE hour >= ?1 ORDER BY hour",
+        )?;
+        let rows = statement.query_map(params![since], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn hourly_account_snapshots(
         &self,
         since: i64,
     ) -> Result<Vec<crate::snapshots::HourlySnapshot>> {
-        let raw_rows: Vec<(i64, String)> = {
-            let conn = self.lock_connection("hourly_account_snapshots");
-            let mut statement = conn.prepare_cached(
-                "SELECT hour, payload FROM account_hourly_snapshots WHERE hour >= ?1 ORDER BY hour",
-            )?;
-            let rows = statement.query_map(params![since], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-            })?;
-            rows.collect::<rusqlite::Result<_>>()?
-        };
-        raw_rows
+        self.query_hourly_snapshot_rows(since, "hourly_account_snapshots")?
             .into_iter()
             .map(|(hour, payload)| {
                 Ok(crate::snapshots::HourlySnapshot {
@@ -482,17 +497,7 @@ impl Database {
         &self,
         since: i64,
     ) -> Result<Vec<crate::snapshots::RawHourlySnapshot>> {
-        let raw_rows: Vec<(i64, String)> = {
-            let conn = self.lock_connection("hourly_account_snapshots_raw");
-            let mut statement = conn.prepare_cached(
-                "SELECT hour, payload FROM account_hourly_snapshots WHERE hour >= ?1 ORDER BY hour",
-            )?;
-            let rows = statement.query_map(params![since], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-            })?;
-            rows.collect::<rusqlite::Result<_>>()?
-        };
-        raw_rows
+        self.query_hourly_snapshot_rows(since, "hourly_account_snapshots_raw")?
             .into_iter()
             .map(|(hour, payload)| {
                 Ok(crate::snapshots::RawHourlySnapshot {
@@ -541,16 +546,24 @@ impl Database {
         Ok(())
     }
 
-    pub fn daily_snapshots(&self, limit: usize) -> Result<Vec<crate::snapshots::DailySnapshot>> {
-        let raw_rows: Vec<String> = {
-            let conn = self.lock_connection("daily_snapshots");
-            let mut statement = conn.prepare_cached(
-                "SELECT payload FROM daily_snapshots ORDER BY date DESC LIMIT ?1",
-            )?;
-            let rows = statement.query_map(params![limit as i64], |row| row.get::<_, String>(0))?;
-            rows.collect::<rusqlite::Result<_>>()?
-        };
-        raw_rows
+    fn query_daily_snapshot_payloads(
+        &self,
+        limit: usize,
+        operation: &'static str,
+    ) -> Result<Vec<String>> {
+        let conn = self.lock_connection(operation);
+        let mut statement =
+            conn.prepare_cached("SELECT payload FROM daily_snapshots ORDER BY date DESC LIMIT ?1")?;
+        let rows = statement.query_map(params![limit as i64], |row| row.get::<_, String>(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn daily_snapshots(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<crate::snapshots::DailySnapshot>> {
+        self.query_daily_snapshot_payloads(limit, "daily_snapshots")?
             .into_iter()
             .map(|payload| Ok(serde_json::from_str(&payload)?))
             .collect()
@@ -560,15 +573,7 @@ impl Database {
         &self,
         limit: usize,
     ) -> Result<Vec<Box<serde_json::value::RawValue>>> {
-        let raw_rows: Vec<String> = {
-            let conn = self.lock_connection("daily_snapshots_raw");
-            let mut statement = conn.prepare_cached(
-                "SELECT payload FROM daily_snapshots ORDER BY date DESC LIMIT ?1",
-            )?;
-            let rows = statement.query_map(params![limit as i64], |row| row.get::<_, String>(0))?;
-            rows.collect::<rusqlite::Result<_>>()?
-        };
-        raw_rows
+        self.query_daily_snapshot_payloads(limit, "daily_snapshots_raw")?
             .into_iter()
             .map(|payload| Ok(serde_json::value::RawValue::from_string(payload)?))
             .collect()
@@ -664,7 +669,6 @@ impl Database {
         }
         snapshot
             .execute_batch("DELETE FROM auth_sessions; DELETE FROM history_account_ids; VACUUM;")?;
-        // VACUUM removes credentials from freed pages and old config payloads too.
         Ok(snapshot.serialize(rusqlite::DatabaseName::Main)?.to_vec())
     }
 
@@ -1247,15 +1251,19 @@ impl Database {
         // Acquire write intent before deduplication reads so contention can use
         // SQLite's busy handler instead of failing a deferred lock upgrade.
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let mut paper_ledger = matches!(trade.mode, TradingMode::Paper | TradingMode::Unknown)
-            .then(|| self.paper_ledger.lock().unwrap());
         let inserted = insert_trade_on(&tx, trade)?;
         tx.commit()?;
         if inserted {
-            if let Some(ledger) = paper_ledger.as_mut().and_then(|guard| guard.as_mut()) {
-                ledger.record_legacy(&trade.symbol);
+            if matches!(trade.mode, TradingMode::Paper | TradingMode::Unknown) {
+                if let Some(ledger) = self
+                    .paper_ledger
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_mut()
+                {
+                    ledger.record_legacy(&trade.symbol);
+                }
             }
-            drop(paper_ledger);
             self.publish_trade_revision(&trade.symbol);
         }
         Ok(inserted)
@@ -1365,22 +1373,25 @@ impl Database {
                 params![parent],
             )?;
         }
-        // Hold the ledger lock through commit so readers cannot observe a
-        // committed transaction without its corresponding cached contribution.
-        let mut paper_ledger = matches!(trade.mode, TradingMode::Paper | TradingMode::Unknown)
-            .then(|| self.paper_ledger.lock().unwrap());
+        // `conn` remains locked until after `paper_ledger` updates, so no reader can
+        // observe the committed SQLite transaction before the cached contribution lands,
+        // while async readers never block on SQLite `fsync` during `tx.commit()`.
         tx.commit()?;
         if inserted {
-            if let Some(ledger) = paper_ledger.as_mut().and_then(|guard| guard.as_mut()) {
-                if let Some((position, account)) = paper_state {
-                    ledger.commit(&trade.symbol, position, account);
-                } else {
-                    ledger.record_legacy(&trade.symbol);
+            if matches!(trade.mode, TradingMode::Paper | TradingMode::Unknown) {
+                if let Some(ledger) = self
+                    .paper_ledger
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_mut()
+                {
+                    if let Some((position, account)) = paper_state {
+                        ledger.commit(&trade.symbol, position, account);
+                    } else {
+                        ledger.record_legacy(&trade.symbol);
+                    }
                 }
             }
-        }
-        drop(paper_ledger);
-        if inserted {
             self.publish_trade_revision(&trade.symbol);
         }
         Ok(inserted)
@@ -1442,9 +1453,13 @@ impl Database {
             ],
         )?;
         save_pair_status_on(&tx, symbol, TradingMode::Paper, BotStatus::Paused)?;
-        let mut ledger = self.paper_ledger.lock().unwrap();
         tx.commit()?;
-        if let Some(ledger) = ledger.as_mut() {
+        if let Some(ledger) = self
+            .paper_ledger
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
             ledger.commit(symbol, &position, &account);
         }
         Ok(())
@@ -2320,7 +2335,9 @@ pub(crate) fn config_version<T: serde::Serialize>(value: &T) -> String {
         }
     }
     let mut writer = MacWriter(Hmac::<Sha256>::new_from_slice(&*KEY).expect("valid HMAC key"));
-    let _ = serde_json::to_writer(&mut writer, value);
+    if let Err(error) = serde_json::to_writer(&mut writer, value) {
+        warn!(%error, "Failed to serialize configuration for version digest");
+    }
     hex::encode(writer.0.finalize().into_bytes())
 }
 
@@ -2976,24 +2993,36 @@ fn is_duplicate_single_response_query(
     Ok(safe)
 }
 
-fn decimal_col_or_zero(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<Decimal> {
+fn decimal_col(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<Decimal> {
     let raw: String = row.get(index)?;
-    Ok(Decimal::from_str(&raw).unwrap_or(Decimal::ZERO))
+    Decimal::from_str(&raw).map_err(|err| {
+        rusqlite::Error::FromSqlConversionFailure(index, rusqlite::types::Type::Text, Box::new(err))
+    })
 }
 
 fn trade_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TradeRecord> {
-    let side: String = row.get(3)?;
+    let side_raw: String = row.get(3)?;
+    let side = OrderSide::from_exchange_str(&side_raw).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            3,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Invalid order side in trades table: {side_raw}"),
+            )),
+        )
+    })?;
     Ok(TradeRecord {
         trade_id: row.get(0)?,
         client_order_id: row.get(1)?,
         symbol: row.get(2)?,
         mode: TradingMode::from_db(&row.get::<_, String>(13)?),
-        side: OrderSide::from_exchange_str(&side).unwrap_or(OrderSide::Sell),
-        price: decimal_col_or_zero(row, 4)?,
-        quantity: decimal_col_or_zero(row, 5)?,
-        amount_usdc: decimal_col_or_zero(row, 6)?,
-        realized_pnl: decimal_col_or_zero(row, 7)?,
-        commission: decimal_col_or_zero(row, 8)?,
+        side,
+        price: decimal_col(row, 4)?,
+        quantity: decimal_col(row, 5)?,
+        amount_usdc: decimal_col(row, 6)?,
+        realized_pnl: decimal_col(row, 7)?,
+        commission: decimal_col(row, 8)?,
         pnl_verified: row.get::<_, i32>(9)? != 0,
         is_maker: row.get::<_, i32>(10)? != 0,
         timestamp: row.get(11)?,
@@ -5529,5 +5558,32 @@ mod tests {
             .exchange
             .api_secret
             .is_some());
+    }
+
+    #[test]
+    fn trade_from_row_surfaces_corrupted_decimal_and_side_values() {
+        let db = Database::open(":memory:").unwrap();
+        {
+            let conn = db.lock_connection("corrupt_trade");
+            conn.execute(
+                "INSERT INTO trades (trade_id, client_order_id, symbol, side, price, quantity, amount_usdc, realized_pnl, commission, pnl_verified, is_maker, timestamp, note, mode) \
+                 VALUES ('bad-1', 'cid-1', 'SOLUSDC', 'BUY', 'not-a-decimal', '1', '100', '0', '0', 1, 1, '2026-01-01T00:00:00Z', '', 'PAPER')",
+                [],
+            )
+            .unwrap();
+        }
+        assert!(db.get_recent_trades(10).is_err());
+
+        let db2 = Database::open(":memory:").unwrap();
+        {
+            let conn = db2.lock_connection("corrupt_side");
+            conn.execute(
+                "INSERT INTO trades (trade_id, client_order_id, symbol, side, price, quantity, amount_usdc, realized_pnl, commission, pnl_verified, is_maker, timestamp, note, mode) \
+                 VALUES ('bad-2', 'cid-2', 'SOLUSDC', 'INVALID_SIDE', '100', '1', '100', '0', '0', 1, 1, '2026-01-01T00:00:00Z', '', 'PAPER')",
+                [],
+            )
+            .unwrap();
+        }
+        assert!(db2.get_recent_trades(10).is_err());
     }
 }

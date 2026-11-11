@@ -5,7 +5,9 @@ import { ArrowRightOutlined, EyeOutlined, PlusOutlined, SearchOutlined, Thunderb
 import { useOverview } from '../lib/queries';
 import { useUrlParams } from '../lib/urlState';
 import { AccountsContext } from '../lib/session';
-import { beijingDay, cnyText, compactNumber as number, compactPrice as price, entryChange, entryPriceText, groupTradePnl, maxPositionPolicyLabel, modeLabel, positivePrice, positionAmount, positionGroups, quoteAsset, ratioText, SNAPSHOT_STALE_MS, todayPnlGroups, todayTradeCounts, trimFractionZeros, type AccountGroup, type PositionGroup } from '../lib/format';
+import { errorMessage } from '../lib/api';
+import { sameGridConfig } from '../lib/configDiff';
+import { beijingDay, cnyText, compactNumber as number, comparePositionAmount, entryChange, entryPriceText, groupTradePnl, maxPositionPolicyLabel, modeLabel, positivePrice, positionAmount, positionGroups, quantity, quoteAsset, ratioText, SNAPSHOT_STALE_MS, todayPnlGroups, todayTradeCounts, trimFractionZeros, type AccountGroup, type PositionGroup } from '../lib/format';
 import { ControlResultBanner, DirectionTag, DirectionText, ErrorNotice, FreshnessText, PageTitle, Pnl, SignalButton, SignalChip, StatusTag, type Signal } from '../components/Common';
 import { runBatchControls, useControls } from '../components/Controls';
 import type { GridConfig, Overview, Pair, Trade } from '../lib/types';
@@ -107,22 +109,6 @@ function OverviewFinanceDisclosure({
     </div>
   </details>;
 }
-function sameGridConfig(a: GridConfig, b: GridConfig) {
-  return a === b || (
-    a.direction === b.direction &&
-    a.grid_interval === b.grid_interval &&
-    a.order_amount_usdc === b.order_amount_usdc &&
-    a.buy_window === b.buy_window &&
-    a.sell_window === b.sell_window &&
-    a.min_price === b.min_price &&
-    a.max_price === b.max_price &&
-    a.max_position_usdc === b.max_position_usdc &&
-    a.pause_on_max_position === b.pause_on_max_position &&
-    a.cancel_opening_on_max_position === b.cancel_opening_on_max_position &&
-    a.min_liquidation_distance_pct === b.min_liquidation_distance_pct &&
-    a.post_only === b.post_only
-  );
-}
 const StrategyCard = memo(function StrategyCard({
   entry,
   stale,
@@ -153,7 +139,7 @@ const StrategyCard = memo(function StrategyCard({
     </div>
     <div className="strategy-metrics" aria-label={`${s.symbol} 策略指标`}>
       <div><span>持仓金额{quoteSuffix}</span><strong>{number(positionAmount(s))}</strong></div>
-      <div><span>持仓数量</span><strong>{price(s.position.size)}</strong></div>
+      <div><span>持仓数量</span><strong>{quantity(s.position.size)}</strong></div>
       <div><span>开仓价格</span><strong>{entryPriceText(s.position, true)}</strong></div>
       <div><span>涨跌幅</span><strong className={change.className}>{change.text}</strong></div>
       <div><span>已实现盈亏{quoteSuffix}</span><strong><Pnl value={s.stats.total_realized_pnl} compact /></strong></div>
@@ -205,8 +191,8 @@ export default function OverviewPage() {
     status: { fallback: 'all', allowed: ['all', 'RUNNING', 'PAUSED', 'ERROR', 'STOPPED', 'LIVE'] },
   });
   const setSearch = (value: string) => updateFilters({ q: value });
-  const setSort = (value: string) => updateFilters({ sort: value });
-  const setStatusFilter = (value: string) => updateFilters({ status: value });
+  const setSort = (value: typeof sort) => updateFilters({ sort: value });
+  const setStatusFilter = (value: typeof statusFilter) => updateFilters({ status: value });
   const [batchBusy, setBatchBusy] = useState(false);
   const [report, setReport] = useState<BatchReport | null>(null);
   const [tradesExpanded, setTradesExpanded] = useState(false);
@@ -274,7 +260,7 @@ export default function OverviewPage() {
       if (outcomes.length) setReport({ action, total: selected.length, outcomes });
       else { setReport(null); message.success(`已${action === 'pause' ? '暂停' : '恢复'} ${selected.length} 个策略`); }
     } catch (error) {
-      if (mounted.current) message.error(`批量操作失败：${error instanceof Error ? error.message : String(error)}`);
+      if (mounted.current) message.error(`批量操作失败：${errorMessage(error)}`);
     } finally { batchLock.current = false; if (mounted.current) setBatchBusy(false); }
   };
   const visible = useMemo(() => {
@@ -282,10 +268,7 @@ export default function OverviewPage() {
     const matchesStatus = (e: typeof entries[number]) => statusFilter === 'all' || (statusFilter === 'LIVE' ? e.mode === 'LIVE' : e.snapshot.status === statusFilter);
     const filtered = entries.filter(e => e.snapshot.symbol.includes(query) && matchesStatus(e));
     if (sort === 'position') {
-      return filtered
-        .map(entry => ({ entry, running: entry.snapshot.status === 'RUNNING' ? 1 : 0, amount: positionAmount(entry.snapshot) ?? -1 }))
-        .sort((a, b) => (b.running - a.running) || (b.amount - a.amount) || a.entry.snapshot.symbol.localeCompare(b.entry.snapshot.symbol))
-        .map(item => item.entry);
+      return filtered.sort((a, b) => (Number(b.snapshot.status === 'RUNNING') - Number(a.snapshot.status === 'RUNNING')) || comparePositionAmount(a.snapshot, b.snapshot));
     }
     if (sort === 'today') {
       const totalToday = (symbol: string) => { const c = tradeCountsBySymbol.get(symbol); return c ? c.buy + c.sell : -1; };
@@ -305,7 +288,7 @@ export default function OverviewPage() {
   const pnlGroups = useMemo(() => todayPnlGroups(overview.data?.today_pnl, dayNow), [overview.data?.today_pnl, currentDay]);
   const accountList = useAccountGroups(accounts);
   const positionList = useMemo(() => positionGroups(entries), [entries]);
-  const renderStatusButton = (value: string, tier: Signal, label: string, count: number) =>
+  const renderStatusButton = (value: Exclude<typeof statusFilter, 'all'>, tier: Signal, label: string, count: number) =>
     overview.data && count > 0 ? <SignalButton tier={tier} active={statusFilter === value} onClick={() => setStatusFilter(statusFilter === value ? 'all' : value)}>{label} {count}</SignalButton> : null;
   return <>
     <PageTitle title="策略运行概览" description="账户、持仓与全部策略的实时状态" />

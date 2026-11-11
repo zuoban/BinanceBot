@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { api } from '../lib/api';
+import { api, ApiError } from '../lib/api';
 import { downloadDatabase } from '../lib/database';
 
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
@@ -64,4 +64,17 @@ it('uses the 120s timeout for database exports instead of the default 15s timeou
   expect(timeoutFactory).toHaveBeenCalledWith(120_000);
   timeout.abort(new DOMException('Timed out', 'TimeoutError'));
   await result;
+});
+
+it('distinguishes export body stream read failure from connection failure with ApiError', async () => {
+  const brokenResponse = {
+    ok: true,
+    status: 200,
+    headers: new Headers({ 'Content-Disposition': 'attachment; filename="snap.db"' }),
+    blob: () => Promise.reject(new TypeError('network stream interrupted')),
+  } as unknown as Response;
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(brokenResponse));
+  const failure = downloadDatabase('/api/database/export');
+  await expect(failure).rejects.toBeInstanceOf(ApiError);
+  await expect(failure).rejects.toMatchObject({ message: '读取导出文件失败，请重试', status: 200, kind: 'invalid-response' });
 });

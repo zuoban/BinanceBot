@@ -37,14 +37,18 @@ impl MarketCache {
         symbol: &str,
     ) -> Result<(Decimal, DateTime<Utc>)> {
         let key = client.market_cache_key();
-        let existing = self.entries.read().unwrap().get(key).cloned();
+        let existing = self
+            .entries
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(key)
+            .cloned();
         let entry = existing.unwrap_or_else(|| {
-            self.entries
-                .write()
-                .unwrap()
-                .entry(key.to_owned())
-                .or_default()
-                .clone()
+            let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
+            if entries.len() > 64 {
+                entries.retain(|k, v| k == key || Arc::strong_count(v) > 1);
+            }
+            entries.entry(key.to_owned()).or_default().clone()
         });
         // A slow shared HTTP request must not stall every engine's reconciliation.
         let mut entry = tokio::time::timeout(ENTRY_WAIT, entry.lock())

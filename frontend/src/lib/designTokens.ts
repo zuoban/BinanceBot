@@ -15,7 +15,6 @@ const lightPalette = {
   '--negative': '#dc2626',
   '--danger-border': 'rgba(220, 38, 38, 0.28)',
   '--history-equity': '#b47800',
-  '--history-equity-fill': 'rgba(180, 120, 0, 0.12)',
   '--sig-calm': '#15803d', '--sig-calm-bg': 'rgba(21, 128, 61, 0.07)', '--sig-calm-line': 'rgba(21, 128, 61, 0.2)',
   '--sig-blue': '#52555d', '--sig-blue-bg': '#f1f2f4', '--sig-blue-line': 'rgba(23, 24, 28, 0.12)',
   '--sig-yellow': '#9a6700', '--sig-yellow-bg': 'rgba(180, 120, 0, 0.08)', '--sig-yellow-line': 'rgba(180, 120, 0, 0.24)',
@@ -25,8 +24,7 @@ const lightPalette = {
   '--rail-muted': '#8e929c', '--rail-hover': '#1c1e22', '--rail-active': '#23262c', '--rail-accent': '#e5a910',
   '--rail-active-text': '#f5f6f7', '--rail-border-strong': 'rgba(237, 238, 240, 0.16)',
   '--rail-positive': '#4cc38a', '--rail-negative': '#e5484d',
-  '--rail-running': '#4cc38a', '--rail-error': '#e5484d',
-  '--rail-info-line': 'rgba(237, 238, 240, 0.14)', '--rail-live': '#f0b90b', '--rail-live-line': 'rgba(240, 185, 11, 0.28)',
+  '--rail-live': '#f0b90b', '--rail-live-line': 'rgba(240, 185, 11, 0.28)',
   '--rail-warning': '#e5a910', '--rail-warning-line': 'rgba(229, 169, 16, 0.26)',
   '--selection-bg': 'rgba(180, 120, 0, 0.14)', '--action-foreground': '#ffffff',
   '--savebar-shadow': '0 8px 24px rgba(0, 0, 0, 0.06)',
@@ -43,7 +41,7 @@ export const palettes = {
     '--text-primary': '#edeef0', '--text-secondary': '#a0a3ab', '--text-muted': '#848892',
     '--accent': '#e5a910', '--accent-soft': 'rgba(229, 169, 16, 0.12)',
     '--positive': '#4cc38a', '--negative': '#e5484d', '--danger-border': 'rgba(229, 72, 77, 0.32)',
-    '--history-equity': '#e5a910', '--history-equity-fill': 'rgba(229, 169, 16, 0.14)',
+    '--history-equity': '#e5a910',
     '--sig-calm': '#4cc38a', '--sig-calm-bg': 'rgba(76, 195, 138, 0.1)', '--sig-calm-line': 'rgba(76, 195, 138, 0.22)',
     '--sig-blue': '#a0a3ab', '--sig-blue-bg': '#212328', '--sig-blue-line': 'rgba(237, 238, 240, 0.12)',
     '--sig-yellow': '#e5a910', '--sig-yellow-bg': 'rgba(229, 169, 16, 0.1)', '--sig-yellow-line': 'rgba(229, 169, 16, 0.26)',
@@ -62,7 +60,7 @@ export const fonts = {
 
 export const dimensions = {
   radiusControl: 8, radiusPanel: 12, radiusChip: 6,
-  space1: 4, space2: 8, space3: 12, space4: 16, space5: 20, space6: 24, space8: 32,
+  space1: 4, space2: 8, space3: 12, space4: 16, space5: 20,
   textXs: 12, textSm: 13, textBase: 14, textSection: 16, textTitle: 28,
   controlHeight: 36, controlHeightSM: 28, controlTouch: 44,
 } as const;
@@ -71,7 +69,7 @@ export const sharedCssTokens = {
   '--font-sans': fonts.sans, '--font-mono': fonts.mono,
   '--radius-control': `${dimensions.radiusControl}px`, '--radius-panel': `${dimensions.radiusPanel}px`, '--radius-chip': `${dimensions.radiusChip}px`,
   '--space-1': `${dimensions.space1}px`, '--space-2': `${dimensions.space2}px`, '--space-3': `${dimensions.space3}px`,
-  '--space-4': `${dimensions.space4}px`, '--space-5': `${dimensions.space5}px`, '--space-6': `${dimensions.space6}px`, '--space-8': `${dimensions.space8}px`,
+  '--space-4': `${dimensions.space4}px`, '--space-5': `${dimensions.space5}px`,
   '--text-xs': `${dimensions.textXs}px`, '--text-sm': `${dimensions.textSm}px`, '--text-base': `${dimensions.textBase}px`,
   '--text-section': `${dimensions.textSection}px`, '--text-title': `${dimensions.textTitle}px`, '--control-touch': `${dimensions.controlTouch}px`,
 } as const;

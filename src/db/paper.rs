@@ -98,10 +98,11 @@ impl AssetLedger {
         self.unrealized_pnl -= contribution.unrealized_pnl;
         self.position_margin -= contribution.position_margin;
         if let Some(time) = contribution.open_valuation_time {
-            let count = self.open_valuation_times.get_mut(&time).unwrap();
-            *count -= 1;
-            if *count == 0 {
-                self.open_valuation_times.remove(&time);
+            if let Some(count) = self.open_valuation_times.get_mut(&time) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    self.open_valuation_times.remove(&time);
+                }
             }
         }
     }
@@ -212,12 +213,13 @@ impl PaperLedger {
             {
                 return;
             }
-            let totals = self.assets.get_mut(&previous.asset).unwrap();
-            totals.remove(previous);
-            if previous.asset == account.asset {
-                previous.refresh(position, account, committed);
-                totals.add(previous);
-                return;
+            if let Some(totals) = self.assets.get_mut(&previous.asset) {
+                totals.remove(previous);
+                if previous.asset == account.asset {
+                    previous.refresh(position, account, committed);
+                    totals.add(previous);
+                    return;
+                }
             }
             previous.asset.clone_from(&account.asset);
             previous.refresh(position, account, committed);
@@ -245,17 +247,20 @@ impl PaperLedger {
             !account.asset.is_empty(),
             "Missing paper asset for {symbol}"
         );
-        if let Some(unresolved) = self.unresolved_legacy.get(&account.asset) {
+        if let Some(first_unresolved) = self
+            .unresolved_legacy
+            .get(&account.asset)
+            .and_then(|unresolved| unresolved.iter().next())
+        {
             anyhow::bail!(
-                "旧模拟盘状态无法从成交历史可靠恢复：{}，请先人工核对并迁移仓位和余额",
-                unresolved.iter().next().unwrap()
+                "旧模拟盘状态无法从成交历史可靠恢复：{first_unresolved}，请先人工核对并迁移仓位和余额"
             );
         }
         self.publish(symbol, position, account, false);
         Ok(self
             .assets
-            .get(&account.asset)
-            .unwrap()
+            .entry(account.asset.clone())
+            .or_default()
             .account(&account.asset))
     }
 }
@@ -270,18 +275,39 @@ impl Database {
         account: &AccountInfo,
     ) -> Result<AccountInfo> {
         {
-            let mut ledger = self.paper_ledger.lock().unwrap();
+            let mut ledger = self.paper_ledger.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ledger) = ledger.as_mut() {
                 return ledger.shared(symbol, position, account);
             }
         }
-        // Writers use this same connection -> ledger lock order. Loading all
-        // committed rows and installing the cache is atomic with their commits.
+        // Writers hold `conn` until after updating `paper_ledger`, so loading all
+        // committed rows under `conn` -> `paper_ledger` is atomic with their commits.
         let conn = self.lock_connection("shared_paper_account");
-        let mut ledger = self.paper_ledger.lock().unwrap();
-        if ledger.is_none() {
-            *ledger = Some(PaperLedger::load(&conn)?);
+        let mut ledger = self.paper_ledger.lock().unwrap_or_else(|e| e.into_inner());
+        let ledger = match ledger.as_mut() {
+            Some(existing) => existing,
+            None => ledger.insert(PaperLedger::load(&conn)?),
+        };
+        ledger.shared(symbol, position, account)
+    }
+
+    /// Pre-load the shared paper ledger on a blocking thread so later runtime
+    /// transitions from Live to Paper never touch SQLite on Tokio worker threads.
+    pub(crate) fn warm_paper_ledger(&self) {
+        if self
+            .paper_ledger
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+        {
+            return;
         }
-        ledger.as_mut().unwrap().shared(symbol, position, account)
+        let conn = self.lock_connection("warm_paper_ledger");
+        let mut ledger = self.paper_ledger.lock().unwrap_or_else(|e| e.into_inner());
+        if ledger.is_none() {
+            if let Ok(loaded) = PaperLedger::load(&conn) {
+                *ledger = Some(loaded);
+            }
+        }
     }
 }

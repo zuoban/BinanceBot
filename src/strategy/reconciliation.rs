@@ -1,5 +1,16 @@
 use super::*;
 
+struct OpenLiveOrderAdoption<'a> {
+    pause_epoch: u64,
+    position_ready: bool,
+    live_ids: &'a HashMap<String, BinanceOrderResponse>,
+    uncertain_ids: &'a HashSet<String>,
+    restored_ids: &'a HashSet<String>,
+    pair_intents: &'a HashMap<String, GridOrder>,
+    remainder_plan: Option<&'a RemainderPlan>,
+    persisted_managed: &'a HashMap<String, GridOrder>,
+}
+
 pub(crate) fn find_durable_order<'a>(
     client_order_id: &str,
     managed: &'a [GridOrder],
@@ -619,16 +630,16 @@ impl GridTradingEngine {
                 };
 
                 if !self
-                    .adopt_and_persist_open_live_orders(
+                    .adopt_and_persist_open_live_orders(OpenLiveOrderAdoption {
                         pause_epoch,
                         position_ready,
-                        &live_ids,
-                        &uncertain_ids,
-                        &restored_ids,
-                        &pair_intents,
-                        remainder_plan.as_ref(),
-                        &persisted_managed,
-                    )
+                        live_ids: &live_ids,
+                        uncertain_ids: &uncertain_ids,
+                        restored_ids: &restored_ids,
+                        pair_intents: &pair_intents,
+                        remainder_plan: remainder_plan.as_ref(),
+                        persisted_managed: &persisted_managed,
+                    })
                     .await
                 {
                     return false;
@@ -2010,18 +2021,17 @@ impl GridTradingEngine {
         Some(managed_by_id)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn adopt_and_persist_open_live_orders(
-        &mut self,
-        pause_epoch: u64,
-        position_ready: bool,
-        live_ids: &HashMap<String, BinanceOrderResponse>,
-        uncertain_ids: &HashSet<String>,
-        restored_ids: &HashSet<String>,
-        pair_intents: &HashMap<String, GridOrder>,
-        remainder_plan: Option<&RemainderPlan>,
-        persisted_managed: &HashMap<String, GridOrder>,
-    ) -> bool {
+    async fn adopt_and_persist_open_live_orders(&mut self, ctx: OpenLiveOrderAdoption<'_>) -> bool {
+        let OpenLiveOrderAdoption {
+            pause_epoch,
+            position_ready,
+            live_ids,
+            uncertain_ids,
+            restored_ids,
+            pair_intents,
+            remainder_plan,
+            persisted_managed,
+        } = ctx;
         let mut orders_to_persist = Vec::new();
         {
             let mut active = self.state.active_orders.write().await;

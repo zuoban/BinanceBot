@@ -2,7 +2,7 @@ import { Suspense, lazy, useContext, useEffect, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
 import { Alert, App, Button, Card, Checkbox, Col, Form, Input, InputNumber, Row, Space, Switch, Tabs } from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { api, post } from '../lib/api';
+import { api, errorMessage, post } from '../lib/api';
 import { EditContext } from '../lib/session';
 import type { GlobalConfig, ServerConfig } from '../lib/types';
 import { ConflictReloadButton, ErrorNotice, FormRevertButton, isConfigConflict, PageTitle } from '../components/Common';
@@ -37,7 +37,7 @@ function ProbeButton({ label, path, body, disabled, resetKey }: { label: string;
       if (mounted.current && activeKey.current === key) setResult({ ok: true, text });
     } catch (error) {
       if (mounted.current && activeKey.current === key) {
-        const text = (error as Error).message;
+        const text = errorMessage(error);
         setResult({ ok: false, text });
         message.error(text);
       }
@@ -259,10 +259,11 @@ function SecuritySettings() {
     </dl>
   </Card>;
 }
+const settingsTabs = ['global', 'server', 'database', 'security'] as const;
 export default function Settings() {
   const edit = useContext(EditContext);
   const { modal } = App.useApp();
-  const [active, setActive] = useUrlParam<string>('tab', 'global', ['global', 'server', 'database', 'security']);
+  const [active, setActive] = useUrlParam('tab', 'global', settingsTabs);
   const switching = useRef(false);
   const savingRef = useRef(edit.saving);
   savingRef.current = edit.saving;
@@ -273,12 +274,13 @@ export default function Settings() {
   }, []);
   return <div className="settings-page"><PageTitle title="全局设置" description="交易所连接、通知和控制台安全设置" />
     <Tabs className="settings-tabs" activeKey={active} onChange={async key => {
-      if (switching.current || savingRef.current) return;
+      const next = settingsTabs.find(t => t === key);
+      if (!next || switching.current || savingRef.current) return;
       switching.current = true;
       try {
         if (edit.dirty && !await modal.confirm({ title: '放弃未保存的修改？', okText: '放弃修改', cancelText: '继续编辑' })) return;
         if (!mounted.current || savingRef.current) return;
-        edit.setDirty(false); setActive(key);
+        edit.setDirty(false); setActive(next);
       } finally {
         switching.current = false;
       }

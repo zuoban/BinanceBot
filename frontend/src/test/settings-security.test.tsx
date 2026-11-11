@@ -3,6 +3,7 @@ import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeEach, expect, it, vi } from 'vitest';
+import type * as Api from '../lib/api';
 import { EditContext } from '../lib/session';
 import { MemoryRouter } from 'react-router-dom';
 import Settings from '../pages/Settings';
@@ -12,7 +13,10 @@ vi.mock('antd', async importOriginal => {
   const antd = await importOriginal<typeof import('antd')>();
   return { ...antd, App: { useApp: () => ({ modal: { confirm: mocks.confirm }, message: { success: mocks.success, error: mocks.error } }) } };
 });
-vi.mock('../lib/api', () => ({ api: mocks.api, post: mocks.post }));
+vi.mock('../lib/api', async importOriginal => {
+  const actual = await importOriginal<typeof Api>();
+  return { ...actual, api: mocks.api, post: mocks.post };
+});
 
 beforeEach(() => {
   vi.clearAllMocks();

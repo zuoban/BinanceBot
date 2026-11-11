@@ -15,6 +15,7 @@ vi.mock('antd', () => ({
 vi.mock('@ant-design/icons', () => ({}));
 vi.mock('../lib/api', () => ({
   api: vi.fn(), post: vi.fn(),
+  errorMessage: (error: unknown) => error instanceof Error ? error.message : String(error),
   pairPath: (value: { symbol: string }, path: string) => `/api/pairs/${value.symbol}/${path}`,
 }));
 

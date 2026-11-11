@@ -1,7 +1,7 @@
 import { useContext, useEffect, useRef, useState } from 'react';
 import { App, type ModalFuncProps } from 'antd';
 import type { QueryClient, QueryKey } from '@tanstack/react-query';
-import { authenticatedFetch } from './api';
+import { ApiError, authenticatedFetch, errorMessage } from './api';
 import { downloadBlob } from './exportCsv';
 import { EditContext } from './session';
 
@@ -24,14 +24,14 @@ export async function downloadDatabase(path: string, targets?: DatabaseTarget[])
   });
   if (!response.ok) {
     const result = await response.json().catch(() => null) as { message?: string } | null;
-    throw new Error(result?.message || '数据库导出失败，请重试');
+    throw new ApiError(result?.message || '数据库导出失败，请重试', response.status);
   }
   const filename = response.headers.get('Content-Disposition')?.match(/filename="?([^";]+)"?/)?.[1] ?? 'binancebot-analysis.db';
   let blob: Blob;
   try {
     blob = await response.blob();
   } catch {
-    throw new Error('无法连接后端服务，请检查网络后重试');
+    throw new ApiError('读取导出文件失败，请重试', response.status, 'invalid-response');
   }
   downloadBlob(blob, filename);
 }
@@ -57,7 +57,7 @@ export function useDatabaseAction<T extends string>() {
       const text = await task();
       if (mounted.current && text) message.success(text);
     } catch (error) {
-      if (mounted.current) message.error((error as Error).message);
+      if (mounted.current) message.error(errorMessage(error));
     } finally {
       lock.current = false;
       if (mounted.current) {

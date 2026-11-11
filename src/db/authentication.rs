@@ -19,13 +19,13 @@ impl SessionCache {
     fn hit(&self, token: &str) -> bool {
         self.0
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .get(token)
             .is_some_and(|validated| validated.elapsed() < SESSION_CACHE_TTL)
     }
 
     fn insert(&self, token: &str) {
-        let mut entries = self.0.lock().unwrap();
+        let mut entries = self.0.lock().unwrap_or_else(|e| e.into_inner());
         if entries.len() >= SESSION_CACHE_PRUNE_AT {
             entries.retain(|_, validated| validated.elapsed() < SESSION_CACHE_TTL);
         }
@@ -33,11 +33,14 @@ impl SessionCache {
     }
 
     fn remove(&self, token: &str) {
-        self.0.lock().unwrap().remove(token);
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(token);
     }
 
     fn clear(&self) {
-        self.0.lock().unwrap().clear();
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 }
 

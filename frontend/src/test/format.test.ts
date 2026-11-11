@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { accountGroups, ageText, availableRatio, comparePositionAmount, number, positionAmount, positionGroups, relativeTime, todayCount, todayPnlGroups, trimFractionZeros } from '../lib/format';
+import { addSignedDecimals, formatDecimalDisplay, subSignedDecimals, sumSignedDecimals } from '../lib/decimal';
+import { accountGroups, ageText, availableRatio, comparePositionAmount, groupTradePnl, number, positionAmount, positionGroups, quantity, relativeTime, todayCount, todayPnlGroups, trimFractionZeros } from '../lib/format';
 import { snapshot } from './fixtures';
 
 it('removes only insignificant fractional zeros and normalizes negative zero after rounding', () => {
@@ -7,6 +8,21 @@ it('removes only insignificant fractional zeros and normalizes negative zero aft
     .toEqual(['10,000', '99.54', '0', '0.001', '-1.2', '--']);
   expect(number(-0.001, 2)).toBe('0.00');
   expect(trimFractionZeros(number(-0.001, 2))).toBe('0');
+});
+
+it('formats quantities and signed decimals exactly without IEEE-754 truncation or 4-decimal caps', () => {
+  expect(quantity('1.00025')).toBe('1.00025');
+  expect(quantity('0.002000')).toBe('0.002');
+  expect(quantity('10000.50')).toBe('10,000.5');
+  expect(quantity('-2')).toBe('-2');
+  expect(quantity('-0.000')).toBe('0');
+  expect(quantity('9007199254740993.123456')).toBe('9,007,199,254,740,993.123456');
+  expect(quantity('invalid')).toBe('--');
+  expect(quantity('')).toBe('--');
+  expect(formatDecimalDisplay('1234.5', { minFractionDigits: 2, trimZeros: false })).toBe('1,234.50');
+  expect(addSignedDecimals('0.1', '0.2')).toBe('0.3');
+  expect(subSignedDecimals('0.3', '0.1')).toBe('0.2');
+  expect(sumSignedDecimals(['0.1', '0.2', '-0.3'])).toBe('0');
 });
 
 it('formats relative trade times across units and handles invalid or future dates', () => {
@@ -155,6 +171,21 @@ describe('today realized pnl', () => {
     const now = Date.parse('2026-01-01T16:00:00Z');
     expect(todayPnlGroups({ window_start: '', window_end: new Date(now - 1).toISOString(), groups: [] }, now)).toBeNull();
     expect(todayPnlGroups(null, now)).toBeNull();
+  });
+  it('eliminates float residue when summing realized pnl across trades and today groups', () => {
+    const now = new Date().toISOString();
+    const groups = todayPnlGroups({ window_start: now, window_end: now, groups: [
+      { symbol: 'BTCUSDC', mode: 'PAPER', realized_pnl: '0.1', pending_pnl_count: 0 },
+      { symbol: 'ETHUSDC', mode: 'PAPER', realized_pnl: '0.2', pending_pnl_count: 0 },
+      { symbol: 'SOLUSDC', mode: 'PAPER', realized_pnl: '-0.3', pending_pnl_count: 0 },
+    ] })!;
+    expect(groups[0].total).toBe(0);
+    const tradeMap = groupTradePnl([
+      { trade_id: '1', symbol: 'BTCUSDC', mode: 'PAPER', side: 'BUY', price: '100', quantity: '1', amount_usdc: '100', realized_pnl: '0.1', commission: '0', pnl_verified: true, is_maker: true, timestamp: now, note: '' },
+      { trade_id: '2', symbol: 'ETHUSDC', mode: 'PAPER', side: 'SELL', price: '100', quantity: '1', amount_usdc: '100', realized_pnl: '0.2', commission: '0', pnl_verified: true, is_maker: true, timestamp: now, note: '' },
+      { trade_id: '3', symbol: 'SOLUSDC', mode: 'PAPER', side: 'SELL', price: '100', quantity: '1', amount_usdc: '100', realized_pnl: '-0.3', commission: '0', pnl_verified: true, is_maker: true, timestamp: now, note: '' },
+    ]);
+    expect(tradeMap.get('PAPER:USDC')?.total).toBe(0);
   });
 });
 

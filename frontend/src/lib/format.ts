@@ -1,3 +1,4 @@
+import { formatDecimal, formatDecimalDisplay, parseSignedDecimal, rescaleDecimal, type Fixed } from './decimal';
 import type { AccountObservation, GridConfig, Mode, Overview, PairSummary, Snapshot, Status, Trade } from './types';
 
 export const SNAPSHOT_STALE_MS = 10_000;
@@ -83,6 +84,7 @@ export const price = (value: unknown) => number(value, Math.min(10, Math.max(4, 
 export const trimFractionZeros = (value: string) => value.replace(/(\.\d*?[1-9])0+$|\.0+$/, '$1');
 export const compactNumber = (value: unknown, digits = 2) => trimFractionZeros(number(value, digits));
 export const compactPrice = (value: unknown) => trimFractionZeros(price(value));
+export const quantity = (value: unknown) => formatDecimalDisplay(value, { trimZeros: true }) ?? '--';
 export function positivePrice(value: unknown, compact = false) {
   const n = numeric(value);
   return n !== null && n > 0 ? (compact ? compactPrice(n) : price(n)) : '--';
@@ -147,7 +149,6 @@ const isSameBeijingDay = (windowEnd: string | undefined, now: number) => {
   const endTs = Date.parse(windowEnd);
   return Number.isFinite(endTs) && Math.floor((endTs + 8 * 3600_000) / 86_400_000) === Math.floor((now + 8 * 3600_000) / 86_400_000);
 };
-const normalizeFloatTotal = (total: number) => Math.abs(total) < 1e-12 ? 0 : Number(total.toPrecision(12));
 export function todayTradeCounts(s: Snapshot | PairSummary, now = Date.now()) {
   if ('today_trade_counts' in s) {
     const counts = s.today_trade_counts;
@@ -157,33 +158,52 @@ export function todayTradeCounts(s: Snapshot | PairSummary, now = Date.now()) {
   if (!stats || !isSameBeijingDay(stats.window_end, now)) return null;
   return stats.buckets.reduce((counts, b) => ({ buy: counts.buy + b.buy_count, sell: counts.sell + b.sell_count }), { buy: 0, sell: 0 });
 }
+export interface ModeAssetPnlGroup {
+  key: string;
+  mode: Mode;
+  asset: string;
+  sum: number;
+  pending: number;
+  available: boolean;
+}
+export function groupModeAssetPnl<T extends { mode: Mode; symbol: string }>(
+  items: Iterable<T>,
+  extract: (item: T) => { pnl: unknown; pending?: number; valid?: boolean },
+): Map<string, ModeAssetPnlGroup> {
+  const raw = groupByKey(
+    items,
+    item => modeAsset(item.mode, item.symbol).key,
+    (item, key) => ({ key, mode: item.mode, asset: modeAsset(item.mode, item.symbol).asset, values: [] as Fixed[], pending: 0, available: true }),
+    (group, item) => {
+      const { pnl, pending = 0, valid = true } = extract(item);
+      const parsed = parseSignedDecimal(pnl);
+      if (!valid || !parsed || !Number.isInteger(pending) || pending < 0) {
+        group.available = false;
+        if (Number.isInteger(pending) && pending > 0) group.pending += pending;
+        if (parsed) group.values.push(parsed);
+      } else {
+        group.values.push(parsed);
+        group.pending += pending;
+      }
+    },
+  );
+  const result = new Map<string, ModeAssetPnlGroup>();
+  for (const [key, group] of raw) {
+    const scale = group.values.reduce((max, item) => Math.max(max, item.s), 0);
+    const totalScaled = group.values.reduce((acc, item) => acc + rescaleDecimal(item, scale), 0n);
+    const sum = totalScaled === 0n ? 0 : Number(formatDecimal(totalScaled, scale));
+    result.set(key, { key, mode: group.mode, asset: group.asset, sum, pending: group.pending, available: group.available && Number.isFinite(sum) });
+  }
+  return result;
+}
 export function todayPnlGroups(stats: Overview['today_pnl'], now = Date.now()) {
   if (!stats || !isSameBeijingDay(stats.window_end, now)) return null;
-  const groups = groupByKey(
-    stats.groups,
-    row => modeAsset(row.mode, row.symbol).key,
-    row => ({ mode: row.mode, asset: modeAsset(row.mode, row.symbol).asset, total: 0, pending: 0, available: true }),
-    (group, row) => {
-      const pnl = numeric(row.realized_pnl);
-      if (pnl === null || !Number.isInteger(row.pending_pnl_count) || row.pending_pnl_count < 0) group.available = false;
-      else { group.total += pnl; group.pending += row.pending_pnl_count; }
-    },
-  );
-  return [...groups.entries()].map(([key, group]) => ({ ...group, key, total: group.available && !group.pending && Number.isFinite(group.total) ? normalizeFloatTotal(group.total) : null }));
+  return [...groupModeAssetPnl(stats.groups, row => ({ pnl: row.realized_pnl, pending: row.pending_pnl_count })).values()]
+    .map(group => ({ ...group, total: group.available && !group.pending ? group.sum : null }));
 }
 export function groupTradePnl(trades: Trade[]) {
-  const groups = groupByKey(
-    trades,
-    trade => modeAsset(trade.mode, trade.symbol).key,
-    trade => ({ mode: trade.mode, asset: modeAsset(trade.mode, trade.symbol).asset, total: 0, available: true }),
-    (group, trade) => {
-      const pnl = numeric(trade.realized_pnl);
-      if (!trade.pnl_verified || pnl === null) group.available = false;
-      else group.total += pnl;
-    },
-  );
-  for (const group of groups.values()) group.total = normalizeFloatTotal(group.total);
-  return groups;
+  const groups = groupModeAssetPnl(trades, trade => ({ pnl: trade.realized_pnl, valid: trade.pnl_verified }));
+  return new Map([...groups.entries()].map(([key, group]) => [key, { mode: group.mode, asset: group.asset, total: group.sum, available: group.available }]));
 }
 export function todayCount(s: Snapshot | PairSummary, now = Date.now()) {
   const counts = todayTradeCounts(s, now);

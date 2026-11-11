@@ -3,7 +3,7 @@ import { App, Button, Segmented, Table, Tag } from 'antd';
 import { CheckOutlined, CopyOutlined, DownloadOutlined } from '@ant-design/icons';
 import { Link, useInRouterContext } from 'react-router-dom';
 import type { ColumnsType } from 'antd/es/table';
-import { beijingDay, number, price, relativeTime, time } from '../lib/format';
+import { beijingDay, number, price, quantity, relativeTime, time } from '../lib/format';
 import { priceDiffPercent } from '../lib/gridPreview';
 import { useNow } from '../lib/useNow';
 import type { Log, Order, Trade } from '../lib/types';
@@ -19,6 +19,19 @@ const NowContext = createContext(0);
 function NowProvider({ currentNow, enabled, children }: { currentNow?: number; enabled: boolean; children: React.ReactNode }) {
   const fallbackNow = useNow(1000, currentNow === undefined && enabled);
   return <NowContext.Provider value={currentNow ?? fallbackNow}>{children}</NowContext.Provider>;
+}
+const NARROW_MEDIA_QUERY = '(max-width: 600px)';
+function useNarrowViewport(skip = false) {
+  const [narrow, setNarrow] = useState(() => !skip && typeof window !== 'undefined' && Boolean(window.matchMedia?.(NARROW_MEDIA_QUERY)?.matches));
+  useEffect(() => {
+    if (skip || typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+    const media = window.matchMedia(NARROW_MEDIA_QUERY);
+    setNarrow(media.matches);
+    const update = () => setNarrow(media.matches);
+    media.addEventListener('change', update);
+    return () => media.removeEventListener('change', update);
+  }, [skip]);
+  return narrow;
 }
 function RelativeTime({ value, className }: { value: string; className?: string }) {
   const now = useContext(NowContext);
@@ -87,7 +100,7 @@ const orderColumns: ColumnsType<Order> = [
   { title: '方向', dataIndex: 'side', render: side, width: 90, fixed: 'left' },
   { title: '价格', align: 'right', className: 'table-numeric', dataIndex: 'price', render: (v: string) => <Copyable value={v}>{price(v)}</Copyable>, sorter: (a, b) => Number(a.price) - Number(b.price) },
   { title: '距标记价格', align: 'right', className: 'table-numeric', render: (_, o) => <OrderMarkDiff orderPrice={o.price} /> },
-  { title: '数量', align: 'right', className: 'table-numeric', dataIndex: 'quantity', render: price },
+  { title: '数量', align: 'right', className: 'table-numeric', dataIndex: 'quantity', render: quantity },
   { title: '金额', align: 'right', className: 'table-numeric', dataIndex: 'amount_usdc', render: (v: string) => number(v) },
   { title: '用途', render: (_, o) => orderPurpose(o) },
   { title: '状态', dataIndex: 'status' },
@@ -97,17 +110,17 @@ const orderPagination = { pageSize: 15, showSizeChanger: false, hideOnSinglePage
 const orderScroll = { x: 900 } as const;
 const orderExpandable = {
   rowExpandable: (o: Order) => !!o.merge_sources?.length,
-  expandedRowRender: (o: Order) => <ul className="order-merge-sources">{o.merge_sources.map(source => <li key={source.client_order_id}>{source.client_order_id} · {price(source.price)} × {price(source.quantity)}</li>)}</ul>,
+  expandedRowRender: (o: Order) => <ul className="order-merge-sources">{o.merge_sources.map(source => <li key={source.client_order_id}>{source.client_order_id} · {price(source.price)} × {quantity(source.quantity)}</li>)}</ul>,
 };
 const OrderMobileItem = memo(function OrderMobileItem({ order: o }: { order: Order }) {
   return <li className="trade-list-item">
     <div className="trade-list-heading">{side(o.side)}<strong><Copyable value={o.price}>{price(o.price)}</Copyable></strong><span className="trade-list-time">{orderPurpose(o)}</span></div>
     <dl>
-      <div><dt>数量</dt><dd>{price(o.quantity)}</dd></div>
+      <div><dt>数量</dt><dd>{quantity(o.quantity)}</dd></div>
       <div><dt>金额</dt><dd>{number(o.amount_usdc)}</dd></div>
       <div><dt>距标记价</dt><dd><OrderMarkDiff orderPrice={o.price} /></dd></div>
     </dl>
-    {o.merge_sources?.length > 0 && <ul className="order-merge-sources order-merge-sources-mobile">{o.merge_sources.map(source => <li key={source.client_order_id}>{source.client_order_id} · {price(source.price)} × {price(source.quantity)}</li>)}</ul>}
+    {o.merge_sources?.length > 0 && <ul className="order-merge-sources order-merge-sources-mobile">{o.merge_sources.map(source => <li key={source.client_order_id}>{source.client_order_id} · {price(source.price)} × {quantity(source.quantity)}</li>)}</ul>}
   </li>;
 });
 export const OrdersTable = memo(function OrdersTable({ orders, mark }: { orders: Order[]; mark?: string }) {
@@ -138,6 +151,7 @@ const tradePagination = { pageSize: 15, showSizeChanger: false, hideOnSinglePage
 const tradeScroll = { x: 1000 } as const;
 export const TradesTable = memo(function TradesTable({ trades: allTrades, overview = false, now: currentNow }: { trades: Trade[]; overview?: boolean; now?: number }) {
   const [filter, setFilter] = useState<SideFilter>('ALL');
+  const isNarrow = useNarrowViewport(overview);
   const trades = useMemo(() => overview || filter === 'ALL' ? allTrades : allTrades.filter(trade => trade.side === filter), [allTrades, filter, overview]);
   const exportRows = useCallback(() => downloadCsv(`trades-${beijingDay()}.csv`, toCsv(
     ['时间（北京）', '方向', '成交价格', '数量', '金额', '已实现盈亏', '手续费', '成交方式', '备注'],
@@ -148,7 +162,7 @@ export const TradesTable = memo(function TradesTable({ trades: allTrades, overvi
     { title: '方向', dataIndex: 'side', render: side, width: 90, fixed: overview ? undefined : 'left' },
     { title: overview ? '成交时间' : '时间（北京）', className: 'table-numeric', dataIndex: 'timestamp', render: overview ? (value: string) => <RelativeTime value={value} /> : time, width: overview ? 90 : 185 },
     { title: '成交价格', align: 'right', className: 'table-numeric', dataIndex: 'price', render: (v: string) => overview ? price(v) : <Copyable value={v}>{price(v)}</Copyable> },
-    { title: '数量', align: 'right', className: 'table-numeric', dataIndex: 'quantity', render: price },
+    { title: '数量', align: 'right', className: 'table-numeric', dataIndex: 'quantity', render: quantity },
     { title: '金额', align: 'right', className: 'table-numeric', dataIndex: 'amount_usdc', render: (v: string) => number(v) },
     { title: overview ? '盈亏' : '已实现盈亏', align: 'right', className: 'table-numeric', render: (_, t) => t.pnl_verified ? <Pnl value={t.realized_pnl} /> : <Tag>待同步</Tag> },
     { title: '手续费', align: 'right', className: 'table-numeric', render: (_, t) => t.pnl_verified ? number(t.commission, 4) : <Tag>待同步</Tag> },
@@ -171,14 +185,14 @@ export const TradesTable = memo(function TradesTable({ trades: allTrades, overvi
       mobileRows={(overview ? trades : trades.slice(0, 50)).map(trade => <li className="trade-list-item" key={trade.trade_id}>
         <div className="trade-list-heading">{overview ? <><strong><SymbolCell symbol={trade.symbol} /></strong>{side(trade.side)}</> : <>{side(trade.side)}<strong><Copyable value={trade.price}>{price(trade.price)}</Copyable></strong></>}<RelativeTime value={trade.timestamp} className="trade-list-time" /></div>
         <dl>
-          <div><dt>{overview ? '成交均价' : '数量'}</dt><dd>{price(overview ? trade.price : trade.quantity)}</dd></div>
+          <div><dt>{overview ? '成交均价' : '数量'}</dt><dd>{overview ? price(trade.price) : quantity(trade.quantity)}</dd></div>
           <div><dt>金额</dt><dd>{number(trade.amount_usdc)}</dd></div>
           <div><dt>盈亏</dt><dd>{trade.pnl_verified ? <Pnl value={trade.realized_pnl} /> : <Tag>待同步</Tag>}</dd></div>
         </dl>
       </li>)}
     />
   </div>, [overview, filter, trades, allTrades.length, exportRows, columns]);
-  return <NowProvider currentNow={currentNow} enabled={trades.length > 0}>{body}</NowProvider>;
+  return <NowProvider currentNow={currentNow} enabled={trades.length > 0 && (overview || isNarrow)}>{body}</NowProvider>;
 });
 const levels = ['ALL', 'ERROR', 'WARN', 'INFO', 'DEBUG'] as const;
 type LevelFilter = typeof levels[number];

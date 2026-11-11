@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
@@ -28,11 +29,13 @@ type Entry<T> = Arc<Mutex<CacheEntry<T>>>;
 type CacheEntryMap<T> = HashMap<[u8; 32], (u64, Entry<T>)>;
 
 pub(super) struct CacheEntries<T> {
+    next_epoch: AtomicU64,
     entries: std::sync::RwLock<CacheEntryMap<T>>,
 }
 impl<T> Default for CacheEntries<T> {
     fn default() -> Self {
         Self {
+            next_epoch: AtomicU64::new(0),
             entries: std::sync::RwLock::new(HashMap::new()),
         }
     }
@@ -42,15 +45,26 @@ impl<T> CacheEntries<T> {
     // A critical refresh detaches shared loaders without representing a fill.
     // Concurrent critical refreshes must not invalidate one another.
     fn detach_sync(&self, key: [u8; 32]) -> u64 {
-        let mut entries = self.entries.write().unwrap();
-        let (epoch, entry) = entries.entry(key).or_default();
+        let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
+        let (epoch, entry) = entries.entry(key).or_insert_with(|| {
+            (
+                self.next_epoch.fetch_add(1, Ordering::Relaxed),
+                Default::default(),
+            )
+        });
         *entry = Default::default();
-        *epoch
+        let current_epoch = *epoch;
+        if entries.len() > 256 {
+            entries.retain(|k, (_, entry)| *k == key || Arc::strong_count(entry) > 1);
+        }
+        current_epoch
     }
 
     fn detach_if_current_sync(&self, key: [u8; 32], expected: u64) -> bool {
-        let mut entries = self.entries.write().unwrap();
-        let (epoch, entry) = entries.entry(key).or_default();
+        let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
+        let Some((epoch, entry)) = entries.get_mut(&key) else {
+            return false;
+        };
         if *epoch != expected {
             return false;
         }
@@ -74,12 +88,26 @@ impl<T> CacheEntries<T> {
     }
 
     fn entry_sync(&self, key: [u8; 32]) -> (u64, Entry<T>) {
-        if let Some((epoch, entry)) = self.entries.read().unwrap().get(&key) {
+        if let Some((epoch, entry)) = self
+            .entries
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+        {
             return (*epoch, entry.clone());
         }
-        let mut entries = self.entries.write().unwrap();
-        let (epoch, entry) = entries.entry(key).or_default();
-        (*epoch, entry.clone())
+        let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
+        let (epoch, entry) = entries.entry(key).or_insert_with(|| {
+            (
+                self.next_epoch.fetch_add(1, Ordering::Relaxed),
+                Default::default(),
+            )
+        });
+        let result = (*epoch, entry.clone());
+        if entries.len() > 256 {
+            entries.retain(|k, (_, entry)| *k == key || Arc::strong_count(entry) > 1);
+        }
+        result
     }
 
     #[cfg(test)]
@@ -89,17 +117,24 @@ impl<T> CacheEntries<T> {
 
     // Retire the entry without waiting for an in-flight loader holding its lock.
     pub(super) async fn retire(&self, key: [u8; 32]) -> u64 {
-        let mut entries = self.entries.write().unwrap();
-        let (epoch, entry) = entries.entry(key).or_default();
-        *epoch = epoch.wrapping_add(1);
+        let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
+        let next = self.next_epoch.fetch_add(1, Ordering::Relaxed);
+        let (epoch, entry) = entries
+            .entry(key)
+            .or_insert_with(|| (next, Default::default()));
+        *epoch = next;
         *entry = Default::default();
-        *epoch
+        let retired_epoch = *epoch;
+        if entries.len() > 256 {
+            entries.retain(|k, (_, entry)| *k == key || Arc::strong_count(entry) > 1);
+        }
+        retired_epoch
     }
 
     fn is_current_sync(&self, key: [u8; 32], epoch: u64, entry: &Entry<T>) -> bool {
         self.entries
             .read()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .get(&key)
             .is_some_and(|(e, current)| *e == epoch && Arc::ptr_eq(current, entry))
     }

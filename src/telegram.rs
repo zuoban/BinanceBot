@@ -93,6 +93,7 @@ impl TelegramNotifier {
         if config.bot_token.trim().is_empty() || config.chat_id.trim().is_empty() {
             return Err(anyhow!("Bot Token or Chat ID is empty"));
         }
+        TelegramConfig::validate_bot_token(&config.bot_token)?;
         let endpoint = format!("{}/bot{}/sendMessage", self.api_base_url, config.bot_token);
         let response = self
             .client
@@ -986,5 +987,30 @@ mod tests {
         assert!(message.contains("  - SOLUSDC（多 20）：2469.00 USDC｜浮盈 +69.00 USDC"));
         assert!(!message.contains("ETHUSDC"));
         assert!(message.contains("生成时间：2026-11-10 00:00:05（北京时间）"));
+    }
+
+    #[tokio::test]
+    async fn send_message_rejects_malformed_bot_token_before_http_request() {
+        let notifier = TelegramNotifier::with_base_url(
+            TelegramNotifier::shared_client(),
+            "http://127.0.0.1:1".into(),
+        );
+        for invalid in [
+            "123:abc/../../getMe",
+            "123:abc?foo=1",
+            "123:abc#frag",
+            "123:abc\\x",
+        ] {
+            let config = TelegramConfig {
+                enabled: true,
+                bot_token: invalid.into(),
+                chat_id: "12345".into(),
+            };
+            let err = notifier.send_test_message(&config).await.unwrap_err();
+            assert!(
+                err.to_string().contains("Telegram Bot Token 格式无效"),
+                "{invalid}: {err}"
+            );
+        }
     }
 }

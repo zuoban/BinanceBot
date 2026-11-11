@@ -252,15 +252,15 @@ fn auth_service_error<T>() -> (StatusCode, Json<ApiResponse<T>>) {
 }
 
 async fn require_auth_middleware(
-    State(state): State<Arc<AppState>>,
+    State(auth): State<Arc<crate::server::state::AuthContext>>,
     req: axum::extract::Request,
     next: Next,
 ) -> Result<Response, (StatusCode, Json<ApiResponse<()>>)> {
-    if !state.is_auth_configured() {
+    if !auth.is_auth_configured() {
         return Ok(next.run(req).await);
     }
     let is_valid = match extract_token(req.headers()) {
-        Some(token) => match state.check_token_valid(token).await {
+        Some(token) => match auth.check_token_valid(token).await {
             Ok(valid) => valid,
             Err(error) => {
                 error!("Failed to check session: {}", error);
@@ -296,7 +296,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         )
         .route("/api/database/clear", post(single_database_clear_handler))
         .route_layer(middleware::from_fn_with_state(
-            state.clone(),
+            state.auth.clone(),
             require_auth_middleware,
         ))
         .route("/api/accounts/ws", get(accounts_ws_handler))
@@ -351,10 +351,6 @@ fn create_base_router(state: Arc<AppState>, history_clear: bool) -> Router {
         .route("/api/trades", get(get_trades_handler))
         .route("/api/logs", get(get_logs_handler))
         .route(
-            "/api/database/export",
-            get(export_database_handler).post(export_selected_database_handler),
-        )
-        .route(
             "/api/config",
             get(get_config_handler).post(post_config_handler),
         )
@@ -362,18 +358,37 @@ fn create_base_router(state: Arc<AppState>, history_clear: bool) -> Router {
     if history_clear {
         api_protected = api_protected.route("/api/trades/clear", post(clear_trade_history_handler));
     }
-    let api_protected = api_protected.route_layer(middleware::from_fn_with_state(
-        state.clone(),
-        require_auth_middleware,
-    ));
+    let api_protected = api_protected
+        .route_layer(middleware::from_fn_with_state(
+            state.auth.clone(),
+            require_auth_middleware,
+        ))
+        .with_state(state.clone());
+    let account = database_export_routes(state.auth.clone());
+    let auth_routes = public_routes().with_state(state.auth.clone());
 
-    public_routes()
+    Router::new()
         .route("/ws", get(ws_handler))
-        .merge(api_protected)
         .with_state(state)
+        .merge(auth_routes)
+        .merge(account)
+        .merge(api_protected)
 }
 
-fn public_routes() -> Router<Arc<AppState>> {
+fn database_export_routes(auth: Arc<crate::server::state::AuthContext>) -> Router {
+    Router::new()
+        .route(
+            "/api/database/export",
+            get(export_database_handler).post(export_selected_database_handler),
+        )
+        .route_layer(middleware::from_fn_with_state(
+            auth.clone(),
+            require_auth_middleware,
+        ))
+        .with_state(auth)
+}
+
+fn public_routes() -> Router<Arc<crate::server::state::AuthContext>> {
     Router::new()
         .route("/api/auth/status", get(get_auth_status_handler))
         .route("/api/auth/login", post(post_auth_login_handler))
@@ -394,7 +409,7 @@ pub fn create_multi_router(states: Vec<Arc<AppState>>) -> Router {
         };
         let scoped = pair_routes()
             .route_layer(middleware::from_fn_with_state(
-                state.clone(),
+                state.auth.clone(),
                 require_auth_middleware,
             ))
             .route("/ws", get(ws_handler))
@@ -408,7 +423,7 @@ pub fn create_multi_router(states: Vec<Arc<AppState>>) -> Router {
         .route("/api/trades/clear", post(clear_multi_trade_history_handler))
         .route("/api/database/clear", post(multi_database_clear_handler))
         .route_layer(middleware::from_fn_with_state(
-            primary,
+            primary.auth.clone(),
             require_auth_middleware,
         ))
         .route("/api/accounts/ws", get(accounts_ws_handler))
@@ -481,7 +496,7 @@ async fn collect_overview(
 
 /// Dispatch through the current registry so newly added pairs are immediately addressable.
 pub async fn create_managed_router(handle: RuntimeHandle) -> Router {
-    let primary = handle.states.read().await[0].clone();
+    let auth = handle.auth.clone();
     let protected = exchange_routes(handle.rate_limiter.clone())
         .route(
             "/api/pairs",
@@ -522,7 +537,7 @@ pub async fn create_managed_router(handle: RuntimeHandle) -> Router {
             get(get_server_config_handler).post(post_server_config_handler),
         )
         .route_layer(middleware::from_fn_with_state(
-            primary.clone(),
+            auth.clone(),
             require_auth_middleware,
         ))
         .route("/ws", get(dispatch_pair))
@@ -532,18 +547,10 @@ pub async fn create_managed_router(handle: RuntimeHandle) -> Router {
             handle.clone(),
         ))))
         .with_state(handle);
-    let account = Router::new()
-        .route(
-            "/api/database/export",
-            get(export_database_handler).post(export_selected_database_handler),
-        )
-        .route_layer(middleware::from_fn_with_state(
-            primary.clone(),
-            require_auth_middleware,
-        ));
+    let account = database_export_routes(auth.clone());
     public_routes()
+        .with_state(auth)
         .merge(account)
-        .with_state(primary)
         .merge(protected)
 }
 
@@ -627,15 +634,14 @@ async fn clear_symbol(
 }
 
 async fn export_selected_database_handler(
-    State(state): State<Arc<AppState>>,
+    State(auth): State<Arc<crate::server::state::AuthContext>>,
     Json(payload): Json<DatabaseTargetsRequest>,
 ) -> Response {
     let Some((trades, snapshots)) = payload.selected_targets() else {
         return StatusCode::BAD_REQUEST.into_response();
     };
     database_export_response(
-        state
-            .db
+        auth.db
             .run_blocking(move |db| db.export_selected_analysis_snapshot(trades, snapshots))
             .await,
     )
@@ -745,7 +751,10 @@ async fn dispatch_pair(
         .clone();
     *req.uri_mut() = uri;
     req.extensions_mut().insert(handle);
-    router.oneshot(req).await.unwrap()
+    match router.oneshot(req).await {
+        Ok(response) => response,
+        Err(never) => match never {},
+    }
 }
 
 async fn get_managed_pairs_handler(
@@ -904,17 +913,39 @@ fn web_global_config_view(global: &crate::config::GlobalConfig) -> WebGlobalConf
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct TestExchangePayload {
     api_key: Option<String>,
     api_secret: Option<String>,
     recv_window: Option<u64>,
 }
 
-#[derive(Debug, Deserialize)]
+impl std::fmt::Debug for TestExchangePayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TestExchangePayload")
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "api_secret",
+                &self.api_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("recv_window", &self.recv_window)
+            .finish()
+    }
+}
+
+#[derive(Deserialize)]
 struct TestTelegramPayload {
     bot_token: Option<String>,
     chat_id: Option<String>,
+}
+
+impl std::fmt::Debug for TestTelegramPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TestTelegramPayload")
+            .field("bot_token", &self.bot_token.as_ref().map(|_| "[REDACTED]"))
+            .field("chat_id", &self.chat_id)
+            .finish()
+    }
 }
 
 /// Resolve probe credentials: a non-blank override wins, otherwise the saved value is used.
@@ -973,7 +1004,7 @@ impl ProbeGate {
 
     /// Err carries the whole seconds left to wait (at least one).
     fn enter(&self, now: std::time::Instant) -> Result<(), u64> {
-        let mut last = self.0.lock().unwrap();
+        let mut last = self.0.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(wait) = last
             .and_then(|at| PROBE_COOLDOWN.checked_sub(now.saturating_duration_since(at)))
             .filter(|wait| !wait.is_zero())
@@ -1227,16 +1258,15 @@ async fn clear_multi_trade_history_handler(
 }
 
 async fn get_auth_status_handler(
-    State(state): State<Arc<AppState>>,
+    State(auth): State<Arc<crate::server::state::AuthContext>>,
     headers: HeaderMap,
 ) -> (StatusCode, Json<ApiResponse<AuthStatusResponse>>) {
-    let initialized = state.is_auth_configured();
+    let initialized = auth.is_auth_configured();
     let result = if !initialized {
         Ok(true)
     } else if let Some(token) = extract_token(&headers) {
         let token = token.to_owned();
-        state
-            .db
+        auth.db
             .run_blocking(move |db| db.is_session_valid(&token))
             .await
     } else {
@@ -1270,20 +1300,20 @@ fn auth_busy<T>() -> (StatusCode, Json<ApiResponse<T>>) {
 }
 
 async fn post_auth_login_handler(
-    State(state): State<Arc<AppState>>,
+    State(auth): State<Arc<crate::server::state::AuthContext>>,
     ConnectInfo(address): ConnectInfo<SocketAddr>,
     Json(payload): Json<AuthLoginPayload>,
 ) -> (StatusCode, Json<ApiResponse<AuthTokenResponse>>) {
-    let Some(permit) = state.try_begin_auth_work() else {
+    let Some(permit) = auth.try_begin_auth_work() else {
         return auth_busy();
     };
-    if !state.begin_login_attempt(peer_ip(address)).await {
+    if !auth.begin_login_attempt(peer_ip(address)).await {
         return status_err(
             StatusCode::TOO_MANY_REQUESTS,
             "登录尝试过于频繁，请一分钟后重试",
         );
     }
-    let Some(admin_auth) = state.admin_auth() else {
+    let Some(admin_auth) = auth.admin_auth() else {
         warn!("Admin login rejected: no password configured for this process");
         return status_err(StatusCode::BAD_REQUEST, "未启用管理员密码认证，无需登录");
     };
@@ -1307,9 +1337,9 @@ async fn post_auth_login_handler(
     }
 
     let token = crate::auth::generate_session_token();
-    match state.create_session(&token).await {
+    match auth.create_session(&token).await {
         Ok(()) => {
-            state.clear_login_attempts(peer_ip(address)).await;
+            auth.clear_login_attempts(peer_ip(address)).await;
             info!("Admin authentication successful");
             (
                 StatusCode::OK,
@@ -1324,11 +1354,11 @@ async fn post_auth_login_handler(
 }
 
 async fn post_auth_logout_handler(
-    State(state): State<Arc<AppState>>,
+    State(auth): State<Arc<crate::server::state::AuthContext>>,
     headers: HeaderMap,
 ) -> (StatusCode, Json<ApiResponse<()>>) {
     if let Some(token) = extract_token(&headers) {
-        if let Err(error) = state.delete_session(token).await {
+        if let Err(error) = auth.delete_session(token).await {
             error!("Failed to delete session during logout: {}", error);
             return status_err(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1406,10 +1436,11 @@ async fn clear_trade_history_handler(
     .await
 }
 
-async fn export_database_handler(State(state): State<Arc<AppState>>) -> Response {
+async fn export_database_handler(
+    State(auth): State<Arc<crate::server::state::AuthContext>>,
+) -> Response {
     database_export_response(
-        state
-            .db
+        auth.db
             .run_blocking(|db| db.export_analysis_snapshot())
             .await,
     )
@@ -1802,15 +1833,32 @@ async fn dispatch_control(
     dispatch_prepared_control(state, action, pending_pause, None, None, None).await
 }
 
+fn control_action_label(action: &BotControlAction) -> &'static str {
+    match action {
+        BotControlAction::Pause | BotControlAction::PauseAlreadyPersisted => "pause",
+        BotControlAction::Resume { .. } => "resume",
+        BotControlAction::CancelAll | BotControlAction::CancelAllAlreadyPersisted => "cancel_all",
+        BotControlAction::Rebalance { .. } => "rebalance",
+        BotControlAction::UpdateConfig { .. } => "update_config",
+        BotControlAction::UpdateGlobalConfig { .. } => "update_global_config",
+        BotControlAction::GlobalRiskCancel => "global_risk_cancel",
+        BotControlAction::Shutdown { .. } => "shutdown",
+    }
+}
+
+const WS_MAX_FRAME_BYTES: usize = 64 * 1024;
+const WS_RESULT_QUEUE_CAPACITY: usize = 32;
+const WS_CONTROL_QUEUE_CAPACITY: usize = 16;
+
 async fn dispatch_prepared_control(
     state: Arc<AppState>,
     (action, reply): (BotControlAction, Option<ControlReply>),
     pending_pause: Option<PendingControlPause>,
     submitted: Option<tokio::sync::oneshot::Sender<()>>,
-    socket_results: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    socket_results: Option<tokio::sync::mpsc::Sender<String>>,
     socket_token: Option<String>,
 ) -> Json<ApiResponse<String>> {
-    let action_name = format!("{:?}", action);
+    let action_name = control_action_label(&action);
     let action = match action {
         BotControlAction::Pause => BotControlAction::PauseAlreadyPersisted,
         BotControlAction::CancelAll => BotControlAction::CancelAllAlreadyPersisted,
@@ -1887,6 +1935,40 @@ fn websocket_token(headers: &HeaderMap) -> &str {
         .unwrap_or_default()
 }
 
+fn ws_origin_allowed(headers: &HeaderMap) -> bool {
+    let Some(origin_header) = headers.get(axum::http::header::ORIGIN) else {
+        return true;
+    };
+    let Ok(origin_str) = origin_header.to_str() else {
+        return false;
+    };
+    let Ok(origin) = url::Url::parse(origin_str) else {
+        return false;
+    };
+    if !matches!(origin.scheme(), "http" | "https") {
+        return false;
+    }
+    let Some(origin_host) = origin.host_str() else {
+        return false;
+    };
+    let Some(host_str) = headers
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    let Ok(req_url) = url::Url::parse(&format!("http://{host_str}")) else {
+        return false;
+    };
+    if req_url.host_str() != Some(origin_host) {
+        return false;
+    }
+    match req_url.port() {
+        Some(req_port) => origin.port_or_known_default() == Some(req_port),
+        None => origin.port().is_none(),
+    }
+}
+
 #[derive(Clone)]
 enum AccountSource {
     Fixed(Arc<Vec<Arc<AppState>>>),
@@ -1898,6 +1980,20 @@ impl AccountSource {
         match self {
             Self::Fixed(states) => states.as_ref().clone(),
             Self::Managed(handle) => handle.states.read().await.clone(),
+        }
+    }
+
+    fn auth(&self) -> Option<Arc<crate::server::state::AuthContext>> {
+        match self {
+            Self::Fixed(states) => states.first().map(|state| state.auth.clone()),
+            Self::Managed(handle) => Some(handle.auth.clone()),
+        }
+    }
+
+    fn subscribe_retirement(&self) -> Option<tokio::sync::watch::Receiver<bool>> {
+        match self {
+            Self::Fixed(states) => states.first().map(|state| state.subscribe_retirement()),
+            Self::Managed(handle) => Some(handle.stop.subscribe()),
         }
     }
 
@@ -2000,56 +2096,75 @@ async fn upgrade_accounts_socket(
     headers: HeaderMap,
     hub: Arc<AccountHub>,
 ) -> Response {
+    if !ws_origin_allowed(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     let token = websocket_token(&headers).to_string();
-    let states = hub.source.states().await;
-    let Some(primary) = states.first().cloned() else {
+    let (Some(auth), Some(mut retired)) = (hub.source.auth(), hub.source.subscribe_retirement())
+    else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    if !primary.is_token_valid(&token).await {
+    if !auth.is_token_valid(&token).await {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    ws.protocols(["auth"]).on_upgrade(move |socket| async move {
-        let mut retired = primary.subscribe_retirement();
-        if *retired.borrow() { return; }
-        let mut frames = hub.subscribe().await;
-        let (mut sender, mut receiver) = socket.split();
-        let mut check_auth = tokio::time::interval(std::time::Duration::from_secs(1));
-        loop {
-            let frame = frames.borrow_and_update().clone();
-            if let Some(frame) = frame {
-                if !primary.is_token_valid(&token).await { break; }
-                if !matches!(tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    send_until_retired(&mut sender, Message::Text((*frame).clone()), &mut retired),
-                ).await, Ok(Some(Ok(())))) { break; }
+    ws.protocols(["auth"])
+        .max_message_size(WS_MAX_FRAME_BYTES)
+        .max_frame_size(WS_MAX_FRAME_BYTES)
+        .on_upgrade(move |socket| async move {
+            if *retired.borrow() {
+                return;
             }
+            let mut frames = hub.subscribe().await;
+            let (mut sender, mut receiver) = socket.split();
+            let mut check_auth = tokio::time::interval(std::time::Duration::from_secs(1));
             loop {
-                tokio::select! {
-                    biased;
-                    _ = retired.changed() => return,
-                    _ = check_auth.tick() => {
-                        if !primary.is_token_valid(&token).await { return; }
-                    }
-                    changed = frames.changed() => {
-                        if changed.is_err() { return; }
+                let frame = frames.borrow_and_update().clone();
+                if let Some(frame) = frame {
+                    if !auth.is_token_valid(&token).await {
                         break;
                     }
-                    message = receiver.next() => {
-                        match message {
-                            Some(Ok(Message::Ping(payload))) => {
-                                if !matches!(tokio::time::timeout(
-                                    std::time::Duration::from_secs(5),
-                                    send_until_retired(&mut sender, Message::Pong(payload), &mut retired),
-                                ).await, Ok(Some(Ok(())))) { return; }
+                    if !matches!(
+                        tokio::time::timeout(
+                            std::time::Duration::from_secs(5),
+                            send_until_retired(
+                                &mut sender,
+                                Message::Text((*frame).clone()),
+                                &mut retired
+                            ),
+                        )
+                        .await,
+                        Ok(Some(Ok(())))
+                    ) {
+                        break;
+                    }
+                }
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = retired.changed() => return,
+                        _ = check_auth.tick() => {
+                            if !auth.is_token_valid(&token).await { return; }
+                        }
+                        changed = frames.changed() => {
+                            if changed.is_err() { return; }
+                            break;
+                        }
+                        message = receiver.next() => {
+                            match message {
+                                Some(Ok(Message::Ping(payload))) => {
+                                    if !matches!(tokio::time::timeout(
+                                        std::time::Duration::from_secs(5),
+                                        send_until_retired(&mut sender, Message::Pong(payload), &mut retired),
+                                    ).await, Ok(Some(Ok(())))) { return; }
+                                }
+                                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return,
+                                _ => {}
                             }
-                            Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return,
-                            _ => {}
                         }
                     }
                 }
             }
-        }
-    })
+        })
 }
 
 async fn ws_handler(
@@ -2057,6 +2172,13 @@ async fn ws_handler(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> Response {
+    if !ws_origin_allowed(&headers) {
+        return (
+            StatusCode::FORBIDDEN,
+            "Forbidden: Cross-origin WebSocket connection rejected",
+        )
+            .into_response();
+    }
     let token = websocket_token(&headers);
     if !state.is_token_valid(token).await {
         return (
@@ -2068,6 +2190,8 @@ async fn ws_handler(
 
     let token = token.to_string();
     ws.protocols(["auth"])
+        .max_message_size(WS_MAX_FRAME_BYTES)
+        .max_frame_size(WS_MAX_FRAME_BYTES)
         .on_upgrade(move |socket| handle_socket(socket, state, token))
 }
 
@@ -2122,8 +2246,8 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, token: String) {
         }
     }
 
-    let (result_tx, result_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-    let (control_tx, control_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (result_tx, result_rx) = tokio::sync::mpsc::channel::<String>(WS_RESULT_QUEUE_CAPACITY);
+    let (control_tx, control_rx) = tokio::sync::mpsc::channel(WS_CONTROL_QUEUE_CAPACITY);
     spawn_socket_control_worker(state.clone(), result_tx.clone(), token.clone(), control_rx);
     let mut send_task =
         spawn_socket_send_task(sender, state.clone(), token.clone(), retired, result_rx, rx);
@@ -2144,9 +2268,9 @@ type SocketControlEntry = (
 
 fn spawn_socket_control_worker(
     worker_state: Arc<AppState>,
-    worker_results: tokio::sync::mpsc::UnboundedSender<String>,
+    worker_results: tokio::sync::mpsc::Sender<String>,
     worker_token: String,
-    mut control_rx: tokio::sync::mpsc::UnboundedReceiver<SocketControlEntry>,
+    mut control_rx: tokio::sync::mpsc::Receiver<SocketControlEntry>,
 ) {
     tokio::spawn(async move {
         while let Some((name, action, pending_pause)) = control_rx.recv().await {
@@ -2165,7 +2289,9 @@ fn spawn_socket_control_worker(
                 )
                 .await
                 .0;
-                let _ = results.send(control_ws_message(Some(&name), response));
+                let _ = results
+                    .send(control_ws_message(Some(&name), response))
+                    .await;
             });
             let _ = ready.await;
         }
@@ -2177,7 +2303,7 @@ fn spawn_socket_send_task(
     send_state: Arc<AppState>,
     send_token: String,
     mut retired: tokio::sync::watch::Receiver<bool>,
-    mut result_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    mut result_rx: tokio::sync::mpsc::Receiver<String>,
     mut rx: tokio::sync::broadcast::Receiver<String>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -2213,8 +2339,8 @@ fn spawn_socket_recv_task(
     mut receiver: futures_util::stream::SplitStream<WebSocket>,
     state_clone: Arc<AppState>,
     token: String,
-    result_tx: tokio::sync::mpsc::UnboundedSender<String>,
-    control_tx: tokio::sync::mpsc::UnboundedSender<SocketControlEntry>,
+    result_tx: tokio::sync::mpsc::Sender<String>,
+    control_tx: tokio::sync::mpsc::Sender<SocketControlEntry>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(Ok(msg)) = receiver.next().await {
@@ -2233,10 +2359,16 @@ fn spawn_socket_recv_task(
                 let action = match action {
                     Ok(action) => action,
                     Err(message) => {
-                        let _ = result_tx.send(control_ws_message(
-                            name.as_deref(),
-                            ApiResponse::err(message),
-                        ));
+                        if result_tx
+                            .send(control_ws_message(
+                                name.as_deref(),
+                                ApiResponse::err(message),
+                            ))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
                         continue;
                     }
                 };
@@ -2246,12 +2378,16 @@ fn spawn_socket_recv_task(
                 let prepare_queue = control_tx.clone();
                 let preparation = tokio::spawn(async move {
                     if let Err(message) = prepare_control(&prepare_state, &action.0).await {
-                        let _ = prepare_results.send(control_ws_message(
-                            name.as_deref(),
-                            ApiResponse::err(message),
-                        ));
+                        let _ = prepare_results
+                            .send(control_ws_message(
+                                name.as_deref(),
+                                ApiResponse::err(message),
+                            ))
+                            .await;
                     } else if let Some(action_name) = name {
-                        let _ = prepare_queue.send((action_name, action, pending_pause));
+                        let _ = prepare_queue
+                            .send((action_name, action, pending_pause))
+                            .await;
                     }
                 });
                 if preparation.await.is_err() {
@@ -3704,5 +3840,133 @@ mod tests {
             .map(|o| o.client_order_id)
             .collect();
         assert_eq!(ids, vec!["a", "b", "c"]);
+    }
+
+    #[tokio::test]
+    async fn websocket_rejects_cross_origin_and_accepts_same_origin_or_cli() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let (tx, _) = tokio::sync::mpsc::channel(1);
+        let state = AppState::new(AppConfig::default(), db, tx);
+        let router = create_router(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        for path in ["/ws", "/api/accounts/ws"] {
+            for bad_origin in ["https://evil.example", "null", "http://127.0.0.1:1"] {
+                let mut req = format!("ws://{address}{path}")
+                    .into_client_request()
+                    .unwrap();
+                req.headers_mut()
+                    .insert("Sec-WebSocket-Protocol", "auth".parse().unwrap());
+                req.headers_mut()
+                    .insert("Origin", bad_origin.parse().unwrap());
+                let err = tokio_tungstenite::connect_async(req).await.unwrap_err();
+                match err {
+                    tokio_tungstenite::tungstenite::Error::Http(response) => {
+                        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+                    }
+                    other => panic!("expected HTTP 403 rejection, got {other:?}"),
+                }
+            }
+
+            let mut same_origin = format!("ws://{address}{path}")
+                .into_client_request()
+                .unwrap();
+            same_origin
+                .headers_mut()
+                .insert("Sec-WebSocket-Protocol", "auth".parse().unwrap());
+            same_origin
+                .headers_mut()
+                .insert("Origin", format!("http://{address}").parse().unwrap());
+            let (mut socket, _) = tokio_tungstenite::connect_async(same_origin).await.unwrap();
+            let _ = socket.close(None).await;
+        }
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn managed_accounts_ws_survives_removing_initial_pair() {
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let mut config = AppConfig::default();
+        config.pairs = ["SOLUSDC", "BTCUSDT"]
+            .map(|symbol| crate::config::TradingPairConfig::new(symbol.into()))
+            .to_vec();
+        db.save_config(&config).unwrap();
+        db.save_pair_status(
+            "SOLUSDC",
+            crate::types::TradingMode::Paper,
+            crate::types::BotStatus::Paused,
+        )
+        .unwrap();
+        db.save_pair_status(
+            "BTCUSDT",
+            crate::types::TradingMode::Paper,
+            crate::types::BotStatus::Paused,
+        )
+        .unwrap();
+        let mut runtime = crate::runtime::TradingRuntime::start_with_test_exchange(
+            &config,
+            db,
+            "http://127.0.0.1:1".into(),
+        )
+        .await
+        .unwrap();
+        let handle = runtime.handle();
+        let router = create_managed_router(handle.clone()).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let (mut accounts_ws, _) =
+            tokio_tungstenite::connect_async(format!("ws://{address}/api/accounts/ws"))
+                .await
+                .unwrap();
+        let first_msg = tokio::time::timeout(std::time::Duration::from_secs(3), accounts_ws.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let first_json: serde_json::Value =
+            serde_json::from_str(first_msg.to_text().unwrap()).unwrap();
+        assert_eq!(first_json["data"]["pairs"].as_array().unwrap().len(), 2);
+
+        let removed = handle.states.write().await.remove(0);
+        assert_eq!(removed.pair_scope(), Some("SOLUSDC"));
+        removed.retire();
+
+        let updated = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let msg = accounts_ws
+                    .next()
+                    .await
+                    .expect("accounts stream must remain open after retiring first pair")
+                    .expect("accounts frame must succeed");
+                let json: serde_json::Value = serde_json::from_str(msg.to_text().unwrap()).unwrap();
+                let pairs = json["data"]["pairs"].as_array().unwrap();
+                if pairs.len() == 1 {
+                    break pairs[0]["snapshot"]["symbol"].as_str().unwrap().to_owned();
+                }
+            }
+        })
+        .await
+        .expect("accounts stream must publish single remaining pair");
+        assert_eq!(updated, "BTCUSDT");
+
+        handle.request_shutdown();
+        let closed = tokio::time::timeout(std::time::Duration::from_secs(3), accounts_ws.next())
+            .await
+            .expect("runtime shutdown must close managed accounts stream");
+        assert!(matches!(
+            closed,
+            None | Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) | Some(Err(_))
+        ));
+
+        server.abort();
+        let _ = server.await;
+        let _ = runtime.shutdown(std::time::Duration::from_secs(2)).await;
     }
 }

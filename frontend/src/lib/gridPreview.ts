@@ -1,24 +1,11 @@
 /** Mirrors the engine's zero-anchored lattice (strategy/precision.rs `grid_window_prices`) with exact decimal arithmetic. */
-interface Fixed { n: bigint; s: number }
-const pattern = /^\d+(\.\d+)?$/;
-
-function parse(value: unknown): Fixed | null {
-  if (value === null || value === undefined) return null;
-  const text = String(value).trim();
-  if (!pattern.test(text)) return null;
-  const [whole, fraction = ''] = text.split('.');
-  return { n: BigInt(whole + fraction), s: fraction.length };
-}
-const rescale = (value: Fixed, scale: number) => value.n * 10n ** BigInt(scale - value.s);
-function format(n: bigint, scale: number) {
-  const digits = n.toString().padStart(scale + 1, '0');
-  const whole = digits.slice(0, digits.length - scale), fraction = digits.slice(digits.length - scale);
-  return scale === 0 ? whole : `${whole}.${fraction}`.replace(/\.?0+$/, '');
-}
-function scalePair(a: Fixed, b: Fixed): [bigint, bigint, number] {
-  const scale = Math.max(a.s, b.s);
-  return [rescale(a, scale), rescale(b, scale), scale];
-}
+import {
+  formatDecimal as format,
+  parseUnsignedDecimal as parse,
+  rescaleDecimal as rescale,
+  scaleDecimalPair as scalePair,
+  type Fixed,
+} from './decimal';
 const formatPercent4 = (num: bigint, den: bigint): string => format((num * 1000000n + den / 2n) / den, 4);
 const floorDiv = (a: bigint, b: bigint) => a / b;
 const ceilDiv = (a: bigint, b: bigint) => (a + b - 1n) / b;

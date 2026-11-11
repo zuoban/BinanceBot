@@ -2,7 +2,7 @@ import { memo, useMemo, useRef } from 'react';
 import { theme } from 'antd';
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import type { Snapshot } from '../lib/types';
-import { numeric, price, todayCount } from '../lib/format';
+import { numeric, price, quantity, todayCount } from '../lib/format';
 import { priceDiffPercent } from '../lib/gridPreview';
 import { useExpired } from '../lib/useNow';
 import { NoData, useCenterElementScroll } from './Common';
@@ -51,7 +51,7 @@ const HourlyChartContent = memo(function HourlyChartContent({ stats, hourBucket,
       <span className="muted">北京时间 · 最近时段在左侧</span>
       <span className="chart-legend" aria-hidden="true"><span className="chart-legend-item"><i className="chart-dot chart-dot-buy" />买入</span><span className="chart-legend-item"><i className="chart-dot chart-dot-sell" />卖出</span></span>
     </div>
-    <div className="chart hourly-chart" role="region" aria-label="北京时间今日每小时成交笔数"><ResponsiveContainer width="100%" height={264}>
+    <div className="chart" role="region" aria-label="北京时间今日每小时成交笔数"><ResponsiveContainer width="100%" height={264}>
       <BarChart accessibilityLayer data={data} barGap={2} maxBarSize={12} margin={barChartMargin}>
         <CartesianGrid vertical={false} stroke={token.colorBorderSecondary} />
         <XAxis dataKey="hour" interval="preserveStartEnd" minTickGap={24} tickLine={false} axisLine={false} tick={axisTick} />
@@ -75,7 +75,7 @@ export const DepthChart = memo(function DepthChart({ snapshot }: { snapshot: Sna
       else sell++;
     }
     const sorted = orders
-      .map(order => ({ kind: 'order' as const, value: numeric(order.price) ?? -Infinity, order, priceText: price(order.price), qtyText: price(order.quantity) }))
+      .map(order => ({ kind: 'order' as const, value: numeric(order.price) ?? -Infinity, order, priceText: price(order.price), qtyText: quantity(order.quantity) }))
       .sort((a, b) => b.value - a.value);
     return { buyCount: buy, sellCount: sell, orderRows: sorted };
   }, [orders]);

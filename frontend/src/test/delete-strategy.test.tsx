@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { useDeleteStrategy } from '../components/DeleteStrategy';
+import { ControlProvider } from '../components/Controls';
 import type * as Api from '../lib/api';
 import { pair } from './fixtures';
 
@@ -22,7 +23,7 @@ function Harness({ mode = 'PAPER' }: { mode?: 'PAPER' | 'LIVE' }) {
 function setup(mode: 'PAPER' | 'LIVE' = 'PAPER') {
   const client = new QueryClient();
   const invalidate = vi.spyOn(client, 'invalidateQueries');
-  render(<QueryClientProvider client={client}><Harness mode={mode} /></QueryClientProvider>);
+  render(<QueryClientProvider client={client}><ControlProvider><Harness mode={mode} /></ControlProvider></QueryClientProvider>);
   return invalidate;
 }
 

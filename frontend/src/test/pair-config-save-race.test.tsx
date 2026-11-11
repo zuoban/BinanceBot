@@ -21,7 +21,7 @@ vi.mock('../lib/api', async importOriginal => ({ ...await importOriginal<typeof 
 vi.mock('../lib/queries', () => {
   return { usePairs: () => ({ data: [pair('BTCUSDC'), pair('ETHUSDC')], dataUpdatedAt: Date.now() }), useLiveAccounts: () => ({ accounts: [], stale: false, error: null }) };
 });
-vi.mock('../components/Controls', () => ({ ControlProvider: ({ children }: { children: React.ReactNode }) => children, useControls: () => ({ results: {} }) }));
+vi.mock('../components/Controls', () => ({ ControlProvider: ({ children }: { children: React.ReactNode }) => children, useControls: () => ({ busy: new Set<string>(), pending: {}, results: {}, clearResult: vi.fn(), run: vi.fn() }) }));
 vi.mock('../components/ThemeSwitch', () => ({ ThemeSwitch: () => null, ThemeSegmented: () => null, themeLabels: { system: '跟随系统', light: '浅色', dark: '深色' } }));
 
 beforeEach(() => {

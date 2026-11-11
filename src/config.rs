@@ -36,7 +36,7 @@ pub struct TradingPairConfig {
 }
 
 /// Legacy per-pair connection fields, read only to migrate older configurations.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct PairExchangeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
@@ -65,7 +65,7 @@ impl TradingPairConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct TelegramConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -76,7 +76,7 @@ pub struct TelegramConfig {
 }
 
 /// Shared connection and notification settings, without a pair's symbol or mode.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Clone, PartialEq, serde::Serialize)]
 pub struct GlobalConfig {
     pub api_key: String,
     pub api_secret: String,
@@ -114,7 +114,7 @@ impl GlobalConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExchangeConfig {
     #[serde(default = "default_symbol")]
     pub symbol: String,
@@ -126,6 +126,97 @@ pub struct ExchangeConfig {
     pub recv_window: u64,
     #[serde(default = "default_sync_interval")]
     pub sync_interval_secs: u64,
+}
+
+pub(crate) fn redact_secret(value: &str) -> &'static str {
+    if value.is_empty() {
+        ""
+    } else {
+        "[REDACTED]"
+    }
+}
+
+pub(crate) fn redact_optional_secret(value: &Option<String>) -> Option<&'static str> {
+    value.as_deref().map(redact_secret)
+}
+
+impl std::fmt::Debug for PairExchangeConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            api_key,
+            api_secret,
+            recv_window,
+            sync_interval_secs,
+        } = self;
+        f.debug_struct("PairExchangeConfig")
+            .field("api_key", &redact_optional_secret(api_key))
+            .field("api_secret", &redact_optional_secret(api_secret))
+            .field("recv_window", recv_window)
+            .field("sync_interval_secs", sync_interval_secs)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for TelegramConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            enabled,
+            bot_token,
+            chat_id,
+        } = self;
+        f.debug_struct("TelegramConfig")
+            .field("enabled", enabled)
+            .field("bot_token", &redact_secret(bot_token))
+            .field("chat_id", chat_id)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for GlobalConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            api_key,
+            api_secret,
+            recv_window,
+            sync_interval_secs,
+            telegram,
+            global_max_position_notional,
+            pause_on_zero_available_margin,
+            min_available_margin_pct,
+        } = self;
+        f.debug_struct("GlobalConfig")
+            .field("api_key", &redact_secret(api_key))
+            .field("api_secret", &redact_secret(api_secret))
+            .field("recv_window", recv_window)
+            .field("sync_interval_secs", sync_interval_secs)
+            .field("telegram", telegram)
+            .field("global_max_position_notional", global_max_position_notional)
+            .field(
+                "pause_on_zero_available_margin",
+                pause_on_zero_available_margin,
+            )
+            .field("min_available_margin_pct", min_available_margin_pct)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for ExchangeConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            symbol,
+            api_key,
+            api_secret,
+            recv_window,
+            sync_interval_secs,
+        } = self;
+        f.debug_struct("ExchangeConfig")
+            .field("symbol", symbol)
+            .field("api_key", &redact_secret(api_key))
+            .field("api_secret", &redact_secret(api_secret))
+            .field("recv_window", recv_window)
+            .field("sync_interval_secs", sync_interval_secs)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -456,11 +547,27 @@ impl ExchangeConfig {
 }
 
 impl TelegramConfig {
+    pub(crate) fn validate_bot_token(token: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !token.is_empty()
+                && !token.chars().any(|ch| {
+                    matches!(ch, '/' | '?' | '#' | '\\')
+                        || ch.is_whitespace()
+                        || ch.is_ascii_control()
+                }),
+            "Telegram Bot Token 格式无效"
+        );
+        Ok(())
+    }
+
     fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
             !self.enabled || (!self.bot_token.trim().is_empty() && !self.chat_id.trim().is_empty()),
             "启用 Telegram 通知前请填写 Bot Token 和 Chat ID"
         );
+        if self.enabled || !self.bot_token.is_empty() {
+            Self::validate_bot_token(&self.bot_token)?;
+        }
         Ok(())
     }
 }
@@ -795,5 +902,62 @@ mod tests {
         config.exchange.api_key = "key".into();
         config.exchange.api_secret.clear();
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn debug_redacts_secrets_and_bot_token_rejects_url_injection_chars() {
+        let mut config = AppConfig::default();
+        config.exchange.api_key = "live-api-key-value".into();
+        config.exchange.api_secret = "live-api-secret-value".into();
+        config.telegram.enabled = true;
+        config.telegram.bot_token = "123456:valid-bot_token".into();
+        config.telegram.chat_id = "987654".into();
+        let mut pair = super::TradingPairConfig::new("SOLUSDC".into());
+        pair.exchange.api_key = Some("legacy-pair-key".into());
+        pair.exchange.api_secret = Some("legacy-pair-secret".into());
+        let global = super::GlobalConfig::from_app(&config);
+
+        let rendered = format!("{config:?} {pair:?} {global:?}");
+        for secret in [
+            "live-api-key-value",
+            "live-api-secret-value",
+            "123456:valid-bot_token",
+            "legacy-pair-key",
+            "legacy-pair-secret",
+        ] {
+            assert!(!rendered.contains(secret), "{rendered}");
+        }
+        assert!(rendered.contains("[REDACTED]"));
+        assert!(config.validate().is_ok());
+
+        for invalid in [
+            "123:abc/../../evil",
+            "123:abc?chat_id=1",
+            "123:abc#frag",
+            "123:abc\\path",
+            "123:abc space",
+            "123:abc\r\n",
+            "123:abc\x00",
+        ] {
+            config.telegram.bot_token = invalid.into();
+            assert!(
+                config
+                    .validate()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Telegram Bot Token 格式无效"),
+                "{invalid:?}"
+            );
+            config.telegram.enabled = false;
+            assert!(
+                config
+                    .validate()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Telegram Bot Token 格式无效"),
+                "{invalid:?}"
+            );
+            config.telegram.enabled = true;
+        }
     }
 }

@@ -154,7 +154,7 @@ impl ObservedOrderIdentity {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GridOrder {
     pub client_order_id: String,
     pub order_id: Option<i64>,
@@ -552,7 +552,11 @@ impl Default for GridStats {
 pub const MARKET_PRICE_MAX_AGE_SECS: i64 = 15;
 
 pub(crate) fn beijing_offset() -> chrono::FixedOffset {
-    chrono::FixedOffset::east_opt(8 * 3600).expect("UTC+8 is a valid fixed offset")
+    const OFFSET: chrono::FixedOffset = match chrono::FixedOffset::east_opt(8 * 3600) {
+        Some(offset) => offset,
+        None => panic!("invalid UTC+8 offset"),
+    };
+    OFFSET
 }
 
 pub(crate) fn non_blank(value: Option<String>) -> Option<String> {
@@ -780,7 +784,7 @@ pub enum BotControlAction {
     },
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 pub struct UpdateGlobalConfigPayload {
     pub baseline_version: Option<String>,
     pub recv_window: Option<u64>,
@@ -807,6 +811,50 @@ pub struct UpdateGlobalConfigPayload {
         skip_serializing_if = "Option::is_none"
     )]
     pub min_available_margin_pct: Option<Option<Decimal>>,
+}
+
+impl std::fmt::Debug for UpdateGlobalConfigPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            baseline_version,
+            recv_window,
+            sync_interval_secs,
+            api_key,
+            api_secret,
+            clear_api_credentials,
+            clear_telegram_credentials,
+            telegram_enabled,
+            telegram_bot_token,
+            telegram_chat_id,
+            global_max_position_notional,
+            pause_on_zero_available_margin,
+            min_available_margin_pct,
+        } = self;
+        f.debug_struct("UpdateGlobalConfigPayload")
+            .field("baseline_version", baseline_version)
+            .field("recv_window", recv_window)
+            .field("sync_interval_secs", sync_interval_secs)
+            .field("api_key", &crate::config::redact_optional_secret(api_key))
+            .field(
+                "api_secret",
+                &crate::config::redact_optional_secret(api_secret),
+            )
+            .field("clear_api_credentials", clear_api_credentials)
+            .field("clear_telegram_credentials", clear_telegram_credentials)
+            .field("telegram_enabled", telegram_enabled)
+            .field(
+                "telegram_bot_token",
+                &crate::config::redact_optional_secret(telegram_bot_token),
+            )
+            .field("telegram_chat_id", telegram_chat_id)
+            .field("global_max_position_notional", global_max_position_notional)
+            .field(
+                "pause_on_zero_available_margin",
+                pause_on_zero_available_margin,
+            )
+            .field("min_available_margin_pct", min_available_margin_pct)
+            .finish()
+    }
 }
 
 fn deserialize_optional_decimal_update<'de, D>(
@@ -883,7 +931,7 @@ pub struct WebGlobalConfigView {
     pub telegram_chat_id: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct UpdateConfigPayload {
     #[serde(default)]
     pub baseline_version: Option<String>,
@@ -927,6 +975,74 @@ pub struct UpdateConfigPayload {
     /// Replaces the saved value; omitted or null clears it.
     #[serde(default)]
     pub min_liquidation_distance_pct: Option<Decimal>,
+}
+
+impl std::fmt::Debug for UpdateConfigPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            baseline_version,
+            symbol,
+            direction,
+            grid_interval,
+            order_amount_usdc,
+            buy_window,
+            sell_window,
+            post_only,
+            dry_run,
+            is_testnet,
+            recv_window,
+            sync_interval_secs,
+            api_key,
+            api_secret,
+            clear_api_credentials,
+            clear_telegram_credentials,
+            telegram_enabled,
+            telegram_bot_token,
+            telegram_chat_id,
+            min_price,
+            max_price,
+            max_position_usdc,
+            pause_on_max_position,
+            cancel_opening_on_max_position,
+            min_liquidation_distance_pct,
+        } = self;
+        f.debug_struct("UpdateConfigPayload")
+            .field("baseline_version", baseline_version)
+            .field("symbol", symbol)
+            .field("direction", direction)
+            .field("grid_interval", grid_interval)
+            .field("order_amount_usdc", order_amount_usdc)
+            .field("buy_window", buy_window)
+            .field("sell_window", sell_window)
+            .field("post_only", post_only)
+            .field("dry_run", dry_run)
+            .field("is_testnet", is_testnet)
+            .field("recv_window", recv_window)
+            .field("sync_interval_secs", sync_interval_secs)
+            .field("api_key", &crate::config::redact_optional_secret(api_key))
+            .field(
+                "api_secret",
+                &crate::config::redact_optional_secret(api_secret),
+            )
+            .field("clear_api_credentials", clear_api_credentials)
+            .field("clear_telegram_credentials", clear_telegram_credentials)
+            .field("telegram_enabled", telegram_enabled)
+            .field(
+                "telegram_bot_token",
+                &crate::config::redact_optional_secret(telegram_bot_token),
+            )
+            .field("telegram_chat_id", telegram_chat_id)
+            .field("min_price", min_price)
+            .field("max_price", max_price)
+            .field("max_position_usdc", max_position_usdc)
+            .field("pause_on_max_position", pause_on_max_position)
+            .field(
+                "cancel_opening_on_max_position",
+                cancel_opening_on_max_position,
+            )
+            .field("min_liquidation_distance_pct", min_liquidation_distance_pct)
+            .finish()
+    }
 }
 
 impl UpdateConfigPayload {
@@ -1144,5 +1260,55 @@ mod tests {
         keep_order.apply_terminal_fill(&response, updated_at);
         assert_eq!(keep_order.price, dec!(100));
         assert_eq!(keep_order.amount_usdc, dec!(150));
+    }
+
+    #[test]
+    fn config_payload_debug_redacts_secrets() {
+        let global = UpdateGlobalConfigPayload {
+            api_key: Some("payload-api-key".into()),
+            api_secret: Some("payload-api-secret".into()),
+            telegram_bot_token: Some("payload-bot-token".into()),
+            telegram_chat_id: Some("12345".into()),
+            ..Default::default()
+        };
+        let pair = UpdateConfigPayload {
+            baseline_version: None,
+            symbol: "SOLUSDC".into(),
+            direction: None,
+            grid_interval: dec!(0.1),
+            order_amount_usdc: dec!(100),
+            buy_window: 5,
+            sell_window: 5,
+            post_only: Some(true),
+            dry_run: None,
+            is_testnet: None,
+            recv_window: None,
+            sync_interval_secs: None,
+            api_key: Some("pair-payload-key".into()),
+            api_secret: Some("pair-payload-secret".into()),
+            clear_api_credentials: false,
+            clear_telegram_credentials: false,
+            telegram_enabled: None,
+            telegram_bot_token: Some("pair-payload-token".into()),
+            telegram_chat_id: None,
+            min_price: None,
+            max_price: None,
+            max_position_usdc: None,
+            pause_on_max_position: None,
+            cancel_opening_on_max_position: None,
+            min_liquidation_distance_pct: None,
+        };
+        let rendered = format!("{global:?} {pair:?}");
+        for secret in [
+            "payload-api-key",
+            "payload-api-secret",
+            "payload-bot-token",
+            "pair-payload-key",
+            "pair-payload-secret",
+            "pair-payload-token",
+        ] {
+            assert!(!rendered.contains(secret), "{rendered}");
+        }
+        assert!(rendered.contains("[REDACTED]"));
     }
 }

@@ -130,7 +130,11 @@ impl GlobalPositionLimit {
             return self.enabled.load(Ordering::SeqCst)
                 && !self.membership_ready.load(Ordering::SeqCst);
         };
-        let committed = self.committed_config.read().unwrap().clone();
+        let committed = self
+            .committed_config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let committed_ref = committed.as_ref();
         let (
             global_max_position_notional,
@@ -380,7 +384,10 @@ impl GlobalPositionLimit {
                     .is_some_and(|pct| pct > Decimal::ZERO),
             Ordering::SeqCst,
         );
-        *self.committed_config.write().unwrap() = Some(config);
+        *self
+            .committed_config
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Some(config);
     }
 
     pub(crate) async fn commit_config(&self, config: crate::config::GlobalConfig) {
@@ -393,7 +400,11 @@ impl GlobalPositionLimit {
         if !self.enabled.load(Ordering::SeqCst)
             && !self.blocked.load(Ordering::SeqCst)
             && !self.triggered.load(Ordering::SeqCst)
-            && self.committed_config.read().unwrap().is_some()
+            && self
+                .committed_config
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some()
         {
             return false;
         }
@@ -471,9 +482,109 @@ const MAX_LOGIN_SOURCES: usize = 10_000;
 const MAX_SOURCE_LOGIN_ATTEMPTS: usize = 10;
 
 #[derive(Default)]
-struct LoginAttempts {
+pub(crate) struct LoginAttempts {
     by_source: HashMap<IpAddr, VecDeque<Instant>>,
     global: VecDeque<Instant>,
+}
+
+/// Process-wide authentication, session validation, and login rate-limiting state.
+/// Decoupled from individual `AppState` lifecycles so removing the first trading
+/// pair never strands global HTTP routes or closes runtime-wide WebSocket streams.
+pub(crate) struct AuthContext {
+    pub(crate) db: Arc<Database>,
+    pub(crate) login_failures: Mutex<LoginAttempts>,
+    auth_work: Arc<Semaphore>,
+    admin_auth: Option<Arc<crate::auth::AdminAuth>>,
+}
+
+impl AuthContext {
+    pub(crate) fn new(
+        db: Arc<Database>,
+        admin_auth: Option<Arc<crate::auth::AdminAuth>>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            db,
+            login_failures: Mutex::new(LoginAttempts::default()),
+            auth_work: Arc::new(Semaphore::new(4)),
+            admin_auth,
+        })
+    }
+
+    pub(crate) fn admin_auth(&self) -> Option<Arc<crate::auth::AdminAuth>> {
+        self.admin_auth.clone()
+    }
+
+    pub(crate) fn is_auth_configured(&self) -> bool {
+        self.admin_auth.is_some()
+    }
+
+    pub(crate) async fn check_token_valid(&self, token: &str) -> anyhow::Result<bool> {
+        if !self.is_auth_configured() {
+            return Ok(true);
+        }
+        if token.is_empty() {
+            return Ok(false);
+        }
+        if self.db.session_recently_validated(token) {
+            return Ok(true);
+        }
+        let token = token.to_string();
+        self.db
+            .run_blocking(move |db| db.is_session_valid(&token))
+            .await
+    }
+
+    pub(crate) async fn is_token_valid(&self, token: &str) -> bool {
+        self.check_token_valid(token).await.unwrap_or(false)
+    }
+
+    pub(crate) async fn create_session(&self, token: &str) -> anyhow::Result<()> {
+        let token = token.to_string();
+        self.db
+            .run_blocking(move |db| db.create_session(&token))
+            .await
+    }
+
+    pub(crate) async fn delete_session(&self, token: &str) -> anyhow::Result<()> {
+        let token = token.to_string();
+        self.db
+            .run_blocking(move |db| db.delete_session(&token))
+            .await
+    }
+
+    pub(crate) async fn begin_login_attempt(&self, source: IpAddr) -> bool {
+        let mut failures = self.login_failures.lock().await;
+        failures.by_source.retain(|_, attempts| {
+            attempts.retain(|time| time.elapsed() < LOGIN_WINDOW);
+            !attempts.is_empty()
+        });
+        failures.global.retain(|time| time.elapsed() < LOGIN_WINDOW);
+        if failures.global.len() >= MAX_GLOBAL_LOGIN_ATTEMPTS {
+            return false;
+        }
+        // Active windows must not be evicted by churn from other sources.
+        if !failures.by_source.contains_key(&source)
+            && failures.by_source.len() >= MAX_LOGIN_SOURCES
+        {
+            return false;
+        }
+        let attempts = failures.by_source.entry(source).or_default();
+        if attempts.len() >= MAX_SOURCE_LOGIN_ATTEMPTS {
+            return false;
+        }
+        let now = Instant::now();
+        attempts.push_back(now);
+        failures.global.push_back(now);
+        true
+    }
+
+    pub(crate) async fn clear_login_attempts(&self, source: IpAddr) {
+        self.login_failures.lock().await.by_source.remove(&source);
+    }
+
+    pub(crate) fn try_begin_auth_work(&self) -> Option<OwnedSemaphorePermit> {
+        self.auth_work.clone().try_acquire_owned().ok()
+    }
 }
 
 pub struct AppState {
@@ -517,9 +628,7 @@ pub struct AppState {
     pub(crate) snapshot_scope_lock: RwLock<()>,
     snapshot_publish_lock: Mutex<()>,
     snapshot_cache: snapshot::SnapshotCache,
-    login_failures: Mutex<LoginAttempts>,
-    auth_work: Arc<Semaphore>,
-    admin_auth: Option<Arc<crate::auth::AdminAuth>>,
+    pub(crate) auth: Arc<AuthContext>,
 
     pub action_tx: mpsc::Sender<BotControlAction>,
     pub ws_broadcast_tx: broadcast::Sender<String>,
@@ -558,14 +667,15 @@ impl AppState {
         cny_rates: Arc<CnyRateCache>,
         admin_auth: Option<Arc<crate::auth::AdminAuth>>,
     ) -> Arc<Self> {
-        Self::build(
+        let auth = AuthContext::new(db.clone(), admin_auth);
+        Self::build_with_auth(
             config,
             db,
             action_tx,
             None,
             Arc::new(Mutex::new(())),
             cny_rates,
-            admin_auth,
+            auth,
         )
     }
 
@@ -604,25 +714,26 @@ impl AppState {
         admin_auth: Option<Arc<crate::auth::AdminAuth>>,
     ) -> Arc<Self> {
         let symbol = config.exchange.symbol.clone();
-        Self::build(
+        let auth = AuthContext::new(db.clone(), admin_auth);
+        Self::build_with_auth(
             config,
             db,
             action_tx,
             Some(symbol),
             trade_commit_lock,
             cny_rates,
-            admin_auth,
+            auth,
         )
     }
 
-    fn build(
+    pub(crate) fn build_with_auth(
         config: AppConfig,
         db: Arc<Database>,
         action_tx: mpsc::Sender<BotControlAction>,
         pair_scope: Option<String>,
         trade_commit_lock: Arc<Mutex<()>>,
         cny_rates: Arc<CnyRateCache>,
-        admin_auth: Option<Arc<crate::auth::AdminAuth>>,
+        auth: Arc<AuthContext>,
     ) -> Arc<Self> {
         let (ws_broadcast_tx, _) = broadcast::channel(100);
         let symbol = config.exchange.symbol.clone();
@@ -678,6 +789,10 @@ impl AppState {
                 initial_status = BotStatus::Paused;
                 paper_restore_failed = true;
             }
+        } else if !config.exchange.is_paper() {
+            // Warm the shared paper ledger while already on a blocking thread so a
+            // subsequent Live -> Paper switch never queries SQLite on Tokio workers.
+            db.warm_paper_ledger();
         }
 
         // Preload recent trades from SQLite database
@@ -737,9 +852,7 @@ impl AppState {
             snapshot_scope_lock: RwLock::new(()),
             snapshot_publish_lock: Mutex::new(()),
             snapshot_cache: snapshot::SnapshotCache::default(),
-            login_failures: Mutex::new(LoginAttempts::default()),
-            auth_work: Arc::new(Semaphore::new(4)),
-            admin_auth,
+            auth,
             action_tx,
             ws_broadcast_tx,
             managed_router: std::sync::OnceLock::new(),
@@ -1333,71 +1446,31 @@ impl AppState {
 
 impl AppState {
     pub async fn check_token_valid(&self, token: &str) -> anyhow::Result<bool> {
-        if !self.is_auth_configured() {
-            return Ok(true);
-        }
-        if token.is_empty() {
-            return Ok(false);
-        }
-        if self.db.session_recently_validated(token) {
-            return Ok(true);
-        }
-        let token = token.to_string();
-        self.db
-            .run_blocking(move |db| db.is_session_valid(&token))
-            .await
+        self.auth.check_token_valid(token).await
     }
 
     pub async fn is_token_valid(&self, token: &str) -> bool {
-        self.check_token_valid(token).await.unwrap_or(false)
+        self.auth.is_token_valid(token).await
     }
 
     pub async fn create_session(&self, token: &str) -> anyhow::Result<()> {
-        let token = token.to_string();
-        self.db
-            .run_blocking(move |db| db.create_session(&token))
-            .await
+        self.auth.create_session(token).await
     }
 
     pub async fn delete_session(&self, token: &str) -> anyhow::Result<()> {
-        let token = token.to_string();
-        self.db
-            .run_blocking(move |db| db.delete_session(&token))
-            .await
+        self.auth.delete_session(token).await
     }
 
     pub async fn begin_login_attempt(&self, source: IpAddr) -> bool {
-        let mut failures = self.login_failures.lock().await;
-        failures.by_source.retain(|_, attempts| {
-            attempts.retain(|time| time.elapsed() < LOGIN_WINDOW);
-            !attempts.is_empty()
-        });
-        failures.global.retain(|time| time.elapsed() < LOGIN_WINDOW);
-        if failures.global.len() >= MAX_GLOBAL_LOGIN_ATTEMPTS {
-            return false;
-        }
-        // Active windows must not be evicted by churn from other sources.
-        if !failures.by_source.contains_key(&source)
-            && failures.by_source.len() >= MAX_LOGIN_SOURCES
-        {
-            return false;
-        }
-        let attempts = failures.by_source.entry(source).or_default();
-        if attempts.len() >= MAX_SOURCE_LOGIN_ATTEMPTS {
-            return false;
-        }
-        let now = Instant::now();
-        attempts.push_back(now);
-        failures.global.push_back(now);
-        true
+        self.auth.begin_login_attempt(source).await
     }
 
     pub async fn clear_login_attempts(&self, source: IpAddr) {
-        self.login_failures.lock().await.by_source.remove(&source);
+        self.auth.clear_login_attempts(source).await
     }
 
     pub fn try_begin_auth_work(&self) -> Option<OwnedSemaphorePermit> {
-        self.auth_work.clone().try_acquire_owned().ok()
+        self.auth.try_begin_auth_work()
     }
 
     pub async fn pause_trading(self: &Arc<Self>) -> anyhow::Result<()> {
@@ -1740,11 +1813,11 @@ impl AppState {
     }
 
     pub fn admin_auth(&self) -> Option<Arc<crate::auth::AdminAuth>> {
-        self.admin_auth.clone()
+        self.auth.admin_auth()
     }
 
     pub fn is_auth_configured(&self) -> bool {
-        self.admin_auth.is_some()
+        self.auth.is_auth_configured()
     }
 
     pub(crate) fn telegram_notifier(&self) -> &TelegramNotifier {
@@ -1781,7 +1854,7 @@ mod tests {
         assert!(!state.begin_login_attempt(other).await);
         state.clear_login_attempts(first).await;
         assert!(!state.begin_login_attempt(other).await);
-        state.login_failures.lock().await.global[0] = Instant::now() - Duration::from_secs(61);
+        state.auth.login_failures.lock().await.global[0] = Instant::now() - Duration::from_secs(61);
         assert!(state.begin_login_attempt(other).await);
     }
 
@@ -1793,7 +1866,7 @@ mod tests {
         let blocked = IpAddr::V4(std::net::Ipv4Addr::from(1));
         let new_source = IpAddr::V4(std::net::Ipv4Addr::from(10_001));
         {
-            let mut attempts = state.login_failures.lock().await;
+            let mut attempts = state.auth.login_failures.lock().await;
             for i in 1..=10_000 {
                 let count = if i == 1 { 10 } else { 1 };
                 attempts.by_source.insert(
@@ -1804,7 +1877,7 @@ mod tests {
         }
         assert!(!state.begin_login_attempt(new_source).await);
         assert!(!state.begin_login_attempt(blocked).await);
-        state.login_failures.lock().await.by_source.insert(
+        state.auth.login_failures.lock().await.by_source.insert(
             IpAddr::V4(std::net::Ipv4Addr::from(2)),
             VecDeque::from([Instant::now() - Duration::from_secs(61)]),
         );

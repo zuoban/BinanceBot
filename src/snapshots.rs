@@ -96,13 +96,6 @@ pub struct DailySnapshot {
 }
 
 #[derive(Debug, Serialize)]
-pub struct OverviewHistory {
-    pub snapshots: Vec<HourlySnapshot>,
-    pub current_accounts: Vec<HistoryAccount>,
-    pub daily_snapshots: Vec<DailySnapshot>,
-}
-
-#[derive(Debug, Serialize)]
 pub(crate) struct RawHourlySnapshot {
     pub hour: i64,
     pub groups: Box<serde_json::value::RawValue>,
@@ -589,7 +582,9 @@ pub async fn run_hourly_snapshots(handle: RuntimeHandle) {
         if !within_capture_window(next, now) {
             continue;
         }
-        let deadline = DateTime::from_timestamp(next + 60, 0).unwrap();
+        let Some(deadline) = DateTime::from_timestamp(next + 60, 0) else {
+            continue;
+        };
         let remaining = (deadline - now).to_std().unwrap_or_default();
         let snapshots = match tokio::time::timeout(remaining, collect_hourly(&handle)).await {
             Ok(Ok(Some(snapshots))) => snapshots,

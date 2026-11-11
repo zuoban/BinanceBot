@@ -9,6 +9,10 @@ export class LoadErrorBoundary extends Component<Props, { failed: boolean }> {
     return { failed: true };
   }
 
+  componentDidCatch(error: unknown) {
+    console.error(`${this.props.label}加载失败`, error);
+  }
+
   render() {
     if (this.state.failed) return <div className="history-empty" role="alert">
       <span>{this.props.label}加载失败，请刷新页面重试。</span>

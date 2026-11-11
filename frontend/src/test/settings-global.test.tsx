@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeEach, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
+import type * as Api from '../lib/api';
 import Settings from '../pages/Settings';
 
 const mocks = vi.hoisted(() => ({ api: vi.fn(), post: vi.fn(), success: vi.fn(), error: vi.fn(), confirm: vi.fn() }));
@@ -10,7 +11,10 @@ vi.mock('antd', async importOriginal => {
   const antd = await importOriginal<typeof import('antd')>();
   return { ...antd, App: { useApp: () => ({ modal: { confirm: mocks.confirm }, message: { success: mocks.success, error: mocks.error } }) } };
 });
-vi.mock('../lib/api', () => ({ api: mocks.api, post: mocks.post }));
+vi.mock('../lib/api', async importOriginal => {
+  const actual = await importOriginal<typeof Api>();
+  return { ...actual, api: mocks.api, post: mocks.post };
+});
 
 const config = {
   version: 'version-1', recv_window: 5000, sync_interval_secs: 30, global_max_position_notional: '123.45',

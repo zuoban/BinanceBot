@@ -71,7 +71,7 @@ pub enum BinanceFilter {
     Unknown,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 pub struct BinanceOrderResponse {
     #[serde(rename = "orderId")]
     pub order_id: i64,
@@ -235,7 +235,12 @@ impl BinancePositionRisk {
             mark_price: self.mark_price,
             unrealized_pnl: self.un_realized_profit,
             liquidation_price: self.liquidation_price,
-            leverage: self.leverage.parse().unwrap_or(20),
+            leverage: self
+                .leverage
+                .parse::<u32>()
+                .ok()
+                .filter(|&v| v > 0)
+                .unwrap_or(1),
             update_time,
         }
     }
@@ -276,41 +281,6 @@ impl BinanceAccountInfoResponse {
             .filter(|asset| symbol.ends_with(&asset.asset))
             .max_by_key(|asset| asset.asset.len())
     }
-}
-
-/// WebSocket 24hr Mini-Ticker payload
-#[derive(Debug, Deserialize)]
-pub struct BinanceWs24hrTicker {
-    #[serde(rename = "e")]
-    pub event_type: String,
-    #[serde(rename = "E")]
-    pub event_time: i64,
-    #[serde(rename = "s")]
-    pub symbol: String,
-    #[serde(rename = "c")]
-    pub close_price: Decimal,
-    #[serde(rename = "o")]
-    pub open_price: Decimal,
-    #[serde(rename = "h")]
-    pub high_price: Decimal,
-    #[serde(rename = "l")]
-    pub low_price: Decimal,
-    #[serde(rename = "v")]
-    pub volume: Decimal,
-    #[serde(rename = "q")]
-    pub quote_volume: Decimal,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct BinanceWsMarkPrice {
-    #[serde(rename = "e")]
-    pub event_type: String,
-    #[serde(rename = "E")]
-    pub event_time: i64,
-    #[serde(rename = "s")]
-    pub symbol: String,
-    #[serde(rename = "p")]
-    pub mark_price: Decimal,
 }
 
 #[cfg(test)]
@@ -380,9 +350,14 @@ mod tests {
             liquidation_price: dec!(80),
             leverage: "15".into(),
         };
-        let pos = risk.into_position_info(None);
+        let pos = risk.clone().into_position_info(None);
         assert_eq!(pos.symbol, "SOLUSDC");
         assert_eq!(pos.size, dec!(3.5));
         assert_eq!(pos.leverage, 15);
+        for invalid in ["0", "", "invalid"] {
+            let mut fallback = risk.clone();
+            fallback.leverage = invalid.into();
+            assert_eq!(fallback.into_position_info(None).leverage, 1);
+        }
     }
 }

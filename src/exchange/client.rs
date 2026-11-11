@@ -87,7 +87,7 @@ async fn checked_response(response: reqwest::Response) -> Result<reqwest::Respon
         return Ok(response);
     }
     let status = response.status();
-    let body = response.text().await?;
+    let body = response.text().await.map_err(reqwest::Error::without_url)?;
     match serde_json::from_str::<BinanceApiError>(&body) {
         Ok(error) => Err(ExchangeError::ApiError {
             code: error.code,
@@ -430,7 +430,7 @@ impl BinanceFuturesClient {
                         "Exchange request finished"
                     );
                 }
-                return Err(error);
+                return Err(error.without_url());
             }
         };
         // Only retain the path, never the signed query or the full URL.
@@ -447,7 +447,7 @@ impl BinanceFuturesClient {
                 }
             }
         }
-        let response = response?;
+        let response = response.map_err(reqwest::Error::without_url)?;
         self.limiter.observe(
             &self.base_url,
             self.rate_account_key(),
@@ -465,8 +465,12 @@ impl BinanceFuturesClient {
     ) -> Result<T> {
         self.reserve(weight, class)?;
         let url = format!("{}{}", self.base_url, path_and_query);
-        let resp = self.send(self.client.get(&url)).await?.error_for_status()?;
-        Ok(resp.json().await?)
+        let resp = self
+            .send(self.client.get(&url))
+            .await?
+            .error_for_status()
+            .map_err(reqwest::Error::without_url)?;
+        Ok(resp.json().await.map_err(reqwest::Error::without_url)?)
     }
 
     async fn get_signed_json<T: serde::de::DeserializeOwned>(
@@ -486,7 +490,7 @@ impl BinanceFuturesClient {
             include_status,
         )
         .await?;
-        Ok(resp.json().await?)
+        Ok(resp.json().await.map_err(reqwest::Error::without_url)?)
     }
 
     /// Fetch exchange info (symbol filters)
@@ -499,7 +503,7 @@ impl BinanceFuturesClient {
         };
 
         let resp = checked_response(self.send(self.client.get(&url)).await?).await?;
-        let info: BinanceExchangeInfo = resp.json().await?;
+        let info: BinanceExchangeInfo = resp.json().await.map_err(reqwest::Error::without_url)?;
         self.limiter
             .update_exchange_limits(&self.base_url, &info.rate_limits);
         Ok(info)
@@ -604,7 +608,8 @@ impl BinanceFuturesClient {
 
         let resp = checked_response(self.send(self.client.get(&url)).await?).await?;
 
-        let orders: Vec<BinanceOrderResponse> = resp.json().await?;
+        let orders: Vec<BinanceOrderResponse> =
+            resp.json().await.map_err(reqwest::Error::without_url)?;
         Ok(orders)
     }
 
@@ -685,7 +690,9 @@ impl BinanceFuturesClient {
                 body
             ));
         }
-        Ok(Some(resp.json().await?))
+        Ok(Some(
+            resp.json().await.map_err(reqwest::Error::without_url)?,
+        ))
     }
 
     fn acquire_fill_progress_slot(
@@ -850,13 +857,14 @@ impl BinanceFuturesClient {
                     resp.status()
                 ));
             }
-            let page: Vec<ExecutionFill> = match resp.json().await {
-                Ok(page) => page,
-                Err(error) => {
-                    cleanup.failed_query = true;
-                    return Err(error.into());
-                }
-            };
+            let page: Vec<ExecutionFill> =
+                match resp.json().await.map_err(reqwest::Error::without_url) {
+                    Ok(page) => page,
+                    Err(error) => {
+                        cleanup.failed_query = true;
+                        return Err(error.into());
+                    }
+                };
             if self.fill_generations.lock().unwrap().get(symbol).copied() != Some(clear_revision) {
                 return Err(anyhow!("Trade history was cleared during reconciliation"));
             }
@@ -1015,6 +1023,7 @@ impl BinanceFuturesClient {
         let order: BinanceOrderResponse = resp
             .json()
             .await
+            .map_err(reqwest::Error::without_url)
             .map_err(|e| ExchangeError::Other(format!("Failed to parse order response: {}", e)))?;
         Ok(order)
     }
@@ -2054,5 +2063,62 @@ mod tests {
         assert_eq!(lookups.load(Ordering::SeqCst), historical_lookups + 1);
         server.abort();
         let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn signed_and_public_http_errors_strip_request_urls() {
+        use axum::{http::StatusCode, routing::get, routing::post, Router};
+
+        let mut config = crate::config::AppConfig::default().exchange;
+        config.api_key = "test-key".into();
+        config.api_secret = "test-secret".into();
+
+        let unreachable = BinanceFuturesClient::with_base_url(&config, "http://127.0.0.1:1".into());
+        let transport_err = unreachable.get_open_orders("SOLUSDC").await.unwrap_err();
+        let rendered = format!("{transport_err} {transport_err:?}");
+        assert!(!rendered.contains("signature="), "{rendered}");
+        assert!(!rendered.contains("recvWindow="), "{rendered}");
+
+        let app = Router::new()
+            .route(
+                "/fapi/v1/ticker/price",
+                get(|| async { StatusCode::BAD_GATEWAY }),
+            )
+            .route("/fapi/v1/order", post(|| async { "not-json" }))
+            .route("/fapi/v2/account", get(|| async { "not-json" }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = BinanceFuturesClient::with_base_url(&config, url.clone());
+
+        let public_err = client.get_ticker_price("SOLUSDC").await.unwrap_err();
+        let public_rendered = format!("{public_err} {public_err:?}");
+        assert!(!public_rendered.contains(&url), "{public_rendered}");
+
+        let account_err = client.get_account().await.unwrap_err();
+        let account_rendered = format!("{account_err} {account_err:?}");
+        assert!(
+            !account_rendered.contains("signature="),
+            "{account_rendered}"
+        );
+        assert!(!account_rendered.contains(&url), "{account_rendered}");
+
+        let order_err = client
+            .place_order(NewOrderRequest {
+                symbol: "SOLUSDC",
+                side: "BUY",
+                price: "100",
+                quantity: "1",
+                client_order_id: "gb_test",
+                post_only: true,
+                reduce_only: false,
+            })
+            .await
+            .unwrap_err();
+        let order_rendered = format!("{order_err} {order_err:?}");
+        assert!(!order_rendered.contains("signature="), "{order_rendered}");
+        assert!(!order_rendered.contains(&url), "{order_rendered}");
+
+        server.abort();
     }
 }

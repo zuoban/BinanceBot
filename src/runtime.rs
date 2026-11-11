@@ -61,7 +61,7 @@ struct ActiveRemoval(Arc<std::sync::Mutex<Option<String>>>);
 
 impl Drop for ActiveRemoval {
     fn drop(&mut self) {
-        *self.0.lock().unwrap() = None;
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 }
 
@@ -89,11 +89,12 @@ pub struct RuntimeHandle {
     pub(crate) membership_lock: Arc<Mutex<()>>,
     global_position_limit: Arc<crate::server::state::GlobalPositionLimit>,
     pub(crate) db: Arc<Database>,
+    pub(crate) auth: Arc<crate::server::state::AuthContext>,
     pub(crate) active_server: crate::config::ServerConfig,
     pub(crate) rate_limiter: Arc<RateLimiter>,
     pub(crate) probes: Arc<crate::server::routes::ProbeGates>,
     commands: mpsc::Sender<RuntimeCommand>,
-    stop: watch::Sender<bool>,
+    pub(crate) stop: watch::Sender<bool>,
     active_removal: Arc<std::sync::Mutex<Option<String>>>,
     engine_aborts: Arc<std::sync::Mutex<Vec<EngineAbortEntry>>>,
     early_stops: Arc<Mutex<Vec<EarlyStopEntry>>>,
@@ -102,7 +103,10 @@ pub struct RuntimeHandle {
 impl RuntimeHandle {
     /// Stop order admission immediately; the running membership command is allowed to finish.
     pub fn request_shutdown(&self) {
-        let _admission = self.active_removal.lock().unwrap();
+        let _admission = self
+            .active_removal
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         self.global_position_limit
             .shutdown_requested
             .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -120,7 +124,7 @@ impl RuntimeHandle {
     }
 
     fn register_engine(&self, pair: &PairTask) {
-        let mut engines = self.engine_aborts.lock().unwrap();
+        let mut engines = self.engine_aborts.lock().unwrap_or_else(|e| e.into_inner());
         engines.retain(|(state, _)| {
             state
                 .upgrade()
@@ -131,7 +135,11 @@ impl RuntimeHandle {
 
     /// Begin stopping existing engines while an admitted membership change finishes.
     pub async fn start_early_shutdown(&self, limit: Duration) {
-        let removing = self.active_removal.lock().unwrap().clone();
+        let removing = self
+            .active_removal
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let states = self.states.read().await.clone();
         let mut stops = self.early_stops.lock().await;
         for state in states {
@@ -145,17 +153,17 @@ impl RuntimeHandle {
             {
                 continue;
             }
-            let abort =
-                self.engine_aborts
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .find_map(|(registered, abort)| {
-                        registered
-                            .upgrade()
-                            .filter(|registered| Arc::ptr_eq(registered, &state))
-                            .map(|_| abort.clone())
-                    });
+            let abort = self
+                .engine_aborts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .find_map(|(registered, abort)| {
+                    registered
+                        .upgrade()
+                        .filter(|registered| Arc::ptr_eq(registered, &state))
+                        .map(|_| abort.clone())
+                });
             let Some(abort) = abort else {
                 continue;
             };
@@ -278,7 +286,12 @@ impl RuntimeHandle {
         }
         if !rollback_errors.is_empty() {
             for state in states {
-                let _ = state.pause_trading().await;
+                if let Err(pause_err) = state.pause_trading().await {
+                    tracing::error!(
+                        %pause_err,
+                        "Failed to persist emergency pause after global config rollback failure"
+                    );
+                }
                 let _ = state
                     .action_tx
                     .send(crate::types::BotControlAction::Pause)
@@ -344,7 +357,7 @@ pub struct TradingRuntime {
     market_cache: Arc<MarketCache>,
     rate_limiter: Arc<RateLimiter>,
     global_position_limit: Arc<crate::server::state::GlobalPositionLimit>,
-    admin_auth: Option<Arc<crate::auth::AdminAuth>>,
+    auth: Arc<crate::server::state::AuthContext>,
     #[cfg(test)]
     test_exchange_url: Option<String>,
 }
@@ -375,6 +388,10 @@ impl TradingRuntime {
             .iter()
             .map(|pair| (Arc::downgrade(&pair.state), pair.engine.abort_handle()))
             .collect();
+        let auth = pairs
+            .first()
+            .map(|pair| pair.state.auth.clone())
+            .unwrap_or_else(|| crate::server::state::AuthContext::new(db.clone(), admin_auth));
         Self {
             pairs,
             global_position_limit: global_position_limit.clone(),
@@ -383,6 +400,7 @@ impl TradingRuntime {
                 membership_lock: Arc::new(Mutex::new(())),
                 global_position_limit,
                 db,
+                auth: auth.clone(),
                 active_server,
                 rate_limiter: rate_limiter.clone(),
                 probes: Arc::default(),
@@ -399,7 +417,7 @@ impl TradingRuntime {
             position_cache: Arc::new(PositionCache::default()),
             market_cache: Arc::new(MarketCache::default()),
             rate_limiter,
-            admin_auth,
+            auth,
             #[cfg(test)]
             test_exchange_url: None,
         }
@@ -447,7 +465,7 @@ impl TradingRuntime {
     }
 
     #[cfg(test)]
-    async fn start_with_test_exchange(
+    pub(crate) async fn start_with_test_exchange(
         config: &AppConfig,
         db: Arc<Database>,
         url: String,
@@ -720,27 +738,19 @@ impl TradingRuntime {
         let state_db = db.clone();
         let trade_lock = self.trade_lock.clone();
         let cny_rates = self.cny_rates.clone();
-        let admin_auth = self.admin_auth.clone();
+        let auth = self.auth.clone();
+        let pair_scope = multi.then(|| state_config.exchange.symbol.clone());
         let state = db
             .run_blocking(move |_| {
-                Ok(if multi {
-                    AppState::new_for_pair_with_rates(
-                        state_config,
-                        state_db,
-                        action_tx,
-                        trade_lock,
-                        cny_rates,
-                        admin_auth,
-                    )
-                } else {
-                    AppState::new_with_rates(
-                        state_config,
-                        state_db,
-                        action_tx,
-                        cny_rates,
-                        admin_auth,
-                    )
-                })
+                Ok(AppState::build_with_auth(
+                    state_config,
+                    state_db,
+                    action_tx,
+                    pair_scope,
+                    trade_lock,
+                    cny_rates,
+                    auth,
+                ))
             })
             .await?;
         if force_paused || previous_unclean {
@@ -762,7 +772,7 @@ impl TradingRuntime {
                 )
                 .await;
         }
-        if self.admin_auth.is_none() && !strategy.exchange.is_paper() {
+        if !self.auth.is_auth_configured() && !strategy.exchange.is_paper() {
             if prearmed.is_none() {
                 state.pause_trading().await?;
             }
@@ -861,7 +871,12 @@ impl TradingRuntime {
                 None
             };
             if let Some(Err(error)) = &initialized {
-                let _ = engine_state.pause_trading().await;
+                if let Err(pause_err) = engine_state.pause_trading().await {
+                    tracing::error!(
+                        %pause_err,
+                        "Failed to persist pause after startup reconciliation failure"
+                    );
+                }
                 engine_state
                     .add_log(
                         "ERROR",
@@ -980,7 +995,11 @@ impl TradingRuntime {
         // Claim the engine only once all potentially blocking admission checks
         // are complete. Shutdown can stop it while removal waits for those locks.
         let _removal = {
-            let mut active = self.handle.active_removal.lock().unwrap();
+            let mut active = self
+                .handle
+                .active_removal
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             anyhow::ensure!(
                 !*self.handle.stop.borrow(),
                 "程序正在退出，无法修改交易对列表"
@@ -1146,7 +1165,7 @@ impl TradingRuntime {
                 command = self.command_rx.recv() => {
                     let Some(command) = command else { return "Runtime command channel closed".into(); };
                     {
-                        let _admission = self.handle.active_removal.lock().unwrap();
+                        let _admission = self.handle.active_removal.lock().unwrap_or_else(|e| e.into_inner());
                         if *self.handle.stop.borrow() {
                             command.reject_on_shutdown();
                             return "Runtime shutdown requested".into();
@@ -1238,7 +1257,12 @@ impl TradingRuntime {
                             Err(error) => {
                                 pair.engine.abort();
                                 let _ = (&mut pair.engine).await;
-                                let _ = pair.state.pause_trading().await;
+                                if let Err(pause_err) = pair.state.pause_trading().await {
+                                    tracing::error!(
+                                        %pause_err,
+                                        "Failed to persist pause after early shutdown task failure"
+                                    );
+                                }
                                 Err(anyhow::anyhow!("停机任务失败: {error}"))
                             }
                         }

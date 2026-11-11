@@ -37,11 +37,11 @@ function LiveConfigConfirmContent({ changes, values }: { changes: FieldChange[] 
   </div>;
 }
 function PairRiskAndRangeSection() {
-  return <Row gutter={[20, 20]} className="config-risk-row">
+  return <Row gutter={[20, 20]}>
     <Col xs={24} xl={14} className="config-risk-col">
       <Card title="仓位限制">
         <Row gutter={[20, 16]}>
-          <Col span={24}><Form.Item name="max_position_usdc" label="最大持仓名义价值" extra={<div className="field-help"><p><strong>注意：</strong>留空表示不设置；选择暂停策略或仅撤销开仓单时须填写大于 0 的上限。</p></div>} dependencies={['pause_on_max_position', 'cancel_opening_on_max_position']} rules={[({ getFieldValue }) => ({ validator: (_, value) => !(getFieldValue('pause_on_max_position') || getFieldValue('cancel_opening_on_max_position')) || isPositiveDecimal(value) ? Promise.resolve() : Promise.reject(new Error(getFieldValue('pause_on_max_position') ? '暂停策略需要大于 0 的持仓上限' : '撤销开仓单需要大于 0 的持仓上限')) })]}><InputNumber stringMode min="0" className="full-width-input" /></Form.Item></Col>
+          <Col span={24}><Form.Item name="max_position_usdc" label="最大持仓名义价值" extra={<div className="field-help"><p><strong>注意：</strong>留空表示不设置；选择暂停策略或仅撤销开仓单时须填写大于 0 的上限。</p></div>} dependencies={['pause_on_max_position', 'cancel_opening_on_max_position']} rules={[({ getFieldValue }) => ({ validator: (_, value) => { const pause = Boolean(getFieldValue('pause_on_max_position')); const cancelOpening = Boolean(getFieldValue('cancel_opening_on_max_position')); if (pause || cancelOpening) return isPositiveDecimal(value) ? Promise.resolve() : Promise.reject(new Error(pause ? '暂停策略需要大于 0 的持仓上限' : '撤销开仓单需要大于 0 的持仓上限')); if (value == null || value === '') return Promise.resolve(); return isPositiveDecimal(value) ? Promise.resolve() : Promise.reject(new Error('请输入大于 0 的持仓上限')); } })]}><InputNumber stringMode min="0" className="full-width-input" /></Form.Item></Col>
           <Col span={24}><Form.Item name="pause_on_max_position" label="持仓上限处理方式" extra={<div className="field-help"><p><strong>触发条件：</strong>选择暂停策略时，当前持仓名义价值达到上限，或下一笔完整开仓单成交后预计超过上限。</p><p><strong>执行动作：</strong>暂停策略并尝试撤销机器人挂单；限制开仓会保留平仓订单。</p><p><strong>恢复：</strong>暂停后需手动恢复。</p><p><strong>注意：</strong>撤单可能失败，请检查交易所挂单。仅挂单占用额度不会触发暂停。</p></div>} valuePropName="checked"><Switch checkedChildren="暂停策略" unCheckedChildren="限制开仓" /></Form.Item></Col>
           <Col span={24}><Form.Item name="cancel_opening_on_max_position" label="达到上限时仅撤开仓单" extra={<div className="field-help"><p><strong>触发条件：</strong>开启后，持仓名义价值达到上限。</p><p><strong>执行动作：</strong>只撤销开仓方向的挂单，策略保持运行并继续维护平仓单。</p><p><strong>恢复：</strong>回落到上限以下后自动恢复开仓。</p><p><strong>注意：</strong>与「暂停策略」互斥，开启一项会关闭另一项。</p></div>} valuePropName="checked"><Switch checkedChildren="撤开仓单" unCheckedChildren="关闭" /></Form.Item></Col>
           <Col span={24}><Form.Item name="min_liquidation_distance_pct" label="强平距离阈值（%）" extra={<div className="field-help"><p><strong>触发条件：</strong>持仓的标记价格距强平价不超过该百分比（占标记价）时。</p><p><strong>执行动作：</strong>只撤销开仓方向的挂单并保持运行，继续维护平仓单。</p><p><strong>恢复：</strong>距离回升后自动恢复开仓。</p><p><strong>注意：</strong>留空表示不启用。依赖交易所返回的强平价，模拟盘或无强平价时不生效。</p></div>} rules={[{ validator: (_, value) => value == null || value === '' || isPercentDecimal(value) ? Promise.resolve() : Promise.reject(new Error('请输入大于 0 且小于 100 的百分比')) }]}><InputNumber stringMode min="0" max="100" className="full-width-input" /></Form.Item></Col>
@@ -126,9 +126,9 @@ export default function PairConfig() {
       if (!adding && typeof data !== 'string') form.setFieldsValue(data);
       message.success(adding ? '交易对已添加，策略保持暂停，请检查配置后手动恢复' : '策略配置已保存并生效');
       const targetSymbol = adding ? (typeof data === 'string' ? data : values.symbol.trim().toUpperCase()) : symbol;
+      void client.invalidateQueries({ queryKey: ['pairs'] });
       void client.invalidateQueries({ queryKey: ['snapshot', targetSymbol] });
       navigate(`/pairs/${targetSymbol}`, { replace: true });
-      void client.invalidateQueries({ queryKey: ['pairs'] });
       void client.invalidateQueries({ queryKey: ['overview'] });
       if (adding) void client.resetQueries({ queryKey: ['overview-history'] });
       if (!adding) void client.invalidateQueries({ queryKey: ['config', symbol] });
@@ -219,7 +219,7 @@ export default function PairConfig() {
       baseline.current = { symbol, config: data };
       form.setFieldsValue(data);
     }} />}
-    {pairs.data && !pair && !adding && <Alert type="warning" title="该交易对不存在或已移除" />}
+    {pairs.data && !pair && !adding && !pairs.isFetching && <Alert type="warning" title="该交易对不存在或已移除" />}
     <Form<FormValues>
       className="config-form"
       form={form}
@@ -281,8 +281,8 @@ export default function PairConfig() {
       <div className="config-editor-grid">
       <Card title="网格参数">
         <Row gutter={[20, 16]}>
-          <Col xs={24} md={12}><Form.Item name="grid_interval" label="网格间距" dependencies={['symbol']} extra="相邻网格价格的固定差值，单位为报价资产" rules={[{ required: true, message: '请输入网格间距' }, () => ({ validator: (_, value) => { const error = tickSize ? tickSizeError(value, tickSize) : null; return error ? Promise.reject(new Error(error)) : Promise.resolve(); } })]}><InputNumber stringMode min="0.0000000001" className="full-width-input" /></Form.Item></Col>
-          <Col xs={24} md={12}><Form.Item name="order_amount_usdc" label="每格金额（报价资产）" dependencies={['symbol']} rules={[{ required: true, message: '请输入每格金额' }, () => ({ validator: (_, value) => { const error = orderAmountError(value, effectiveMark, { stepSize, minQty, minNotional }); return error ? Promise.reject(new Error(error)) : Promise.resolve(); } })]}><InputNumber stringMode min="0.0000000001" className="full-width-input" /></Form.Item></Col>
+          <Col xs={24} md={12}><Form.Item name="grid_interval" label="网格间距" dependencies={['symbol']} extra="相邻网格价格的固定差值，单位为报价资产" rules={[{ required: true, message: '请输入网格间距' }, () => ({ validator: (_, value) => { if (value == null || value === '') return Promise.resolve(); if (!isPositiveDecimal(value)) return Promise.reject(new Error('网格间距必须大于 0')); const error = tickSize ? tickSizeError(value, tickSize) : null; return error ? Promise.reject(new Error(error)) : Promise.resolve(); } })]}><InputNumber stringMode min="0" className="full-width-input" /></Form.Item></Col>
+          <Col xs={24} md={12}><Form.Item name="order_amount_usdc" label="每格金额（报价资产）" dependencies={['symbol']} rules={[{ required: true, message: '请输入每格金额' }, () => ({ validator: (_, value) => { if (value == null || value === '') return Promise.resolve(); if (!isPositiveDecimal(value)) return Promise.reject(new Error('每格金额必须大于 0')); const error = orderAmountError(value, effectiveMark, { stepSize, minQty, minNotional }); return error ? Promise.reject(new Error(error)) : Promise.resolve(); } })]}><InputNumber stringMode min="0" className="full-width-input" /></Form.Item></Col>
           <Col xs={24} md={12}><Form.Item name="buy_window" label="买单窗口" extra="当前价格下方预挂的买单数量，范围为 1–50" rules={[{ required: true }]}><InputNumber min={1} max={50} precision={0} className="full-width-input" /></Form.Item></Col>
           <Col xs={24} md={12}><Form.Item name="sell_window" label="卖单窗口" extra="当前价格上方预挂的卖单数量，范围为 1–50" rules={[{ required: true }]}><InputNumber min={1} max={50} precision={0} className="full-width-input" /></Form.Item></Col>
         </Row>

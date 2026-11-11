@@ -354,6 +354,38 @@ struct PaperWindowCache {
     orders: HashMap<String, GridOrder>,
 }
 
+struct ConfigScopeReset<'a> {
+    new_config: &'a crate::config::AppConfig,
+    new_client: Arc<BinanceFuturesClient>,
+    new_rules: SymbolRules,
+    new_price: Option<Decimal>,
+    paper_state: Option<(PositionInfo, AccountInfo)>,
+    market_changed: bool,
+    mode_changed: bool,
+    client_changed: bool,
+    fetch_rules: bool,
+}
+
+struct LiveGridOrderSubmission<'a> {
+    config: &'a crate::config::AppConfig,
+    symbol: &'a str,
+    side: OrderSide,
+    formatted_price: &'a str,
+    formatted_qty: &'a str,
+    client_order_id: String,
+    order: GridOrder,
+}
+
+struct UncertainCanceledOrder<'a> {
+    symbol: &'a str,
+    order: &'a BinanceOrderResponse,
+    confirmation: Option<&'a BinanceOrderResponse>,
+    managed_sources: &'a HashMap<String, GridOrder>,
+    recovery_sources: Option<&'a (HashMap<String, GridOrder>, Option<RemainderPlan>)>,
+    managed_read_failed: bool,
+    metadata_ready: bool,
+}
+
 #[derive(Clone, Copy)]
 struct WindowPlacementContext<'a> {
     last_fill: LastFillSnapshot,
@@ -536,15 +568,8 @@ impl GridTradingEngine {
         if !observations.is_empty() || !identities.is_empty() {
             let batches = self.initial_order_responses.entry(key).or_default();
             if let Some(existing) = batches.iter().find(|batch| batch.batch_id == batch_id) {
-                let same = match (
-                    serde_json::to_vec(&existing.responses),
-                    serde_json::to_vec(&observations),
-                    serde_json::to_vec(&existing.identities),
-                    serde_json::to_vec(identities),
-                ) {
-                    (Ok(a), Ok(b), Ok(c), Ok(d)) => a == b && c == d,
-                    _ => false,
-                };
+                let same = existing.responses == observations
+                    && existing.identities.as_slice() == identities;
                 if !same {
                     error!("Initial order snapshot batch ID reused with different data");
                     self.last_orders_sync = None;
@@ -1247,7 +1272,7 @@ impl GridTradingEngine {
         if let Some((_, _, cached)) = self
             .last_fill_cache
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .as_ref()
             .filter(|(s, m, snap)| s == symbol && *m == mode && snap.revision == revision)
         {
@@ -1261,7 +1286,10 @@ impl GridTradingEngine {
             .await?;
         let snapshot = LastFillSnapshot { revision, fill };
         if self.state.db.symbol_trade_revision(symbol) == revision {
-            *self.last_fill_cache.lock().unwrap() = Some((symbol.clone(), mode, snapshot));
+            *self
+                .last_fill_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some((symbol.clone(), mode, snapshot));
         }
         Ok(snapshot)
     }
@@ -1402,12 +1430,18 @@ impl GridTradingEngine {
         // Fetch initial market price
         let ticker_requested_at = Utc::now();
         match self.client.get_ticker_price(&symbol).await {
-            Ok(price) => {
+            Ok(price) if price > Decimal::ZERO => {
                 let mut ticker = self.state.ticker.write().await;
                 ticker.symbol = symbol.clone();
                 ticker.last_price = price;
                 ticker.update_time = ticker_requested_at;
                 info!("Initial market price for {}: {}", symbol, price);
+            }
+            Ok(price) => {
+                warn!("Invalid initial market price for {}: {}", symbol, price);
+                if !config.exchange.is_paper() {
+                    return Err(anyhow!("Initial market price must be positive"));
+                }
             }
             Err(e) => {
                 warn!("Failed to fetch initial market price: {}", e);
@@ -1419,11 +1453,12 @@ impl GridTradingEngine {
 
         let mark_requested_at = Utc::now();
         match self.client.get_mark_price(&symbol).await {
-            Ok(price) => {
+            Ok(price) if price > Decimal::ZERO => {
                 let mut ticker = self.state.ticker.write().await;
                 ticker.mark_price = price;
                 ticker.mark_update_time = mark_requested_at;
             }
+            Ok(price) => warn!("Invalid initial mark price for {}: {}", symbol, price),
             Err(e) => warn!("Failed to fetch initial mark price: {}", e),
         }
         if config.exchange.is_paper() {
@@ -1958,8 +1993,8 @@ impl GridTradingEngine {
             return Err(error);
         }
 
-        self.reset_runtime_scope_after_config_change(
-            &new_config,
+        self.reset_runtime_scope_after_config_change(ConfigScopeReset {
+            new_config: &new_config,
             new_client,
             new_rules,
             new_price,
@@ -1968,7 +2003,7 @@ impl GridTradingEngine {
             mode_changed,
             client_changed,
             fetch_rules,
-        )
+        })
         .await;
         drop(scope_transition);
 
@@ -2044,19 +2079,18 @@ impl GridTradingEngine {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn reset_runtime_scope_after_config_change(
-        &mut self,
-        new_config: &crate::config::AppConfig,
-        new_client: Arc<BinanceFuturesClient>,
-        new_rules: SymbolRules,
-        new_price: Option<Decimal>,
-        paper_state: Option<(PositionInfo, AccountInfo)>,
-        market_changed: bool,
-        mode_changed: bool,
-        client_changed: bool,
-        fetch_rules: bool,
-    ) {
+    async fn reset_runtime_scope_after_config_change(&mut self, reset: ConfigScopeReset<'_>) {
+        let ConfigScopeReset {
+            new_config,
+            new_client,
+            new_rules,
+            new_price,
+            paper_state,
+            market_changed,
+            mode_changed,
+            client_changed,
+            fetch_rules,
+        } = reset;
         self.client = new_client;
         if market_changed || mode_changed || client_changed {
             if let Some(task) = self.pnl_reconcile_task.take() {
@@ -4009,7 +4043,7 @@ impl GridTradingEngine {
         }
 
         if side == config.grid.direction.opening_side() {
-            let (occupied, exposure) = {
+            let exposure = {
                 let active_orders = self.state.active_orders.read().await;
                 if grid_level_occupied(
                     active_orders.values(),
@@ -4029,12 +4063,11 @@ impl GridTradingEngine {
                         valuation_price,
                         active_orders.values(),
                     ) + price * full_quantity;
-                    (false, Some((position.clone(), exposure)))
+                    Some((position.clone(), exposure))
                 } else {
-                    (false, None)
+                    None
                 }
             };
-            let _ = occupied;
             if let (Some(limit), Some((position, exposure))) =
                 (config.grid.max_position_usdc, exposure)
             {
@@ -4220,30 +4253,32 @@ impl GridTradingEngine {
         } else {
             let formatted_price = rules.format_price(price);
             let formatted_qty = rules.format_quantity(quantity);
-            self.submit_and_reconcile_live_grid_order(
-                &config,
-                &symbol,
+            self.submit_and_reconcile_live_grid_order(LiveGridOrderSubmission {
+                config: &config,
+                symbol: &symbol,
                 side,
-                &formatted_price,
-                &formatted_qty,
+                formatted_price: &formatted_price,
+                formatted_qty: &formatted_qty,
                 client_order_id,
                 order,
-            )
+            })
             .await
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn submit_and_reconcile_live_grid_order(
         &mut self,
-        config: &crate::config::AppConfig,
-        symbol: &str,
-        side: OrderSide,
-        formatted_price: &str,
-        formatted_qty: &str,
-        client_order_id: String,
-        mut order: GridOrder,
+        submission: LiveGridOrderSubmission<'_>,
     ) -> bool {
+        let LiveGridOrderSubmission {
+            config,
+            symbol,
+            side,
+            formatted_price,
+            formatted_qty,
+            client_order_id,
+            mut order,
+        } = submission;
         if let Err(e) = self.save_managed_order(&order).await {
             error!("Could not persist order intent {}: {}", client_order_id, e);
             self.pause_trading().await;
@@ -4752,15 +4787,15 @@ impl GridTradingEngine {
                 {
                     let confirmation = self.client.get_order(&symbol, order.order_id).await;
                     if confirmation.as_ref().is_ok_and(unresolved_filled_quantity) {
-                        self.retain_uncertain_canceled_order(
-                            &symbol,
-                            &order,
-                            confirmation.as_ref().ok(),
-                            &managed_sources,
-                            recovery_sources.as_ref(),
+                        self.retain_uncertain_canceled_order(UncertainCanceledOrder {
+                            symbol: &symbol,
+                            order: &order,
+                            confirmation: confirmation.as_ref().ok(),
+                            managed_sources: &managed_sources,
+                            recovery_sources: recovery_sources.as_ref(),
                             managed_read_failed,
                             metadata_ready,
-                        )
+                        })
                         .await;
                         cancellation_failed = true;
                         continue;
@@ -4818,17 +4853,16 @@ impl GridTradingEngine {
         true
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn retain_uncertain_canceled_order(
-        &mut self,
-        symbol: &str,
-        order: &BinanceOrderResponse,
-        confirmation: Option<&BinanceOrderResponse>,
-        managed_sources: &HashMap<String, GridOrder>,
-        recovery_sources: Option<&(HashMap<String, GridOrder>, Option<RemainderPlan>)>,
-        managed_read_failed: bool,
-        metadata_ready: bool,
-    ) {
+    async fn retain_uncertain_canceled_order(&mut self, ctx: UncertainCanceledOrder<'_>) {
+        let UncertainCanceledOrder {
+            symbol,
+            order,
+            confirmation,
+            managed_sources,
+            recovery_sources,
+            managed_read_failed,
+            metadata_ready,
+        } = ctx;
         self.block_reconciliation_and_invalidate_caches().await;
         // A managed exchange order can be absent from local
         // metadata. Keep it recoverable before the list changes.

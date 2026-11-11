@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { App } from 'antd';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeEach, expect, it, vi } from 'vitest';
+import type * as Api from '../lib/api';
 import { LoadErrorBoundary } from '../components/LoadErrorBoundary';
 import { OverviewHistory } from '../components/OverviewHistory';
 import { MemoryRouter } from 'react-router-dom';
@@ -14,7 +15,10 @@ vi.mock('../components/DatabaseSettings', () => { throw new Error('database modu
 vi.mock('../lib/queries', () => ({
   useOverviewHistory: () => ({ data: { snapshots: [{ hour: Math.floor(Date.now() / 3600000) * 3600, groups: [{ mode: 'PAPER', asset: 'USDC', account_id: null, equity: '100' }] }], current_accounts: [{ mode: 'PAPER', asset: 'USDC', account_id: null }] }, isPending: false, error: null }),
 }));
-vi.mock('../lib/api', () => ({ api: vi.fn().mockResolvedValue({}), post: vi.fn() }));
+vi.mock('../lib/api', async importOriginal => {
+  const actual = await importOriginal<typeof Api>();
+  return { ...actual, api: vi.fn().mockResolvedValue({}), post: vi.fn() };
+});
 
 beforeEach(() => {
   vi.spyOn(console, 'error').mockImplementation(() => {});

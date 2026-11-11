@@ -3,7 +3,8 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { Alert, Button, Card, Col, Descriptions, Row, Statistic, Tabs } from 'antd';
 import { SettingOutlined } from '@ant-design/icons';
 import { usePairSnapshot, usePairs } from '../lib/queries';
-import { beijingClockFormat, cnyText, entryPriceText, number, numeric, positivePrice, price, quoteAsset, ratioText, todayTradeCounts, trimFractionZeros } from '../lib/format';
+import { signedDecimalToNumber, subSignedDecimals } from '../lib/decimal';
+import { beijingClockFormat, cnyText, entryPriceText, number, positivePrice, quantity, quoteAsset, ratioText, todayTradeCounts, trimFractionZeros } from '../lib/format';
 import { ControlResultBanner, DirectionTag, DirectionText, ErrorNotice, FreshnessText, ModeTag, PageBreadcrumb, PageTitle, Pnl, SignalChip, StatusTag } from '../components/Common';
 import { PairControls, useControls } from '../components/Controls';
 import { DepthChart, HourlyChart } from '../components/Charts';
@@ -13,6 +14,7 @@ import { DetailLoading } from '../components/Loading';
 import { useDocumentTitle } from '../lib/documentTitle';
 import { useUrlParam } from '../lib/urlState';
 import { useAccountGroups, useBeijingDay } from '../lib/useNow';
+const detailTabs = ['monitor', 'orders', 'trades', 'logs'] as const;
 export default function PairDetail() {
   const { symbol } = useParams();
   const navigate = useNavigate();
@@ -21,34 +23,33 @@ export default function PairDetail() {
   const query = usePairSnapshot(pair);
   const controls = useControls();
   const dayNow = useBeijingDay();
-  const [tab, setTab] = useUrlParam<string>('tab', 'monitor', ['monitor', 'orders', 'trades', 'logs']);
+  const [tab, setTab] = useUrlParam('tab', 'monitor', detailTabs);
   const s = query.data, asset = quoteAsset(symbol ?? '');
   const accountEntries = useMemo(() => s && pair ? [{ snapshot: s, mode: s.mode, account_observation_stale: query.stale }] : [], [s, pair, query.stale]);
   const account = useAccountGroups(accountEntries, !!s && !!pair)[0];
   const today = useMemo(() => s ? todayTradeCounts(s, dayNow) : null, [s, dayNow]);
   useDocumentTitle(`${positivePrice(s?.ticker.mark_price)} | ${today?.buy ?? '--'}B | ${today?.sell ?? '--'}S`);
   const todayPnl = today && s?.hourly_trade_stats && s.hourly_trade_stats.pending_pnl_count === 0 ? s.hourly_trade_stats.realized_pnl : null;
-  const realizedPnl = numeric(s?.stats.total_realized_pnl), commission = numeric(s?.stats.total_commission);
-  const netPnl = s?.stats.pending_pnl_trades === 0 && realizedPnl !== null && commission !== null ? realizedPnl - commission : null;
+  const netPnl = s?.stats.pending_pnl_trades === 0 ? signedDecimalToNumber(subSignedDecimals(s.stats.total_realized_pnl, s.stats.total_commission)) : null;
   const currentPair = pair && s ? { ...pair, status: s.status, grid_config: s.grid_config, mode: s.mode } : pair;
   return <div>
     <PageBreadcrumb items={[{ label: '策略总览', to: '/' }, { label: symbol ?? '策略详情' }]} />
     <PageTitle title={symbol ?? '策略详情'} description="行情、网格与成交，随策略实时更新"
       extra={<div className="detail-actions">{currentPair && <PairControls pair={currentPair} stale={query.stale || !!query.error} />}<Button icon={<SettingOutlined />} onClick={() => navigate(`/pairs/${symbol}/config`)}>策略参数</Button></div>} />
     <ErrorNotice error={pairs.error || query.error} retry={() => { void pairs.refetch(); void query.refetch(); }} />
-    {pairs.data && !pair && <Alert type="warning" title="该交易对不存在或已移除" />}
+    {pairs.data && !pair && !pairs.isFetching && <Alert type="warning" title="该交易对不存在或已移除" />}
     {symbol && <ControlResultBanner symbol={symbol} results={controls.results} clearResult={controls.clearResult} variant="alert" />}
     {pair && <div className="detail-status signal-strip"><StatusTag status={currentPair!.status} /><DirectionTag direction={currentPair!.grid_config.direction} /><ModeTag mode={currentPair!.mode} /><SignalChip tier={query.live ? 'calm' : 'yellow'}>{query.live ? '实时连接' : 'HTTP 自动刷新'}</SignalChip><span className="muted freshness" title={query.dataUpdatedAt ? `最近同步 ${beijingClockFormat.format(query.dataUpdatedAt)}` : undefined}>{query.dataUpdatedAt ? <FreshnessText updatedAt={query.dataUpdatedAt} prefix="更新于 " /> : '等待首次快照'}</span></div>}
     {query.stale && s && <Alert type="warning" showIcon title="快照暂未更新，数值可能已过期；仍可撤单并暂停。" />}
-    {!s && (pairs.isPending || (pair && query.isPending)) && <DetailLoading />}
+    {!s && (pairs.isPending || (!pair && pairs.isFetching) || (pair && query.isPending)) && <DetailLoading />}
     {s && <>
       <Row gutter={[16, 16]} className={`metric-row${query.stale ? ' is-stale' : ''}`}>
         <Col xs={12} xl={6} className="metric-col"><Card><Statistic title={`标记价格 / ${asset}`} value={positivePrice(s.ticker.mark_price)} /><div className="muted">最新成交 {positivePrice(s.ticker.last_price)}</div></Card></Col>
         <Col xs={12} xl={6} className="metric-col"><Card><Statistic title={`已实现盈亏 / ${asset}`} value={s.stats.total_realized_pnl} formatter={() => <Pnl value={s.stats.total_realized_pnl} />} /><div className="muted">扣费后 {number(netPnl)}</div></Card></Col>
-        <Col xs={12} xl={6} className="metric-col"><Card><Statistic title={`持仓未实现 / ${asset}`} value={s.position.unrealized_pnl} formatter={() => <Pnl value={s.position.unrealized_pnl} />} /><div className="muted">持仓数量 {price(s.position.size)}</div></Card></Col>
+        <Col xs={12} xl={6} className="metric-col"><Card><Statistic title={`持仓未实现 / ${asset}`} value={s.position.unrealized_pnl} formatter={() => <Pnl value={s.position.unrealized_pnl} />} /><div className="muted">持仓数量 {quantity(s.position.size)}</div></Card></Col>
         <Col xs={12} xl={6} className="metric-col"><Card><Statistic title={`账户权益 / ${account?.asset || asset}`} value={account?.equity ?? '--'} formatter={() => number(account?.equity)} /><div className="muted">{cnyText(account?.cny)} · 可用 {number(account?.available)}</div></Card></Col>
       </Row>
-      <Tabs className="detail-tabs" activeKey={tab} onChange={setTab} items={[
+      <Tabs className="detail-tabs" activeKey={tab} onChange={key => { const next = detailTabs.find(t => t === key); if (next) setTab(next); }} items={[
         { key: 'monitor', label: '实时监控', children: <>
           <Row gutter={[20, 20]}><Col xs={24} xl={14}><Card title="今日成交"><div className="today-trade-summary" aria-label="今日成交汇总">
             <div><span>成交总数</span><strong>{today ? today.buy + today.sell : '--'} <small>笔</small></strong></div>

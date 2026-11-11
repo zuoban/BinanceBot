@@ -3,6 +3,7 @@ import { Alert, App, Button, Empty, Space } from 'antd';
 import { ArrowDownOutlined, ArrowUpOutlined, CheckCircleOutlined, CloseCircleOutlined, CloseOutlined, ExclamationCircleOutlined, InfoCircleOutlined, ReloadOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { Link } from 'react-router-dom';
 import { EditContext } from '../lib/session';
+import { errorMessage } from '../lib/api';
 import type { GridConfig, Mode, Status } from '../lib/types';
 type Direction = GridConfig['direction'];
 import { ageText, compactNumber, directionLabel, modeLabel, number, numeric, sig3Format, statusLabel } from '../lib/format';
@@ -60,11 +61,12 @@ export function DirectionText({ direction }: { direction: Direction }) {
   return <SideTag side={direction === 'SHORT' ? 'SELL' : 'BUY'} label={directionLabel(direction)} />;
 }
 export function Pnl({ value, compact = false }: { value: unknown; compact?: boolean }) {
-  const n = numeric(value);
+  const raw = numeric(value);
+  const n = raw !== null && Math.abs(raw) < 1e-12 ? 0 : raw;
   if (compact && n !== null && Math.abs(n) > 0 && Math.abs(n) < 0.01) {
     return <span className={n < 0 ? 'negative numeric' : 'positive numeric'}>{sig3Format.format(n)}</span>;
   }
-  const text = compact ? compactNumber(value) : number(value);
+  const text = compact ? compactNumber(n) : number(n);
   return <span className={text === '--' ? 'numeric' : text.startsWith('-') ? 'negative numeric' : 'positive numeric'}>{text}</span>;
 }
 export const NoData = () => <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无数据" />;
@@ -108,7 +110,7 @@ export function ConflictReloadButton<T>({ label, activeRef, refetch, onLoaded, o
       if (activeRef.current !== current) return;
       const result = await refetch();
       if (activeRef.current !== current) return;
-      if (result.error) { message.error((result.error as Error).message); return; }
+      if (result.error) { message.error(errorMessage(result.error)); return; }
       if (!result.data || onLoaded(result.data) === false) return;
       edit.setDirty(false);
       onReset();

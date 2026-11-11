@@ -7,7 +7,9 @@ import { beforeEach, expect, it, vi } from 'vitest';
 import Shell from '../components/Shell';
 import PairConfig from '../pages/PairConfig';
 import PairDetail from '../pages/PairDetail';
+import type * as Antd from 'antd';
 import { ApiError } from '../lib/api';
+import type * as Api from '../lib/api';
 import type { GridConfig } from '../lib/types';
 import { pair } from './fixtures';
 
@@ -16,19 +18,25 @@ const mocks = vi.hoisted(() => {
   return { confirm, success, error, run: vi.fn(), api: vi.fn(), post: vi.fn(), app: { modal: { confirm }, message: { success, error } } };
 });
 vi.mock('antd', async importOriginal => {
-  const antd = await importOriginal<typeof import('antd')>();
+  const antd = await importOriginal<typeof Antd>();
   return { ...antd, App: { useApp: () => mocks.app } };
 });
-vi.mock('../lib/api', async importOriginal => ({ ...await importOriginal<typeof import('../lib/api')>(), api: mocks.api, post: mocks.post }));
-vi.mock('../lib/queries', async () => {
-  const { pair } = await import('./fixtures');
-  return { usePairs: () => ({ data: [pair('BTCUSDC'), pair('ETHUSDC')], dataUpdatedAt: Date.now() }), useLiveAccounts: () => ({ accounts: [], stale: false, error: null }), usePairSnapshot: () => ({ data: undefined, isPending: false, refetch: vi.fn() }) };
+vi.mock('../lib/api', async importOriginal => {
+  const actual = await importOriginal<typeof Api>();
+  return { ...actual, api: mocks.api, post: mocks.post };
 });
-vi.mock('../components/Controls', () => ({ ControlProvider: ({ children }: { children: React.ReactNode }) => children, PairControls: () => null, useControls: () => ({ results: {}, run: mocks.run }) }));
+const pairsState = vi.hoisted(() => ({ isFetching: false }));
+vi.mock('../lib/queries', () => ({
+  usePairs: () => ({ data: [pair('BTCUSDC'), pair('ETHUSDC')], isFetching: pairsState.isFetching, dataUpdatedAt: Date.now() }),
+  useLiveAccounts: () => ({ accounts: [], stale: false, error: null }),
+  usePairSnapshot: () => ({ data: undefined, isPending: false, refetch: vi.fn() }),
+}));
+vi.mock('../components/Controls', () => ({ ControlProvider: ({ children }: { children: React.ReactNode }) => children, PairControls: () => null, useControls: () => ({ busy: new Set<string>(), pending: {}, results: {}, clearResult: vi.fn(), run: mocks.run }) }));
 vi.mock('../components/ThemeSwitch', () => ({ ThemeSwitch: () => null, ThemeSegmented: () => null, themeLabels: { system: '跟随系统', light: '浅色', dark: '深色' } }));
 
 beforeEach(() => {
   vi.clearAllMocks();
+  pairsState.isFetching = false;
 });
 function setup(request: Promise<unknown>, initialPath = '/pairs/BTCUSDC/config', configError?: Error, symbols = (_path: string): Promise<string[]> => Promise.resolve(['BTCUSDC', 'SOLUSDC']), postOnly = true) {
   mocks.api.mockImplementation((path: string, init?: RequestInit) => path.startsWith('/api/exchange/symbols?') ? symbols(path) : init?.method === 'DELETE' ? request : configError ? Promise.reject(configError) : Promise.resolve({ ...pair('BTCUSDC').grid_config, post_only: postOnly, config_version: 'version-1' }));
@@ -165,6 +173,33 @@ it('requires a position limit when pause is enabled and allows clearing it when 
   await waitFor(() => expect(mocks.post).toHaveBeenCalledWith('/api/pairs', expect.objectContaining({
     max_position_usdc: null, pause_on_max_position: false,
   })));
+});
+
+it('rejects zero or non-positive max_position_usdc, grid_interval, and order_amount_usdc values', async () => {
+  setup(Promise.resolve(), '/pairs/new');
+  const user = userEvent.setup();
+  await selectSymbol(user, 'SOLUSDC');
+  await user.click(screen.getByRole('switch', { name: '持仓上限处理方式' }));
+  const cap = screen.getByLabelText('最大持仓名义价值');
+  await user.clear(cap);
+  await user.type(cap, '0');
+  const interval = screen.getByLabelText('网格间距');
+  await user.clear(interval);
+  await user.type(interval, '0');
+  const amount = screen.getByLabelText('每格金额（报价资产）');
+  await user.clear(amount);
+  await user.type(amount, '0');
+  await user.click(screen.getByRole('button', { name: '保存并添加' }));
+  expect(await screen.findByText('请输入大于 0 的持仓上限')).toBeInTheDocument();
+  expect(await screen.findByText('网格间距必须大于 0')).toBeInTheDocument();
+  expect(await screen.findByText('每格金额必须大于 0')).toBeInTheDocument();
+  expect(mocks.post).not.toHaveBeenCalled();
+});
+
+it('suppresses the missing-pair warning while pairs are refetching', () => {
+  pairsState.isFetching = true;
+  setup(Promise.resolve(), '/pairs/UNKNOWN/config');
+  expect(screen.queryByText('该交易对不存在或已移除')).not.toBeInTheDocument();
 });
 
 it.each([

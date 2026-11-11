@@ -2,31 +2,42 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { App, Button, Dropdown, Space } from 'antd';
 import { MoreOutlined } from '@ant-design/icons';
 import { useQueryClient } from '@tanstack/react-query';
-import { api, pairPath, post } from '../lib/api';
+import { api, errorMessage, pairPath, post } from '../lib/api';
 import type { Action, Pair, Snapshot } from '../lib/types';
 import { StrategyToggle, strategySecondaryItems } from './StrategyMenu';
-async function confirmControlState(pair: Pair, action: Action): Promise<boolean> {
+async function confirmControlState(pair: Pair, action: Action, sleep: (ms: number) => Promise<boolean>, isMounted: () => boolean): Promise<boolean> {
   if (action === 'rebalance') return true;
   for (let attempt = 0; attempt < 5; attempt++) {
-    await new Promise(resolve => setTimeout(resolve, 800));
+    if (!await sleep(800)) return false;
     const snapshot = await api<Snapshot>(pairPath(pair, 'status'));
+    if (!isMounted()) return false;
     const matches = action === 'resume' ? snapshot.status === 'RUNNING' : snapshot.status === 'PAUSED';
     if (matches) return true;
   }
   return false;
 }
 
+const BATCH_PAUSE_CONCURRENCY = 6;
 export type ControlResult = 'confirmed' | 'cancellation_unconfirmed' | 'state_unconfirmed' | 'request_unconfirmed' | 'failed' | 'not_submitted';
 export const pendingLabel: Record<Action, string> = { pause: '暂停中…', resume: '恢复中…', cancel_all: '撤单中…', rebalance: '重建中…' };
-interface ControlState { busy: Set<string>; pending: Record<string, Action>; results: Record<string, string>; clearResult?: (symbol: string) => void; run: (pair: Pair, action: Action, confirmed?: boolean) => Promise<ControlResult> }
+interface ControlState { busy: Set<string>; pending: Record<string, Action>; results: Record<string, string>; clearResult: (symbol: string) => void; run: (pair: Pair, action: Action, confirmed?: boolean) => Promise<ControlResult> }
 export async function runBatchControls(pairs: Pair[], action: 'pause' | 'resume', run: ControlState['run']): Promise<{ pair: Pair; result: Exclude<ControlResult, 'confirmed'> }[]> {
   const outcomes: { pair: Pair; result: Exclude<ControlResult, 'confirmed'> }[] = [];
   const record = (pair: Pair, result: ControlResult) => {
     if (result !== 'confirmed') outcomes.push({ pair, result });
   };
   if (action === 'pause') {
-    const results = await Promise.allSettled(pairs.map(pair => run(pair, action, true)));
-    results.forEach((result, index) => record(pairs[index], result.status === 'fulfilled' ? result.value : 'request_unconfirmed'));
+    const settled = new Array<ControlResult>(pairs.length);
+    let nextIndex = 0;
+    const worker = async () => {
+      while (nextIndex < pairs.length) {
+        const index = nextIndex++;
+        try { settled[index] = await run(pairs[index], action, true); }
+        catch { settled[index] = 'request_unconfirmed'; }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(BATCH_PAUSE_CONCURRENCY, pairs.length) }, () => worker()));
+    for (let index = 0; index < pairs.length; index++) record(pairs[index], settled[index]);
   } else {
     for (const pair of pairs) {
       try { record(pair, await run(pair, action, true)); } catch { record(pair, 'request_unconfirmed'); }
@@ -61,15 +72,42 @@ function resolveControlOutcome(action: Action, observedState: boolean): { result
     outcome: confirmedState ? 'confirmed' : 'state_unconfirmed',
   };
 }
-const Context = createContext<ControlState>(null!);
-export const useControls = () => useContext(Context);
+const Context = createContext<ControlState | null>(null);
+export function useControls(): ControlState {
+  const context = useContext(Context);
+  if (!context) throw new Error('useControls must be used within ControlProvider');
+  return context;
+}
 export function ControlProvider({ pairs, children }: { pairs?: Pair[]; children: React.ReactNode }) {
   const { modal, message } = App.useApp();
   const client = useQueryClient();
   const locked = useRef(new Set<string>());
+  const mounted = useRef(true);
+  const wakeups = useRef(new Set<() => void>());
   const [busy, setBusy] = useState(new Set<string>());
   const [pending, setPending] = useState<Record<string, Action>>({});
   const [results, setResults] = useState<Record<string, string>>({});
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      for (const wake of wakeups.current) wake();
+      wakeups.current.clear();
+    };
+  }, []);
+  const sleep = useCallback((ms: number) => new Promise<boolean>(resolve => {
+    if (!mounted.current) { resolve(false); return; }
+    const wake = () => {
+      window.clearTimeout(timer);
+      wakeups.current.delete(wake);
+      resolve(false);
+    };
+    const timer = window.setTimeout(() => {
+      wakeups.current.delete(wake);
+      resolve(mounted.current);
+    }, ms);
+    wakeups.current.add(wake);
+  }), []);
   const clearResult = useCallback((symbol: string) => {
     setResults(current => {
       if (!(symbol in current)) return current;
@@ -87,7 +125,7 @@ export function ControlProvider({ pairs, children }: { pairs?: Pair[]; children:
     });
   }, [pairs]);
   const run = useCallback(async (pair: Pair, action: Action, confirmed = false): Promise<ControlResult> => {
-    if (locked.current.has(pair.symbol)) return 'not_submitted';
+    if (locked.current.has(pair.symbol) || !mounted.current) return 'not_submitted';
     locked.current.add(pair.symbol); setBusy(new Set(locked.current));
     let submitted = false;
     try {
@@ -95,38 +133,49 @@ export function ControlProvider({ pairs, children }: { pairs?: Pair[]; children:
       if (dangerous && !confirmed) {
         const { title, content } = controlConfirmCopy(pair, action);
         const accepted = await modal.confirm({ title, content, okText: '确认执行', cancelText: '取消' });
-        if (!accepted) return 'not_submitted';
+        if (!accepted || !mounted.current) return 'not_submitted';
       }
+      if (!mounted.current) return 'not_submitted';
       setResults(r => ({ ...r, [pair.symbol]: '正在提交…' }));
       setPending(p => ({ ...p, [pair.symbol]: action }));
       submitted = true;
       await post(pairPath(pair, 'control'), action === 'resume' || action === 'rebalance' ? { action, expected_mode: pair.mode } : { action });
-      const observedState = await confirmControlState(pair, action).catch(() => false);
+      if (!mounted.current) return 'state_unconfirmed';
+      const observedState = await confirmControlState(pair, action, sleep, () => mounted.current).catch(() => false);
       const { resultText, confirmedState, outcome } = resolveControlOutcome(action, observedState);
-      setResults(r => ({ ...r, [pair.symbol]: resultText }));
-      if (!confirmedState) message.warning(`${pair.symbol}：${resultText}`);
+      if (mounted.current) {
+        setResults(r => ({ ...r, [pair.symbol]: resultText }));
+        if (!confirmedState) message.warning(`${pair.symbol}：${resultText}`);
+      }
       return outcome;
     } catch (error) {
-      const text = error instanceof Error ? error.message : String(error);
+      const text = errorMessage(error);
       if (submitted) {
         const result = `请求结果不明，操作可能已生效：${text}；请刷新状态并核对交易所挂单及日志后再操作`;
-        setResults(r => ({ ...r, [pair.symbol]: result }));
-        message.warning(`${pair.symbol}：${result}`);
+        if (mounted.current) {
+          setResults(r => ({ ...r, [pair.symbol]: result }));
+          message.warning(`${pair.symbol}：${result}`);
+        }
         return 'request_unconfirmed';
       }
-      setResults(r => ({ ...r, [pair.symbol]: `未提交：${text}` }));
-      message.error(`${pair.symbol}：${text}`);
+      if (mounted.current) {
+        setResults(r => ({ ...r, [pair.symbol]: `未提交：${text}` }));
+        message.error(`${pair.symbol}：${text}`);
+      }
       return 'failed';
     } finally {
-      locked.current.delete(pair.symbol); setBusy(new Set(locked.current));
-      setPending(p => { const { [pair.symbol]: _done, ...rest } = p; return rest; });
+      locked.current.delete(pair.symbol);
+      if (mounted.current) {
+        setBusy(new Set(locked.current));
+        setPending(p => { const { [pair.symbol]: _done, ...rest } = p; return rest; });
+      }
       if (submitted) {
         void client.invalidateQueries({ queryKey: ['pairs'] });
         void client.invalidateQueries({ queryKey: ['overview'] });
         void client.invalidateQueries({ queryKey: ['snapshot', pair.symbol] });
       }
     }
-  }, [client, message, modal]);
+  }, [client, message, modal, sleep]);
   const value = useMemo(() => ({ busy, pending, results, clearResult, run }), [busy, pending, results, clearResult, run]);
   return <Context.Provider value={value}>{children}</Context.Provider>;
 }

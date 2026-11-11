@@ -2,21 +2,30 @@ import { render, screen } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { beforeEach, expect, it, vi } from 'vitest';
 import PairDetail from '../pages/PairDetail';
+import { Pnl } from '../components/Common';
 import { pair, snapshot } from './fixtures';
-import type { Snapshot } from '../lib/types';
+import type { Pair, Snapshot } from '../lib/types';
 
-const state = vi.hoisted(() => ({ data: undefined as Snapshot | undefined }));
+const state = vi.hoisted(() => ({
+  data: undefined as Snapshot | undefined,
+  pairs: [] as Pair[] | undefined,
+  pairsPending: false,
+  pairsFetching: false,
+}));
 vi.mock('../lib/queries', () => ({
-  usePairs: () => ({ data: [pair()], isPending: false }),
+  usePairs: () => ({ data: state.pairs, isPending: state.pairsPending, isFetching: state.pairsFetching }),
   usePairSnapshot: () => ({ data: state.data, live: true, stale: false, isPending: false }),
 }));
-vi.mock('../components/Controls', () => ({ PairControls: () => null, useControls: () => ({ results: {} }) }));
+vi.mock('../components/Controls', () => ({ PairControls: () => null, useControls: () => ({ busy: new Set<string>(), pending: {}, results: {}, clearResult: vi.fn(), run: vi.fn() }) }));
 vi.mock('../components/Charts', () => ({ DepthChart: () => null, HourlyChart: () => null }));
 vi.mock('../components/DataTables', () => ({ LogsTable: () => null, OrdersTable: () => null, TradesTable: () => null }));
 vi.mock('../components/HistoryActions', () => ({ HistoryActions: () => null }));
 
 beforeEach(() => {
   state.data = snapshot();
+  state.pairs = [pair()];
+  state.pairsPending = false;
+  state.pairsFetching = false;
 });
 
 function view() {
@@ -77,4 +86,26 @@ it('displays the strategy direction badge in the detail signal strip', () => {
   render(view());
   expect(screen.getByRole('img', { name: '策略方向：做空' })).toHaveClass('strategy-direction-short');
   expect(screen.getByText('方向').parentElement).toHaveTextContent('↓做空');
+});
+
+it('computes net pnl and position quantity exactly and clamps sub-1e-12 float residue in Pnl', () => {
+  state.data!.stats.total_realized_pnl = '0.3';
+  state.data!.stats.total_commission = '0.1';
+  state.data!.position.size = '1.00025';
+  render(<>{view()}<div data-testid="residue"><Pnl value={-2.78e-17} compact /></div></>);
+  expect(screen.getByText('扣费后 0.20')).toBeInTheDocument();
+  expect(screen.getByText('持仓数量 1.00025')).toBeInTheDocument();
+  expect(screen.getByTestId('residue')).toHaveTextContent('0');
+});
+
+it('shows detail loading instead of a missing-pair warning while pairs are still refetching', () => {
+  state.data = undefined;
+  state.pairs = [pair('BTCUSDC')];
+  state.pairsFetching = true;
+  const { rerender } = render(view());
+  expect(screen.queryByText('该交易对不存在或已移除')).not.toBeInTheDocument();
+  expect(screen.getByRole('status', { name: '正在加载策略详情' })).toBeInTheDocument();
+  state.pairsFetching = false;
+  rerender(view());
+  expect(screen.getByText('该交易对不存在或已移除')).toBeInTheDocument();
 });

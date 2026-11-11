@@ -7,9 +7,10 @@ import type { ControlResult } from '../components/Controls';
 import { api, ApiError, post } from '../lib/api';
 import { pair, snapshot } from './fixtures';
 
+const messages = vi.hoisted(() => ({ warning: vi.fn(), error: vi.fn() }));
 vi.mock('antd', () => ({
   App: Object.assign(({ children }: { children: React.ReactNode }) => children, {
-    useApp: () => ({ modal: { confirm: vi.fn() }, message: { warning: vi.fn(), error: vi.fn() } }),
+    useApp: () => ({ modal: { confirm: vi.fn() }, message: messages }),
   }),
 }));
 vi.mock('@ant-design/icons', () => ({}));
@@ -20,6 +21,7 @@ vi.mock('../lib/api', () => ({
   },
   api: vi.fn(),
   post: vi.fn(),
+  errorMessage: (error: unknown) => error instanceof Error ? error.message : String(error),
   pairPath: (value: { symbol: string }, path: string) => `/api/pairs/${value.symbol}/${path}`,
 }));
 
@@ -178,4 +180,28 @@ it.each(['PAPER', 'LIVE'] as const)('binds a confirmed resume to the displayed %
     unmount();
     client.clear();
   }
+});
+
+it('throws a clear error when useControls is called outside ControlProvider', () => {
+  expect(() => renderHook(() => useControls())).toThrow('useControls must be used within ControlProvider');
+});
+
+it('aborts pending confirmation timers and skips state/message updates on unmount', async () => {
+  vi.useFakeTimers();
+  vi.mocked(post).mockResolvedValue(undefined);
+  vi.mocked(api).mockResolvedValue(snapshot());
+  const client = new QueryClient();
+  const wrapper = ({ children }: { children: React.ReactNode }) => <QueryClientProvider client={client}><App><ControlProvider>{children}</ControlProvider></App></QueryClientProvider>;
+  const { result, unmount } = renderHook(() => useControls(), { wrapper });
+  let pending!: Promise<ControlResult>;
+  act(() => { pending = result.current.run(pair(), 'pause', true); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+  expect(post).toHaveBeenCalledOnce();
+  expect(api).not.toHaveBeenCalled();
+  unmount();
+  await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+  expect(await pending).toBe('state_unconfirmed');
+  expect(api).not.toHaveBeenCalled();
+  expect(messages.warning).not.toHaveBeenCalled();
+  client.clear();
 });

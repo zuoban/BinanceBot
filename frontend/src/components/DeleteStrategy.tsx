@@ -1,7 +1,7 @@
 import { useRef, useState } from 'react';
 import { App, Input } from 'antd';
 import { useQueryClient, type QueryClient } from '@tanstack/react-query';
-import { api, ApiError } from '../lib/api';
+import { api, ApiError, errorMessage } from '../lib/api';
 import type { Pair } from '../lib/types';
 import { useControls } from './Controls';
 
@@ -40,7 +40,7 @@ export function useDeleteStrategy() {
       deleteStarted = true;
       await api(`/api/pairs/${encodeURIComponent(pair.symbol)}`, { method: 'DELETE', body: JSON.stringify({ confirm: true }), timeoutMs: 90_000 });
       message.success('策略已删除，历史记录保留');
-      controls?.clearResult?.(pair.symbol);
+      controls.clearResult(pair.symbol);
       client.removeQueries({ queryKey: ['snapshot', pair.symbol] });
       client.removeQueries({ queryKey: ['config', pair.symbol] });
       invalidateStrategyListQueries(client);
@@ -50,7 +50,7 @@ export function useDeleteStrategy() {
         invalidateStrategyListQueries(client);
       }
       const uncertain = deleteStarted && error instanceof ApiError && error.kind === 'invalid-response';
-      message.error(`${(error as Error).message}${uncertain ? '；删除结果可能已生效，请刷新状态或查看日志后再操作' : ''}`);
+      message.error(`${errorMessage(error)}${uncertain ? '；删除结果可能已生效，请刷新状态或查看日志后再操作' : ''}`);
       return false;
     } finally {
       locked.current = false;

@@ -1,9 +1,10 @@
 import { Suspense, lazy, memo, useMemo, useState } from 'react';
 import { Button, Card, Select } from 'antd';
 import { useOverviewHistory } from '../lib/queries';
-import { availableRatio, compactNumber, compactPrice, modeLabel, numeric, quoteAsset, ratioText, time } from '../lib/format';
+import { parseSignedDecimal } from '../lib/decimal';
+import { availableRatio, compactNumber, groupModeAssetPnl, modeLabel, numeric, quantity, quoteAsset, ratioText, time, type ModeAssetPnlGroup } from '../lib/format';
 import { useExpired } from '../lib/useNow';
-import type { DailySnapshot, HistoryAccount, Mode, OverviewHistoryData } from '../lib/types';
+import type { DailySnapshot, HistoryAccount, OverviewHistoryData } from '../lib/types';
 import { Pnl } from './Common';
 import { LoadErrorBoundary } from './LoadErrorBoundary';
 
@@ -84,30 +85,24 @@ const DailySnapshotsSection = memo(function DailySnapshotsSection({ snapshots }:
     [snapshots],
   );
   const tradeSummary = useMemo(() => {
-    if (!active) return { buy: 0, sell: 0, total: 0, pnlGroups: [] as { key: string; mode: Mode; asset: string; pnl: number; pending: number }[] };
+    if (!active) return { buy: 0, sell: 0, total: 0, pnlGroups: [] as ModeAssetPnlGroup[] };
     let buy = 0, sell = 0;
-    const groups = new Map<string, { key: string; mode: Mode; asset: string; pnl: number; pending: number }>();
     for (const item of active.trades) {
       buy += item.buy_count;
       sell += item.sell_count;
-      const asset = quoteAsset(item.symbol) || item.symbol;
-      const key = `${item.mode}:${asset}`;
-      let group = groups.get(key);
-      if (!group) {
-        group = { key, mode: item.mode, asset, pnl: 0, pending: 0 };
-        groups.set(key, group);
-      }
-      group.pnl += numeric(item.realized_pnl) ?? 0;
-      group.pending += item.pending_pnl_count;
     }
-    return { buy, sell, total: buy + sell, pnlGroups: [...groups.values()] };
+    const pnlGroups = [...groupModeAssetPnl(active.trades, item => ({ pnl: item.realized_pnl, pending: item.pending_pnl_count })).values()];
+    return { buy, sell, total: buy + sell, pnlGroups };
   }, [active]);
   const openPositions = useMemo(
-    () => (active?.pair_positions ?? []).filter(item => (numeric(item.size) ?? 0) !== 0),
+    () => (active?.pair_positions ?? []).filter(item => {
+      const parsed = parseSignedDecimal(item.size);
+      return parsed ? parsed.n !== 0n : (numeric(item.size) ?? 0) !== 0;
+    }),
     [active],
   );
   if (!active) return null;
-  return <div className="history-daily daily-snapshot-section" aria-label="每日运行快照">
+  return <div className="history-daily" aria-label="每日运行快照">
     <div className="history-caption">
       <div className="history-caption-main"><h3>每日运行快照</h3><span>每日 00:00 自动归档前一日数据 · 北京时间</span></div>
       <span className="numeric">生成于 {time(active.generated_at)}</span>
@@ -148,7 +143,7 @@ const DailySnapshotsSection = memo(function DailySnapshotsSection({ snapshots }:
               {!tradeSummary.pnlGroups.length ? <strong>0</strong> : tradeSummary.pnlGroups.map(group => (
                 <div className="daily-snapshot-pnl-row" key={group.key}>
                   <span>{modeLabel[group.mode]} {group.asset}</span>
-                  <strong><Pnl value={group.pnl} compact /> <small>{group.asset}</small>{group.pending > 0 && <em className="pending-pnl-warn">（{group.pending} 笔待同步）</em>}</strong>
+                  <strong><Pnl value={group.sum} compact /> <small>{group.asset}</small>{group.pending > 0 && <em className="pending-pnl-warn">（{group.pending} 笔待同步）</em>}</strong>
                 </div>
               ))}
             </div>
@@ -184,10 +179,12 @@ const DailySnapshotsSection = memo(function DailySnapshotsSection({ snapshots }:
         {openPositions.length > 0 && (
           <div className="daily-snapshot-sublist" aria-label="持仓明细">
             {openPositions.map(item => {
-              const size = numeric(item.size) ?? 0;
+              const parsed = parseSignedDecimal(item.size);
+              const long = parsed ? parsed.n > 0n : (numeric(item.size) ?? 0) > 0;
+              const absSize = typeof item.size === 'string' ? item.size.trim().replace(/^[+-]/, '') : Math.abs(numeric(item.size) ?? 0);
               const quote = quoteAsset(item.symbol) || item.symbol;
               return <div className="daily-snapshot-subrow" key={`${item.mode}:${item.symbol}`}>
-                <span>{item.symbol} <small className={size > 0 ? 'position-long' : 'position-short'}>{size > 0 ? '做多' : '做空'} {compactPrice(Math.abs(size))}</small></span>
+                <span>{item.symbol} <small className={long ? 'position-long' : 'position-short'}>{long ? '做多' : '做空'} {quantity(absSize)}</small></span>
                 <strong>{compactNumber(item.position_amount)} <small>{quote}</small> · 浮盈 <Pnl value={item.unrealized_pnl} compact /></strong>
               </div>;
             })}

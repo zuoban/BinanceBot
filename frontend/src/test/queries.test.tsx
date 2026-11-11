@@ -259,3 +259,46 @@ it('falls back at five seconds, marks old data stale, and recovers on a new fram
     vi.useRealTimers();
   }
 });
+
+it('skips scheduling a timer when already expired during render and clamps multi-month deadlines', () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2025-01-01T00:00:00Z'));
+  const timeoutSpy = vi.spyOn(window, 'setTimeout');
+  try {
+    const past = renderHook(() => useExpired(Date.now() - 1000));
+    expect(past.result.current).toBe(true);
+    expect(timeoutSpy).not.toHaveBeenCalled();
+    past.unmount();
+
+    const farFuture = Date.now() + 60 * 86_400_000;
+    const future = renderHook(() => useExpired(farFuture));
+    expect(future.result.current).toBe(false);
+    expect(timeoutSpy).toHaveBeenCalledWith(expect.any(Function), 2_147_483_647);
+    future.unmount();
+  } finally {
+    timeoutSpy.mockRestore();
+    vi.useRealTimers();
+  }
+});
+
+it('ignores non-object JSON frames and detaches socket handlers before closing on unmount', () => {
+  vi.stubGlobal('WebSocket', FakeSocket);
+  const onData = vi.fn();
+  const { result, unmount } = renderHook(() => useSocket('/api/accounts/ws', 'accounts', onData));
+  const sock = FakeSocket.instances[0];
+  act(() => {
+    sock.onmessage?.({ data: 'null' });
+    sock.onmessage?.({ data: '42' });
+    sock.onmessage?.({ data: '"plain"' });
+  });
+  expect(onData).not.toHaveBeenCalled();
+  expect(result.current.connected).toBe(false);
+  let handlersClearedBeforeClose = false;
+  const origClose = sock.close.bind(sock);
+  sock.close = () => {
+    handlersClearedBeforeClose = sock.onmessage === null && sock.onclose === null && sock.onerror === null;
+    origClose();
+  };
+  unmount();
+  expect(handlersClearedBeforeClose).toBe(true);
+});

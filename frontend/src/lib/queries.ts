@@ -40,8 +40,8 @@ export function useSocket<T extends keyof SocketDataByType>(path: string | undef
       socket.onmessage = event => {
         if (stopped) return;
         try {
-          const envelope = JSON.parse(event.data) as SocketMessage;
-          if (envelope.type !== type) return;
+          const envelope = JSON.parse(event.data) as Partial<SocketMessage> | null;
+          if (!envelope || typeof envelope !== 'object' || envelope.type !== type) return;
           const receivedAt = Date.now();
           const prev = lastReceivedRef.current;
           const prevTime = prev.path === path ? prev.time : 0;
@@ -68,7 +68,14 @@ export function useSocket<T extends keyof SocketDataByType>(path: string | undef
       socket.onerror = () => socket?.close();
     };
     connect();
-    return () => { stopped = true; clearTimeout(retry); socket?.close(); };
+    return () => {
+      stopped = true;
+      clearTimeout(retry);
+      if (socket) {
+        socket.onmessage = socket.onclose = socket.onerror = null;
+        socket.close();
+      }
+    };
   }, [path, type]);
   const connected = state.path === path ? state.connected : false;
   return useMemo(() => ({

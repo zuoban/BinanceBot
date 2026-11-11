@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { api, pairPath, tokenStore } from '../lib/api';
+import { api, errorMessage, pairPath, tokenStore } from '../lib/api';
 import { pair } from './fixtures';
 
 afterEach(() => vi.unstubAllGlobals());
@@ -43,5 +43,37 @@ describe('API client', () => {
   it('reports the server error for an incorrect password', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ success: false, message: '密码错误' }), { status: 401 })));
     await expect(api('/api/auth/login', { method: 'POST', body: '{}' })).rejects.toThrow('密码错误');
+  });
+  it('falls back to in-memory token storage when sessionStorage throws on get or only on set', () => {
+    const brokenStorage = {
+      getItem: () => { throw new DOMException('Blocked', 'SecurityError'); },
+      setItem: () => { throw new DOMException('Blocked', 'SecurityError'); },
+      removeItem: () => { throw new DOMException('Blocked', 'SecurityError'); },
+      clear: () => {},
+    };
+    vi.stubGlobal('sessionStorage', brokenStorage);
+    tokenStore.clear();
+    expect(tokenStore.get()).toBeNull();
+    tokenStore.set('fallback-token');
+    expect(tokenStore.get()).toBe('fallback-token');
+    tokenStore.clear();
+    expect(tokenStore.get()).toBeNull();
+
+    const quotaStorage = {
+      getItem: () => null,
+      setItem: () => { throw new DOMException('Quota', 'QuotaExceededError'); },
+      removeItem: () => {},
+      clear: () => {},
+    };
+    vi.stubGlobal('sessionStorage', quotaStorage);
+    tokenStore.set('quota-fallback-token');
+    expect(tokenStore.get()).toBe('quota-fallback-token');
+    tokenStore.clear();
+    expect(tokenStore.get()).toBeNull();
+  });
+  it('formats Error instances and arbitrary thrown values via errorMessage', () => {
+    expect(errorMessage(new Error('明确错误'))).toBe('明确错误');
+    expect(errorMessage('字符串错误')).toBe('字符串错误');
+    expect(errorMessage(404)).toBe('404');
   });
 });

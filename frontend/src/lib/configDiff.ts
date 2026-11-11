@@ -25,6 +25,10 @@ const same = (a: unknown, b: unknown) => {
   return a === b;
 };
 
+export function sameGridConfig(a: GridConfig, b: GridConfig): boolean {
+  return a === b || (a.post_only === b.post_only && fields.every(({ key }) => same(a[key], b[key])));
+}
+
 /** Compare the saved configuration with the submitted one; numeric strings compare by value. */
 export function diffGridConfig(before: Editable, after: Editable): FieldChange[] {
   return fields.flatMap(({ key, label, risky, show }) =>

@@ -14,16 +14,19 @@ export function useNow(intervalMs = 1000, enabled = true) {
   return now;
 }
 
+const MAX_TIMEOUT_MS = 2_147_483_647;
+
 /** Re-render at an expiry boundary instead of on every clock tick. */
 export function useExpired(deadline: number) {
-  const [, refresh] = useState(0);
+  const [tick, refresh] = useState(0);
+  const expired = !Number.isFinite(deadline) || Date.now() > deadline;
   useEffect(() => {
-    const remaining = deadline - Date.now();
-    if (!Number.isFinite(remaining)) return;
-    const timer = window.setTimeout(() => refresh(value => value + 1), Math.max(0, remaining + 1));
+    if (expired) return;
+    const delay = Math.min(Math.max(0, deadline - Date.now() + 1), MAX_TIMEOUT_MS);
+    const timer = window.setTimeout(() => refresh(value => value + 1), delay);
     return () => window.clearTimeout(timer);
-  }, [deadline]);
-  return !Number.isFinite(deadline) || Date.now() > deadline;
+  }, [deadline, expired, tick]);
+  return expired;
 }
 
 /** Re-render only when Beijing midnight (00:00 UTC+8) passes. */

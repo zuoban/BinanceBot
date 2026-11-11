@@ -1,6 +1,17 @@
 //! A durable cancel/reconcile/submit workflow for explicitly identified closing-position remainders.
 use super::*;
 
+struct RemainderTargetSubmission<'a> {
+    config: &'a crate::config::AppConfig,
+    rules: &'a SymbolRules,
+    plan: &'a mut RemainderPlan,
+    paper: bool,
+    pause_epoch: u64,
+    closing_side: OrderSide,
+    price: Decimal,
+    quantity: Decimal,
+}
+
 impl GridTradingEngine {
     pub(super) async fn load_remainder_plan(&self) -> Result<Option<RemainderPlan>> {
         let (symbol, mode) = {
@@ -253,16 +264,16 @@ impl GridTradingEngine {
             plan.phase = RemainderPhase::Complete;
             return self.persist_remainder_plan(plan).await;
         }
-        self.submit_remainder_plan_target(
-            &config,
-            &rules,
+        self.submit_remainder_plan_target(RemainderTargetSubmission {
+            config: &config,
+            rules: &rules,
             plan,
             paper,
             pause_epoch,
             closing_side,
             price,
             quantity,
-        )
+        })
         .await
     }
 
@@ -303,18 +314,20 @@ impl GridTradingEngine {
         Ok(true)
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn submit_remainder_plan_target(
         &mut self,
-        config: &crate::config::AppConfig,
-        rules: &SymbolRules,
-        plan: &mut RemainderPlan,
-        paper: bool,
-        pause_epoch: u64,
-        closing_side: OrderSide,
-        price: Decimal,
-        quantity: Decimal,
+        target: RemainderTargetSubmission<'_>,
     ) -> Result<()> {
+        let RemainderTargetSubmission {
+            config,
+            rules,
+            plan,
+            paper,
+            pause_epoch,
+            closing_side,
+            price,
+            quantity,
+        } = target;
         let Some(_submission) = self.state.try_order_submission() else {
             return Ok(());
         };

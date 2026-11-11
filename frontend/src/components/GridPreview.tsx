@@ -52,7 +52,7 @@ export function GridPreview<Values extends Partial<Omit<GridConfig, 'post_only'>
     return { sells: [...preview.sells].reverse().map(p => build('sell', p)), buys: preview.buys.map(p => build('buy', p)) };
   }, [preview, reference, sizings]);
   const renderLevel = ({ key, side, price, sizing: s, diff }: NonNullable<typeof ladder>['sells'][number]) => (
-    <li key={key} className={`grid-preview-level grid-preview-${side}${s?.error ? ' grid-preview-unplaceable' : ''}`} title={s?.error ?? undefined}><span className="grid-preview-order"><span className="grid-preview-side">{side === 'sell' ? '卖' : '买'}</span>{s && <small className="grid-preview-qty"> · {s.quantity} ({s.notional} {quote})</small>}</span><span className="grid-preview-price">{diff && <small className="grid-preview-diff">{diff}</small>}<strong className="grid-preview-value">{price}</strong></span></li>
+    <li key={key} className={`grid-preview-${side}${s?.error ? ' grid-preview-unplaceable' : ''}`} title={s?.error ?? undefined}><span className="grid-preview-order"><span className="grid-preview-side">{side === 'sell' ? '卖' : '买'}</span>{s && <small className="grid-preview-qty"> · {s.quantity} ({s.notional} {quote})</small>}</span><span className="grid-preview-price">{diff && <small className="grid-preview-diff">{diff}</small>}<strong className="grid-preview-value">{price}</strong></span></li>
   );
   return <section className="grid-preview" aria-label="网格预览">
     <div className="grid-preview-head">
@@ -65,18 +65,18 @@ export function GridPreview<Values extends Partial<Omit<GridConfig, 'post_only'>
           : <Input size="small" className="grid-preview-reference" aria-label="预览参考价格" placeholder="输入参考价格" inputMode="decimal" value={typed} onChange={event => setTyped(event.target.value.trim())} />}
       </div>
     </div>
-    {tickError || rangeError ? <p className="grid-preview-notice grid-preview-error" role="alert"><CloseCircleOutlined aria-hidden="true" /><span><strong className="grid-preview-notice-title">参数错误：</strong>{tickError ?? rangeError}</span></p>
+    {tickError || rangeError ? <p className="grid-preview-notice grid-preview-error" role="alert"><CloseCircleOutlined aria-hidden="true" /><span><strong>参数错误：</strong>{tickError ?? rangeError}</span></p>
       : !preview ? <p className="muted grid-preview-empty">填写网格间距、买卖窗口{hasMark ? '' : '和参考价格'}后显示将挂出的价位。</p> : <>
       <ol ref={ladderRef} className="grid-preview-ladder" aria-label="预计挂单价位，由高到低">
         {ladder!.sells.map(renderLevel)}
-        <li className="grid-preview-level grid-preview-mark"><span className="grid-preview-order">参考价</span><strong className="grid-preview-price grid-preview-value">{reference}</strong></li>
+        <li className="grid-preview-mark"><span className="grid-preview-order">参考价</span><strong className="grid-preview-price grid-preview-value">{reference}</strong></li>
         {ladder!.buys.map(renderLevel)}
       </ol>
       <p className="muted">共 {orders} 个挂单。{(preview.buyClipped || preview.sellClipped) && '价格区间限制了部分价位。'}{worstCase && worstCase !== '0' && ` ${openingLabel}全部成交时新增名义价值约 ${worstCase} ${quote}。`}</p>
-      {overLimit && <p className="grid-preview-notice grid-preview-warning" role="alert"><WarningOutlined aria-hidden="true" /><span><strong className="grid-preview-notice-title">持仓超限风险：</strong>{openingLabel}全部成交的名义价值超过最大持仓名义价值 {String(values?.max_position_usdc)} {quote}，达到上限后将{maxPositionPolicyLabel({ pause_on_max_position: Boolean(values?.pause_on_max_position), cancel_opening_on_max_position: Boolean(values?.cancel_opening_on_max_position) })}。</span></p>}
-      {cap?.tight && <p className="grid-preview-notice grid-preview-warning" role="alert"><WarningOutlined aria-hidden="true" /><span><strong className="grid-preview-notice-title">持仓容量风险：</strong>按目标金额估算，持仓上限约可容纳 {cap.levels} 格，对应约 {cap.percent}% 的单边价格距离。{values?.pause_on_max_position ? '达到上限或下一笔完整开仓单预计超限时，策略会暂停并尝试撤销挂单。' : values?.cancel_opening_on_max_position ? '达到上限时尝试撤销开仓挂单，平仓单继续按当前网格窗口维护。' : '超过敞口上限的新增开仓单会被跳过，已有挂单继续留在交易所。'}平仓可能产生已实现亏损；请结合可用保证金和可接受敞口检查每格金额与持仓上限。</span></p>}
-      {thinSpacing && <p className="grid-preview-notice grid-preview-warning" role="alert"><WarningOutlined aria-hidden="true" /><span><strong className="grid-preview-notice-title">手续费风险：</strong>网格间距仅为参考价的 {spacingPercent(values?.grid_interval, reference)}%，低于 Maker 往返手续费估算（2 × 0.02% = 0.04%）。按此费率每格成交后净收益为负；USDC 合约 Maker 费率可能为 0，请以账户实际费率为准。</span></p>}
-      {unplaceable.length > 0 && <p className="grid-preview-notice grid-preview-error" role="alert"><CloseCircleOutlined aria-hidden="true" /><span><strong className="grid-preview-notice-title">挂单错误：</strong>{unplaceable.length === orders ? `全部 ${orders} 档均无法挂单：` : `${unplaceable.length}/${orders} 档无法挂单：`}{unplaceable[0]}。</span></p>}
+      {overLimit && <p className="grid-preview-notice grid-preview-warning" role="alert"><WarningOutlined aria-hidden="true" /><span><strong>持仓超限风险：</strong>{openingLabel}全部成交的名义价值超过最大持仓名义价值 {String(values?.max_position_usdc)} {quote}，达到上限后将{maxPositionPolicyLabel({ pause_on_max_position: Boolean(values?.pause_on_max_position), cancel_opening_on_max_position: Boolean(values?.cancel_opening_on_max_position) })}。</span></p>}
+      {cap?.tight && <p className="grid-preview-notice grid-preview-warning" role="alert"><WarningOutlined aria-hidden="true" /><span><strong>持仓容量风险：</strong>按目标金额估算，持仓上限约可容纳 {cap.levels} 格，对应约 {cap.percent}% 的单边价格距离。{values?.pause_on_max_position ? '达到上限或下一笔完整开仓单预计超限时，策略会暂停并尝试撤销挂单。' : values?.cancel_opening_on_max_position ? '达到上限时尝试撤销开仓挂单，平仓单继续按当前网格窗口维护。' : '超过敞口上限的新增开仓单会被跳过，已有挂单继续留在交易所。'}平仓可能产生已实现亏损；请结合可用保证金和可接受敞口检查每格金额与持仓上限。</span></p>}
+      {thinSpacing && <p className="grid-preview-notice grid-preview-warning" role="alert"><WarningOutlined aria-hidden="true" /><span><strong>手续费风险：</strong>网格间距仅为参考价的 {spacingPercent(values?.grid_interval, reference)}%，低于 Maker 往返手续费估算（2 × 0.02% = 0.04%）。按此费率每格成交后净收益为负；USDC 合约 Maker 费率可能为 0，请以账户实际费率为准。</span></p>}
+      {unplaceable.length > 0 && <p className="grid-preview-notice grid-preview-error" role="alert"><CloseCircleOutlined aria-hidden="true" /><span><strong>挂单错误：</strong>{unplaceable.length === orders ? `全部 ${orders} 档均无法挂单：` : `${unplaceable.length}/${orders} 档无法挂单：`}{unplaceable[0]}。</span></p>}
     </>}
   </section>;
 }
