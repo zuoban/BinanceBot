@@ -4,7 +4,7 @@ use crate::exchange::rate_limit::{RateLimiter, RequestClass};
 use crate::exchange::signature::sign_query;
 use anyhow::{anyhow, Result};
 use chrono::Utc;
-use reqwest::header::{HeaderMap, HeaderValue};
+use reqwest::header::HeaderValue;
 use reqwest::Client;
 use rust_decimal::Decimal;
 use sha2::{Digest, Sha256};
@@ -195,8 +195,21 @@ impl Drop for FillCacheCleanup<'_> {
     }
 }
 
+fn shared_http_client() -> Client {
+    static CLIENT: std::sync::OnceLock<Client> = std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .expect("Failed to build HTTP client")
+        })
+        .clone()
+}
+
 pub struct BinanceFuturesClient {
     base_url: String,
+    api_key_header: Option<HeaderValue>,
     api_secret: String,
     client: Client,
     recv_window: u64,
@@ -247,19 +260,14 @@ impl BinanceFuturesClient {
         base_url: String,
         limiter: Arc<RateLimiter>,
     ) -> Self {
-        let mut headers = HeaderMap::new();
-        if !config.api_key.is_empty() {
-            if let Ok(mut val) = HeaderValue::from_str(&config.api_key) {
+        let api_key_header = if !config.api_key.is_empty() {
+            HeaderValue::from_str(&config.api_key).ok().map(|mut val| {
                 val.set_sensitive(true);
-                headers.insert("X-MBX-APIKEY", val);
-            }
-        }
-
-        let client = Client::builder()
-            .default_headers(headers)
-            .timeout(Duration::from_secs(10))
-            .build()
-            .expect("Failed to build HTTP client");
+                val
+            })
+        } else {
+            None
+        };
 
         let account_cache_key = Self::compute_account_cache_key(
             &base_url,
@@ -272,8 +280,9 @@ impl BinanceFuturesClient {
 
         Self {
             base_url,
+            api_key_header,
             api_secret: config.api_secret.clone(),
-            client,
+            client: shared_http_client(),
             recv_window: config.recv_window,
             account_cache_key,
             account_identity_key,
@@ -396,8 +405,11 @@ impl BinanceFuturesClient {
 
     async fn send(
         &self,
-        request: reqwest::RequestBuilder,
+        mut request: reqwest::RequestBuilder,
     ) -> Result<reqwest::Response, reqwest::Error> {
+        if let Some(api_key) = &self.api_key_header {
+            request = request.header("X-MBX-APIKEY", api_key.clone());
+        }
         let started = tracing::enabled!(tracing::Level::DEBUG).then(Instant::now);
         let request = match request.build() {
             Ok(request) => request,
@@ -1110,6 +1122,45 @@ pub(crate) fn one_way_position_ref<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn shared_http_pool_keeps_api_headers_isolated_per_request() {
+        use axum::{http::HeaderMap, routing::get, Router};
+        let app = Router::new().route(
+            "/",
+            get(|headers: HeaderMap| async move {
+                headers
+                    .get("X-MBX-APIKEY")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("missing")
+                    .to_owned()
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let request = |key: &'static str| {
+            let url = url.clone();
+            async move {
+                let mut config = crate::config::AppConfig::default().exchange;
+                config.api_key = key.into();
+                let client = BinanceFuturesClient::with_base_url(&config, url.clone());
+                client
+                    .send(client.client.get(url))
+                    .await
+                    .unwrap()
+                    .text()
+                    .await
+                    .unwrap()
+            }
+        };
+        let (first, second, public) =
+            tokio::join!(request("first-key"), request("second-key"), request(""));
+        assert_eq!(first, "first-key");
+        assert_eq!(second, "second-key");
+        assert_eq!(public, "missing");
+        server.abort();
+    }
 
     #[tokio::test]
     async fn backlog_retention_survives_long_rounds_and_shrinking_count() {

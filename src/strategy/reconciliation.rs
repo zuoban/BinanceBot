@@ -471,9 +471,15 @@ impl GridTradingEngine {
                             self.state.active_orders.read().await
                         }
                     };
-                    let missing = active
-                        .keys()
-                        .any(|id| !live_orders.iter().any(|order| &order.client_order_id == id));
+                    let missing = if active.is_empty() {
+                        false
+                    } else {
+                        let seen_ids: HashSet<&str> = live_orders
+                            .iter()
+                            .map(|order| order.client_order_id.as_str())
+                            .collect();
+                        active.keys().any(|id| !seen_ids.contains(id.as_str()))
+                    };
                     if missing && fill_guard.is_none() {
                         fill_guard = Some(self.state.publish_fill_reconciliation());
                     }
@@ -549,7 +555,7 @@ impl GridTradingEngine {
 
                 // Every live snapshot is checked against durable identities;
                 // in-memory conflict barriers do not survive a process restart.
-                if !self
+                let Some(persisted_managed) = self
                     .verify_live_snapshot_identities(
                         account_key,
                         &symbol,
@@ -559,9 +565,9 @@ impl GridTradingEngine {
                         &mut restored_ids,
                     )
                     .await
-                {
+                else {
                     return false;
-                }
+                };
 
                 // A partial fill moves exposure into the position and changes
                 // available margin. Refresh both before reducing its reservation.
@@ -603,6 +609,7 @@ impl GridTradingEngine {
                         &restored_ids,
                         &pair_intents,
                         remainder_plan.as_ref(),
+                        &persisted_managed,
                     )
                     .await
                 {
@@ -861,6 +868,12 @@ impl GridTradingEngine {
         if let Err(error) = &managed {
             error!("Could not verify snapshot order identities: {}", error);
         }
+        let managed_by_id: HashMap<&str, &GridOrder> = managed
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .map(|order| (order.client_order_id.as_str(), order))
+            .collect();
         let state = self.state.clone();
         let active = state.active_orders.read().await;
         let mut duplicates: Vec<_> = groups
@@ -868,11 +881,7 @@ impl GridTradingEngine {
             .filter(|orders| {
                 let first = orders[0];
                 let known = [
-                    managed.as_ref().ok().and_then(|items| {
-                        items
-                            .iter()
-                            .find(|order| order.client_order_id == first.client_order_id)
-                    }),
+                    managed_by_id.get(first.client_order_id.as_str()).copied(),
                     pair_intents.get(&first.client_order_id),
                     remainder_plan.and_then(|plan| plan.find_order(&first.client_order_id)),
                     active.get(&first.client_order_id),
@@ -1851,9 +1860,9 @@ impl GridTradingEngine {
         pair_intents: &HashMap<String, GridOrder>,
         remainder_plan: Option<&RemainderPlan>,
         restored_ids: &mut HashSet<String>,
-    ) -> bool {
+    ) -> Option<HashMap<String, GridOrder>> {
         if live_ids.is_empty() {
-            return true;
+            return Some(HashMap::new());
         }
         let managed = match self.load_managed_orders(symbol).await {
             Ok(orders) => orders,
@@ -1912,9 +1921,13 @@ impl GridTradingEngine {
                 drop(active);
                 self.persist_identity_observations(account_key, symbol)
                     .await;
-                return false;
+                return None;
             }
         };
+        let managed_by_id: HashMap<String, GridOrder> = managed
+            .into_iter()
+            .map(|order| (order.client_order_id.clone(), order))
+            .collect();
         let mut conflicts = Vec::new();
         let mut invalid_live_identity = false;
         let state = self.state.clone();
@@ -1925,9 +1938,7 @@ impl GridTradingEngine {
                 self.track_provisional_observation(found);
             }
             let candidates = [
-                managed
-                    .iter()
-                    .find(|order| order.client_order_id == found.client_order_id),
+                managed_by_id.get(&found.client_order_id),
                 active.get(&found.client_order_id),
                 pair_intents.get(&found.client_order_id),
                 remainder_plan.and_then(|plan| plan.find_order(&found.client_order_id)),
@@ -1943,7 +1954,7 @@ impl GridTradingEngine {
         drop(active);
         if invalid_live_identity && conflicts.is_empty() {
             self.report_reconciliation_state(true).await;
-            return false;
+            return None;
         }
         if !conflicts.is_empty() {
             self.report_reconciliation_state(true).await;
@@ -1957,16 +1968,15 @@ impl GridTradingEngine {
             }
             self.persist_identity_observations(account_key, symbol)
                 .await;
-            return false;
+            return None;
         }
         let mut active = self.state.active_orders.write().await;
         for found in live_ids.values() {
-            if let Some(durable) = find_durable_order(
-                &found.client_order_id,
-                &managed,
-                pair_intents,
-                remainder_plan,
-            ) {
+            if let Some(durable) = managed_by_id
+                .get(&found.client_order_id)
+                .or_else(|| pair_intents.get(&found.client_order_id))
+                .or_else(|| remainder_plan.and_then(|plan| plan.find_order(&found.client_order_id)))
+            {
                 let mut restored = durable.clone();
                 if let Some(current) = active.get(&found.client_order_id) {
                     if current.has_compatible_identity(durable) {
@@ -1979,7 +1989,7 @@ impl GridTradingEngine {
                 restored_ids.insert(found.client_order_id.clone());
             }
         }
-        true
+        Some(managed_by_id)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1992,6 +2002,7 @@ impl GridTradingEngine {
         restored_ids: &HashSet<String>,
         pair_intents: &HashMap<String, GridOrder>,
         remainder_plan: Option<&RemainderPlan>,
+        persisted_managed: &HashMap<String, GridOrder>,
     ) -> bool {
         let mut orders_to_persist = Vec::new();
         {
@@ -2027,7 +2038,12 @@ impl GridTradingEngine {
                     order.quantity = quantity;
                     order.amount_usdc = order.price * order.quantity;
                     order.status = live_order.open_order_status();
-                    orders_to_persist.push(order.clone());
+                    if persisted_managed
+                        .get(client_id)
+                        .is_none_or(|persisted| !persisted.matches_persisted_state(order))
+                    {
+                        orders_to_persist.push(order.clone());
+                    }
                 } else {
                     let order = GridOrder::from_exchange_response(
                         live_order,

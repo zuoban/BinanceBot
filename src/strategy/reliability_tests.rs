@@ -837,6 +837,59 @@ async fn managed_open_price_updates_are_durable_and_zero_blocks_until_corrected(
 }
 
 #[tokio::test]
+async fn unchanged_managed_snapshot_skips_writes_but_changed_price_requires_persistence() {
+    let path = std::env::temp_dir().join(format!("managed-dirty-{}.db", uuid::Uuid::new_v4()));
+    let db = Arc::new(Database::open(&path).unwrap());
+    db.save_bot_status(BotStatus::Running).unwrap();
+    let (order, response) = managed_price_fixture();
+    db.save_managed_order(&order).unwrap();
+    let fake = Exchange::default();
+    fake.orders
+        .lock()
+        .unwrap()
+        .insert(order.client_order_id.clone(), response);
+    let (url, server) = exchange_server(fake.clone()).await;
+    let mut engine = engine(db.clone(), &url).await;
+    assert!(engine.sync_live_orders().await);
+    let saved = db.load_managed_orders("SOLUSDC").unwrap().pop().unwrap();
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER reject_unchanged BEFORE INSERT ON managed_orders \
+         BEGIN SELECT RAISE(ABORT, 'unexpected managed order write'); END;",
+        )
+        .unwrap();
+    for _ in 0..3 {
+        assert!(engine.sync_live_orders().await);
+    }
+    let unchanged = db.load_managed_orders("SOLUSDC").unwrap().pop().unwrap();
+    assert_eq!(unchanged.updated_at, saved.updated_at);
+
+    fake.orders
+        .lock()
+        .unwrap()
+        .get_mut(&order.client_order_id)
+        .unwrap()
+        .price = dec!(102.375);
+    assert!(!engine.sync_live_orders().await);
+    assert!(engine.reconciliation_blocked);
+    assert_eq!(
+        db.load_managed_orders("SOLUSDC").unwrap()[0].price,
+        saved.price
+    );
+    connection
+        .execute_batch("DROP TRIGGER reject_unchanged;")
+        .unwrap();
+    assert!(engine.sync_live_orders().await);
+    assert_managed_price(&engine, &db, dec!(102.375)).await;
+    server.abort();
+    drop(engine);
+    drop(connection);
+    drop(db);
+    let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test]
 async fn managed_open_price_write_failure_blocks_and_recovers_on_retry_after_restart() {
     let path = std::env::temp_dir().join(format!("managed-price-{}.db", uuid::Uuid::new_v4()));
     let db = Arc::new(Database::open(&path).unwrap());

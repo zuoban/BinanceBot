@@ -3,7 +3,7 @@ import { useQuery, useQueryClient, type QueryClient, type QueryKey, type UseQuer
 import { api, pairPath, socketUrl, tokenStore } from './api';
 import { SNAPSHOT_STALE_MS } from './format';
 import type { AccountFrame, AccountObservation, OverviewHistoryData, Overview, Pair, Snapshot, SocketMessage } from './types';
-import { useNow } from './useNow';
+import { useExpired, useNow } from './useNow';
 const SOCKET_LIVE_MS = 5000;
 const HTTP_FALLBACK_MS = 3000;
 
@@ -22,12 +22,17 @@ type SocketDataByType = { [Message in SocketMessage as Message['type']]: Message
 export function useSocket<T extends keyof SocketDataByType>(path: string | undefined, type: T, onData: (data: SocketDataByType[T]) => void | boolean) {
   const callback = useRef<(data: SocketDataByType[T]) => void | boolean>(onData);
   callback.current = onData;
-  const [state, setState] = useState({ path, lastReceived: 0, connected: false });
+  const lastReceivedRef = useRef<{ path: string | undefined; time: number }>({ path, time: 0 });
+  if (lastReceivedRef.current.path !== path) {
+    lastReceivedRef.current = { path, time: 0 };
+  }
+  const [state, setState] = useState({ path, connected: false, epoch: 0 });
   useEffect(() => {
-    setState({ path, lastReceived: 0, connected: false });
+    lastReceivedRef.current = { path, time: 0 };
+    setState({ path, connected: false, epoch: 0 });
     if (!path) return;
     let stopped = false, socket: WebSocket | undefined, retry: ReturnType<typeof setTimeout>;
-    let attempts = 0;
+    let attempts = 0, receiving = false;
     const connect = () => {
       const token = tokenStore.get();
       if (stopped) return;
@@ -38,12 +43,22 @@ export function useSocket<T extends keyof SocketDataByType>(path: string | undef
           const envelope = JSON.parse(event.data) as SocketMessage;
           if (envelope.type !== type) return;
           if (callback.current(envelope.data as SocketDataByType[T]) === false) return;
-          attempts = 0; setState({ path, lastReceived: Date.now(), connected: true });
+          attempts = 0;
+          const receivedAt = Date.now();
+          const prevTime = lastReceivedRef.current.path === path ? lastReceivedRef.current.time : 0;
+          lastReceivedRef.current = { path, time: receivedAt };
+          if (!receiving || prevTime === 0 || receivedAt - prevTime >= SOCKET_LIVE_MS) {
+            receiving = true;
+            setState(prev => ({ path, connected: true, epoch: prev.epoch + 1 }));
+          }
         } catch { /* Ignore malformed frames; HTTP remains the fallback. */ }
       };
       socket.onclose = () => {
         if (stopped) return;
-        setState(prev => prev.path === path ? { ...prev, connected: false } : prev);
+        if (receiving) {
+          receiving = false;
+          setState(prev => prev.path === path ? { ...prev, connected: false } : prev);
+        }
         retry = setTimeout(connect, Math.min(1000 * 2 ** attempts++, 15_000));
       };
       socket.onerror = () => socket?.close();
@@ -51,8 +66,13 @@ export function useSocket<T extends keyof SocketDataByType>(path: string | undef
     connect();
     return () => { stopped = true; clearTimeout(retry); socket?.close(); };
   }, [path, type]);
-  const current = state.path === path ? state : { lastReceived: 0, connected: false };
-  return { lastReceived: current.lastReceived, connected: current.connected };
+  const connected = state.path === path ? state.connected : false;
+  return useMemo(() => ({
+    get lastReceived() {
+      return lastReceivedRef.current.path === path ? lastReceivedRef.current.time : 0;
+    },
+    connected,
+  }), [path, connected, state.epoch]);
 }
 
 function useSocketFallbackQuery<TData>(key: QueryKey, queryFn: (signal: AbortSignal) => Promise<TData>, socket: { connected: boolean; lastReceived: number }, enabled = true) {
@@ -63,15 +83,21 @@ function useSocketFallbackQuery<TData>(key: QueryKey, queryFn: (signal: AbortSig
     enabled,
     refetchInterval: () => socket.connected && Date.now() - socket.lastReceived < SOCKET_LIVE_MS ? false : HTTP_FALLBACK_MS,
   });
-  const now = useNow(1000, enabled);
-  // The clock also restarts polling when an open socket silently stops sending.
+  // A timer restarts polling when an open socket silently stops sending, without rendering a clock tick.
   useEffect(() => {
-    if (enabled && now - socket.lastReceived >= SOCKET_LIVE_MS && now - query.dataUpdatedAt >= HTTP_FALLBACK_MS && now - lastFallback.current >= HTTP_FALLBACK_MS && !query.isFetching) {
-      lastFallback.current = now;
-      void query.refetch();
-    }
-  }, [now, socket.lastReceived, enabled, query.dataUpdatedAt, query.isFetching, query.refetch]);
-  return { query, now };
+    if (!enabled) return;
+    const check = () => {
+      const now = Date.now();
+      if (now - socket.lastReceived >= SOCKET_LIVE_MS && now - query.dataUpdatedAt >= HTTP_FALLBACK_MS && now - lastFallback.current >= HTTP_FALLBACK_MS && !query.isFetching) {
+        lastFallback.current = now;
+        void query.refetch();
+      }
+    };
+    check();
+    const timer = window.setInterval(check, 1000);
+    return () => window.clearInterval(timer);
+  }, [enabled, socket, query.dataUpdatedAt, query.isFetching, query.refetch]);
+  return query;
 }
 
 function publishSocketQueryData<TData>(client: QueryClient, key: QueryKey, data: TData) {
@@ -87,7 +113,8 @@ export function usePairSnapshot(pair: Pair | undefined) {
     publishSocketQueryData(client, key, data);
   };
   const socket = useSocket(pair && pairPath(pair, 'ws'), 'snapshot', acceptSnapshot);
-  const { query, now } = useSocketFallbackQuery(key, signal => api<Snapshot>(pairPath(pair!, 'status'), { signal }), socket, !!pair);
+  const query = useSocketFallbackQuery(key, signal => api<Snapshot>(pairPath(pair!, 'status'), { signal }), socket, !!pair);
+  const now = useNow(1000, !!pair);
   return { ...query, now, live: socket.connected && now - socket.lastReceived < SOCKET_LIVE_MS, stale: now - query.dataUpdatedAt > SNAPSHOT_STALE_MS };
 }
 
@@ -101,13 +128,13 @@ export function useLiveAccounts() {
     if (current && generatedAt < Date.parse(current.generated_at)) return false;
     publishSocketQueryData(client, key, data);
   });
-  const { query, now } = useSocketFallbackQuery(key, async signal => {
+  const query = useSocketFallbackQuery(key, async signal => {
     const data = await api<AccountFrame>('/api/accounts', { signal });
     const current = client.getQueryData<AccountFrame>(key);
     return current && Date.parse(data.generated_at) < Date.parse(current.generated_at) ? current : data;
   }, stream);
   const generatedAt = Date.parse(query.data?.generated_at ?? '');
-  const stale = now - query.dataUpdatedAt > SNAPSHOT_STALE_MS || !Number.isFinite(generatedAt) || now - generatedAt > SNAPSHOT_STALE_MS;
+  const stale = useExpired(Math.min(query.dataUpdatedAt, generatedAt) + SNAPSHOT_STALE_MS);
   const accounts = useMemo<AccountObservation[]>(() => (query.data?.pairs ?? []).map(entry => ({ ...entry, account_observation_stale: stale })), [query.data?.pairs, stale]);
-  return { accounts, stale, error: query.error, now };
+  return { accounts, stale, error: query.error };
 }

@@ -18,8 +18,8 @@ export function controlResultMeta(result: string): { tier: Signal; alertType: 'e
   if (result === '已确认') return { tier: 'calm', alertType: 'success', pending: false };
   return { tier: 'blue', alertType: 'info', pending: result === '正在提交…' };
 }
-export function ControlResultBanner({ symbol, results, clearResult, variant = 'inline' }: { symbol: string; results: Record<string, string>; clearResult?: (symbol: string) => void; variant?: 'inline' | 'alert' }) {
-  const result = results[symbol];
+export function ControlResultBanner({ symbol, results, result: directResult, clearResult, variant = 'inline' }: { symbol: string; results?: Record<string, string>; result?: string; clearResult?: (symbol: string) => void; variant?: 'inline' | 'alert' }) {
+  const result = directResult ?? results?.[symbol];
   if (!result) return null;
   const meta = controlResultMeta(result);
   if (variant === 'alert') {

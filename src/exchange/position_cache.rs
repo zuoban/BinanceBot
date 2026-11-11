@@ -1,14 +1,50 @@
 use super::cache_entries::CacheEntries;
-use super::client::one_way_position_ref;
 use super::{BinanceFuturesClient, BinancePositionRisk};
 use anyhow::Result;
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 const MAX_AGE: Duration = Duration::from_secs(1);
+const ONE_WAY_POSITION_ERROR: &str = "策略仅支持币安单向持仓模式，请先将账户设置为单向持仓";
 
 struct PositionSnapshot {
-    positions: Vec<BinancePositionRisk>,
+    positions: HashMap<String, Option<BinancePositionRisk>>,
     received_instant: Instant,
+}
+
+impl PositionSnapshot {
+    fn from_vec(list: Vec<BinancePositionRisk>, received_instant: Instant) -> Self {
+        let mut positions = HashMap::with_capacity(list.len());
+        for position in list {
+            let valid_side = position
+                .position_side
+                .as_deref()
+                .is_none_or(|side| side == "BOTH");
+            let key = position.symbol.to_ascii_uppercase();
+            match positions.entry(key) {
+                Entry::Vacant(entry) => {
+                    entry.insert(valid_side.then_some(position));
+                }
+                Entry::Occupied(mut entry) => {
+                    entry.insert(None);
+                }
+            }
+        }
+        Self {
+            positions,
+            received_instant,
+        }
+    }
+
+    fn lookup(&self, symbol: &str) -> Result<Option<BinancePositionRisk>> {
+        let key = symbol.to_ascii_uppercase();
+        match self.positions.get(&key) {
+            None => Ok(None),
+            Some(Some(position)) => Ok(Some(position.clone())),
+            Some(None) => anyhow::bail!(ONE_WAY_POSITION_ERROR),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -51,18 +87,9 @@ impl PositionCache {
                     |snapshot| snapshot.received_instant.elapsed() < MAX_AGE,
                     || async {
                         let positions = client.get_all_positions().await?;
-                        Ok(PositionSnapshot {
-                            positions,
-                            received_instant: Instant::now(),
-                        })
+                        Ok(PositionSnapshot::from_vec(positions, Instant::now()))
                     },
-                    |snapshot| {
-                        (
-                            one_way_position_ref(&snapshot.positions, symbol)
-                                .map(|position| position.cloned()),
-                            snapshot.received_instant,
-                        )
-                    },
+                    |snapshot| (snapshot.lookup(symbol), snapshot.received_instant),
                 )
                 .await?;
             let position = position?;
@@ -142,6 +169,34 @@ mod tests {
         let url = format!("http://{}", listener.local_addr().unwrap());
         let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         (url, calls, mode, task)
+    }
+
+    #[test]
+    fn position_index_keeps_duplicates_and_hedge_errors_scoped_to_each_symbol() {
+        let row = |symbol: &str, side: &str| {
+            serde_json::from_value(json!({
+                "symbol": symbol, "positionSide": side, "positionAmt": "0",
+                "entryPrice": "0", "markPrice": "100", "unRealizedProfit": "0",
+                "liquidationPrice": "0", "leverage": "20"
+            }))
+            .unwrap()
+        };
+        let snapshot = PositionSnapshot::from_vec(
+            vec![
+                row("SOLUSDC", "BOTH"),
+                row("solusdc", "BOTH"),
+                row("ETHUSDC", "LONG"),
+                row("BTCUSDT", "BOTH"),
+            ],
+            Instant::now(),
+        );
+        assert!(snapshot.lookup("SOLUSDC").is_err());
+        assert!(snapshot.lookup("ethusdc").is_err());
+        assert_eq!(
+            snapshot.lookup("btcusdt").unwrap().unwrap().symbol,
+            "BTCUSDT"
+        );
+        assert!(snapshot.lookup("BNBUSDC").unwrap().is_none());
     }
 
     #[tokio::test]

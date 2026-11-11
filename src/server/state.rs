@@ -383,6 +383,13 @@ impl GlobalPositionLimit {
     }
 
     pub(crate) async fn check(&self) -> bool {
+        if !self.enabled.load(Ordering::SeqCst)
+            && !self.blocked.load(Ordering::SeqCst)
+            && !self.triggered.load(Ordering::SeqCst)
+            && self.committed_config.read().unwrap().is_some()
+        {
+            return false;
+        }
         let _guard = self.lock.lock().await;
         self.check_locked().await
     }
@@ -871,7 +878,7 @@ impl AppState {
         }
         let notify_trade =
             telegram.enabled && (trade.pnl_verified || trade.side != direction.closing_side());
-        let mut notification_stats = None;
+        let notification_stats;
         {
             let _commit = self.trade_commit_lock.lock().await;
             let mut updated = self.stats.read().await.clone();
@@ -893,18 +900,37 @@ impl AppState {
             match self
                 .db
                 .run_blocking(move |db| {
-                    db.insert_trade_with_paper_recovery(
+                    let inserted = db.insert_trade_with_paper_recovery(
                         &stored_trade,
                         &stored_stats,
                         pair_intent.as_ref(),
                         consumed_pair_source.as_deref(),
                         stored_paper_state.as_ref(),
-                    )
+                    )?;
+                    let stats = if inserted && notify_trade {
+                        match db.get_hourly_trade_stats(
+                            &stored_trade.symbol,
+                            stored_trade.mode,
+                            stored_trade.timestamp,
+                        ) {
+                            Ok(stats) => Some(stats),
+                            Err(error) => {
+                                warn!("Could not load Telegram trade counts: {}", error);
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    Ok((inserted, stats))
                 })
                 .await
             {
-                Ok(true) => *self.stats.write().await = updated,
-                Ok(false) => return true,
+                Ok((true, stats)) => {
+                    *self.stats.write().await = updated;
+                    notification_stats = stats;
+                }
+                Ok((false, _)) => return true,
                 Err(e) => {
                     error!(
                         "Failed to persist trade and grid stats to SQLite database: {}",
@@ -924,10 +950,6 @@ impl AppState {
                     &current_position,
                     &current_account,
                 );
-            }
-            if notify_trade {
-                // Capture counts while commits are serialized, before another fill can advance them.
-                notification_stats = self.trade_notification_stats(&trade).await;
             }
 
             // Keep the cache update in the same critical section as persistence
@@ -2488,6 +2510,20 @@ mod tests {
                 .unwrap(),
             Some(BotControlAction::GlobalRiskCancel)
         ));
+    }
+
+    #[tokio::test]
+    async fn disabled_committed_guard_skips_check_and_membership_locks() {
+        let states = Arc::new(RwLock::new(Vec::new()));
+        let global = GlobalPositionLimit::new(states.clone());
+        global.initialize_config(crate::config::GlobalConfig::from_app(&AppConfig::default()));
+        let _check = global.lock.lock().await;
+        let _members = states.write().await;
+        assert!(
+            !tokio::time::timeout(Duration::from_secs(1), global.check())
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]

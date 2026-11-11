@@ -5,12 +5,21 @@ import { AppstoreOutlined, ArrowDownOutlined, ArrowUpOutlined, LineChartOutlined
 import { useLiveAccounts, usePairs } from '../lib/queries';
 import { AccountsContext, EditContext, useSession } from '../lib/session';
 import { accountGroups, compactNumber, directionLabel, ratioText, SNAPSHOT_STALE_MS, statusLabel } from '../lib/format';
-import type { Mode, Pair } from '../lib/types';
+import type { AccountObservation, Mode, Pair } from '../lib/types';
+import { useExpired, useNow } from '../lib/useNow';
 import { ControlProvider } from './Controls';
 import { PaletteHost, routeSymbol } from './CommandPalette';
 import { ThemeSegmented } from './ThemeSwitch';
 import { defaultTitle, useDocumentTitle } from '../lib/documentTitle';
 import { ModeTag } from './Common';
+
+function ShellTitle({ accounts, alert, active }: { accounts: AccountObservation[]; alert: boolean; active: boolean }) {
+  const now = useNow();
+  const groups = useMemo(() => accountGroups(accounts, now), [accounts, now]);
+  const title = groups.length ? groups.map(group => `${compactNumber(group.equity)} | ${ratioText(group.ratio, true)}`).join(' / ') : defaultTitle;
+  useDocumentTitle(active ? `${alert ? '⚠ ' : ''}${title}` : null);
+  return null;
+}
 
 export default function Shell() {
   const location = useLocation();
@@ -18,10 +27,27 @@ export default function Shell() {
   const liveAccounts = useLiveAccounts();
   const accounts = liveAccounts.accounts;
   const accountPairs = useMemo(() => new Map(accounts.map(entry => [entry.snapshot.symbol, entry])), [accounts]);
-  const currentPairs = useMemo(() => pairs.data?.map(pair => {
-    const observation = accountPairs.get(pair.symbol);
-    return observation?.mode === pair.mode && !observation.account_observation_stale ? { ...pair, status: observation.snapshot.status } : pair;
-  }), [pairs.data, accountPairs]);
+  const pairCache = useRef<{ overrides: WeakMap<Pair, Pair>; current?: Pair[] }>({ overrides: new WeakMap() });
+  const currentPairs = useMemo(() => {
+    if (!pairs.data) return undefined;
+    let changed = false;
+    const mapped = pairs.data.map(pair => {
+      const observation = accountPairs.get(pair.symbol);
+      if (observation?.mode === pair.mode && !observation.account_observation_stale && observation.snapshot.status !== pair.status) {
+        changed = true;
+        const cached = pairCache.current.overrides.get(pair);
+        if (cached?.status === observation.snapshot.status) return cached;
+        const updated = { ...pair, status: observation.snapshot.status };
+        pairCache.current.overrides.set(pair, updated);
+        return updated;
+      }
+      return pair;
+    });
+    const previous = pairCache.current.current;
+    const result = !changed ? pairs.data : previous?.length === mapped.length && mapped.every((pair, index) => pair === previous[index]) ? previous : mapped;
+    pairCache.current.current = result;
+    return result;
+  }, [pairs.data, accountPairs]);
   const pairModeChanged = useMemo(() => pairs.data?.some(pair => {
     const observation = accountPairs.get(pair.symbol);
     return observation && observation.mode !== pair.mode;
@@ -29,13 +55,9 @@ export default function Shell() {
   const [dirty, setDirty] = useState(false), [saving, setSaving] = useState(false);
   const { modal, message } = App.useApp();
   const { logout, authEnabled } = useSession();
-  const groups = useMemo(() => accountGroups(accounts, liveAccounts.now), [accounts, liveAccounts.now]);
+  const pairsStale = useExpired(pairs.dataUpdatedAt + SNAPSHOT_STALE_MS);
   const alert = !!liveAccounts.error || liveAccounts.stale || accounts.some(entry => entry.account_observation_stale || entry.snapshot.status === 'ERROR');
-  const withAlert = (title: string) => alert ? `⚠ ${title}` : title;
   const symbol = routeSymbol(location.pathname);
-  useDocumentTitle(Boolean(symbol && !location.pathname.endsWith('/config')) ? null : withAlert(groups.length ? groups.map(group => {
-    return `${compactNumber(group.equity)} | ${ratioText(group.ratio, true)}`;
-  }).join(' / ') : defaultTitle));
   const blocker = useBlocker(({ currentLocation, nextLocation }) => (dirty || saving) && currentLocation.pathname !== nextLocation.pathname);
   useEffect(() => {
     if (blocker.state !== 'blocked') return;
@@ -66,6 +88,7 @@ export default function Shell() {
   const page: SidebarProps['page'] = location.pathname.startsWith('/settings') ? 'settings' : location.pathname.startsWith('/pairs/') ? 'pair' : 'overview';
   const sidebarProps = { pairs: currentPairs, pending: pairs.isPending, symbol, page, pathname: location.pathname, mode, authEnabled, saving, onNavigate: () => setDrawer(false), onSearch: () => { if (saving) return; setDrawer(false); setPalette(true); }, onLogout: () => void logOut() };
   return <EditContext.Provider value={context}><AccountsContext.Provider value={accounts}><ControlProvider pairs={currentPairs}><div className="app-layout">
+    <ShellTitle accounts={accounts} alert={alert} active={!symbol || location.pathname.endsWith('/config')} />
     <a className="skip-link" href="#main">跳到主内容</a>
     <aside className="sidebar"><SidebarBody idPrefix="rail" {...sidebarProps} /></aside>
     <header className="mobilebar">
@@ -83,7 +106,7 @@ export default function Shell() {
       <button type="button" className={`bottombar-item${page === 'pair' ? ' bottombar-item-active' : ''}`} aria-label="切换或查看交易对" aria-expanded={drawer} onClick={() => setDrawer(open => !open)}><LineChartOutlined aria-hidden="true" /><span>交易对</span></button>
       <Link to="/settings" className={`bottombar-item${page === 'settings' ? ' bottombar-item-active' : ''}`} aria-current={page === 'settings' ? 'page' : undefined}><SettingOutlined aria-hidden="true" /><span>设置</span></Link>
     </nav>
-    <PaletteHost open={palette} setOpen={setPalette} pairs={currentPairs} stale={!!pairs.error || !!liveAccounts.error || liveAccounts.stale || !!pairModeChanged || liveAccounts.now - pairs.dataUpdatedAt > SNAPSHOT_STALE_MS} authEnabled={authEnabled} saving={saving} onLogout={logOut} />
+    <PaletteHost open={palette} setOpen={setPalette} pairs={currentPairs} stale={!!pairs.error || !!liveAccounts.error || liveAccounts.stale || !!pairModeChanged || pairsStale} authEnabled={authEnabled} saving={saving} onLogout={logOut} />
   </div></ControlProvider></AccountsContext.Provider></EditContext.Provider>;
 }
 

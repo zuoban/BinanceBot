@@ -1421,6 +1421,111 @@ async fn directions_are_independent_and_respect_price_bounds() {
 }
 
 #[tokio::test]
+async fn unchanged_paper_ticks_skip_database_work_but_configuration_and_orders_invalidate() {
+    let mut engine = paper_engine().await;
+    engine.state.config.write().await.grid.max_position_usdc = None;
+    engine.state.position.write().await.size = dec!(5.04);
+    let samples = engine.state.db.enable_benchmark_wait_samples();
+    engine.maintain_grid_window().await;
+    assert!(engine.paper_window_cache.is_some());
+    let initial = orders(&engine).await;
+    let queries = samples.queue.lock().unwrap().len();
+    for price in [dec!(118.81), dec!(118.87), dec!(118.89)] {
+        engine.state.ticker.write().await.last_price = price;
+        engine.simulate_order_fills(price).await;
+    }
+    assert_eq!(samples.queue.lock().unwrap().len(), queries);
+    let unchanged = orders(&engine).await;
+    assert!(initial.iter().all(|order| unchanged
+        .iter()
+        .any(|current| { current.client_order_id == order.client_order_id })));
+
+    // An in-place order change keeps the count and ID but still requires cleanup.
+    let id = initial
+        .iter()
+        .find(|order| order.side == OrderSide::Buy)
+        .unwrap()
+        .client_order_id
+        .clone();
+    engine
+        .state
+        .active_orders
+        .write()
+        .await
+        .get_mut(&id)
+        .unwrap()
+        .price = dec!(117);
+    engine.simulate_order_fills(dec!(118.84)).await;
+    assert!(samples.queue.lock().unwrap().len() > queries);
+    assert!(!engine.state.active_orders.read().await.contains_key(&id));
+    engine.maintain_grid_window().await;
+    assert!(engine.paper_window_cache.is_some());
+    let queries = samples.queue.lock().unwrap().len();
+    engine.state.config.write().await.grid.buy_window = 2;
+    engine.simulate_order_fills(dec!(118.84)).await;
+    assert!(samples.queue.lock().unwrap().len() > queries);
+    assert_eq!(
+        orders(&engine)
+            .await
+            .iter()
+            .filter(|order| order.side == OrderSide::Buy)
+            .count(),
+        2
+    );
+    assert_eq!(*engine.state.status.read().await, BotStatus::Running);
+    assert!(engine.state.db.get_recent_trades(10).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn paper_window_cache_does_not_bypass_limits_or_failed_maintenance_retries() {
+    let mut engine = paper_engine().await;
+    engine.state.position.write().await.size = dec!(5.04);
+    let state = engine.state.clone();
+    let gate = state.order_submission_lock.clone().write_owned().await;
+    engine.maintain_grid_window().await;
+    assert!(engine.paper_window_cache.is_none());
+    drop(gate);
+    engine.maintain_grid_window().await;
+    assert!(engine.paper_window_cache.is_some());
+    {
+        let mut config = state.config.write().await;
+        config.grid.max_position_usdc = Some(dec!(500));
+        config.grid.pause_on_max_position = true;
+    }
+    engine.simulate_order_fills(dec!(118.84)).await;
+    assert_eq!(*state.status.read().await, BotStatus::Paused);
+    assert!(orders(&engine).await.is_empty());
+}
+
+#[tokio::test]
+async fn last_fill_context_is_invalidated_by_a_fill_before_the_next_order() {
+    let mut engine = paper_engine().await;
+    let config = engine.state.config.read().await.clone();
+    let cached = engine.load_last_fill(&config).await.unwrap();
+    assert!(cached.fill.is_none());
+    let mut fill = order("cached_fill", OrderSide::Buy, dec!(118.8), dec!(0.1));
+    assert!(engine.on_order_filled(&mut fill).await);
+    assert!(
+        !engine
+            .place_grid_order_with_last_fill(
+                OrderSide::Buy,
+                dec!(118.8),
+                "gb_stale_fill_context".into(),
+                -1,
+                None,
+                Some(cached),
+            )
+            .await
+    );
+    assert!(!engine
+        .state
+        .active_orders
+        .read()
+        .await
+        .contains_key("gb_stale_fill_context"));
+}
+
+#[tokio::test]
 async fn price_jitter_and_engine_restart_preserve_grid_and_queue_priority() {
     let mut engine = paper_engine().await;
     engine.state.position.write().await.size = dec!(5.04);

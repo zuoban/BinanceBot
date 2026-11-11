@@ -254,6 +254,23 @@ impl GridOrder {
         self.price = self.price.max(min_price);
         self.reserve_quantity(min_quantity);
     }
+
+    pub(crate) fn matches_persisted_state(&self, other: &Self) -> bool {
+        self.client_order_id == other.client_order_id
+            && self.order_id == other.order_id
+            && self.symbol == other.symbol
+            && self.side == other.side
+            && self.price == other.price
+            && self.quantity == other.quantity
+            && self.amount_usdc == other.amount_usdc
+            && self.status == other.status
+            && self.created_at == other.created_at
+            && self.grid_level == other.grid_level
+            && self.paired_client_order_id == other.paired_client_order_id
+            && self.is_take_profit == other.is_take_profit
+            && self.purpose == other.purpose
+            && self.merge_sources == other.merge_sources
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -267,7 +284,7 @@ pub enum OrderPurpose {
     Remainder,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrderSource {
     pub client_order_id: String,
     pub price: Decimal,

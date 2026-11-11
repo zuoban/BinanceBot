@@ -411,21 +411,25 @@ impl Database {
         &self,
         since: i64,
     ) -> Result<Vec<crate::snapshots::HourlySnapshot>> {
-        let conn = self.lock_connection("hourly_account_snapshots");
-        let mut statement = conn.prepare(
-            "SELECT hour, payload FROM account_hourly_snapshots WHERE hour >= ?1 ORDER BY hour",
-        )?;
-        let rows = statement.query_map(params![since], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-        })?;
-        rows.map(|row| {
-            let (hour, payload) = row?;
-            Ok(crate::snapshots::HourlySnapshot {
-                hour,
-                groups: serde_json::from_str(&payload)?,
+        let raw_rows: Vec<(i64, String)> = {
+            let conn = self.lock_connection("hourly_account_snapshots");
+            let mut statement = conn.prepare(
+                "SELECT hour, payload FROM account_hourly_snapshots WHERE hour >= ?1 ORDER BY hour",
+            )?;
+            let rows = statement.query_map(params![since], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        raw_rows
+            .into_iter()
+            .map(|(hour, payload)| {
+                Ok(crate::snapshots::HourlySnapshot {
+                    hour,
+                    groups: serde_json::from_str(&payload)?,
+                })
             })
-        })
-        .collect()
+            .collect()
     }
 
     const DAILY_SNAPSHOT_RETENTION_DAYS: i64 = 90;
@@ -467,11 +471,17 @@ impl Database {
     }
 
     pub fn daily_snapshots(&self, limit: usize) -> Result<Vec<crate::snapshots::DailySnapshot>> {
-        let conn = self.lock_connection("daily_snapshots");
-        let mut statement =
-            conn.prepare("SELECT payload FROM daily_snapshots ORDER BY date DESC LIMIT ?1")?;
-        let rows = statement.query_map(params![limit as i64], |row| row.get::<_, String>(0))?;
-        rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+        let raw_rows: Vec<String> = {
+            let conn = self.lock_connection("daily_snapshots");
+            let mut statement =
+                conn.prepare("SELECT payload FROM daily_snapshots ORDER BY date DESC LIMIT ?1")?;
+            let rows = statement.query_map(params![limit as i64], |row| row.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        raw_rows
+            .into_iter()
+            .map(|payload| Ok(serde_json::from_str(&payload)?))
+            .collect()
     }
 
     pub fn daily_trade_summaries(
@@ -1953,58 +1963,8 @@ impl Database {
 
     /// Aggregate persisted trades across all modes and symbols for the Beijing day.
     pub fn get_today_pnl(&self, now: DateTime<Utc>) -> Result<crate::types::TodayPnl> {
-        let window_start = beijing_midnight(now);
         let conn = self.lock_connection("get_today_pnl");
-        let mut stmt = conn.prepare(
-            "SELECT symbol, mode, timestamp, realized_pnl, pnl_verified FROM trades
-             WHERE timestamp >= ?1 AND timestamp < ?2",
-        )?;
-        let rows = stmt.query_map(
-            params![
-                window_start.date_naive().to_string(),
-                (now + ChronoDuration::days(1)).date_naive().to_string()
-            ],
-            |row| {
-                let verified = row.get::<_, bool>(4)?;
-                let pnl = if verified {
-                    Some(row.get::<_, String>(3)?)
-                } else {
-                    None
-                };
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, DateTime<Utc>>(2)?,
-                    pnl,
-                ))
-            },
-        )?;
-        let mut groups: std::collections::BTreeMap<(String, String), crate::types::TodayPnlGroup> =
-            std::collections::BTreeMap::new();
-        for row in rows {
-            let (symbol, mode, timestamp, pnl) = row?;
-            if timestamp < window_start || timestamp > now {
-                continue;
-            }
-            let group = groups
-                .entry((mode, symbol))
-                .or_insert_with_key(|(mode, symbol)| crate::types::TodayPnlGroup {
-                    symbol: symbol.clone(),
-                    mode: TradingMode::from_db(mode),
-                    realized_pnl: Decimal::ZERO,
-                    pending_pnl_count: 0,
-                });
-            if let Some(pnl) = pnl {
-                group.realized_pnl += Decimal::from_str(&pnl)?;
-            } else {
-                group.pending_pnl_count += 1;
-            }
-        }
-        Ok(crate::types::TodayPnl {
-            window_start,
-            window_end: now,
-            groups: groups.into_values().collect(),
-        })
+        hourly::today_pnl_on(&conn, now)
     }
 
     pub async fn cached_today_pnl(
@@ -2774,9 +2734,17 @@ fn run_schema_migrations(conn: &mut Connection) -> Result<()> {
     retire_legacy_testnet_rows(&tx)?;
     tx.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_trades_unverified_scope
-         ON trades (symbol, mode, timestamp DESC) WHERE pnl_verified = 0;",
+         ON trades (symbol, mode, timestamp DESC) WHERE pnl_verified = 0;
+         CREATE INDEX IF NOT EXISTS idx_initial_order_responses_order
+         ON initial_order_responses (account_key, expected_symbol, client_order_id);
+         CREATE INDEX IF NOT EXISTS idx_initial_order_responses_batch
+         ON initial_order_responses (account_key, expected_symbol, batch_id);",
     )?;
     hourly::migrate_on(&tx)?;
+    tx.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_trade_hourly_rollups_hour
+         ON trade_hourly_rollups (hour);",
+    )?;
     tx.commit()?;
     Ok(())
 }

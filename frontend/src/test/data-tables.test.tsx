@@ -85,6 +85,25 @@ it('renders the same filtered rows in the table and in the narrow-screen card li
   expect(screen.getByRole('table').querySelectorAll('tbody tr.ant-table-row')).toHaveLength(1);
 });
 
+it('keeps duplicate log keys unique across pages and stable when new logs arrive', async () => {
+  const logs = Array.from({ length: 61 }, () => log('INFO', '网格已对账'));
+  const { rerender } = view(<LogsTable logs={logs} />);
+  const pageKeys = () => [...screen.getByRole('table').querySelectorAll('tbody tr.ant-table-row')].map(row => row.getAttribute('data-row-key'));
+  const keys = pageKeys();
+  const oldestMobile = screen.getByRole('list', { name: '日志列表' }).lastElementChild;
+  const user = userEvent.setup();
+  await user.click(screen.getByTitle('2'));
+  keys.push(...pageKeys());
+  await user.click(screen.getByTitle('3'));
+  const oldestKey = pageKeys()[0];
+  keys.push(...pageKeys());
+  expect(keys).toHaveLength(61);
+  expect(new Set(keys).size).toBe(61);
+  rerender(<App><LogsTable logs={[log('INFO', '新日志'), log('INFO', '网格已对账'), ...logs]} /></App>);
+  expect(pageKeys()).toContain(oldestKey);
+  expect(screen.getByRole('list', { name: '日志列表' }).lastElementChild).toBe(oldestMobile);
+});
+
 it('caps the card list but keeps the export complete', async () => {
   const many = Array.from({ length: 120 }, (_, i) => log('INFO', `事件 ${i}`));
   view(<LogsTable logs={many} />);

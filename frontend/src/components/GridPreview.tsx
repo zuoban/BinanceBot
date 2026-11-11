@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { Form, Input } from 'antd';
 import type { FormInstance } from 'antd';
 import { CloseCircleOutlined, WarningOutlined } from '@ant-design/icons';
@@ -20,21 +20,33 @@ export function GridPreview<Values extends Partial<Omit<GridConfig, 'post_only'>
   const cleanMinNotional = positiveDecimalText(minNotional);
   const tickError = values && cleanTick ? tickSizeError(values.grid_interval, cleanTick) : null;
   const rangeError = values ? priceRangeError('min', values.min_price, values.max_price) ?? priceRangeError('max', values.min_price, values.max_price) : null;
-  const preview = values && !tickError && !rangeError ? gridPreview({ reference, interval: values.grid_interval, buyWindow: values.buy_window, sellWindow: values.sell_window, min: values.min_price, max: values.max_price }) : null;
-  const sizings = new Map(
-    preview && cleanStep ? [...preview.sells, ...preview.buys].map(price => [price, orderSizing(price, values?.order_amount_usdc, { stepSize: cleanStep, minQty, minNotional })] as const) : [],
+  const preview = useMemo(
+    () => values && !tickError && !rangeError ? gridPreview({ reference, interval: values.grid_interval, buyWindow: values.buy_window, sellWindow: values.sell_window, min: values.min_price, max: values.max_price }) : null,
+    [values?.grid_interval, values?.buy_window, values?.sell_window, values?.min_price, values?.max_price, reference, tickError, rangeError],
   );
-  const unplaceable = [...sizings.values()].flatMap(s => s?.error ? [s.error] : []);
+  const sizings = useMemo(
+    () => new Map(
+      preview && cleanStep ? [...preview.sells, ...preview.buys].map(price => [price, orderSizing(price, values?.order_amount_usdc, { stepSize: cleanStep, minQty, minNotional })] as const) : [],
+    ),
+    [preview, cleanStep, values?.order_amount_usdc, minQty, minNotional],
+  );
+  const unplaceable = useMemo(() => [...sizings.values()].flatMap(s => s?.error ? [s.error] : []), [sizings]);
   const short = values?.direction === 'SHORT';
   const openingLabel = short ? '卖单' : '买单';
   const openingPrices = preview ? (short ? preview.sells : preview.buys) : [];
   const orders = preview ? preview.buys.length + preview.sells.length : 0;
   useCenterElementScroll(ladderRef, '.grid-preview-mark', [preview?.sells.length, preview?.buys.length]);
-  const worstCase = preview && values ? (cleanStep
-    ? sumDecimals(openingPrices.flatMap(price => { const s = sizings.get(price); return s && !s.error ? [s.notional] : []; }))
-    : exposure(values.order_amount_usdc, openingPrices.length)) : null;
+  const worstCase = useMemo(
+    () => preview && values ? (cleanStep
+      ? sumDecimals(openingPrices.flatMap(price => { const s = sizings.get(price); return s && !s.error ? [s.notional] : []; }))
+      : exposure(values.order_amount_usdc, openingPrices.length)) : null,
+    [preview, values?.order_amount_usdc, cleanStep, openingPrices, sizings],
+  );
   const overLimit = exceeds(worstCase, values?.max_position_usdc);
-  const cap = preview && values ? capCoverage(values.max_position_usdc, values.order_amount_usdc, values.grid_interval, reference) : null;
+  const cap = useMemo(
+    () => preview && values ? capCoverage(values.max_position_usdc, values.order_amount_usdc, values.grid_interval, reference) : null,
+    [preview, values?.max_position_usdc, values?.order_amount_usdc, values?.grid_interval, reference],
+  );
   const thinSpacing = !!preview && !!values && spacingBelowRoundTripFee(values.grid_interval, reference);
   const renderLevel = (side: 'sell' | 'buy', price: string) => {
     const s = sizings.get(price), diff = priceDiffPercent(price, reference);

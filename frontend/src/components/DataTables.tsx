@@ -170,13 +170,25 @@ const logColumns: ColumnsType<Log> = [
 ];
 export function LogsTable({ logs }: { logs: Log[] }) {
   const [level, setLevel] = useState<LevelFilter>('ALL');
-  const rows = useMemo(() => level === 'ALL' ? logs : logs.filter(log => log.level === level), [logs, level]);
+  const rows = useMemo(() => {
+    const filtered = level === 'ALL' ? logs : logs.filter(log => log.level === level);
+    const counts = new Map<string, number>();
+    const keyed = new Array<Log & { key: string }>(filtered.length);
+    for (let i = filtered.length - 1; i >= 0; i--) {
+      const log = filtered[i];
+      const base = JSON.stringify([log.timestamp, log.level, log.message]);
+      const sequence = counts.get(base) ?? 0;
+      counts.set(base, sequence + 1);
+      keyed[i] = { ...log, key: `${base}-${sequence}` };
+    }
+    return keyed;
+  }, [logs, level]);
   const exportRows = () => downloadCsv(`logs-${beijingDay()}.csv`, toCsv(['时间（北京）', '级别', '内容'], rows.map(l => [time(l.timestamp), l.level, l.message])));
   return <>
     <TableFilterBar label="按级别筛选" value={level} onChange={setLevel} options={levelOptions} shown={rows.length} total={logs.length} onExport={exportRows} />
     <ResponsiveTableSection
       hint="左右滑动查看完整日志"
-      desktop={<Table<Log> rowKey={(l, i) => `${l.timestamp}-${l.level}-${i}-${l.message}`} rowClassName={l => l.level === 'ERROR' ? 'log-row-error' : l.level === 'WARN' ? 'log-row-warn' : ''} dataSource={rows} size="small" scroll={{ x: 600 }} pagination={{ pageSize: 30, showSizeChanger: false, hideOnSinglePage: true }} columns={logColumns} />}
+      desktop={<Table<Log> rowKey="key" rowClassName={l => l.level === 'ERROR' ? 'log-row-error' : l.level === 'WARN' ? 'log-row-warn' : ''} dataSource={rows} size="small" scroll={{ x: 600 }} pagination={{ pageSize: 30, showSizeChanger: false, hideOnSinglePage: true }} columns={logColumns} />}
       hasRows={rows.length > 0}
       totalCount={logs.length}
       emptyFilteredText="没有符合筛选条件的日志"
@@ -184,7 +196,7 @@ export function LogsTable({ logs }: { logs: Log[] }) {
       listLabel="日志列表"
       truncatedLimit={100}
       totalFilteredCount={rows.length}
-      mobileRows={rows.slice(0, 100).map((l, i) => <li className={`trade-list-item log-item-${l.level.toLowerCase()}`} key={`${l.timestamp}-${l.level}-${i}-${l.message}`}>
+      mobileRows={rows.slice(0, 100).map(l => <li className={`trade-list-item log-item-${l.level.toLowerCase()}`} key={l.key}>
         <div className="trade-list-heading"><span className={`log-level log-level-${l.level.toLowerCase()}`}>{l.level}</span><span className="trade-list-time">{time(l.timestamp)}</span></div>
         <p className="log-message">{l.message}</p>
       </li>)}

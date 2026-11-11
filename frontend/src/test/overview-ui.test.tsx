@@ -8,6 +8,12 @@ import { runBatchControls } from '../components/Controls';
 import { summarySnapshot } from './fixtures';
 import type { Overview } from '../lib/types';
 import { AccountsContext } from '../lib/session';
+import { entryChange } from '../lib/format';
+
+vi.mock('../lib/format', async importOriginal => {
+  const actual = await importOriginal<typeof import('../lib/format')>();
+  return { ...actual, entryChange: vi.fn(actual.entryChange) };
+});
 
 const overview = vi.hoisted(() => ({ data: undefined as Overview | undefined, error: null as Error | null, dataUpdatedAt: Date.now(), isPending: false, refetch: vi.fn() }));
 beforeEach(() => {
@@ -50,6 +56,24 @@ it('orders running strategies first, then by absolute position amount, and updat
   overview.data = { ...overview.data, pairs: [...pairs] };
   rerender(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
   expect(symbols()).toEqual(['BTCUSDC', 'ZECUSDC', 'ADAUSDC', 'SOLUSDC', 'ETHUSDC', 'XRPUSDC', 'BNBUSDC']);
+});
+
+it('keeps unchanged strategy cards memoized when another snapshot or control result changes', () => {
+  const first = { snapshot: summarySnapshot('BTCUSDC'), mode: 'PAPER' as const, scoped: true };
+  const second = { snapshot: summarySnapshot('ETHUSDC'), mode: 'PAPER' as const, scoped: true };
+  overview.data = { generated_at: new Date().toISOString(), pairs: [first, second], recent_trades: [] };
+  const { rerender } = render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+  vi.mocked(entryChange).mockClear();
+  overview.data = { ...overview.data, pairs: [{ ...first, snapshot: { ...first.snapshot, ticker: { ...first.snapshot.ticker, mark_price: '102' } } }, second] };
+  rerender(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+  expect(entryChange).toHaveBeenCalledTimes(1);
+  expect(entryChange).toHaveBeenCalledWith(first.snapshot.position, '102');
+  vi.mocked(entryChange).mockClear();
+  actions.results = { BTCUSDC: '已确认' };
+  rerender(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
+  expect(entryChange).toHaveBeenCalledTimes(1);
+  expect(screen.getByText('已确认')).toBeInTheDocument();
+  expect(entryChange).not.toHaveBeenCalledWith(second.snapshot.position, second.snapshot.ticker.mark_price);
 });
 
 it('places the add link in the strategy section and navigates to it', async () => {

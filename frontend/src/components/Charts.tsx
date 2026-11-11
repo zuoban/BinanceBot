@@ -1,4 +1,4 @@
-import { useMemo, useRef } from 'react';
+import { memo, useMemo, useRef } from 'react';
 import { theme } from 'antd';
 import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import type { Snapshot } from '../lib/types';
@@ -17,14 +17,17 @@ export function todayHourlyData(stats: NonNullable<Snapshot['hourly_trade_stats'
   });
 }
 
-export function HourlyChart({ snapshot, now: currentNow }: { snapshot: Snapshot; now?: number }) {
-  const { token } = theme.useToken();
+export const HourlyChart = memo(function HourlyChart({ snapshot, now: currentNow }: { snapshot: Snapshot; now?: number }) {
   const fallbackNow = useNow(1000, currentNow === undefined);
   const now = currentNow ?? fallbackNow;
-  const hourBucket = Math.floor(now / 3600_000);
-  const data = useMemo(() => snapshot.hourly_trade_stats ? todayHourlyData(snapshot.hourly_trade_stats, now) : [], [snapshot.hourly_trade_stats, hourBucket]);
-  if (todayCount(snapshot, now) === null) return <NoData />;
-  const axisTick = { fontSize: 12, fontFamily: 'var(--font-mono)', fill: token.colorTextTertiary };
+  return <HourlyChartContent stats={snapshot.hourly_trade_stats} hourBucket={Math.floor(now / 3600_000)} available={todayCount(snapshot, now) !== null} />;
+});
+
+const HourlyChartContent = memo(function HourlyChartContent({ stats, hourBucket, available }: { stats: Snapshot['hourly_trade_stats']; hourBucket: number; available: boolean }) {
+  const { token } = theme.useToken();
+  const data = useMemo(() => stats ? todayHourlyData(stats, hourBucket * 3600_000) : [], [stats, hourBucket]);
+  const axisTick = useMemo(() => ({ fontSize: 12, fontFamily: 'var(--font-mono)', fill: token.colorTextTertiary }), [token.colorTextTertiary]);
+  if (!available) return <NoData />;
   return <>
     <div className="muted chart-caption">北京时间 · 最近时段在左侧 · 选择柱形查看每小时明细</div>
     <div className="chart hourly-chart" role="region" aria-label="北京时间今日每小时成交笔数"><ResponsiveContainer width="100%" height={270}>
@@ -37,23 +40,33 @@ export function HourlyChart({ snapshot, now: currentNow }: { snapshot: Snapshot;
       </BarChart>
     </ResponsiveContainer></div>
   </>;
-}
-export function DepthChart({ snapshot }: { snapshot: Snapshot }) {
+});
+export const DepthChart = memo(function DepthChart({ snapshot }: { snapshot: Snapshot }) {
   const orders = snapshot.active_orders;
   const containerRef = useRef<HTMLDivElement>(null);
   const mark = numeric(snapshot.ticker.mark_price);
   const hasMark = mark !== null && mark > 0;
   useCenterElementScroll(containerRef, '.grid-level-mark', [snapshot.symbol, orders.length, hasMark]);
+  const { buyCount, sellCount, orderRows } = useMemo(() => {
+    let buy = 0, sell = 0;
+    for (const order of orders) {
+      if (order.side === 'BUY') buy++;
+      else sell++;
+    }
+    const sorted = orders
+      .map(order => ({ kind: 'order' as const, value: numeric(order.price) ?? -Infinity, order }))
+      .sort((a, b) => b.value - a.value);
+    return { buyCount: buy, sellCount: sell, orderRows: sorted };
+  }, [orders]);
+  const rows = useMemo(() => {
+    if (!hasMark) return orderRows;
+    const result: ({ kind: 'order'; value: number; order: typeof orders[number] } | { kind: 'mark'; value: number })[] = [...orderRows];
+    const insertIdx = result.findIndex(r => r.value < mark);
+    if (insertIdx === -1) result.push({ kind: 'mark', value: mark });
+    else result.splice(insertIdx, 0, { kind: 'mark', value: mark });
+    return result;
+  }, [orderRows, hasMark, mark]);
   if (!orders.length) return <NoData />;
-  let buyCount = 0, sellCount = 0;
-  for (const order of orders) {
-    if (order.side === 'BUY') buyCount++;
-    else sellCount++;
-  }
-  const entries = orders.map(order => ({ kind: 'order' as const, value: numeric(order.price) ?? -Infinity, order }));
-  const rows: ({ kind: 'order'; value: number; order: typeof orders[number] } | { kind: 'mark'; value: number })[] = entries;
-  if (hasMark) rows.push({ kind: 'mark', value: mark });
-  rows.sort((a, b) => b.value - a.value);
   return <>
     <div className="muted chart-caption">买单 {buyCount} 笔 · 卖单 {sellCount} 笔</div>
     <div ref={containerRef} className="grid-levels" role="region" aria-label="按价格从高到低排列的实时网格挂单" tabIndex={0}>
@@ -66,4 +79,4 @@ export function DepthChart({ snapshot }: { snapshot: Snapshot }) {
       })}
     </div>
   </>;
-}
+});

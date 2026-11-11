@@ -225,7 +225,7 @@ pub(super) fn stats_on(
         let value = if stored.latest.is_some_and(|latest| latest <= now) {
             stored
         } else {
-            load_boundary_rollup_on(conn, symbol, mode, bucket, window_start, now)?
+            load_boundary_rollup_on(conn, symbol, mode.as_str(), bucket, window_start, now)?
         };
         let index = ((bucket - first_hour) / 3600) as usize;
         result.buckets[index].buy_count = value.buys as u64;
@@ -236,12 +236,57 @@ pub(super) fn stats_on(
     Ok(result)
 }
 
+pub(super) fn today_pnl_on(
+    conn: &Connection,
+    now: DateTime<Utc>,
+) -> Result<crate::types::TodayPnl> {
+    let window_start = beijing_midnight(now);
+    let first_hour = window_start.timestamp();
+    let last_hour = hour(now);
+    let mut statement = conn.prepare(
+        "SELECT hour, buy_count, sell_count, realized_pnl, pending_pnl_count, latest_timestamp, symbol, mode
+         FROM trade_hourly_rollups
+         WHERE hour >= ?1 AND hour <= ?2",
+    )?;
+    let mut rows = statement.query(params![first_hour, last_hour])?;
+    let mut groups: std::collections::BTreeMap<(String, String), crate::types::TodayPnlGroup> =
+        std::collections::BTreeMap::new();
+    while let Some(row) = rows.next()? {
+        let (bucket, stored) = Rollup::from_row(row)?;
+        let symbol: String = row.get(6)?;
+        let mode: String = row.get(7)?;
+        let value = if stored.latest.is_some_and(|latest| latest <= now) {
+            stored
+        } else {
+            load_boundary_rollup_on(conn, &symbol, &mode, bucket, window_start, now)?
+        };
+        if value.buys == 0 && value.sells == 0 && value.pending == 0 && value.pnl.is_zero() {
+            continue;
+        }
+        let group = groups
+            .entry((mode, symbol))
+            .or_insert_with_key(|(mode, symbol)| crate::types::TodayPnlGroup {
+                symbol: symbol.clone(),
+                mode: TradingMode::from_db(mode),
+                realized_pnl: Decimal::ZERO,
+                pending_pnl_count: 0,
+            });
+        group.realized_pnl += value.pnl;
+        group.pending_pnl_count += value.pending as u64;
+    }
+    Ok(crate::types::TodayPnl {
+        window_start,
+        window_end: now,
+        groups: groups.into_values().collect(),
+    })
+}
+
 /// Only the boundary hour can contain entries after the upper bound.
 /// Parse timestamps before comparing so nanoseconds remain exact.
 fn load_boundary_rollup_on(
     conn: &Connection,
     symbol: &str,
-    mode: TradingMode,
+    mode: &str,
     bucket: i64,
     window_start: DateTime<Utc>,
     now: DateTime<Utc>,
@@ -250,7 +295,7 @@ fn load_boundary_rollup_on(
         "SELECT timestamp, side, realized_pnl, pnl_verified FROM trades
          WHERE symbol = ?1 AND mode = ?2 AND stats_hour = ?3",
     )?;
-    let mut entries = boundary.query(params![symbol, mode.as_str(), bucket])?;
+    let mut entries = boundary.query(params![symbol, mode, bucket])?;
     let mut value = Rollup::default();
     while let Some(entry) = entries.next()? {
         let timestamp: DateTime<Utc> = entry.get(0)?;

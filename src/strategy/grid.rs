@@ -321,6 +321,29 @@ struct InitialOrderResponseBatch {
 type TerminalDisagreements =
     HashMap<([u8; 32], String, String), Vec<(BinanceOrderResponse, BinanceOrderResponse)>>;
 
+#[derive(Clone, Copy)]
+struct LastFillSnapshot {
+    revision: u64,
+    fill: Option<(OrderSide, Decimal)>,
+}
+
+#[derive(PartialEq)]
+struct PaperWindowInputs {
+    symbol: String,
+    grid: crate::config::GridConfig,
+    rules: SymbolRules,
+    reference_band: (Decimal, Decimal),
+    maker_band: (Decimal, Decimal),
+    position: (Decimal, Decimal, Decimal, u32),
+    trade_revision: u64,
+    pause_epoch: u64,
+}
+
+struct PaperWindowCache {
+    inputs: PaperWindowInputs,
+    orders: HashMap<String, GridOrder>,
+}
+
 pub struct GridTradingEngine {
     state: Arc<AppState>,
     client: Arc<BinanceFuturesClient>,
@@ -341,6 +364,7 @@ pub struct GridTradingEngine {
     mark_price_task: Option<JoinHandle<MarkPriceCompletion>>,
     ticker_task: Option<JoinHandle<TickerCompletion>>,
     pending_paper_ticker: Option<(Decimal, chrono::DateTime<Utc>, u64)>,
+    paper_window_cache: Option<PaperWindowCache>,
     reconciliation_blocked: bool,
     provisional_order_ids: HashSet<([u8; 32], String)>,
     order_identity_conflicts: HashMap<([u8; 32], String), GridOrder>,
@@ -411,6 +435,7 @@ impl GridTradingEngine {
             mark_price_task: None,
             ticker_task: None,
             pending_paper_ticker: None,
+            paper_window_cache: None,
             reconciliation_blocked: false,
             provisional_order_ids: HashSet::new(),
             order_identity_conflicts: HashMap::new(),
@@ -1195,31 +1220,52 @@ impl GridTradingEngine {
         Ok(())
     }
 
-    async fn window_prices(
+    async fn load_last_fill(&self, config: &crate::config::AppConfig) -> Result<LastFillSnapshot> {
+        let symbol = config.exchange.symbol.clone();
+        let mode = config.exchange.trading_mode();
+        // Capture before the read so a concurrent fill or history clear invalidates
+        // this context even when it commits while the blocking query is pending.
+        let revision = self.state.db.symbol_trade_revision(&symbol);
+        let fill = self
+            .state
+            .db
+            .run_blocking(move |db| db.last_fill_for(&symbol, mode))
+            .await?;
+        Ok(LastFillSnapshot { revision, fill })
+    }
+
+    pub(super) async fn window_prices(
         &self,
         config: &crate::config::AppConfig,
         rules: &SymbolRules,
         market: Decimal,
     ) -> Result<(Vec<Decimal>, Vec<Decimal>)> {
-        let symbol = config.exchange.symbol.clone();
-        let mode = config.exchange.trading_mode();
-        let last_fill = self
-            .state
-            .db
-            .run_blocking(move |db| db.last_fill_for(&symbol, mode))
-            .await?;
+        let last_fill = self.load_last_fill(config).await?;
+        Ok(Self::window_prices_with_last_fill(
+            config, rules, market, last_fill,
+        ))
+    }
+
+    fn window_prices_with_last_fill(
+        config: &crate::config::AppConfig,
+        rules: &SymbolRules,
+        market: Decimal,
+        last_fill: LastFillSnapshot,
+    ) -> (Vec<Decimal>, Vec<Decimal>) {
         let interval = config.grid.grid_interval;
         // A recent fill only reserves its immediate neighborhood. It must never
         // pin either window to an old price while the mark price moves away.
-        Ok(rules.grid_window_prices(
+        rules.grid_window_prices(
             market,
             interval,
             (config.grid.buy_window, config.grid.sell_window),
             (config.grid.min_price, config.grid.max_price),
             |_, price| {
-                last_fill.is_none_or(|(_, fill_price)| (price - fill_price).abs() >= interval)
+                last_fill
+                    .fill
+                    .is_none_or(|(_, fill_price)| (price - fill_price).abs() >= interval)
             },
-        ))
+        )
     }
 
     async fn set_global_reconciliation_ready(&self, ready: bool) {
@@ -2163,6 +2209,7 @@ impl GridTradingEngine {
                 })
                 .then_with(|| a.client_order_id.cmp(&b.client_order_id))
         });
+        let had_fills = !filled_orders.is_empty();
         for mut order in filled_orders {
             if *self.state.status.read().await != BotStatus::Running {
                 break;
@@ -2189,7 +2236,7 @@ impl GridTradingEngine {
         }
 
         if !self.state.active_orders.read().await.is_empty() {
-            self.maintain_grid_window().await;
+            self.maintain_grid_window_inner(!had_fills).await;
         }
     }
 
@@ -3408,8 +3455,12 @@ impl GridTradingEngine {
         }
     }
 
-    /// Ensure the active pre-placed order window matches buy_window and sell_window
+    /// Ensure the active pre-placed order window matches buy_window and sell_window.
     async fn maintain_grid_window(&mut self) {
+        self.maintain_grid_window_inner(false).await;
+    }
+
+    async fn maintain_grid_window_inner(&mut self, skip_unchanged_paper: bool) {
         let config = self.state.config.read().await.clone();
         if self.state.is_shutting_down() || *self.state.status.read().await != BotStatus::Running {
             return;
@@ -3435,6 +3486,66 @@ impl GridTradingEngine {
         if !self.market_data_ready().await {
             return;
         }
+        // Keep all admission, freshness and protective cancellation checks above
+        // the cache. Only a completed paper maintenance cycle can be reused.
+        let paper_inputs = if config.exchange.is_paper()
+            && self
+                .last_remainder_change
+                .is_none_or(|at| at.elapsed() >= Duration::from_secs(30))
+        {
+            let ticker = self.state.ticker.read().await;
+            let position = self.state.position.read().await;
+            let price_band = |price: Decimal| {
+                // Exposure and liquidation thresholds can move inside a grid cell.
+                if config.grid.max_position_usdc.is_some()
+                    || config.grid.min_liquidation_distance_pct.is_some()
+                {
+                    (price, price)
+                } else {
+                    price
+                        .checked_div(config.grid.grid_interval)
+                        .map(|steps| (steps.floor(), steps.ceil()))
+                        .unwrap_or((price, price))
+                }
+            };
+            Some(PaperWindowInputs {
+                symbol: config.exchange.symbol.clone(),
+                grid: config.grid.clone(),
+                rules: self.state.rules.read().await.clone(),
+                reference_band: price_band(ticker.grid_reference_price()),
+                maker_band: price_band(ticker.last_price),
+                position: (
+                    position.size,
+                    position.entry_price,
+                    position.liquidation_price,
+                    position.leverage,
+                ),
+                trade_revision: self.state.db.symbol_trade_revision(&config.exchange.symbol),
+                pause_epoch: self.state.pause_epoch(),
+            })
+        } else {
+            None
+        };
+        if skip_unchanged_paper {
+            if let Some(cached) = self
+                .paper_window_cache
+                .as_ref()
+                .filter(|cached| paper_inputs.as_ref() == Some(&cached.inputs))
+            {
+                let active = self.state.active_orders.read().await;
+                if active.len() == cached.orders.len()
+                    && active.iter().all(|(id, order)| {
+                        cached
+                            .orders
+                            .get(id)
+                            .is_some_and(|previous| previous.matches_persisted_state(order))
+                    })
+                {
+                    return;
+                }
+            }
+        }
+        self.paper_window_cache = None;
         match self.recover_remainder_plan().await {
             Ok(true) => return,
             Ok(false) => {}
@@ -3487,6 +3598,7 @@ impl GridTradingEngine {
             mut active_sell_prices,
             desired_buy_prices,
             desired_sell_prices,
+            last_fill,
         )) = self
             .compute_desired_window_prices(&config, &rules, current_price)
             .await
@@ -3500,6 +3612,7 @@ impl GridTradingEngine {
             return;
         }
 
+        let mut placement_failed = false;
         for (side, desired_prices, active_prices, grid_level) in [
             (
                 OrderSide::Buy,
@@ -3531,7 +3644,14 @@ impl GridTradingEngine {
                 if !already_exists && on_maker_side {
                     let client_id = new_grid_client_order_id(side);
                     if self
-                        .place_grid_order(side, target_price, client_id, grid_level, None)
+                        .place_grid_order_with_last_fill(
+                            side,
+                            target_price,
+                            client_id,
+                            grid_level,
+                            None,
+                            Some(last_fill),
+                        )
                         .await
                     {
                         active_prices.push(target_price);
@@ -3541,6 +3661,8 @@ impl GridTradingEngine {
                         {
                             return;
                         }
+                    } else {
+                        placement_failed = true;
                     }
                 }
             }
@@ -3557,8 +3679,24 @@ impl GridTradingEngine {
                 .await;
             return;
         }
-        self.prune_grid_window(&desired_buy_prices, &desired_sell_prices)
-            .await;
+        if self
+            .prune_grid_window(&desired_buy_prices, &desired_sell_prices)
+            .await
+        {
+            return;
+        }
+        if let Some(inputs) = paper_inputs.filter(|inputs| {
+            !placement_failed
+                && inputs.trade_revision == self.state.db.symbol_trade_revision(&inputs.symbol)
+        }) {
+            // A deferred remainder workflow must retry even without a price move.
+            if matches!(self.load_remainder_plan().await, Ok(None)) {
+                self.paper_window_cache = Some(PaperWindowCache {
+                    inputs,
+                    orders: self.state.active_orders.read().await.clone(),
+                });
+            }
+        }
     }
 
     async fn cancel_misaligned_window_orders(
@@ -3593,44 +3731,46 @@ impl GridTradingEngine {
         config: &crate::config::AppConfig,
         rules: &SymbolRules,
         current_price: Decimal,
-    ) -> Option<(Vec<Decimal>, Vec<Decimal>, Vec<Decimal>, Vec<Decimal>)> {
+    ) -> Option<(
+        Vec<Decimal>,
+        Vec<Decimal>,
+        Vec<Decimal>,
+        Vec<Decimal>,
+        LastFillSnapshot,
+    )> {
         let grid_interval = config.grid.grid_interval;
-        let active_orders: Vec<GridOrder> = self
-            .state
-            .active_orders
-            .read()
-            .await
-            .values()
-            .cloned()
-            .collect();
         let mut active_buy_prices = Vec::new();
         let mut active_sell_prices = Vec::new();
         let mut reserved_buys = Vec::new();
         let mut reserved_sells = Vec::new();
-        for order in &active_orders {
-            let (active, reserved) = if order.side == OrderSide::Buy {
-                (&mut active_buy_prices, &mut reserved_buys)
-            } else {
-                (&mut active_sell_prices, &mut reserved_sells)
-            };
-            active.push(order.price);
-            // Partial executions still reserve funds or inventory without
-            // displacing the nearest window.
-            if !is_window_order(order) {
-                reserved.push(order.price);
+        {
+            let active_orders = self.state.active_orders.read().await;
+            for order in active_orders.values() {
+                let (active, reserved) = if order.side == OrderSide::Buy {
+                    (&mut active_buy_prices, &mut reserved_buys)
+                } else {
+                    (&mut active_sell_prices, &mut reserved_sells)
+                };
+                active.push(order.price);
+                // Partial executions still reserve funds or inventory without
+                // displacing the nearest window.
+                if !is_window_order(order) {
+                    reserved.push(order.price);
+                }
             }
         }
+        let last_fill = match self.load_last_fill(config).await {
+            Ok(last_fill) => last_fill,
+            Err(error) => {
+                self.state
+                    .add_log("ERROR", format!("Could not load last fills: {}", error))
+                    .await;
+                self.pause_trading().await;
+                return None;
+            }
+        };
         let (mut desired_buy_prices, mut desired_sell_prices) =
-            match self.window_prices(config, rules, current_price).await {
-                Ok(prices) => prices,
-                Err(error) => {
-                    self.state
-                        .add_log("ERROR", format!("Could not load last fills: {}", error))
-                        .await;
-                    self.pause_trading().await;
-                    return None;
-                }
-            };
+            Self::window_prices_with_last_fill(config, rules, current_price, last_fill);
         // Protected orders inside either nearest band occupy their level without
         // extending the band to compensate for far-away protected orders.
         desired_buy_prices.retain(|price| {
@@ -3653,6 +3793,7 @@ impl GridTradingEngine {
             active_sell_prices,
             desired_buy_prices,
             desired_sell_prices,
+            last_fill,
         ))
     }
 
@@ -3663,32 +3804,38 @@ impl GridTradingEngine {
         desired_buys: &[Decimal],
         desired_sells: &[Decimal],
     ) -> bool {
+        let desired_buy_set: HashSet<Decimal> = desired_buys.iter().copied().collect();
+        let desired_sell_set: HashSet<Decimal> = desired_sells.iter().copied().collect();
         let (total, mut obsolete) = {
             let active_guard = self.state.active_orders.read().await;
             let total = active_guard.len();
-            let mut active: Vec<&GridOrder> = active_guard.values().collect();
+            let mut occupied: HashSet<_> = active_guard
+                .values()
+                .filter(|o| !is_window_order(o))
+                .map(|o| (o.side, o.price))
+                .collect();
+            let mut window_orders: Vec<&GridOrder> = active_guard
+                .values()
+                .filter(|o| is_window_order(o))
+                .collect();
+            if window_orders.is_empty() {
+                return false;
+            }
             // Preserve existing queue priority, without preferring any order label.
-            active.sort_by(|a, b| {
+            window_orders.sort_by(|a, b| {
                 a.created_at
                     .cmp(&b.created_at)
                     .then_with(|| a.client_order_id.cmp(&b.client_order_id))
             });
-            let mut occupied: HashSet<_> = active
-                .iter()
-                .filter(|o| !is_window_order(o))
-                .map(|o| (o.side, o.price))
-                .collect();
-            let obsolete: Vec<GridOrder> = active
+            let obsolete: Vec<GridOrder> = window_orders
                 .into_iter()
                 .filter(|order| {
                     let desired = if order.side == OrderSide::Buy {
-                        desired_buys
+                        &desired_buy_set
                     } else {
-                        desired_sells
+                        &desired_sell_set
                     };
-                    is_window_order(order)
-                        && (!desired.contains(&order.price)
-                            || !occupied.insert((order.side, order.price)))
+                    !desired.contains(&order.price) || !occupied.insert((order.side, order.price))
                 })
                 .cloned()
                 .collect();
@@ -3755,6 +3902,7 @@ impl GridTradingEngine {
         rules: &SymbolRules,
         side: OrderSide,
         price: Decimal,
+        cached_last_fill: Option<LastFillSnapshot>,
     ) -> Option<Decimal> {
         let full_quantity = rules.calculate_quantity(price, config.grid.order_amount_usdc)?;
         if !config.exchange.is_paper() && !self.live_reconciliation_ready() {
@@ -3786,16 +3934,23 @@ impl GridTradingEngine {
             return None;
         }
         if reference_price > Decimal::ZERO {
-            let (buys, sells) = match self.window_prices(config, rules, reference_price).await {
-                Ok(prices) => prices,
-                Err(error) => {
-                    self.state
-                        .add_log("ERROR", format!("Could not load last fills: {}", error))
-                        .await;
-                    self.pause_trading().await;
-                    return None;
-                }
+            let last_fill = match cached_last_fill.filter(|snapshot| {
+                snapshot.revision == self.state.db.symbol_trade_revision(&config.exchange.symbol)
+            }) {
+                Some(last_fill) => last_fill,
+                None => match self.load_last_fill(config).await {
+                    Ok(last_fill) => last_fill,
+                    Err(error) => {
+                        self.state
+                            .add_log("ERROR", format!("Could not load last fills: {}", error))
+                            .await;
+                        self.pause_trading().await;
+                        return None;
+                    }
+                },
             };
+            let (buys, sells) =
+                Self::window_prices_with_last_fill(config, rules, reference_price, last_fill);
             let window = if side == OrderSide::Buy { buys } else { sells };
             if !window.contains(&price) {
                 return None;
@@ -3882,6 +4037,7 @@ impl GridTradingEngine {
     }
 
     /// Place a single grid order (either Maker GTX on Binance or simulated)
+    #[cfg(test)]
     async fn place_grid_order(
         &mut self,
         side: OrderSide,
@@ -3889,6 +4045,26 @@ impl GridTradingEngine {
         client_order_id: String,
         grid_level: i32,
         paired_client_order_id: Option<String>,
+    ) -> bool {
+        self.place_grid_order_with_last_fill(
+            side,
+            price,
+            client_order_id,
+            grid_level,
+            paired_client_order_id,
+            None,
+        )
+        .await
+    }
+
+    async fn place_grid_order_with_last_fill(
+        &mut self,
+        side: OrderSide,
+        price: Decimal,
+        client_order_id: String,
+        grid_level: i32,
+        paired_client_order_id: Option<String>,
+        cached_last_fill: Option<LastFillSnapshot>,
     ) -> bool {
         if self.state.is_shutting_down() || *self.state.status.read().await != BotStatus::Running {
             return false;
@@ -3911,15 +4087,14 @@ impl GridTradingEngine {
         }
         let rules = self.state.rules.read().await.clone();
         let Some(quantity) = self
-            .validate_and_size_grid_order(&config, &rules, side, price)
+            .validate_and_size_grid_order(&config, &rules, side, price, cached_last_fill)
             .await
         else {
             return false;
         };
 
         let symbol = config.exchange.symbol.clone();
-        let formatted_price = rules.format_price(price);
-        let formatted_qty = rules.format_quantity(quantity);
+        let now = Utc::now();
         let mut order = GridOrder {
             client_order_id: client_order_id.clone(),
             order_id: None,
@@ -3929,8 +4104,8 @@ impl GridTradingEngine {
             quantity,
             amount_usdc: price * quantity,
             status: OrderStatus::New,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: now,
+            updated_at: now,
             grid_level,
             paired_client_order_id,
             is_take_profit: false,
@@ -3942,15 +4117,19 @@ impl GridTradingEngine {
             if !self.insert_paper_order(&mut order).await {
                 return false;
             }
-            debug!(
-                "[PAPER] Placed {} Maker order: price={}, qty={}, id={}",
-                side.as_str(),
-                formatted_price,
-                formatted_qty,
-                client_order_id
-            );
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                debug!(
+                    "[PAPER] Placed {} Maker order: price={}, qty={}, id={}",
+                    side.as_str(),
+                    rules.format_price(price),
+                    rules.format_quantity(quantity),
+                    client_order_id
+                );
+            }
             true
         } else {
+            let formatted_price = rules.format_price(price);
+            let formatted_qty = rules.format_quantity(quantity);
             self.submit_and_reconcile_live_grid_order(
                 &config,
                 &symbol,

@@ -90,6 +90,59 @@ async fn overview_today_pnl_covers_history_modes_boundaries_and_cache_invalidati
         .all(|g| g.symbol != "DELETEDUSDT"));
 }
 
+#[test]
+fn overview_today_pnl_reads_complete_rollups_and_requires_detail_only_at_the_boundary() {
+    let directory = std::env::temp_dir().join(format!("overview-rollups-{}", uuid::Uuid::new_v4()));
+    let path = directory.join("test.db");
+    let db = Database::open(&path).unwrap();
+    let now = test_time();
+    let mut earlier = trade(
+        "complete-rollup",
+        "SOLUSDC",
+        TradingMode::Paper,
+        now - chrono::Duration::hours(1),
+    );
+    earlier.realized_pnl = dec!(1.23456789);
+    db.insert_trade(&earlier).unwrap();
+    let editor = rusqlite::Connection::open(&path).unwrap();
+    editor
+        .execute("ALTER TABLE trades RENAME TO unavailable_trades", [])
+        .unwrap();
+    assert_eq!(
+        db.get_today_pnl(now).unwrap().groups[0].realized_pnl,
+        earlier.realized_pnl
+    );
+    editor
+        .execute("ALTER TABLE unavailable_trades RENAME TO trades", [])
+        .unwrap();
+
+    let mut current = trade("boundary-current", "SOLUSDC", TradingMode::Paper, now);
+    current.realized_pnl = dec!(0.00000001);
+    db.insert_trade(&current).unwrap();
+    let mut future = trade(
+        "boundary-future",
+        "SOLUSDC",
+        TradingMode::Paper,
+        now + chrono::Duration::nanoseconds(1),
+    );
+    future.realized_pnl = dec!(999);
+    db.insert_trade(&future).unwrap();
+    editor
+        .execute("ALTER TABLE trades RENAME TO unavailable_trades", [])
+        .unwrap();
+    assert!(db.get_today_pnl(now).is_err());
+    editor
+        .execute("ALTER TABLE unavailable_trades RENAME TO trades", [])
+        .unwrap();
+    assert_eq!(
+        db.get_today_pnl(now).unwrap().groups[0].realized_pnl,
+        dec!(1.23456790)
+    );
+    drop(editor);
+    drop(db);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
 #[tokio::test]
 async fn overview_today_pnl_failed_query_returns_none_and_recovers() {
     let directory = std::env::temp_dir().join(format!("overview-pnl-{}", uuid::Uuid::new_v4()));
@@ -97,12 +150,18 @@ async fn overview_today_pnl_failed_query_returns_none_and_recovers() {
     let db = Arc::new(Database::open(&path).unwrap());
     let editor = rusqlite::Connection::open(&path).unwrap();
     editor
-        .execute("ALTER TABLE trades RENAME TO unavailable_trades", [])
+        .execute(
+            "ALTER TABLE trade_hourly_rollups RENAME TO unavailable_rollups",
+            [],
+        )
         .unwrap();
     let now = test_time();
     assert!(db.cached_today_pnl(now).await.is_none());
     editor
-        .execute("ALTER TABLE unavailable_trades RENAME TO trades", [])
+        .execute(
+            "ALTER TABLE unavailable_rollups RENAME TO trade_hourly_rollups",
+            [],
+        )
         .unwrap();
     assert!(db.cached_today_pnl(now).await.is_none());
     tokio::time::sleep(std::time::Duration::from_millis(1100)).await;

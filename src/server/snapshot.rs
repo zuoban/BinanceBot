@@ -257,44 +257,63 @@ impl AppState {
         charts: Option<SnapshotCharts>,
     ) -> Option<(OverviewPairView, Vec<TradeRecord>)> {
         let _scope = self.snapshot_scope_lock.read().await;
-        let _commit = self.trade_commit_lock.lock().await;
-        let config = self.config.read().await;
-        let mode = config.exchange.trading_mode();
-        if charts
-            .as_ref()
-            .is_some_and(|charts| !charts.is_current(&config, &self.db))
-        {
-            return None;
-        }
-        let status = *self.status.read().await;
-        let ticker = {
-            let ticker = self.ticker.read().await;
-            SummaryTicker {
-                mark_price: ticker.mark_price,
-                mark_update_time: ticker.mark_update_time,
+        let (symbol, mode, grid_config, status, ticker, position, account, stats, mut recent) = {
+            let _commit = self.trade_commit_lock.lock().await;
+            let config = self.config.read().await;
+            let mode = config.exchange.trading_mode();
+            if charts
+                .as_ref()
+                .is_some_and(|charts| !charts.is_current(&config, &self.db))
+            {
+                return None;
             }
+            let status = *self.status.read().await;
+            let ticker = {
+                let ticker = self.ticker.read().await;
+                SummaryTicker {
+                    mark_price: ticker.mark_price,
+                    mark_update_time: ticker.mark_update_time,
+                }
+            };
+            let (position, account) = self
+                .with_position_and_account(&config, |position| SummaryPosition {
+                    size: position.size,
+                    entry_price: position.entry_price,
+                    mark_price: position.mark_price,
+                    unrealized_pnl: position.unrealized_pnl,
+                })
+                .await;
+            let orders = self.active_orders.read().await;
+            let active_buy_orders = orders
+                .values()
+                .filter(|order| order.side == OrderSide::Buy)
+                .count();
+            let active_sell_orders = orders.len() - active_buy_orders;
+            drop(orders);
+            let stats = SummaryStats {
+                total_realized_pnl: self.stats.read().await.total_realized_pnl,
+                active_buy_orders,
+                active_sell_orders,
+            };
+            let trades = self.recent_trades.read().await;
+            let recent: Vec<TradeRecord> = trades
+                .iter()
+                .filter(|trade| trade.mode == mode && trade.symbol == config.exchange.symbol)
+                .cloned()
+                .collect();
+            (
+                config.exchange.symbol.clone(),
+                mode,
+                config.summary(),
+                status,
+                ticker,
+                position,
+                account,
+                stats,
+                recent,
+            )
         };
-        let (position, account) = self
-            .with_position_and_account(&config, |position| SummaryPosition {
-                size: position.size,
-                entry_price: position.entry_price,
-                mark_price: position.mark_price,
-                unrealized_pnl: position.unrealized_pnl,
-            })
-            .await;
         let account_cny_rate = self.cny_rates.get(&account.asset).await;
-        let orders = self.active_orders.read().await;
-        let active_buy_orders = orders
-            .values()
-            .filter(|order| order.side == OrderSide::Buy)
-            .count();
-        let active_sell_orders = orders.len() - active_buy_orders;
-        drop(orders);
-        let stats = SummaryStats {
-            total_realized_pnl: self.stats.read().await.total_realized_pnl,
-            active_buy_orders,
-            active_sell_orders,
-        };
         let today_trade_counts = charts.and_then(|charts| charts.trades).map(|stats| {
             let (buy, sell) = stats.total_counts();
             TodayTradeCounts {
@@ -304,26 +323,21 @@ impl AppState {
                 sell,
             }
         });
-        let trades = self.recent_trades.read().await;
-        let mut recent: Vec<_> = trades
-            .iter()
-            .filter(|trade| trade.mode == mode && trade.symbol == config.exchange.symbol)
-            .collect();
         recent.sort_unstable_by(|a, b| {
             b.timestamp
                 .cmp(&a.timestamp)
                 .then_with(|| b.trade_id.cmp(&a.trade_id))
         });
-        let recent = recent.into_iter().take(20).cloned().collect();
+        recent.truncate(20);
         Some((
             OverviewPairView {
                 scoped: self.pair_scope().is_some(),
                 mode,
                 snapshot: PairSummary {
-                    symbol: config.exchange.symbol.clone(),
+                    symbol,
                     status,
                     mode,
-                    grid_config: config.summary(),
+                    grid_config,
                     ticker,
                     position,
                     stats,
@@ -389,57 +403,90 @@ impl AppState {
         now: DateTime<Utc>,
     ) -> Option<BotSnapshot> {
         let _scope = self.snapshot_scope_lock.read().await;
-        let _commit = self.trade_commit_lock.lock().await;
-        let config = self.config.read().await;
-        if charts
-            .as_ref()
-            .is_some_and(|charts| !charts.is_current(&config, &self.db))
-        {
-            return None;
-        }
-        let status = *self.status.read().await;
-        let ticker = self.ticker.read().await.clone();
-        let mut stats = self.stats.read().await.clone();
-        let (position, account) = self
-            .with_position_and_account(&config, PositionInfo::clone)
-            .await;
+        let (
+            symbol,
+            mode,
+            grid_config,
+            status,
+            ticker,
+            mut stats,
+            position,
+            account,
+            mut active_orders,
+            recent_trades,
+            recent_logs,
+        ) = {
+            let _commit = self.trade_commit_lock.lock().await;
+            let config = self.config.read().await;
+            if charts
+                .as_ref()
+                .is_some_and(|charts| !charts.is_current(&config, &self.db))
+            {
+                return None;
+            }
+            let status = *self.status.read().await;
+            let ticker = self.ticker.read().await.clone();
+            let stats = self.stats.read().await.clone();
+            let (position, account) = self
+                .with_position_and_account(&config, PositionInfo::clone)
+                .await;
+            let active_orders: Vec<GridOrder> =
+                self.active_orders.read().await.values().cloned().collect();
+            let recent_trades = self
+                .recent_trades
+                .read()
+                .await
+                .iter()
+                .rev()
+                .take(50)
+                .cloned()
+                .collect();
+            let recent_logs = self
+                .recent_logs
+                .read()
+                .await
+                .iter()
+                .rev()
+                .take(50)
+                .cloned()
+                .collect();
+            (
+                config.exchange.symbol.clone(),
+                config.exchange.trading_mode(),
+                config.summary(),
+                status,
+                ticker,
+                stats,
+                position,
+                account,
+                active_orders,
+                recent_trades,
+                recent_logs,
+            )
+        };
+        active_orders.sort_by(|a, b| {
+            b.price
+                .cmp(&a.price)
+                .then_with(|| a.client_order_id.cmp(&b.client_order_id))
+        });
         let account_cny_rate = self.cny_rates.get(&account.asset).await;
-        let active_orders = self.sorted_active_orders().await;
         stats.active_buy_orders = active_orders
             .iter()
             .filter(|order| order.side == OrderSide::Buy)
             .count();
         stats.active_sell_orders = active_orders.len() - stats.active_buy_orders;
         stats.uptime_secs = (now - stats.start_time).num_seconds().max(0) as u64;
-        let recent_trades = self
-            .recent_trades
-            .read()
-            .await
-            .iter()
-            .rev()
-            .take(50)
-            .cloned()
-            .collect();
-        let recent_logs = self
-            .recent_logs
-            .read()
-            .await
-            .iter()
-            .rev()
-            .take(50)
-            .cloned()
-            .collect();
         let hourly_trade_stats = charts.and_then(|charts| charts.trades);
         Some(BotSnapshot {
             status,
-            mode: config.exchange.trading_mode(),
-            symbol: config.exchange.symbol.clone(),
+            mode,
+            symbol,
             ticker,
             stats,
             position,
             account,
             account_cny_rate,
-            grid_config: config.summary(),
+            grid_config,
             active_orders,
             recent_trades,
             hourly_trade_stats,

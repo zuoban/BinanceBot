@@ -140,6 +140,7 @@ export function PaletteHost({ open, setOpen, pairs, stale, authEnabled, saving, 
     return () => window.removeEventListener('keydown', onKey);
   }, [navigate, setOpen]);
   const commands = useMemo<Command[]>(() => {
+    if (!open) return [];
     const all: Command[] = [
       { key: 'go-overview', group: '页面', label: '策略总览', hint: 'g o', keywords: 'overview home 总览 首页', icon: <AppstoreOutlined />, run: () => navigate('/') },
       { key: 'go-settings', group: '页面', label: '全局设置', hint: 'g s', keywords: 'settings 设置 api telegram', icon: <SettingOutlined />, run: () => navigate('/settings') },
@@ -163,7 +164,7 @@ export function PaletteHost({ open, setOpen, pairs, stale, authEnabled, saving, 
     const byKey = new Map(wrapped.map(command => [command.key, command]));
     const recents = recent.flatMap(key => { const command = byKey.get(key); return command && !command.disabled ? [{ ...command, group: '最近使用', key: `recent-${command.key}` }] : []; });
     return [...recents, ...wrapped];
-  }, [pairs, navigate, busy, run, preference, setPreference, authEnabled, saving, onLogout, stale, recent, remember]);
+  }, [open, pairs, navigate, busy, run, preference, setPreference, authEnabled, saving, onLogout, stale, recent, remember]);
   return <>
     <CommandPalette open={open} onClose={() => setOpen(false)} commands={commands} />
     <Modal open={help} onCancel={() => setHelp(false)} footer={null} title="键盘快捷键" width={440} destroyOnHidden>

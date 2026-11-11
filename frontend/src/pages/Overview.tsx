@@ -1,4 +1,4 @@
-import { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { App, Button, Card, Col, Dropdown, Empty, Grid, Input, Popover, Row, Select, Space, Statistic } from 'antd';
 import { ArrowRightOutlined, EyeOutlined, PlusOutlined, SearchOutlined, ThunderboltOutlined } from '@ant-design/icons';
@@ -107,21 +107,23 @@ function OverviewFinanceDisclosure({
     </div>
   </details>;
 }
-function StrategyCard({
+const StrategyCard = memo(function StrategyCard({
   entry,
   stale,
-  tradeCounts,
-  results,
+  buyCount,
+  sellCount,
+  controlResult,
   clearResult,
 }: {
   entry: Overview['pairs'][number];
   stale: boolean;
-  tradeCounts: { buy: number; sell: number } | null;
-  results: Record<string, string>;
+  buyCount: number | null;
+  sellCount: number | null;
+  controlResult?: string;
   clearResult?: (symbol: string) => void;
 }) {
   const { snapshot: s } = entry;
-  const pair = toPair(entry);
+  const pair = useMemo(() => toPair(entry), [entry]);
   const quote = quoteAsset(s.symbol), quoteSuffix = quote ? ` / ${quote}` : '', quoteUnit = quote ? ` ${quote}` : '';
   const change = entryChange(s.position, s.ticker.mark_price);
   return <Card className={`strategy-card ${s.grid_config.direction === 'SHORT' ? 'strategy-short' : 'strategy-long'}`}>
@@ -140,12 +142,12 @@ function StrategyCard({
       <div><span>涨跌幅</span><strong className={change.className}>{change.text}</strong></div>
       <div><span>已实现盈亏{quoteSuffix}</span><strong><Pnl value={s.stats.total_realized_pnl} compact /></strong></div>
       <div><span>未实现盈亏{quoteSuffix}</span><strong><Pnl value={s.position.unrealized_pnl} compact /></strong></div>
-      <div><span>今日成交</span><strong>{tradeCounts ? tradeCounts.buy + tradeCounts.sell : '--'} <small>笔</small></strong></div>
-      <div><span>买单 / 卖单</span><strong>{tradeCounts?.buy ?? '--'} <small>/</small> {tradeCounts?.sell ?? '--'}</strong></div>
+      <div><span>今日成交</span><strong>{buyCount !== null && sellCount !== null ? buyCount + sellCount : '--'} <small>笔</small></strong></div>
+      <div><span>买单 / 卖单</span><strong>{buyCount ?? '--'} <small>/</small> {sellCount ?? '--'}</strong></div>
     </div>
-    <ControlResultBanner symbol={s.symbol} results={results} clearResult={clearResult} variant="inline" />
+    <ControlResultBanner symbol={s.symbol} result={controlResult} clearResult={clearResult} variant="inline" />
   </Card>;
-}
+});
 export default function OverviewPage() {
   const overview = useOverview();
   const navigate = useNavigate();
@@ -319,7 +321,10 @@ export default function OverviewPage() {
       {(search || sort !== 'position' || statusFilter !== 'all') && <Button type="text" onClick={clearFilters}>清除筛选</Button>}
     </div>
     <div className="strategy-grid">
-      {visible.map(entry => <StrategyCard key={entry.snapshot.symbol} entry={entry} stale={stale} tradeCounts={tradeCountsBySymbol.get(entry.snapshot.symbol) ?? null} results={controls.results} clearResult={controls.clearResult} />)}
+      {visible.map(entry => {
+        const symbol = entry.snapshot.symbol, counts = tradeCountsBySymbol.get(symbol);
+        return <StrategyCard key={symbol} entry={entry} stale={stale} buyCount={counts?.buy ?? null} sellCount={counts?.sell ?? null} controlResult={controls.results[symbol]} clearResult={controls.clearResult} />;
+      })}
       {!visible.length && <Card className="strategy-empty"><Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={pairs.length ? '没有符合筛选条件的策略' : '暂无策略数据'}>{pairs.length ? <Button onClick={clearFilters}>清除筛选</Button> : addPairButton({ type: 'primary' })}</Empty></Card>}
     </div>
     </section>

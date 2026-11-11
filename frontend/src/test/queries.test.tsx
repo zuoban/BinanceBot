@@ -1,10 +1,12 @@
 /// <reference lib="es2024.promise" />
+import { useLayoutEffect } from 'react';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterEach, expect, it, vi } from 'vitest';
 import { useLiveAccounts, usePairSnapshot, useSocket } from '../lib/queries';
 import { tokenStore } from '../lib/api';
 import { pair, snapshot } from './fixtures';
+import { useExpired } from '../lib/useNow';
 
 class FakeSocket {
   static instances: FakeSocket[] = [];
@@ -33,6 +35,73 @@ it('only delivers the message type expected by a socket', () => {
   expect(result.current.connected).toBe(true);
 });
 
+it('expires data even when its deadline passes between rendering and effects, and resets on refresh', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2025-01-01T00:00:00Z'));
+  const initialDeadline = Date.now() + 1;
+  let renders = 0;
+  const { result, rerender, unmount } = renderHook(({ deadline }) => {
+    renders++;
+    const expired = useExpired(deadline);
+    useLayoutEffect(() => { vi.setSystemTime(initialDeadline + 1); }, []);
+    return expired;
+  }, { initialProps: { deadline: initialDeadline } });
+  try {
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(result.current).toBe(true);
+    rerender({ deadline: Date.now() + 10_000 });
+    expect(result.current).toBe(false);
+    const freshRenders = renders;
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(result.current).toBe(false);
+    expect(renders).toBe(freshRenders);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(result.current).toBe(true);
+  } finally {
+    unmount();
+    vi.useRealTimers();
+  }
+});
+
+it('updates socket activity without rendering healthy frames and publishes disconnects and recovery', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2025-01-01T00:00:00Z'));
+  vi.stubGlobal('WebSocket', FakeSocket);
+  const onData = vi.fn();
+  let renders = 0;
+  const { result, unmount } = renderHook(() => {
+    renders++;
+    return useSocket('/api/accounts/ws', 'accounts', onData);
+  });
+  const send = () => FakeSocket.instances.at(-1)!.onmessage?.({ data: JSON.stringify({ type: 'accounts', data: { generated_at: new Date().toISOString(), pairs: [] } }) });
+  try {
+    act(send);
+    const live = result.current, healthyRenders = renders;
+    for (let i = 0; i < 4; i++) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); send(); });
+      expect(result.current).toBe(live);
+      expect(result.current.lastReceived).toBe(Date.now());
+      expect(renders).toBe(healthyRenders);
+    }
+    onData.mockReturnValueOnce(false);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); send(); });
+    expect(result.current.lastReceived).toBe(Date.now() - 1000);
+    expect(renders).toBe(healthyRenders);
+    await act(async () => { await vi.advanceTimersByTimeAsync(4000); send(); });
+    expect(result.current.connected).toBe(true);
+    expect(result.current).not.toBe(live);
+    expect(result.current.lastReceived).toBe(Date.now());
+    act(() => FakeSocket.instances.at(-1)!.close());
+    expect(result.current.connected).toBe(false);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); send(); });
+    expect(FakeSocket.instances).toHaveLength(2);
+    expect(result.current.connected).toBe(true);
+  } finally {
+    unmount();
+    vi.useRealTimers();
+  }
+});
+
 it('polls lightweight accounts after silence or rejected older frames and marks old observations stale', async () => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date('2025-01-01T00:00:00Z'));
@@ -44,7 +113,11 @@ it('polls lightweight accounts after silence or rejected older frames and marks 
   vi.stubGlobal('fetch', fetchMock);
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const wrapper = ({ children }: { children: React.ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
-  const { result, unmount } = renderHook(() => useLiveAccounts(), { wrapper });
+  let renders = 0;
+  const { result, unmount } = renderHook(() => {
+    renders++;
+    return useLiveAccounts();
+  }, { wrapper });
   try {
     await act(async () => { await vi.advanceTimersByTimeAsync(0); });
     expect(result.current.accounts[0].snapshot.position.size).toBe('0');
@@ -54,9 +127,11 @@ it('polls lightweight accounts after silence or rejected older frames and marks 
     act(() => FakeSocket.instances[0].onmessage?.({ data: JSON.stringify({ type: 'accounts', data: { generated_at: new Date().toISOString(), pairs: [{ mode: 'PAPER', snapshot: streamed }] } }) }));
     expect(result.current.accounts[0].snapshot.position.size).toBe('2');
     expect(result.current.accounts[0].snapshot.ticker.mark_price).toBe('123');
-    const requests = fetchMock.mock.calls.length;
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    const requests = fetchMock.mock.calls.length, healthyRenders = renders;
     await act(async () => { await vi.advanceTimersByTimeAsync(4999); });
     expect(fetchMock).toHaveBeenCalledTimes(requests);
+    expect(renders).toBe(healthyRenders);
     const older = snapshot();
     older.position.size = '99';
     act(() => FakeSocket.instances[0].onmessage?.({ data: JSON.stringify({ type: 'accounts', data: { generated_at: '2024-12-31T23:59:59Z', pairs: [{ mode: 'PAPER', snapshot: older }] } }) }));
@@ -94,7 +169,7 @@ it('keeps current account membership and modes and rejects late HTTP or older so
     send(old);
     expect(result.current.accounts.map(entry => entry.mode)).toEqual(['LIVE', 'PAPER']);
     send({ generated_at: '2026-01-01T00:00:02Z', pairs: [] });
-    expect(result.current.accounts).toEqual([]);
+    await waitFor(() => expect(result.current.accounts).toEqual([]));
   } finally {
     unmount();
     client.clear();
