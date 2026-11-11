@@ -1,6 +1,6 @@
 import { memo, useMemo, useRef } from 'react';
 import { theme } from 'antd';
-import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import type { Snapshot } from '../lib/types';
 import { numeric, price, todayCount } from '../lib/format';
 import { priceDiffPercent } from '../lib/gridPreview';
@@ -29,14 +29,17 @@ const HourlyChartContent = memo(function HourlyChartContent({ stats, hourBucket,
   const axisTick = useMemo(() => ({ fontSize: 12, fontFamily: 'var(--font-mono)', fill: token.colorTextTertiary }), [token.colorTextTertiary]);
   if (!available) return <NoData />;
   return <>
-    <div className="muted chart-caption">北京时间 · 最近时段在左侧 · 选择柱形查看每小时明细</div>
-    <div className="chart hourly-chart" role="region" aria-label="北京时间今日每小时成交笔数"><ResponsiveContainer width="100%" height={270}>
-      <BarChart accessibilityLayer data={data} barGap={2} margin={{ top: 16, right: 12, bottom: 4, left: -12 }}>
-        <CartesianGrid strokeDasharray="3 5" vertical={false} stroke={token.colorBorderSecondary} />
+    <div className="chart-caption-row">
+      <span className="muted">北京时间 · 最近时段在左侧</span>
+      <span className="chart-legend" aria-hidden="true"><span className="chart-legend-item"><i className="chart-dot chart-dot-buy" />买入</span><span className="chart-legend-item"><i className="chart-dot chart-dot-sell" />卖出</span></span>
+    </div>
+    <div className="chart hourly-chart" role="region" aria-label="北京时间今日每小时成交笔数"><ResponsiveContainer width="100%" height={264}>
+      <BarChart accessibilityLayer data={data} barGap={2} maxBarSize={12} margin={{ top: 12, right: 12, bottom: 4, left: -12 }}>
+        <CartesianGrid vertical={false} stroke={token.colorBorderSecondary} />
         <XAxis dataKey="hour" interval="preserveStartEnd" minTickGap={24} tickLine={false} axisLine={false} tick={axisTick} />
         <YAxis allowDecimals={false} axisLine={false} tickLine={false} tick={axisTick} />
-        <Legend /><Tooltip cursor={{ fill: token.colorFillSecondary }} contentStyle={{ background: token.colorBgElevated, borderColor: token.colorBorder, borderRadius: 8, boxShadow: 'var(--overlay-shadow)', color: token.colorText, fontSize: 12 }} labelStyle={{ color: token.colorText, fontFamily: 'var(--font-mono)', fontWeight: 600, marginBottom: 4 }} itemStyle={{ fontFamily: 'var(--font-mono)' }} />
-        <Bar dataKey="买入" fill={token.colorSuccess} radius={[3, 3, 0, 0]} /><Bar dataKey="卖出" fill={token.colorError} radius={[3, 3, 0, 0]} />
+        <Tooltip cursor={{ fill: token.colorFillSecondary }} contentStyle={{ background: token.colorBgElevated, borderColor: token.colorBorder, borderRadius: 8, boxShadow: 'var(--overlay-shadow)', color: token.colorText, fontSize: 12 }} labelStyle={{ color: token.colorText, fontFamily: 'var(--font-mono)', fontWeight: 500, marginBottom: 4 }} itemStyle={{ fontFamily: 'var(--font-mono)' }} />
+        <Bar dataKey="买入" fill={token.colorSuccess} radius={[2, 2, 0, 0]} /><Bar dataKey="卖出" fill={token.colorError} radius={[2, 2, 0, 0]} />
       </BarChart>
     </ResponsiveContainer></div>
   </>;

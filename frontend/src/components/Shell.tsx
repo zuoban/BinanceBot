@@ -17,7 +17,7 @@ function ShellTitle({ accounts, alert, active }: { accounts: AccountObservation[
   const now = useNow();
   const groups = useMemo(() => accountGroups(accounts, now), [accounts, now]);
   const title = groups.length ? groups.map(group => `${compactNumber(group.equity)} | ${ratioText(group.ratio, true)}`).join(' / ') : defaultTitle;
-  useDocumentTitle(active ? `${alert ? '⚠ ' : ''}${title}` : null);
+  useDocumentTitle(active ? `${alert ? '[!] ' : ''}${title}` : null);
   return null;
 }
 
@@ -137,7 +137,7 @@ function SidebarBody({ idPrefix, pairs, pending, symbol, page, pathname, mode, a
         const short = pair.grid_config.direction === 'SHORT';
         const active = pair.symbol === symbol;
         return <Link key={pair.symbol} to={`/pairs/${pair.symbol}${pathname.endsWith('/config') ? '/config' : ''}`} onClick={onNavigate} className={`sidebar-pair${active ? ' sidebar-pair-active' : ''}`} aria-current={active ? 'page' : undefined} title={`${pair.symbol} · ${statusLabel[pair.status]} · ${directionLabel(pair.grid_config.direction)}`}>
-          <span className={`status-dot status-dot-${pair.status.toLowerCase()}`} aria-hidden="true" />
+          <span className="sidebar-icon-slot" aria-hidden="true"><span className={`status-dot status-dot-${pair.status.toLowerCase()}`} /></span>
           <span className="sidebar-pair-symbol">{pair.symbol}</span>
           <span className={`sidebar-pair-side ${short ? 'short' : 'long'}`} aria-hidden="true">{short ? <ArrowDownOutlined /> : <ArrowUpOutlined />}</span>
           <span className="sr-only">{statusLabel[pair.status]}，{directionLabel(pair.grid_config.direction)}</span>

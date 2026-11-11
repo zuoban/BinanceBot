@@ -157,8 +157,8 @@ function GlobalSettings() {
         <Row gutter={[20, 16]} className="settings-fields">
           <Col xs={24} md={12}><Form.Item name="api_key" label="API Key"><Input.Password autoComplete="off" placeholder="留空保留已保存的值" disabled={!ready || edit.saving || clearApi} /></Form.Item></Col>
           <Col xs={24} md={12}><Form.Item name="api_secret" label="API Secret"><Input.Password autoComplete="new-password" placeholder="留空保留已保存的值" disabled={!ready || edit.saving || clearApi} /></Form.Item></Col>
-          <Col xs={24} md={12}><Form.Item name="recv_window" label="请求有效窗口（毫秒）" extra="交易所接受已签名请求的时间窗口。" rules={[{ required: true }]}><InputNumber min={1} precision={0} className="full-width-input" /></Form.Item></Col>
-          <Col xs={24} md={12}><Form.Item name="sync_interval_secs" label="同步间隔（秒）" extra="策略定期同步订单、账户和持仓的间隔。" rules={[{ required: true }]}><InputNumber min={1} precision={0} className="full-width-input" /></Form.Item></Col>
+          <Col xs={24} md={12}><Form.Item name="recv_window" label="请求有效窗口（毫秒）" extra="交易所接受已签名请求的时间窗口" rules={[{ required: true }]}><InputNumber min={1} precision={0} className="full-width-input" /></Form.Item></Col>
+          <Col xs={24} md={12}><Form.Item name="sync_interval_secs" label="同步间隔（秒）" extra="策略定期同步订单、账户和持仓的间隔" rules={[{ required: true }]}><InputNumber min={1} precision={0} className="full-width-input" /></Form.Item></Col>
         </Row>
         <div className="settings-card-footer">
           <ProbeButton label="测试连接" path="/api/global/test-exchange" disabled={!ready || edit.saving || clearApi}
@@ -181,8 +181,8 @@ function GlobalSettings() {
           <Card title="Telegram 通知" className="settings-card settings-card-fill">
             <Row gutter={[16, 16]}>
               <Col span={24}><Form.Item name="telegram_enabled" label="通知开关" valuePropName="checked"><Switch checkedChildren="开启" unCheckedChildren="关闭" /></Form.Item></Col>
-              <Col xs={24} sm={12}><Form.Item name="telegram_bot_token" label="Bot Token" extra={query.data?.has_telegram_bot_token ? '已保存 Token，留空保持不变。' : '尚未配置 Token。'}><Input.Password autoComplete="new-password" disabled={!ready || edit.saving || clearTelegram} /></Form.Item></Col>
-              <Col xs={24} sm={12}><Form.Item name="telegram_chat_id" label="Chat ID" extra="向机器人发送消息后，可通过 Telegram Bot API 的 getUpdates 获取会话 ID。"><Input className="numeric" disabled={!ready || edit.saving || clearTelegram} /></Form.Item></Col>
+              <Col xs={24} sm={12}><Form.Item name="telegram_bot_token" label="Bot Token" extra={query.data?.has_telegram_bot_token ? '已保存 Token，留空保持不变' : '尚未配置 Token'}><Input.Password autoComplete="new-password" disabled={!ready || edit.saving || clearTelegram} /></Form.Item></Col>
+              <Col xs={24} sm={12}><Form.Item name="telegram_chat_id" label="Chat ID" extra="向机器人发送消息后，可通过 Telegram Bot API 的 getUpdates 获取会话 ID"><Input className="numeric" disabled={!ready || edit.saving || clearTelegram} /></Form.Item></Col>
             </Row>
             <div className="settings-card-footer">
               <ProbeButton label="发送测试消息" path="/api/global/test-telegram" disabled={!ready || edit.saving || clearTelegram}

@@ -1,6 +1,6 @@
 import { useContext, useLayoutEffect, useRef, type DependencyList, type RefObject } from 'react';
 import { Alert, App, Button, Empty, Space } from 'antd';
-import { ArrowDownOutlined, ArrowUpOutlined, CheckCircleFilled, ClockCircleFilled, CloseCircleFilled, CloseOutlined, ExclamationCircleFilled, InfoCircleFilled, MinusCircleFilled, ReloadOutlined, ThunderboltFilled } from '@ant-design/icons';
+import { ArrowDownOutlined, ArrowUpOutlined, CheckCircleOutlined, CloseCircleOutlined, CloseOutlined, ExclamationCircleOutlined, InfoCircleOutlined, ReloadOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { Link } from 'react-router-dom';
 import { EditContext } from '../lib/session';
 import type { GridConfig, Mode, Status } from '../lib/types';
@@ -11,7 +11,7 @@ export function ErrorNotice({ error, retry }: { error: Error | null; retry?: () 
   return <Alert type="error" showIcon title={error.message} action={retry && <Button size="small" onClick={retry} icon={<ReloadOutlined />}>重试</Button>} />;
 }
 export type Signal = 'calm' | 'blue' | 'yellow' | 'orange' | 'red';
-export const signalIcon: Record<Signal, React.ReactNode> = { calm: <CheckCircleFilled />, blue: <InfoCircleFilled />, yellow: <ExclamationCircleFilled />, orange: <ThunderboltFilled />, red: <CloseCircleFilled /> };
+export const signalIcon: Record<Signal, React.ReactNode> = { calm: <CheckCircleOutlined />, blue: <InfoCircleOutlined />, yellow: <ExclamationCircleOutlined />, orange: <ThunderboltOutlined />, red: <CloseCircleOutlined /> };
 export function controlResultMeta(result: string): { tier: Signal; alertType: 'error' | 'warning' | 'success' | 'info'; pending: boolean } {
   if (result.startsWith('未提交')) return { tier: 'red', alertType: 'error', pending: false };
   if (result.includes('尚未确认') || result.includes('结果不明')) return { tier: 'yellow', alertType: 'warning', pending: false };
@@ -40,13 +40,13 @@ export function SignalButton({ tier, active, onClick, children }: { tier: Signal
   return <button type="button" className={`signal signal-${tier} signal-button${active ? ' signal-active' : ''}`} aria-pressed={active} title={active ? '点击取消筛选' : '点击筛选'} onClick={onClick}><span className="signal-icon" aria-hidden="true">{signalIcon[tier]}</span>{children}</button>;
 }
 export const ModeTag = ({ mode }: { mode: Mode }) => <SignalChip tier={mode === 'LIVE' ? 'orange' : mode === 'UNKNOWN' ? 'yellow' : 'blue'}>{modeLabel[mode]}</SignalChip>;
-const statusMeta: Record<Status, { tier: Signal; icon: React.ReactNode }> = {
-  RUNNING: { tier: 'calm', icon: <CheckCircleFilled /> },
-  PAUSED: { tier: 'blue', icon: <MinusCircleFilled /> },
-  STOPPED: { tier: 'blue', icon: <ClockCircleFilled /> },
-  ERROR: { tier: 'red', icon: <CloseCircleFilled /> },
+const statusTier: Record<Status, Signal> = {
+  RUNNING: 'calm',
+  PAUSED: 'blue',
+  STOPPED: 'blue',
+  ERROR: 'red',
 };
-export const StatusTag = ({ status }: { status: Status }) => <SignalChip tier={statusMeta[status].tier} icon={statusMeta[status].icon}>{statusLabel[status]}</SignalChip>;
+export const StatusTag = ({ status }: { status: Status }) => <SignalChip tier={statusTier[status]} icon={<span className={`status-dot status-dot-${status.toLowerCase()}`} />}>{statusLabel[status]}</SignalChip>;
 export function DirectionTag({ direction }: { direction: Direction }) {
   const short = direction === 'SHORT';
   return <span className={`strategy-direction strategy-direction-${short ? 'short' : 'long'}`} role="img" aria-label={`策略方向：${directionLabel(direction)}`}>{short ? <ArrowDownOutlined /> : <ArrowUpOutlined />}{directionLabel(direction)}</span>;

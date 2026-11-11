@@ -242,17 +242,21 @@ export function OverviewHistory() {
       <div className="history-empty">暂无快照数据，整点后开始记录</div>
     ) : (
       <>
-        <div className="history-caption">
-          <div className="history-caption-main"><h3>近 24 小时</h3><span>单位 {asset} · 北京时间</span></div>
-          <span className="numeric">最近记录 {latest ? formatDate(latest.hour) : '--'}</span>
-        </div>
-        {renderPlot(data, ticks, '24 小时权益图', `近24小时${asset ?? ''}账户权益折线图，最近记录 ${latest ? `${formatDate(latest.hour)}，权益 ${compactNumber(latest.equity)}` : '暂无'}`, '近 24 小时暂无可用的权益快照')}
-        <div className="history-daily">
-          <div className="history-caption">
-            <div className="history-caption-main"><h3>近 7 天</h3><span>单位 {asset} · 每日 00:00 · 北京时间</span></div>
-            <span className="numeric">最近零点记录 {latestDay ? formatDate(latestDay.hour) : '--'}</span>
+        <div className="history-charts-grid">
+          <div className="history-chart-primary">
+            <div className="history-caption">
+              <div className="history-caption-main"><h3>近 24 小时</h3><span>单位 {asset} · 北京时间</span></div>
+              <span className="numeric">最近记录 {latest ? formatDate(latest.hour) : '--'}</span>
+            </div>
+            {renderPlot(data, ticks, '24 小时权益图', `近24小时${asset ?? ''}账户权益折线图，最近记录 ${latest ? `${formatDate(latest.hour)}，权益 ${compactNumber(latest.equity)}` : '暂无'}`, '近 24 小时暂无可用的权益快照')}
           </div>
-          {renderPlot(dailyData, dailyTicks, '7 天权益图', `近7天${asset ?? ''}账户权益折线图，每日北京时间零点，最近记录 ${latestDay ? `${formatDate(latestDay.hour)}，权益 ${compactNumber(latestDay.equity)}` : '暂无'}`, '近 7 天暂无可用的零点权益快照', true)}
+          <div className="history-chart-secondary">
+            <div className="history-caption">
+              <div className="history-caption-main"><h3>近 7 天</h3><span>每日 00:00 · 北京时间</span></div>
+              <span className="numeric">最近零点记录 {latestDay ? formatDate(latestDay.hour) : '--'}</span>
+            </div>
+            {renderPlot(dailyData, dailyTicks, '7 天权益图', `近7天${asset ?? ''}账户权益折线图，每日北京时间零点，最近记录 ${latestDay ? `${formatDate(latestDay.hour)}，权益 ${compactNumber(latestDay.equity)}` : '暂无'}`, '近 7 天暂无可用的零点权益快照', true)}
+          </div>
         </div>
         {dailySnapshots.length > 0 && <DailySnapshotsSection snapshots={dailySnapshots} />}
       </>

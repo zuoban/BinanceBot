@@ -1,5 +1,5 @@
 import { memo } from 'react';
-import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+import { Area, ComposedChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 
 type HistoryPoint = { hour: number; equity: number | null };
 const hourFormat = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hour12: false });
@@ -10,7 +10,7 @@ const axisTick = { fontSize: 11, fontFamily: 'var(--font-mono)', fill: 'var(--te
 function HistoryDot({ cx, cy, payload, stroke, index, data, discrete }: { cx?: number; cy?: number; payload?: { hour: number }; stroke?: string; index?: number; data: HistoryPoint[]; discrete: boolean }) {
   if (cx == null || cy == null || !payload || (index != null && data[index]?.equity == null)) return null;
   const isolated = discrete || (index != null && data[index - 1]?.equity == null && data[index + 1]?.equity == null);
-  return <circle cx={cx} cy={cy} r={2} fill={discrete ? 'var(--history-equity)' : stroke} className={payload.hour % (4 * 3600) === 0 || isolated ? undefined : 'history-point-hourly'} />;
+  return <circle cx={cx} cy={cy} r={2} fill={discrete ? (stroke ?? 'var(--history-equity)') : stroke} className={payload.hour % (4 * 3600) === 0 || isolated ? undefined : 'history-point-hourly'} />;
 }
 
 export default memo(function OverviewHistoryChart({ data, ticks, asset, formatValue, formatDate, daily = false, discrete = false }: {
@@ -32,13 +32,21 @@ export default memo(function OverviewHistoryChart({ data, ticks, asset, formatVa
     labelStyle: { color: 'var(--text-primary)', fontFamily: 'var(--font-mono)', fontWeight: 600, marginBottom: 4 },
     itemStyle: { color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' },
   };
-  return <ResponsiveContainer width="100%" height={200}>
-    <LineChart data={data} margin={{ top: 12, right: daily ? 28 : 12, bottom: 0, left: 4 }}>
+  const lineColor = daily ? 'var(--text-secondary)' : 'var(--history-equity)';
+  const chartHeight = daily ? 196 : 236;
+  return <ResponsiveContainer width="100%" height={chartHeight}>
+    <ComposedChart data={data} margin={{ top: 12, right: daily ? 16 : 12, bottom: 0, left: 4 }}>
+      {!daily && !discrete && <defs>
+        <linearGradient id="equityAreaFill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="var(--history-equity)" stopOpacity={0.18} />
+          <stop offset="100%" stopColor="var(--history-equity)" stopOpacity={0} />
+        </linearGradient>
+      </defs>}
       <CartesianGrid vertical={false} stroke="var(--border-hairline)" />
       <XAxis dataKey="hour" ticks={ticks} tickFormatter={daily ? formatDay : formatHour} tickLine={false} axisLine={false} interval={daily ? 'equidistantPreserveEnd' : 'preserveEnd'} minTickGap={daily ? 24 : 12} tick={axisTick} />
-      <YAxis width="auto" domain={['auto', 'auto']} tickFormatter={axisValue} tickLine={false} axisLine={false} tick={axisTick} tickCount={3} />
+      <YAxis width="auto" domain={['auto', 'auto']} tickFormatter={axisValue} tickLine={false} axisLine={false} tick={axisTick} tickCount={daily ? 3 : 4} />
       <Tooltip {...tooltip} />
-      <Line name="账户权益" dataKey="equity" stroke={discrete ? 'none' : 'var(--history-equity)'} strokeWidth={2} dot={<HistoryDot data={data} discrete={discrete} />} activeDot={{ r: 4, fill: 'var(--history-equity)' }} connectNulls={false} isAnimationActive={false} />
-    </LineChart>
+      <Area type="monotone" name="账户权益" dataKey="equity" stroke={discrete ? 'none' : lineColor} strokeWidth={daily ? 1.5 : 2} fill={!daily && !discrete ? 'url(#equityAreaFill)' : 'none'} dot={<HistoryDot data={data} discrete={discrete} stroke={lineColor} />} activeDot={{ r: 4, fill: lineColor }} connectNulls={false} isAnimationActive={false} />
+    </ComposedChart>
   </ResponsiveContainer>;
 });
