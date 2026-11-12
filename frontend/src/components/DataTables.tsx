@@ -18,6 +18,76 @@ const purposeLabel: Record<string, string> = { GRID: '网格', TAKE_PROFIT: '止
 function orderPurpose(o: Order) {
   return purposeLabel[o.purpose] ?? (o.is_take_profit ? '止盈' : '历史订单');
 }
+
+function sameMergeSources(a: Order['merge_sources'], b: Order['merge_sources']) {
+  if (a === b) return true;
+  const left = a ?? [], right = b ?? [];
+  if (left.length !== right.length) return false;
+  for (let i = 0; i < left.length; i++) {
+    if (
+      left[i].client_order_id !== right[i].client_order_id ||
+      left[i].price !== right[i].price ||
+      left[i].quantity !== right[i].quantity
+    ) return false;
+  }
+  return true;
+}
+
+function sameOrders(a: Order[], b: Order[]) {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const l = a[i], r = b[i];
+    if (
+      l.client_order_id !== r.client_order_id ||
+      l.side !== r.side ||
+      l.price !== r.price ||
+      l.quantity !== r.quantity ||
+      l.amount_usdc !== r.amount_usdc ||
+      l.purpose !== r.purpose ||
+      l.is_take_profit !== r.is_take_profit ||
+      l.status !== r.status ||
+      l.created_at !== r.created_at ||
+      !sameMergeSources(l.merge_sources, r.merge_sources)
+    ) return false;
+  }
+  return true;
+}
+
+export function sameTrades(a: Trade[], b: Trade[]) {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const l = a[i], r = b[i];
+    if (
+      l.trade_id !== r.trade_id ||
+      l.symbol !== r.symbol ||
+      l.mode !== r.mode ||
+      l.side !== r.side ||
+      l.price !== r.price ||
+      l.quantity !== r.quantity ||
+      l.amount_usdc !== r.amount_usdc ||
+      l.realized_pnl !== r.realized_pnl ||
+      l.commission !== r.commission ||
+      l.pnl_verified !== r.pnl_verified ||
+      l.is_maker !== r.is_maker ||
+      l.timestamp !== r.timestamp ||
+      l.note !== r.note
+    ) return false;
+  }
+  return true;
+}
+
+function sameLogs(a: Log[], b: Log[]) {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const l = a[i], r = b[i];
+    if (l.timestamp !== r.timestamp || l.level !== r.level || l.message !== r.message) return false;
+  }
+  return true;
+}
+
 const NowContext = createContext(0);
 function NowProvider({ currentNow, enabled, children }: { currentNow?: number; enabled: boolean; children: React.ReactNode }) {
   const fallbackNow = useNow(1000, currentNow === undefined && enabled);
@@ -169,7 +239,7 @@ export const OrdersTable = memo(function OrdersTable({ orders, mark }: { orders:
     />
   </>, [filter, isNarrow, rows, orders.length, exportRows]);
   return <MarkPriceContext.Provider value={mark}>{body}</MarkPriceContext.Provider>;
-});
+}, (prev, next) => prev.mark === next.mark && sameOrders(prev.orders, next.orders));
 const tradePagination = { pageSize: 15, showSizeChanger: false, hideOnSinglePage: true } as const;
 const tradeScroll = { x: 1000 } as const;
 export const TradesTable = memo(function TradesTable({ trades: allTrades, overview = false, now: currentNow }: { trades: Trade[]; overview?: boolean; now?: number }) {
@@ -216,7 +286,11 @@ export const TradesTable = memo(function TradesTable({ trades: allTrades, overvi
     />
   </div>, [overview, isNarrow, filter, trades, allTrades.length, exportRows, columns]);
   return <NowProvider currentNow={currentNow} enabled={trades.length > 0 && (overview || isNarrow)}>{body}</NowProvider>;
-});
+}, (prev, next) =>
+  prev.overview === next.overview &&
+  prev.now === next.now &&
+  sameTrades(prev.trades, next.trades),
+);
 const levels = ['ALL', 'ERROR', 'WARN', 'SUCCESS', 'INFO'] as const;
 type LevelFilter = typeof levels[number];
 const levelOptions: { value: LevelFilter; label: string }[] = levels.map(value => ({ value, label: value === 'ALL' ? '全部' : value }));
@@ -264,4 +338,4 @@ export const LogsTable = memo(function LogsTable({ logs }: { logs: Log[] }) {
       </li>)}
     />
   </>;
-});
+}, (prev, next) => sameLogs(prev.logs, next.logs));

@@ -146,6 +146,26 @@ pub(super) async fn get_trades_handler(
     let symbol = config.exchange.symbol.clone();
     let mode = config.exchange.trading_mode();
     drop(config);
+    if !state
+        .recent_trades_dirty
+        .load(std::sync::atomic::Ordering::SeqCst)
+        && state
+            .recent_trades_revision
+            .load(std::sync::atomic::Ordering::Acquire)
+            == state.db.symbol_trade_revision(&symbol)
+    {
+        let recent = state.recent_trades.read().await;
+        let matched: Vec<TradeRecord> = recent
+            .iter()
+            .rev()
+            .filter(|t| t.symbol == symbol && t.mode == mode)
+            .take(100)
+            .cloned()
+            .collect();
+        if matched.len() == 100 || recent.iter().all(|t| t.symbol == symbol && t.mode == mode) {
+            return json_ok(matched);
+        }
+    }
     let query_symbol = symbol.clone();
     let trades = match state
         .db

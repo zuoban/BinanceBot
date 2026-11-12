@@ -57,6 +57,7 @@ pub struct AppState {
     pub(crate) paper_restore_failed: AtomicBool,
     pub(super) stats_dirty: AtomicBool,
     pub(super) recent_trades_dirty: AtomicBool,
+    pub(crate) recent_trades_revision: AtomicU64,
     pub(crate) global_cancel_pending: AtomicBool,
     pub(crate) global_cancel_queued: AtomicBool,
     pause_epoch: AtomicU64,
@@ -96,6 +97,7 @@ struct RestoredPairState {
     stats: GridStats,
     stats_dirty: bool,
     trades_dirty: bool,
+    trades_revision: u64,
 }
 
 impl AppState {
@@ -231,9 +233,10 @@ impl AppState {
         db: &Database,
         symbol: &str,
         mode: crate::types::TradingMode,
-    ) -> (VecDeque<TradeRecord>, GridStats, bool, bool) {
+    ) -> (VecDeque<TradeRecord>, GridStats, bool, bool, u64) {
         let mut stats_dirty = false;
         let mut recent_trades_dirty = false;
+        let trades_revision = db.symbol_trade_revision(symbol);
         let saved_trades = match db.get_recent_trades_for(symbol, mode, RECENT_TRADE_LIMIT) {
             Ok(trades) => trades,
             Err(e) => {
@@ -263,6 +266,7 @@ impl AppState {
             build_grid_stats(scoped_stats, pnl_totals),
             stats_dirty,
             recent_trades_dirty,
+            trades_revision,
         )
     }
 
@@ -275,7 +279,7 @@ impl AppState {
         let mode = config.exchange.trading_mode();
         let (status, position, account, paper_failed) =
             Self::restore_initial_status_and_paper(config, db, pair_scope);
-        let (trades, stats, stats_dirty, trades_dirty) =
+        let (trades, stats, stats_dirty, trades_dirty, trades_revision) =
             Self::restore_initial_trades_and_stats(db, &symbol, mode);
         RestoredPairState {
             ticker: TickerInfo {
@@ -290,6 +294,7 @@ impl AppState {
             stats,
             stats_dirty,
             trades_dirty,
+            trades_revision,
         }
     }
 
@@ -324,6 +329,7 @@ impl AppState {
             paper_restore_failed: AtomicBool::new(r.paper_failed),
             stats_dirty: AtomicBool::new(r.stats_dirty),
             recent_trades_dirty: AtomicBool::new(r.trades_dirty),
+            recent_trades_revision: AtomicU64::new(r.trades_revision),
             global_cancel_pending: AtomicBool::new(false),
             global_cancel_queued: AtomicBool::new(false),
             pause_epoch: AtomicU64::new(0),

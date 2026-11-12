@@ -99,6 +99,7 @@ type PersistedTradeOutcome = (
     GridStats,
     Option<VecDeque<TradeRecord>>,
     Option<HourlyTradeStats>,
+    u64,
 );
 
 struct PersistTradeInput<'a> {
@@ -165,11 +166,13 @@ fn persist_trade_and_stats_on_db(
             .ok()
         })
         .flatten();
+    let revision = db.symbol_trade_revision(&stored_trade.symbol);
     Ok((
         inserted,
         if inserted { updated } else { base },
         reloaded_trades,
         hourly,
+        revision,
     ))
 }
 
@@ -295,18 +298,15 @@ impl AppState {
         &self,
         trade: &TradeRecord,
         paper_state: Option<(PositionInfo, AccountInfo)>,
-        outcome: (
-            bool,
-            GridStats,
-            Option<VecDeque<TradeRecord>>,
-            Option<HourlyTradeStats>,
-        ),
+        outcome: PersistedTradeOutcome,
     ) -> (bool, Option<HourlyTradeStats>) {
-        let (inserted, next_stats, reloaded_trades, notification_stats) = outcome;
+        let (inserted, next_stats, reloaded_trades, notification_stats, revision) = outcome;
         let had_reloaded_trades = reloaded_trades.is_some();
         if let Some(reloaded) = reloaded_trades {
             *self.recent_trades.write().await = reloaded;
             self.recent_trades_dirty.store(false, Ordering::SeqCst);
+            self.recent_trades_revision
+                .store(revision, Ordering::Release);
         }
         *self.stats.write().await = next_stats;
         self.stats_dirty.store(false, Ordering::SeqCst);
@@ -319,6 +319,8 @@ impl AppState {
         }
         if !had_reloaded_trades {
             cache_recent_trade(&mut *self.recent_trades.write().await, trade.clone());
+            self.recent_trades_revision
+                .store(revision, Ordering::Release);
         }
         (true, notification_stats)
     }
@@ -464,6 +466,10 @@ impl AppState {
             existing.commission = trade.commission;
             existing.is_maker = trade.is_maker;
             existing.pnl_verified = true;
+            self.recent_trades_revision.store(
+                self.db.symbol_trade_revision(&trade.symbol),
+                Ordering::Release,
+            );
         }
         Ok(true)
     }

@@ -1,7 +1,9 @@
 use super::ws::{authorize_and_configure_ws, send_with_timeout};
 use super::{json_ok, ApiResponse};
 use crate::runtime::RuntimeHandle;
-use crate::server::state::snapshot::{AccountFrame, AccountMessage};
+use crate::server::state::snapshot::{
+    snapshot_frame_unchanged, AccountFrame, AccountMessage, SNAPSHOT_IDLE_HEARTBEAT,
+};
 use crate::server::state::{AppState, AuthContext};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::http::{HeaderMap, StatusCode};
@@ -80,6 +82,7 @@ impl AccountHub {
         tokio::spawn(async move {
             let mut ticks = tokio::time::interval(std::time::Duration::from_secs(1));
             ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut last_broadcast: Option<(std::time::Instant, usize, Arc<str>)> = None;
             loop {
                 tokio::select! {
                     biased;
@@ -111,7 +114,20 @@ impl AccountHub {
                         };
                         // If the last subscriber left during collection, the
                         // closed branch performs the synchronized shutdown.
-                        let _ = sender.send(Some(Arc::<str>::from(message)));
+                        let receivers = sender.receiver_count();
+                        let skip = last_broadcast.as_ref().is_some_and(
+                            |(sent_at, prev_receivers, prev_frame)| {
+                                receivers <= *prev_receivers
+                                    && sent_at.elapsed() < SNAPSHOT_IDLE_HEARTBEAT
+                                    && snapshot_frame_unchanged(prev_frame, &message)
+                            },
+                        );
+                        if !skip {
+                            let arc_msg = Arc::<str>::from(message);
+                            let _ = sender.send(Some(Arc::clone(&arc_msg)));
+                            last_broadcast =
+                                Some((std::time::Instant::now(), receivers, arc_msg));
+                        }
                     }
                 }
             }

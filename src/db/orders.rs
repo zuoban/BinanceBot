@@ -163,6 +163,26 @@ impl Database {
         Ok(())
     }
 
+    pub(crate) fn delete_managed_orders(&self, client_order_ids: &[String]) -> Result<()> {
+        if client_order_ids.is_empty() {
+            return Ok(());
+        }
+        if client_order_ids.len() == 1 {
+            return self.delete_managed_order(&client_order_ids[0]);
+        }
+        let mut conn = self.lock_connection("delete_managed_orders");
+        let tx = super::immediate_tx(&mut conn)?;
+        {
+            let mut stmt =
+                tx.prepare_cached("DELETE FROM managed_orders WHERE client_order_id = ?1;")?;
+            for id in client_order_ids {
+                stmt.execute(params![id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub(crate) fn clear_managed_orders(&self, symbol: &str) -> Result<()> {
         let conn = self.lock_connection("clear_managed_orders");
         conn.prepare_cached("DELETE FROM managed_orders WHERE symbol = ?1;")?

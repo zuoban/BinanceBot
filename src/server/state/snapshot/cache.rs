@@ -10,7 +10,7 @@ use tokio::sync::Mutex;
 use tracing::warn;
 
 pub(super) const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(800);
-pub(super) const SNAPSHOT_IDLE_HEARTBEAT: Duration = Duration::from_secs(3);
+pub(crate) const SNAPSHOT_IDLE_HEARTBEAT: Duration = Duration::from_secs(3);
 const TRADE_CACHE_TTL: Duration = Duration::from_secs(5);
 const QUERY_RETRY_DELAY: Duration = Duration::from_secs(5);
 
@@ -135,7 +135,7 @@ fn split_volatile_field<'a>(s: &'a str, needle: &str) -> Option<(&'a str, &'a st
     }
 }
 
-pub(super) fn snapshot_frame_unchanged(previous: &str, current: &str) -> bool {
+pub(crate) fn snapshot_frame_unchanged(previous: &str, current: &str) -> bool {
     fn strip_volatile(frame: &str) -> (&str, &str, &str) {
         let (head, after_gen) =
             split_volatile_field(frame, "\"generated_at\":").unwrap_or(("", frame));

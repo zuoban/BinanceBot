@@ -91,6 +91,25 @@ impl GridTradingEngine {
         Ok(())
     }
 
+    pub(super) async fn remove_managed_and_active_orders(
+        &self,
+        client_order_ids: Vec<String>,
+    ) -> Result<()> {
+        if client_order_ids.is_empty() {
+            return Ok(());
+        }
+        let to_delete = client_order_ids.clone();
+        self.state
+            .db
+            .run_blocking(move |db| db.delete_managed_orders(&to_delete))
+            .await?;
+        let mut active = self.state.active_orders.write().await;
+        for id in &client_order_ids {
+            active.remove(id);
+        }
+        Ok(())
+    }
+
     // Direct order lookups can observe a fill absent from the open-orders
     // snapshot. Preserve the old reservation until both risk inputs are fresh.
     pub(super) async fn prepare_partial_adoption(

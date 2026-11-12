@@ -69,6 +69,21 @@ const HourlyChartContent = memo(function HourlyChartContent({ stats, hourBucket,
     </ResponsiveContainer></div>
   </>;
 }, (prev, next) => prev.available === next.available && prev.hourBucket === next.hourBucket && sameHourlyStats(prev.stats, next.stats));
+function sameDepthOrders(a: Snapshot['active_orders'], b: Snapshot['active_orders']) {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const left = a[i], right = b[i];
+    if (
+      left.client_order_id !== right.client_order_id ||
+      left.side !== right.side ||
+      left.price !== right.price ||
+      left.quantity !== right.quantity
+    ) return false;
+  }
+  return true;
+}
+
 export const DepthChart = memo(function DepthChart({ snapshot }: { snapshot: Snapshot }) {
   const orders = snapshot.active_orders;
   const containerRef = useRef<HTMLDivElement>(null);
@@ -89,8 +104,12 @@ export const DepthChart = memo(function DepthChart({ snapshot }: { snapshot: Sna
     return { buyCount: buy, sellCount: sell, orderRows: sorted };
   }, [orders]);
   const rows = useMemo(() => {
-    if (!hasMark) return orderRows;
-    const result: (typeof orderRows[number] | { kind: 'mark'; priceText: string })[] = [...orderRows];
+    const withDiff = orderRows.map(r => ({
+      ...r,
+      diff: hasMark ? priceDiffPercent(r.order.price, markPrice) : null,
+    }));
+    if (!hasMark) return withDiff;
+    const result: (typeof withDiff[number] | { kind: 'mark'; priceText: string })[] = [...withDiff];
     const insertIdx = orderRows.findIndex(r => compareSignedDecimals(r.order.price, markPrice) < 0);
     const markRow = { kind: 'mark' as const, priceText: price(markPrice) };
     if (insertIdx === -1) result.push(markRow);
@@ -103,11 +122,14 @@ export const DepthChart = memo(function DepthChart({ snapshot }: { snapshot: Sna
     <div ref={containerRef} className="grid-levels" role="region" aria-label="按价格从高到低排列的实时网格挂单" tabIndex={0}>
       {rows.map(row => {
         if (row.kind === 'mark') return <div className="grid-level grid-level-mark" key="mark"><span>标记价</span><span className="grid-level-line" /><strong>{row.priceText}</strong></div>;
-        const diff = hasMark ? priceDiffPercent(row.order.price, markPrice) : null;
         return <div className={`grid-level grid-level-${row.order.side.toLowerCase()}`} key={row.order.client_order_id}>
-          <span>{row.order.side === 'BUY' ? '买单' : '卖单'} <span className="grid-level-quantity">{row.qtyText}</span></span><span className="grid-level-line" />{diff && <span className="grid-level-diff">{diff}</span>}<strong>{row.priceText}</strong>
+          <span>{row.order.side === 'BUY' ? '买单' : '卖单'} <span className="grid-level-quantity">{row.qtyText}</span></span><span className="grid-level-line" />{row.diff && <span className="grid-level-diff">{row.diff}</span>}<strong>{row.priceText}</strong>
         </div>;
       })}
     </div>
   </>;
-});
+}, (prev, next) =>
+  prev.snapshot.symbol === next.snapshot.symbol &&
+  prev.snapshot.ticker.mark_price === next.snapshot.ticker.mark_price &&
+  sameDepthOrders(prev.snapshot.active_orders, next.snapshot.active_orders),
+);

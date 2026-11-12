@@ -4,7 +4,7 @@ import { modeLabel } from '../lib/format';
 import { groupTradePnl, positionAmount } from '../lib/portfolio';
 import type { Mode, Overview, Status, Trade } from '../lib/types';
 import { FreshnessText, Pnl, SignalButton, SignalChip, type Signal } from './Common';
-import { TradesTable } from './DataTables';
+import { sameTrades, TradesTable } from './DataTables';
 
 type StatusFilter = 'all' | Status | 'LIVE';
 type OverviewSort = 'position' | 'symbol' | 'today' | 'orders';
@@ -112,4 +112,4 @@ export const OverviewTradesCard = memo(function OverviewTradesCard({ recentTrade
     <div id="recent-trades-list"><TradesTable overview trades={displayedTrades} /></div>
     {recentTrades.length > 5 && <div className="overview-trades-toggle"><Button type="text" aria-expanded={tradesExpanded} aria-controls="recent-trades-list" onClick={() => setTradesExpanded(value => !value)}>{tradesExpanded ? '收起' : '展开最近 20 条'}</Button></div>}
   </Card>;
-});
+}, (prev, next) => sameTrades(prev.recentTrades, next.recentTrades));

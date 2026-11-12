@@ -35,6 +35,7 @@ impl GridTradingEngine {
         terminal_orders: Vec<(GridOrder, BinanceOrderResponse)>,
     ) -> bool {
         let mut persistence_ok = true;
+        let mut unfilled_ids = Vec::new();
         for (mut order, exchange_order) in terminal_orders {
             if exchange_order.executed_qty > Decimal::ZERO {
                 order.apply_terminal_fill(&exchange_order, exchange_fill_time(&exchange_order));
@@ -42,20 +43,17 @@ impl GridTradingEngine {
                     persistence_ok = false;
                 }
             } else {
-                if let Err(e) = self
-                    .remove_managed_and_active_order(&order.client_order_id)
-                    .await
-                {
-                    error!(
-                        "Could not delete closed order {}: {}",
-                        order.client_order_id, e
-                    );
-                    persistence_ok = false;
-                }
                 debug!(
                     "Order {} closed without a fill ({})",
                     order.client_order_id, exchange_order.status
                 );
+                unfilled_ids.push(order.client_order_id);
+            }
+        }
+        if !unfilled_ids.is_empty() {
+            if let Err(e) = self.remove_managed_and_active_orders(unfilled_ids).await {
+                error!("Could not delete closed orders: {}", e);
+                persistence_ok = false;
             }
         }
         persistence_ok

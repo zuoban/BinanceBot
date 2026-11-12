@@ -22,22 +22,25 @@ impl AppState {
         let result = self
             .db
             .run_blocking(move |db| {
+                let rev = db.symbol_trade_revision(&query_symbol);
                 let saved_stats = db.load_scoped_stats(&query_symbol, mode)?;
                 let pnl_totals = db.get_pnl_totals(&query_symbol, mode)?;
                 let trades = db.get_recent_trades_for(&query_symbol, mode, RECENT_TRADE_LIMIT)?;
                 Ok((
                     build_grid_stats(saved_stats, Some(pnl_totals)),
                     recent_trade_cache(trades),
+                    rev,
                 ))
             })
             .await;
         match result {
-            Ok((mut loaded_stats, loaded_trades)) => {
+            Ok((mut loaded_stats, loaded_trades, rev)) => {
                 preserve_runtime_grid_stats(&mut loaded_stats, &cached_stats);
                 self.stats_dirty.store(false, Ordering::SeqCst);
                 self.recent_trades_dirty.store(false, Ordering::SeqCst);
                 *self.stats.write().await = loaded_stats;
                 *self.recent_trades.write().await = loaded_trades;
+                self.recent_trades_revision.store(rev, Ordering::Release);
             }
             Err(e) => {
                 error!("Failed to load scoped statistics: {}", e);
@@ -151,6 +154,7 @@ impl AppState {
     }
 
     async fn reset_trade_history_cache(&self) {
+        let symbol = self.config.read().await.exchange.symbol.clone();
         self.stats_dirty.store(false, Ordering::SeqCst);
         self.recent_trades_dirty.store(false, Ordering::SeqCst);
         let mut stats = self.stats.write().await;
@@ -158,5 +162,7 @@ impl AppState {
         preserve_runtime_grid_stats(&mut cleared, &stats);
         *stats = cleared;
         self.recent_trades.write().await.clear();
+        self.recent_trades_revision
+            .store(self.db.symbol_trade_revision(&symbol), Ordering::Release);
     }
 }
