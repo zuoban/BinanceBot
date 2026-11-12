@@ -72,10 +72,22 @@ const beijingTimeFormat = new Intl.DateTimeFormat('zh-CN', {
   second: '2-digit',
   hour12: false,
 });
+const TIME_CACHE_LIMIT = 2048;
+const timeFormatCache = new Map<string | number, string>();
 export const isValidEpochMs = (ms: number) => Number.isFinite(ms) && Math.abs(ms) <= 8.64e15;
 export const time = (value: string | number) => {
+  const canCache = typeof value === 'number' || value.length <= 64;
+  if (canCache) {
+    const cached = timeFormatCache.get(value);
+    if (cached !== undefined) return cached;
+  }
   const ts = typeof value === 'number' ? value : Date.parse(value);
-  return isValidEpochMs(ts) ? beijingTimeFormat.format(ts) : '--';
+  const formatted = isValidEpochMs(ts) ? beijingTimeFormat.format(ts) : '--';
+  if (canCache) {
+    if (timeFormatCache.size >= TIME_CACHE_LIMIT) timeFormatCache.clear();
+    timeFormatCache.set(value, formatted);
+  }
+  return formatted;
 };
 function formatSeconds(seconds: number) {
   const [amount, unit] = seconds < 60 ? [seconds, '秒'] : seconds < 3600 ? [Math.floor(seconds / 60), '分钟'] : seconds < 86400 ? [Math.floor(seconds / 3600), '小时'] : [Math.floor(seconds / 86400), '天'];

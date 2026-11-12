@@ -184,6 +184,32 @@ impl GridTradingEngine {
                     rules.tick_size,
                 );
                 if !already_exists && side.is_maker_price(target_price, current_price) {
+                    if side == config.grid.direction.closing_side() {
+                        let Some(full_quantity) =
+                            rules.calculate_quantity(target_price, config.grid.order_amount_usdc)
+                        else {
+                            placement_failed = true;
+                            continue;
+                        };
+                        let available = {
+                            let active_orders = self.state.active_orders.read().await;
+                            closing_quantity_available(
+                                config.grid.direction,
+                                self.state.position.read().await.size,
+                                active_orders.values(),
+                            )
+                        };
+                        if available < full_quantity {
+                            debug!(
+                                "Skipping {} at {}: available {} < full grid quantity {}",
+                                side.as_str(),
+                                target_price,
+                                available,
+                                full_quantity
+                            );
+                            continue;
+                        }
+                    }
                     let client_id = new_grid_client_order_id(side);
                     if self
                         .place_grid_order_in_window(
@@ -301,19 +327,22 @@ impl GridTradingEngine {
         } else {
             &window.desired_buy_prices
         };
-        if let Err(e) = self.reconcile_remainder(closing_prices).await {
-            self.state
-                .add_log("WARN", format!("Remainder reconciliation pending: {}", e))
-                .await;
-            return;
-        }
+        let remainder_active = match self.reconcile_remainder(closing_prices).await {
+            Ok(active) => active,
+            Err(e) => {
+                self.state
+                    .add_log("WARN", format!("Remainder reconciliation pending: {}", e))
+                    .await;
+                return;
+            }
+        };
         if self
             .prune_grid_window(&window.desired_buy_prices, &window.desired_sell_prices)
             .await
         {
             return;
         }
-        self.store_paper_window_cache_if_clean(paper_inputs, placement_failed)
+        self.store_paper_window_cache_if_clean(paper_inputs, placement_failed || remainder_active)
             .await;
     }
 

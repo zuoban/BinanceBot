@@ -155,7 +155,7 @@ impl GridTradingEngine {
         Some((sources, target))
     }
 
-    pub(super) async fn reconcile_remainder(&mut self, desired_prices: &[Decimal]) -> Result<()> {
+    pub(super) async fn reconcile_remainder(&mut self, desired_prices: &[Decimal]) -> Result<bool> {
         let config = self.state.config.read().await.clone();
         let closing_side = config.grid.direction.closing_side();
         let closing_window = if closing_side == OrderSide::Buy {
@@ -168,14 +168,14 @@ impl GridTradingEngine {
             || *self.state.status.read().await != BotStatus::Running
             || !self.state.ticker.read().await.prices_are_fresh(Utc::now())
         {
-            return Ok(());
+            return Ok(false);
         }
         let rules = self.state.rules.read().await.clone();
         let Some((sources, target)) = self
             .plan_remainder_target(&config, &rules, desired_prices)
             .await
         else {
-            return Ok(());
+            return Ok(false);
         };
         let mut plan = RemainderPlan {
             mode: config.exchange.trading_mode(),
@@ -186,7 +186,11 @@ impl GridTradingEngine {
         };
         // No cancellation or submission can precede this durable intent.
         self.persist_remainder_plan(&plan).await?;
-        Box::pin(self.execute_remainder_plan(&mut plan)).await
+        Box::pin(self.execute_remainder_plan(&mut plan)).await?;
+        Ok(matches!(
+            plan.phase,
+            RemainderPhase::Canceling | RemainderPhase::Submitting
+        ))
     }
 
     async fn validate_remainder_submission_window(

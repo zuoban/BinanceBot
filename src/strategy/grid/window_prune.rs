@@ -98,13 +98,10 @@ impl GridTradingEngine {
             !placement_failed
                 && inputs.trade_revision == self.state.db.symbol_trade_revision(&inputs.symbol)
         }) {
-            // A deferred remainder workflow must retry even without a price move.
-            if matches!(self.load_remainder_plan().await, Ok(None)) {
-                self.paper_window_cache = Some(PaperWindowCache {
-                    inputs,
-                    orders: self.state.active_orders.read().await.clone(),
-                });
-            }
+            self.paper_window_cache = Some(PaperWindowCache {
+                inputs,
+                orders: self.state.active_orders.read().await.clone(),
+            });
         }
     }
 
@@ -268,21 +265,32 @@ impl GridTradingEngine {
     /// Keep closing orders within the directional position, nearest prices first.
     pub(super) async fn trim_closing_orders_to_position(&mut self) -> bool {
         let direction = self.state.config.read().await.grid.direction;
-        let mut closing_orders: Vec<GridOrder> = self
-            .state
-            .active_orders
-            .read()
-            .await
-            .values()
-            .filter(|order| order.side == direction.closing_side())
-            .cloned()
-            .collect();
+        let mut remaining = direction.position_quantity(self.state.position.read().await.size);
+        let mut closing_orders: Vec<GridOrder> = {
+            let active = self.state.active_orders.read().await;
+            if active
+                .values()
+                .filter(|order| order.side == direction.closing_side())
+                .try_fold(Decimal::ZERO, |acc, order| {
+                    (order.quantity >= Decimal::ZERO)
+                        .then(|| acc.checked_add(order.quantity))
+                        .flatten()
+                })
+                .is_some_and(|total| total <= remaining)
+            {
+                return false;
+            }
+            active
+                .values()
+                .filter(|order| order.side == direction.closing_side())
+                .cloned()
+                .collect()
+        };
         closing_orders.sort_by(|a, b| {
             direction
                 .closing_price_cmp(a.price, b.price)
                 .then_with(|| a.client_order_id.cmp(&b.client_order_id))
         });
-        let mut remaining = direction.position_quantity(self.state.position.read().await.size);
         let mut canceled_any = false;
         for order in closing_orders {
             if order.quantity <= remaining {

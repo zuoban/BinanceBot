@@ -10,14 +10,38 @@ const SIGNED_DECIMAL_PATTERN = /^([+-])?(\d+)(?:\.(\d+))?$/;
 
 const MAX_DECIMAL_INPUT_LENGTH = 64;
 const MAX_DECIMAL_PART_DIGITS = 30;
+const DECIMAL_CACHE_LIMIT = 4096;
+const unsignedDecimalCache = new Map<string, Fixed | null>();
+const signedDecimalCache = new Map<string, Fixed | null>();
 
 export function parseUnsignedDecimal(value: unknown): Fixed | null {
   if (value === null || value === undefined) return null;
+  if (typeof value === 'string' && value.length <= MAX_DECIMAL_INPUT_LENGTH) {
+    const cached = unsignedDecimalCache.get(value);
+    if (cached !== undefined) return cached;
+  }
   const text = String(value).trim();
-  if (text.length > MAX_DECIMAL_INPUT_LENGTH || !UNSIGNED_DECIMAL_PATTERN.test(text)) return null;
+  if (text.length > MAX_DECIMAL_INPUT_LENGTH || !UNSIGNED_DECIMAL_PATTERN.test(text)) {
+    if (typeof value === 'string' && value.length <= MAX_DECIMAL_INPUT_LENGTH) {
+      if (unsignedDecimalCache.size >= DECIMAL_CACHE_LIMIT) unsignedDecimalCache.clear();
+      unsignedDecimalCache.set(value, null);
+    }
+    return null;
+  }
   const [whole, fraction = ''] = text.split('.');
-  if (whole.replace(/^0+/, '').length > MAX_DECIMAL_PART_DIGITS || fraction.length > MAX_DECIMAL_PART_DIGITS) return null;
-  return { n: BigInt(whole + fraction), s: fraction.length };
+  if (whole.replace(/^0+/, '').length > MAX_DECIMAL_PART_DIGITS || fraction.length > MAX_DECIMAL_PART_DIGITS) {
+    if (typeof value === 'string' && value.length <= MAX_DECIMAL_INPUT_LENGTH) {
+      if (unsignedDecimalCache.size >= DECIMAL_CACHE_LIMIT) unsignedDecimalCache.clear();
+      unsignedDecimalCache.set(value, null);
+    }
+    return null;
+  }
+  const parsed: Fixed = { n: BigInt(whole + fraction), s: fraction.length };
+  if (typeof value === 'string' && value.length <= MAX_DECIMAL_INPUT_LENGTH) {
+    if (unsignedDecimalCache.size >= DECIMAL_CACHE_LIMIT) unsignedDecimalCache.clear();
+    unsignedDecimalCache.set(value, parsed);
+  }
+  return parsed;
 }
 
 export function parseSignedDecimal(value: unknown): Fixed | null {
@@ -29,17 +53,44 @@ export function parseSignedDecimal(value: unknown): Fixed | null {
     const raw = String(value);
     text = /[eE]/.test(raw) && Math.abs(value) < 1 ? value.toFixed(20) : raw;
   } else if (typeof value === 'string') {
+    if (value.length <= MAX_DECIMAL_INPUT_LENGTH) {
+      const cached = signedDecimalCache.get(value);
+      if (cached !== undefined) return cached;
+    }
     text = value.trim();
   } else {
     return null;
   }
-  if (text.length > MAX_DECIMAL_INPUT_LENGTH) return null;
+  if (text.length > MAX_DECIMAL_INPUT_LENGTH) {
+    if (typeof value === 'string' && value.length <= MAX_DECIMAL_INPUT_LENGTH) {
+      if (signedDecimalCache.size >= DECIMAL_CACHE_LIMIT) signedDecimalCache.clear();
+      signedDecimalCache.set(value, null);
+    }
+    return null;
+  }
   const match = SIGNED_DECIMAL_PATTERN.exec(text);
-  if (!match) return null;
+  if (!match) {
+    if (typeof value === 'string' && value.length <= MAX_DECIMAL_INPUT_LENGTH) {
+      if (signedDecimalCache.size >= DECIMAL_CACHE_LIMIT) signedDecimalCache.clear();
+      signedDecimalCache.set(value, null);
+    }
+    return null;
+  }
   const [, sign, whole, fraction = ''] = match;
-  if (whole.replace(/^0+/, '').length > MAX_DECIMAL_PART_DIGITS || fraction.length > MAX_DECIMAL_PART_DIGITS) return null;
+  if (whole.replace(/^0+/, '').length > MAX_DECIMAL_PART_DIGITS || fraction.length > MAX_DECIMAL_PART_DIGITS) {
+    if (typeof value === 'string' && value.length <= MAX_DECIMAL_INPUT_LENGTH) {
+      if (signedDecimalCache.size >= DECIMAL_CACHE_LIMIT) signedDecimalCache.clear();
+      signedDecimalCache.set(value, null);
+    }
+    return null;
+  }
   const magnitude = BigInt(whole + fraction);
-  return { n: sign === '-' && magnitude !== 0n ? -magnitude : magnitude, s: fraction.length };
+  const parsed: Fixed = { n: sign === '-' && magnitude !== 0n ? -magnitude : magnitude, s: fraction.length };
+  if (typeof value === 'string' && value.length <= MAX_DECIMAL_INPUT_LENGTH) {
+    if (signedDecimalCache.size >= DECIMAL_CACHE_LIMIT) signedDecimalCache.clear();
+    signedDecimalCache.set(value, parsed);
+  }
+  return parsed;
 }
 
 export const rescaleDecimal = (value: Fixed, scale: number): bigint => value.n * 10n ** BigInt(scale - value.s);

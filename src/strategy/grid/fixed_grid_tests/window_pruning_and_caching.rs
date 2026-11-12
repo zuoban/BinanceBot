@@ -446,6 +446,33 @@ async fn unchanged_paper_ticks_skip_database_work_but_configuration_and_orders_i
 }
 
 #[tokio::test]
+async fn paper_window_cache_populates_with_flat_position_and_invalidates_when_position_grows() {
+    let mut engine = paper_engine().await;
+    engine.state.config.write().await.grid.max_position_usdc = None;
+    engine.state.position.write().await.size = Decimal::ZERO;
+    let samples = engine.state.db.enable_benchmark_wait_samples();
+    engine.maintain_grid_window().await;
+    assert!(engine.paper_window_cache.is_some());
+    let queries = samples.queue.lock().unwrap().len();
+    for price in [dec!(118.81), dec!(118.87), dec!(118.89)] {
+        engine.state.ticker.write().await.last_price = price;
+        engine.simulate_order_fills(price).await;
+    }
+    assert_eq!(samples.queue.lock().unwrap().len(), queries);
+    assert!(orders(&engine)
+        .await
+        .iter()
+        .all(|order| order.side == OrderSide::Buy));
+
+    engine.state.position.write().await.size = dec!(2);
+    engine.simulate_order_fills(dec!(118.85)).await;
+    assert!(orders(&engine)
+        .await
+        .iter()
+        .any(|order| order.side == OrderSide::Sell));
+}
+
+#[tokio::test]
 async fn paper_window_cache_does_not_bypass_limits_or_failed_maintenance_retries() {
     let mut engine = paper_engine().await;
     engine.state.position.write().await.size = dec!(5.04);

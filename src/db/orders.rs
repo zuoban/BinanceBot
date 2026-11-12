@@ -1,18 +1,69 @@
-use super::Database;
+use super::{evidence::load_terminal_order_disagreements_on, Database};
 use crate::types::{GridOrder, RemainderPlan, TradingMode};
 use anyhow::Result;
 use chrono::Utc;
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
+
+pub(crate) type LiveSyncPreflightDbResult = std::result::Result<
+    (Vec<GridOrder>, Option<RemainderPlan>, Option<Result<bool>>),
+    (bool, anyhow::Error),
+>;
+
+fn load_pair_intents_on(
+    conn: &Connection,
+    symbol: &str,
+    mode: TradingMode,
+) -> Result<Vec<GridOrder>> {
+    super::query_json_vec(
+        conn,
+        "SELECT order_json FROM pair_intents WHERE symbol = ?1 AND mode = ?2 ORDER BY created_at;",
+        params![symbol, mode.as_str()],
+        "pair_intents",
+    )
+}
+
+fn load_remainder_plan_on(
+    conn: &Connection,
+    symbol: &str,
+    mode: TradingMode,
+) -> Result<Option<RemainderPlan>> {
+    let json: Option<String> = conn
+        .prepare_cached(
+            "SELECT plan_json FROM remainder_plans WHERE symbol = ?1 AND mode = ?2 AND active = 1;",
+        )?
+        .query_row(params![symbol, mode.as_str()], |row| row.get(0))
+        .optional()?;
+    json.map(|json| serde_json::from_str(&json).map_err(Into::into))
+        .transpose()
+}
 
 impl Database {
     pub fn load_pair_intents(&self, symbol: &str, mode: TradingMode) -> Result<Vec<GridOrder>> {
         let conn = self.lock_connection("load_pair_intents");
-        super::query_json_vec(
-            &conn,
-            "SELECT order_json FROM pair_intents WHERE symbol = ?1 AND mode = ?2 ORDER BY created_at;",
-            params![symbol, mode.as_str()],
-            "pair_intents",
-        )
+        load_pair_intents_on(&conn, symbol, mode)
+    }
+
+    pub(crate) fn load_live_sync_preflight(
+        &self,
+        account: [u8; 32],
+        symbol: &str,
+        mode: TradingMode,
+        check_disagreements: bool,
+    ) -> LiveSyncPreflightDbResult {
+        let conn = self.lock_connection("load_live_sync_preflight");
+        let intents = match load_pair_intents_on(&conn, symbol, mode) {
+            Ok(orders) => orders,
+            Err(err) => return Err((true, err)),
+        };
+        let plan = match load_remainder_plan_on(&conn, symbol, mode) {
+            Ok(plan) => plan,
+            Err(err) => return Err((false, err)),
+        };
+        let disagreements_blocked = check_disagreements.then(|| {
+            load_terminal_order_disagreements_on(&conn, account, symbol)
+                .map(|records| !records.is_empty())
+        });
+        Ok((intents, plan, disagreements_blocked))
     }
 
     pub(crate) fn delete_pair_intent(&self, parent_client_order_id: &str) -> Result<()> {
@@ -65,14 +116,7 @@ impl Database {
         mode: TradingMode,
     ) -> Result<Option<RemainderPlan>> {
         let conn = self.lock_connection("load_remainder_plan");
-        let json: Option<String> = conn
-            .prepare_cached(
-                "SELECT plan_json FROM remainder_plans WHERE symbol = ?1 AND mode = ?2 AND active = 1;",
-            )?
-            .query_row(params![symbol, mode.as_str()], |row| row.get(0))
-            .optional()?;
-        json.map(|json| serde_json::from_str(&json).map_err(Into::into))
-            .transpose()
+        load_remainder_plan_on(&conn, symbol, mode)
     }
 
     pub fn save_managed_order(&self, order: &GridOrder) -> Result<()> {

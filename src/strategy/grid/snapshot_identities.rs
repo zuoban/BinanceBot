@@ -175,14 +175,22 @@ impl GridTradingEngine {
         account_key: [u8; 32],
         symbol: &str,
         live_ids: &HashMap<String, BinanceOrderResponse>,
-        pair_intents: &HashMap<String, GridOrder>,
-        remainder_plan: Option<&RemainderPlan>,
+        recovery: (
+            &HashMap<String, GridOrder>,
+            Option<&RemainderPlan>,
+            Option<Vec<GridOrder>>,
+        ),
         restored_ids: &mut HashSet<String>,
     ) -> Option<HashMap<String, GridOrder>> {
+        let (pair_intents, remainder_plan, preloaded_managed) = recovery;
         if live_ids.is_empty() {
             return Some(HashMap::new());
         }
-        let managed = match self.load_managed_orders(symbol).await {
+        let managed_result = match preloaded_managed {
+            Some(orders) => Ok(orders),
+            None => self.load_managed_orders(symbol).await,
+        };
+        let managed = match managed_result {
             Ok(orders) => orders,
             Err(error) => {
                 error!("Could not verify live order identities: {}", error);

@@ -209,24 +209,7 @@ impl Database {
         )>,
     > {
         let conn = self.lock_connection("load_terminal_order_disagreements");
-        let mut stmt = conn.prepare_cached("SELECT client_order_id, first_json, conflicting_json FROM terminal_order_disagreements WHERE account_key=?1 AND expected_symbol=?2")?;
-        let rows = stmt.query_map(params![&account[..], symbol], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?;
-        let mut records = Vec::new();
-        for row in rows {
-            let (client_order_id, first, conflicting) = row?;
-            records.push((
-                client_order_id,
-                serde_json::from_str(&first)?,
-                serde_json::from_str(&conflicting)?,
-            ));
-        }
-        Ok(records)
+        load_terminal_order_disagreements_on(&conn, account, symbol)
     }
 
     pub(crate) fn save_identity_observations(
@@ -295,6 +278,39 @@ impl Database {
         }
         Ok(observations)
     }
+}
+
+pub(super) fn load_terminal_order_disagreements_on(
+    conn: &Connection,
+    account: [u8; 32],
+    symbol: &str,
+) -> Result<
+    Vec<(
+        String,
+        crate::exchange::BinanceOrderResponse,
+        crate::exchange::BinanceOrderResponse,
+    )>,
+> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT client_order_id, first_json, conflicting_json FROM terminal_order_disagreements WHERE account_key=?1 AND expected_symbol=?2",
+    )?;
+    let rows = stmt.query_map(params![&account[..], symbol], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    let mut records = Vec::new();
+    for row in rows {
+        let (client_order_id, first, conflicting) = row?;
+        records.push((
+            client_order_id,
+            serde_json::from_str(&first)?,
+            serde_json::from_str(&conflicting)?,
+        ));
+    }
+    Ok(records)
 }
 
 fn insert_initial_order_response_rows(

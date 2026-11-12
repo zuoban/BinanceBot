@@ -426,14 +426,14 @@ impl GridTradingEngine {
     pub(super) async fn detect_and_persist_snapshot_conflicts(
         &mut self,
         scan: SnapshotConflictScan<'_>,
-    ) -> bool {
+    ) -> Option<Option<Vec<GridOrder>>> {
         let managed = self.load_managed_orders(scan.symbol).await;
         if let Err(error) = &managed {
             error!("Could not verify snapshot order identities: {}", error);
         }
         let detected = self.scan_snapshot_conflicts(&scan, &managed).await;
         if detected.duplicates.is_empty() && detected.active_identity_observations.is_empty() {
-            return true;
+            return Some(managed.ok());
         }
         let block = self.snapshot_conflicts_require_block(
             scan.account_key,
@@ -452,6 +452,6 @@ impl GridTradingEngine {
                 detected,
             )
             .await;
-        saved && !block
+        (saved && !block).then_some(None)
     }
 }

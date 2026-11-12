@@ -42,28 +42,37 @@ impl GridTradingEngine {
         symbol: &str,
         mode: TradingMode,
     ) -> Option<LiveSyncPreflight> {
+        let fast_disagreement_check = self.evidence.is_scope_loaded(account_key, symbol)
+            && !self
+                .evidence
+                .has_pending_initial_responses(account_key, symbol)
+            && self
+                .collect_identity_observations(account_key, symbol)
+                .as_ref()
+                .is_some_and(Vec::is_empty)
+            && !self
+                .evidence
+                .has_terminal_disagreements(account_key, symbol);
         let preflight_symbol = symbol.to_owned();
         let preflight = self
             .state
             .db
             .run_blocking(move |db| {
-                let intents = match db.load_pair_intents(&preflight_symbol, mode) {
-                    Ok(orders) => orders,
-                    Err(e) => return Ok(Err((true, e))),
-                };
-                match db.load_remainder_plan(&preflight_symbol, mode) {
-                    Ok(plan) => Ok(Ok((intents, plan))),
-                    Err(e) => Ok(Err((false, e))),
-                }
+                Ok(db.load_live_sync_preflight(
+                    account_key,
+                    &preflight_symbol,
+                    mode,
+                    fast_disagreement_check,
+                ))
             })
             .await;
-        let (pair_intents, remainder_plan) = match preflight {
-            Ok(Ok((intents, plan))) => {
+        let (pair_intents, remainder_plan, disagreements_blocked) = match preflight {
+            Ok(Ok((intents, plan, disagreements_blocked))) => {
                 let map: HashMap<String, GridOrder> = intents
                     .into_iter()
                     .map(|order| (order.client_order_id.clone(), order))
                     .collect();
-                (map, plan)
+                (map, plan, disagreements_blocked)
             }
             Ok(Err((true, e))) | Err(e) => {
                 error!("Could not load pending pair intents: {}", e);
@@ -76,23 +85,42 @@ impl GridTradingEngine {
                 return None;
             }
         };
-        // A previous failed managed-order read may have left an exchange-only
-        // placeholder in memory. Recover durable metadata before any normal or
-        // terminal reconciliation can persist or consume that placeholder.
-        if !self.load_identity_observations(account_key, symbol).await
-            || !self
-                .persist_identity_observations(account_key, symbol)
+        if let Some(disagreements_result) = disagreements_blocked {
+            match disagreements_result {
+                Ok(true) => {
+                    warn!("Terminal order disagreement for {} requires manual investigation; automatic clearing is unavailable", symbol);
+                    self.mark_orders_reconciliation_blocked().await;
+                    return None;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    error!(
+                        "Could not load or persist terminal order disagreements: {}",
+                        error
+                    );
+                    self.mark_orders_reconciliation_blocked().await;
+                    return None;
+                }
+            }
+        } else {
+            // A previous failed managed-order read may have left an exchange-only
+            // placeholder in memory. Recover durable metadata before any normal or
+            // terminal reconciliation can persist or consume that placeholder.
+            if !self.load_identity_observations(account_key, symbol).await
+                || !self
+                    .persist_identity_observations(account_key, symbol)
+                    .await
+            {
+                self.last_orders_sync = None;
+                return None;
+            }
+            if self
+                .terminal_disagreement_blocked(account_key, symbol)
                 .await
-        {
-            self.last_orders_sync = None;
-            return None;
-        }
-        if self
-            .terminal_disagreement_blocked(account_key, symbol)
-            .await
-        {
-            self.mark_orders_reconciliation_blocked().await;
-            return None;
+            {
+                self.mark_orders_reconciliation_blocked().await;
+                return None;
+            }
         }
         let (restored_ids, _) = self
             .restore_provisional_orders(account_key, symbol, &pair_intents, remainder_plan.as_ref())
@@ -112,14 +140,18 @@ impl GridTradingEngine {
         pause_epoch: u64,
         account_key: [u8; 32],
         symbol: &str,
-        input: (&HashMap<String, GridOrder>, Option<&RemainderPlan>),
+        input: (
+            &HashMap<String, GridOrder>,
+            Option<&RemainderPlan>,
+            Option<Vec<GridOrder>>,
+        ),
         state: (
             HashMap<String, BinanceOrderResponse>,
             HashSet<String>,
             HashSet<String>,
         ),
     ) -> Option<HashMap<String, BinanceOrderResponse>> {
-        let (pair_intents, remainder_plan) = input;
+        let (pair_intents, remainder_plan, preloaded_managed) = input;
         let (live_ids, uncertain_ids, mut restored_ids) = state;
         let inconsistent_fill = live_ids.values().any(unresolved_filled_quantity);
         // Every live snapshot is checked against durable identities;
@@ -129,8 +161,7 @@ impl GridTradingEngine {
                 account_key,
                 symbol,
                 &live_ids,
-                pair_intents,
-                remainder_plan,
+                (pair_intents, remainder_plan, preloaded_managed),
                 &mut restored_ids,
             )
             .await?;
@@ -187,7 +218,7 @@ impl GridTradingEngine {
         {
             self.set_global_reconciliation_ready(false).await;
         }
-        if !self
+        let mut preloaded_managed = self
             .detect_and_persist_snapshot_conflicts(SnapshotConflictScan {
                 account_key,
                 symbol,
@@ -196,9 +227,9 @@ impl GridTradingEngine {
                 remainder_plan,
                 restored_ids: &restored_ids,
             })
-            .await
-        {
-            return None;
+            .await?;
+        if self.evidence.has_conflicts_for_scope(account_key, symbol) {
+            preloaded_managed = None;
         }
         let (mut corrected_terminal, resolved_conflict_ids) = self
             .resolve_order_identity_conflicts(
@@ -216,7 +247,7 @@ impl GridTradingEngine {
         let mut live_ids = self
             .adopt_conflict_free_snapshot(
                 (priority, pause_epoch, account_key, symbol, mode),
-                (pair_intents, remainder_plan),
+                (pair_intents, remainder_plan, preloaded_managed),
                 live_ids,
                 restored_ids,
                 &mut corrected_terminal,
@@ -231,13 +262,17 @@ impl GridTradingEngine {
     async fn adopt_conflict_free_snapshot(
         &mut self,
         scope: (ReconciliationPriority, u64, [u8; 32], &str, TradingMode),
-        recovery: (&HashMap<String, GridOrder>, Option<&RemainderPlan>),
+        recovery: (
+            &HashMap<String, GridOrder>,
+            Option<&RemainderPlan>,
+            Option<Vec<GridOrder>>,
+        ),
         mut live_ids: HashMap<String, BinanceOrderResponse>,
         restored_ids: HashSet<String>,
         corrected_terminal: &mut HashMap<String, BinanceOrderResponse>,
     ) -> Option<HashMap<String, BinanceOrderResponse>> {
         let (priority, pause_epoch, account_key, symbol, mode) = scope;
-        let (pair_intents, remainder_plan) = recovery;
+        let (pair_intents, remainder_plan, mut preloaded_managed) = recovery;
         let uncertain_ids = self
             .reconcile_uncertain_zero_fills(
                 account_key,
@@ -248,6 +283,9 @@ impl GridTradingEngine {
                 corrected_terminal,
             )
             .await?;
+        if !uncertain_ids.is_empty() {
+            preloaded_managed = None;
+        }
         if live_ids.values().any(invalid_snapshot_price) {
             let snapshot: Vec<_> = live_ids.values().cloned().collect();
             self.retain_invalid_price_snapshot(account_key, symbol, mode, &snapshot)
@@ -259,7 +297,7 @@ impl GridTradingEngine {
             pause_epoch,
             account_key,
             symbol,
-            (pair_intents, remainder_plan),
+            (pair_intents, remainder_plan, preloaded_managed),
             (live_ids, uncertain_ids, restored_ids),
         )
         .await

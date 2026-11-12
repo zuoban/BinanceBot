@@ -44,11 +44,12 @@ export function resolveTrades(snapshot: Snapshot | undefined, fetched: Trade[] |
     const existing = merged.get(trade.trade_id);
     merged.set(trade.trade_id, existing ? (existing.pnl_verified !== trade.pnl_verified ? (existing.pnl_verified ? existing : trade) : existing) : trade);
   }
-  const sorted = [...merged.values()].sort((a, b) => {
-    const ta = Date.parse(a.timestamp), tb = Date.parse(b.timestamp);
-    const va = Number.isFinite(ta), vb = Number.isFinite(tb);
-    return (va !== vb ? (vb ? 1 : -1) : va ? tb - ta : 0) || b.trade_id.localeCompare(a.trade_id);
+  const entries = [...merged.values()].map(trade => {
+    const ts = Date.parse(trade.timestamp);
+    return { trade, ts, valid: Number.isFinite(ts) };
   });
+  entries.sort((a, b) => (a.valid !== b.valid ? (b.valid ? 1 : -1) : a.valid ? b.ts - a.ts : 0) || b.trade.trade_id.localeCompare(a.trade.trade_id));
+  const sorted = entries.map(entry => entry.trade);
   return fetchedAt >= snapshotAt ? sorted : sorted.slice(0, Math.max(snapshot.stats.total_trades, scopedRecent.length));
 }
 
@@ -80,8 +81,14 @@ function usePairTabHistory(pair: Pair | undefined, tab: (typeof detailTabs)[numb
     enabled: !!pair && tab === 'logs',
     refetchInterval: 5_000,
   }, client);
-  const trades = useMemo(() => resolveTrades(snapshot, tradesQuery.data, tradesQuery.isError, tradesQuery.dataUpdatedAt, snapshotUpdatedAt), [snapshot, tradesQuery.data, tradesQuery.isError, tradesQuery.dataUpdatedAt, snapshotUpdatedAt]);
-  const logs = useMemo(() => resolveLogs(snapshot, logsQuery.data, logsQuery.isError, logsQuery.dataUpdatedAt, snapshotUpdatedAt), [snapshot, logsQuery.data, logsQuery.isError, logsQuery.dataUpdatedAt, snapshotUpdatedAt]);
+  const trades = useMemo(
+    () => (tab === 'trades' ? resolveTrades(snapshot, tradesQuery.data, tradesQuery.isError, tradesQuery.dataUpdatedAt, snapshotUpdatedAt) : []),
+    [tab, snapshot, tradesQuery.data, tradesQuery.isError, tradesQuery.dataUpdatedAt, snapshotUpdatedAt],
+  );
+  const logs = useMemo(
+    () => (tab === 'logs' ? resolveLogs(snapshot, logsQuery.data, logsQuery.isError, logsQuery.dataUpdatedAt, snapshotUpdatedAt) : []),
+    [tab, snapshot, logsQuery.data, logsQuery.isError, logsQuery.dataUpdatedAt, snapshotUpdatedAt],
+  );
   return { trades, logs };
 }
 
