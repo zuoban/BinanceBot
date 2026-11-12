@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.89"
 
 [dependencies]
-tokio = { version = "1.40", features = ["full"] }
+tokio = { version = "1.40", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time", "io-util"] }
 tokio-tungstenite = { version = "0.24", features = ["connect", "rustls-tls-native-roots"] }
 futures-util = "0.3"
 
