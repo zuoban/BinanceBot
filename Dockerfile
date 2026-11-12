@@ -32,8 +32,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /usr/src/app/target/release/binance-grid-bot /app/binance-grid-bot
 
 # Ensure data directory for SQLite persistence
-RUN install -d -m 0700 /app/data
+RUN groupadd --system --gid 10001 bot \
+    && useradd --system --uid 10001 --gid 10001 --no-create-home --home-dir /app --shell /usr/sbin/nologin bot \
+    && install -d -m 0700 -o 10001 -g 10001 /app/data
 VOLUME ["/app/data"]
+USER 10001:10001
 
 # Expose web dashboard port
 EXPOSE 8080

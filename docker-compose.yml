@@ -7,6 +7,7 @@ services:
     container_name: binance-grid-bot
     restart: unless-stopped
     stop_grace_period: 45s
+    user: "${BOT_UID:-10001}:${BOT_GID:-10001}"
     command: ["--db", "/app/data/bot.db", "--host", "0.0.0.0", "--port", "8080"]
     volumes:
       - ./data:/app/data
@@ -17,8 +18,6 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    cap_add:
-      - DAC_OVERRIDE
   frontend:
     build:
       context: .
