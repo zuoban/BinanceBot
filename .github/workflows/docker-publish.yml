@@ -37,8 +37,8 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci --ignore-scripts
         working-directory: frontend
-      - name: Test and build frontend
-        run: npm test && npm run build
+      - name: Lint, test and build frontend
+        run: npm run lint && npm test && npm run build
         working-directory: frontend
 
   build:

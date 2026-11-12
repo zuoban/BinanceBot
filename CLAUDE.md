@@ -21,6 +21,7 @@ cargo test --locked test_name -- --nocapture   # 按名称筛选测试
 cd frontend
 npm ci
 npm run dev                   # Vite，默认代理 /api 和 /ws 到 127.0.0.1:8080
+npm run lint                  # ESLint（react-hooks/exhaustive-deps 为警告级别）
 npm test                      # Vitest 全量运行
 npm test -- src/test/api.test.ts  # 单个测试文件；可追加 -t '测试名称'
 npm run build                 # TypeScript 检查及 Vite 生产构建
