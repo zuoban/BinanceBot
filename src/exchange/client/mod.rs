@@ -31,12 +31,12 @@ mod error;
 mod fill_reconciler;
 
 use error::{
-    checked_response, is_invalid_timestamp_body, is_valid_client_order_id, order_response_error,
-    parse_api_error_body, read_bounded_error_body,
+    checked_response, is_invalid_timestamp_body, order_response_error, parse_api_error_body,
+    read_bounded_error_body,
 };
 pub(crate) use error::{
-    read_bounded_bytes, read_bounded_json, summarize_non_json_body, ExchangeError,
-    LocalRateLimitError,
+    is_batch_endpoint_unsupported, is_valid_client_order_id, read_bounded_bytes, read_bounded_json,
+    summarize_non_json_body, ExchangeError, LocalRateLimitError,
 };
 
 #[cfg(test)]

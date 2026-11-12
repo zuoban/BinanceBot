@@ -250,14 +250,11 @@ impl GridTradingEngine {
             .cloned()
             .collect();
         openings.sort_by(|a, b| a.client_order_id.cmp(&b.client_order_id));
-        let mut canceled = true;
-        for order in openings {
-            if *self.state.status.read().await != BotStatus::Running {
-                return false;
-            }
-            canceled &= Box::pin(self.cancel_single_order(&order)).await;
+        if openings.is_empty() {
+            return true;
         }
-        canceled
+        Box::pin(self.cancel_grid_orders(&openings, false)).await
+            && *self.state.status.read().await == BotStatus::Running
     }
 
     pub(super) async fn protect_openings_and_check_limits(

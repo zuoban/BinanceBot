@@ -158,6 +158,52 @@ async fn exchange_server(fake: Exchange) -> (String, JoinHandle<()>) {
             }
             (StatusCode::OK, Json(serde_json::to_value(found).unwrap()))
         }))
+        .route("/fapi/v1/batchOrders", axum::routing::delete(|State(fake): State<Exchange>, Query(query): Query<HashMap<String, String>>| async move {
+            if fake.cancel_fails.load(Ordering::SeqCst) {
+                return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"code": -1007, "msg": "unknown"})));
+            }
+            let id_targets = query
+                .get("orderIdList")
+                .and_then(|raw| serde_json::from_str::<Vec<i64>>(raw).ok());
+            let cid_targets = query
+                .get("origClientOrderIdList")
+                .and_then(|raw| serde_json::from_str::<Vec<String>>(raw).ok());
+            let mut orders = fake.orders.lock().unwrap();
+            let count = id_targets
+                .as_ref()
+                .map_or_else(|| cid_targets.as_ref().map_or(0, Vec::len), Vec::len);
+            let mut items = Vec::with_capacity(count);
+            for idx in 0..count {
+                let found = if let Some(ref ids) = id_targets {
+                    let target_id = ids[idx];
+                    orders.values_mut().find(|order| order.order_id == target_id)
+                } else {
+                    let target_cid = &cid_targets.as_ref().unwrap()[idx];
+                    orders.values_mut().find(|order| &order.client_order_id == target_cid)
+                };
+                let Some(found) = found else {
+                    items.push(json!({"code": -2011, "msg": "Unknown order sent."}));
+                    continue;
+                };
+                if found.status == "FILLED" && found.executed_qty.is_zero() {
+                    items.push(json!({"code": -2011, "msg": "already filled"}));
+                    continue;
+                }
+                if fake.fill_on_cancel.load(Ordering::SeqCst) {
+                    found.status = "FILLED".into();
+                    found.executed_qty = found.orig_qty;
+                    found.avg_price = Some(found.price);
+                } else {
+                    found.status = "CANCELED".into();
+                }
+                found.update_time = Some(Utc::now().timestamp_millis());
+                items.push(serde_json::to_value(found.clone()).unwrap());
+            }
+            if fake.lose_cancel_response.load(Ordering::SeqCst) {
+                return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"code": -1007, "msg": "cancel response lost"})));
+            }
+            (StatusCode::OK, Json(json!(items)))
+        }))
         .route("/fapi/v2/positionRisk", get(|State(fake): State<Exchange>| async move {
             fake.position_calls.fetch_add(1, Ordering::SeqCst);
             if fake.block_position.load(Ordering::SeqCst) {

@@ -844,3 +844,120 @@ async fn user_data_wakeup_triggers_immediate_sync_cycle_without_waiting_for_time
     let _ = run_task.await;
     server.abort();
 }
+
+#[tokio::test]
+async fn bulk_and_window_cancellation_batch_up_to_ten_orders_per_request() {
+    let mut config = AppConfig::default();
+    config.exchange.api_key = "live-key".into();
+    config.exchange.api_secret = "live-secret".into();
+    config.grid.grid_interval = dec!(1);
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    db.save_bot_status(BotStatus::Running).unwrap();
+    let fake = PairExchange::default();
+
+    let make_order = |idx: usize, id: i64, price: Decimal| {
+        let cid = format!("gb_b_batch_{idx:02}");
+        let grid = GridOrder {
+            client_order_id: cid.clone(),
+            order_id: Some(id),
+            symbol: "SOLUSDC".into(),
+            side: OrderSide::Buy,
+            price,
+            quantity: dec!(1),
+            amount_usdc: price,
+            status: OrderStatus::New,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            grid_level: -(idx as i32) - 1,
+            paired_client_order_id: None,
+            is_take_profit: false,
+            purpose: OrderPurpose::Grid,
+            merge_sources: Vec::new(),
+        };
+        let resp = BinanceOrderResponse {
+            order_id: id,
+            client_order_id: cid,
+            symbol: "SOLUSDC".into(),
+            status: "NEW".into(),
+            price,
+            avg_price: None,
+            orig_qty: dec!(1),
+            executed_qty: Decimal::ZERO,
+            side: "BUY".into(),
+            order_type: "LIMIT".into(),
+            time_in_force: "GTX".into(),
+            update_time: None,
+        };
+        (grid, resp)
+    };
+
+    let mut seeded = Vec::new();
+    for idx in 0..12 {
+        let (grid, resp) = make_order(idx, 2000 + idx as i64, dec!(80) + Decimal::from(idx as u64));
+        db.save_managed_order(&grid).unwrap();
+        fake.orders
+            .lock()
+            .unwrap()
+            .insert(grid.client_order_id.clone(), resp);
+        seeded.push(grid);
+    }
+
+    // Order #03 already filled right before batch cancel runs; openOrders still includes it
+    // only if we test window pruning, so test window pruning first with 12 orders where #03
+    // filled on exchange before batch cancel arrives!
+    {
+        let mut orders = fake.orders.lock().unwrap();
+        let filled = orders.get_mut("gb_b_batch_03").unwrap();
+        filled.status = "FILLED".into();
+        filled.executed_qty = dec!(1);
+        filled.avg_price = Some(filled.price);
+        filled.update_time = Some(Utc::now().timestamp_millis());
+    }
+
+    let (url, server) = pair_exchange_server(fake.clone()).await;
+    let mut engine = pair_recovery_engine(&config, db.clone(), url).await;
+    *engine.state.status.write().await = BotStatus::Running;
+    for grid in &seeded {
+        engine
+            .state
+            .active_orders
+            .write()
+            .await
+            .insert(grid.client_order_id.clone(), grid.clone());
+    }
+
+    assert!(engine.cancel_grid_orders(&seeded, true).await);
+    // 12 orders = 1 batch of 10 + 1 batch of 2 -> 2 batch requests, 0 single cancel requests!
+    assert_eq!(fake.batch_cancel_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(fake.single_cancel_calls.load(Ordering::SeqCst), 0);
+    assert!(engine.state.active_orders.read().await.is_empty());
+    assert!(db.load_managed_orders("SOLUSDC").unwrap().is_empty());
+    // Order #03 (-2011 in batch response) was confirmed FILLED via lookup and recorded as a trade!
+    assert!(db
+        .get_trade_by_client_id("gb_b_batch_03", TradingMode::Live)
+        .unwrap()
+        .is_some());
+
+    // Now seed 11 open orders (10 + 1): first 10 use batchOrders, lone 11th uses single cancel_order (2 HTTP calls total instead of 11).
+    fake.batch_cancel_calls.store(0, Ordering::SeqCst);
+    fake.single_cancel_calls.store(0, Ordering::SeqCst);
+    for idx in 0..11 {
+        let (grid, resp) = make_order(
+            idx + 20,
+            3000 + idx as i64,
+            dec!(70) + Decimal::from(idx as u64),
+        );
+        db.save_managed_order(&grid).unwrap();
+        fake.orders
+            .lock()
+            .unwrap()
+            .insert(grid.client_order_id.clone(), resp);
+    }
+    assert!(engine.cancel_all_orders().await);
+    assert_eq!(fake.batch_cancel_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fake.single_cancel_calls.load(Ordering::SeqCst), 1);
+    assert!(engine.state.active_orders.read().await.is_empty());
+    assert!(db.load_managed_orders("SOLUSDC").unwrap().is_empty());
+
+    server.abort();
+}

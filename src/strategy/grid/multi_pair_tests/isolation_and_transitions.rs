@@ -43,8 +43,8 @@ async fn periodic_reconciliation_preserves_critical_budget_for_cancellation() {
                     async move {
                         canceled.store(true, Ordering::SeqCst);
                         Json(json!({
-                            "orderId": 42,
-                            "clientOrderId": "gb_b_live",
+                            "orderId": 123,
+                            "clientOrderId": "gb_test",
                             "symbol": "SOLUSDC",
                             "status": "CANCELED",
                             "price": "100",

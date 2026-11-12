@@ -24,14 +24,13 @@ pub(crate) struct BinanceListenKeyResponse {
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
 #[serde(untagged)]
-#[allow(dead_code, clippy::large_enum_variant)]
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum BinanceBatchOrderItem {
     Order(BinanceOrderResponse),
     Error(BinanceApiError),
 }
 
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub(crate) enum CancelBatchTarget<'a> {
     OrderIds(&'a [i64]),
     ClientOrderIds(&'a [&'a str]),

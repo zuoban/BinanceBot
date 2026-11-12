@@ -34,6 +34,8 @@ use tokio::sync::{broadcast, mpsc};
 struct PairExchange {
     orders: Arc<Mutex<HashMap<String, BinanceOrderResponse>>>,
     posts: Arc<Mutex<Vec<String>>>,
+    batch_cancel_calls: Arc<AtomicUsize>,
+    single_cancel_calls: Arc<AtomicUsize>,
     fail_lookup: Arc<AtomicUsize>,
     filled_zero_lookup: Arc<AtomicUsize>,
     fail_open_orders: Arc<AtomicUsize>,
@@ -115,6 +117,7 @@ async fn pair_exchange_server(fake: PairExchange) -> (String, tokio::task::JoinH
                     }
                 })
                 .delete(|State(fake): State<PairExchange>, Query(query): Query<HashMap<String, String>>| async move {
+                    fake.single_cancel_calls.fetch_add(1, Ordering::SeqCst);
                     if fake.block_cancel.load(Ordering::SeqCst) != 0 {
                         fake.cancel_started.notify_one();
                         fake.release_cancel.notified().await;
@@ -122,9 +125,20 @@ async fn pair_exchange_server(fake: PairExchange) -> (String, tokio::task::JoinH
                     if consume_failure(&fake.fail_cancel) {
                         return (axum::http::StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"code": -1000})));
                     }
-                    let id: i64 = query["orderId"].parse().unwrap();
                     let mut orders = fake.orders.lock().unwrap();
-                    let order = orders.values_mut().find(|order| order.order_id == id).unwrap();
+                    let found = if let Some(id_raw) = query.get("orderId") {
+                        let id: i64 = id_raw.parse().unwrap();
+                        orders.values_mut().find(|order| order.order_id == id)
+                    } else {
+                        let cid = &query["origClientOrderId"];
+                        orders.values_mut().find(|order| &order.client_order_id == cid)
+                    };
+                    let Some(order) = found else {
+                        return (axum::http::StatusCode::BAD_REQUEST, Json(serde_json::json!({"code": -2011, "msg": "Unknown order sent."})));
+                    };
+                    if order.is_terminal() {
+                        return (axum::http::StatusCode::BAD_REQUEST, Json(serde_json::json!({"code": -2011, "msg": "Unknown order sent."})));
+                    }
                     order.status = "CANCELED".into();
                     (axum::http::StatusCode::OK, Json(serde_json::to_value(order.clone()).unwrap()))
                 })
@@ -153,6 +167,50 @@ async fn pair_exchange_server(fake: PairExchange) -> (String, tokio::task::JoinH
                     } else {
                         (axum::http::StatusCode::OK, Json(serde_json::to_value(order).unwrap()))
                     }
+                }),
+            )
+            .route(
+                "/fapi/v1/batchOrders",
+                delete(|State(fake): State<PairExchange>, Query(query): Query<HashMap<String, String>>| async move {
+                    fake.batch_cancel_calls.fetch_add(1, Ordering::SeqCst);
+                    if fake.block_cancel.load(Ordering::SeqCst) != 0 {
+                        fake.cancel_started.notify_one();
+                        fake.release_cancel.notified().await;
+                    }
+                    let id_targets = query
+                        .get("orderIdList")
+                        .and_then(|raw| serde_json::from_str::<Vec<i64>>(raw).ok());
+                    let cid_targets = query
+                        .get("origClientOrderIdList")
+                        .and_then(|raw| serde_json::from_str::<Vec<String>>(raw).ok());
+                    let count = id_targets
+                        .as_ref()
+                        .map_or_else(|| cid_targets.as_ref().map_or(0, Vec::len), Vec::len);
+                    let mut orders = fake.orders.lock().unwrap();
+                    let mut items = Vec::with_capacity(count);
+                    for idx in 0..count {
+                        if consume_failure(&fake.fail_cancel) {
+                            items.push(serde_json::json!({"code": -1000, "msg": "cancel failed"}));
+                            continue;
+                        }
+                        let found = if let Some(ref ids) = id_targets {
+                            let target_id = ids[idx];
+                            orders.values_mut().find(|order| order.order_id == target_id)
+                        } else {
+                            let target_cid = &cid_targets.as_ref().unwrap()[idx];
+                            orders.values_mut().find(|order| &order.client_order_id == target_cid)
+                        };
+                        match found {
+                            Some(order) if !order.is_terminal() => {
+                                order.status = "CANCELED".into();
+                                items.push(serde_json::to_value(order.clone()).unwrap());
+                            }
+                            _ => {
+                                items.push(serde_json::json!({"code": -2011, "msg": "Unknown order sent."}));
+                            }
+                        }
+                    }
+                    (axum::http::StatusCode::OK, Json(serde_json::Value::Array(items)))
                 }),
             )
             .with_state(fake);

@@ -1,9 +1,162 @@
 use super::snapshot_identities::invalid_snapshot_price;
 use super::*;
+use crate::exchange::client::{is_batch_endpoint_unsupported, is_valid_client_order_id};
+use crate::exchange::{BinanceBatchOrderItem, CancelBatchTarget};
+use anyhow::anyhow;
 use futures_util::stream::{self, StreamExt};
 
 type RecoverySources = (HashMap<String, GridOrder>, Option<RemainderPlan>);
 const MAX_CONCURRENT_ORDER_CANCELS: usize = 8;
+const MAX_BATCH_CANCEL_SIZE: usize = 10;
+
+fn has_unique_positive_order_ids(ids: &[i64]) -> bool {
+    if ids.iter().any(|&id| id <= 0) {
+        return false;
+    }
+    let mut sorted = ids.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    sorted.len() == ids.len()
+}
+
+fn has_unique_valid_client_ids(cids: &[&str]) -> bool {
+    if cids.iter().any(|cid| !is_valid_client_order_id(cid)) {
+        return false;
+    }
+    let mut sorted = cids.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    sorted.len() == cids.len()
+}
+
+fn validate_live_snapshot_cancel_response(
+    symbol: &str,
+    expected: &BinanceOrderResponse,
+    resp: BinanceOrderResponse,
+) -> Result<BinanceOrderResponse> {
+    anyhow::ensure!(
+        resp.matches_identity(expected)
+            && resp.has_valid_symbol_and_side(symbol)
+            && !invalid_snapshot_price(&resp)
+            && !unresolved_filled_quantity(&resp)
+            && resp.is_terminal(),
+        "Cancel response for {} requires follow-up order confirmation",
+        expected.client_order_id
+    );
+    Ok(resp)
+}
+
+async fn cancel_live_snapshot_individually(
+    client: &BinanceFuturesClient,
+    symbol: &str,
+    chunk: Vec<BinanceOrderResponse>,
+) -> Vec<(BinanceOrderResponse, Result<BinanceOrderResponse>)> {
+    let mut results = Vec::with_capacity(chunk.len());
+    for order in chunk {
+        let res = client
+            .cancel_order(symbol, Some(order.order_id), None)
+            .await
+            .and_then(|resp| validate_live_snapshot_cancel_response(symbol, &order, resp));
+        results.push((order, res));
+    }
+    results
+}
+
+async fn cancel_live_snapshot_chunk(
+    client: Arc<BinanceFuturesClient>,
+    symbol: String,
+    chunk: Vec<BinanceOrderResponse>,
+) -> Vec<(BinanceOrderResponse, Result<BinanceOrderResponse>)> {
+    let ids: Vec<i64> = chunk.iter().map(|order| order.order_id).collect();
+    if chunk.len() < 2 || !has_unique_positive_order_ids(&ids) {
+        return cancel_live_snapshot_individually(&client, &symbol, chunk).await;
+    }
+    match client
+        .cancel_batch_orders(&symbol, CancelBatchTarget::OrderIds(&ids))
+        .await
+    {
+        Ok(items) => chunk
+            .into_iter()
+            .zip(items)
+            .map(|(order, item)| {
+                let res = match item {
+                    BinanceBatchOrderItem::Order(resp) => {
+                        validate_live_snapshot_cancel_response(&symbol, &order, resp)
+                    }
+                    BinanceBatchOrderItem::Error(err) => Err(ExchangeError::ApiError {
+                        code: err.code,
+                        msg: err.msg,
+                    }
+                    .into()),
+                };
+                (order, res)
+            })
+            .collect(),
+        Err(error) if is_batch_endpoint_unsupported(&error) => {
+            cancel_live_snapshot_individually(&client, &symbol, chunk).await
+        }
+        Err(error) => {
+            let detail = error.to_string();
+            chunk
+                .into_iter()
+                .map(|order| (order, Err(anyhow!("{detail}"))))
+                .collect()
+        }
+    }
+}
+
+async fn cancel_grid_order_chunk_requests(
+    client: &BinanceFuturesClient,
+    symbol_override: Option<&str>,
+    chunk: &[GridOrder],
+) -> Vec<Result<BinanceOrderResponse>> {
+    let symbol = symbol_override.unwrap_or(chunk[0].symbol.as_str());
+    let same_symbol = symbol_override.is_some() || chunk.iter().all(|order| order.symbol == symbol);
+    if chunk.len() >= 2 && same_symbol {
+        let ids: Option<Vec<i64>> = chunk.iter().map(|order| order.order_id).collect();
+        let cids: Vec<&str> = chunk
+            .iter()
+            .map(|order| order.client_order_id.as_str())
+            .collect();
+        let batch_target = if let Some(ref ids) = ids {
+            has_unique_positive_order_ids(ids).then_some(CancelBatchTarget::OrderIds(ids))
+        } else {
+            has_unique_valid_client_ids(&cids).then_some(CancelBatchTarget::ClientOrderIds(&cids))
+        };
+        if let Some(target) = batch_target {
+            match client.cancel_batch_orders(symbol, target).await {
+                Ok(items) => {
+                    return items
+                        .into_iter()
+                        .map(|item| match item {
+                            BinanceBatchOrderItem::Order(resp) => Ok(resp),
+                            BinanceBatchOrderItem::Error(err) => Err(ExchangeError::ApiError {
+                                code: err.code,
+                                msg: err.msg,
+                            }
+                            .into()),
+                        })
+                        .collect();
+                }
+                Err(error) if is_batch_endpoint_unsupported(&error) => {}
+                Err(error) => {
+                    let detail = error.to_string();
+                    return (0..chunk.len()).map(|_| Err(anyhow!("{detail}"))).collect();
+                }
+            }
+        }
+    }
+    let mut outcomes = Vec::with_capacity(chunk.len());
+    for order in chunk {
+        let target_symbol = symbol_override.unwrap_or(order.symbol.as_str());
+        outcomes.push(
+            client
+                .cancel_order(target_symbol, order.order_id, Some(&order.client_order_id))
+                .await,
+        );
+    }
+    outcomes
+}
 
 struct CancelRecoveryMetadata {
     recovery_sources: Option<RecoverySources>,
@@ -23,11 +176,20 @@ struct UncertainCanceledOrder<'a> {
 
 impl GridTradingEngine {
     async fn confirm_live_order_canceled(&mut self, order: &GridOrder) -> Option<bool> {
-        let exchange_order = match self
+        let cancel_result = self
             .client
             .cancel_order(&order.symbol, order.order_id, Some(&order.client_order_id))
+            .await;
+        self.confirm_live_order_cancel_result(order, cancel_result)
             .await
-        {
+    }
+
+    async fn confirm_live_order_cancel_result(
+        &mut self,
+        order: &GridOrder,
+        cancel_result: Result<BinanceOrderResponse>,
+    ) -> Option<bool> {
+        let exchange_order = match cancel_result {
             Ok(canceled) => {
                 if !order.matches_exchange_identity(&canceled) {
                     self.track_identity_conflict(order, &canceled);
@@ -132,6 +294,74 @@ impl GridTradingEngine {
         true
     }
 
+    /// Cancel a deterministic slice of grid orders in batches of up to 10.
+    pub(super) async fn cancel_grid_orders(
+        &mut self,
+        orders: &[GridOrder],
+        stop_on_error: bool,
+    ) -> bool {
+        if orders.is_empty() {
+            return true;
+        }
+        let paper = self.state.config.read().await.exchange.is_paper();
+        if paper {
+            if *self.state.status.read().await != BotStatus::Running {
+                return false;
+            }
+            let ids: Vec<String> = orders.iter().map(|o| o.client_order_id.clone()).collect();
+            if let Err(e) = self.remove_managed_and_active_orders(ids).await {
+                error!("Could not delete managed orders: {}", e);
+                self.mark_orders_reconciliation_blocked().await;
+                self.pause_trading().await;
+                return false;
+            }
+            return true;
+        }
+        let mut all_ok = true;
+        for chunk in orders.chunks(MAX_BATCH_CANCEL_SIZE) {
+            if *self.state.status.read().await != BotStatus::Running {
+                return false;
+            }
+            if chunk.len() == 1 {
+                if !self.cancel_single_order(&chunk[0]).await {
+                    all_ok = false;
+                    if stop_on_error {
+                        return false;
+                    }
+                }
+                continue;
+            }
+            let outcomes = cancel_grid_order_chunk_requests(&self.client, None, chunk).await;
+            let mut unfilled_to_remove = Vec::with_capacity(chunk.len());
+            let mut chunk_ok = true;
+            for (order, outcome) in chunk.iter().zip(outcomes) {
+                match Box::pin(self.confirm_live_order_cancel_result(order, outcome)).await {
+                    None => unfilled_to_remove.push(order.client_order_id.clone()),
+                    Some(true) => {}
+                    Some(false) => chunk_ok = false,
+                }
+            }
+            if !unfilled_to_remove.is_empty() {
+                if let Err(e) = self
+                    .remove_managed_and_active_orders(unfilled_to_remove)
+                    .await
+                {
+                    error!("Could not delete canceled managed orders: {}", e);
+                    self.mark_orders_reconciliation_blocked().await;
+                    self.pause_trading().await;
+                    chunk_ok = false;
+                }
+            }
+            if !chunk_ok {
+                all_ok = false;
+                if stop_on_error {
+                    return false;
+                }
+            }
+        }
+        all_ok
+    }
+
     async fn load_cancel_recovery_metadata(
         &mut self,
         paper: bool,
@@ -194,36 +424,47 @@ impl GridTradingEngine {
 
     async fn cancel_known_orders_without_snapshot(&self, symbol: &str) {
         // The exchange listing is incomplete, but known orders can still
-        // be canceled individually. Preserve all recovery metadata.
-        let known: Vec<_> = self
+        // be canceled in batches. Preserve all recovery metadata.
+        let mut known: Vec<_> = self
             .state
             .active_orders
             .read()
             .await
             .values()
+            .filter(|order| is_grid_order(&order.client_order_id))
             .cloned()
             .collect();
+        known.sort_by(|a, b| a.client_order_id.cmp(&b.client_order_id));
+        let (with_ids, without_ids): (Vec<_>, Vec<_>) = known
+            .into_iter()
+            .partition(|order| order.order_id.is_some_and(|id| id > 0));
         let client = Arc::clone(&self.client);
-        stream::iter(
-            known
-                .into_iter()
-                .filter(|order| is_grid_order(&order.client_order_id)),
-        )
-        .for_each_concurrent(MAX_CONCURRENT_ORDER_CANCELS, |order| {
-            let client = Arc::clone(&client);
-            async move {
-                if let Err(error) = client
-                    .cancel_order(symbol, order.order_id, Some(&order.client_order_id))
-                    .await
-                {
-                    warn!(
-                        "Failed to cancel known managed order {}: {}",
-                        order.client_order_id, error
-                    );
+        let mut batches: Vec<Vec<GridOrder>> = with_ids
+            .chunks(MAX_BATCH_CANCEL_SIZE)
+            .chain(without_ids.chunks(MAX_BATCH_CANCEL_SIZE))
+            .map(|chunk| chunk.to_vec())
+            .collect();
+        batches.retain(|chunk| !chunk.is_empty());
+        let symbol_owned = symbol.to_string();
+        stream::iter(batches)
+            .for_each_concurrent(MAX_CONCURRENT_ORDER_CANCELS, |chunk| {
+                let client = Arc::clone(&client);
+                let target_symbol = symbol_owned.clone();
+                async move {
+                    let outcomes =
+                        cancel_grid_order_chunk_requests(&client, Some(&target_symbol), &chunk)
+                            .await;
+                    for (order, res) in chunk.iter().zip(outcomes) {
+                        if let Err(error) = res {
+                            warn!(
+                                "Failed to cancel known managed order {}: {}",
+                                order.client_order_id, error
+                            );
+                        }
+                    }
                 }
-            }
-        })
-        .await;
+            })
+            .await;
     }
 
     async fn confirm_failed_grid_order_cancel(
@@ -298,24 +539,31 @@ impl GridTradingEngine {
             }
         };
         let client = Arc::clone(&self.client);
+        let mut grid_orders: Vec<BinanceOrderResponse> = live_orders
+            .into_iter()
+            .filter(|order| is_grid_order(&order.client_order_id))
+            .collect();
+        grid_orders.sort_by(|a, b| {
+            a.client_order_id
+                .cmp(&b.client_order_id)
+                .then_with(|| a.order_id.cmp(&b.order_id))
+        });
+        let chunks: Vec<Vec<BinanceOrderResponse>> = grid_orders
+            .chunks(MAX_BATCH_CANCEL_SIZE)
+            .map(|chunk| chunk.to_vec())
+            .collect();
+        let symbol_owned = symbol.to_string();
         let cancel_outcomes: Vec<(BinanceOrderResponse, Result<BinanceOrderResponse>)> =
-            stream::iter(
-                live_orders
-                    .into_iter()
-                    .filter(|order| is_grid_order(&order.client_order_id)),
-            )
-            .map(|order| {
-                let client = Arc::clone(&client);
-                async move {
-                    let res = client
-                        .cancel_order(symbol, Some(order.order_id), None)
-                        .await;
-                    (order, res)
-                }
-            })
-            .buffered(MAX_CONCURRENT_ORDER_CANCELS)
-            .collect()
-            .await;
+            stream::iter(chunks)
+                .map(|chunk| {
+                    cancel_live_snapshot_chunk(Arc::clone(&client), symbol_owned.clone(), chunk)
+                })
+                .buffered(MAX_CONCURRENT_ORDER_CANCELS)
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .flatten()
+                .collect();
 
         let mut cancellation_failed = false;
         for (order, cancel_result) in cancel_outcomes {

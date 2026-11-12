@@ -443,7 +443,6 @@ impl BinanceFuturesClient {
     }
 
     /// Cancel 1..=10 orders for a symbol in a single `/fapi/v1/batchOrders` call.
-    #[allow(dead_code)]
     pub(crate) async fn cancel_batch_orders(
         &self,
         symbol: &str,

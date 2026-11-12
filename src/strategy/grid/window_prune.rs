@@ -204,13 +204,7 @@ impl GridTradingEngine {
             )
             .await;
         obsolete.sort_by(|a, b| a.client_order_id.cmp(&b.client_order_id));
-        for order in obsolete {
-            if *self.state.status.read().await != BotStatus::Running
-                || !self.cancel_single_order(&order).await
-            {
-                return true;
-            }
-        }
+        let _ = self.cancel_grid_orders(&obsolete, true).await;
         true
     }
 
@@ -252,13 +246,7 @@ impl GridTradingEngine {
             return false;
         }
         misaligned.sort_by(|a, b| a.client_order_id.cmp(&b.client_order_id));
-        for order in misaligned {
-            if *self.state.status.read().await != BotStatus::Running
-                || !self.cancel_single_order(&order).await
-            {
-                return true;
-            }
-        }
+        let _ = self.cancel_grid_orders(&misaligned, true).await;
         true
     }
 
