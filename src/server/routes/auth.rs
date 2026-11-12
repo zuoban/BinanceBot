@@ -10,7 +10,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
-fn extract_token(headers: &HeaderMap) -> Option<&str> {
+fn extract_raw_token(headers: &HeaderMap) -> Option<&str> {
     if headers
         .get_all(axum::http::header::AUTHORIZATION)
         .iter()
@@ -27,14 +27,28 @@ fn extract_token(headers: &HeaderMap) -> Option<&str> {
             s.strip_prefix("Bearer ")
                 .or_else(|| s.strip_prefix("bearer "))
         })
-        .and_then(sanitize_session_token)
+        .map(str::trim)
+        .filter(|t| {
+            !t.is_empty()
+                && t.len() <= crate::auth::MAX_METRICS_TOKEN_BYTES
+                && t.bytes().all(|b| b.is_ascii_graphic())
+        })
     {
         return Some(token);
     }
     headers
         .get("X-Auth-Token")
         .and_then(|val| val.to_str().ok())
-        .and_then(sanitize_session_token)
+        .map(str::trim)
+        .filter(|t| {
+            !t.is_empty()
+                && t.len() <= crate::auth::MAX_METRICS_TOKEN_BYTES
+                && t.bytes().all(|b| b.is_ascii_graphic())
+        })
+}
+
+fn extract_token(headers: &HeaderMap) -> Option<&str> {
+    extract_raw_token(headers).and_then(sanitize_session_token)
 }
 
 fn auth_service_error<T>() -> (StatusCode, Json<ApiResponse<T>>) {
@@ -74,6 +88,44 @@ pub(super) async fn require_auth_middleware(
     Ok(next.run(req).await)
 }
 
+pub(super) async fn require_metrics_auth_middleware(
+    State(auth): State<Arc<AuthContext>>,
+    req: axum::extract::Request,
+    next: Next,
+) -> Result<Response, (StatusCode, Json<ApiResponse<()>>)> {
+    let has_admin = auth.is_auth_configured();
+    let metrics_auth = auth.metrics_auth();
+    if !has_admin && metrics_auth.is_none() {
+        return Ok(next.run(req).await);
+    }
+    let raw_token = extract_raw_token(req.headers());
+    if let (Some(metrics_auth), Some(token)) = (metrics_auth, raw_token) {
+        if metrics_auth.verify(token) {
+            return Ok(next.run(req).await);
+        }
+    }
+    if has_admin {
+        let is_valid = match raw_token.and_then(sanitize_session_token) {
+            Some(token) => match auth.check_token_valid(token).await {
+                Ok(valid) => valid,
+                Err(SessionCheckError::Busy) => return Err(auth_busy()),
+                Err(SessionCheckError::Database(error)) => {
+                    error!("Failed to check session: {}", error);
+                    return Err(auth_service_error());
+                }
+            },
+            None => false,
+        };
+        if is_valid {
+            return Ok(next.run(req).await);
+        }
+    }
+    Err(status_err(
+        StatusCode::UNAUTHORIZED,
+        "未授权访问：请提供有效的指标抓取令牌或管理员会话令牌",
+    ))
+}
+
 pub(super) async fn get_auth_status_handler(
     State(auth): State<Arc<AuthContext>>,
     headers: HeaderMap,
@@ -103,13 +155,32 @@ pub(super) async fn get_auth_status_handler(
 }
 
 fn peer_ip(address: SocketAddr) -> IpAddr {
-    match address.ip() {
-        IpAddr::V6(ip) => ip
-            .to_ipv4_mapped()
-            .map(IpAddr::V4)
-            .unwrap_or(IpAddr::V6(ip)),
-        ip => ip,
+    crate::auth::canonical_ip(address.ip())
+}
+
+fn resolve_login_source_ip(
+    address: SocketAddr,
+    headers: &HeaderMap,
+    trusted_proxies: Option<&crate::auth::TrustedProxies>,
+) -> IpAddr {
+    let peer = peer_ip(address);
+    if !trusted_proxies.is_some_and(|trusted| trusted.contains(peer)) {
+        return peer;
     }
+    let mut real_ip_headers = headers.get_all("x-real-ip").iter();
+    let Some(raw) = real_ip_headers.next() else {
+        return peer;
+    };
+    if real_ip_headers.next().is_some() {
+        return peer;
+    }
+    raw.to_str()
+        .ok()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && s.len() <= 64)
+        .and_then(|s| s.parse::<IpAddr>().ok())
+        .map(crate::auth::canonical_ip)
+        .unwrap_or(peer)
 }
 
 fn auth_busy<T>() -> (StatusCode, Json<ApiResponse<T>>) {
@@ -119,6 +190,7 @@ fn auth_busy<T>() -> (StatusCode, Json<ApiResponse<T>>) {
 pub(super) async fn post_auth_login_handler(
     State(auth): State<Arc<AuthContext>>,
     ConnectInfo(address): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(payload): Json<AuthLoginPayload>,
 ) -> (StatusCode, Json<ApiResponse<AuthTokenResponse>>) {
     let Some(admin_auth) = auth.admin_auth() else {
@@ -128,7 +200,7 @@ pub(super) async fn post_auth_login_handler(
     let Some(permit) = auth.try_begin_auth_work() else {
         return auth_busy();
     };
-    let source = peer_ip(address);
+    let source = resolve_login_source_ip(address, &headers, auth.trusted_proxies());
     let Some(attempt_at) = auth.begin_login_attempt(source).await else {
         return status_err(
             StatusCode::TOO_MANY_REQUESTS,

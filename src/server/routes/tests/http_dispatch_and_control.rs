@@ -69,6 +69,120 @@ async fn dispatch_pair_preserves_query_strings_for_unscoped_and_scoped_routes() 
 }
 
 #[tokio::test]
+async fn dedicated_metrics_token_is_read_only_for_metrics_and_preserves_admin_session_access() {
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    db.create_session("admin-session-token").unwrap();
+    let mut config = AppConfig::default();
+    config.pairs = vec![crate::config::TradingPairConfig::new("SOLUSDC".into())];
+    db.save_config(&config).unwrap();
+    db.save_pair_status("SOLUSDC", TradingMode::Paper, BotStatus::Paused)
+        .unwrap();
+    let admin_auth = Arc::new(crate::auth::AdminAuth::from_password("test-password").unwrap());
+    let mut runtime = crate::runtime::TradingRuntime::start_with_test_exchange_and_admin_auth(
+        &config,
+        db,
+        "http://127.0.0.1:1".into(),
+        admin_auth,
+    )
+    .await
+    .unwrap();
+    let handle = runtime.handle();
+    handle.set_metrics_auth(Arc::new(
+        crate::auth::MetricsAuth::from_token("prom-scrape-secret-token-2026").unwrap(),
+    ));
+    let router = create_managed_router(handle);
+
+    let scrape_metrics = router
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/api/metrics")
+                .header("authorization", "Bearer prom-scrape-secret-token-2026")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(scrape_metrics.status(), StatusCode::OK);
+
+    for forbidden_uri in ["/api/overview", "/api/pairs", "/api/database/export"] {
+        let rejected = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(forbidden_uri)
+                    .header("authorization", "Bearer prom-scrape-secret-token-2026")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rejected.status(),
+            StatusCode::UNAUTHORIZED,
+            "{forbidden_uri}"
+        );
+    }
+
+    let admin_metrics = router
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/api/metrics")
+                .header("authorization", "Bearer admin-session-token")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(admin_metrics.status(), StatusCode::OK);
+
+    let wrong_metrics = router
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/api/metrics")
+                .header("authorization", "Bearer wrong-scrape-secret-token-2026")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(wrong_metrics.status(), StatusCode::UNAUTHORIZED);
+
+    let _ = runtime.shutdown(std::time::Duration::from_secs(2)).await;
+
+    let open_db = Arc::new(Database::open(":memory:").unwrap());
+    let (tx, _rx) = tokio::sync::mpsc::channel(1);
+    let open_state = AppState::new(AppConfig::default(), open_db, tx);
+    open_state.auth.set_metrics_auth(Arc::new(
+        crate::auth::MetricsAuth::from_token("metrics-only-secret-token").unwrap(),
+    ));
+    let single_router = create_router(open_state);
+    let anon_metrics = single_router
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/api/metrics")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(anon_metrics.status(), StatusCode::UNAUTHORIZED);
+    let ok_metrics = single_router
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/api/metrics")
+                .header("X-Auth-Token", "metrics-only-secret-token")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ok_metrics.status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn control_requires_confirmation_mode_and_propagates_engine_rejections() {
     let db = Arc::new(Database::open(":memory:").unwrap());
     let (action_tx, mut action_rx) = tokio::sync::mpsc::channel(1);

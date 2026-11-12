@@ -34,7 +34,7 @@ pub(crate) use probes::{sanitized_probe_error, ProbeGates};
 use accounts_ws::{accounts_ws_handler, get_accounts_handler, AccountHub, AccountSource};
 use auth::{
     get_auth_status_handler, post_auth_login_handler, post_auth_logout_handler,
-    require_auth_middleware,
+    require_auth_middleware, require_metrics_auth_middleware,
 };
 use config_probes::{
     add_pair_handler, get_config_handler, get_global_config_handler, get_server_config_handler,
@@ -194,14 +194,26 @@ fn create_base_router(state: Arc<AppState>, history_clear: bool) -> Router {
         ))
         .with_state(state.clone());
     let account = database_export_routes(state.auth.clone());
+    let metrics = metrics_routes(state.auth.clone());
     let auth_routes = public_routes().with_state(state.auth.clone());
 
     Router::new()
         .route("/ws", get(ws_handler))
         .with_state(state)
         .merge(auth_routes)
+        .merge(metrics)
         .merge(account)
         .merge(api_protected)
+}
+
+fn metrics_routes(auth: Arc<AuthContext>) -> Router {
+    Router::new()
+        .route("/api/metrics", get(get_metrics_handler))
+        .route_layer(middleware::from_fn_with_state(
+            auth.clone(),
+            require_metrics_auth_middleware,
+        ))
+        .with_state(auth)
 }
 
 fn database_export_routes(auth: Arc<AuthContext>) -> Router {
@@ -278,7 +290,6 @@ pub fn create_managed_router(handle: RuntimeHandle) -> Router {
         .route("/api/overview", get(get_managed_overview_handler))
         .route("/api/accounts", get(get_accounts_handler))
         .route("/api/overview/history", get(get_overview_history_handler))
-        .route("/api/metrics", get(get_metrics_handler))
         .route("/api/pairs/:symbol", delete(remove_pair_handler))
         .route(
             "/api/pairs/:symbol/database/export",
@@ -322,8 +333,10 @@ pub fn create_managed_router(handle: RuntimeHandle) -> Router {
         ))))
         .with_state(handle);
     let account = database_export_routes(auth.clone());
+    let metrics = metrics_routes(auth.clone());
     public_routes()
         .with_state(auth)
+        .merge(metrics)
         .merge(account)
         .merge(protected)
         .layer(DefaultBodyLimit::max(64 * 1024))

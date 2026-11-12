@@ -157,7 +157,7 @@ BOT_VERSION=0.11.0 ADMIN_PASSWORD='请替换为强密码' docker compose pull
 BOT_VERSION=0.11.0 ADMIN_PASSWORD='请替换为强密码' docker compose up -d
 ```
 
-不设置 `ADMIN_PASSWORD` 时容器以无认证模式运行。后端镜像本身只提供 API，单独运行后端容器不会提供网页。镜像默认在容器内监听 `0.0.0.0`，端口沿用数据库配置（新数据库为 `8080`），不修改数据库中保存的监听配置；直接使用 `docker run` 时可通过 `-e ADMIN_PASSWORD=...` 启用登录，发布默认端口时请指定 `-p 127.0.0.1:8080:8080`，避免将未加密的 HTTP 服务暴露到所有宿主机接口。若覆盖镜像默认命令，需自行指定 `--host 0.0.0.0` 才能通过容器网络访问后端。前端通过同源 `/api`、`/ws` 代理连接后端，生产反向代理必须支持 WebSocket Upgrade、透传包含端口的原始 `Host` 请求头并显式覆盖转发协议头（例如外层 TLS Nginx 必须配置 `proxy_set_header Host $http_host; proxy_set_header X-Forwarded-Proto $scheme;`，切勿使用 `$proxy_add_x_forwarded_proto` 追加，以通过后端 WebSocket 同源 `Origin` 校验），并将所有前端路由回退到 `index.html`。
+不设置 `ADMIN_PASSWORD` 时容器以无认证模式运行。后端镜像本身只提供 API，单独运行后端容器不会提供网页。镜像默认在容器内监听 `0.0.0.0`，端口沿用数据库配置（新数据库为 `8080`），不修改数据库中保存的监听配置；直接使用 `docker run` 时可通过 `-e ADMIN_PASSWORD=...` 启用登录，发布默认端口时请指定 `-p 127.0.0.1:8080:8080`，避免将未加密的 HTTP 服务暴露到所有宿主机接口。若覆盖镜像默认命令，需自行指定 `--host 0.0.0.0` 才能通过容器网络访问后端。前端通过同源 `/api`、`/ws` 代理连接后端，内置 Nginx 对 `POST /api/auth/login` 提供独立的源 IP 速率限制并传递 `X-Real-IP`；若后端仅能通过受控反向代理访问，可通过 `TRUSTED_PROXIES`（或 `--trusted-proxies`，逗号分隔 IP/CIDR，默认不信任任何转发头）允许后端按真实客户端 IP 隔离登录频控。生产反向代理必须支持 WebSocket Upgrade、透传包含端口的原始 `Host` 请求头并显式覆盖转发协议头（例如外层 TLS Nginx 必须配置 `proxy_set_header Host $http_host; proxy_set_header X-Forwarded-Proto $scheme;`，切勿使用 `$proxy_add_x_forwarded_proto` 追加，以通过后端 WebSocket 同源 `Origin` 校验），并将所有前端路由回退到 `index.html`。
 
 ### 3. 升级与回滚
 
@@ -510,7 +510,7 @@ curl -i http://127.0.0.1:8080/api/auth/status
 
 ### 4. 运行指标（Prometheus 文本格式）
 
-已登录的会话可访问 `GET /api/metrics`（需要与其他接口相同的 `Authorization: Bearer` 会话令牌；未设置 `ADMIN_PASSWORD` 时无需令牌），内容为 Prometheus 文本格式，指标均为进程内累计值，重启后归零：
+可通过环境变量 `METRICS_TOKEN`（或 `--metrics-token`，至少 16 位可见 ASCII 字符，建议使用环境变量）配置专用的只读指标抓取令牌，也可继续使用已登录管理员会话的 `Authorization: Bearer` 令牌访问 `GET /api/metrics`（未设置 `ADMIN_PASSWORD` 且未设置 `METRICS_TOKEN` 时无需令牌），内容为 Prometheus 文本格式，指标均为进程内累计值，重启后归零：
 
 - `binance_bot_sqlite_connection_lock_wait_seconds`：等待共享 SQLite 连接互斥锁的耗时直方图。
 - `binance_bot_sqlite_blocking_queue_wait_seconds`：SQLite 任务从提交到阻塞线程开始执行的排队耗时直方图。
@@ -518,7 +518,7 @@ curl -i http://127.0.0.1:8080/api/auth/status
 - `binance_bot_sync_failures_total{kind="open_orders|position|account"}`：挂单、持仓、账户同步失败次数。
 - `binance_bot_http_requests_total{status="2xx|4xx|5xx"}`：后端 API 的 HTTP 响应状态分类；前端静态资源由 Nginx 提供，不计入；101 WebSocket 升级及 1xx/3xx 响应不计入。
 
-会话令牌 24 小时后过期，且重启后失效，因此不适合直接配置为 Prometheus 的长期抓取凭证；长期采集需要另行提供可轮换的凭证或在受控网络内使用反向代理注入令牌。指标没有按交易对区分，也不包含价格、持仓、订单或凭证信息。
+`METRICS_TOKEN` 仅对只读的 `GET /api/metrics` 有效，不能访问控制台状态、交易控制、配置修改或数据库导出等其他接口，也不会在每次抓取时查询 SQLite 会话表，适合配置为 Prometheus 的长期抓取凭证。管理员登录会话令牌仍会在 24 小时后或进程重启后失效。指标没有按交易对区分，也不包含价格、持仓、订单或凭证信息。
 
 ---
 

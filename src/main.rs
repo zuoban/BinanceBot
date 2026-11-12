@@ -1,5 +1,5 @@
 use binance_grid_bot::{
-    auth::AdminAuth,
+    auth::{AdminAuth, MetricsAuth, TrustedProxies},
     config::{AppConfig, ServerConfig},
     db::{
         read_active_listen_addr, read_saved_server_config, ActiveListenGuard, Database,
@@ -39,6 +39,12 @@ struct CliArgs {
     /// Administrator password for the web console (prefer the ADMIN_PASSWORD environment variable)
     #[arg(long)]
     admin_password: Option<String>,
+    /// Read-only bearer token for GET /api/metrics (prefer the METRICS_TOKEN environment variable)
+    #[arg(long)]
+    metrics_token: Option<String>,
+    /// Comma-separated proxy IPs or CIDRs trusted for X-Real-IP login rate limiting (or TRUSTED_PROXIES)
+    #[arg(long)]
+    trusted_proxies: Option<String>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -174,6 +180,39 @@ fn resolve_admin_auth(cli_password: Option<String>) -> anyhow::Result<Option<Arc
         .or_else(env_pw)
         .map(|pw| AdminAuth::from_password(&pw).map(Arc::new))
         .transpose()
+}
+
+fn resolve_metrics_auth(cli_token: Option<String>) -> anyhow::Result<Option<Arc<MetricsAuth>>> {
+    let cli_supplied = cli_token.filter(|t| !t.is_empty());
+    if cli_supplied.is_some() {
+        warn!(
+            "--metrics-token was supplied on the command line and may be visible in process listings; \
+             prefer the METRICS_TOKEN environment variable"
+        );
+    }
+    let env_tok = || {
+        std::env::var("METRICS_TOKEN")
+            .ok()
+            .filter(|t| !t.is_empty())
+    };
+    cli_supplied
+        .or_else(env_tok)
+        .map(|tok| MetricsAuth::from_token(&tok).map(Arc::new))
+        .transpose()
+}
+
+fn resolve_trusted_proxies(cli_spec: Option<String>) -> anyhow::Result<Option<TrustedProxies>> {
+    let cli_supplied = cli_spec.filter(|s| !s.trim().is_empty());
+    let env_spec = || {
+        std::env::var("TRUSTED_PROXIES")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+    };
+    cli_supplied
+        .or_else(env_spec)
+        .map(|spec| TrustedProxies::parse(&spec))
+        .transpose()
+        .map(|opt| opt.filter(|p| !p.is_empty()))
 }
 
 fn init_tracing() {
@@ -343,6 +382,8 @@ async fn main() -> anyhow::Result<()> {
     let signal = signals.wait();
     tokio::pin!(signal);
     let admin_auth = resolve_admin_auth(args.admin_password)?;
+    let metrics_auth = resolve_metrics_auth(args.metrics_token)?;
+    let trusted_proxies = resolve_trusted_proxies(args.trusted_proxies)?;
     let _process_lock = DatabaseProcessLock::acquire(&args.db)?;
     let db = Arc::new(Database::open(&args.db)?);
     db.clear_all_sessions()
@@ -353,13 +394,29 @@ async fn main() -> anyhow::Result<()> {
     config.server.port = args.port.unwrap_or(config.server.port);
     let strategies = config.strategy_configs()?;
     log_startup_summary(&args.db, &strategies, admin_auth.is_some());
+    if metrics_auth.is_some() {
+        info!("Metrics authentication: dedicated read-only scrape token enabled");
+    }
+    if let Some(proxies) = &trusted_proxies {
+        info!(
+            "Trusted login proxies configured ({} rule(s))",
+            proxies.len()
+        );
+    }
     let addr = config.server.socket_addr()?;
     // Bind before starting any engine, including initialization-time reconciliation.
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let _listen_guard = ActiveListenGuard::record(Path::new(db.path()), listener.local_addr()?)?;
     let runtime = start_runtime_until_ready(&config, db, admin_auth, signal.as_mut()).await?;
+    let handle = runtime.handle();
+    if let Some(metrics_auth) = metrics_auth {
+        handle.set_metrics_auth(metrics_auth);
+    }
+    if let Some(proxies) = trusted_proxies {
+        handle.set_trusted_proxies(proxies);
+    }
     let snapshot_task = tokio::spawn(run_hourly_snapshots(runtime.handle()));
-    let app = create_managed_router(runtime.handle());
+    let app = create_managed_router(handle);
     info!(
         "API server running at http://{} (local: http://127.0.0.1:{})",
         addr, config.server.port
@@ -413,6 +470,20 @@ mod tests {
         for opt in opts.split_whitespace() {
             assert!(CliArgs::try_parse_from(["bot", opt, "value"]).is_err());
         }
+        let cli = CliArgs::try_parse_from([
+            "bot",
+            "--metrics-token",
+            "0123456789abcdef",
+            "--trusted-proxies",
+            "127.0.0.1,172.16.0.0/12",
+        ])
+        .unwrap();
+        let metrics = resolve_metrics_auth(cli.metrics_token).unwrap().unwrap();
+        assert!(metrics.verify("0123456789abcdef"));
+        let proxies = resolve_trusted_proxies(cli.trusted_proxies)
+            .unwrap()
+            .unwrap();
+        assert!(proxies.contains("172.18.0.2".parse().unwrap()));
     }
 
     #[tokio::test]

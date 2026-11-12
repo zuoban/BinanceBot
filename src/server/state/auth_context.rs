@@ -2,7 +2,7 @@ use super::AppState;
 use crate::db::Database;
 use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 
@@ -49,6 +49,8 @@ pub(crate) struct AuthContext {
     session_lookup_permits: Arc<Semaphore>,
     logout_permits: Arc<Semaphore>,
     admin_auth: Option<Arc<crate::auth::AdminAuth>>,
+    metrics_auth: OnceLock<Arc<crate::auth::MetricsAuth>>,
+    trusted_proxies: OnceLock<crate::auth::TrustedProxies>,
 }
 
 impl AuthContext {
@@ -63,11 +65,29 @@ impl AuthContext {
             session_lookup_permits: Arc::new(Semaphore::new(MAX_COLD_SESSION_LOOKUPS)),
             logout_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_LOGOUTS)),
             admin_auth,
+            metrics_auth: OnceLock::new(),
+            trusted_proxies: OnceLock::new(),
         })
     }
 
     pub(crate) fn admin_auth(&self) -> Option<Arc<crate::auth::AdminAuth>> {
         self.admin_auth.clone()
+    }
+
+    pub(crate) fn set_metrics_auth(&self, metrics_auth: Arc<crate::auth::MetricsAuth>) {
+        let _ = self.metrics_auth.set(metrics_auth);
+    }
+
+    pub(crate) fn metrics_auth(&self) -> Option<&Arc<crate::auth::MetricsAuth>> {
+        self.metrics_auth.get()
+    }
+
+    pub(crate) fn set_trusted_proxies(&self, proxies: crate::auth::TrustedProxies) {
+        let _ = self.trusted_proxies.set(proxies);
+    }
+
+    pub(crate) fn trusted_proxies(&self) -> Option<&crate::auth::TrustedProxies> {
+        self.trusted_proxies.get()
     }
 
     pub(crate) fn is_auth_configured(&self) -> bool {

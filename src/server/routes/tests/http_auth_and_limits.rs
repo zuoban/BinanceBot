@@ -396,3 +396,123 @@ async fn shared_proxy_ip_successful_login_preserves_prior_failed_attempts_and_di
     let blocked_res = app.oneshot(login_req("wrong-pw")).await.unwrap();
     assert_eq!(blocked_res.status(), StatusCode::TOO_MANY_REQUESTS);
 }
+
+#[tokio::test]
+async fn trusted_proxy_x_real_ip_isolates_clients_while_untrusted_peers_cannot_spoof() {
+    use axum::{body::Body, http::Request};
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    let (tx, _rx) = tokio::sync::mpsc::channel(1);
+    let state = AppState::new_with_admin_auth(
+        AppConfig::default(),
+        db,
+        tx,
+        Some(Arc::new(
+            crate::auth::AdminAuth::from_password("admin-secret-pw").unwrap(),
+        )),
+    );
+    state
+        .auth
+        .set_trusted_proxies(crate::auth::TrustedProxies::parse("172.18.0.0/16").unwrap());
+
+    let untrusted_peer: std::net::SocketAddr = "198.51.100.99:5000".parse().unwrap();
+    let untrusted_app = create_router(state.clone())
+        .layer(axum::Extension(axum::extract::ConnectInfo(untrusted_peer)));
+    for idx in 0..10 {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/auth/login")
+            .header("Content-Type", "application/json")
+            .header("X-Real-IP", format!("203.0.113.{idx}"))
+            .body(Body::from(r#"{"password":"wrong"}"#))
+            .unwrap();
+        assert_eq!(
+            untrusted_app.clone().oneshot(req).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    let spoofed_11th = Request::builder()
+        .method("POST")
+        .uri("/api/auth/login")
+        .header("Content-Type", "application/json")
+        .header("X-Real-IP", "203.0.113.250")
+        .body(Body::from(r#"{"password":"wrong"}"#))
+        .unwrap();
+    assert_eq!(
+        untrusted_app.oneshot(spoofed_11th).await.unwrap().status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+
+    let trusted_peer: std::net::SocketAddr = "172.18.0.2:40000".parse().unwrap();
+    let trusted_app = create_router(state.clone())
+        .layer(axum::Extension(axum::extract::ConnectInfo(trusted_peer)));
+    for _ in 0..10 {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/auth/login")
+            .header("Content-Type", "application/json")
+            .header("X-Real-IP", "203.0.113.10")
+            .body(Body::from(r#"{"password":"wrong"}"#))
+            .unwrap();
+        assert_eq!(
+            trusted_app.clone().oneshot(req).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    let blocked_attacker = Request::builder()
+        .method("POST")
+        .uri("/api/auth/login")
+        .header("Content-Type", "application/json")
+        .header("X-Real-IP", "203.0.113.10")
+        .body(Body::from(r#"{"password":"admin-secret-pw"}"#))
+        .unwrap();
+    assert_eq!(
+        trusted_app
+            .clone()
+            .oneshot(blocked_attacker)
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+
+    let legitimate_other_client = Request::builder()
+        .method("POST")
+        .uri("/api/auth/login")
+        .header("Content-Type", "application/json")
+        .header("X-Real-IP", "203.0.113.11")
+        .body(Body::from(r#"{"password":"admin-secret-pw"}"#))
+        .unwrap();
+    assert_eq!(
+        trusted_app
+            .clone()
+            .oneshot(legitimate_other_client)
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
+    let duplicate_headers = Request::builder()
+        .method("POST")
+        .uri("/api/auth/login")
+        .header("Content-Type", "application/json")
+        .header("X-Real-IP", "203.0.113.20")
+        .header("X-Real-IP", "203.0.113.21")
+        .body(Body::from(r#"{"password":"wrong"}"#))
+        .unwrap();
+    assert_eq!(
+        trusted_app
+            .oneshot(duplicate_headers)
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert!(state
+        .auth
+        .login_failures
+        .lock()
+        .await
+        .by_source
+        .contains_key(&trusted_peer.ip()));
+}

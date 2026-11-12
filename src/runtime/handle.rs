@@ -26,6 +26,14 @@ pub struct RuntimeHandle {
 }
 
 impl RuntimeHandle {
+    pub fn set_metrics_auth(&self, metrics_auth: Arc<crate::auth::MetricsAuth>) {
+        self.auth.set_metrics_auth(metrics_auth);
+    }
+
+    pub fn set_trusted_proxies(&self, proxies: crate::auth::TrustedProxies) {
+        self.auth.set_trusted_proxies(proxies);
+    }
+
     /// Stop order admission immediately; the running membership command is allowed to finish.
     pub fn request_shutdown(&self) {
         let _admission = self.active_removal.lock_unpoisoned();

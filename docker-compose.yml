@@ -14,6 +14,8 @@ services:
     environment:
       RUST_LOG: binance_grid_bot=info
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      METRICS_TOKEN: ${METRICS_TOKEN:-}
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
     security_opt:
       - no-new-privileges:true
     cap_drop:
