@@ -51,6 +51,27 @@ struct PnlVerificationBatch<'a> {
     retry_needed: &'a AtomicBool,
 }
 
+fn validate_pnl_order(trade: &TradeRecord, order: &BinanceOrderResponse) -> Result<()> {
+    anyhow::ensure!(
+        order.order_id > 0
+            && order.client_order_id == trade.client_order_id
+            && order.symbol == trade.symbol
+            && order.side == trade.side.as_str(),
+        "PnL order identity mismatch for {}",
+        trade.client_order_id
+    );
+    anyhow::ensure!(
+        order.is_terminal()
+            && trade.quantity > Decimal::ZERO
+            && order.executed_qty == trade.quantity
+            && order.orig_qty >= order.executed_qty
+            && (order.status != "FILLED" || order.orig_qty == order.executed_qty),
+        "PnL order terminal quantities do not match saved trade {}",
+        trade.client_order_id
+    );
+    Ok(())
+}
+
 impl PnlVerificationBatch<'_> {
     async fn verify_trade(&self, mut trade: TradeRecord, order_id: Option<i64>) {
         if self.quota_blocked.load(Ordering::Relaxed) {
@@ -60,10 +81,13 @@ impl PnlVerificationBatch<'_> {
             let order_id = match order_id {
                 Some(order_id) => order_id,
                 None => {
-                    self.client
+                    let order = self
+                        .client
                         .get_order_by_client_id_for_pnl(&trade.symbol, &trade.client_order_id)
-                        .await?
-                        .order_id
+                        .await?;
+                    // A successful lookup and matching fill total cannot establish identity.
+                    validate_pnl_order(&trade, &order)?;
+                    order.order_id
                 }
             };
             let fills = self

@@ -339,6 +339,7 @@ mod identity_barriers_and_cleanup;
 mod identity_resolution_and_mismatches;
 mod managed_and_partial_evidence;
 mod pair_intent_recovery;
+mod pnl_identity;
 mod remainder_identity_recovery;
 mod snapshot_open_prices;
 mod submission_staleness_and_shutdown;
