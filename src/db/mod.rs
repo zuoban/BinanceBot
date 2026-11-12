@@ -36,6 +36,7 @@ pub(crate) use config_runtime::config_version;
 pub use process_lock::{
     read_active_listen_addr, read_saved_server_config, ActiveListenGuard, DatabaseProcessLock,
 };
+pub(crate) use trades_stats::OrderFillDbOutcome;
 
 pub(crate) fn beijing_midnight(now: DateTime<Utc>) -> DateTime<Utc> {
     let beijing = crate::types::beijing_offset();

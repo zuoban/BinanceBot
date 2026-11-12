@@ -8,6 +8,13 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use rust_decimal::Decimal;
 use std::str::FromStr;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OrderFillDbOutcome {
+    Inserted,
+    Duplicate,
+    AlreadyRecorded,
+}
 impl Database {
     pub(crate) fn trade_data_revision(&self) -> u64 {
         self.trade_revisions.current()
@@ -73,11 +80,42 @@ impl Database {
         consumed_pair_source: Option<&str>,
         paper_state: Option<&(PositionInfo, AccountInfo)>,
     ) -> Result<bool> {
+        Ok(matches!(
+            self.insert_trade_with_paper_recovery_inner(
+                trade,
+                stats,
+                pair_intent,
+                consumed_pair_source,
+                paper_state,
+                false,
+            )?,
+            OrderFillDbOutcome::Inserted
+        ))
+    }
+
+    pub(crate) fn insert_trade_with_paper_recovery_inner(
+        &self,
+        trade: &TradeRecord,
+        stats: &GridStats,
+        pair_intent: Option<&GridOrder>,
+        consumed_pair_source: Option<&str>,
+        paper_state: Option<&(PositionInfo, AccountInfo)>,
+        dedup_client_order_id: bool,
+    ) -> Result<OrderFillDbOutcome> {
         anyhow::ensure!(
             paper_state.is_none() || trade.mode == TradingMode::Paper,
             "Paper state requires a paper trade"
         );
         let mut conn = self.lock_connection("insert_trade_with_recovery");
+        if dedup_client_order_id
+            && has_recorded_order_on(&conn, &trade.client_order_id, trade.mode)?
+        {
+            if trade.mode != TradingMode::Paper {
+                conn.prepare_cached("DELETE FROM managed_orders WHERE client_order_id = ?1;")?
+                    .execute(params![trade.client_order_id])?;
+            }
+            return Ok(OrderFillDbOutcome::AlreadyRecorded);
+        }
         let tx = immediate_tx(&mut conn)?;
         let inserted = insert_trade_on(&tx, trade)?;
         if inserted {
@@ -107,7 +145,11 @@ impl Database {
             }
             self.publish_trade_revision(&trade.symbol);
         }
-        Ok(inserted)
+        Ok(if inserted {
+            OrderFillDbOutcome::Inserted
+        } else {
+            OrderFillDbOutcome::Duplicate
+        })
     }
 
     #[cfg(test)]
@@ -169,11 +211,7 @@ impl Database {
         mode: TradingMode,
     ) -> Result<bool> {
         let conn = self.lock_connection("has_recorded_order");
-        let mut stmt = conn.prepare_cached(
-            "SELECT EXISTS(SELECT 1 FROM trades WHERE client_order_id = ?1 AND mode = ?2)
-                 OR EXISTS(SELECT 1 FROM cleared_trade_ids WHERE client_order_id = ?1 AND mode = ?2);",
-        )?;
-        Ok(stmt.query_row(params![client_order_id, mode.as_str()], |row| row.get(0))?)
+        has_recorded_order_on(&conn, client_order_id, mode)
     }
 
     /// Restore the execution frontier for this symbol and mode.
@@ -211,63 +249,93 @@ impl Database {
     }
 
     /// Return true only for the first successful PnL verification of a saved trade.
+    #[cfg(test)]
     pub(crate) fn verify_trade_pnl(
         &self,
         trade: &TradeRecord,
         expected_clear_revision: u64,
     ) -> Result<bool> {
+        self.verify_trades_pnl_batch(std::slice::from_ref(trade), expected_clear_revision)
+            .map(|verified| !verified.is_empty())
+    }
+
+    pub(crate) fn verify_trades_pnl_batch(
+        &self,
+        trades: &[TradeRecord],
+        expected_clear_revision: u64,
+    ) -> Result<Vec<TradeRecord>> {
+        if trades.is_empty() {
+            return Ok(Vec::new());
+        }
         let mut conn = self.lock_connection("verify_trade_pnl");
-        let saved_symbol: Option<String> = conn
-            .prepare_cached(
+        let mut candidates = Vec::with_capacity(trades.len());
+        {
+            let mut select_symbol = conn.prepare_cached(
                 "SELECT symbol FROM trades WHERE trade_id = ?1 AND mode = ?2 AND pnl_verified = 0",
-            )?
-            .query_row(params![trade.trade_id, trade.mode.as_str()], |row| {
-                row.get(0)
-            })
-            .optional()?;
-        let Some(saved_symbol) = saved_symbol else {
-            return Ok(false);
-        };
-        if self.trade_clear_revisions.for_symbol(&saved_symbol) != expected_clear_revision {
-            return Ok(false);
+            )?;
+            for trade in trades {
+                let saved_symbol: Option<String> = select_symbol
+                    .query_row(params![trade.trade_id, trade.mode.as_str()], |row| {
+                        row.get(0)
+                    })
+                    .optional()?;
+                if let Some(saved_symbol) = saved_symbol {
+                    if self.trade_clear_revisions.for_symbol(&saved_symbol)
+                        == expected_clear_revision
+                    {
+                        candidates.push((trade, saved_symbol));
+                    }
+                }
+            }
+        }
+        if candidates.is_empty() {
+            return Ok(Vec::new());
         }
         let tx = immediate_tx(&mut conn)?;
-        let updated_trade: Option<(String, DateTime<Utc>)> = {
-            let mut statement = tx.prepare_cached(
-                "UPDATE trades SET realized_pnl = ?1, commission = ?2, is_maker = ?3, pnl_verified = 1 WHERE trade_id = ?4 AND mode = ?5 AND pnl_verified = 0 RETURNING symbol, timestamp;",
-            )?;
-            let mut rows = statement.query(params![
-                trade.realized_pnl.to_string(),
-                trade.commission.to_string(),
-                if trade.is_maker { 1 } else { 0 },
-                trade.trade_id,
-                trade.mode.as_str(),
-            ])?;
-            let saved = rows
-                .next()?
-                .map(|row| -> rusqlite::Result<_> { Ok((row.get(0)?, row.get(1)?)) })
-                .transpose()?;
-            // Step through completion so errors after RETURNING are propagated.
-            while rows.next()?.is_some() {}
-            saved
-        };
-        if let Some((symbol, timestamp)) = &updated_trade {
-            hourly::verify_on(
-                &tx,
-                symbol,
-                trade.mode,
-                *timestamp,
-                trade.realized_pnl,
-                trade.commission,
-            )?;
+        let mut verified = Vec::with_capacity(candidates.len());
+        let mut updated_symbols = Vec::new();
+        for (trade, _) in candidates {
+            let updated_trade: Option<(String, DateTime<Utc>)> = {
+                let mut statement = tx.prepare_cached(
+                    "UPDATE trades SET realized_pnl = ?1, commission = ?2, is_maker = ?3, pnl_verified = 1 WHERE trade_id = ?4 AND mode = ?5 AND pnl_verified = 0 RETURNING symbol, timestamp;",
+                )?;
+                let mut rows = statement.query(params![
+                    trade.realized_pnl.to_string(),
+                    trade.commission.to_string(),
+                    if trade.is_maker { 1 } else { 0 },
+                    trade.trade_id,
+                    trade.mode.as_str(),
+                ])?;
+                let saved = rows
+                    .next()?
+                    .map(|row| -> rusqlite::Result<_> { Ok((row.get(0)?, row.get(1)?)) })
+                    .transpose()?;
+                // Step through completion so errors after RETURNING are propagated.
+                while rows.next()?.is_some() {}
+                saved
+            };
+            if let Some((symbol, timestamp)) = updated_trade {
+                hourly::verify_on(
+                    &tx,
+                    &symbol,
+                    trade.mode,
+                    timestamp,
+                    trade.realized_pnl,
+                    trade.commission,
+                )?;
+                if !updated_symbols.contains(&symbol) {
+                    updated_symbols.push(symbol.clone());
+                }
+                let mut committed = trade.clone();
+                committed.symbol = symbol;
+                verified.push(committed);
+            }
         }
         tx.commit()?;
-        if let Some((symbol, _)) = updated_trade {
-            self.publish_trade_revision(&symbol);
-            Ok(true)
-        } else {
-            Ok(false)
+        for symbol in &updated_symbols {
+            self.publish_trade_revision(symbol);
         }
+        Ok(verified)
     }
 
     pub fn get_recent_trades(&self, limit: usize) -> Result<Vec<TradeRecord>> {
@@ -389,6 +457,18 @@ fn persist_inserted_trade_recovery_on(
 
 fn parse_order_side(side: &str) -> Result<OrderSide> {
     OrderSide::from_exchange_str(side).with_context(|| format!("Invalid order side: {}", side))
+}
+
+fn has_recorded_order_on(
+    conn: &Connection,
+    client_order_id: &str,
+    mode: TradingMode,
+) -> Result<bool> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT EXISTS(SELECT 1 FROM trades WHERE client_order_id = ?1 AND mode = ?2)
+             OR EXISTS(SELECT 1 FROM cleared_trade_ids WHERE client_order_id = ?1 AND mode = ?2);",
+    )?;
+    Ok(stmt.query_row(params![client_order_id, mode.as_str()], |row| row.get(0))?)
 }
 
 fn insert_trade_on(conn: &Connection, trade: &TradeRecord) -> Result<bool> {

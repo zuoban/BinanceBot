@@ -511,3 +511,38 @@ fn committed_clear_publishes_revision_before_releasing_connection() {
     assert_eq!(revision, 1);
     assert_eq!(db.symbol_trade_clear_revision("SOLUSDC"), revision);
 }
+
+#[test]
+fn verify_trades_pnl_batch_commits_multiple_trades_and_updates_rollups_once() {
+    let db = Database::open(":memory:").unwrap();
+    let mut first = revision_test_trade();
+    first.trade_id = "batch-1".into();
+    first.client_order_id = "cid-batch-1".into();
+    let mut second = revision_test_trade();
+    second.trade_id = "batch-2".into();
+    second.client_order_id = "cid-batch-2".into();
+    assert!(db.insert_trade(&first).unwrap());
+    assert!(db.insert_trade(&second).unwrap());
+    let rev_before = db.symbol_trade_revision("SOLUSDC");
+
+    first.realized_pnl = dec!(1.25);
+    first.commission = dec!(0.02);
+    first.pnl_verified = true;
+    second.realized_pnl = dec!(2.75);
+    second.commission = dec!(0.03);
+    second.pnl_verified = true;
+    let verified = db
+        .verify_trades_pnl_batch(&[first.clone(), second.clone()], 0)
+        .unwrap();
+    assert_eq!(verified.len(), 2);
+    assert_eq!(db.symbol_trade_revision("SOLUSDC"), rev_before + 1);
+    assert_eq!(
+        db.get_pnl_totals("SOLUSDC", TradingMode::Paper).unwrap(),
+        (dec!(4.00), dec!(0.05), 0)
+    );
+    assert!(db
+        .verify_trades_pnl_batch(&[first, second], 0)
+        .unwrap()
+        .is_empty());
+    assert_eq!(db.symbol_trade_revision("SOLUSDC"), rev_before + 1);
+}

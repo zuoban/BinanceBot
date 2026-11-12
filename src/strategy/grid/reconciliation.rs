@@ -390,6 +390,7 @@ impl GridTradingEngine {
         let symbol = validation.symbol;
         let mode = validation.mode;
         let pause_epoch = validation.pause_epoch;
+        let has_pair_intents = !validation.pair_intents.is_empty();
         let adopt_fut = self.validate_and_adopt_live_snapshot(validation, remainder_plan.as_ref());
         let Some(adopted) = Box::pin(adopt_fut).await else {
             return false;
@@ -414,6 +415,7 @@ impl GridTradingEngine {
             pause_epoch,
             terminal_orders,
             remainder_plan: &mut remainder_plan,
+            has_pair_intents,
             has_fill_guard: fill_guard.is_some(),
             resolved_conflict_ids: &resolved_conflict_ids,
         };

@@ -329,6 +329,8 @@ impl GridTradingEngine {
 
     /// Risk refresh and its global check must precede this durable commit.
     pub(super) async fn commit_order_fill(&mut self, order: &mut GridOrder) -> bool {
+        use crate::db::OrderFillDbOutcome;
+
         order.status = OrderStatus::Filled;
         let config = self.state.config.read().await.clone();
         let is_paper = config.exchange.is_paper();
@@ -336,11 +338,14 @@ impl GridTradingEngine {
             order.updated_at = Utc::now();
         }
         let mode = config.exchange.trading_mode();
-        if let Some(outcome) = self
-            .retire_already_recorded_fill(order, is_paper, mode)
-            .await
-        {
-            return outcome;
+        let has_paired_source = order.paired_client_order_id.is_some();
+        if has_paired_source {
+            if let Some(outcome) = self
+                .retire_already_recorded_fill(order, is_paper, mode)
+                .await
+            {
+                return outcome;
+            }
         }
         let Some((cycle_profit, is_completed_cycle, note)) =
             self.resolve_paired_cycle_fill(&config, order, mode).await
@@ -374,17 +379,18 @@ impl GridTradingEngine {
             timestamp: order.updated_at,
             note: note.clone(),
         };
-        let recorded = self
+        let Some(outcome) = self
             .state
-            .record_trade_with_paper_state(
+            .record_order_fill_with_paper_state(
                 trade,
                 is_completed_cycle.then_some(cycle_profit),
                 None,
                 order.paired_client_order_id.clone(),
                 paper_state,
+                !has_paired_source,
             )
-            .await;
-        if !recorded {
+            .await
+        else {
             self.pause_trading().await;
             self.state
                 .active_orders
@@ -393,6 +399,16 @@ impl GridTradingEngine {
                 .entry(order.client_order_id.clone())
                 .or_insert_with(|| order.clone());
             return false;
+        };
+        if outcome == OrderFillDbOutcome::AlreadyRecorded {
+            if !is_paper {
+                self.state
+                    .active_orders
+                    .write()
+                    .await
+                    .remove(&order.client_order_id);
+            }
+            return true;
         }
         self.finalize_committed_fill(order, is_paper, is_completed_cycle, note)
             .await;

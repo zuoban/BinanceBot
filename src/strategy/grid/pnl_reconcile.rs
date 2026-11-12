@@ -45,7 +45,6 @@ pub(super) fn exchange_fill_time(order: &BinanceOrderResponse) -> chrono::DateTi
 
 struct PnlVerificationBatch<'a> {
     client: &'a BinanceFuturesClient,
-    state: &'a Arc<AppState>,
     clear_revision: u64,
     quota_blocked: &'a AtomicBool,
     retry_needed: &'a AtomicBool,
@@ -73,9 +72,13 @@ fn validate_pnl_order(trade: &TradeRecord, order: &BinanceOrderResponse) -> Resu
 }
 
 impl PnlVerificationBatch<'_> {
-    async fn verify_trade(&self, mut trade: TradeRecord, order_id: Option<i64>) {
+    async fn fetch_verified_trade(
+        &self,
+        mut trade: TradeRecord,
+        order_id: Option<i64>,
+    ) -> Option<TradeRecord> {
         if self.quota_blocked.load(Ordering::Relaxed) {
-            return;
+            return None;
         }
         let result = async {
             let order_id = match order_id {
@@ -103,14 +106,7 @@ impl PnlVerificationBatch<'_> {
                 trade.commission = commission;
                 trade.is_maker = maker;
                 trade.pnl_verified = true;
-                if let Err(e) = self
-                    .state
-                    .verify_trade_pnl(trade, self.clear_revision)
-                    .await
-                {
-                    warn!("Could not save verified trade PnL: {}", e);
-                    self.retry_needed.store(true, Ordering::Relaxed);
-                }
+                Some(trade)
             }
             Err(e) => {
                 self.retry_needed.store(true, Ordering::Relaxed);
@@ -125,6 +121,7 @@ impl PnlVerificationBatch<'_> {
                     "PnL verification deferred for {}: {}",
                     trade.client_order_id, e
                 );
+                None
             }
         }
     }
@@ -230,14 +227,25 @@ impl GridTradingEngine {
             let retry_needed = AtomicBool::new(false);
             let batch = PnlVerificationBatch {
                 client: &client,
-                state: &state,
                 clear_revision,
                 quota_blocked: &quota_blocked,
                 retry_needed: &retry_needed,
             };
-            stream::iter(pending)
-                .for_each_concurrent(4, |(trade, order_id)| batch.verify_trade(trade, order_id))
+            let verified: Vec<TradeRecord> = stream::iter(pending)
+                .map(|(trade, order_id)| batch.fetch_verified_trade(trade, order_id))
+                .buffered(4)
+                .filter_map(|trade| async move { trade })
+                .collect()
                 .await;
+            if !verified.is_empty() {
+                if let Err(e) = state
+                    .verify_trades_pnl_batch(verified, clear_revision)
+                    .await
+                {
+                    warn!("Could not save verified trade PnL: {}", e);
+                    retry_needed.store(true, Ordering::Relaxed);
+                }
+            }
             retry_needed.load(Ordering::Relaxed).then(|| {
                 Instant::now() + Duration::from_millis(60_000 + rand::random::<u64>() % 1001)
             })

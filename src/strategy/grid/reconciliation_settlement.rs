@@ -7,6 +7,7 @@ pub(super) struct LiveSyncSettlement<'a> {
     pub(super) pause_epoch: u64,
     pub(super) terminal_orders: Vec<(GridOrder, BinanceOrderResponse)>,
     pub(super) remainder_plan: &'a mut Option<RemainderPlan>,
+    pub(super) has_pair_intents: bool,
     pub(super) has_fill_guard: bool,
     pub(super) resolved_conflict_ids: &'a [String],
 }
@@ -70,6 +71,7 @@ impl GridTradingEngine {
             pause_epoch,
             mut terminal_orders,
             remainder_plan,
+            has_pair_intents,
             has_fill_guard,
             resolved_conflict_ids,
         } = settlement;
@@ -101,11 +103,13 @@ impl GridTradingEngine {
         }
         if !persistence_ok {
             self.last_orders_sync = None;
-        } else if !(if has_fill_guard {
-            self.drain_pair_intents_under_gate(symbol, mode).await
-        } else {
-            self.drain_pair_intents(symbol, mode).await
-        }) {
+        } else if has_pair_intents
+            && !(if has_fill_guard {
+                self.drain_pair_intents_under_gate(symbol, mode).await
+            } else {
+                self.drain_pair_intents(symbol, mode).await
+            })
+        {
             persistence_ok = false;
             self.last_orders_sync = None;
         }

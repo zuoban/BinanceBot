@@ -805,3 +805,54 @@ fn symbol_and_selected_exports_preserve_rollups_drop_triggers_and_saturate_snaps
         .unwrap();
     assert!(oversized.export_analysis_snapshot().is_err());
 }
+
+#[test]
+fn clear_trade_history_caps_cleared_ids_and_pair_openings_at_retention_limit() {
+    use crate::db::trades_cleanup::{
+        MAX_CLEARED_PAIR_OPENINGS_PER_SCOPE, MAX_CLEARED_TRADE_IDS_PER_MODE,
+    };
+
+    let db = Database::open(":memory:").unwrap();
+    let total = (MAX_CLEARED_TRADE_IDS_PER_MODE as usize) + 64;
+    {
+        let mut conn = db.conn.lock().unwrap();
+        let tx = conn.transaction().unwrap();
+        {
+            let mut stmt = tx
+                .prepare(
+                    "INSERT INTO trades (
+                        trade_id, client_order_id, symbol, mode, side, price, quantity,
+                        amount_usdc, realized_pnl, commission, pnl_verified, is_maker, timestamp, note
+                    ) VALUES (?1, ?2, 'SOLUSDC', 'LIVE', 'BUY', '100', '1', '100', '0', '0', 1, 1, ?3, '')",
+                )
+                .unwrap();
+            for i in 0..total {
+                let ts = chrono::DateTime::from_timestamp(1_700_000_000 + i as i64, 0)
+                    .unwrap()
+                    .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+                stmt.execute(params![format!("tid-{i}"), format!("cid-{i}"), ts,])
+                    .unwrap();
+            }
+        }
+        tx.commit().unwrap();
+    }
+    assert_eq!(db.clear_trade_history_for_symbol("SOLUSDC").unwrap(), total);
+    let conn = db.conn.lock().unwrap();
+    let cleared_ids: i64 = conn
+        .query_row("SELECT COUNT(*) FROM cleared_trade_ids", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let cleared_openings: i64 = conn
+        .query_row("SELECT COUNT(*) FROM cleared_pair_openings", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(cleared_ids, MAX_CLEARED_TRADE_IDS_PER_MODE);
+    assert_eq!(cleared_openings, MAX_CLEARED_PAIR_OPENINGS_PER_SCOPE);
+    drop(conn);
+    assert!(!db.has_recorded_order("cid-0", TradingMode::Live).unwrap());
+    assert!(db
+        .has_recorded_order(&format!("cid-{}", total - 1), TradingMode::Live)
+        .unwrap());
+}

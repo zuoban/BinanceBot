@@ -2,6 +2,9 @@ use super::{immediate_tx, Database};
 use anyhow::Result;
 use rusqlite::{params, Connection};
 
+pub(crate) const MAX_CLEARED_TRADE_IDS_PER_MODE: i64 = 4096;
+pub(crate) const MAX_CLEARED_PAIR_OPENINGS_PER_SCOPE: i64 = 4096;
+
 impl Database {
     /// Delete analysis history atomically while preserving order deduplication
     /// and the execution frontier needed by a running or restarted strategy.
@@ -68,8 +71,20 @@ fn clear_trades_on(tx: &Connection, symbol: Option<&str>) -> Result<usize> {
     )?;
     tx.execute(
         "INSERT OR IGNORE INTO cleared_trade_ids (trade_id, client_order_id, mode)
-         SELECT trade_id, client_order_id, mode FROM trades WHERE (?1 IS NULL OR symbol = ?1)",
+         SELECT trade_id, client_order_id, mode FROM trades
+         WHERE (?1 IS NULL OR symbol = ?1)
+         ORDER BY timestamp ASC, rowid ASC",
         params![symbol],
+    )?;
+    tx.execute(
+        "DELETE FROM cleared_trade_ids
+         WHERE rowid IN (
+             SELECT rowid FROM (
+                 SELECT rowid, ROW_NUMBER() OVER (PARTITION BY mode ORDER BY rowid DESC) AS rn
+                 FROM cleared_trade_ids
+             ) WHERE rn > ?1
+         )",
+        params![MAX_CLEARED_TRADE_IDS_PER_MODE],
     )?;
     preserve_pair_openings_on(tx, symbol)?;
     let deleted = tx.execute(
@@ -98,12 +113,24 @@ fn preserve_pair_openings_on(conn: &Connection, symbol: Option<&str>) -> Result<
     conn.execute(
         "INSERT OR IGNORE INTO cleared_pair_openings (symbol, mode, client_order_id, side, price, quantity)
          SELECT symbol, mode, client_order_id, side, price, quantity FROM (
-             SELECT symbol, mode, client_order_id, side, price, quantity,
+             SELECT symbol, mode, client_order_id, side, price, quantity, timestamp, rowid AS src_rowid,
                     ROW_NUMBER() OVER (PARTITION BY symbol, mode, client_order_id
                                        ORDER BY timestamp DESC, rowid DESC) AS rank
              FROM trades WHERE (?1 IS NULL OR symbol = ?1)
-         ) WHERE rank = 1",
+         ) WHERE rank = 1
+         ORDER BY timestamp ASC, src_rowid ASC",
         params![symbol],
+    )?;
+    conn.execute(
+        "DELETE FROM cleared_pair_openings
+         WHERE rowid IN (
+             SELECT rowid FROM (
+                 SELECT rowid, ROW_NUMBER() OVER (PARTITION BY symbol, mode ORDER BY rowid DESC) AS rn
+                 FROM cleared_pair_openings
+                 WHERE (?1 IS NULL OR symbol = ?1)
+             ) WHERE rn > ?2
+         )",
+        params![symbol, MAX_CLEARED_PAIR_OPENINGS_PER_SCOPE],
     )?;
     Ok(())
 }

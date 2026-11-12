@@ -110,6 +110,9 @@ impl GridTradingEngine {
                 return false;
             }
         };
+        if intents.is_empty() {
+            return true;
+        }
 
         for intent in intents {
             let original = intent.clone();

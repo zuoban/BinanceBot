@@ -85,7 +85,11 @@ function sameDepthOrders(a: Snapshot['active_orders'], b: Snapshot['active_order
 }
 
 export const DepthChart = memo(function DepthChart({ snapshot }: { snapshot: Snapshot }) {
-  const orders = snapshot.active_orders;
+  const stableOrdersRef = useRef(snapshot.active_orders);
+  if (!sameDepthOrders(stableOrdersRef.current, snapshot.active_orders)) {
+    stableOrdersRef.current = snapshot.active_orders;
+  }
+  const orders = stableOrdersRef.current;
   const containerRef = useRef<HTMLDivElement>(null);
   const markPrice = snapshot.ticker.mark_price;
   const parsedMark = parseSignedDecimal(markPrice);

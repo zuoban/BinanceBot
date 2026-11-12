@@ -1,4 +1,5 @@
 use super::AppState;
+use crate::db::OrderFillDbOutcome;
 use crate::types::{
     AccountInfo, GridOrder, GridStats, HourlyTradeStats, PositionInfo, TradeRecord, TradingMode,
 };
@@ -95,7 +96,7 @@ fn reload_durable_base_stats(
 }
 
 type PersistedTradeOutcome = (
-    bool,
+    OrderFillDbOutcome,
     GridStats,
     Option<VecDeque<TradeRecord>>,
     Option<HourlyTradeStats>,
@@ -112,6 +113,7 @@ struct PersistTradeInput<'a> {
     consumed_pair_source: Option<&'a str>,
     paper_state: Option<&'a (PositionInfo, AccountInfo)>,
     notify_trade: bool,
+    dedup_client_order_id: bool,
 }
 
 fn persist_trade_and_stats_on_db(
@@ -128,6 +130,7 @@ fn persist_trade_and_stats_on_db(
         consumed_pair_source,
         paper_state,
         notify_trade,
+        dedup_client_order_id,
     } = input;
     let base = if stats_dirty {
         reload_durable_base_stats(db, &stored_trade.symbol, stored_trade.mode, &cached_stats)?
@@ -135,13 +138,19 @@ fn persist_trade_and_stats_on_db(
         cached_stats
     };
     let updated = updated_stats_for_trade(&base, stored_trade, cycle_profit);
-    let inserted = db.insert_trade_with_paper_recovery(
+    let status = db.insert_trade_with_paper_recovery_inner(
         stored_trade,
         &updated,
         pair_intent,
         consumed_pair_source,
         paper_state,
+        dedup_client_order_id,
     )?;
+    if status == OrderFillDbOutcome::AlreadyRecorded {
+        let revision = db.symbol_trade_revision(&stored_trade.symbol);
+        return Ok((status, base, None, None, revision));
+    }
+    let inserted = status == OrderFillDbOutcome::Inserted;
     // Never fail after commit: paper_accounts and PaperLedger have already advanced.
     let reloaded_trades = if trades_dirty {
         match db.get_recent_trades_for(&stored_trade.symbol, stored_trade.mode, RECENT_TRADE_LIMIT)
@@ -168,7 +177,7 @@ fn persist_trade_and_stats_on_db(
         .flatten();
     let revision = db.symbol_trade_revision(&stored_trade.symbol);
     Ok((
-        inserted,
+        status,
         if inserted { updated } else { base },
         reloaded_trades,
         hourly,
@@ -202,6 +211,47 @@ impl AppState {
         consumed_pair_source: Option<String>,
         paper_state: Option<(PositionInfo, AccountInfo)>,
     ) -> bool {
+        self.record_trade_with_options(
+            trade,
+            cycle_profit,
+            pair_intent,
+            consumed_pair_source,
+            paper_state,
+            false,
+        )
+        .await
+        .is_some()
+    }
+
+    pub(crate) async fn record_order_fill_with_paper_state(
+        self: &Arc<Self>,
+        trade: TradeRecord,
+        cycle_profit: Option<Decimal>,
+        pair_intent: Option<GridOrder>,
+        consumed_pair_source: Option<String>,
+        paper_state: Option<(PositionInfo, AccountInfo)>,
+        dedup_client_order_id: bool,
+    ) -> Option<OrderFillDbOutcome> {
+        self.record_trade_with_options(
+            trade,
+            cycle_profit,
+            pair_intent,
+            consumed_pair_source,
+            paper_state,
+            dedup_client_order_id,
+        )
+        .await
+    }
+
+    async fn record_trade_with_options(
+        self: &Arc<Self>,
+        trade: TradeRecord,
+        cycle_profit: Option<Decimal>,
+        pair_intent: Option<GridOrder>,
+        consumed_pair_source: Option<String>,
+        paper_state: Option<(PositionInfo, AccountInfo)>,
+        dedup_client_order_id: bool,
+    ) -> Option<OrderFillDbOutcome> {
         if paper_state.is_some() {
             let state = Arc::clone(self);
             let order_id = trade.client_order_id.clone();
@@ -213,9 +263,10 @@ impl AppState {
                         pair_intent,
                         consumed_pair_source,
                         paper_state,
+                        dedup_client_order_id,
                     )
                     .await;
-                if recorded {
+                if recorded.is_some() {
                     state.active_orders.write().await.remove(&order_id);
                 } else if let Err(error) = state.pause_trading().await {
                     error!("Could not persist paused bot status: {}", error);
@@ -227,7 +278,7 @@ impl AppState {
                 Ok(recorded) => recorded,
                 Err(error) => {
                     error!("Paper fill commit task failed: {}", error);
-                    false
+                    None
                 }
             };
         }
@@ -237,6 +288,7 @@ impl AppState {
             pair_intent,
             consumed_pair_source,
             paper_state,
+            dedup_client_order_id,
         )
         .await
     }
@@ -259,8 +311,8 @@ impl AppState {
         pair_intent: Option<GridOrder>,
         consumed_pair_source: Option<String>,
         paper_state: Option<(PositionInfo, AccountInfo)>,
-        notify_trade: bool,
-    ) -> Result<(bool, Option<HourlyTradeStats>), ()> {
+        (notify_trade, dedup_client_order_id): (bool, bool),
+    ) -> Result<(OrderFillDbOutcome, Option<HourlyTradeStats>), ()> {
         let _commit = self.trade_commit_lock.lock().await;
         let stats_dirty = self.stats_dirty.load(Ordering::SeqCst);
         let trades_dirty = self.recent_trades_dirty.load(Ordering::SeqCst);
@@ -282,6 +334,7 @@ impl AppState {
                         consumed_pair_source: consumed_pair_source.as_deref(),
                         paper_state: stored_paper.as_ref(),
                         notify_trade,
+                        dedup_client_order_id,
                     },
                 )
             })
@@ -299,8 +352,11 @@ impl AppState {
         trade: &TradeRecord,
         paper_state: Option<(PositionInfo, AccountInfo)>,
         outcome: PersistedTradeOutcome,
-    ) -> (bool, Option<HourlyTradeStats>) {
-        let (inserted, next_stats, reloaded_trades, notification_stats, revision) = outcome;
+    ) -> (OrderFillDbOutcome, Option<HourlyTradeStats>) {
+        let (status, next_stats, reloaded_trades, notification_stats, revision) = outcome;
+        if status == OrderFillDbOutcome::AlreadyRecorded {
+            return (status, None);
+        }
         let had_reloaded_trades = reloaded_trades.is_some();
         if let Some(reloaded) = reloaded_trades {
             *self.recent_trades.write().await = reloaded;
@@ -310,8 +366,8 @@ impl AppState {
         }
         *self.stats.write().await = next_stats;
         self.stats_dirty.store(false, Ordering::SeqCst);
-        if !inserted {
-            return (false, None);
+        if status != OrderFillDbOutcome::Inserted {
+            return (status, None);
         }
         if let Some((position, account)) = paper_state {
             self.apply_committed_paper_state(&trade.symbol, trade.mode, position, account)
@@ -322,7 +378,7 @@ impl AppState {
             self.recent_trades_revision
                 .store(revision, Ordering::Release);
         }
-        (true, notification_stats)
+        (OrderFillDbOutcome::Inserted, notification_stats)
     }
 
     async fn apply_committed_paper_state(
@@ -346,7 +402,8 @@ impl AppState {
         pair_intent: Option<GridOrder>,
         consumed_pair_source: Option<String>,
         paper_state: Option<(PositionInfo, AccountInfo)>,
-    ) -> bool {
+        dedup_client_order_id: bool,
+    ) -> Option<OrderFillDbOutcome> {
         let (current_symbol, current_mode, telegram, direction, sync_interval_secs) = {
             let cfg = self.config.read().await;
             (
@@ -362,25 +419,25 @@ impl AppState {
                 "Trade scope differs from the active strategy: {}",
                 trade.trade_id
             );
-            return false;
+            return None;
         }
         let notify_trade =
             telegram.enabled && (trade.pnl_verified || trade.side != direction.closing_side());
-        let Ok((inserted, notification_stats)) = self
+        let Ok((status, notification_stats)) = self
             .commit_trade_to_db_and_caches(
                 &trade,
                 cycle_profit,
                 pair_intent,
                 consumed_pair_source,
                 paper_state,
-                notify_trade,
+                (notify_trade, dedup_client_order_id),
             )
             .await
         else {
-            return false;
+            return None;
         };
-        if !inserted {
-            return true;
+        if status != OrderFillDbOutcome::Inserted {
+            return Some(status);
         }
         if self.ws_broadcast_tx.receiver_count() > 0 {
             if let Some(json) = crate::types::ws_frame_json("trade", &trade) {
@@ -397,7 +454,7 @@ impl AppState {
             )
             .await;
         }
-        true
+        Some(OrderFillDbOutcome::Inserted)
     }
 
     pub async fn verify_trade_pnl(
@@ -405,6 +462,18 @@ impl AppState {
         trade: TradeRecord,
         expected_clear_revision: u64,
     ) -> anyhow::Result<()> {
+        self.verify_trades_pnl_batch(vec![trade], expected_clear_revision)
+            .await
+    }
+
+    pub async fn verify_trades_pnl_batch(
+        self: &Arc<Self>,
+        trades: Vec<TradeRecord>,
+        expected_clear_revision: u64,
+    ) -> anyhow::Result<()> {
+        if trades.is_empty() {
+            return Ok(());
+        }
         let commit = self.trade_commit_lock.clone().lock_owned().await;
         // Retirement closes admission even if an aborted worker is still polling.
         if self.is_retired() {
@@ -413,65 +482,73 @@ impl AppState {
         let state = self.clone();
         // Once admitted, finish publishing even if the requester stops.
         tokio::spawn(async move {
-            if !state
-                .verify_trade_pnl_inner(&trade, expected_clear_revision)
-                .await?
-            {
+            let verified = state
+                .verify_trades_pnl_batch_inner(trades, expected_clear_revision)
+                .await?;
+            if verified.is_empty() {
                 return Ok(());
             }
             // Account capture takes the same lock; finish publication before preparing it.
             drop(commit);
-            let notification = state.closing_trade_notification_target(&trade).await;
-            if let Some(target) = notification {
-                state.notify_verified_closing_trade(trade, target).await;
+            for trade in verified {
+                let notification = state.closing_trade_notification_target(&trade).await;
+                if let Some(target) = notification {
+                    state.notify_verified_closing_trade(trade, target).await;
+                }
             }
             Ok(())
         })
         .await?
     }
 
-    async fn verify_trade_pnl_inner(
+    async fn verify_trades_pnl_batch_inner(
         &self,
-        trade: &TradeRecord,
+        trades: Vec<TradeRecord>,
         expected_clear_revision: u64,
-    ) -> anyhow::Result<bool> {
-        let stored_trade = trade.clone();
-        if !self
+    ) -> anyhow::Result<Vec<TradeRecord>> {
+        let verified = self
             .db
-            .run_blocking(move |db| db.verify_trade_pnl(&stored_trade, expected_clear_revision))
-            .await?
-        {
-            return Ok(false);
+            .run_blocking(move |db| db.verify_trades_pnl_batch(&trades, expected_clear_revision))
+            .await?;
+        if verified.is_empty() {
+            return Ok(Vec::new());
         }
         let config = self.config.read().await;
         let current_mode = config.exchange.trading_mode();
         let current_symbol = config.exchange.symbol.clone();
         drop(config);
-        if trade.symbol == current_symbol
-            && trade.mode == current_mode
-            && !self.stats_dirty.load(Ordering::SeqCst)
-        {
+        if !self.stats_dirty.load(Ordering::SeqCst) {
             let mut stats = self.stats.write().await;
-            stats.total_realized_pnl = stats.total_realized_pnl.saturating_add(trade.realized_pnl);
-            stats.total_commission = stats.total_commission.saturating_add(trade.commission);
-            stats.pending_pnl_trades = stats.pending_pnl_trades.saturating_sub(1);
+            for trade in &verified {
+                if trade.symbol == current_symbol && trade.mode == current_mode {
+                    stats.total_realized_pnl =
+                        stats.total_realized_pnl.saturating_add(trade.realized_pnl);
+                    stats.total_commission =
+                        stats.total_commission.saturating_add(trade.commission);
+                    stats.pending_pnl_trades = stats.pending_pnl_trades.saturating_sub(1);
+                }
+            }
         }
         let mut recent = self.recent_trades.write().await;
-        if let Some(existing) = recent
-            .iter_mut()
-            .find(|item| item.trade_id == trade.trade_id)
-        {
-            // Verification updates PnL fields only; SQLite retains the original timestamp.
-            existing.realized_pnl = trade.realized_pnl;
-            existing.commission = trade.commission;
-            existing.is_maker = trade.is_maker;
-            existing.pnl_verified = true;
-            self.recent_trades_revision.store(
-                self.db.symbol_trade_revision(&trade.symbol),
-                Ordering::Release,
-            );
+        let mut updated_symbol = None;
+        for trade in &verified {
+            if let Some(existing) = recent
+                .iter_mut()
+                .find(|item| item.trade_id == trade.trade_id)
+            {
+                // Verification updates PnL fields only; SQLite retains the original timestamp.
+                existing.realized_pnl = trade.realized_pnl;
+                existing.commission = trade.commission;
+                existing.is_maker = trade.is_maker;
+                existing.pnl_verified = true;
+                updated_symbol = Some(trade.symbol.as_str());
+            }
         }
-        Ok(true)
+        if let Some(symbol) = updated_symbol {
+            self.recent_trades_revision
+                .store(self.db.symbol_trade_revision(symbol), Ordering::Release);
+        }
+        Ok(verified)
     }
 
     pub(crate) async fn drain_trade_commits(&self) {
