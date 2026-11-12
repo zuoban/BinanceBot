@@ -258,11 +258,14 @@ fn init_tables_includes_stats_hour_without_alter_table() {
     )
     .unwrap();
     let db = Database {
+        read_conns: Vec::new(),
+        next_reader: AtomicUsize::new(0),
         conn: Mutex::new(conn),
         path: ":memory:".into(),
         #[cfg(unix)]
         file_identity: None,
         history_account_ids: Mutex::new(HashMap::new()),
+        trade_commit_seq: AtomicU64::new(0),
         trade_revisions: RevisionTracker::default(),
         trade_clear_revisions: RevisionTracker::default(),
         revision_publish_hook: Mutex::new(None),
@@ -546,4 +549,113 @@ fn verify_trades_pnl_batch_commits_multiple_trades_and_updates_rollups_once() {
         .unwrap()
         .is_empty());
     assert_eq!(db.symbol_trade_revision("SOLUSDC"), rev_before + 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wal_read_pool_serves_queries_without_blocking_on_held_write_transaction() {
+    use std::sync::{mpsc, Arc};
+    use std::time::Duration;
+
+    let dir = crate::test_support::TempTestDir::new("wal-read-pool");
+    let path = dir.join("bot.db");
+    let db = Arc::new(Database::open(&path).unwrap());
+    assert_eq!(db.read_conns.len(), 4);
+    for slot in &db.read_conns {
+        let conn = slot.lock().unwrap();
+        assert!(conn.execute("DELETE FROM trades", []).is_err());
+    }
+
+    let now: DateTime<Utc> = "2026-10-14T03:20:00Z".parse().unwrap();
+    let mut committed = revision_test_trade();
+    committed.trade_id = "committed-1".into();
+    committed.client_order_id = "cid-committed-1".into();
+    committed.price = dec!(101.5);
+    committed.realized_pnl = dec!(2.5);
+    committed.pnl_verified = true;
+    committed.timestamp = now;
+    assert!(db.insert_trade(&committed).unwrap());
+    db.save_hourly_account_snapshot(1_760_412_000, &[]).unwrap();
+
+    let (locked_tx, locked_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let writer_db = Arc::clone(&db);
+    let writer = std::thread::spawn(move || {
+        let mut conn = writer_db.conn.lock().unwrap();
+        let tx = immediate_tx(&mut conn).unwrap();
+        tx.execute(
+            "INSERT INTO trades (
+                trade_id, client_order_id, symbol, mode, side, price, quantity,
+                amount_usdc, realized_pnl, commission, pnl_verified, is_maker, timestamp, note
+            ) VALUES ('uncommitted-2', 'cid-uncommitted-2', 'SOLUSDC', 'PAPER', 'SELL', '105', '1',
+                      '105', '99', '0', 1, 1, ?1, '')",
+            params![format_sqlite_timestamp(now)],
+        )
+        .unwrap();
+        locked_tx.send(()).unwrap();
+        release_rx.recv().unwrap();
+        tx.rollback().unwrap();
+    });
+    locked_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(db.conn.try_lock().is_err());
+
+    let reader_db = Arc::clone(&db);
+    let reads = tokio::time::timeout(
+        Duration::from_secs(3),
+        tokio::task::spawn_blocking(move || {
+            let today = reader_db.get_today_pnl(now).unwrap();
+            assert_eq!(today.groups.len(), 1);
+            assert_eq!(today.groups[0].realized_pnl, dec!(2.5));
+
+            let hourly = reader_db
+                .get_hourly_trade_stats("SOLUSDC", TradingMode::Paper, now)
+                .unwrap();
+            assert_eq!(hourly.realized_pnl, dec!(2.5));
+
+            let recent = reader_db
+                .get_recent_trades_for("SOLUSDC", TradingMode::Paper, 10)
+                .unwrap();
+            assert_eq!(recent.len(), 1);
+            assert_eq!(recent[0].trade_id, "committed-1");
+
+            assert_eq!(
+                reader_db
+                    .last_fill_for("SOLUSDC", TradingMode::Paper)
+                    .unwrap(),
+                Some((OrderSide::Buy, dec!(101.5)))
+            );
+            assert_eq!(reader_db.hourly_account_snapshots_raw(0).unwrap().len(), 1);
+        }),
+    )
+    .await
+    .expect("WAL read pool blocked on held write transaction");
+    reads.unwrap();
+
+    release_tx.send(()).unwrap();
+    writer.join().unwrap();
+
+    // Verify commit-epoch guard prevents caching torn WAL reads before revision publish.
+    let (reached_tx, reached_rx) = mpsc::channel();
+    let (resume_tx, resume_rx) = mpsc::channel();
+    *db.revision_publish_hook.lock().unwrap() = Some((reached_tx, resume_rx));
+    let mut second = committed.clone();
+    second.trade_id = "committed-2".into();
+    second.client_order_id = "cid-committed-2".into();
+    second.realized_pnl = dec!(3.5);
+    let writer_db = Arc::clone(&db);
+    let commit_writer = std::thread::spawn(move || writer_db.insert_trade(&second));
+    reached_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(db.trade_commit_stable_token().is_none());
+    assert_eq!(db.trade_data_revision(), 1);
+
+    let inflight_pnl = db.cached_today_pnl(now).await.unwrap();
+    assert_eq!(inflight_pnl.groups[0].realized_pnl, dec!(6.0));
+    assert!(db.today_pnl_cache.lock().await.is_none());
+
+    resume_tx.send(()).unwrap();
+    assert!(commit_writer.join().unwrap().unwrap());
+    assert!(db.trade_commit_stable_token().is_some());
+    assert_eq!(db.trade_data_revision(), 2);
+    let stable_pnl = db.cached_today_pnl(now).await.unwrap();
+    assert_eq!(stable_pnl.groups[0].realized_pnl, dec!(6.0));
+    assert!(db.today_pnl_cache.lock().await.is_some());
 }

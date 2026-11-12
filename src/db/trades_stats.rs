@@ -45,6 +45,7 @@ impl Database {
         // SQLite's busy handler instead of failing a deferred lock upgrade.
         let tx = immediate_tx(&mut conn)?;
         let inserted = insert_trade_on(&tx, trade)?;
+        let _commit_guard = inserted.then(|| self.begin_trade_commit());
         tx.commit()?;
         if inserted {
             if matches!(trade.mode, TradingMode::Paper | TradingMode::Unknown) {
@@ -132,6 +133,7 @@ impl Database {
         // `conn` remains locked until after `paper_ledger` updates, so no reader can
         // observe the committed SQLite transaction before the cached contribution lands,
         // while async readers never block on SQLite `fsync` during `tx.commit()`.
+        let _commit_guard = inserted.then(|| self.begin_trade_commit());
         tx.commit()?;
         if inserted {
             if matches!(trade.mode, TradingMode::Paper | TradingMode::Unknown) {
@@ -176,7 +178,7 @@ impl Database {
         client_order_id: &str,
         mode: TradingMode,
     ) -> Result<Option<(OrderSide, Decimal, Decimal)>> {
-        let conn = self.lock_connection("get_pair_opening");
+        let conn = self.lock_read_connection("get_pair_opening");
         let value: Option<(String, String, String)> = conn
             .prepare_cached(
                 "SELECT side, price, quantity FROM (
@@ -220,7 +222,7 @@ impl Database {
         symbol: &str,
         mode: TradingMode,
     ) -> Result<Option<(OrderSide, Decimal)>> {
-        let conn = self.lock_connection("last_fill_for");
+        let conn = self.lock_read_connection("last_fill_for");
         let mut stmt = conn.prepare_cached(
             "SELECT side, price FROM (
                  SELECT * FROM (
@@ -339,6 +341,7 @@ impl Database {
                 verified.push(committed);
             }
         }
+        let _commit_guard = (!updated_symbols.is_empty()).then(|| self.begin_trade_commit());
         tx.commit()?;
         for symbol in &updated_symbols {
             self.publish_trade_revision(symbol);
@@ -347,7 +350,7 @@ impl Database {
     }
 
     pub fn get_recent_trades(&self, limit: usize) -> Result<Vec<TradeRecord>> {
-        let conn = self.lock_connection("get_recent_trades");
+        let conn = self.lock_read_connection("get_recent_trades");
         let mut stmt = conn.prepare_cached(select_trades_sql!(
             "ORDER BY timestamp DESC, rowid DESC LIMIT ?1;"
         ))?;
@@ -366,7 +369,7 @@ impl Database {
         mode: TradingMode,
         limit: usize,
     ) -> Result<Vec<TradeRecord>> {
-        let conn = self.lock_connection("get_recent_trades_for");
+        let conn = self.lock_read_connection("get_recent_trades_for");
         let mut stmt = conn.prepare_cached(select_trades_sql!(
             "WHERE symbol = ?1 AND mode = ?2 ORDER BY timestamp DESC, rowid DESC LIMIT ?3;"
         ))?;

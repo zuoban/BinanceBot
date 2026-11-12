@@ -23,7 +23,7 @@ impl Database {
     ) -> Result<HourlyTradeStats> {
         #[cfg(test)]
         self.hourly_stats_queries.fetch_add(1, Ordering::Relaxed);
-        let conn = self.lock_connection("get_hourly_trade_stats");
+        let conn = self.lock_read_connection("get_hourly_trade_stats");
         hourly::stats_on(&conn, symbol, mode, now)
     }
 
@@ -32,7 +32,7 @@ impl Database {
         symbol: &str,
         mode: TradingMode,
     ) -> Result<(Decimal, Decimal, usize)> {
-        let conn = self.lock_connection("get_pnl_totals");
+        let conn = self.lock_read_connection("get_pnl_totals");
         hourly::pnl_totals_on(&conn, symbol, mode)
     }
 
@@ -41,7 +41,7 @@ impl Database {
         symbol: &str,
         mode: TradingMode,
     ) -> Result<(Decimal, Decimal, usize, usize)> {
-        let conn = self.lock_connection("get_pnl_rollup");
+        let conn = self.lock_read_connection("get_pnl_rollup");
         hourly::pnl_rollup_on(&conn, symbol, mode)
     }
 
@@ -50,7 +50,7 @@ impl Database {
         symbol: &str,
         mode: TradingMode,
     ) -> Result<Option<(usize, usize, Decimal, Decimal)>> {
-        let conn = self.lock_connection("load_scoped_stats");
+        let conn = self.lock_read_connection("load_scoped_stats");
         let mut stmt = conn.prepare_cached(
             "SELECT total_trades, completed_cycles, total_realized_profit, total_volume_usdc FROM scoped_grid_stats WHERE symbol = ?1 AND mode = ?2;",
         )?;

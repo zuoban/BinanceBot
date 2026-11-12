@@ -158,12 +158,14 @@ pub(crate) fn sort_and_truncate_recent_trades(trades: &mut Vec<TradeRecord>, lim
 pub(super) struct SnapshotCharts {
     scope: SnapshotScope,
     revision: u64,
+    stable: bool,
     pub(super) trades: Option<HourlyTradeStats>,
 }
 
 impl SnapshotCharts {
     pub(super) fn is_current(&self, config: &AppConfig, db: &Database) -> bool {
-        self.scope == SnapshotScope::from_config(config)
+        self.stable
+            && self.scope == SnapshotScope::from_config(config)
             && self.revision == db.symbol_trade_revision(&self.scope.symbol)
     }
 }
@@ -184,24 +186,37 @@ impl SnapshotCache {
             hour: now.timestamp().div_euclid(3600),
             revision,
         };
-        if cache
+        if let Some(entry) = cache
             .as_ref()
-            .is_none_or(|entry| !entry.reusable(&key, now, TRADE_CACHE_TTL))
+            .filter(|entry| entry.reusable(&key, now, TRADE_CACHE_TTL))
         {
-            let query_scope = scope.clone();
-            let value = db
-                .run_blocking(move |db| {
-                    db.get_hourly_trade_stats(&query_scope.symbol, query_scope.mode, now)
-                })
-                .await
-                .map_err(|error| warn!("Failed to load hourly trade counts: {}", error))
-                .ok();
-            *cache = Some(CachedQuery::new(key, value, now));
+            return SnapshotCharts {
+                scope,
+                revision,
+                stable: true,
+                trades: entry.value.clone(),
+            };
+        }
+        let commit_token = db.trade_commit_stable_token();
+        let query_scope = scope.clone();
+        let value = db
+            .run_blocking(move |db| {
+                db.get_hourly_trade_stats(&query_scope.symbol, query_scope.mode, now)
+            })
+            .await
+            .map_err(|error| warn!("Failed to load hourly trade counts: {}", error))
+            .ok();
+        let stable = commit_token.is_some()
+            && db.trade_commit_stable_token() == commit_token
+            && db.symbol_trade_revision(&scope.symbol) == revision;
+        if stable {
+            *cache = Some(CachedQuery::new(key, value.clone(), now));
         }
         SnapshotCharts {
             scope,
             revision,
-            trades: cache.as_ref().and_then(|entry| entry.value.clone()),
+            stable,
+            trades: value,
         }
     }
 }

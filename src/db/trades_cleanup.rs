@@ -32,6 +32,7 @@ impl Database {
         } else {
             0
         };
+        let _commit_guard = trades.then(|| self.begin_trade_commit());
         tx.commit()?;
         if trades {
             #[cfg(test)]
@@ -47,6 +48,7 @@ impl Database {
         let mut conn = self.lock_connection("clear_trade_history_for_symbol");
         let tx = immediate_tx(&mut conn)?;
         let deleted = clear_trades_on(&tx, Some(symbol))?;
+        let _commit_guard = self.begin_trade_commit();
         tx.commit()?;
         self.publish_trade_revision(symbol);
         self.trade_clear_revisions.publish(symbol);

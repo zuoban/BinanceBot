@@ -103,7 +103,7 @@ impl Database {
         since: i64,
         operation: &'static str,
     ) -> Result<Vec<(i64, String)>> {
-        let conn = self.lock_connection(operation);
+        let conn = self.lock_read_connection(operation);
         let mut statement = conn.prepare_cached(
             "SELECT hour, payload FROM account_hourly_snapshots WHERE hour >= ?1 ORDER BY hour",
         )?;
@@ -192,7 +192,7 @@ impl Database {
         &self,
         limit: usize,
     ) -> Result<Vec<crate::snapshots::DailySnapshot>> {
-        let conn = self.lock_connection("daily_snapshots");
+        let conn = self.lock_read_connection("daily_snapshots");
         super::query_json_vec(
             &conn,
             "SELECT payload FROM daily_snapshots ORDER BY date DESC LIMIT ?1",
@@ -205,7 +205,7 @@ impl Database {
         &self,
         limit: usize,
     ) -> Result<Vec<Box<serde_json::value::RawValue>>> {
-        let conn = self.lock_connection("daily_snapshots_raw");
+        let conn = self.lock_read_connection("daily_snapshots_raw");
         super::query_json_vec(
             &conn,
             "SELECT payload FROM daily_snapshots ORDER BY date DESC LIMIT ?1",
@@ -219,7 +219,7 @@ impl Database {
         window_start: DateTime<Utc>,
         window_end: DateTime<Utc>,
     ) -> Result<Vec<crate::snapshots::DailyTradeGroup>> {
-        let conn = self.lock_connection("daily_trade_summaries");
+        let conn = self.lock_read_connection("daily_trade_summaries");
         Ok(
             hourly::scan_window_rollups_on(&conn, window_start, window_end, false)?
                 .into_iter()
@@ -239,7 +239,7 @@ impl Database {
 
     /// Aggregate persisted trades across all modes and symbols for the Beijing day.
     pub(crate) fn get_today_pnl(&self, now: DateTime<Utc>) -> Result<crate::types::TodayPnl> {
-        let conn = self.lock_connection("get_today_pnl");
+        let conn = self.lock_read_connection("get_today_pnl");
         hourly::today_pnl_on(&conn, now)
     }
 
@@ -264,12 +264,18 @@ impl Database {
                 return value.clone();
             }
         }
+        let commit_token = self.trade_commit_stable_token();
         let value = self
             .run_blocking(move |db| db.get_today_pnl(now))
             .await
             .map_err(|error| tracing::warn!("Failed to load overview today PnL: {}", error))
             .ok();
-        *cache = Some((revision, day, std::time::Instant::now(), value.clone()));
+        if commit_token.is_some()
+            && self.trade_commit_stable_token() == commit_token
+            && self.trade_data_revision() == revision
+        {
+            *cache = Some((revision, day, std::time::Instant::now(), value.clone()));
+        }
         value
     }
 

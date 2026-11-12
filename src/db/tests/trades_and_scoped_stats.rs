@@ -484,11 +484,14 @@ fn legacy_trades_can_be_backfilled_without_double_counting() {
             params![Utc::now().to_rfc3339()],
         ).unwrap();
     let db = Database {
+        read_conns: Vec::new(),
+        next_reader: AtomicUsize::new(0),
         conn: Mutex::new(conn),
         path: ":memory:".into(),
         #[cfg(unix)]
         file_identity: None,
         history_account_ids: Mutex::new(HashMap::new()),
+        trade_commit_seq: AtomicU64::new(0),
         trade_revisions: RevisionTracker::default(),
         trade_clear_revisions: RevisionTracker::default(),
         revision_publish_hook: Mutex::new(None),

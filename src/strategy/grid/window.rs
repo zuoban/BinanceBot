@@ -33,6 +33,7 @@ impl GridTradingEngine {
         {
             return Ok(*cached);
         }
+        let commit_token = self.state.db.trade_commit_stable_token();
         let query_symbol = symbol.clone();
         let fill = self
             .state
@@ -40,7 +41,10 @@ impl GridTradingEngine {
             .run_blocking(move |db| db.last_fill_for(&query_symbol, mode))
             .await?;
         let snapshot = LastFillSnapshot { revision, fill };
-        if self.state.db.symbol_trade_revision(symbol) == revision {
+        if commit_token.is_some()
+            && self.state.db.trade_commit_stable_token() == commit_token
+            && self.state.db.symbol_trade_revision(symbol) == revision
+        {
             *self.last_fill_cache.lock_unpoisoned() = Some((symbol.clone(), mode, snapshot));
         }
         Ok(snapshot)

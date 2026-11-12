@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OpenFlags};
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use tracing::info;
 
@@ -131,6 +131,78 @@ fn open_configured_connection(open_path: &Path, is_memory: bool) -> Result<Conne
     Ok(conn)
 }
 
+const READ_POOL_SIZE: usize = 4;
+
+fn open_read_only_connection(open_path: &Path) -> Result<Connection> {
+    // Open with VFS read-write flags so WAL shared-memory (`-shm`) can always
+    // attach cleanly on freshly reopened databases, while enforcing SQL-level
+    // immutability via `PRAGMA query_only = ON`.
+    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX
+        | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+    let conn = Connection::open_with_flags(open_path, flags)
+        .with_context(|| format!("Failed to open SQLite read connection at {:?}", open_path))?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))
+        .context("Failed to configure SQLite read connection busy timeout")?;
+    conn.set_prepared_statement_cache_capacity(64);
+    conn.execute_batch(
+        "PRAGMA query_only = ON;
+         PRAGMA temp_store = MEMORY;
+         PRAGMA cache_size = -4000;
+         PRAGMA mmap_size = 67108864;",
+    )
+    .context("Failed to configure SQLite read-only connection")?;
+    let query_only: i64 = conn
+        .query_row("PRAGMA query_only", [], |row| row.get(0))
+        .context("Failed to read SQLite query_only mode")?;
+    anyhow::ensure!(query_only == 1, "SQLite read connection is not query_only");
+    Ok(conn)
+}
+
+fn open_read_connection_pool(
+    open_path: &Path,
+    #[cfg(unix)] expected_identity: Option<(u64, u64)>,
+) -> Result<Vec<Mutex<Connection>>> {
+    let mut pool = Vec::with_capacity(READ_POOL_SIZE);
+    for _ in 0..READ_POOL_SIZE {
+        #[cfg(unix)]
+        if let Some(expected_id) = expected_identity {
+            use std::os::unix::fs::MetadataExt;
+            validate_database_and_sidecars(open_path)?;
+            let meta = std::fs::symlink_metadata(open_path)
+                .with_context(|| format!("Failed to inspect {:?}", open_path))?;
+            anyhow::ensure!(
+                !meta.file_type().is_symlink() && (meta.dev(), meta.ino()) == expected_id,
+                "SQLite database file changed while opening read pool at {:?}",
+                open_path
+            );
+        }
+        pool.push(Mutex::new(open_read_only_connection(open_path)?));
+    }
+    #[cfg(unix)]
+    if let Some(expected_id) = expected_identity {
+        use std::os::unix::fs::MetadataExt;
+        validate_database_and_sidecars(open_path)?;
+        let meta = std::fs::symlink_metadata(open_path)
+            .with_context(|| format!("Failed to inspect {:?}", open_path))?;
+        anyhow::ensure!(
+            !meta.file_type().is_symlink() && (meta.dev(), meta.ino()) == expected_id,
+            "SQLite database file changed after opening read pool at {:?}",
+            open_path
+        );
+    }
+    Ok(pool)
+}
+
+#[must_use]
+pub(super) struct TradeCommitGuard<'a>(&'a AtomicU64);
+
+impl Drop for TradeCommitGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::Release);
+    }
+}
+
 type TodayPnlCacheEntry = (
     u64,
     DateTime<Utc>,
@@ -183,11 +255,16 @@ type MembershipHook = (
 );
 
 pub struct Database {
+    // Declared before `conn` so read-only pool handles close first on Drop,
+    // allowing the primary read-write handle to run SQLite's clean WAL close.
+    read_conns: Vec<Mutex<Connection>>,
+    next_reader: AtomicUsize,
     conn: Mutex<Connection>,
     path: String,
     #[cfg(unix)]
     file_identity: Option<(u64, u64)>,
     history_account_ids: Mutex<HashMap<[u8; 32], String>>,
+    trade_commit_seq: AtomicU64,
     trade_revisions: RevisionTracker,
     trade_clear_revisions: RevisionTracker,
     #[cfg(test)]
@@ -271,6 +348,63 @@ impl Database {
         conn
     }
 
+    pub(super) fn lock_read_connection(
+        &self,
+        operation: &'static str,
+    ) -> std::sync::MutexGuard<'_, Connection> {
+        if self.read_conns.is_empty() {
+            return self.lock_connection(operation);
+        }
+        let waiting_since = std::time::Instant::now();
+        #[cfg(test)]
+        let benchmark_wait = self
+            .benchmark_wait_samples
+            .get()
+            .map(|samples| (samples, std::time::Instant::now()));
+        let len = self.read_conns.len();
+        let start = self.next_reader.fetch_add(1, Ordering::Relaxed);
+        let mut guard = None;
+        for offset in 0..len {
+            let idx = start.wrapping_add(offset) % len;
+            match self.read_conns[idx].try_lock() {
+                Ok(conn) => {
+                    guard = Some(conn);
+                    break;
+                }
+                Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                    guard = Some(poisoned.into_inner());
+                    break;
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {}
+            }
+        }
+        let conn = guard.unwrap_or_else(|| self.read_conns[start % len].lock_unpoisoned());
+        crate::metrics::SQLITE_CONNECTION_LOCK_WAIT.observe(waiting_since.elapsed());
+        #[cfg(test)]
+        if let Some((samples, waiting_since)) = benchmark_wait {
+            let elapsed = waiting_since.elapsed().as_secs_f64() * 1000.0;
+            samples.connection.lock().unwrap().push(elapsed);
+        }
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            tracing::debug!(
+                operation,
+                lock_wait_us = waiting_since.elapsed().as_micros() as u64,
+                "SQLite read connection lock acquired"
+            );
+        }
+        conn
+    }
+
+    pub(super) fn begin_trade_commit(&self) -> TradeCommitGuard<'_> {
+        self.trade_commit_seq.fetch_add(1, Ordering::AcqRel);
+        TradeCommitGuard(&self.trade_commit_seq)
+    }
+
+    pub(crate) fn trade_commit_stable_token(&self) -> Option<u64> {
+        let seq = self.trade_commit_seq.load(Ordering::Acquire);
+        (seq & 1 == 0).then_some(seq)
+    }
+
     #[cfg(test)]
     pub(crate) fn enable_benchmark_wait_samples(&self) -> std::sync::Arc<DatabaseWaitSamples> {
         let samples = std::sync::Arc::new(DatabaseWaitSamples::default());
@@ -346,12 +480,15 @@ impl Database {
         } else {
             None
         };
-        let db = Self {
+        let mut db = Self {
+            read_conns: Vec::new(),
+            next_reader: AtomicUsize::new(0),
             conn: Mutex::new(conn),
             path: path_str,
             #[cfg(unix)]
             file_identity,
             history_account_ids: Mutex::new(HashMap::new()),
+            trade_commit_seq: AtomicU64::new(0),
             trade_revisions: RevisionTracker::default(),
             trade_clear_revisions: RevisionTracker::default(),
             #[cfg(test)]
@@ -369,6 +506,13 @@ impl Database {
         };
 
         db.init_tables()?;
+        if !is_memory {
+            db.read_conns = open_read_connection_pool(
+                &open_path,
+                #[cfg(unix)]
+                file_identity,
+            )?;
+        }
         Ok(db)
     }
 
