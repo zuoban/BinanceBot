@@ -146,7 +146,7 @@ Unix 上新建的数据库及目录使用私有权限；已有数据库及其 `-
 
 ### 2. 使用预构建镜像
 
-镜像仅在发布 GitHub Release 时构建并推送；面向 `main` 的 Pull Request 和推送到 `main` 都执行后端及前端质量检查（含前端 ESLint），单独推送版本标签或保存 Release 草稿不会更新镜像。版本标签应与 `Cargo.toml` 一致，例如 `v0.10.10`；应在最终代码提交后创建新标签，不移动已推送的旧标签。正式 Release 会更新 `latest`，预发布 Release 会发布对应版本镜像，但不会覆盖 `latest`。每次发布仍须通过后端和前端检查后才会构建镜像。CI 与后端 Docker 构建均固定使用 Rust 1.98.1，镜像构建按 `Cargo.lock` 锁定依赖。依赖安全审计（`cargo audit` 与前端生产依赖的 `npm audit`）由独立的 [安全审计工作流](.github/workflows/security.yml) 在依赖文件变更及每周定时执行，Dependabot 按周提交依赖更新 Pull Request。
+镜像仅在发布 GitHub Release 时构建并推送；面向 `main` 的 Pull Request 和推送到 `main` 都执行后端及前端质量检查（含前端 ESLint），单独推送版本标签或保存 Release 草稿不会更新镜像。版本标签应与 `Cargo.toml` 一致，例如 `v0.10.10`；应在最终代码提交后创建新标签，不移动已推送的旧标签。正式 Release 会更新 `latest`，预发布 Release 会发布对应版本镜像，但不会覆盖 `latest`。每次发布仍须通过后端和前端检查后才会构建镜像。CI 与后端 Docker 构建均固定使用 Rust 1.98.1，镜像构建按 `Cargo.lock` 锁定依赖。依赖安全审计（`cargo audit` 与前端生产依赖的 `npm audit`）由独立的 [安全审计工作流](.github/workflows/security.yml) 在依赖文件变更及每周定时执行，Dependabot 只提交次要和补丁版本更新（Cargo 与 npm 按生态合并为一个 Pull Request），大版本、Rust 与 Node 基础镜像需手动评估和升级；安全公告触发的更新不受此限制。
 
 仓库 `main` 已将 GitHub Actions 的 `checks` 设为必需状态检查，并要求待合并分支跟上最新 `main`；管理员保留默认豁免。对应触发与检查定义见 [GitHub 工作流](.github/workflows/docker-publish.yml)。
 
