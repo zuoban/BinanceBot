@@ -1,11 +1,11 @@
 use super::{dispatch_pair, json_ok, json_ok_msg, status_err, ApiResponse};
 use crate::runtime::RuntimeHandle;
-use crate::server::state::{AppState, AuthContext};
+use crate::server::state::{AppState, AuthContext, MembershipGuard};
 use crate::types::{beijing_offset, BotSnapshot};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
+use axum::{Extension, Json};
 use serde::Deserialize;
 use std::future::Future;
 use std::sync::Arc;
@@ -76,17 +76,20 @@ pub(super) async fn single_pair_clear_handler(
     if state.config.read().await.exchange.symbol != symbol {
         return StatusCode::NOT_FOUND.into_response();
     }
-    clear_symbol(&state, symbol, payload.0)
+    clear_symbol(&state, symbol, payload.0, None)
         .await
         .into_response()
 }
 
 pub(super) async fn dispatch_managed_database_pair(
     State(handle): State<RuntimeHandle>,
-    req: axum::extract::Request,
+    mut req: axum::extract::Request,
 ) -> Response {
-    let _membership = handle.membership_lock.lock().await;
-    dispatch_pair(State(handle.clone()), req).await
+    let membership = Arc::new(handle.membership_lock.clone().lock_owned().await);
+    req.extensions_mut().insert(membership.clone());
+    let response = dispatch_pair(State(handle), req).await;
+    drop(membership);
+    response
 }
 
 pub(super) async fn scoped_export_handler(State(state): State<Arc<AppState>>) -> Response {
@@ -105,16 +108,24 @@ async fn export_symbol(state: &AppState, symbol: String) -> Response {
 
 pub(super) async fn scoped_clear_handler(
     State(state): State<Arc<AppState>>,
+    membership: Option<Extension<MembershipGuard>>,
     Json(payload): Json<ClearTradeHistoryRequest>,
 ) -> (StatusCode, Json<ApiResponse<ClearTradeHistoryResponse>>) {
     let symbol = state.config.read().await.exchange.symbol.clone();
-    clear_symbol(&state, symbol, payload).await
+    clear_symbol(
+        &state,
+        symbol,
+        payload,
+        membership.map(|Extension(guard)| guard),
+    )
+    .await
 }
 
 async fn clear_symbol(
     state: &Arc<AppState>,
     symbol: String,
     payload: ClearTradeHistoryRequest,
+    membership_guard: Option<MembershipGuard>,
 ) -> (StatusCode, Json<ApiResponse<ClearTradeHistoryResponse>>) {
     if !payload.confirm {
         return status_err(
@@ -122,7 +133,10 @@ async fn clear_symbol(
             "请确认清理当前币种所有模式的成交历史",
         );
     }
-    match state.clear_symbol_trade_history(symbol).await {
+    match state
+        .clear_symbol_trade_history(symbol, membership_guard)
+        .await
+    {
         Ok((deleted_trades, snapshot)) => (
             StatusCode::OK,
             json_ok(ClearTradeHistoryResponse {
@@ -172,7 +186,7 @@ pub(super) async fn managed_database_clear_handler(
     let Some((trades, snapshots)) = payload.confirmed_targets() else {
         return StatusCode::BAD_REQUEST.into_response();
     };
-    let membership = handle.membership_lock.clone().lock_owned().await;
+    let membership = Arc::new(handle.membership_lock.clone().lock_owned().await);
     let states = handle.states.read().await.clone();
     database_clear_with_guard(&states, trades, snapshots, Some(membership)).await
 }
@@ -188,7 +202,7 @@ async fn database_clear_with_guard(
     states: &[Arc<AppState>],
     trades: bool,
     snapshots: bool,
-    guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+    guard: Option<MembershipGuard>,
 ) -> Response {
     if states.is_empty() {
         return StatusCode::NOT_FOUND.into_response();
@@ -213,12 +227,11 @@ pub(super) async fn clear_managed_history_handler(
     Json(payload): Json<ClearTradeHistoryRequest>,
 ) -> (StatusCode, Json<ApiResponse<ClearTradeHistoryResponse>>) {
     // Keep the set of caches stable while resetting shared history and statistics.
-    let _membership = handle.membership_lock.lock().await;
-    clear_multi_trade_history_handler(
-        State(Arc::new(handle.states.read().await.clone())),
-        Json(payload),
-    )
-    .await
+    let membership = Arc::new(handle.membership_lock.clone().lock_owned().await);
+    let states = handle.states.read().await.clone();
+    let response = clear_multi_trade_history(&states, payload, Some(membership.clone())).await;
+    drop(membership);
+    response
 }
 
 async fn run_clear_trade_history(
@@ -274,10 +287,18 @@ pub(super) async fn clear_multi_trade_history_handler(
     State(states): State<Arc<Vec<Arc<AppState>>>>,
     Json(payload): Json<ClearTradeHistoryRequest>,
 ) -> (StatusCode, Json<ApiResponse<ClearTradeHistoryResponse>>) {
+    clear_multi_trade_history(&states, payload, None).await
+}
+
+async fn clear_multi_trade_history(
+    states: &[Arc<AppState>],
+    payload: ClearTradeHistoryRequest,
+    membership_guard: Option<MembershipGuard>,
+) -> (StatusCode, Json<ApiResponse<ClearTradeHistoryResponse>>) {
     run_clear_trade_history(
-        &states,
+        states,
         payload,
-        AppState::clear_trade_history_for(&states),
+        AppState::clear_trade_history_for(states, membership_guard),
         |deleted_trades| format!("已清理全部历史成交记录，共 {} 笔", deleted_trades),
         |deleted_trades| {
             format!(

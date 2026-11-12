@@ -29,6 +29,7 @@ mod tests;
 pub(crate) use auth_context::{sanitize_session_token, AuthContext, SessionCheckError};
 pub(crate) use global_risk::GlobalPositionLimit;
 pub(crate) use risk_guards::{ExchangeSubmissionGuard, PendingFillReconciliation};
+pub(crate) use state_cleanup::MembershipGuard;
 use state_trades::{build_grid_stats, recent_trade_cache, RECENT_TRADE_LIMIT};
 
 const MAX_RECENT_LOGS: usize = 250;

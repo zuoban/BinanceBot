@@ -342,7 +342,7 @@ async fn trade_notifications_skip_disabled_or_cleared_pnl_verifications() {
             .symbol_trade_clear_revision(&closing.symbol);
         if clear_history {
             assert_eq!(
-                AppState::clear_trade_history_for(&[fixture.state.clone()])
+                AppState::clear_trade_history_for(&[fixture.state.clone()], None)
                     .await
                     .unwrap(),
                 1

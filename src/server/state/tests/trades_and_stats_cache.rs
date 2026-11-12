@@ -86,7 +86,7 @@ async fn cancelled_cleanup_finishes_all_cache_resets_before_releasing_commit_loc
             match cleanup_kind {
                 0 => {
                     states[0]
-                        .clear_symbol_trade_history("SOLUSDC".into())
+                        .clear_symbol_trade_history("SOLUSDC".into(), None)
                         .await
                         .unwrap();
                 }
@@ -140,7 +140,7 @@ async fn clearing_previous_symbol_preserves_current_symbol_cache() {
     state.recent_trades.write().await.push_back(current);
     assert_eq!(
         state
-            .clear_symbol_trade_history("SOLUSDC".into())
+            .clear_symbol_trade_history("SOLUSDC".into(), None)
             .await
             .unwrap()
             .0,

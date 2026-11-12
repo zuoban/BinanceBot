@@ -14,6 +14,7 @@ mod add_pair_validation_and_rollback;
 mod early_and_concurrent_shutdown;
 mod failed_removal_rebuild;
 mod global_config_and_probes;
+mod history_cleanup_cancellation;
 mod managed_api_and_history;
 mod removal_positions_and_guards;
 mod startup_and_restart;

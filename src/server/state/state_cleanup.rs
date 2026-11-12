@@ -7,6 +7,9 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tracing::error;
 
+// Routed requests and detached cleanup share exclusion until the last owner finishes.
+pub(crate) type MembershipGuard = Arc<tokio::sync::OwnedMutexGuard<()>>;
+
 impl AppState {
     pub async fn refresh_current_scope(&self) {
         let _commit = self.trade_commit_lock.lock().await;
@@ -49,15 +52,17 @@ impl AppState {
     }
 
     pub(crate) async fn clear_trade_history(self: &Arc<Self>) -> anyhow::Result<usize> {
-        Self::clear_trade_history_for(std::slice::from_ref(self)).await
+        Self::clear_trade_history_for(std::slice::from_ref(self), None).await
     }
 
     pub(crate) async fn clear_symbol_trade_history(
         self: &Arc<Self>,
         symbol: String,
+        membership_guard: Option<MembershipGuard>,
     ) -> anyhow::Result<(usize, BotSnapshot)> {
         let state = Arc::clone(self);
         tokio::spawn(async move {
+            let _membership = membership_guard;
             let deleted = {
                 let _commit = state.trade_commit_lock.lock().await;
                 let db_symbol = symbol.clone();
@@ -80,9 +85,12 @@ impl AppState {
         .await?
     }
 
-    pub(crate) async fn clear_trade_history_for(states: &[Arc<Self>]) -> anyhow::Result<usize> {
+    pub(crate) async fn clear_trade_history_for(
+        states: &[Arc<Self>],
+        membership_guard: Option<MembershipGuard>,
+    ) -> anyhow::Result<usize> {
         Ok(
-            Self::clear_selected_database_inner(states, true, false, None, false)
+            Self::clear_selected_database_inner(states, true, false, membership_guard, false)
                 .await?
                 .0,
         )
@@ -92,7 +100,7 @@ impl AppState {
         states: &[Arc<Self>],
         trades: bool,
         snapshots: bool,
-        membership_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+        membership_guard: Option<MembershipGuard>,
     ) -> anyhow::Result<(usize, usize)> {
         Self::clear_selected_database_inner(states, trades, snapshots, membership_guard, true).await
     }
@@ -101,7 +109,7 @@ impl AppState {
         states: &[Arc<Self>],
         trades: bool,
         snapshots: bool,
-        membership_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+        membership_guard: Option<MembershipGuard>,
         broadcast: bool,
     ) -> anyhow::Result<(usize, usize)> {
         let states = states.to_vec();

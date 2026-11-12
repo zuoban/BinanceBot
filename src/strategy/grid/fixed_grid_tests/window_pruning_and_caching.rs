@@ -122,7 +122,7 @@ async fn paired_paper_close_after_history_cleanup_records_the_cycle_spread() {
             let deleted = if symbol_only {
                 engine
                     .state
-                    .clear_symbol_trade_history("SOLUSDC".into())
+                    .clear_symbol_trade_history("SOLUSDC".into(), None)
                     .await
                     .unwrap()
                     .0
