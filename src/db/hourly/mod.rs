@@ -59,19 +59,21 @@ impl Rollup {
 struct PnlRollup {
     pnl: Decimal,
     commission: Decimal,
+    non_quote_commission: i64,
     pending: i64,
 }
 
 fn load_pnl_on(conn: &Connection, symbol: &str, mode: &str) -> Result<PnlRollup> {
     Ok(conn
         .prepare_cached(
-            "SELECT realized_pnl, commission, pending_pnl_count FROM trade_pnl_rollups WHERE symbol = ?1 AND mode = ?2",
+            "SELECT realized_pnl, commission, pending_pnl_count, non_quote_commission_count FROM trade_pnl_rollups WHERE symbol = ?1 AND mode = ?2",
         )?
         .query_row(params![symbol, mode], |row| {
             Ok(PnlRollup {
                 pnl: decimal_col(row, 0)?,
                 commission: decimal_col(row, 1)?,
                 pending: row.get(2)?,
+                non_quote_commission: row.get(3)?,
             })
         })
         .optional()?
@@ -82,11 +84,19 @@ fn save_pnl_on(conn: &Connection, symbol: &str, mode: &str, value: &PnlRollup) -
     let pnl = value.pnl.to_string();
     let fee = value.commission.to_string();
     conn.prepare_cached(
-        "INSERT INTO trade_pnl_rollups (symbol, mode, realized_pnl, commission, pending_pnl_count)
-         VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(symbol, mode) DO UPDATE SET
-         realized_pnl = excluded.realized_pnl, commission = excluded.commission, pending_pnl_count = excluded.pending_pnl_count",
+        "INSERT INTO trade_pnl_rollups (symbol, mode, realized_pnl, commission, pending_pnl_count, non_quote_commission_count)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(symbol, mode) DO UPDATE SET
+         realized_pnl = excluded.realized_pnl, commission = excluded.commission,
+         pending_pnl_count = excluded.pending_pnl_count, non_quote_commission_count = excluded.non_quote_commission_count",
     )?
-    .execute(params![symbol, mode, pnl, fee, value.pending])?;
+    .execute(params![
+        symbol,
+        mode,
+        pnl,
+        fee,
+        value.pending,
+        value.non_quote_commission
+    ])?;
     Ok(())
 }
 
@@ -94,10 +104,20 @@ fn migrate_pnl_on(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS trade_pnl_rollups (
              symbol TEXT NOT NULL, mode TEXT NOT NULL, realized_pnl TEXT NOT NULL,
-             commission TEXT NOT NULL, pending_pnl_count INTEGER NOT NULL, PRIMARY KEY (symbol, mode)
+             commission TEXT NOT NULL, pending_pnl_count INTEGER NOT NULL,
+             non_quote_commission_count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (symbol, mode)
          );
          CREATE TABLE IF NOT EXISTS trade_pnl_rollup_state (id INTEGER PRIMARY KEY CHECK (id = 1));",
     )?;
+    if !conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('trade_pnl_rollups') WHERE name = 'non_quote_commission_count')",
+        [],
+        |row| row.get::<_, bool>(0),
+    )? {
+        conn.execute_batch(
+            "ALTER TABLE trade_pnl_rollups ADD COLUMN non_quote_commission_count INTEGER NOT NULL DEFAULT 0;",
+        )?;
+    }
     if conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM trade_pnl_rollup_state WHERE id = 1)",
         [],
@@ -109,20 +129,36 @@ fn migrate_pnl_on(conn: &Connection) -> Result<()> {
     let mut rollups: HashMap<(String, String), PnlRollup> = HashMap::new();
     {
         let mut statement = conn
-            .prepare("SELECT symbol, mode, realized_pnl, commission, pnl_verified FROM trades")?;
+            .prepare("SELECT symbol, mode, realized_pnl, commission, pnl_verified, commission_asset FROM trades")?;
         let mut rows = statement.query([])?;
         while let Some(row) = rows.next()? {
             let symbol: String = row.get(0)?;
             let mode: String = row.get(1)?;
             let verified: bool = row.get(4)?;
+            let asset: Option<String> = row.get(5)?;
+            let non_quote = asset.as_deref().map(str::trim).filter(|raw| {
+                !raw.is_empty()
+                    && crate::types::quote_asset(&symbol)
+                        .is_none_or(|quote| !raw.eq_ignore_ascii_case(quote))
+            });
             let entry = rollups.entry((symbol, mode)).or_default();
             if verified {
                 entry.pnl = entry
                     .pnl
                     .saturating_add(Decimal::from_str(&row.get::<_, String>(2)?)?);
-                entry.commission = entry
-                    .commission
-                    .saturating_add(Decimal::from_str(&row.get::<_, String>(3)?)?);
+                let fee = Decimal::from_str(&row.get::<_, String>(3)?)?;
+                match non_quote {
+                    None => {
+                        entry.commission = entry.commission.saturating_add(fee);
+                    }
+                    Some(raw) if raw.eq_ignore_ascii_case("MIXED") => {
+                        entry.commission = entry.commission.saturating_add(fee);
+                        entry.non_quote_commission = entry.non_quote_commission.saturating_add(1);
+                    }
+                    Some(_) => {
+                        entry.non_quote_commission = entry.non_quote_commission.saturating_add(1);
+                    }
+                }
             } else {
                 entry.pending = entry.pending.saturating_add(1);
             }
@@ -144,6 +180,20 @@ pub(super) fn pnl_totals_on(
     Ok((
         rollup.pnl,
         rollup.commission,
+        rollup.pending.max(0) as usize,
+    ))
+}
+
+pub(super) fn pnl_rollup_on(
+    conn: &Connection,
+    symbol: &str,
+    mode: TradingMode,
+) -> Result<(Decimal, Decimal, usize, usize)> {
+    let rollup = load_pnl_on(conn, symbol, mode.as_str())?;
+    Ok((
+        rollup.pnl,
+        rollup.commission,
+        rollup.non_quote_commission.max(0) as usize,
         rollup.pending.max(0) as usize,
     ))
 }
@@ -245,7 +295,12 @@ pub(super) fn insert_on(conn: &Connection, trade: &TradeRecord) -> Result<()> {
     let mut pnl_rollup = load_pnl_on(conn, &trade.symbol, trade.mode.as_str())?;
     if trade.pnl_verified {
         pnl_rollup.pnl = pnl_rollup.pnl.saturating_add(trade.realized_pnl);
-        pnl_rollup.commission = pnl_rollup.commission.saturating_add(trade.commission);
+        pnl_rollup.commission = pnl_rollup
+            .commission
+            .saturating_add(trade.quote_commission());
+        if trade.has_non_quote_commission() {
+            pnl_rollup.non_quote_commission = pnl_rollup.non_quote_commission.saturating_add(1);
+        }
     } else {
         pnl_rollup.pending = pnl_rollup.pending.saturating_add(1);
     }
@@ -258,7 +313,8 @@ pub(super) fn verify_on(
     mode: TradingMode,
     timestamp: DateTime<Utc>,
     pnl: Decimal,
-    commission: Decimal,
+    quote_commission: Decimal,
+    has_non_quote_commission: bool,
 ) -> Result<()> {
     let bucket = hour(timestamp);
     let mut rollup = load_on(conn, symbol, mode.as_str(), bucket)?;
@@ -273,7 +329,10 @@ pub(super) fn verify_on(
     );
     pnl_rollup.pending -= 1;
     pnl_rollup.pnl = pnl_rollup.pnl.saturating_add(pnl);
-    pnl_rollup.commission = pnl_rollup.commission.saturating_add(commission);
+    pnl_rollup.commission = pnl_rollup.commission.saturating_add(quote_commission);
+    if has_non_quote_commission {
+        pnl_rollup.non_quote_commission = pnl_rollup.non_quote_commission.saturating_add(1);
+    }
     save_pnl_on(conn, symbol, mode.as_str(), &pnl_rollup)
 }
 pub(super) fn stats_on(

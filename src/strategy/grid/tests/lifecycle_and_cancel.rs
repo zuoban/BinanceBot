@@ -107,6 +107,7 @@ fn seed_paper_position(db: &Database) {
         amount_usdc: dec!(100),
         realized_pnl: dec!(0),
         commission: dec!(0),
+        commission_asset: None,
         pnl_verified: true,
         is_maker: true,
         timestamp: Utc::now(),

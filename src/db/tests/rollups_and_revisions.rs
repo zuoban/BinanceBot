@@ -34,6 +34,7 @@ fn daily_trade_summaries_respects_non_hour_aligned_half_open_windows() {
         amount_usdc: dec!(100),
         realized_pnl: pnl,
         commission: Decimal::ZERO,
+        commission_asset: None,
         pnl_verified: verified,
         is_maker: true,
         timestamp,

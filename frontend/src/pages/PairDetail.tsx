@@ -139,7 +139,15 @@ export default function PairDetail() {
   const today = useMemo(() => s ? todayTradeCounts(s, dayNow) : null, [s, dayNow]);
   useDocumentTitle(`${positivePrice(s?.ticker.mark_price)} | ${today?.buy ?? '--'}B | ${today?.sell ?? '--'}S`);
   const todayPnl = today && s?.hourly_trade_stats && s.hourly_trade_stats.pending_pnl_count === 0 ? s.hourly_trade_stats.realized_pnl : null;
-  const netPnl = s?.stats.pending_pnl_trades === 0 ? subSignedDecimals(s.stats.total_realized_pnl, s.stats.total_commission) : null;
+  const rawNonQuoteTrades = s?.stats.non_quote_commission_trades;
+  const invalidNonQuoteTrades = rawNonQuoteTrades !== undefined && (!Number.isInteger(rawNonQuoteTrades) || rawNonQuoteTrades < 0);
+  const nonQuoteCommissionTrades = !invalidNonQuoteTrades && (rawNonQuoteTrades ?? 0) > 0 ? rawNonQuoteTrades! : 0;
+  const netPnl = s?.stats.pending_pnl_trades === 0 && !invalidNonQuoteTrades && nonQuoteCommissionTrades === 0
+    ? subSignedDecimals(s.stats.total_realized_pnl, s.stats.total_commission)
+    : null;
+  const netPnlText = s?.stats.pending_pnl_trades === 0 && nonQuoteCommissionTrades > 0
+    ? '含非计价币手续费'
+    : `扣费后 ${number(netPnl)}`;
   const currentPair = pair && s ? { ...pair, status: s.status, grid_config: s.grid_config, mode: s.mode, ...(s.account_scope !== undefined && { account_scope: s.account_scope }) } : pair;
   return <div>
     <PageBreadcrumb items={[{ label: '策略总览', to: '/' }, { label: symbol ?? '策略详情' }]} />
@@ -154,7 +162,7 @@ export default function PairDetail() {
     {s && <>
       <Row gutter={[16, 16]} className={`metric-row${stale ? ' is-stale' : ''}`}>
         <Col xs={12} xl={6} className="metric-col"><Card><Statistic title={`标记价格 / ${asset}`} value={positivePrice(s.ticker.mark_price)} /><div className="muted">最新成交 {positivePrice(s.ticker.last_price)}</div></Card></Col>
-        <Col xs={12} xl={6} className="metric-col"><Card><Statistic title={`已实现盈亏 / ${asset}`} value={s.stats.total_realized_pnl} formatter={() => <Pnl value={s.stats.total_realized_pnl} />} /><div className="muted">扣费后 {number(netPnl)}</div></Card></Col>
+        <Col xs={12} xl={6} className="metric-col"><Card><Statistic title={`已实现盈亏 / ${asset}`} value={s.stats.total_realized_pnl} formatter={() => <Pnl value={s.stats.total_realized_pnl} />} /><div className="muted">{netPnlText}</div></Card></Col>
         <Col xs={12} xl={6} className="metric-col"><Card><Statistic title={`持仓未实现 / ${asset}`} value={s.position.unrealized_pnl} formatter={() => <Pnl value={s.position.unrealized_pnl} />} /><div className="muted">持仓数量 {quantity(s.position.size)}</div></Card></Col>
         <Col xs={12} xl={6} className="metric-col"><Card><Statistic title={`账户权益 / ${account?.asset || asset}`} value={account?.equity ?? '--'} formatter={() => number(account?.equity)} /><div className="muted">{cnyText(account?.cny)} · 可用 {number(account?.available)}</div></Card></Col>
       </Row>
@@ -174,7 +182,7 @@ export default function PairDetail() {
             { key: 'leverage', label: '杠杆', children: `${s.position.leverage}×` },
             { key: 'interval', label: '网格间距', children: `${trimFractionZeros(s.grid_config.grid_interval)} ${asset}` },
             { key: 'amount', label: '每格金额', children: `${trimFractionZeros(s.grid_config.order_amount_usdc)} ${asset}` },
-            { key: 'commission', label: '累计手续费', children: number(s.stats.total_commission, 4) },
+            { key: 'commission', label: '累计手续费', children: nonQuoteCommissionTrades > 0 ? `${number(s.stats.total_commission, 4)} ${asset}（另 ${nonQuoteCommissionTrades} 笔其他币种）` : number(s.stats.total_commission, 4) },
             { key: 'cycles', label: '历史配对循环', children: s.stats.completed_cycles },
             { key: 'trades', label: '累计成交', children: s.stats.total_trades },
             { key: 'pending', label: '待核实盈亏', children: s.stats.pending_pnl_trades > 0 ? <span className="pending-pnl-warn">{s.stats.pending_pnl_trades} 笔</span> : `${s.stats.pending_pnl_trades} 笔` },

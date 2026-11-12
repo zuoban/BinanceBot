@@ -485,6 +485,7 @@ async fn accepted_intent_without_order_id_survives_missing_snapshot_and_lookup()
                     amount_usdc: dec!(200),
                     realized_pnl: dec!(0),
                     commission: dec!(0),
+                    commission_asset: None,
                     pnl_verified: true,
                     is_maker: true,
                     timestamp: Utc::now(),

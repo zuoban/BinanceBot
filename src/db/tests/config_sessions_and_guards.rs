@@ -501,6 +501,7 @@ fn paper_ledger_accepts_first_mark_valuation_with_earlier_mark_timestamp() {
         amount_usdc: dec!(200),
         realized_pnl: Decimal::ZERO,
         commission: Decimal::ZERO,
+        commission_asset: None,
         pnl_verified: true,
         is_maker: true,
         timestamp: initial_now,

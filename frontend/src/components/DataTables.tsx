@@ -5,8 +5,8 @@ import { Link, useInRouterContext } from 'react-router-dom';
 import type { ColumnsType } from 'antd/es/table';
 import { pairRoute } from '../lib/api';
 import { useMountedRef } from '../lib/asyncGuard';
-import { compareSignedDecimals } from '../lib/decimal';
-import { ageText, beijingDay, number, price, quantity, time } from '../lib/format';
+import { compareSignedDecimals, parseSignedDecimal } from '../lib/decimal';
+import { ageText, beijingDay, number, price, quantity, time, trimFractionZeros } from '../lib/format';
 import { priceDiffPercent } from '../lib/gridPreview';
 import { useNow } from '../lib/useNow';
 import type { Log, Order, Trade } from '../lib/types';
@@ -69,6 +69,7 @@ export function sameTrades(a: Trade[], b: Trade[]) {
       l.amount_usdc !== r.amount_usdc ||
       l.realized_pnl !== r.realized_pnl ||
       l.commission !== r.commission ||
+      (l.commission_asset ?? null) !== (r.commission_asset ?? null) ||
       l.pnl_verified !== r.pnl_verified ||
       l.is_maker !== r.is_maker ||
       l.timestamp !== r.timestamp ||
@@ -242,13 +243,31 @@ export const OrdersTable = memo(function OrdersTable({ orders, mark }: { orders:
 }, (prev, next) => prev.mark === next.mark && sameOrders(prev.orders, next.orders));
 const tradePagination = { pageSize: 15, showSizeChanger: false, hideOnSinglePage: true } as const;
 const tradeScroll = { x: 1000 } as const;
+function formatTradeCommission(t: Trade) {
+  const asset = t.commission_asset?.trim();
+  if (!asset) return number(t.commission, 4);
+  if (asset === 'MIXED') {
+    const parsed = parseSignedDecimal(t.commission);
+    return parsed && parsed.n !== 0n ? `${number(t.commission, 4)} + 其他币种` : '多币种';
+  }
+  return `${quantity(t.commission)} ${asset}`;
+}
+function exportTradeCommission(t: Trade) {
+  const asset = t.commission_asset?.trim();
+  if (!asset) return t.commission;
+  if (asset === 'MIXED') {
+    const parsed = parseSignedDecimal(t.commission);
+    return parsed && parsed.n !== 0n ? `${t.commission} + 其他币种` : '多币种';
+  }
+  return `${trimFractionZeros(t.commission)} ${asset}`;
+}
 export const TradesTable = memo(function TradesTable({ trades: allTrades, overview = false, now: currentNow }: { trades: Trade[]; overview?: boolean; now?: number }) {
   const [filter, setFilter] = useState<SideFilter>('ALL');
   const isNarrow = useNarrowViewport();
   const trades = useMemo(() => overview || filter === 'ALL' ? allTrades : allTrades.filter(trade => trade.side === filter), [allTrades, filter, overview]);
   const exportRows = useCallback(() => downloadCsv(`trades-${beijingDay()}.csv`, toCsv(
     ['时间（北京）', '方向', '成交价格', '数量', '金额', '已实现盈亏', '手续费', '成交方式', '备注'],
-    trades.map(t => [time(t.timestamp), t.side === 'BUY' ? '买入' : '卖出', t.price, t.quantity, t.amount_usdc, t.pnl_verified ? t.realized_pnl : '待同步', t.pnl_verified ? t.commission : '待同步', t.pnl_verified ? (t.is_maker ? 'Maker' : 'Taker') : '待同步', t.note]),
+    trades.map(t => [time(t.timestamp), t.side === 'BUY' ? '买入' : '卖出', t.price, t.quantity, t.amount_usdc, t.pnl_verified ? t.realized_pnl : '待同步', t.pnl_verified ? exportTradeCommission(t) : '待同步', t.pnl_verified ? (t.is_maker ? 'Maker' : 'Taker') : '待同步', t.note]),
   )), [trades]);
   const columns = useMemo<ColumnsType<Trade>>(() => [
     ...(overview ? [{ title: '交易对', dataIndex: 'symbol', className: 'trade-symbol', width: 130, render: (symbol: string) => <SymbolCell symbol={symbol} /> }] : []),
@@ -258,7 +277,7 @@ export const TradesTable = memo(function TradesTable({ trades: allTrades, overvi
     { title: '数量', align: 'right', className: 'table-numeric', dataIndex: 'quantity', render: quantity },
     { title: '金额', align: 'right', className: 'table-numeric', dataIndex: 'amount_usdc', render: (v: string) => number(v) },
     { title: overview ? '盈亏' : '已实现盈亏', align: 'right', className: 'table-numeric', render: (_, t) => t.pnl_verified ? <Pnl value={t.realized_pnl} /> : <Tag>待同步</Tag> },
-    { title: '手续费', align: 'right', className: 'table-numeric', render: (_, t) => t.pnl_verified ? number(t.commission, 4) : <Tag>待同步</Tag> },
+    { title: '手续费', align: 'right', className: 'table-numeric', render: (_, t) => t.pnl_verified ? formatTradeCommission(t) : <Tag>待同步</Tag> },
     { title: '成交方式', render: (_, t) => t.pnl_verified ? (t.is_maker ? 'Maker' : 'Taker') : <Tag>待同步</Tag> },
     { title: '备注', dataIndex: 'note', ellipsis: true },
   ], [overview]);

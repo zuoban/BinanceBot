@@ -295,13 +295,17 @@ impl Database {
         let mut verified = Vec::with_capacity(candidates.len());
         let mut updated_symbols = Vec::new();
         for (trade, _) in candidates {
+            let normalized_asset = trade
+                .normalized_commission_asset()
+                .map(str::to_ascii_uppercase);
             let updated_trade: Option<(String, DateTime<Utc>)> = {
                 let mut statement = tx.prepare_cached(
-                    "UPDATE trades SET realized_pnl = ?1, commission = ?2, is_maker = ?3, pnl_verified = 1 WHERE trade_id = ?4 AND mode = ?5 AND pnl_verified = 0 RETURNING symbol, timestamp;",
+                    "UPDATE trades SET realized_pnl = ?1, commission = ?2, commission_asset = ?3, is_maker = ?4, pnl_verified = 1 WHERE trade_id = ?5 AND mode = ?6 AND pnl_verified = 0 RETURNING symbol, timestamp;",
                 )?;
                 let mut rows = statement.query(params![
                     trade.realized_pnl.to_string(),
                     trade.commission.to_string(),
+                    normalized_asset.as_deref(),
                     if trade.is_maker { 1 } else { 0 },
                     trade.trade_id,
                     trade.mode.as_str(),
@@ -315,19 +319,23 @@ impl Database {
                 saved
             };
             if let Some((symbol, timestamp)) = updated_trade {
+                let mut committed = trade.clone();
+                committed.symbol = symbol.clone();
+                committed.commission_asset = committed
+                    .normalized_commission_asset()
+                    .map(str::to_ascii_uppercase);
                 hourly::verify_on(
                     &tx,
                     &symbol,
-                    trade.mode,
+                    committed.mode,
                     timestamp,
-                    trade.realized_pnl,
-                    trade.commission,
+                    committed.realized_pnl,
+                    committed.quote_commission(),
+                    committed.has_non_quote_commission(),
                 )?;
                 if !updated_symbols.contains(&symbol) {
                     updated_symbols.push(symbol.clone());
                 }
-                let mut committed = trade.clone();
-                committed.symbol = symbol;
                 verified.push(committed);
             }
         }
@@ -484,14 +492,17 @@ fn insert_trade_on(conn: &Connection, trade: &TradeRecord) -> Result<bool> {
     if cleared {
         return Ok(false);
     }
+    let normalized_asset = trade
+        .normalized_commission_asset()
+        .map(str::to_ascii_uppercase);
     let inserted = conn
         .prepare_cached(
             r#"
             INSERT OR IGNORE INTO trades (
                 trade_id, client_order_id, symbol, mode, side, price, quantity,
                 amount_usdc, realized_pnl, commission, pnl_verified, is_maker, timestamp, note,
-                stats_hour
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15);
+                stats_hour, commission_asset
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16);
             "#,
         )?
         .execute(params![
@@ -510,6 +521,7 @@ fn insert_trade_on(conn: &Connection, trade: &TradeRecord) -> Result<bool> {
             super::format_sqlite_timestamp(trade.timestamp),
             trade.note,
             hourly::hour(trade.timestamp),
+            normalized_asset.as_deref(),
         ])
         .context("Failed to insert trade into SQLite database")?;
     if inserted == 1 {
@@ -530,10 +542,17 @@ fn trade_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TradeRecord> {
             )),
         )
     })?;
+    let symbol: String = row.get(2)?;
+    let commission_asset = row
+        .get::<_, Option<String>>(14)?
+        .map(|s| s.trim().to_ascii_uppercase())
+        .filter(|s| {
+            !s.is_empty() && crate::types::quote_asset(&symbol).is_none_or(|quote| s != quote)
+        });
     Ok(TradeRecord {
         trade_id: row.get(0)?,
         client_order_id: row.get(1)?,
-        symbol: row.get(2)?,
+        symbol,
         mode: TradingMode::from_db(&row.get::<_, String>(13)?),
         side,
         price: decimal_col(row, 4)?,
@@ -541,6 +560,7 @@ fn trade_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TradeRecord> {
         amount_usdc: decimal_col(row, 6)?,
         realized_pnl: decimal_col(row, 7)?,
         commission: decimal_col(row, 8)?,
+        commission_asset,
         pnl_verified: row.get::<_, i32>(9)? != 0,
         is_maker: row.get::<_, i32>(10)? != 0,
         timestamp: row.get(11)?,

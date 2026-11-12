@@ -11,7 +11,7 @@ use tracing::info;
 macro_rules! select_trades_sql {
     ($suffix:literal) => {
         concat!(
-            "SELECT trade_id, client_order_id, symbol, side, price, quantity, amount_usdc, realized_pnl, commission, pnl_verified, is_maker, timestamp, note, mode FROM trades ",
+            "SELECT trade_id, client_order_id, symbol, side, price, quantity, amount_usdc, realized_pnl, commission, pnl_verified, is_maker, timestamp, note, mode, commission_asset FROM trades ",
             $suffix
         )
     };
@@ -393,7 +393,7 @@ impl Database {
                 quantity TEXT NOT NULL, amount_usdc TEXT NOT NULL, realized_pnl TEXT NOT NULL,
                 commission TEXT NOT NULL, pnl_verified INTEGER NOT NULL DEFAULT 0,
                 is_maker INTEGER NOT NULL, timestamp TEXT NOT NULL, note TEXT NOT NULL,
-                stats_hour INTEGER
+                stats_hour INTEGER, commission_asset TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades (timestamp DESC);
             CREATE TABLE IF NOT EXISTS cleared_trade_ids (trade_id TEXT PRIMARY KEY, client_order_id TEXT NOT NULL, mode TEXT NOT NULL);

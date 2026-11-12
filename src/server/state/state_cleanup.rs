@@ -24,10 +24,10 @@ impl AppState {
             .run_blocking(move |db| {
                 let rev = db.symbol_trade_revision(&query_symbol);
                 let saved_stats = db.load_scoped_stats(&query_symbol, mode)?;
-                let pnl_totals = db.get_pnl_totals(&query_symbol, mode)?;
+                let pnl_rollup = db.get_pnl_rollup(&query_symbol, mode)?;
                 let trades = db.get_recent_trades_for(&query_symbol, mode, RECENT_TRADE_LIMIT)?;
                 Ok((
-                    build_grid_stats(saved_stats, Some(pnl_totals)),
+                    build_grid_stats(saved_stats, Some(pnl_rollup)),
                     recent_trade_cache(trades),
                     rev,
                 ))

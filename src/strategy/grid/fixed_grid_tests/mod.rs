@@ -68,6 +68,7 @@ fn journal_trade(id: usize, side: OrderSide, price: Decimal, quantity: Decimal) 
         amount_usdc: price * quantity,
         realized_pnl: Decimal::ZERO,
         commission: Decimal::ZERO,
+        commission_asset: None,
         pnl_verified: true,
         is_maker: true,
         timestamp: Utc::now(),

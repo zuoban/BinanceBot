@@ -66,6 +66,7 @@ impl PnlFixture {
             amount_usdc: order.amount_usdc,
             realized_pnl: Decimal::ZERO,
             commission: Decimal::ZERO,
+            commission_asset: None,
             pnl_verified: false,
             is_maker: true,
             timestamp: Utc::now(),
@@ -171,4 +172,140 @@ async fn restored_pnl_verification_accepts_partial_terminal_fills() {
         assert_eq!(verified[0].quantity, dec!(1.25));
         assert_eq!(verified[0].realized_pnl, dec!(1.25));
     }
+}
+
+#[tokio::test]
+async fn pnl_verification_records_bnb_and_mixed_fees_without_polluting_quote_commission() {
+    let (bnb_order, mut bnb_resp) = managed_price_fixture();
+    bnb_resp.order_id = 1001;
+    bnb_resp.status = "FILLED".into();
+    bnb_resp.executed_qty = bnb_order.quantity;
+    bnb_resp.avg_price = Some(bnb_order.price);
+
+    let mut mixed_order = bnb_order.clone();
+    mixed_order.client_order_id = "gb_b_mixed_fee".into();
+    let mut mixed_resp = bnb_resp.clone();
+    mixed_resp.order_id = 1002;
+    mixed_resp.client_order_id = mixed_order.client_order_id.clone();
+
+    let bnb_qty = bnb_order.quantity;
+    let app = Router::new()
+        .route(
+            "/fapi/v1/order",
+            get(move |Query(query): Query<HashMap<String, String>>| {
+                let bnb = bnb_resp.clone();
+                let mixed = mixed_resp.clone();
+                async move {
+                    match query.get("origClientOrderId").map(String::as_str) {
+                        Some(id) if id == mixed.client_order_id => Json(mixed),
+                        _ => Json(bnb),
+                    }
+                }
+            }),
+        )
+        .route(
+            "/fapi/v1/userTrades",
+            get(
+                move |Query(query): Query<HashMap<String, String>>| async move {
+                    let oid: i64 = query["orderId"].parse().unwrap();
+                    if oid == 1001 {
+                        Json(json!([{
+                            "id": 11, "orderId": 1001, "qty": bnb_qty,
+                            "realizedPnl": "2.50", "commission": "0.00025",
+                            "commissionAsset": "BNB", "maker": true
+                        }]))
+                    } else {
+                        Json(json!([
+                            {
+                                "id": 21, "orderId": 1002, "qty": "0.25",
+                                "realizedPnl": "0.50", "commission": "0.00010",
+                                "commissionAsset": "BNB", "maker": true
+                            },
+                            {
+                                "id": 22, "orderId": 1002, "qty": "1.00",
+                                "realizedPnl": "1.00", "commission": "0.04",
+                                "commissionAsset": "USDC", "maker": false
+                            }
+                        ]))
+                    }
+                },
+            ),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let db = database();
+    let mut eng = engine(db.clone(), &url).await;
+    for order in [&bnb_order, &mixed_order] {
+        let pending = TradeRecord {
+            trade_id: format!("grid:{}", order.client_order_id),
+            client_order_id: order.client_order_id.clone(),
+            symbol: order.symbol.clone(),
+            mode: TradingMode::Live,
+            side: order.side,
+            price: order.price,
+            quantity: order.quantity,
+            amount_usdc: order.amount_usdc,
+            realized_pnl: Decimal::ZERO,
+            commission: Decimal::ZERO,
+            commission_asset: None,
+            pnl_verified: false,
+            is_maker: true,
+            timestamp: Utc::now(),
+            note: String::new(),
+        };
+        assert!(eng.state.record_trade(pending, None, None, None).await);
+    }
+
+    eng.reconcile_unverified_trades().await;
+    let retry = tokio::time::timeout(
+        Duration::from_secs(5),
+        eng.pnl_reconcile_task.take().unwrap(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(retry.is_none());
+
+    {
+        let stats = eng.state.stats.read().await;
+        assert_eq!(stats.pending_pnl_trades, 0);
+        assert_eq!(stats.total_realized_pnl, dec!(4.00));
+        assert_eq!(stats.total_commission, dec!(0.04));
+        assert_eq!(stats.non_quote_commission_trades, 2);
+    }
+    let saved = db.get_recent_trades(10).unwrap();
+    let saved_bnb = saved
+        .iter()
+        .find(|t| t.client_order_id == bnb_order.client_order_id)
+        .unwrap();
+    assert_eq!(saved_bnb.commission, dec!(0.00025));
+    assert_eq!(saved_bnb.commission_asset.as_deref(), Some("BNB"));
+    let saved_mixed = saved
+        .iter()
+        .find(|t| t.client_order_id == mixed_order.client_order_id)
+        .unwrap();
+    assert_eq!(saved_mixed.commission, dec!(0.04));
+    assert_eq!(saved_mixed.commission_asset.as_deref(), Some("MIXED"));
+    assert!(!saved_mixed.is_maker);
+
+    let cached = eng.state.recent_trades.read().await;
+    assert_eq!(
+        cached
+            .iter()
+            .find(|t| t.client_order_id == bnb_order.client_order_id)
+            .unwrap()
+            .commission_asset
+            .as_deref(),
+        Some("BNB")
+    );
+    drop(cached);
+
+    let reopened = engine(db, &url).await;
+    let restored = reopened.state.stats.read().await;
+    assert_eq!(restored.total_realized_pnl, dec!(4.00));
+    assert_eq!(restored.total_commission, dec!(0.04));
+    assert_eq!(restored.non_quote_commission_trades, 2);
+    assert_eq!(restored.pending_pnl_trades, 0);
+    server.abort();
 }

@@ -20,6 +20,7 @@ pub(super) fn cache_test_trade(id: &str, seconds: i64, mode: TradingMode) -> Tra
         amount_usdc: dec!(100),
         realized_pnl: Decimal::ZERO,
         commission: Decimal::ZERO,
+        commission_asset: None,
         pnl_verified: false,
         is_maker: true,
         timestamp: chrono::DateTime::from_timestamp(1_700_000_000 + seconds, 0).unwrap(),

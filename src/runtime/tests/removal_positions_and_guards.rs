@@ -475,6 +475,7 @@ async fn paper_removal_rejects_durable_saved_position_when_memory_was_flat_and_r
             amount_usdc: rust_decimal_macros::dec!(250),
             realized_pnl: rust_decimal::Decimal::ZERO,
             commission: rust_decimal::Decimal::ZERO,
+            commission_asset: None,
             pnl_verified: true,
             is_maker: true,
             timestamp: chrono::Utc::now(),

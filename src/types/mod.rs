@@ -57,6 +57,8 @@ pub struct GridStats {
     pub total_realized_pnl: Decimal,
     /// Commission charged in the symbol's quote asset.
     pub total_commission: Decimal,
+    #[serde(default)]
+    pub non_quote_commission_trades: usize,
     pub pending_pnl_trades: usize,
     pub total_volume_usdc: Decimal,
     pub start_time: DateTime<Utc>,
@@ -73,6 +75,7 @@ impl Default for GridStats {
             total_realized_profit: Decimal::ZERO,
             total_realized_pnl: Decimal::ZERO,
             total_commission: Decimal::ZERO,
+            non_quote_commission_trades: 0,
             pending_pnl_trades: 0,
             total_volume_usdc: Decimal::ZERO,
             start_time: Utc::now(),

@@ -16,11 +16,44 @@ pub struct TradeRecord {
     pub amount_usdc: Decimal,
     pub realized_pnl: Decimal,
     pub commission: Decimal,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commission_asset: Option<String>,
     #[serde(default)]
     pub pnl_verified: bool,
     pub is_maker: bool,
     pub timestamp: DateTime<Utc>,
     pub note: String,
+}
+
+impl TradeRecord {
+    #[must_use]
+    #[inline]
+    pub(crate) fn normalized_commission_asset(&self) -> Option<&str> {
+        let asset = self.commission_asset.as_deref()?.trim();
+        if asset.is_empty()
+            || quote_asset(&self.symbol).is_some_and(|quote| asset.eq_ignore_ascii_case(quote))
+        {
+            None
+        } else {
+            Some(asset)
+        }
+    }
+
+    #[must_use]
+    #[inline]
+    pub(crate) fn quote_commission(&self) -> Decimal {
+        match self.normalized_commission_asset() {
+            None => self.commission,
+            Some(asset) if asset.eq_ignore_ascii_case("MIXED") => self.commission,
+            Some(_) => Decimal::ZERO,
+        }
+    }
+
+    #[must_use]
+    #[inline]
+    pub(crate) fn has_non_quote_commission(&self) -> bool {
+        self.normalized_commission_asset().is_some()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

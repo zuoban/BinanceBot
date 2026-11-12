@@ -384,6 +384,14 @@ fn migrate_trades_columns_and_scope_index(conn: &Connection) -> Result<()> {
             [],
         )?;
     }
+    let has_commission_asset: i64 = conn.query_row(
+        "SELECT count(*) FROM pragma_table_info('trades') WHERE name = 'commission_asset';",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_commission_asset == 0 {
+        conn.execute("ALTER TABLE trades ADD COLUMN commission_asset TEXT;", [])?;
+    }
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_trades_scope ON trades (symbol, mode, timestamp DESC);",
         [],

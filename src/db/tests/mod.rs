@@ -21,6 +21,7 @@ pub(super) fn revision_test_trade() -> TradeRecord {
         amount_usdc: dec!(100),
         realized_pnl: Decimal::ZERO,
         commission: Decimal::ZERO,
+        commission_asset: None,
         pnl_verified: false,
         is_maker: true,
         timestamp: Utc::now(),

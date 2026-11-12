@@ -95,6 +95,24 @@ it('renders UNVERIFIED order purpose as 待核实', () => {
   expect(screen.getAllByText('待核实').length).toBeGreaterThan(0);
 });
 
+it('renders and exports non-quote and mixed commission assets without rounding small BNB fees to zero', async () => {
+  const rows = [
+    makeTrade({ trade_id: 't-bnb', symbol: 'SOLUSDC', side: 'BUY', commission: '0.00004500', commission_asset: 'BNB' }),
+    makeTrade({ trade_id: 't-mixed-quote', symbol: 'SOLUSDC', side: 'SELL', commission: '0.04', commission_asset: 'MIXED' }),
+    makeTrade({ trade_id: 't-mixed-zero', symbol: 'SOLUSDC', side: 'SELL', commission: '0', commission_asset: 'MIXED' }),
+  ];
+  view(<TradesTable trades={rows} />);
+  expect(screen.getByText('0.000045 BNB')).toBeInTheDocument();
+  expect(screen.getByText('0.0400 + 其他币种')).toBeInTheDocument();
+  expect(screen.getByText('多币种')).toBeInTheDocument();
+
+  await userEvent.setup().click(screen.getByRole('button', { name: /导出 CSV/ }));
+  const csv = String(exported.download.mock.calls[0][1]);
+  expect(csv).toContain(',0.000045 BNB,');
+  expect(csv).toContain(',0.04 + 其他币种,');
+  expect(csv).toContain(',多币种,');
+});
+
 it('filters logs by level and exports the filtered rows', async () => {
   view(<LogsTable logs={[log('INFO', '网格已对账'), log('ERROR', '撤单失败'), log('WARN', '接近上限')]} />);
   const user = userEvent.setup();

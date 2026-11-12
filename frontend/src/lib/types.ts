@@ -29,6 +29,7 @@ export interface Order {
 export interface Trade {
   trade_id: string; symbol: string; mode: Mode; side: 'BUY' | 'SELL'; price: Decimal;
   quantity: Decimal; amount_usdc: Decimal; realized_pnl: Decimal; commission: Decimal;
+  commission_asset?: string | null;
   pnl_verified: boolean; is_maker: boolean; timestamp: string; note: string;
 }
 export interface Log { timestamp: string; level: string; message: string }
@@ -41,7 +42,7 @@ export interface Snapshot {
   ticker: { last_price: Decimal; mark_price: Decimal; change_percent_24h: Decimal; high_24h: Decimal; low_24h: Decimal; update_time: string; mark_update_time: string };
   stats: {
     total_trades: number; completed_cycles: number; total_realized_pnl: Decimal;
-    total_commission: Decimal; pending_pnl_trades: number; total_volume_usdc: Decimal;
+    total_commission: Decimal; non_quote_commission_trades?: number; pending_pnl_trades: number; total_volume_usdc: Decimal;
     uptime_secs: number; active_buy_orders: number; active_sell_orders: number;
   };
   position: { size: Decimal; entry_price: Decimal; mark_price: Decimal; unrealized_pnl: Decimal; liquidation_price: Decimal; leverage: number };

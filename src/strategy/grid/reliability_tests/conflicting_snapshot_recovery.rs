@@ -84,6 +84,7 @@ async fn recovery_intent_in_conflicting_snapshot_is_available_to_cancel_fallback
                 amount_usdc: dec!(200),
                 realized_pnl: dec!(0),
                 commission: dec!(0),
+                commission_asset: None,
                 pnl_verified: true,
                 is_maker: true,
                 timestamp: Utc::now(),

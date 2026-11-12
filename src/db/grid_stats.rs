@@ -36,6 +36,15 @@ impl Database {
         hourly::pnl_totals_on(&conn, symbol, mode)
     }
 
+    pub(crate) fn get_pnl_rollup(
+        &self,
+        symbol: &str,
+        mode: TradingMode,
+    ) -> Result<(Decimal, Decimal, usize, usize)> {
+        let conn = self.lock_connection("get_pnl_rollup");
+        hourly::pnl_rollup_on(&conn, symbol, mode)
+    }
+
     pub(crate) fn load_scoped_stats(
         &self,
         symbol: &str,

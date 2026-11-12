@@ -36,6 +36,7 @@ fn hourly_trade_stats_cover_beijing_today_and_isolate_scope() {
         amount_usdc: dec!(100),
         realized_pnl: Decimal::ZERO,
         commission: Decimal::ZERO,
+        commission_asset: None,
         pnl_verified: false,
         is_maker: true,
         timestamp: start,
@@ -179,6 +180,7 @@ fn last_fill_uses_execution_time_scope_and_stable_ties() {
         amount_usdc: dec!(118.8),
         realized_pnl: Decimal::ZERO,
         commission: Decimal::ZERO,
+        commission_asset: None,
         pnl_verified: false,
         is_maker: true,
         timestamp: now,
@@ -243,6 +245,7 @@ fn test_db_trade_lifecycle() {
         amount_usdc: dec!(99.132),
         realized_pnl: dec!(0.0),
         commission: dec!(0.0),
+        commission_asset: None,
         pnl_verified: true,
         is_maker: true,
         timestamp: Utc::now(),
@@ -272,6 +275,7 @@ fn trade_and_stats_commit_together_and_duplicates_do_not_recount() {
         amount_usdc: dec!(100),
         realized_pnl: Decimal::ZERO,
         commission: Decimal::ZERO,
+        commission_asset: None,
         pnl_verified: true,
         is_maker: true,
         timestamp: Utc::now(),
@@ -369,6 +373,7 @@ fn pair_intent_and_fill_commit_atomically() {
         amount_usdc: parent.amount_usdc,
         realized_pnl: Decimal::ZERO,
         commission: Decimal::ZERO,
+        commission_asset: None,
         pnl_verified: false,
         is_maker: true,
         timestamp: Utc::now(),
@@ -438,6 +443,7 @@ fn trading_modes_have_separate_history_and_totals() {
             amount_usdc: dec!(100),
             realized_pnl: pnl,
             commission: dec!(0.1),
+            commission_asset: None,
             pnl_verified: true,
             is_maker: true,
             timestamp: Utc::now(),
@@ -640,6 +646,7 @@ fn subsecond_fills_sort_chronologically_for_last_fill_and_cleared_frontiers() {
         amount_usdc: price,
         realized_pnl: Decimal::ZERO,
         commission: Decimal::ZERO,
+        commission_asset: None,
         pnl_verified: true,
         is_maker: true,
         timestamp: parse_ts(ts),
@@ -720,4 +727,63 @@ fn subsecond_fills_sort_chronologically_for_last_fill_and_cleared_frontiers() {
         db.last_fill_for("SOLUSDC", TradingMode::Live).unwrap(),
         Some((OrderSide::Sell, dec!(106)))
     );
+}
+
+#[test]
+fn pnl_rollups_upgrade_existing_table_and_preserve_non_quote_counts() {
+    let dir = crate::test_support::TempTestDir::new("pnl-rollup-non-quote");
+    let path = dir.join("bot.db");
+    {
+        let db = Database::open(&path).unwrap();
+        let conn = db.conn.lock().unwrap();
+        conn.execute_batch(
+            "DROP TABLE trade_pnl_rollups;
+             CREATE TABLE trade_pnl_rollups (
+                 symbol TEXT NOT NULL, mode TEXT NOT NULL, realized_pnl TEXT NOT NULL,
+                 commission TEXT NOT NULL, pending_pnl_count INTEGER NOT NULL,
+                 PRIMARY KEY (symbol, mode)
+             );
+             INSERT INTO trade_pnl_rollups (symbol, mode, realized_pnl, commission, pending_pnl_count)
+             VALUES ('SOLUSDC', 'LIVE', '10.5', '0.12', 0);",
+        )
+        .unwrap();
+    }
+
+    let db = Database::open(&path).unwrap();
+    assert_eq!(
+        db.get_pnl_rollup("SOLUSDC", TradingMode::Live).unwrap(),
+        (dec!(10.5), dec!(0.12), 0, 0)
+    );
+
+    let mut bnb_trade = TradeRecord {
+        trade_id: "bnb-1".into(),
+        client_order_id: "cid-bnb-1".into(),
+        symbol: "SOLUSDC".into(),
+        mode: TradingMode::Live,
+        side: OrderSide::Sell,
+        price: dec!(105),
+        quantity: dec!(1),
+        amount_usdc: dec!(105),
+        realized_pnl: Decimal::ZERO,
+        commission: Decimal::ZERO,
+        commission_asset: None,
+        pnl_verified: false,
+        is_maker: true,
+        timestamp: Utc::now(),
+        note: String::new(),
+    };
+    assert!(db.insert_trade(&bnb_trade).unwrap());
+    bnb_trade.realized_pnl = dec!(1.5);
+    bnb_trade.commission = dec!(0.0004);
+    bnb_trade.commission_asset = Some("bnb".into());
+    bnb_trade.pnl_verified = true;
+    assert!(db.verify_trade_pnl(&bnb_trade, 0).unwrap());
+
+    assert_eq!(
+        db.get_pnl_rollup("SOLUSDC", TradingMode::Live).unwrap(),
+        (dec!(12.0), dec!(0.12), 1, 0)
+    );
+    let loaded = db.get_recent_trades(1).unwrap();
+    assert_eq!(loaded[0].commission_asset.as_deref(), Some("BNB"));
+    assert_eq!(loaded[0].commission, dec!(0.0004));
 }

@@ -22,6 +22,7 @@ fn trade(id: &str, at: DateTime<Utc>, verified: bool) -> TradeRecord {
         amount_usdc: dec!(100),
         realized_pnl: dec!(0.0000000000000000000000000001),
         commission: Decimal::ZERO,
+        commission_asset: None,
         pnl_verified: verified,
         is_maker: true,
         timestamp: at,

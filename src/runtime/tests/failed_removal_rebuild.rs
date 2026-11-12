@@ -107,6 +107,7 @@ async fn failed_removal_drains_old_verification_before_restoring_replacement() {
             amount_usdc: dec!(100),
             realized_pnl: dec!(0),
             commission: dec!(0),
+            commission_asset: None,
             pnl_verified: false,
             is_maker: true,
             timestamp: chrono::Utc::now(),

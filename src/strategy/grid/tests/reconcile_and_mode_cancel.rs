@@ -287,6 +287,7 @@ async fn already_recorded_terminal_counter_order_retires_its_pending_intent() {
         amount_usdc: intent.amount_usdc,
         realized_pnl: dec!(1),
         commission: dec!(0),
+        commission_asset: None,
         pnl_verified: true,
         is_maker: true,
         timestamp: Utc::now(),

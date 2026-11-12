@@ -630,6 +630,7 @@ async fn global_cleanup_resets_all_pair_caches_without_changing_their_statuses()
             amount_usdc: dec!(100),
             realized_pnl: dec!(2),
             commission: dec!(0.1),
+            commission_asset: None,
             pnl_verified: true,
             is_maker: true,
             timestamp: Utc::now(),

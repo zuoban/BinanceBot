@@ -406,6 +406,7 @@ async fn switching_mode_reloads_only_that_modes_trades() {
             amount_usdc: dec!(100),
             realized_pnl: pnl,
             commission: Decimal::ZERO,
+            commission_asset: None,
             pnl_verified: true,
             is_maker: true,
             timestamp: Utc::now(),

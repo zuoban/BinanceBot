@@ -399,6 +399,7 @@ async fn builds_and_persists_daily_snapshot_with_previous_day_trades_and_positio
             amount_usdc: dec!(100),
             realized_pnl: pnl,
             commission: dec!(0.02),
+            commission_asset: None,
             pnl_verified: verified,
             is_maker: true,
             timestamp: at,

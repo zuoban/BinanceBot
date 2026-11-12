@@ -40,27 +40,71 @@ async fn buy_window_respects_position_and_open_buy_exposure() {
 
 #[test]
 fn exchange_fills_include_losses_and_fees() {
-    let fills = vec![
-        BinanceUserTrade {
-            realized_pnl: dec!(1.20),
-            commission: dec!(0.03),
-            commission_asset: "USDC".into(),
-            maker: true,
-        },
-        BinanceUserTrade {
-            realized_pnl: dec!(-2.00),
-            commission: dec!(0.04),
-            commission_asset: "USDC".into(),
-            maker: false,
-        },
-    ];
+    let base_fills = || {
+        vec![
+            BinanceUserTrade {
+                realized_pnl: dec!(1.20),
+                commission: dec!(0.03),
+                commission_asset: "USDC".into(),
+                maker: true,
+            },
+            BinanceUserTrade {
+                realized_pnl: dec!(-2.00),
+                commission: dec!(0.04),
+                commission_asset: "USDC".into(),
+                maker: false,
+            },
+        ]
+    };
     assert_eq!(
-        aggregate_execution_pnl("SOLUSDC", &fills).unwrap(),
-        (dec!(-0.80), dec!(0.07), false)
+        aggregate_execution_pnl("SOLUSDC", &base_fills()).unwrap(),
+        (dec!(-0.80), dec!(0.07), None, false)
     );
-    let mut wrong_asset = fills;
-    wrong_asset[0].commission_asset = "BNB".into();
-    assert!(aggregate_execution_pnl("SOLUSDC", &wrong_asset).is_err());
+
+    let mut bnb_only = base_fills();
+    bnb_only[0].commission = dec!(0.00012);
+    bnb_only[0].commission_asset = "bnb".into();
+    bnb_only[1].commission = dec!(0.00018);
+    bnb_only[1].commission_asset = "BNB".into();
+    assert_eq!(
+        aggregate_execution_pnl("SOLUSDC", &bnb_only).unwrap(),
+        (dec!(-0.80), dec!(0.00030), Some("BNB".into()), false)
+    );
+
+    let mut zero_fee_non_quote = base_fills();
+    zero_fee_non_quote[0].commission = Decimal::ZERO;
+    zero_fee_non_quote[0].commission_asset = "BNB".into();
+    assert_eq!(
+        aggregate_execution_pnl("SOLUSDC", &zero_fee_non_quote).unwrap(),
+        (dec!(-0.80), dec!(0.04), None, false)
+    );
+
+    let mut mixed_quote_and_bnb = base_fills();
+    mixed_quote_and_bnb[0].commission = dec!(0.00012);
+    mixed_quote_and_bnb[0].commission_asset = "BNB".into();
+    assert_eq!(
+        aggregate_execution_pnl("SOLUSDC", &mixed_quote_and_bnb).unwrap(),
+        (dec!(-0.80), dec!(0.04), Some("MIXED".into()), false)
+    );
+
+    let mut mixed_two_non_quote = base_fills();
+    mixed_two_non_quote[0].commission = dec!(0.00012);
+    mixed_two_non_quote[0].commission_asset = "BNB".into();
+    mixed_two_non_quote[1].commission = dec!(0.02);
+    mixed_two_non_quote[1].commission_asset = "BNFCR".into();
+    assert_eq!(
+        aggregate_execution_pnl("SOLUSDC", &mixed_two_non_quote).unwrap(),
+        (dec!(-0.80), Decimal::ZERO, Some("MIXED".into()), false)
+    );
+
+    for invalid_asset in ["", "BNB FEE", "MIXED", "TOO_LONG_ASSET_NAME_123"] {
+        let mut invalid = base_fills();
+        invalid[0].commission_asset = invalid_asset.into();
+        assert!(
+            aggregate_execution_pnl("SOLUSDC", &invalid).is_err(),
+            "{invalid_asset}"
+        );
+    }
     assert!(aggregate_execution_pnl("SOLUSDC", &[]).is_err());
 }
 

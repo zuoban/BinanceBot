@@ -21,6 +21,7 @@ async fn cancelled_cleanup_preserves_membership(path: &str, payload: Value, scop
             amount_usdc: dec!(100),
             realized_pnl: dec!(2),
             commission: Decimal::ZERO,
+            commission_asset: None,
             pnl_verified: true,
             is_maker: true,
             timestamp: chrono::Utc::now(),

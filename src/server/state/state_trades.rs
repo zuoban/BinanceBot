@@ -31,7 +31,7 @@ pub(super) fn recent_trade_cache(trades: Vec<TradeRecord>) -> VecDeque<TradeReco
 
 pub(super) fn build_grid_stats(
     scoped: Option<(usize, usize, Decimal, Decimal)>,
-    pnl: Option<(Decimal, Decimal, usize)>,
+    pnl: Option<(Decimal, Decimal, usize, usize)>,
 ) -> GridStats {
     let mut stats = GridStats::default();
     if let Some((total_trades, cycles, profit, volume)) = scoped {
@@ -40,9 +40,10 @@ pub(super) fn build_grid_stats(
         stats.total_realized_profit = profit;
         stats.total_volume_usdc = volume;
     }
-    if let Some((realized_pnl, commission, pending)) = pnl {
+    if let Some((realized_pnl, commission, non_quote_commission_trades, pending)) = pnl {
         stats.total_realized_pnl = realized_pnl;
         stats.total_commission = commission;
+        stats.non_quote_commission_trades = non_quote_commission_trades;
         stats.pending_pnl_trades = pending;
     }
     stats
@@ -67,7 +68,13 @@ fn updated_stats_for_trade(
         updated.total_realized_pnl = updated
             .total_realized_pnl
             .saturating_add(trade.realized_pnl);
-        updated.total_commission = updated.total_commission.saturating_add(trade.commission);
+        updated.total_commission = updated
+            .total_commission
+            .saturating_add(trade.quote_commission());
+        if trade.has_non_quote_commission() {
+            updated.non_quote_commission_trades =
+                updated.non_quote_commission_trades.saturating_add(1);
+        }
     } else {
         updated.pending_pnl_trades = updated.pending_pnl_trades.saturating_add(1);
     }
@@ -89,7 +96,7 @@ fn reload_durable_base_stats(
 ) -> anyhow::Result<GridStats> {
     let mut base = build_grid_stats(
         db.load_scoped_stats(symbol, mode)?,
-        Some(db.get_pnl_totals(symbol, mode)?),
+        Some(db.get_pnl_rollup(symbol, mode)?),
     );
     preserve_runtime_grid_stats(&mut base, cached);
     Ok(base)
@@ -523,8 +530,13 @@ impl AppState {
                 if trade.symbol == current_symbol && trade.mode == current_mode {
                     stats.total_realized_pnl =
                         stats.total_realized_pnl.saturating_add(trade.realized_pnl);
-                    stats.total_commission =
-                        stats.total_commission.saturating_add(trade.commission);
+                    stats.total_commission = stats
+                        .total_commission
+                        .saturating_add(trade.quote_commission());
+                    if trade.has_non_quote_commission() {
+                        stats.non_quote_commission_trades =
+                            stats.non_quote_commission_trades.saturating_add(1);
+                    }
                     stats.pending_pnl_trades = stats.pending_pnl_trades.saturating_sub(1);
                 }
             }
@@ -539,6 +551,7 @@ impl AppState {
                 // Verification updates PnL fields only; SQLite retains the original timestamp.
                 existing.realized_pnl = trade.realized_pnl;
                 existing.commission = trade.commission;
+                existing.commission_asset = trade.commission_asset.clone();
                 existing.is_maker = trade.is_maker;
                 existing.pnl_verified = true;
                 updated_symbol = Some(trade.symbol.as_str());

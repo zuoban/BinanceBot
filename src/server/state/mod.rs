@@ -253,7 +253,7 @@ impl AppState {
                 None
             }
         };
-        let pnl_totals = match db.get_pnl_totals(symbol, mode) {
+        let pnl_rollup = match db.get_pnl_rollup(symbol, mode) {
             Ok(totals) => Some(totals),
             Err(e) => {
                 warn!("Failed to load realized PnL totals: {}", e);
@@ -263,7 +263,7 @@ impl AppState {
         };
         (
             recent_trade_cache(saved_trades),
-            build_grid_stats(scoped_stats, pnl_totals),
+            build_grid_stats(scoped_stats, pnl_rollup),
             stats_dirty,
             recent_trades_dirty,
             trades_revision,

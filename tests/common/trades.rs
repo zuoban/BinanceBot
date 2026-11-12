@@ -23,6 +23,7 @@ pub fn sample_trade(
         amount_usdc: price * quantity,
         realized_pnl: dec!(0),
         commission: dec!(0),
+        commission_asset: None,
         pnl_verified: true,
         is_maker: true,
         timestamp: Utc::now(),

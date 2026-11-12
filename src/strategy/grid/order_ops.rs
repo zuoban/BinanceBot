@@ -374,6 +374,7 @@ impl GridTradingEngine {
                 .unwrap_or(order.amount_usdc),
             realized_pnl,
             commission: Decimal::ZERO,
+            commission_asset: None,
             pnl_verified,
             is_maker: true,
             timestamp: order.updated_at,

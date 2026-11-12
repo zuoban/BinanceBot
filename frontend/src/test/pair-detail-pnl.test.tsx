@@ -79,10 +79,26 @@ it.each([
   ['invalid realized profit', { total_realized_pnl: 'invalid' }],
   ['missing pending count', { pending_pnl_trades: undefined }],
   ['invalid pending count', { pending_pnl_trades: -1 }],
+  ['invalid non-quote count', { non_quote_commission_trades: -1 }],
 ])('does not show a definite net profit with %s', (_label, fields) => {
   Object.assign(state.data!.stats, fields);
   render(view());
   expect(screen.getByText('扣费后 --')).toBeInTheDocument();
+});
+
+it('withholds quote net PnL and annotates cumulative fees when non-quote commissions exist', () => {
+  state.data!.stats.total_realized_pnl = '12.5';
+  state.data!.stats.total_commission = '0.04';
+  state.data!.stats.non_quote_commission_trades = 2;
+  state.data!.stats.pending_pnl_trades = 1;
+  const { rerender } = render(view());
+  expect(screen.getByText('扣费后 --')).toBeInTheDocument();
+
+  state.data!.stats.pending_pnl_trades = 0;
+  rerender(view());
+  expect(screen.getByText('含非计价币手续费')).toBeInTheDocument();
+  expect(screen.queryByText(/扣费后/)).not.toBeInTheDocument();
+  expect(screen.getByText('累计手续费').parentElement).toHaveTextContent('0.0400 USDC（另 2 笔其他币种）');
 });
 
 it('shows zero when the inputs are explicitly zero', () => {

@@ -39,6 +39,7 @@ pub(super) fn trade(side: OrderSide) -> TradeRecord {
         amount_usdc: dec!(246.90),
         realized_pnl: dec!(0),
         commission: dec!(0),
+        commission_asset: None,
         pnl_verified: true,
         is_maker: true,
         timestamp: DateTime::parse_from_rfc3339("2026-10-01T12:26:00Z")

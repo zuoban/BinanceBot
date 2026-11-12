@@ -5,34 +5,70 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub(super) fn aggregate_execution_pnl(
     symbol: &str,
     fills: &[BinanceUserTrade],
-) -> Result<(Decimal, Decimal, bool)> {
+) -> Result<(Decimal, Decimal, Option<String>, bool)> {
     let quote =
         quote_asset(symbol).ok_or_else(|| anyhow!("Unsupported quote asset for {}", symbol))?;
     if fills.is_empty() {
         return Err(anyhow!("No exchange fills found for {}", symbol));
     }
-    if fills
-        .iter()
-        .any(|fill| !fill.commission_asset.eq_ignore_ascii_case(quote))
-    {
-        return Err(anyhow!(
-            "Execution commission is not denominated in {}",
-            quote
-        ));
-    }
     let realized_pnl = fills.iter().try_fold(Decimal::ZERO, |acc, fill| {
         acc.checked_add(fill.realized_pnl)
             .ok_or_else(|| anyhow!("Realized PnL overflow for {}", symbol))
     })?;
-    let commission = fills.iter().try_fold(Decimal::ZERO, |acc, fill| {
-        acc.checked_add(fill.commission)
-            .ok_or_else(|| anyhow!("Commission overflow for {}", symbol))
-    })?;
-    Ok((
-        realized_pnl,
-        commission,
-        fills.iter().all(|fill| fill.maker),
-    ))
+    let mut quote_commission = Decimal::ZERO;
+    let mut has_quote_nonzero = false;
+    let mut non_quote_asset: Option<String> = None;
+    let mut non_quote_commission = Decimal::ZERO;
+    let mut multiple_non_quote = false;
+
+    for fill in fills {
+        let asset = fill.commission_asset.as_str();
+        anyhow::ensure!(
+            (1..=16).contains(&asset.len())
+                && asset.bytes().all(|b| b.is_ascii_alphanumeric())
+                && !asset.eq_ignore_ascii_case("MIXED"),
+            "Invalid commission asset {:?} for {}",
+            asset,
+            symbol
+        );
+        if fill.commission.is_zero() {
+            continue;
+        }
+        if asset.eq_ignore_ascii_case(quote) {
+            has_quote_nonzero = true;
+            quote_commission = quote_commission
+                .checked_add(fill.commission)
+                .ok_or_else(|| anyhow!("Commission overflow for {}", symbol))?;
+        } else {
+            let upper = asset.to_ascii_uppercase();
+            match &non_quote_asset {
+                None => {
+                    non_quote_asset = Some(upper);
+                    non_quote_commission = fill.commission;
+                }
+                Some(existing) if existing == &upper => {
+                    non_quote_commission = non_quote_commission
+                        .checked_add(fill.commission)
+                        .ok_or_else(|| anyhow!("Commission overflow for {}", symbol))?;
+                }
+                Some(_) => {
+                    multiple_non_quote = true;
+                }
+            }
+        }
+    }
+
+    let is_maker = fills.iter().all(|fill| fill.maker);
+    let (commission, commission_asset) = if non_quote_asset.is_none()
+        || (!multiple_non_quote && !has_quote_nonzero && non_quote_commission.is_zero())
+    {
+        (quote_commission, None)
+    } else if !has_quote_nonzero && !multiple_non_quote {
+        (non_quote_commission, non_quote_asset)
+    } else {
+        (quote_commission, Some("MIXED".to_string()))
+    };
+    Ok((realized_pnl, commission, commission_asset, is_maker))
 }
 
 pub(super) fn exchange_fill_time(order: &BinanceOrderResponse) -> chrono::DateTime<Utc> {
@@ -101,9 +137,10 @@ impl PnlVerificationBatch<'_> {
         }
         .await;
         match result {
-            Ok((pnl, commission, maker)) => {
+            Ok((pnl, commission, commission_asset, maker)) => {
                 trade.realized_pnl = pnl;
                 trade.commission = commission;
+                trade.commission_asset = commission_asset;
                 trade.is_maker = maker;
                 trade.pnl_verified = true;
                 Some(trade)
