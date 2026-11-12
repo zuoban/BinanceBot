@@ -413,6 +413,7 @@ async fn run_hub_worker(inner: Arc<HubInner>, mut notify_rx: watch::Receiver<u64
             "Multiplexed WebSocket disconnected. Reconnecting in {} seconds...",
             backoff_secs
         );
+        crate::metrics::MARKET_WS_RECONNECTS.inc();
         tokio::select! {
             _ = sleep(Duration::from_millis(
                 rand::random::<u64>() % (backoff_secs * 500 + 1) + backoff_secs * 500,

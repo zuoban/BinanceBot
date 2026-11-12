@@ -4,6 +4,7 @@ pub mod db;
 pub mod exchange;
 pub(crate) mod fx;
 pub mod lifecycle;
+pub(crate) mod metrics;
 pub mod runtime;
 pub mod server;
 pub mod snapshots;

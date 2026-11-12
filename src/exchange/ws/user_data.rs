@@ -532,6 +532,7 @@ async fn run_account_user_stream(
         if inner.active_client_for_account(account_key).is_none() {
             continue 'connect;
         }
+        crate::metrics::USER_DATA_WS_RECONNECTS.inc();
         tokio::select! {
             _ = sleep(Duration::from_millis(
                 rand::random::<u64>() % (backoff_secs * 500 + 1) + backoff_secs * 500,

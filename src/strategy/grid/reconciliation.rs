@@ -318,6 +318,7 @@ impl GridTradingEngine {
             Ok(orders) => Some(orders),
             Err(e) => {
                 warn!("Error during live orders sync: {}", e);
+                crate::metrics::ORDER_RECONCILIATION_FAILURES.inc();
                 self.mark_orders_reconciliation_blocked().await;
                 None
             }

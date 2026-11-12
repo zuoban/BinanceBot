@@ -312,6 +312,7 @@ impl GridTradingEngine {
             }
             Err(error) => {
                 warn!(%symbol, elapsed_ms, error = %error, "Could not sync Binance position");
+                crate::metrics::POSITION_SYNC_FAILURES.inc();
             }
             Ok((None, _)) => {
                 warn!(%symbol, elapsed_ms, "Binance position response contains no record for symbol");
@@ -365,6 +366,7 @@ impl GridTradingEngine {
                 AccountSyncResult::Pending
             }
             Err(e) => {
+                crate::metrics::ACCOUNT_SYNC_FAILURES.inc();
                 warn!(
                     %symbol,
                     elapsed_ms = started.elapsed().as_millis() as u64,

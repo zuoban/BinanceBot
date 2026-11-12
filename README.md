@@ -508,6 +508,18 @@ curl -i http://127.0.0.1:8080/api/auth/status
 
 确认前端端口映射符合预期，再检查 HTTPS 代理或 SSH 隧道、证书、WebSocket 转发，以及云安全组和宿主机防火墙中对应安全入口的规则。页面可访问只表示前端有响应；认证状态接口也正常后，才能确认后端接口可访问。
 
+### 4. 运行指标（Prometheus 文本格式）
+
+已登录的会话可访问 `GET /api/metrics`（需要与其他接口相同的 `Authorization: Bearer` 会话令牌；未设置 `ADMIN_PASSWORD` 时无需令牌），内容为 Prometheus 文本格式，指标均为进程内累计值，重启后归零：
+
+- `binance_bot_sqlite_connection_lock_wait_seconds`：等待共享 SQLite 连接互斥锁的耗时直方图。
+- `binance_bot_sqlite_blocking_queue_wait_seconds`：SQLite 任务从提交到阻塞线程开始执行的排队耗时直方图。
+- `binance_bot_websocket_reconnects_total{stream="market|user_data"}`：行情流与用户数据流的重连次数。
+- `binance_bot_sync_failures_total{kind="open_orders|position|account"}`：挂单、持仓、账户同步失败次数。
+- `binance_bot_http_requests_total{status="2xx|4xx|5xx"}`：后端 API 的 HTTP 响应状态分类；前端静态资源由 Nginx 提供，不计入；101 WebSocket 升级及 1xx/3xx 响应不计入。
+
+会话令牌 24 小时后过期，且重启后失效，因此不适合直接配置为 Prometheus 的长期抓取凭证；长期采集需要另行提供可轮换的凭证或在受控网络内使用反向代理注入令牌。指标没有按交易对区分，也不包含价格、持仓、订单或凭证信息。
+
 ---
 
 ## 🧪 单元测试

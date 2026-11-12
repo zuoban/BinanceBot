@@ -224,14 +224,15 @@ impl Database {
             .get()
             .cloned()
             .map(|samples| (samples, std::time::Instant::now()));
-        let queued_at = tracing::enabled!(tracing::Level::DEBUG).then(std::time::Instant::now);
+        let queued_at = std::time::Instant::now();
         tokio::task::spawn_blocking(move || {
             #[cfg(test)]
             if let Some((samples, queued_at)) = benchmark_wait {
                 let elapsed = queued_at.elapsed().as_secs_f64() * 1000.0;
                 samples.queue.lock().unwrap().push(elapsed);
             }
-            if let Some(queued_at) = queued_at {
+            crate::metrics::SQLITE_BLOCKING_QUEUE_WAIT.observe(queued_at.elapsed());
+            if tracing::enabled!(tracing::Level::DEBUG) {
                 tracing::debug!(
                     queue_wait_us = queued_at.elapsed().as_micros() as u64,
                     "SQLite blocking worker started"
@@ -247,19 +248,20 @@ impl Database {
         &self,
         operation: &'static str,
     ) -> std::sync::MutexGuard<'_, Connection> {
-        let waiting_since = tracing::enabled!(tracing::Level::DEBUG).then(std::time::Instant::now);
+        let waiting_since = std::time::Instant::now();
         #[cfg(test)]
         let benchmark_wait = self
             .benchmark_wait_samples
             .get()
             .map(|samples| (samples, std::time::Instant::now()));
         let conn = self.conn.lock_unpoisoned();
+        crate::metrics::SQLITE_CONNECTION_LOCK_WAIT.observe(waiting_since.elapsed());
         #[cfg(test)]
         if let Some((samples, waiting_since)) = benchmark_wait {
             let elapsed = waiting_since.elapsed().as_secs_f64() * 1000.0;
             samples.connection.lock().unwrap().push(elapsed);
         }
-        if let Some(waiting_since) = waiting_since {
+        if tracing::enabled!(tracing::Level::DEBUG) {
             tracing::debug!(
                 operation,
                 lock_wait_us = waiting_since.elapsed().as_micros() as u64,

@@ -431,6 +431,7 @@ impl BinanceWsStream {
                 "WebSocket disconnected. Reconnecting in {} seconds...",
                 backoff_secs
             );
+            crate::metrics::MARKET_WS_RECONNECTS.inc();
             tokio::select! {
                 _ = sleep(Duration::from_millis(rand::random::<u64>() % (backoff_secs * 500 + 1) + backoff_secs * 500)) => {},
                 changed = self.config_rx.changed() => {

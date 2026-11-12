@@ -525,3 +525,68 @@ async fn get_logs_handler_and_logs_route_return_newest_first_matching_snapshot()
         assert_eq!(messages, snapshot_messages, "{uri}");
     }
 }
+
+#[tokio::test]
+async fn metrics_endpoint_requires_authentication_and_exposes_prometheus_text() {
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    db.create_session("metrics-token").unwrap();
+    let mut config = AppConfig::default();
+    config.pairs = vec![crate::config::TradingPairConfig::new("SOLUSDC".into())];
+    db.save_config(&config).unwrap();
+    db.save_pair_status("SOLUSDC", TradingMode::Paper, BotStatus::Paused)
+        .unwrap();
+    let admin_auth = Arc::new(crate::auth::AdminAuth::from_password("test-password").unwrap());
+    let mut runtime = crate::runtime::TradingRuntime::start_with_test_exchange_and_admin_auth(
+        &config,
+        db,
+        "http://127.0.0.1:1".into(),
+        admin_auth,
+    )
+    .await
+    .unwrap();
+    let router = create_managed_router(runtime.handle());
+
+    let anonymous = router
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/api/metrics")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+
+    let authorized = router
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/api/metrics")
+                .header("authorization", "Bearer metrics-token")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(authorized.status(), StatusCode::OK);
+    assert!(authorized.headers()["content-type"]
+        .to_str()
+        .unwrap()
+        .starts_with("text/plain; version=0.0.4"));
+    let body = axum::body::to_bytes(authorized.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let text = std::str::from_utf8(&body).unwrap();
+    for name in [
+        "binance_bot_sqlite_connection_lock_wait_seconds_count",
+        "binance_bot_sqlite_blocking_queue_wait_seconds_count",
+        "binance_bot_websocket_reconnects_total{stream=\"market\"}",
+        "binance_bot_websocket_reconnects_total{stream=\"user_data\"}",
+        "binance_bot_sync_failures_total{kind=\"open_orders\"}",
+        "binance_bot_http_requests_total{status=\"4xx\"}",
+    ] {
+        assert!(text.contains(name), "missing metric {name}");
+    }
+
+    let _ = runtime.shutdown(std::time::Duration::from_secs(2)).await;
+}

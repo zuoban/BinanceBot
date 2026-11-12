@@ -80,6 +80,7 @@ fn status_err<T>(
 }
 
 async fn apply_security_headers(mut response: Response) -> Response {
+    crate::metrics::record_http_status(response.status().as_u16());
     if response.status() != StatusCode::SWITCHING_PROTOCOLS {
         let headers = response.headers_mut();
         headers
@@ -103,6 +104,17 @@ async fn apply_security_headers(mut response: Response) -> Response {
             ));
     }
     response
+}
+
+async fn get_metrics_handler() -> Response {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        crate::metrics::render(),
+    )
+        .into_response()
 }
 
 pub fn create_router(state: Arc<AppState>) -> Router {
@@ -266,6 +278,7 @@ pub fn create_managed_router(handle: RuntimeHandle) -> Router {
         .route("/api/overview", get(get_managed_overview_handler))
         .route("/api/accounts", get(get_accounts_handler))
         .route("/api/overview/history", get(get_overview_history_handler))
+        .route("/api/metrics", get(get_metrics_handler))
         .route("/api/pairs/:symbol", delete(remove_pair_handler))
         .route(
             "/api/pairs/:symbol/database/export",

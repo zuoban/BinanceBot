@@ -140,6 +140,16 @@ impl TradingRuntime {
     }
 
     #[cfg(test)]
+    pub(crate) async fn start_with_test_exchange_and_admin_auth(
+        config: &AppConfig,
+        db: Arc<Database>,
+        url: String,
+        admin_auth: Arc<crate::auth::AdminAuth>,
+    ) -> anyhow::Result<Self> {
+        Self::start_impl(config, db, None, Some(admin_auth), Some(url), None, None).await
+    }
+
+    #[cfg(test)]
     pub(super) async fn start_with_test_exchange_and_hook(
         config: &AppConfig,
         db: Arc<Database>,
