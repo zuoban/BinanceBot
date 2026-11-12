@@ -248,6 +248,16 @@ it('shows unavailable trade counts when a strategy has no current-day statistics
 });
 
 it('shows five newest trades and expands to twenty across strategies', async () => {
+  let narrow = false;
+  const listeners = new Set<(event: MediaQueryListEvent) => void>();
+  vi.stubGlobal('matchMedia', vi.fn().mockImplementation((query: string) => ({
+    get matches() { return query === '(max-width: 600px)' ? narrow : false; },
+    media: query,
+    addListener: (cb: (event: MediaQueryListEvent) => void) => { if (query === '(max-width: 600px)') listeners.add(cb); },
+    removeListener: (cb: (event: MediaQueryListEvent) => void) => { listeners.delete(cb); },
+    addEventListener: (_: string, cb: (event: MediaQueryListEvent) => void) => { if (query === '(max-width: 600px)') listeners.add(cb); },
+    removeEventListener: (_: string, cb: (event: MediaQueryListEvent) => void) => { listeners.delete(cb); },
+  })));
   const btc = summarySnapshot('BTCUSDC'), eth = summarySnapshot('ETHUSDC');
   const trade = (symbol: string, index: number) => ({ trade_id: `${symbol}-${index}`, symbol, mode: symbol === 'BTCUSDC' ? 'PAPER' as const : 'LIVE' as const, side: 'BUY' as const, price: '123.456789', quantity: '1', amount_usdc: '100', realized_pnl: index === 20 ? '-0.004' : '0', commission: '0', pnl_verified: true, is_maker: true, timestamp: new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString(), note: `成交 ${index}` });
   const recentTrades = Array.from({ length: 22 }, (_, i) => i % 2 === 0 ? trade('BTCUSDC', i) : { ...trade('ETHUSDC', i), side: 'SELL' as const, pnl_verified: i !== 21 }).reverse().slice(0, 20);
@@ -256,6 +266,7 @@ it('shows five newest trades and expands to twenty across strategies', async () 
   const table = screen.getByText('最近成交').closest('.ant-card')!;
   const card = within(table as HTMLElement);
   expect(card.getAllByRole('row').slice(1)).toHaveLength(5);
+  expect(table.querySelector('.table-mobile')).toBeNull();
   const summary = within(card.getByLabelText('当前显示成交汇总'));
   expect(summary.getByText(/当前显示/)).toHaveTextContent('当前显示 5 笔');
   expect(summary.getByText(/买入/)).toHaveTextContent('买入 2 笔');
@@ -266,16 +277,6 @@ it('shows five newest trades and expands to twenty across strategies', async () 
   expect(card.getByRole('columnheader', { name: '方向' })).not.toHaveClass('ant-table-cell-fix-left');
   expect(card.getAllByRole('row')[1]).toHaveTextContent('ETHUSDC');
   expect(card.getAllByRole('row')[1]).toHaveTextContent('成交 21');
-  const mobileTrades = table.querySelector('.table-mobile') as HTMLElement;
-  const firstTrade = within(mobileTrades).getAllByRole('listitem')[0];
-  expect(within(firstTrade).getByText('成交均价').nextElementSibling).toHaveTextContent('123.4568');
-  expect(within(firstTrade).queryByText('模式')).not.toBeInTheDocument();
-  expect(within(firstTrade).queryByText('数量')).not.toBeInTheDocument();
-  expect(within(firstTrade).queryByText('手续费')).not.toBeInTheDocument();
-  expect(within(firstTrade).queryByText('成交方式')).not.toBeInTheDocument();
-  expect(within(firstTrade).queryByText('成交时间（北京）')).not.toBeInTheDocument();
-  expect(within(firstTrade).queryByText('备注')).not.toBeInTheDocument();
-  expect(firstTrade.querySelector('.trade-list-time')).toHaveTextContent(/刚刚|前/);
   expect(card.getAllByRole('row')[1]).not.toHaveTextContent('Maker');
   const user = userEvent.setup();
   await user.click(card.getByRole('button', { name: '展开最近 20 条' }));
@@ -287,6 +288,22 @@ it('shows five newest trades and expands to twenty across strategies', async () 
   expect(card.queryByText('成交 1')).not.toBeInTheDocument();
   await user.click(card.getByRole('button', { name: '收起' }));
   expect(card.getAllByRole('row').slice(1)).toHaveLength(5);
+
+  narrow = true;
+  act(() => {
+    for (const listener of listeners) listener({ matches: true, media: '(max-width: 600px)' } as MediaQueryListEvent);
+  });
+  expect(table.querySelector('.table-desktop')).toBeNull();
+  const mobileTrades = table.querySelector('.table-mobile') as HTMLElement;
+  const firstTrade = within(mobileTrades).getAllByRole('listitem')[0];
+  expect(within(firstTrade).getByText('成交均价').nextElementSibling).toHaveTextContent('123.4568');
+  expect(within(firstTrade).queryByText('模式')).not.toBeInTheDocument();
+  expect(within(firstTrade).queryByText('数量')).not.toBeInTheDocument();
+  expect(within(firstTrade).queryByText('手续费')).not.toBeInTheDocument();
+  expect(within(firstTrade).queryByText('成交方式')).not.toBeInTheDocument();
+  expect(within(firstTrade).queryByText('成交时间（北京）')).not.toBeInTheDocument();
+  expect(within(firstTrade).queryByText('备注')).not.toBeInTheDocument();
+  expect(firstTrade.querySelector('.trade-list-time')).toHaveTextContent(/刚刚|前/);
 });
 
 it('offers creation when there are no strategies', () => {

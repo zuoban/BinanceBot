@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { App } from 'antd';
 import { beforeEach, expect, it, vi } from 'vitest';
@@ -7,6 +7,25 @@ import { log as makeLog, order as makeOrder, trade as makeTrade } from './fixtur
 
 const exported = vi.hoisted(() => ({ download: vi.fn(), copy: vi.fn() }));
 vi.mock('../lib/exportCsv', async importOriginal => ({ ...await importOriginal<typeof import('../lib/exportCsv')>(), downloadCsv: exported.download, copyText: exported.copy }));
+
+function stubNarrowViewport(initialNarrow = false) {
+  let narrow = initialNarrow;
+  const listeners = new Set<(event: MediaQueryListEvent) => void>();
+  vi.stubGlobal('matchMedia', vi.fn().mockImplementation((query: string) => ({
+    get matches() { return query === '(max-width: 600px)' ? narrow : false; },
+    media: query,
+    addListener: (cb: (event: MediaQueryListEvent) => void) => { if (query === '(max-width: 600px)') listeners.add(cb); },
+    removeListener: (cb: (event: MediaQueryListEvent) => void) => { listeners.delete(cb); },
+    addEventListener: (_: string, cb: (event: MediaQueryListEvent) => void) => { if (query === '(max-width: 600px)') listeners.add(cb); },
+    removeEventListener: (_: string, cb: (event: MediaQueryListEvent) => void) => { listeners.delete(cb); },
+  })));
+  return (nextNarrow: boolean) => {
+    narrow = nextNarrow;
+    act(() => {
+      for (const listener of listeners) listener({ matches: narrow, media: '(max-width: 600px)' } as MediaQueryListEvent);
+    });
+  };
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -47,14 +66,20 @@ it('does not add filters or export to the overview trades card', () => {
 });
 
 it('copies the raw price rather than the formatted one', async () => {
+  const setNarrow = stubNarrowViewport(false);
   view(<OrdersTable orders={[order('o1', 'BUY', '67420.50000000')]} mark="67420" />);
-  // The table and the narrow-screen card list both render the price; either one copies the raw value.
-  const buttons = screen.getAllByRole('button', { name: '复制 67420.50000000' });
-  expect(buttons).toHaveLength(2);
-  await userEvent.setup().click(buttons[0]);
+  expect(screen.queryByRole('list', { name: '挂单列表' })).not.toBeInTheDocument();
+  const desktopButton = screen.getByRole('button', { name: '复制 67420.50000000' });
+  await userEvent.setup().click(desktopButton);
   expect(exported.copy).toHaveBeenCalledWith('67420.50000000');
   expect(await screen.findByText('已复制 67420.50000000')).toBeInTheDocument();
-  expect(buttons[0]).toHaveClass('copyable-copied');
+  expect(desktopButton).toHaveClass('copyable-copied');
+
+  setNarrow(true);
+  expect(screen.queryByRole('table')).not.toBeInTheDocument();
+  const mobileButton = within(screen.getByRole('list', { name: '挂单列表' })).getByRole('button', { name: '复制 67420.50000000' });
+  await userEvent.setup().click(mobileButton);
+  expect(exported.copy).toHaveBeenCalledTimes(2);
 });
 
 it('filters orders by side and disables export when nothing matches', async () => {
@@ -83,19 +108,23 @@ it('filters logs by level and exports the filtered rows', async () => {
 });
 
 it('renders the same filtered rows in the table and in the narrow-screen card list', async () => {
+  const setNarrow = stubNarrowViewport(false);
   view(<LogsTable logs={[log('INFO', '网格已对账'), log('ERROR', '撤单失败')]} />);
-  expect(screen.getByRole('list', { name: '日志列表' }).querySelectorAll('li')).toHaveLength(2);
+  expect(screen.getByRole('table').querySelectorAll('tbody tr.ant-table-row')).toHaveLength(2);
+  expect(screen.queryByRole('list', { name: '日志列表' })).not.toBeInTheDocument();
   await userEvent.setup().click(within(screen.getByRole('radiogroup', { name: '按级别筛选' })).getByText('ERROR'));
-  expect(screen.getByRole('list', { name: '日志列表' }).querySelectorAll('li')).toHaveLength(1);
   expect(screen.getByRole('table').querySelectorAll('tbody tr.ant-table-row')).toHaveLength(1);
+  setNarrow(true);
+  expect(screen.queryByRole('table')).not.toBeInTheDocument();
+  expect(screen.getByRole('list', { name: '日志列表' }).querySelectorAll('li')).toHaveLength(1);
 });
 
 it('keeps duplicate log keys unique across pages and stable when new logs arrive', async () => {
+  const setNarrow = stubNarrowViewport(false);
   const logs = Array.from({ length: 61 }, () => log('INFO', '网格已对账'));
   const { rerender } = view(<LogsTable logs={logs} />);
   const pageKeys = () => [...screen.getByRole('table').querySelectorAll('tbody tr.ant-table-row')].map(row => row.getAttribute('data-row-key'));
   const keys = pageKeys();
-  const oldestMobile = screen.getByRole('list', { name: '日志列表' }).lastElementChild;
   const user = userEvent.setup();
   await user.click(screen.getByTitle('2'));
   keys.push(...pageKeys());
@@ -106,12 +135,18 @@ it('keeps duplicate log keys unique across pages and stable when new logs arrive
   expect(new Set(keys).size).toBe(61);
   rerender(<App><LogsTable logs={[log('INFO', '新日志'), log('INFO', '网格已对账'), ...logs]} /></App>);
   expect(pageKeys()).toContain(oldestKey);
+
+  setNarrow(true);
+  const oldestMobile = screen.getByRole('list', { name: '日志列表' }).lastElementChild;
+  rerender(<App><LogsTable logs={[log('INFO', '最新日志'), log('INFO', '新日志'), log('INFO', '网格已对账'), ...logs]} /></App>);
   expect(screen.getByRole('list', { name: '日志列表' }).lastElementChild).toBe(oldestMobile);
 });
 
 it('caps the card list but keeps the export complete', async () => {
+  stubNarrowViewport(true);
   const many = Array.from({ length: 120 }, (_, i) => log('INFO', `事件 ${i}`));
   view(<LogsTable logs={many} />);
+  expect(screen.queryByRole('table')).not.toBeInTheDocument();
   expect(screen.getByRole('list', { name: '日志列表' }).querySelectorAll('li')).toHaveLength(100);
   expect(screen.getByText('仅显示最近 100 条，完整数据请导出 CSV。')).toBeInTheDocument();
   await userEvent.setup().click(screen.getByRole('button', { name: /导出 CSV/ }));

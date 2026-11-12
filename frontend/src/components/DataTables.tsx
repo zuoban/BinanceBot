@@ -24,16 +24,33 @@ function NowProvider({ currentNow, enabled, children }: { currentNow?: number; e
   return <NowContext.Provider value={currentNow ?? fallbackNow}>{children}</NowContext.Provider>;
 }
 const NARROW_MEDIA_QUERY = '(max-width: 600px)';
-function useNarrowViewport(skip = false) {
-  const [narrow, setNarrow] = useState(() => !skip && typeof window !== 'undefined' && Boolean(window.matchMedia?.(NARROW_MEDIA_QUERY)?.matches));
+function isNarrowMediaMatch() {
+  try {
+    return typeof window !== 'undefined' && typeof window.matchMedia === 'function' && Boolean(window.matchMedia(NARROW_MEDIA_QUERY)?.matches);
+  } catch {
+    return false;
+  }
+}
+function useNarrowViewport() {
+  const [narrow, setNarrow] = useState(isNarrowMediaMatch);
   useEffect(() => {
-    if (skip || typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
-    const media = window.matchMedia(NARROW_MEDIA_QUERY);
-    setNarrow(media.matches);
-    const update = () => setNarrow(media.matches);
-    media.addEventListener('change', update);
-    return () => media.removeEventListener('change', update);
-  }, [skip]);
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+    let media: MediaQueryList | undefined;
+    try {
+      media = window.matchMedia(NARROW_MEDIA_QUERY);
+    } catch {
+      return;
+    }
+    if (!media) return;
+    setNarrow(Boolean(media.matches));
+    const update = (event?: MediaQueryListEvent) => setNarrow(Boolean(event ? event.matches : media.matches));
+    if (typeof media.addEventListener === 'function') {
+      media.addEventListener('change', update);
+      return () => media.removeEventListener?.('change', update);
+    }
+    media.addListener?.(update);
+    return () => media.removeListener?.(update);
+  }, []);
   return narrow;
 }
 function RelativeTime({ value, className }: { value: string; className?: string }) {
@@ -79,25 +96,26 @@ function TableFilterBar<T extends string>({ label, value, onChange, options, sho
     <Button size="small" icon={<DownloadOutlined />} disabled={!shown} onClick={onExport}>导出 CSV</Button>
   </div>;
 }
-function ResponsiveTableSection({ hint, desktop, hasRows, totalCount, emptyFilteredText, emptyAllText, listLabel, mobileRows, truncatedLimit, totalFilteredCount }: {
+function ResponsiveTableSection({ isNarrow, hint, renderDesktop, hasRows, totalCount, emptyFilteredText, emptyAllText, listLabel, renderMobileRows, truncatedLimit, totalFilteredCount }: {
+  isNarrow: boolean;
   hint: string;
-  desktop: React.ReactNode;
+  renderDesktop: () => React.ReactNode;
   hasRows: boolean;
   totalCount: number;
   emptyFilteredText: string;
   emptyAllText: string;
   listLabel: string;
-  mobileRows: React.ReactNode;
+  renderMobileRows: () => React.ReactNode;
   truncatedLimit?: number;
   totalFilteredCount?: number;
 }) {
-  return <>
-    <div className="table-desktop"><p className="table-scroll-hint">{hint}</p>{desktop}</div>
-    <div className="table-mobile">
-      {hasRows ? <ul className="trade-list" aria-label={listLabel}>{mobileRows}</ul> : <div className="trade-list-empty">{totalCount ? emptyFilteredText : emptyAllText}</div>}
-      {truncatedLimit !== undefined && (totalFilteredCount ?? 0) > truncatedLimit && <p className="muted">仅显示最近 {truncatedLimit} 条，完整数据请导出 CSV。</p>}
-    </div>
-  </>;
+  if (!isNarrow) {
+    return <div className="table-desktop"><p className="table-scroll-hint">{hint}</p>{renderDesktop()}</div>;
+  }
+  return <div className="table-mobile">
+    {hasRows ? <ul className="trade-list" aria-label={listLabel}>{renderMobileRows()}</ul> : <div className="trade-list-empty">{totalCount ? emptyFilteredText : emptyAllText}</div>}
+    {truncatedLimit !== undefined && (totalFilteredCount ?? 0) > truncatedLimit && <p className="muted">仅显示最近 {truncatedLimit} 条，完整数据请导出 CSV。</p>}
+  </div>;
 }
 const orderColumns: ColumnsType<Order> = [
   { title: '方向', dataIndex: 'side', render: side, width: 90, fixed: 'left' },
@@ -128,6 +146,7 @@ const OrderMobileItem = memo(function OrderMobileItem({ order: o }: { order: Ord
 });
 export const OrdersTable = memo(function OrdersTable({ orders, mark }: { orders: Order[]; mark?: string }) {
   const [filter, setFilter] = useState<SideFilter>('ALL');
+  const isNarrow = useNarrowViewport();
   const rows = useMemo(() => filter === 'ALL' ? orders : orders.filter(order => order.side === filter), [orders, filter]);
   const exportRows = useCallback(() => downloadCsv(`orders-${beijingDay()}.csv`, toCsv(
     ['方向', '价格', '数量', '金额', '用途', '状态', '时间（北京）'],
@@ -136,8 +155,9 @@ export const OrdersTable = memo(function OrdersTable({ orders, mark }: { orders:
   const body = useMemo(() => <>
     <TableFilterBar label="按方向筛选" value={filter} onChange={setFilter} options={sideOptions} shown={rows.length} total={orders.length} onExport={exportRows} />
     <ResponsiveTableSection
+      isNarrow={isNarrow}
       hint="左右滑动查看完整挂单信息"
-      desktop={<Table<Order> rowKey="client_order_id" columns={orderColumns} dataSource={rows} size="small" scroll={orderScroll}
+      renderDesktop={() => <Table<Order> rowKey="client_order_id" columns={orderColumns} dataSource={rows} size="small" scroll={orderScroll}
         pagination={orderPagination}
         expandable={orderExpandable} />}
       hasRows={rows.length > 0}
@@ -145,16 +165,16 @@ export const OrdersTable = memo(function OrdersTable({ orders, mark }: { orders:
       emptyFilteredText="没有符合筛选条件的挂单"
       emptyAllText="暂无挂单"
       listLabel="挂单列表"
-      mobileRows={rows.map(o => <OrderMobileItem key={o.client_order_id} order={o} />)}
+      renderMobileRows={() => rows.map(o => <OrderMobileItem key={o.client_order_id} order={o} />)}
     />
-  </>, [filter, rows, orders.length, exportRows]);
+  </>, [filter, isNarrow, rows, orders.length, exportRows]);
   return <MarkPriceContext.Provider value={mark}>{body}</MarkPriceContext.Provider>;
 });
 const tradePagination = { pageSize: 15, showSizeChanger: false, hideOnSinglePage: true } as const;
 const tradeScroll = { x: 1000 } as const;
 export const TradesTable = memo(function TradesTable({ trades: allTrades, overview = false, now: currentNow }: { trades: Trade[]; overview?: boolean; now?: number }) {
   const [filter, setFilter] = useState<SideFilter>('ALL');
-  const isNarrow = useNarrowViewport(overview);
+  const isNarrow = useNarrowViewport();
   const trades = useMemo(() => overview || filter === 'ALL' ? allTrades : allTrades.filter(trade => trade.side === filter), [allTrades, filter, overview]);
   const exportRows = useCallback(() => downloadCsv(`trades-${beijingDay()}.csv`, toCsv(
     ['时间（北京）', '方向', '成交价格', '数量', '金额', '已实现盈亏', '手续费', '成交方式', '备注'],
@@ -175,8 +195,9 @@ export const TradesTable = memo(function TradesTable({ trades: allTrades, overvi
   const body = useMemo(() => <div>
     {!overview && <TableFilterBar label="按方向筛选" value={filter} onChange={setFilter} options={sideOptions} shown={trades.length} total={allTrades.length} onExport={exportRows} />}
     <ResponsiveTableSection
+      isNarrow={isNarrow}
       hint="左右滑动查看完整成交信息"
-      desktop={<Table<Trade> rowKey="trade_id" columns={columns} dataSource={trades} size="small" scroll={tradeScroll} pagination={overview ? false : tradePagination} />}
+      renderDesktop={() => <Table<Trade> rowKey="trade_id" columns={columns} dataSource={trades} size="small" scroll={tradeScroll} pagination={overview ? false : tradePagination} />}
       hasRows={trades.length > 0}
       totalCount={overview ? 0 : allTrades.length}
       emptyFilteredText="没有符合筛选条件的成交记录"
@@ -184,7 +205,7 @@ export const TradesTable = memo(function TradesTable({ trades: allTrades, overvi
       listLabel="成交列表"
       truncatedLimit={overview ? undefined : 50}
       totalFilteredCount={trades.length}
-      mobileRows={(overview ? trades : trades.slice(0, 50)).map(trade => <li className="trade-list-item" key={trade.trade_id}>
+      renderMobileRows={() => (overview ? trades : trades.slice(0, 50)).map(trade => <li className="trade-list-item" key={trade.trade_id}>
         <div className="trade-list-heading">{overview ? <><strong><SymbolCell symbol={trade.symbol} /></strong>{side(trade.side)}</> : <>{side(trade.side)}<strong><Copyable value={trade.price}>{price(trade.price)}</Copyable></strong></>}<RelativeTime value={trade.timestamp} className="trade-list-time" /></div>
         <dl>
           <div><dt>{overview ? '成交均价' : '数量'}</dt><dd>{overview ? price(trade.price) : quantity(trade.quantity)}</dd></div>
@@ -193,7 +214,7 @@ export const TradesTable = memo(function TradesTable({ trades: allTrades, overvi
         </dl>
       </li>)}
     />
-  </div>, [overview, filter, trades, allTrades.length, exportRows, columns]);
+  </div>, [overview, isNarrow, filter, trades, allTrades.length, exportRows, columns]);
   return <NowProvider currentNow={currentNow} enabled={trades.length > 0 && (overview || isNarrow)}>{body}</NowProvider>;
 });
 const levels = ['ALL', 'ERROR', 'WARN', 'SUCCESS', 'INFO'] as const;
@@ -209,6 +230,7 @@ const logScroll = { x: 600 } as const;
 const logRowClassName = (l: Log) => l.level === 'ERROR' ? 'log-row-error' : l.level === 'WARN' ? 'log-row-warn' : '';
 export const LogsTable = memo(function LogsTable({ logs }: { logs: Log[] }) {
   const [level, setLevel] = useState<LevelFilter>('ALL');
+  const isNarrow = useNarrowViewport();
   const rows = useMemo(() => {
     const filtered = level === 'ALL' ? logs : logs.filter(log => log.level === level);
     const counts = new Map<string, number>();
@@ -222,12 +244,13 @@ export const LogsTable = memo(function LogsTable({ logs }: { logs: Log[] }) {
     }
     return keyed;
   }, [logs, level]);
-  const exportRows = () => downloadCsv(`logs-${beijingDay()}.csv`, toCsv(['时间（北京）', '级别', '内容'], rows.map(l => [time(l.timestamp), l.level, l.message])));
+  const exportRows = useCallback(() => downloadCsv(`logs-${beijingDay()}.csv`, toCsv(['时间（北京）', '级别', '内容'], rows.map(l => [time(l.timestamp), l.level, l.message]))), [rows]);
   return <>
     <TableFilterBar label="按级别筛选" value={level} onChange={setLevel} options={levelOptions} shown={rows.length} total={logs.length} onExport={exportRows} />
     <ResponsiveTableSection
+      isNarrow={isNarrow}
       hint="左右滑动查看完整日志"
-      desktop={<Table<Log> rowKey="key" rowClassName={logRowClassName} dataSource={rows} size="small" scroll={logScroll} pagination={logPagination} columns={logColumns} />}
+      renderDesktop={() => <Table<Log> rowKey="key" rowClassName={logRowClassName} dataSource={rows} size="small" scroll={logScroll} pagination={logPagination} columns={logColumns} />}
       hasRows={rows.length > 0}
       totalCount={logs.length}
       emptyFilteredText="没有符合筛选条件的日志"
@@ -235,7 +258,7 @@ export const LogsTable = memo(function LogsTable({ logs }: { logs: Log[] }) {
       listLabel="日志列表"
       truncatedLimit={100}
       totalFilteredCount={rows.length}
-      mobileRows={rows.slice(0, 100).map(l => <li className={`trade-list-item log-item-${l.level.toLowerCase()}`} key={l.key}>
+      renderMobileRows={() => rows.slice(0, 100).map(l => <li className={`trade-list-item log-item-${l.level.toLowerCase()}`} key={l.key}>
         <div className="trade-list-heading"><span className={`log-level log-level-${l.level.toLowerCase()}`}>{l.level}</span><span className="trade-list-time">{time(l.timestamp)}</span></div>
         <p className="log-message">{l.message}</p>
       </li>)}
