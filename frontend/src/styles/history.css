@@ -47,9 +47,6 @@
 .daily-snapshot-picker-popup .ant-picker-cell-disabled.ant-picker-cell-today .ant-picker-cell-inner::before { border-color: var(--border-strong); }
 .daily-picker-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 4px; color: var(--text-muted); font-size: 12px; line-height: 20px; }
 .daily-picker-latest { padding: 0; border: 0; border-radius: 4px; background: none; color: var(--accent); font: 500 12px/20px var(--font-mono); font-variant-numeric: tabular-nums; cursor: pointer; transition: color 150ms var(--ease-out); }
-@media (hover: hover) and (pointer: fine) {
-  .daily-picker-latest:hover { text-decoration: underline; text-underline-offset: 3px; }
-}
 
 .daily-snapshot-grid { display: grid; grid-template-columns: minmax(0, 1fr); background: var(--bg-card); }
 .daily-snapshot-block { display: flex; flex-direction: column; gap: 12px; min-width: 0; padding: 20px var(--history-pad, 20px); }
@@ -94,9 +91,6 @@
 .daily-subrow-ident { display: inline-flex; align-items: baseline; gap: 4px 8px; flex-wrap: wrap; min-width: 0; }
 .daily-symbol { border-radius: 4px; color: var(--text-primary); font: 500 13px/20px var(--font-mono); }
 .daily-symbol-link { text-decoration: none; transition: color 150ms var(--ease-out); }
-@media (hover: hover) and (pointer: fine) {
-  .daily-symbol-link:hover { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
-}
 .daily-subrow-meta { color: var(--text-muted); font-size: 12px; line-height: 16px; font-variant-numeric: tabular-nums; }
 .daily-subrow-value { margin-left: auto; font: 500 13px/20px var(--font-mono); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
 .daily-subrow-value small, .daily-subrow-pnl small { color: var(--text-muted); font: 400 12px/16px var(--font-sans); }
@@ -137,7 +131,6 @@
   .overview-history .ant-card-body { --history-pad: 16px; }
   .history-heading { gap: 12px; }
   .history-account-row .ant-select { width: 100%; min-width: 0; }
-  .daily-snapshot-picker .ant-picker-input > input { font-size: 16px; }
   .history-metric strong { overflow-wrap: anywhere; }
   .history-point-hourly { display: none; }
 }

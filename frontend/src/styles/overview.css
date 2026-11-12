@@ -91,7 +91,6 @@
 .strategy-card-heading { gap: 8px 12px; margin-bottom: var(--space-3); align-items: center; }
 .strategy-identity { display: flex; align-items: center; min-width: 0; }
 .pair-name { border-radius: 4px; font: 600 16px/24px var(--font-mono); letter-spacing: 0; text-decoration: none; overflow-wrap: anywhere; }
-@media (hover: hover) and (pointer: fine) { .pair-name:hover { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; } }
 .strategy-main { display: flex; align-items: flex-end; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; margin-bottom: 16px; }
 .strategy-tags { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex: none; margin-left: auto; }
 .strategy-card-actions { flex: none; align-items: center; gap: 6px; margin-left: auto; }
@@ -110,7 +109,7 @@
 .strategy-metrics strong { display: inline-flex; align-items: baseline; justify-content: flex-end; flex-wrap: wrap; gap: 2px 4px; font: 500 14px/20px var(--font-mono); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .strategy-metrics strong small { color: var(--text-muted); font: 400 12px/16px var(--font-sans); }
 .strategy-metrics:not(:last-child) { border-bottom: 1px solid var(--border-hairline); }
-.strategy-card .operation-result { margin: 12px 0 16px; }
+.strategy-card .operation-result { margin: var(--space-3) 0 var(--card-pad); }
 
 @container strategy-card (min-width: 520px) {
   .strategy-metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
@@ -130,7 +129,6 @@
 .strategy-config-popover dt { color: var(--text-secondary); font-size: 12px; line-height: 18px; }
 .strategy-config-popover dd { min-width: 0; margin: 0; font: 500 12px/18px var(--font-mono); font-variant-numeric: tabular-nums; text-align: right; overflow-wrap: anywhere; }
 .strategy-config-popover a { display: inline-flex; align-items: center; gap: 6px; width: 100%; padding-top: 10px; border-top: 1px solid var(--border-hairline); border-radius: 4px; color: var(--accent); font-size: 13px; font-weight: 500; text-decoration: none; }
-@media (hover: hover) and (pointer: fine) { .strategy-config-popover a:hover { text-decoration: underline; text-underline-offset: 3px; } }
 
 /* ---------- Recent trades ---------- */
 .overview-trades { margin: 32px 0; overflow: hidden; }

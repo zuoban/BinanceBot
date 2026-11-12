@@ -97,7 +97,7 @@
 .security-guide { display: grid; gap: 16px; margin: 20px 0 0; }
 .security-guide dt { margin-bottom: 4px; font-weight: 500; }
 .security-guide dd { margin: 0; color: var(--text-secondary); line-height: 1.7; }
-.settings-tabs > .ant-tabs-nav { position: sticky; top: 0; z-index: 3; padding-top: 4px; background: color-mix(in srgb, var(--bg-page) 92%, transparent); backdrop-filter: blur(8px); }
+.settings-tabs > .ant-tabs-nav, .detail-tabs > .ant-tabs-nav { position: sticky; top: 0; z-index: 3; padding-top: 4px; background: color-mix(in srgb, var(--bg-page) 92%, transparent); backdrop-filter: blur(8px); }
 
 .confirm-changes p { margin: 0 0 10px; }
 .confirm-changes dl, .confirm-changes ul { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; max-height: min(48vh, 360px); overflow-y: auto; overscroll-behavior: contain; }
@@ -151,7 +151,7 @@
 }
 
 @media (max-width: 900px) {
-  .settings-tabs > .ant-tabs-nav { top: calc(56px + var(--safe-top)); }
+  .settings-tabs > .ant-tabs-nav, .detail-tabs > .ant-tabs-nav { top: calc(56px + var(--safe-top)); }
   .save-bar-dirty { bottom: calc(68px + var(--safe-bottom)); }
 }
 
