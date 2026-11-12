@@ -305,11 +305,17 @@ async fn migration_and_window_pruning_require_terminal_cancellation_and_recover_
         let app = Router::new()
             .route(
                 "/fapi/v1/order",
-                get(move || {
+                get({
+                    let response = response.clone();
+                    move || {
+                        let response = response.clone();
+                        async move { Json(response) }
+                    }
+                })
+                .delete(move || {
                     let response = response.clone();
                     async move { Json(response) }
-                })
-                .delete(|| async { Json(serde_json::json!({})) }),
+                }),
             )
             .route("/fapi/v2/positionRisk", get(|| async {
                 Json(serde_json::json!([{"symbol":"SOLUSDC", "positionSide":"BOTH",
@@ -380,20 +386,34 @@ async fn interrupted_window_cleanup_retries_remaining_orders_after_partial_succe
     engine.state.config.write().await.exchange.api_secret = "live-secret".into();
     let allow_second_cancel = Arc::new(AtomicBool::new(false));
     let gate = allow_second_cancel.clone();
+    let delete_gate = allow_second_cancel.clone();
     let app = Router::new().route(
         "/fapi/v1/order",
         get(move |Query(query): Query<HashMap<String, String>>| {
             let gate = gate.clone();
             async move {
                 let id = &query["origClientOrderId"];
+                let price = if id == "gb_a" { "118.4" } else { "118.3" };
                 Json(serde_json::json!({
                     "orderId": 42, "clientOrderId": id, "symbol": "SOLUSDC",
                     "status": if id == "gb_a" || gate.load(Ordering::SeqCst) { "CANCELED" } else { "NEW" },
-                    "price": "118.4", "origQty": "1.68", "executedQty": "0",
+                    "price": price, "origQty": "1.68", "executedQty": "0",
                     "side": "BUY", "type": "LIMIT", "timeInForce": "GTX"
                 }))
             }
-        }).delete(|| async { Json(serde_json::json!({})) }),
+        }).delete(move |Query(query): Query<HashMap<String, String>>| {
+            let gate = delete_gate.clone();
+            async move {
+                let id = &query["origClientOrderId"];
+                let price = if id == "gb_a" { "118.4" } else { "118.3" };
+                Json(serde_json::json!({
+                    "orderId": 42, "clientOrderId": id, "symbol": "SOLUSDC",
+                    "status": if id == "gb_a" || gate.load(Ordering::SeqCst) { "CANCELED" } else { "NEW" },
+                    "price": price, "origQty": "1.68", "executedQty": "0",
+                    "side": "BUY", "type": "LIMIT", "timeInForce": "GTX"
+                }))
+            }
+        }),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -606,11 +626,17 @@ async fn stale_orders_require_confirmed_cancel_and_record_racing_fills() {
             let app = Router::new()
                 .route(
                     "/fapi/v1/order",
-                    get(move || {
+                    get({
+                        let response = response.clone();
+                        move || {
+                            let response = response.clone();
+                            async move { Json(response) }
+                        }
+                    })
+                    .delete(move || {
                         let response = response.clone();
                         async move { Json(response) }
-                    })
-                    .delete(|| async { Json(serde_json::json!({})) }),
+                    }),
                 )
                 .route("/fapi/v2/positionRisk", get(|| async {
                     Json(serde_json::json!([{"symbol":"SOLUSDC", "positionSide":"BOTH",
@@ -701,4 +727,97 @@ async fn unsubmitted_remainder_at_last_sell_price_is_retired() {
         .iter()
         .filter(|o| o.side == OrderSide::Sell)
         .all(|o| o.price != dec!(119.5)));
+}
+
+#[tokio::test]
+async fn terminal_delete_response_skips_followup_get_and_verifies_identity() {
+    use axum::{routing::get, Json, Router};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    let get_calls = Arc::new(AtomicUsize::new(0));
+    let mismatch_identity = Arc::new(AtomicBool::new(false));
+    let get_counter = get_calls.clone();
+    let mismatch_flag = mismatch_identity.clone();
+    let app = Router::new().route(
+        "/fapi/v1/order",
+        get(move || {
+            let get_counter = get_counter.clone();
+            async move {
+                get_counter.fetch_add(1, Ordering::SeqCst);
+                Json(serde_json::json!({
+                    "orderId": 42,
+                    "clientOrderId": "gb_fast_cancel",
+                    "symbol": "SOLUSDC",
+                    "status": "CANCELED",
+                    "price": "118.4",
+                    "origQty": "1.68",
+                    "executedQty": "0",
+                    "side": "BUY",
+                    "type": "LIMIT",
+                    "timeInForce": "GTX"
+                }))
+            }
+        })
+        .delete(move || {
+            let mismatch_flag = mismatch_flag.clone();
+            async move {
+                let side = if mismatch_flag.load(Ordering::SeqCst) {
+                    "SELL"
+                } else {
+                    "BUY"
+                };
+                Json(serde_json::json!({
+                    "orderId": 42,
+                    "clientOrderId": "gb_fast_cancel",
+                    "symbol": "SOLUSDC",
+                    "status": "CANCELED",
+                    "price": "118.4",
+                    "origQty": "1.68",
+                    "executedQty": "0",
+                    "side": side,
+                    "type": "LIMIT",
+                    "timeInForce": "GTX"
+                }))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let mut engine = paper_engine().await;
+    engine.state.config.write().await.exchange.api_key = "live-key".into();
+    engine.state.config.write().await.exchange.api_secret = "live-secret".into();
+    engine.client = Arc::new(BinanceFuturesClient::with_base_url(
+        &engine.state.config.read().await.exchange,
+        url,
+    ));
+
+    let mut stale = order("fast_cancel", OrderSide::Buy, dec!(118.4), dec!(1.68));
+    stale.order_id = Some(42);
+    engine.state.db.save_managed_order(&stale).unwrap();
+    engine
+        .state
+        .active_orders
+        .write()
+        .await
+        .insert(stale.client_order_id.clone(), stale.clone());
+    assert!(engine.prune_grid_window(&[dec!(118.8)], &[]).await);
+    assert_eq!(get_calls.load(Ordering::SeqCst), 0);
+    assert!(orders(&engine).await.is_empty());
+
+    // A mismatched DELETE response must block reconciliation instead of clearing the order.
+    mismatch_identity.store(true, Ordering::SeqCst);
+    engine.state.db.save_managed_order(&stale).unwrap();
+    engine
+        .state
+        .active_orders
+        .write()
+        .await
+        .insert(stale.client_order_id.clone(), stale);
+    assert!(engine.prune_grid_window(&[dec!(118.8)], &[]).await);
+    assert_eq!(get_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(orders(&engine).await.len(), 1);
+    assert!(engine.reconciliation_blocked);
+    server.abort();
 }

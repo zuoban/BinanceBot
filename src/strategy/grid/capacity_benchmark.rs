@@ -284,7 +284,20 @@ async fn simulated_live_reconciliation() {
                 let calls = emergency_cancel_calls.clone();
                 move || {
                     calls.fetch_add(1, Ordering::Relaxed);
-                    async { Json(json!({})) }
+                    async {
+                        Json(json!({
+                            "orderId": 123,
+                            "clientOrderId": "gb_bench_probe",
+                            "symbol": "BENCHPROBEUSDT",
+                            "status": "CANCELED",
+                            "price": "100",
+                            "origQty": "1",
+                            "executedQty": "0",
+                            "side": "BUY",
+                            "type": "LIMIT",
+                            "timeInForce": "GTX"
+                        }))
+                    }
                 }
             }),
         )

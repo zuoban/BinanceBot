@@ -1,3 +1,4 @@
+use super::snapshot_identities::invalid_snapshot_price;
 use super::*;
 use futures_util::stream::{self, StreamExt};
 
@@ -22,16 +23,43 @@ struct UncertainCanceledOrder<'a> {
 
 impl GridTradingEngine {
     async fn confirm_live_order_canceled(&mut self, order: &GridOrder) -> Option<bool> {
-        if let Err(e) = self
+        let exchange_order = match self
             .client
             .cancel_order(&order.symbol, order.order_id, Some(&order.client_order_id))
             .await
         {
-            warn!("Failed to cancel order {}: {}", order.client_order_id, e);
-            // A lost response or a fill preceding cancellation can still
-            // leave a terminal order. Confirm it through the query below.
-        }
-        let exchange_order = self.lookup_order(order).await;
+            Ok(canceled) => {
+                if !order.matches_exchange_identity(&canceled) {
+                    self.track_identity_conflict(order, &canceled);
+                    self.mark_orders_reconciliation_blocked().await;
+                    if !self
+                        .persist_identity_observations(
+                            self.client.account_identity_key(),
+                            &order.symbol,
+                        )
+                        .await
+                    {
+                        self.pause_trading().await;
+                    }
+                    return Some(false);
+                }
+                if invalid_snapshot_price(&canceled) {
+                    self.block_reconciliation_and_invalidate_caches().await;
+                    return Some(false);
+                }
+                if canceled.is_terminal() {
+                    Ok(Some(canceled))
+                } else {
+                    self.lookup_order(order).await
+                }
+            }
+            Err(e) => {
+                warn!("Failed to cancel order {}: {}", order.client_order_id, e);
+                // A lost response or a fill preceding cancellation can still
+                // leave a terminal order. Confirm it through the query below.
+                self.lookup_order(order).await
+            }
+        };
         if let Ok(Some(exchange_order)) = &exchange_order {
             if !order.matches_exchange_identity(exchange_order) {
                 self.track_identity_conflict(order, exchange_order);
@@ -270,23 +298,24 @@ impl GridTradingEngine {
             }
         };
         let client = Arc::clone(&self.client);
-        let cancel_outcomes: Vec<(BinanceOrderResponse, Result<()>)> = stream::iter(
-            live_orders
-                .into_iter()
-                .filter(|order| is_grid_order(&order.client_order_id)),
-        )
-        .map(|order| {
-            let client = Arc::clone(&client);
-            async move {
-                let res = client
-                    .cancel_order(symbol, Some(order.order_id), None)
-                    .await;
-                (order, res)
-            }
-        })
-        .buffered(MAX_CONCURRENT_ORDER_CANCELS)
-        .collect()
-        .await;
+        let cancel_outcomes: Vec<(BinanceOrderResponse, Result<BinanceOrderResponse>)> =
+            stream::iter(
+                live_orders
+                    .into_iter()
+                    .filter(|order| is_grid_order(&order.client_order_id)),
+            )
+            .map(|order| {
+                let client = Arc::clone(&client);
+                async move {
+                    let res = client
+                        .cancel_order(symbol, Some(order.order_id), None)
+                        .await;
+                    (order, res)
+                }
+            })
+            .buffered(MAX_CONCURRENT_ORDER_CANCELS)
+            .collect()
+            .await;
 
         let mut cancellation_failed = false;
         for (order, cancel_result) in cancel_outcomes {

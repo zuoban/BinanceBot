@@ -662,7 +662,7 @@ async fn fake_server(fake: FakeExchange) -> (String, JoinHandle<()>) {
                 found.avg_price = Some(found.price);
                 *fake.position.lock().unwrap() += if found.side == "BUY" { found.orig_qty } else { -found.orig_qty };
             }
-            Json(json!({}))
+            Json(found.clone())
         }))
         .with_state(fake);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

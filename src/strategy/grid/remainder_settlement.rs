@@ -171,20 +171,25 @@ impl GridTradingEngine {
 
     pub(super) async fn cancel_and_settle_remainder_order(
         &mut self,
-        order: GridOrder,
+        mut order: GridOrder,
         mut found: BinanceOrderResponse,
         mut plan: Option<&mut RemainderPlan>,
     ) -> Result<()> {
         self.confirm_remainder_identity(&order, &found, plan.as_deref_mut())
             .await?;
+        order.order_id = Some(found.order_id);
         if !found.is_terminal() {
-            self.client
+            let canceled = self
+                .client
                 .cancel_order(&order.symbol, None, Some(&order.client_order_id))
                 .await?;
-            found = self
-                .client
-                .get_order_by_client_id(&order.symbol, &order.client_order_id)
-                .await?;
+            found = if canceled.is_terminal() {
+                canceled
+            } else {
+                self.client
+                    .get_order_by_client_id(&order.symbol, &order.client_order_id)
+                    .await?
+            };
         }
         if !found.is_terminal() {
             return Err(anyhow!("Remainder order cancellation is not terminal"));

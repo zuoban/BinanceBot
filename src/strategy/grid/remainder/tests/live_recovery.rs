@@ -94,10 +94,11 @@ async fn exchange_server(fake: Exchange) -> (String, tokio::task::JoinHandle<()>
             order.executed_qty += fill;
             *fake.position.lock().unwrap() -= fill;
             order.status = "CANCELED".into();
+            let canceled = order.clone();
             orders.insert(order.client_order_id.clone(), order);
             if consume(&fake.lose_cancel) {
                 (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"code": -1000})))
-            } else { (StatusCode::OK, Json(json!({}))) }
+            } else { (StatusCode::OK, Json(serde_json::to_value(canceled).unwrap())) }
         }).post(|State(fake): State<Exchange>, Query(query): Query<HashMap<String,String>>| async move {
             fake.posts.lock().unwrap().push(query.clone());
             if consume(&fake.reject_post) { return (StatusCode::BAD_REQUEST, Json(json!({"code": -5022, "msg": "would take liquidity"}))) }

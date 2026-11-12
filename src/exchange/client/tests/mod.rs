@@ -46,7 +46,18 @@ async fn pnl_order_lookups_share_compensation_budget_and_leave_critical_capacity
                     let cancellations = cancellations.clone();
                     async move {
                         cancellations.fetch_add(1, Ordering::SeqCst);
-                        Json(json!({}))
+                        Json(json!({
+                            "orderId": 42,
+                            "clientOrderId": "gb_b_test",
+                            "symbol": "SOLUSDC",
+                            "status": "CANCELED",
+                            "price": "100",
+                            "origQty": "1",
+                            "executedQty": "0",
+                            "side": "BUY",
+                            "type": "LIMIT",
+                            "timeInForce": "GTX"
+                        }))
                     }
                 }
             }),

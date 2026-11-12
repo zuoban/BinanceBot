@@ -335,7 +335,7 @@ impl BinanceFuturesClient {
         symbol: &str,
         order_id: Option<i64>,
         client_order_id: Option<&str>,
-    ) -> Result<()> {
+    ) -> Result<BinanceOrderResponse> {
         if order_id.is_none() {
             if let Some(cid) = client_order_id {
                 anyhow::ensure!(is_valid_client_order_id(cid), "Invalid client_order_id");
@@ -356,12 +356,13 @@ impl BinanceFuturesClient {
             self.signed_url_fmt("/fapi/v1/order", format_args!("symbol={}", symbol))
         };
 
-        self.ensure_signed_success(
-            self.send(self.client.delete(&url)).await?,
-            "Failed to cancel order",
-        )
-        .await?;
-        Ok(())
+        let resp = self
+            .ensure_signed_success(
+                self.send(self.client.delete(&url)).await?,
+                "Failed to cancel order",
+            )
+            .await?;
+        read_bounded_json(resp, 64 * 1024).await
     }
 
     /// Place 1..=5 limit orders in a single `/fapi/v1/batchOrders` call.

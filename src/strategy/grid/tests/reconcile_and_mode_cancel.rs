@@ -535,7 +535,18 @@ async fn cancel_all_only_touches_managed_exchange_orders() {
                     |State(fake): State<FakeExchange>,
                      Query(query): Query<HashMap<String, String>>| async move {
                         fake.canceled.lock().unwrap().push(query["orderId"].clone());
-                        Json(serde_json::json!({}))
+                        Json(serde_json::json!({
+                            "orderId": query["orderId"].parse::<i64>().unwrap(),
+                            "clientOrderId": "gb_b_owned",
+                            "symbol": "SOLUSDC",
+                            "status": "CANCELED",
+                            "price": "100",
+                            "origQty": "1",
+                            "executedQty": "0",
+                            "side": "BUY",
+                            "type": "LIMIT",
+                            "timeInForce": "GTX"
+                        }))
                     },
                 ),
             )
@@ -586,7 +597,18 @@ async fn switching_live_to_paper_cancels_live_orders_before_commit() {
             }))
             .route("/fapi/v1/order", delete(|State(fake): State<FakeExchange>| async move {
                 fake.cancellations.fetch_add(1, Ordering::SeqCst);
-                Json(serde_json::json!({}))
+                Json(serde_json::json!({
+                    "orderId": 42,
+                    "clientOrderId": "gb_b_live",
+                    "symbol": "SOLUSDC",
+                    "status": "CANCELED",
+                    "price": "99",
+                    "origQty": "1",
+                    "executedQty": "0",
+                    "side": "BUY",
+                    "type": "LIMIT",
+                    "timeInForce": "GTX"
+                }))
             }))
             .with_state(fake.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
