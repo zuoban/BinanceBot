@@ -93,14 +93,13 @@ export function useSocket<T extends keyof SocketDataByType>(path: string | undef
         try {
           const envelope = JSON.parse(event.data) as Partial<SocketMessage> | null;
           if (!envelope || typeof envelope !== 'object' || envelope.type !== type) return;
+          if (!envelope.data || typeof envelope.data !== 'object' || Array.isArray(envelope.data)) return;
           const receivedAt = Date.now();
           const prev = lastReceivedRef.current;
           const prevTime = prev.path === path ? prev.time : 0;
+          if (callback.current(envelope.data as SocketDataByType[T]) === false) return;
+          // Rejected frames and callbacks that throw must not postpone HTTP fallback.
           lastReceivedRef.current = { path, time: receivedAt };
-          if (callback.current(envelope.data as SocketDataByType[T]) === false) {
-            lastReceivedRef.current = prev;
-            return;
-          }
           attempts = 0;
           if (!receiving || prevTime === 0 || receivedAt - prevTime >= SOCKET_LIVE_MS) {
             receiving = true;
@@ -181,17 +180,27 @@ function publishSocketQueryData<TData>(client: QueryClient, key: QueryKey, data:
   client.setQueryData(key, data);
 }
 
-function isOlderSnapshot(next: Snapshot, current: Snapshot | undefined): boolean {
-  if (!next.generated_at || !current?.generated_at) return false;
-  const nextAt = Date.parse(next.generated_at), currentAt = Date.parse(current.generated_at);
-  return Number.isFinite(nextAt) && Number.isFinite(currentAt) && nextAt < currentAt;
+function isCurrentFrame(next: { generated_at?: string }, current: { generated_at?: string } | undefined): boolean {
+  // Older servers may omit pair timestamps, but cannot replace a timestamped frame.
+  if (next.generated_at === undefined) return current?.generated_at === undefined;
+  const nextAt = typeof next.generated_at === 'string' ? Date.parse(next.generated_at) : NaN;
+  const currentAt = current?.generated_at ? Date.parse(current.generated_at) : NaN;
+  return Number.isFinite(nextAt) && (!Number.isFinite(currentAt) || nextAt > currentAt);
+}
+
+function isCurrentSnapshot(data: Snapshot, current: Snapshot | undefined, symbol: string | undefined): boolean {
+  return !!data && !!symbol && data.symbol === symbol && isCurrentFrame(data, current);
+}
+
+function isCurrentAccountFrame(data: AccountFrame, current: AccountFrame | undefined): boolean {
+  return !!data && typeof data.generated_at === 'string' && Array.isArray(data.pairs) && isCurrentFrame(data, current);
 }
 
 export function usePairSnapshot(pair: Pair | undefined) {
   const client = useQueryClient();
   const key = ['snapshot', pair?.symbol, pair?.scoped];
   const acceptSnapshot = (data: Snapshot) => {
-    if (data.symbol !== pair?.symbol || isOlderSnapshot(data, client.getQueryData<Snapshot>(key))) return false;
+    if (!isCurrentSnapshot(data, client.getQueryData<Snapshot>(key), pair?.symbol)) return false;
     publishSocketQueryData(client, key, data);
   };
   const socket = useSocket(pair && pairPath(pair, 'ws'), 'snapshot', acceptSnapshot);
@@ -199,7 +208,9 @@ export function usePairSnapshot(pair: Pair | undefined) {
     if (!pair) throw new Error('该交易对不存在或已移除');
     const data = await api<Snapshot>(pairPath(pair, 'status'), { signal });
     const current = client.getQueryData<Snapshot>(key);
-    return isOlderSnapshot(data, current) ? current! : data;
+    // Returning cached data as a success would renew its age without a new observation.
+    if (!isCurrentSnapshot(data, current, pair.symbol)) throw new Error('快照无效或尚未更新，请稍后重试');
+    return data;
   }, socket, !!pair);
   const socketSilent = useExpired(pair && socket.connected ? socket.lastReceived + SOCKET_LIVE_MS - 1 : -Infinity);
   const stale = useExpired(pair ? query.dataUpdatedAt + SNAPSHOT_STALE_MS : -Infinity);
@@ -210,17 +221,14 @@ export function useLiveAccounts() {
   const client = useQueryClient();
   const key = ['accounts'];
   const stream = useSocket('/api/accounts/ws', 'accounts', data => {
-    const generatedAt = Date.parse(data.generated_at);
-    if (!Number.isFinite(generatedAt)) return false;
     const current = client.getQueryData<AccountFrame>(key);
-    if (current && generatedAt < Date.parse(current.generated_at)) return false;
+    if (!isCurrentAccountFrame(data, current)) return false;
     publishSocketQueryData(client, key, data);
   });
   const query = useSocketFallbackQuery(key, async signal => {
     const data = await api<AccountFrame>('/api/accounts', { signal });
     const current = client.getQueryData<AccountFrame>(key);
-    const nextAt = Date.parse(data.generated_at);
-    if (current && (!Number.isFinite(nextAt) || nextAt < Date.parse(current.generated_at))) return current;
+    if (!isCurrentAccountFrame(data, current)) throw new Error('账户快照无效或尚未更新，请稍后重试');
     return data;
   }, stream);
   const stale = useExpired(query.data ? query.dataUpdatedAt + SNAPSHOT_STALE_MS : -Infinity);

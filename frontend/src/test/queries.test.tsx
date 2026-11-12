@@ -126,7 +126,7 @@ it('polls lightweight accounts after silence or rejected older frames and marks 
     const streamed = snapshot();
     streamed.position.size = '2';
     streamed.ticker.mark_price = '123';
-    act(() => FakeSocket.instances[0].onmessage?.({ data: JSON.stringify({ type: 'accounts', data: { generated_at: new Date().toISOString(), pairs: [{ mode: 'PAPER', snapshot: streamed }] } }) }));
+    act(() => FakeSocket.instances[0].onmessage?.({ data: JSON.stringify({ type: 'accounts', data: { generated_at: new Date(Date.now() + 1).toISOString(), pairs: [{ mode: 'PAPER', snapshot: streamed }] } }) }));
     expect(result.current.accounts[0].snapshot.position.size).toBe('2');
     expect(result.current.accounts[0].snapshot.ticker.mark_price).toBe('123');
     await act(async () => { await vi.advanceTimersByTimeAsync(0); });
@@ -397,6 +397,144 @@ it('retains a valid live accounts frame when an HTTP fallback response has an in
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(result.current.accounts[0]?.mode).toBe('LIVE');
     expect(result.current.accounts[0]?.generated_at_ms).toBe(Date.parse('2026-01-01T00:00:01Z'));
+  } finally {
+    unmount();
+    client.clear();
+    vi.useRealTimers();
+  }
+});
+
+it('only counts socket activity after a frame is accepted without throwing', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+  vi.stubGlobal('WebSocket', FakeSocket);
+  const onData = vi.fn();
+  const { result, unmount } = renderHook(() => useSocket('/api/accounts/ws', 'accounts', onData));
+  const send = (data: unknown) => act(() => FakeSocket.instances[0].onmessage?.({ data: JSON.stringify({ type: 'accounts', data }) }));
+  try {
+    send({ generated_at: new Date().toISOString(), pairs: [] });
+    const acceptedAt = result.current.lastReceived;
+    await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
+    onData.mockImplementationOnce(() => { throw new Error('Malformed frame'); });
+    send({ generated_at: new Date().toISOString() });
+    expect(result.current.lastReceived).toBe(acceptedAt);
+    for (const data of [null, [], 'invalid', undefined]) send(data);
+    expect(onData).toHaveBeenCalledTimes(2);
+    expect(result.current.lastReceived).toBe(acceptedAt);
+    send({ generated_at: new Date().toISOString(), pairs: [] });
+    expect(result.current.lastReceived).toBe(Date.now());
+  } finally {
+    unmount();
+    vi.useRealTimers();
+  }
+});
+
+it.each(['older', 'duplicate', 'invalid', 'missing'] as const)('does not renew account freshness with %s HTTP frames and recovers on valid data', async kind => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-01-01T00:01:00Z'));
+  vi.stubGlobal('WebSocket', FakeSocket);
+  const valid = { generated_at: '2026-01-01T00:00:00Z', pairs: [{ mode: 'LIVE', snapshot: snapshot('SOLUSDC', 'LIVE') }] };
+  const timestamps = { older: '2025-12-31T23:59:59Z', duplicate: valid.generated_at, invalid: 'not-a-timestamp', missing: undefined };
+  const rejected = {
+    generated_at: timestamps[kind],
+    pairs: [{ mode: 'PAPER', snapshot: snapshot() }],
+  };
+  const response = (data: unknown) => new Response(JSON.stringify({ success: true, data }), { status: 200 });
+  const fetchMock = vi.fn().mockResolvedValueOnce(response(valid)).mockImplementation(() => Promise.resolve(response(rejected)));
+  vi.stubGlobal('fetch', fetchMock);
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const wrapper = ({ children }: { children: React.ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+  const { result, unmount } = renderHook(() => useLiveAccounts(), { wrapper });
+  try {
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    const receivedAt = result.current.accounts[0].received_at_ms;
+    expect(result.current.stale).toBe(false);
+    await act(async () => { await vi.advanceTimersByTimeAsync(12_001); });
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(2);
+    expect(result.current.accounts[0].mode).toBe('LIVE');
+    expect(result.current.accounts[0].received_at_ms).toBe(receivedAt);
+    expect(result.current.accounts[0].account_observation_stale).toBe(true);
+    expect(result.current.stale).toBe(true);
+    act(() => FakeSocket.instances[0].onmessage?.({ data: JSON.stringify({ type: 'accounts', data: rejected }) }));
+    expect(result.current.accounts[0].received_at_ms).toBe(receivedAt);
+    expect(result.current.accounts[0].mode).toBe('LIVE');
+    fetchMock.mockImplementation(() => Promise.resolve(response({ ...valid, generated_at: '2026-01-01T00:00:01Z', pairs: [] })));
+    await act(async () => { await client.refetchQueries({ queryKey: ['accounts'] }); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(result.current.accounts).toEqual([]);
+    expect(result.current.stale).toBe(false);
+  } finally {
+    unmount();
+    client.clear();
+    vi.useRealTimers();
+  }
+});
+
+it.each(['older', 'duplicate', 'invalid', 'missing', 'wrong-symbol'] as const)('preserves pair data and its age after %s HTTP snapshots', async kind => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-01-01T00:01:00Z'));
+  vi.stubGlobal('WebSocket', FakeSocket);
+  const valid = { ...snapshot(), generated_at: '2026-01-01T00:00:00Z' };
+  const timestamps = { older: '2025-12-31T23:59:59Z', duplicate: valid.generated_at, invalid: 'not-a-timestamp', missing: undefined, 'wrong-symbol': '2026-01-01T00:00:01Z' };
+  const rejected = {
+    ...snapshot(kind === 'wrong-symbol' ? 'BTCUSDC' : 'SOLUSDC'),
+    generated_at: timestamps[kind],
+  };
+  rejected.ticker.last_price = '99';
+  const response = (data: unknown) => new Response(JSON.stringify({ success: true, data }), { status: 200 });
+  const fetchMock = vi.fn().mockResolvedValueOnce(response(valid)).mockImplementation(() => Promise.resolve(response(rejected)));
+  vi.stubGlobal('fetch', fetchMock);
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const wrapper = ({ children }: { children: React.ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+  const { result, unmount } = renderHook(() => usePairSnapshot(pair()), { wrapper });
+  try {
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    const receivedAt = result.current.dataUpdatedAt;
+    await act(async () => { await vi.advanceTimersByTimeAsync(12_001); });
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(2);
+    expect(result.current.data?.symbol).toBe('SOLUSDC');
+    expect(result.current.data?.ticker.last_price).toBe('100');
+    expect(result.current.dataUpdatedAt).toBe(receivedAt);
+    expect(result.current.stale).toBe(true);
+    act(() => FakeSocket.instances[0].onmessage?.({ data: JSON.stringify({ type: 'snapshot', data: rejected }) }));
+    expect(result.current.live).toBe(false);
+    expect(result.current.dataUpdatedAt).toBe(receivedAt);
+    act(() => FakeSocket.instances[0].onmessage?.({ data: JSON.stringify({ type: 'snapshot', data: { ...valid, generated_at: '2026-01-01T00:00:01Z' } }) }));
+    expect(result.current.live).toBe(true);
+    expect(result.current.stale).toBe(false);
+  } finally {
+    unmount();
+    client.clear();
+    vi.useRealTimers();
+  }
+});
+
+it.each([
+  null,
+  { pairs: [] },
+  { generated_at: 'not-a-timestamp', pairs: [] },
+  { generated_at: '2026-01-01T00:00:00Z', pairs: {} },
+])('rejects a malformed first account response without poisoning the cache: %j', async malformed => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-01-01T00:01:00Z'));
+  vi.stubGlobal('WebSocket', FakeSocket);
+  vi.stubGlobal('fetch', vi.fn().mockImplementation(() => Promise.resolve(new Response(JSON.stringify({ success: true, data: malformed }), { status: 200 }))));
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const wrapper = ({ children }: { children: React.ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+  const { result, unmount } = renderHook(() => useLiveAccounts(), { wrapper });
+  try {
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(client.getQueryData(['accounts'])).toBeUndefined();
+    expect(result.current.error).toBeInstanceOf(Error);
+    expect(result.current.stale).toBe(true);
+    const send = (data: unknown) => act(() => FakeSocket.instances[0].onmessage?.({ data: JSON.stringify({ type: 'accounts', data }) }));
+    send(malformed);
+    expect(client.getQueryData(['accounts'])).toBeUndefined();
+    const valid = { generated_at: '2026-01-01T00:00:01Z', pairs: [{ mode: 'LIVE', snapshot: snapshot('SOLUSDC', 'LIVE') }] };
+    send(valid);
+    expect(result.current.accounts[0].mode).toBe('LIVE');
+    expect(result.current.stale).toBe(false);
+    expect(result.current.error).toBeNull();
   } finally {
     unmount();
     client.clear();
