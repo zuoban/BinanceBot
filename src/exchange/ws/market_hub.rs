@@ -7,7 +7,7 @@ use crate::sync_ext::MutexUnpoisonedExt;
 use crate::types::TickerInfo;
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{broadcast, watch};
@@ -28,8 +28,65 @@ struct SlotEntry {
 #[derive(Default)]
 struct HubState {
     slots: HashMap<u64, SlotEntry>,
+    by_symbol: BTreeMap<String, Vec<(u64, broadcast::Sender<TickerInfo>)>>,
     next_slot_id: u64,
     worker_running: bool,
+}
+
+impl HubState {
+    fn detach_symbol(&mut self, slot_id: u64, symbol: &str) {
+        if symbol.is_empty() {
+            return;
+        }
+        if let Some(entries) = self.by_symbol.get_mut(symbol) {
+            entries.retain(|(id, _)| *id != slot_id);
+            if entries.is_empty() {
+                self.by_symbol.remove(symbol);
+            }
+        }
+    }
+
+    fn insert_slot(
+        &mut self,
+        slot_id: u64,
+        symbol: String,
+        ticker_tx: broadcast::Sender<TickerInfo>,
+    ) {
+        if !symbol.is_empty() {
+            self.by_symbol
+                .entry(symbol.clone())
+                .or_default()
+                .push((slot_id, ticker_tx.clone()));
+        }
+        self.slots.insert(slot_id, SlotEntry { symbol, ticker_tx });
+    }
+
+    fn update_slot_symbol(&mut self, slot_id: u64, updated: String) -> bool {
+        let Some(old_symbol) = self.slots.get(&slot_id).map(|slot| slot.symbol.clone()) else {
+            return false;
+        };
+        if old_symbol == updated {
+            return false;
+        }
+        self.detach_symbol(slot_id, &old_symbol);
+        let slot = self.slots.get_mut(&slot_id).expect("checked slot");
+        if !updated.is_empty() {
+            self.by_symbol
+                .entry(updated.clone())
+                .or_default()
+                .push((slot_id, slot.ticker_tx.clone()));
+        }
+        slot.symbol = updated;
+        true
+    }
+
+    fn remove_slot(&mut self, slot_id: u64) -> bool {
+        let Some(removed) = self.slots.remove(&slot_id) else {
+            return false;
+        };
+        self.detach_symbol(slot_id, &removed.symbol);
+        true
+    }
 }
 
 struct HubInner {
@@ -47,27 +104,23 @@ impl HubInner {
     fn desired_symbols(&self) -> BTreeSet<String> {
         let state = self.state.lock_unpoisoned();
         state
-            .slots
-            .values()
-            .map(|slot| slot.symbol.as_str())
-            .filter(|symbol| !symbol.is_empty())
+            .by_symbol
+            .keys()
             .take(MAX_COMBINED_SYMBOLS)
-            .map(str::to_owned)
+            .cloned()
             .collect()
     }
 
-    fn dispatch_ticker(&self, symbol: &str, update: &TickerInfo) {
-        let senders: Vec<broadcast::Sender<TickerInfo>> = {
-            let state = self.state.lock_unpoisoned();
-            state
-                .slots
-                .values()
-                .filter(|slot| slot.symbol == symbol)
-                .map(|slot| slot.ticker_tx.clone())
-                .collect()
+    fn dispatch_ticker(&self, symbol: &str, update: TickerInfo) {
+        let state = self.state.lock_unpoisoned();
+        let Some(subscribers) = state.by_symbol.get(symbol) else {
+            return;
         };
-        for tx in senders {
-            let _ = tx.send(update.clone());
+        if let Some(((_, last_tx), rest)) = subscribers.split_last() {
+            for (_, tx) in rest {
+                let _ = tx.send(update.clone());
+            }
+            let _ = last_tx.send(update);
         }
     }
 }
@@ -80,7 +133,7 @@ struct SlotGuard {
 impl Drop for SlotGuard {
     fn drop(&mut self) {
         let mut state = self.inner.state.lock_unpoisoned();
-        if state.slots.remove(&self.slot_id).is_some() {
+        if state.remove_slot(self.slot_id) {
             drop(state);
             self.inner.bump_notify();
         }
@@ -159,13 +212,7 @@ impl MarketStreamHub {
             let mut state = self.inner.state.lock_unpoisoned();
             state.next_slot_id = state.next_slot_id.wrapping_add(1);
             let slot_id = state.next_slot_id;
-            state.slots.insert(
-                slot_id,
-                SlotEntry {
-                    symbol: initial_symbol,
-                    ticker_tx,
-                },
-            );
+            state.insert_slot(slot_id, initial_symbol, ticker_tx);
             let start_worker = !state.worker_running;
             if start_worker {
                 state.worker_running = true;
@@ -190,22 +237,23 @@ impl MarketStreamHub {
                 let updated = config_rx.borrow_and_update().trim().to_ascii_uppercase();
                 let changed = {
                     let mut state = watcher_inner.state.lock_unpoisoned();
-                    if let Some(slot) = state.slots.get_mut(&slot_id) {
-                        if slot.symbol != updated {
-                            slot.symbol = updated;
-                            true
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    }
+                    state.update_slot_symbol(slot_id, updated)
                 };
                 if changed {
                     watcher_inner.bump_notify();
                 }
             }
         })
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_dispatch(&self, symbol: &str, update: TickerInfo) {
+        self.inner.dispatch_ticker(symbol, update);
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_desired_symbols(&self) -> BTreeSet<String> {
+        self.inner.desired_symbols()
     }
 }
 
@@ -325,7 +373,7 @@ where
                         parse_multiplexed_market_update(text, exchange_now, times_by_symbol)
                     {
                         apply_local_observed_times(&mut update, local_now, exchange_now);
-                        inner.dispatch_ticker(&symbol, &update);
+                        inner.dispatch_ticker(&symbol, update);
                     }
                 }
             }
@@ -346,7 +394,7 @@ async fn run_hub_worker(inner: Arc<HubInner>, mut notify_rx: watch::Receiver<u64
         let mut active_symbols = inner.desired_symbols();
         if active_symbols.is_empty() {
             let mut state = inner.state.lock_unpoisoned();
-            let still_empty = state.slots.values().all(|slot| slot.symbol.is_empty());
+            let still_empty = state.by_symbol.is_empty();
             if still_empty {
                 state.worker_running = false;
                 return;

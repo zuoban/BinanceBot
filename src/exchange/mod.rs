@@ -14,6 +14,4 @@ pub(crate) use cache_entries::SharedRequestPending;
 pub use client::BinanceFuturesClient;
 pub(crate) use client::ExchangeError;
 pub(crate) use model::*;
-#[allow(unused_imports)]
-pub(crate) use ws::BinanceWsStream;
 pub(crate) use ws::{MarketStreamHub, UserDataHub, UserDataScope};

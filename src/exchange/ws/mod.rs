@@ -1,16 +1,23 @@
 use crate::types::TickerInfo;
 use chrono::{DateTime, Utc};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::SinkExt;
+#[cfg(test)]
+use futures_util::StreamExt;
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use std::borrow::Cow;
 use std::time::Duration;
+#[cfg(test)]
 use tokio::sync::{broadcast, watch};
+#[cfg(test)]
 use tokio::time::sleep;
+#[cfg(test)]
 use tokio_tungstenite::connect_async_with_config;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
-use tracing::{error, info, warn};
+use tracing::warn;
+#[cfg(test)]
+use tracing::{error, info};
 
 pub(crate) mod market_hub;
 pub(crate) mod user_data;
@@ -31,11 +38,13 @@ pub(super) fn upstream_ws_config() -> WebSocketConfig {
         ..Default::default()
     }
 }
+#[cfg(test)]
 pub(crate) struct BinanceWsStream {
     config_rx: watch::Receiver<String>,
     ticker_tx: broadcast::Sender<TickerInfo>,
 }
 
+#[cfg(test)]
 fn stream_url(symbol: &str) -> String {
     let host = "wss://fstream.binance.com";
     let symbol = symbol.to_lowercase();
@@ -169,6 +178,7 @@ fn build_24hr_ticker(
     })
 }
 
+#[cfg(test)]
 fn parse_market_update(
     text: &str,
     symbol: &str,
@@ -286,8 +296,8 @@ pub(super) fn apply_local_observed_times(
     }
 }
 
+#[cfg(test)]
 impl BinanceWsStream {
-    #[allow(dead_code)]
     pub(crate) fn new(
         config_rx: watch::Receiver<String>,
         ticker_tx: broadcast::Sender<TickerInfo>,
@@ -298,13 +308,6 @@ impl BinanceWsStream {
         }
     }
 
-    #[allow(dead_code)]
-    pub(crate) async fn run(self) {
-        self.run_with_url_and_timeout(stream_url, WS_READ_IDLE_TIMEOUT)
-            .await;
-    }
-
-    #[cfg(test)]
     async fn run_with_url<F>(self, build_url: F)
     where
         F: Fn(&str) -> String,
@@ -444,6 +447,7 @@ impl BinanceWsStream {
     }
 }
 
+#[cfg(test)]
 enum WsSessionExit {
     Reconnect,
     ConfigChanged,

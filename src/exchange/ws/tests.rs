@@ -488,3 +488,67 @@ async fn user_data_hub_closes_listen_key_when_deactivated_during_backoff() {
     guard_task.abort();
     http_server.abort();
 }
+
+#[tokio::test]
+async fn market_stream_hub_indexes_subscribers_by_symbol_across_rotations_and_drops() {
+    let dead_ws = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dead_addr = dead_ws.local_addr().unwrap();
+    drop(dead_ws);
+
+    let hub = MarketStreamHub::with_base_url_and_timeout(
+        format!("ws://{dead_addr}"),
+        Duration::from_secs(5),
+    );
+    let (_sym1_tx, sym1_rx) = watch::channel("solusdc".to_string());
+    let (sym2_tx, sym2_rx) = watch::channel("SOLUSDC".to_string());
+    let (t1_tx, mut t1_rx) = broadcast::channel(4);
+    let (t2_tx, mut t2_rx) = broadcast::channel(4);
+
+    let g1 = hub.register(sym1_rx, t1_tx);
+    let g2 = hub.register(sym2_rx, t2_tx);
+    assert_eq!(
+        hub.test_desired_symbols().into_iter().collect::<Vec<_>>(),
+        vec!["SOLUSDC".to_string()]
+    );
+
+    hub.test_dispatch(
+        "SOLUSDC",
+        TickerInfo {
+            symbol: "SOLUSDC".into(),
+            mark_price: dec!(125.5),
+            ..TickerInfo::default()
+        },
+    );
+    assert_eq!(t1_rx.try_recv().unwrap().mark_price, dec!(125.5));
+    assert_eq!(t2_rx.try_recv().unwrap().mark_price, dec!(125.5));
+
+    sym2_tx.send("BTCUSDC".to_string()).unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while hub.test_desired_symbols().len() != 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    hub.test_dispatch(
+        "SOLUSDC",
+        TickerInfo {
+            symbol: "SOLUSDC".into(),
+            mark_price: dec!(126),
+            ..TickerInfo::default()
+        },
+    );
+    assert_eq!(t1_rx.try_recv().unwrap().mark_price, dec!(126));
+    assert!(t2_rx.try_recv().is_err());
+
+    g1.abort();
+    let _ = g1.await;
+    assert_eq!(
+        hub.test_desired_symbols().into_iter().collect::<Vec<_>>(),
+        vec!["BTCUSDC".to_string()]
+    );
+    g2.abort();
+    let _ = g2.await;
+    assert!(hub.test_desired_symbols().is_empty());
+}
