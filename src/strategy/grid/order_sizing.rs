@@ -420,4 +420,183 @@ impl GridTradingEngine {
         };
         Box::pin(self.submit_and_reconcile_live_grid_order(submission)).await
     }
+
+    pub(super) async fn size_live_window_batch_chunk(
+        &mut self,
+        config: &crate::config::AppConfig,
+        rules: &SymbolRules,
+        side: OrderSide,
+        grid_level: i32,
+        candidate_prices: &[Decimal],
+        placement_ctx: WindowPlacementContext<'_>,
+    ) -> Option<(Vec<GridOrder>, bool)> {
+        if self.state.is_shutting_down() || *self.state.status.read().await != BotStatus::Running {
+            return None;
+        }
+        if !self.position_direction_ready().await {
+            return None;
+        }
+        let risk = RiskConfigSnapshot::from_config(config);
+        if side == risk.grid.direction.opening_side() && self.opening_suspended_at_limit(risk).await
+        {
+            self.cancel_suspended_opening_orders(risk).await;
+            return None;
+        }
+        let _submission = self.state.try_order_submission()?;
+        if self.pause_if_position_limit_reached().await {
+            return None;
+        }
+        if !self.live_reconciliation_ready() || !self.market_data_ready().await {
+            return None;
+        }
+        let ticker = self.state.ticker.read().await.clone();
+        let current_market_price = ticker.last_price;
+        let reference_price = ticker.grid_reference_price();
+        let symbol = &config.exchange.symbol;
+        let now = Utc::now();
+        let mut sized: Vec<GridOrder> = Vec::with_capacity(candidate_prices.len());
+        let mut failed = false;
+
+        for &price in candidate_prices {
+            let Some(full_quantity) =
+                rules.calculate_quantity(price, config.grid.order_amount_usdc)
+            else {
+                failed = true;
+                continue;
+            };
+            let Some(order_notional) = price.checked_mul(full_quantity) else {
+                failed = true;
+                continue;
+            };
+            if !rules.is_valid_maker_grid_price(&config.grid, side, price, current_market_price) {
+                if !current_market_price.is_zero()
+                    && !side.is_maker_price(price, current_market_price)
+                {
+                    warn!(
+                        "{} price {} crosses market price {}, skipping to prevent Taker fill",
+                        if side == OrderSide::Buy {
+                            "Buy"
+                        } else {
+                            "Sell"
+                        },
+                        price,
+                        current_market_price
+                    );
+                }
+                failed = true;
+                continue;
+            }
+            if !self
+                .price_in_active_grid_window(
+                    config,
+                    rules,
+                    side,
+                    price,
+                    reference_price,
+                    Some(placement_ctx),
+                )
+                .await
+            {
+                failed = true;
+                continue;
+            }
+            if side == config.grid.direction.opening_side() {
+                let maybe_exposure = {
+                    let active_orders = self.state.active_orders.read().await;
+                    if grid_level_occupied(
+                        active_orders.values().chain(sized.iter()),
+                        side,
+                        price,
+                        config.grid.grid_interval,
+                        rules.tick_size,
+                    ) {
+                        failed = true;
+                        continue;
+                    }
+                    if config.grid.max_position_usdc.is_some() {
+                        let position = self.state.position.read().await;
+                        let valuation_price = reference_price.max(current_market_price).max(price);
+                        let exposure = opening_exposure_usdc(
+                            config.grid.direction,
+                            position.size,
+                            valuation_price,
+                            active_orders.values().chain(sized.iter()),
+                        )
+                        .checked_add(order_notional)
+                        .unwrap_or(Decimal::MAX);
+                        Some((position.clone(), exposure))
+                    } else {
+                        None
+                    }
+                };
+                if let (Some(limit), Some((position, exposure))) =
+                    (config.grid.max_position_usdc, maybe_exposure)
+                {
+                    if !self
+                        .check_opening_position_limit(
+                            config,
+                            &ticker,
+                            &position,
+                            limit,
+                            (side, price, full_quantity, exposure),
+                        )
+                        .await
+                    {
+                        if *self.state.status.read().await != BotStatus::Running {
+                            break;
+                        }
+                        failed = true;
+                        continue;
+                    }
+                }
+            } else {
+                let available = {
+                    let active_orders = self.state.active_orders.read().await;
+                    if grid_level_occupied(
+                        active_orders.values().chain(sized.iter()),
+                        side,
+                        price,
+                        config.grid.grid_interval,
+                        rules.tick_size,
+                    ) {
+                        failed = true;
+                        continue;
+                    }
+                    closing_quantity_available(
+                        config.grid.direction,
+                        self.state.position.read().await.size,
+                        active_orders.values().chain(sized.iter()),
+                    )
+                };
+                if available < full_quantity {
+                    debug!(
+                        "Skipping {} at {}: available {} < full grid quantity {}",
+                        side.as_str(),
+                        price,
+                        available,
+                        full_quantity
+                    );
+                    continue;
+                }
+            }
+            sized.push(GridOrder {
+                client_order_id: new_grid_client_order_id(side),
+                order_id: None,
+                symbol: symbol.clone(),
+                side,
+                price,
+                quantity: full_quantity,
+                amount_usdc: order_notional,
+                status: OrderStatus::New,
+                created_at: now,
+                updated_at: now,
+                grid_level,
+                paired_client_order_id: None,
+                is_take_profit: false,
+                purpose: OrderPurpose::Grid,
+                merge_sources: Vec::new(),
+            });
+        }
+        Some((sized, failed))
+    }
 }

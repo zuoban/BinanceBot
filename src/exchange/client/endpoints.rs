@@ -366,7 +366,6 @@ impl BinanceFuturesClient {
     }
 
     /// Place 1..=5 limit orders in a single `/fapi/v1/batchOrders` call.
-    #[allow(dead_code)]
     pub(crate) async fn place_batch_orders(
         &self,
         orders: &[NewOrderRequest<'_>],

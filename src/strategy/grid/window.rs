@@ -163,8 +163,10 @@ impl GridTradingEngine {
         current_price: Decimal,
         window: &mut DesiredGridWindow,
     ) -> Option<bool> {
+        const MAX_BATCH_PLACE_SIZE: usize = 5;
         let grid_interval = config.grid.grid_interval;
         let mut placement_failed = false;
+        let is_paper = config.exchange.is_paper();
         for (side, desired_prices, active_prices, grid_level) in [
             (
                 OrderSide::Buy,
@@ -179,6 +181,71 @@ impl GridTradingEngine {
                 1,
             ),
         ] {
+            let can_batch_side = !is_paper
+                && (side == config.grid.direction.closing_side()
+                    || config.grid.min_liquidation_distance_pct.is_none());
+            if can_batch_side {
+                let mut simulated_active = active_prices.clone();
+                let mut candidates = Vec::new();
+                for &target_price in desired_prices {
+                    let already_exists = has_nearby_grid_order(
+                        &simulated_active,
+                        target_price,
+                        grid_interval,
+                        rules.tick_size,
+                    );
+                    if !already_exists && side.is_maker_price(target_price, current_price) {
+                        simulated_active.push(target_price);
+                        candidates.push(target_price);
+                    }
+                }
+                if candidates.len() >= 2 {
+                    let ctx = WindowPlacementContext {
+                        last_fill: window.last_fill,
+                        precomputed: Some((current_price, desired_prices)),
+                    };
+                    for chunk in candidates.chunks(MAX_BATCH_PLACE_SIZE) {
+                        let Some((sized, size_failed)) = self
+                            .size_live_window_batch_chunk(
+                                config, rules, side, grid_level, chunk, ctx,
+                            )
+                            .await
+                        else {
+                            placement_failed = true;
+                            break;
+                        };
+                        if size_failed {
+                            placement_failed = true;
+                        }
+                        if sized.is_empty() {
+                            if *self.state.status.read().await != BotStatus::Running {
+                                break;
+                            }
+                            continue;
+                        }
+                        let (placed_prices, submit_failed) = Box::pin(
+                            self.submit_and_reconcile_live_grid_batch(config, rules, sized),
+                        )
+                        .await;
+                        if submit_failed {
+                            placement_failed = true;
+                        }
+                        if !placed_prices.is_empty() {
+                            active_prices.extend(placed_prices);
+                            if self
+                                .prune_grid_window(
+                                    &window.desired_buy_prices,
+                                    &window.desired_sell_prices,
+                                )
+                                .await
+                            {
+                                return None;
+                            }
+                        }
+                    }
+                    continue;
+                }
+            }
             for &target_price in desired_prices {
                 // Retain queue priority for active orders still inside the nearest band.
                 let already_exists = has_nearby_grid_order(

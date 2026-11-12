@@ -130,14 +130,18 @@ pub(crate) fn is_valid_client_order_id(cid: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'/' | b'-'))
 }
 
+pub(crate) fn is_batch_order_endpoint_unsupported(error: &ExchangeError) -> bool {
+    matches!(
+        error,
+        ExchangeError::Other(msg)
+            if msg.starts_with("HTTP error 404 ") || msg.starts_with("HTTP error 405 ")
+    )
+}
+
 pub(crate) fn is_batch_endpoint_unsupported(error: &anyhow::Error) -> bool {
-    error.downcast_ref::<ExchangeError>().is_some_and(|err| {
-        matches!(
-            err,
-            ExchangeError::Other(msg)
-                if msg.starts_with("HTTP error 404 ") || msg.starts_with("HTTP error 405 ")
-        )
-    })
+    error
+        .downcast_ref::<ExchangeError>()
+        .is_some_and(is_batch_order_endpoint_unsupported)
 }
 
 pub(super) fn order_response_error(status: reqwest::StatusCode, body: &str) -> ExchangeError {

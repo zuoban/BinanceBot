@@ -34,6 +34,9 @@ use tokio::sync::{broadcast, mpsc};
 struct PairExchange {
     orders: Arc<Mutex<HashMap<String, BinanceOrderResponse>>>,
     posts: Arc<Mutex<Vec<String>>>,
+    batch_place_calls: Arc<AtomicUsize>,
+    single_place_calls: Arc<AtomicUsize>,
+    reject_post_only_prices: Arc<Mutex<Vec<Decimal>>>,
     batch_cancel_calls: Arc<AtomicUsize>,
     single_cancel_calls: Arc<AtomicUsize>,
     fail_lookup: Arc<AtomicUsize>,
@@ -143,8 +146,13 @@ async fn pair_exchange_server(fake: PairExchange) -> (String, tokio::task::JoinH
                     (axum::http::StatusCode::OK, Json(serde_json::to_value(order.clone()).unwrap()))
                 })
                 .post(|State(fake): State<PairExchange>, Query(query): Query<HashMap<String, String>>| async move {
+                    fake.single_place_calls.fetch_add(1, Ordering::SeqCst);
                     let id = query["newClientOrderId"].clone();
                     fake.posts.lock().unwrap().push(id.clone());
+                    let price: Decimal = query["price"].parse().unwrap();
+                    if fake.reject_post_only_prices.lock().unwrap().contains(&price) {
+                        return (axum::http::StatusCode::BAD_REQUEST, Json(serde_json::json!({"code": -5022, "msg": "Post Only rejected"})));
+                    }
                     let mut orders = fake.orders.lock().unwrap();
                     let order_id = orders.values().map(|order| order.order_id).max().unwrap_or(499).max(499) + 1;
                     let order = BinanceOrderResponse {
@@ -152,7 +160,7 @@ async fn pair_exchange_server(fake: PairExchange) -> (String, tokio::task::JoinH
                         client_order_id: id.clone(),
                         symbol: query["symbol"].clone(),
                         status: "NEW".into(),
-                        price: query["price"].parse().unwrap(),
+                        price,
                         avg_price: None,
                         orig_qty: query["quantity"].parse().unwrap(),
                         executed_qty: dec!(0),
@@ -211,6 +219,57 @@ async fn pair_exchange_server(fake: PairExchange) -> (String, tokio::task::JoinH
                         }
                     }
                     (axum::http::StatusCode::OK, Json(serde_json::Value::Array(items)))
+                })
+                .post(|State(fake): State<PairExchange>, Query(query): Query<HashMap<String, String>>| async move {
+                    #[derive(serde::Deserialize)]
+                    struct WireBatchOrder {
+                        symbol: String,
+                        side: String,
+                        price: Decimal,
+                        quantity: Decimal,
+                        #[serde(rename = "newClientOrderId")]
+                        client_order_id: String,
+                        #[serde(rename = "timeInForce")]
+                        time_in_force: String,
+                    }
+                    fake.batch_place_calls.fetch_add(1, Ordering::SeqCst);
+                    let raw_items: Vec<WireBatchOrder> = serde_json::from_str(&query["batchOrders"]).unwrap();
+                    let rejected_prices = fake.reject_post_only_prices.lock().unwrap().clone();
+                    let mut posts = fake.posts.lock().unwrap();
+                    let mut orders = fake.orders.lock().unwrap();
+                    let mut next_id = orders.values().map(|o| o.order_id).max().unwrap_or(499).max(499) + 1;
+                    let mut out = Vec::with_capacity(raw_items.len());
+                    for item in raw_items {
+                        posts.push(item.client_order_id.clone());
+                        if rejected_prices.contains(&item.price) {
+                            out.push(serde_json::json!({"code": -5022, "msg": "Post Only rejected"}));
+                            continue;
+                        }
+                        let order = BinanceOrderResponse {
+                            order_id: next_id,
+                            client_order_id: item.client_order_id.clone(),
+                            symbol: item.symbol,
+                            status: "NEW".into(),
+                            price: item.price,
+                            avg_price: None,
+                            orig_qty: item.quantity,
+                            executed_qty: dec!(0),
+                            side: item.side,
+                            order_type: "LIMIT".into(),
+                            time_in_force: item.time_in_force,
+                            update_time: None,
+                        };
+                        next_id += 1;
+                        orders.insert(item.client_order_id, order.clone());
+                        out.push(serde_json::to_value(order).unwrap());
+                    }
+                    drop(orders);
+                    drop(posts);
+                    if consume_failure(&fake.lose_response) {
+                        (axum::http::StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"code": -1000})))
+                    } else {
+                        (axum::http::StatusCode::OK, Json(serde_json::Value::Array(out)))
+                    }
                 }),
             )
             .with_state(fake);

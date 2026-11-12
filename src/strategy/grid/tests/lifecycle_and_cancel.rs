@@ -961,3 +961,59 @@ async fn bulk_and_window_cancellation_batch_up_to_ten_orders_per_request() {
 
     server.abort();
 }
+
+#[tokio::test]
+async fn live_window_replenishment_batches_up_to_five_orders_and_clears_post_only_rejections() {
+    let (mut config, _, _) = pending_pair_fixture();
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    db.save_bot_status(BotStatus::Running).unwrap();
+    config.grid.buy_window = 6;
+    config.grid.sell_window = 6;
+    config.grid.order_amount_usdc = dec!(100);
+    config.grid.grid_interval = dec!(1);
+    config.grid.max_position_usdc = None;
+    config.grid.min_liquidation_distance_pct = None;
+
+    let fake = PairExchange::default();
+    *fake.reject_post_only_prices.lock().unwrap() = vec![dec!(99)];
+    let (url, server) = pair_exchange_server(fake.clone()).await;
+    let mut engine = pair_recovery_engine(&config, db.clone(), url).await;
+    let info = engine
+        .client
+        .get_exchange_info(Some("SOLUSDC"))
+        .await
+        .unwrap();
+    *engine.state.rules.write().await =
+        crate::strategy::precision::SymbolRules::from_exchange_info(&info, "SOLUSDC").unwrap();
+    *engine.state.status.write().await = BotStatus::Running;
+    let now = Utc::now();
+    *engine.state.ticker.write().await = TickerInfo {
+        symbol: "SOLUSDC".into(),
+        last_price: dec!(100),
+        mark_price: dec!(100),
+        update_time: now,
+        mark_update_time: now,
+        ..TickerInfo::default()
+    };
+    engine.state.position.write().await.size = dec!(10);
+    engine.last_account_sync = Some(Instant::now());
+    engine.last_orders_sync = Some(Instant::now());
+
+    engine.maintain_grid_window().await;
+
+    // 6 buys = batch(5) + single(1); 6 sells = batch(5) + single(1) -> 2 batch + 2 single calls!
+    assert_eq!(fake.batch_place_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(fake.single_place_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(*engine.state.status.read().await, BotStatus::Running);
+
+    // Price 99 was rejected with -5022 inside the buy batch, leaving 5 buys + 6 sells = 11 active & persisted orders.
+    let active = engine.state.active_orders.read().await;
+    assert_eq!(active.len(), 11);
+    assert!(!active.values().any(|order| order.price == dec!(99)));
+    drop(active);
+    let persisted = db.load_managed_orders("SOLUSDC").unwrap();
+    assert_eq!(persisted.len(), 11);
+    assert!(!persisted.iter().any(|order| order.price == dec!(99)));
+
+    server.abort();
+}

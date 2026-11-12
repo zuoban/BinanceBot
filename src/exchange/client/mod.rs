@@ -35,8 +35,9 @@ use error::{
     read_bounded_error_body,
 };
 pub(crate) use error::{
-    is_batch_endpoint_unsupported, is_valid_client_order_id, read_bounded_bytes, read_bounded_json,
-    summarize_non_json_body, ExchangeError, LocalRateLimitError,
+    is_batch_endpoint_unsupported, is_batch_order_endpoint_unsupported, is_valid_client_order_id,
+    read_bounded_bytes, read_bounded_json, summarize_non_json_body, ExchangeError,
+    LocalRateLimitError,
 };
 
 #[cfg(test)]
