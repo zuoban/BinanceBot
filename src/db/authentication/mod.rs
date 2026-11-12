@@ -9,36 +9,61 @@ use std::time::{Duration, Instant};
 /// Positive-only cache of recently validated session tokens. Every in-process
 /// mutation of `auth_sessions` invalidates it while holding the connection lock,
 /// so logout and expiry cleanup take effect immediately; the TTL only bounds how
-/// long an out-of-process edit of the database can go unnoticed.
+/// long an out-of-process edit of the database can go unnoticed. Cache hits also
+/// recheck the session's UTC validity window so caching never extends its lifetime.
 #[derive(Default)]
-pub(super) struct SessionCache(std::sync::Mutex<HashMap<String, Instant>>);
+pub(super) struct SessionCache(std::sync::Mutex<HashMap<String, CachedSession>>);
+
+struct CachedSession {
+    validated_at: Instant,
+    created_at: DateTime<Utc>,
+}
 
 const SESSION_CACHE_TTL: Duration = Duration::from_secs(5);
 const SESSION_CACHE_PRUNE_AT: usize = 64;
+const SESSION_MAX_AGE: ChronoDuration = ChronoDuration::hours(24);
+
+fn session_time_valid(created_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
+    let age = now.signed_duration_since(created_at);
+    age >= ChronoDuration::zero() && age < SESSION_MAX_AGE
+}
+
+impl CachedSession {
+    fn is_valid(&self, now: DateTime<Utc>) -> bool {
+        self.validated_at.elapsed() < SESSION_CACHE_TTL && session_time_valid(self.created_at, now)
+    }
+}
 
 impl SessionCache {
-    fn hit(&self, token: &str) -> bool {
+    fn hit(&self, token: &str, now: DateTime<Utc>) -> bool {
         self.0
             .lock_unpoisoned()
             .get(token)
-            .is_some_and(|validated| validated.elapsed() < SESSION_CACHE_TTL)
+            .is_some_and(|cached| cached.is_valid(now))
     }
 
-    fn insert(&self, token: &str) {
+    fn insert(&self, token: &str, created_at: DateTime<Utc>) {
         let mut entries = self.0.lock_unpoisoned();
         if !entries.contains_key(token) && entries.len() >= SESSION_CACHE_PRUNE_AT {
-            entries.retain(|_, validated| validated.elapsed() < SESSION_CACHE_TTL);
+            let now = Utc::now();
+            entries.retain(|_, cached| cached.is_valid(now));
             if entries.len() >= SESSION_CACHE_PRUNE_AT {
                 if let Some(oldest_key) = entries
                     .iter()
-                    .min_by_key(|(_, validated)| **validated)
+                    .min_by_key(|(_, cached)| cached.validated_at)
                     .map(|(k, _)| k.clone())
                 {
                     entries.remove(&oldest_key);
                 }
             }
         }
-        entries.insert(token.to_owned(), Instant::now());
+        entries.insert(
+            token.to_owned(),
+            CachedSession {
+                validated_at: Instant::now(),
+                created_at,
+            },
+        );
     }
 
     fn remove(&self, token: &str) {
@@ -53,7 +78,7 @@ impl SessionCache {
 impl Database {
     /// Lock-free of SQLite: answers only from recent in-process validations.
     pub(crate) fn session_recently_validated(&self, token: &str) -> bool {
-        self.session_cache.hit(token)
+        self.session_cache.hit(token, Utc::now())
     }
 
     pub fn create_session(&self, token: &str) -> Result<()> {
@@ -66,7 +91,7 @@ impl Database {
         )?
         .execute(params![token, super::format_sqlite_timestamp(now)])
         .context("Failed to insert session token into SQLite database")?;
-        let cutoff = super::format_sqlite_timestamp(now - ChronoDuration::hours(24));
+        let cutoff = super::format_sqlite_timestamp(now - SESSION_MAX_AGE);
         if let Ok(mut stmt) =
             tx.prepare_cached("DELETE FROM auth_sessions WHERE created_at <= ?1 RETURNING token;")
         {
@@ -100,21 +125,22 @@ impl Database {
             self.session_cache.remove(token);
             return Ok(false);
         };
-        let valid = DateTime::parse_from_rfc3339(&created).is_ok_and(|time| {
-            Utc::now().signed_duration_since(time.with_timezone(&Utc)) < ChronoDuration::hours(24)
-        });
-        if valid {
-            self.session_cache.insert(token);
+        let created_at = DateTime::parse_from_rfc3339(&created)
+            .ok()
+            .map(|time| time.with_timezone(&Utc))
+            .filter(|time| session_time_valid(*time, Utc::now()));
+        if let Some(created_at) = created_at {
+            self.session_cache.insert(token, created_at);
         } else {
             self.session_cache.remove(token);
             if let Err(error) = conn
                 .prepare_cached("DELETE FROM auth_sessions WHERE token = ?1;")
                 .and_then(|mut stmt| stmt.execute(params![token]))
             {
-                tracing::warn!(%error, "Failed to delete expired session");
+                tracing::warn!(%error, "Failed to delete invalid or expired session");
             }
         }
-        Ok(valid)
+        Ok(created_at.is_some())
     }
 
     pub fn delete_session(&self, token: &str) -> Result<()> {

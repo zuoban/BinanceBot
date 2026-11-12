@@ -1,6 +1,63 @@
 use super::*;
 
 #[test]
+fn future_and_malformed_session_timestamps_are_rejected() {
+    let db = Database::open(":memory:").unwrap();
+    for (token, created_at) in [
+        (
+            "future",
+            (Utc::now() + ChronoDuration::hours(1)).to_rfc3339(),
+        ),
+        ("malformed", "invalid timestamp".into()),
+    ] {
+        db.create_session(token).unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE auth_sessions SET created_at = ?1 WHERE token = ?2;",
+                params![created_at, token],
+            )
+            .unwrap();
+        assert!(!db.is_session_valid(token).unwrap(), "{token}");
+        assert!(!db.session_recently_validated(token), "{token}");
+    }
+}
+
+#[test]
+fn session_cache_respects_expiry_and_clock_rollback() {
+    let db = Database::open(":memory:").unwrap();
+    db.create_session("near-expiry").unwrap();
+    let now = Utc::now();
+    let expires_at = now + ChronoDuration::hours(1);
+    let created_at = expires_at - SESSION_MAX_AGE;
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE auth_sessions SET created_at = ?1 WHERE token = 'near-expiry';",
+            params![super::super::format_sqlite_timestamp(created_at)],
+        )
+        .unwrap();
+    assert!(db.is_session_valid("near-expiry").unwrap());
+    assert!(db.session_cache.hit("near-expiry", now));
+    // Advance the wall clock across expiry without waiting for the monotonic TTL.
+    assert!(!db.session_cache.hit("near-expiry", expires_at));
+    assert!(!db
+        .session_cache
+        .hit("near-expiry", created_at - ChronoDuration::nanoseconds(1)));
+
+    db.session_cache
+        .0
+        .lock()
+        .unwrap()
+        .get_mut("near-expiry")
+        .unwrap()
+        .validated_at = Instant::now() - SESSION_CACHE_TTL;
+    assert!(!db.session_cache.hit("near-expiry", now));
+}
+
+#[test]
 fn logout_and_clear_invalidate_the_validation_cache_immediately() {
     let db = Database::open(":memory:").unwrap();
     for token in ["a", "b"] {

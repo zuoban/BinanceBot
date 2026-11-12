@@ -368,9 +368,9 @@ async fn dispatch_pair(
                     get(get_config_handler).post(post_managed_config_handler),
                 )
                 .route("/ws", get(ws_handler))
-                .with_state(state.clone())
         })
-        .clone();
+        .clone()
+        .with_state(state.clone());
     *req.uri_mut() = uri;
     req.extensions_mut().insert(handle);
     match router.oneshot(req).await {

@@ -2,21 +2,28 @@ import type { ApiResponse, Pair } from './types';
 
 const TOKEN_KEY = 'binance_bot_auth_token';
 let memoryToken: string | null = null;
+let useMemoryToken = false;
 export const tokenStore = {
   get: (): string | null => {
-    try { return sessionStorage.getItem(TOKEN_KEY) ?? memoryToken; } catch { return memoryToken; }
+    if (useMemoryToken) return memoryToken;
+    try { memoryToken = sessionStorage.getItem(TOKEN_KEY); } catch { /* Retain the last known token. */ }
+    return memoryToken;
   },
   set: (token: string) => {
+    memoryToken = token;
+    useMemoryToken = true;
     try {
       sessionStorage.setItem(TOKEN_KEY, token);
-      memoryToken = null;
-    } catch {
-      memoryToken = token;
-    }
+      useMemoryToken = false;
+    } catch { /* A stale stored token must not override this login. */ }
   },
   clear: () => {
     memoryToken = null;
-    try { sessionStorage.removeItem(TOKEN_KEY); } catch { /* Ignore unavailable Web Storage. */ }
+    useMemoryToken = true;
+    try {
+      sessionStorage.removeItem(TOKEN_KEY);
+      useMemoryToken = false;
+    } catch { /* Keep the signed-out state when Web Storage is unavailable. */ }
   },
 };
 export const errorMessage = (error: unknown): string => error instanceof Error || error instanceof DOMException ? error.message : String(error);

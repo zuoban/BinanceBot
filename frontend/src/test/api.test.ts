@@ -3,7 +3,7 @@ import { api, errorMessage, pairPath, pairRoute, tokenStore } from '../lib/api';
 import { routeSymbol } from '../components/CommandPalette';
 import { pair } from './fixtures';
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { vi.unstubAllGlobals(); tokenStore.clear(); });
 describe('API client', () => {
   it('sends bearer tokens and uses scoped and legacy paths', async () => {
     tokenStore.set('test-token');
@@ -71,6 +71,45 @@ describe('API client', () => {
     expect(tokenStore.get()).toBe('quota-fallback-token');
     tokenStore.clear();
     expect(tokenStore.get()).toBeNull();
+  });
+  it('keeps the new token when storage still contains an old token after a failed write', async () => {
+    vi.stubGlobal('sessionStorage', {
+      getItem: () => 'old-token',
+      setItem: () => { throw new DOMException('Quota', 'QuotaExceededError'); },
+      removeItem: () => {},
+      clear: () => {},
+    });
+    tokenStore.set('new-token');
+    expect(tokenStore.get()).toBe('new-token');
+    const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify({ success: true, data: 7 })));
+    vi.stubGlobal('fetch', fetcher);
+    await api('/api/status');
+    expect(new Headers(fetcher.mock.calls[0][1].headers).get('Authorization')).toBe('Bearer new-token');
+  });
+  it('does not resurrect a stored token when logout cannot remove it', () => {
+    vi.stubGlobal('sessionStorage', {
+      getItem: () => 'old-token',
+      setItem: () => {},
+      removeItem: () => { throw new DOMException('Blocked', 'SecurityError'); },
+      clear: () => {},
+    });
+    tokenStore.clear();
+    expect(tokenStore.get()).toBeNull();
+  });
+  it('retains the last token if storage reads become unavailable after login', () => {
+    let blocked = false;
+    vi.stubGlobal('sessionStorage', {
+      getItem: () => {
+        if (blocked) throw new DOMException('Blocked', 'SecurityError');
+        return 'new-token';
+      },
+      setItem: () => {},
+      removeItem: () => {},
+      clear: () => {},
+    });
+    tokenStore.set('new-token');
+    blocked = true;
+    expect(tokenStore.get()).toBe('new-token');
   });
   it('formats Error instances and arbitrary thrown values via errorMessage', () => {
     expect(errorMessage(new Error('明确错误'))).toBe('明确错误');

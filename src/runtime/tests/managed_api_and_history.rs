@@ -8,6 +8,57 @@ use axum::http::StatusCode;
 use serde_json::{json, Value};
 
 #[tokio::test]
+async fn cached_pair_routes_release_state_after_removal() {
+    let mut runtime = fixture();
+    let handle = runtime.handle();
+    let state = handle.states.read().await[0].clone();
+    let removed = Arc::downgrade(&state);
+    let router = create_managed_router(handle);
+    let manager = tokio::spawn(async move { runtime.run().await });
+
+    let (status, body) = request(
+        &router,
+        "/api/pairs/SOLUSDC/status",
+        "GET",
+        Value::Null,
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["success"], true);
+    assert!(state.managed_router.get().is_some());
+    state.pause_trading().await.unwrap();
+    drop(state);
+
+    let (_, body) = request(
+        &router,
+        "/api/pairs/SOLUSDC",
+        "DELETE",
+        json!({"confirm": true}),
+        true,
+    )
+    .await;
+    assert_eq!(body["success"], true, "{body}");
+    assert!(
+        removed.upgrade().is_none(),
+        "cached routes must not retain a removed pair's state"
+    );
+
+    let (status, body) = request(
+        &router,
+        "/api/pairs/BTCUSDT/status",
+        "GET",
+        Value::Null,
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["symbol"], "BTCUSDT");
+    manager.abort();
+    let _ = manager.await;
+}
+
+#[tokio::test]
 async fn symbols_route_shares_runtime_limiter() {
     use crate::exchange::rate_limit::RequestClass;
 

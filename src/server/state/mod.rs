@@ -80,7 +80,8 @@ pub struct AppState {
 
     pub(crate) action_tx: mpsc::Sender<BotControlAction>,
     pub ws_broadcast_tx: broadcast::Sender<Arc<str>>,
-    pub(crate) managed_router: std::sync::OnceLock<axum::Router>,
+    // Cache route definitions only: a router bound to Arc<Self> would retain itself.
+    pub(crate) managed_router: std::sync::OnceLock<axum::Router<Arc<AppState>>>,
     telegram_notifier: TelegramNotifier,
 }
 
