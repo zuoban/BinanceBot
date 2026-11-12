@@ -79,7 +79,7 @@
   margin-top: 20px; padding: 12px 16px; border: 1px solid var(--border-hairline); border-radius: var(--radius-panel); background: var(--bg-card);
   transition: background-color 180ms var(--ease-out), border-color 180ms var(--ease-out), box-shadow 180ms var(--ease-out);
 }
-.save-bar-dirty { position: sticky; bottom: var(--space-4); z-index: 4; border-color: var(--sig-yellow-line); background: var(--sig-yellow-bg); box-shadow: var(--savebar-shadow); }
+.save-bar-dirty { position: sticky; bottom: var(--space-4); z-index: 4; border-color: var(--sig-yellow-line); background: linear-gradient(var(--sig-yellow-bg), var(--sig-yellow-bg)), var(--bg-card); box-shadow: var(--savebar-shadow); }
 .save-bar-dirty .muted { color: var(--sig-yellow); font-weight: 500; }
 .save-bar-status { display: flex; align-items: center; flex-wrap: wrap; gap: 0 8px; min-width: 0; }
 .save-bar-status .ant-btn-link { padding-inline: 4px; font-weight: 500; }
@@ -97,7 +97,7 @@
 .security-guide { display: grid; gap: 16px; margin: 20px 0 0; }
 .security-guide dt { margin-bottom: 4px; font-weight: 500; }
 .security-guide dd { margin: 0; color: var(--text-secondary); line-height: 1.7; }
-.settings-tabs > .ant-tabs-nav, .detail-tabs > .ant-tabs-nav { position: sticky; top: 0; z-index: 3; padding-top: 4px; background: color-mix(in srgb, var(--bg-page) 92%, transparent); backdrop-filter: blur(8px); }
+.settings-tabs > .ant-tabs-nav, .detail-tabs > .ant-tabs-nav { position: sticky; top: 0; z-index: 3; padding-top: 4px; background: var(--bg-page); background: color-mix(in srgb, var(--bg-page) 92%, transparent); backdrop-filter: blur(8px); }
 
 .confirm-changes p { margin: 0 0 10px; }
 .confirm-changes dl, .confirm-changes ul { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; max-height: min(48vh, 360px); overflow-y: auto; overscroll-behavior: contain; }
