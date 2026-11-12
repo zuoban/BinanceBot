@@ -66,6 +66,8 @@ function buildAntdTheme(dark: boolean) {
       controlItemBgHover: colors.hover,
       controlItemBgActive: colors.active,
       controlItemBgActiveHover: colors.activeHover,
+      controlOutline: palette['--accent-soft'],
+      controlOutlineWidth: 2,
     },
     components: {
       Card: { borderRadiusLG: dimensions.radiusPanel, headerFontSize: dimensions.textSection, headerHeight: 52 },

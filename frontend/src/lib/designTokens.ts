@@ -39,8 +39,8 @@ export const palettes = {
   light: lightPalette,
   dark: {
     ...lightPalette,
-    '--bg-page': '#131416', '--bg-card': '#18191c', '--bg-raised': '#212328',
-    '--border-hairline': 'rgba(237, 238, 240, 0.08)', '--border-strong': 'rgba(237, 238, 240, 0.16)',
+    '--bg-page': '#101113', '--bg-card': '#18191d', '--bg-raised': '#212328',
+    '--border-hairline': 'rgba(237, 238, 240, 0.1)', '--border-strong': 'rgba(237, 238, 240, 0.18)',
     '--text-primary': '#edeef0', '--text-secondary': '#a0a3ab', '--text-muted': '#90949e',
     '--bg-elevated': '#212328',
     '--accent': '#e5a910', '--accent-soft': 'rgba(229, 169, 16, 0.12)',

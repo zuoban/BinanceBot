@@ -183,7 +183,6 @@ kbd {
 .trade-list dd { margin: 4px 0 0; font: 500 13px/20px var(--font-mono); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .trade-list-empty { padding: 28px 0; text-align: center; color: var(--text-muted); }
 
-.table-mobile { display: none; }
 .table-mobile .log-message { margin: 8px 0 0; }
 
 .table-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; margin-bottom: 12px; }
@@ -231,8 +230,6 @@ kbd {
   .page-heading h1 { font-size: 22px; }
   .section-heading { flex-wrap: wrap; gap: 10px; margin: 24px 0 12px; }
   .table-toolbar .ant-segmented { max-width: 100%; overflow-x: auto; }
-  .table-desktop { display: none; }
-  .table-mobile { display: block; }
   .table-toolbar .ant-btn { min-height: 44px; }
   .ant-card-head-title { white-space: normal; }
   .ant-card-head-wrapper { gap: 8px; }

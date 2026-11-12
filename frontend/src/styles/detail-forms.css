@@ -9,7 +9,7 @@
 .chart-dot { display: inline-block; width: 8px; height: 8px; border-radius: 2px; }
 .chart-dot-buy { background: var(--positive); }
 .chart-dot-sell { background: var(--negative); }
-.grid-levels { position: relative; max-height: 380px; overflow-y: auto; overscroll-behavior: contain; padding: 4px 0; border-radius: var(--radius-control); }
+.grid-levels { position: relative; max-height: 380px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 4px 0; border-block: 1px solid var(--border-hairline); border-radius: var(--radius-control); }
 .grid-level { display: flex; align-items: center; gap: 12px; min-height: 32px; padding: 0 8px; border-radius: 6px; font-size: 12px; line-height: 16px; color: var(--text-secondary); transition: background-color 140ms var(--ease-out); }
 @media (hover: hover) and (pointer: fine) { .grid-level:not(.grid-level-mark):hover { background: var(--bg-raised); } }
 .grid-level > span:first-child { flex: 0 0 auto; white-space: nowrap; }
@@ -97,7 +97,7 @@
 .security-guide { display: grid; gap: 16px; margin: 20px 0 0; }
 .security-guide dt { margin-bottom: 4px; font-weight: 500; }
 .security-guide dd { margin: 0; color: var(--text-secondary); line-height: 1.7; }
-.settings-tabs > .ant-tabs-nav { position: sticky; top: 0; z-index: 3; padding-top: 4px; background: var(--bg-page); }
+.settings-tabs > .ant-tabs-nav { position: sticky; top: 0; z-index: 3; padding-top: 4px; background: color-mix(in srgb, var(--bg-page) 92%, transparent); backdrop-filter: blur(8px); }
 
 .confirm-changes p { margin: 0 0 10px; }
 .confirm-changes dl, .confirm-changes ul { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; max-height: min(48vh, 360px); overflow-y: auto; overscroll-behavior: contain; }
@@ -118,7 +118,7 @@
 .grid-preview-meta { display: flex; align-items: center; gap: var(--space-2) var(--space-3); flex-wrap: wrap; min-width: 0; }
 .grid-preview-reference { width: 160px; font-family: var(--font-mono); }
 .grid-preview-empty { margin: 0; }
-.grid-preview-ladder { position: relative; margin: 0 0 var(--space-3); padding: 0; list-style: none; max-height: 320px; overflow-y: auto; overscroll-behavior: contain; }
+.grid-preview-ladder { position: relative; margin: 0 0 var(--space-3); padding: 4px 0; list-style: none; max-height: 320px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; border-block: 1px solid var(--border-hairline); }
 .grid-preview-ladder li { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: center; gap: var(--space-2) var(--space-3); min-height: 28px; padding: var(--space-1) var(--space-2); border-radius: var(--radius-chip); font-size: var(--text-xs); transition: background-color 140ms var(--ease-out); }
 @media (hover: hover) and (pointer: fine) { .grid-preview-ladder li:not(.grid-preview-mark):not(.grid-preview-unplaceable):hover { background: var(--bg-raised); } }
 .grid-preview-ladder li > span { min-width: 0; overflow-wrap: anywhere; }

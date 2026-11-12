@@ -156,7 +156,6 @@
   .bottombar-item .anticon { font-size: 16px; }
   @media (hover: hover) and (pointer: fine) { .bottombar-item:not(.bottombar-item-active):hover { color: var(--rail-text); } }
   .bottombar-item-active, .bottombar-item-active:hover { color: var(--rail-active-text); background: var(--rail-active); }
-  .ant-drawer-content-wrapper { max-width: 100vw !important; }
 }
 
 @media (max-width: 600px) {

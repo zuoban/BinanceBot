@@ -149,7 +149,7 @@ export default function Shell() {
         <Button type="text" icon={<MenuOutlined />} aria-label="打开主导航" aria-expanded={drawer} onClick={() => setDrawer(true)} />
       </div>
     </header>
-    <Drawer open={drawer} onClose={closeDrawer} destroyOnHidden placement="left" size={280} closable={false} className="sidebar-drawer" title={null} styles={{ body: { padding: 0 } }} aria-label="主导航"><SidebarBody idPrefix="drawer" {...sidebarProps} /></Drawer>
+    <Drawer open={drawer} onClose={closeDrawer} destroyOnHidden placement="left" size={280} closable={false} className="sidebar-drawer" title={null} styles={{ body: { padding: 0 }, wrapper: { maxWidth: '100vw' } }} aria-label="主导航"><SidebarBody idPrefix="drawer" {...sidebarProps} /></Drawer>
     <main className="content" id="main"><Outlet /></main>
     <nav className="bottombar" aria-label="底部导航">
       <Link to="/" className={`bottombar-item${page === 'overview' ? ' bottombar-item-active' : ''}`} aria-current={page === 'overview' ? 'page' : undefined}><AppstoreOutlined aria-hidden="true" /><span>总览</span></Link>
