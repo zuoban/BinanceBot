@@ -146,15 +146,15 @@ Unix 上新建的数据库及目录使用私有权限；已有数据库及其 `-
 
 ### 2. 使用预构建镜像
 
-镜像仅在发布 GitHub Release 时构建并推送；面向 `main` 的 Pull Request 和推送到 `main` 都执行后端及前端质量检查（含前端 ESLint），单独推送版本标签或保存 Release 草稿不会更新镜像。版本标签应与 `Cargo.toml` 一致，例如 `v0.10.10`；应在最终代码提交后创建新标签，不移动已推送的旧标签。正式 Release 会更新 `latest`，预发布 Release 会发布对应版本镜像，但不会覆盖 `latest`。每次发布仍须通过后端和前端检查后才会构建镜像。CI 与后端 Docker 构建均固定使用 Rust 1.98.1，镜像构建按 `Cargo.lock` 锁定依赖。依赖安全审计（`cargo audit` 与前端生产依赖的 `npm audit`）由独立的 [安全审计工作流](.github/workflows/security.yml) 在依赖文件变更及每周定时执行，Dependabot 只提交次要和补丁版本更新（Cargo 与 npm 按生态合并为一个 Pull Request），大版本、Rust 与 Node 基础镜像需手动评估和升级；安全公告触发的更新不受此限制。
+镜像仅在发布 GitHub Release 时构建并推送；面向 `main` 的 Pull Request 和推送到 `main` 都执行后端及前端质量检查（含前端 ESLint），单独推送版本标签或保存 Release 草稿不会更新镜像。版本标签应与 `Cargo.toml` 一致，例如 `v0.11.0`；应在最终代码提交后创建新标签，不移动已推送的旧标签。正式 Release 会更新 `latest`，预发布 Release 会发布对应版本镜像，但不会覆盖 `latest`。每次发布仍须通过后端和前端检查后才会构建镜像。CI 与后端 Docker 构建均固定使用 Rust 1.98.1，镜像构建按 `Cargo.lock` 锁定依赖。依赖安全审计（`cargo audit` 与前端生产依赖的 `npm audit`）由独立的 [安全审计工作流](.github/workflows/security.yml) 在依赖文件变更及每周定时执行，Dependabot 只提交次要和补丁版本更新（Cargo 与 npm 按生态合并为一个 Pull Request），大版本、Rust 与 Node 基础镜像需手动评估和升级；安全公告触发的更新不受此限制。
 
 仓库 `main` 已将 GitHub Actions 的 `checks` 设为必需状态检查，并要求待合并分支跟上最新 `main`；管理员保留默认豁免。对应触发与检查定义见 [GitHub 工作流](.github/workflows/docker-publish.yml)。
 
-发布后的两个镜像均需要。Compose 默认固定使用 `0.10.10`；可通过同一个 `BOT_VERSION` 同时选择前后端版本，避免独立跟随 `latest`。使用仓库内的 Compose 配置运行：
+发布后的两个镜像均需要。Compose 默认固定使用 `0.11.0`；可通过同一个 `BOT_VERSION` 同时选择前后端版本，避免独立跟随 `latest`。使用仓库内的 Compose 配置运行：
 
 ```bash
-BOT_VERSION=0.10.10 ADMIN_PASSWORD='请替换为强密码' docker compose pull
-BOT_VERSION=0.10.10 ADMIN_PASSWORD='请替换为强密码' docker compose up -d
+BOT_VERSION=0.11.0 ADMIN_PASSWORD='请替换为强密码' docker compose pull
+BOT_VERSION=0.11.0 ADMIN_PASSWORD='请替换为强密码' docker compose up -d
 ```
 
 不设置 `ADMIN_PASSWORD` 时容器以无认证模式运行。后端镜像本身只提供 API，单独运行后端容器不会提供网页。镜像默认在容器内监听 `0.0.0.0`，端口沿用数据库配置（新数据库为 `8080`），不修改数据库中保存的监听配置；直接使用 `docker run` 时可通过 `-e ADMIN_PASSWORD=...` 启用登录，发布默认端口时请指定 `-p 127.0.0.1:8080:8080`，避免将未加密的 HTTP 服务暴露到所有宿主机接口。若覆盖镜像默认命令，需自行指定 `--host 0.0.0.0` 才能通过容器网络访问后端。前端通过同源 `/api`、`/ws` 代理连接后端，生产反向代理必须支持 WebSocket Upgrade、透传包含端口的原始 `Host` 请求头并显式覆盖转发协议头（例如外层 TLS Nginx 必须配置 `proxy_set_header Host $http_host; proxy_set_header X-Forwarded-Proto $scheme;`，切勿使用 `$proxy_add_x_forwarded_proto` 追加，以通过后端 WebSocket 同源 `Origin` 校验），并将所有前端路由回退到 `index.html`。

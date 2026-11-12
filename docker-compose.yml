@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: "ghcr.io/zuoban/binancebot:${BOT_VERSION:-0.10.10}"
+    image: "ghcr.io/zuoban/binancebot:${BOT_VERSION:-0.11.0}"
     container_name: binance-grid-bot
     restart: unless-stopped
     stop_grace_period: 45s
@@ -22,7 +22,7 @@ services:
     build:
       context: .
       dockerfile: frontend/Dockerfile
-    image: "ghcr.io/zuoban/binancebot-frontend:${BOT_VERSION:-0.10.10}"
+    image: "ghcr.io/zuoban/binancebot-frontend:${BOT_VERSION:-0.11.0}"
     restart: unless-stopped
     depends_on:
       binance-bot:
