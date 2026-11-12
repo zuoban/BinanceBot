@@ -32,6 +32,7 @@ body {
 ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
 ::-webkit-scrollbar-track { background: transparent; }
 
+:focus:not(:focus-visible) { outline: none; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .sidebar :focus-visible, .sidebar-drawer :focus-visible, .mobilebar :focus-visible, .bottombar :focus-visible, .login-brand :focus-visible { outline-color: var(--rail-accent); }
 
