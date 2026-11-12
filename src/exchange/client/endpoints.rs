@@ -1,5 +1,12 @@
 use super::*;
 
+#[derive(serde::Deserialize)]
+struct SymbolMarketResponse<T> {
+    symbol: String,
+    #[serde(flatten)]
+    data: T,
+}
+
 pub(crate) struct NewOrderRequest<'a> {
     pub(crate) symbol: &'a str,
     pub(crate) side: &'a str,
@@ -46,8 +53,14 @@ impl BinanceFuturesClient {
         path: &str,
         symbol: &str,
     ) -> Result<T> {
-        self.get_public_json(1, class, path, &[("symbol", symbol)])
-            .await
+        let response: SymbolMarketResponse<T> = self
+            .get_public_json(1, class, path, &[("symbol", symbol)])
+            .await?;
+        anyhow::ensure!(
+            response.symbol.eq_ignore_ascii_case(symbol),
+            "Binance market response symbol does not match requested symbol {symbol}"
+        );
+        Ok(response.data)
     }
 
     /// Fetch the latest traded price.

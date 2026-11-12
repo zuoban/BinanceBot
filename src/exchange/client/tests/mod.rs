@@ -2,6 +2,7 @@ use super::*;
 
 mod fill_reconciler;
 mod http_and_signing;
+mod market_data;
 
 #[tokio::test]
 async fn pnl_order_lookups_share_compensation_budget_and_leave_critical_capacity() {

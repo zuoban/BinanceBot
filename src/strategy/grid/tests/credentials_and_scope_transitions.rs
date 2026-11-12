@@ -255,7 +255,7 @@ async fn dual_account_server(fake: DualAccountExchange) -> (String, tokio::task:
             Json(serde_json::json!({"symbol":"SOLUSDC","markPrice":"100.5"}))
         }))
         .route("/fapi/v1/ticker/24hr", get(|| async {
-            Json(serde_json::json!({"lastPrice":"100.5","priceChange":"0","priceChangePercent":"0","highPrice":"101","lowPrice":"100","volume":"10"}))
+            Json(serde_json::json!({"symbol":"SOLUSDC","lastPrice":"100.5","priceChange":"0","priceChangePercent":"0","highPrice":"101","lowPrice":"100","volume":"10"}))
         }))
         .route("/fapi/v2/positionRisk", get(move |headers: axum::http::HeaderMap, State(fake): State<DualAccountExchange>| async move {
             if api_key(&headers) == "account-b-key" {
@@ -467,7 +467,7 @@ async fn live_recv_window_only_update_replaces_client_without_wiping_runtime_sta
             "/fapi/v1/ticker/24hr",
             axum::routing::get(|| async {
                 axum::Json(serde_json::json!({
-                    "lastPrice": "100", "priceChange": "0", "priceChangePercent": "0",
+                    "symbol": "SOLUSDC", "lastPrice": "100", "priceChange": "0", "priceChangePercent": "0",
                     "highPrice": "101", "lowPrice": "99", "volume": "10"
                 }))
             }),

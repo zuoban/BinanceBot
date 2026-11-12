@@ -41,7 +41,7 @@ async fn snapshot_push_continues_while_the_trading_engine_waits_for_rest() {
             async move {
                 entered.notify_one();
                 release.notified().await;
-                Json(serde_json::json!({"markPrice":"100"}))
+                Json(serde_json::json!({"symbol":"SOLUSDC","markPrice":"100"}))
             }
         }),
     );

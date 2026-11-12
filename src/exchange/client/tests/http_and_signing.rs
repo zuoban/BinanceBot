@@ -100,7 +100,7 @@ async fn exchange_info_and_open_orders_preserve_binance_error_codes() {
 
 #[tokio::test]
 async fn rate_limit_response_blocks_shared_clients_then_recovers() {
-    use axum::{http::StatusCode, routing::get, Json, Router};
+    use axum::{extract::Query, http::StatusCode, routing::get, Json, Router};
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -109,7 +109,7 @@ async fn rate_limit_response_blocks_shared_clients_then_recovers() {
         "/fapi/v1/premiumIndex",
         get({
             let calls = calls.clone();
-            move || {
+            move |Query(query): Query<std::collections::HashMap<String, String>>| {
                 let calls = calls.clone();
                 async move {
                     if calls.fetch_add(1, Ordering::SeqCst) == 0 {
@@ -122,7 +122,7 @@ async fn rate_limit_response_blocks_shared_clients_then_recovers() {
                         (
                             StatusCode::OK,
                             [("retry-after", "1")],
-                            Json(json!({"markPrice":"100"})),
+                            Json(json!({"symbol": query["symbol"], "markPrice":"100"})),
                         )
                     }
                 }

@@ -70,16 +70,29 @@ impl MarketCache {
                     let requested = Instant::now();
                     let requested_at = Utc::now();
                     let prices = client.get_all_mark_prices_for_fallback().await?;
+                    let mut by_symbol = HashMap::with_capacity(prices.len());
+                    for price in prices {
+                        // A batch with duplicate identities has no authoritative
+                        // price. Reject it before publishing any cached values.
+                        anyhow::ensure!(
+                            by_symbol
+                                .insert(price.symbol.to_ascii_uppercase(), price.mark_price)
+                                .is_none(),
+                            "Duplicate symbol in Binance mark-price response"
+                        );
+                    }
                     Ok(MarketCacheSnapshot {
                         requested,
                         requested_at,
-                        prices: prices
-                            .into_iter()
-                            .map(|price| (price.symbol, price.mark_price))
-                            .collect(),
+                        prices: by_symbol,
                     })
                 },
-                |snapshot| (snapshot.prices.get(symbol).copied(), snapshot.requested_at),
+                |snapshot| {
+                    (
+                        snapshot.prices.get(&symbol.to_ascii_uppercase()).copied(),
+                        snapshot.requested_at,
+                    )
+                },
             )
             .await?;
         if let Some(price) = price {

@@ -241,6 +241,7 @@ async fn pair_recovery_engine(
 mod credentials_and_scope_transitions;
 mod lifecycle_and_cancel;
 mod market_feed_and_fallbacks;
+mod market_identity;
 mod pair_intent_lifecycle;
 mod paper_and_sizing;
 mod reconcile_and_mode_cancel;

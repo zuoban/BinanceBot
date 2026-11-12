@@ -5,6 +5,81 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 #[tokio::test]
+async fn ambiguous_bulk_marks_are_rejected_before_cache_publication() {
+    use serde_json::{json, Value};
+    use tokio::sync::RwLock;
+
+    let response = Arc::new(RwLock::new(json!([])));
+    let bulk = Arc::new(AtomicUsize::new(0));
+    let app = Router::new().route(
+        "/fapi/v1/premiumIndex",
+        get({
+            let response = response.clone();
+            let bulk = bulk.clone();
+            move |Query(query): Query<HashMap<String, String>>| {
+                let response = response.clone();
+                let bulk = bulk.clone();
+                async move {
+                    if let Some(symbol) = query.get("symbol") {
+                        Json(json!({"symbol": symbol, "markPrice": "100"}))
+                    } else {
+                        bulk.fetch_add(1, Ordering::SeqCst);
+                        Json(response.read().await.clone())
+                    }
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = BinanceFuturesClient::with_base_url(&AppConfig::default().exchange, url);
+    let invalid_rows: Vec<Value> = vec![
+        json!([{"symbol":"PAIR9", "markPrice":"101"}, {"symbol":"PAIR9", "markPrice":"102"}]),
+        json!([{"symbol":"PAIR9", "markPrice":"101"}, {"symbol":"pair9", "markPrice":"102"}]),
+        json!([{"symbol":"PAIR9", "markPrice":"101"}, {"symbol":"PAIR9", "markPrice":"101"}]),
+    ];
+    for rows in invalid_rows {
+        let cache = MarketCache::default();
+        for i in 0..9 {
+            cache
+                .mark_price(&client, &format!("PAIR{i}"))
+                .await
+                .unwrap();
+        }
+        *response.write().await = rows.clone();
+        assert!(
+            cache.mark_price(&client, "PAIR9").await.is_err(),
+            "accepted {rows}"
+        );
+        let failed_calls = bulk.load(Ordering::SeqCst);
+        assert!(cache.mark_price(&client, "PAIR9").await.is_err());
+        assert_eq!(bulk.load(Ordering::SeqCst), failed_calls);
+        let (_, entry) = cache.entries.entry(client.market_cache_key());
+        {
+            let mut entry = entry.lock().await;
+            assert!(entry.snapshot.is_none());
+            assert!(entry.failed_at.is_some());
+            // Allow a deterministic retry without sleeping through the cooldown.
+            entry.failed_at = None;
+        }
+        *response.write().await = json!([{"symbol":"pair9", "markPrice":"103"}]);
+        assert_eq!(
+            cache.mark_price(&client, "PAIR9").await.unwrap().0,
+            Decimal::from(103)
+        );
+        let calls = bulk.load(Ordering::SeqCst);
+        assert_eq!(
+            cache.mark_price(&client, "pair9").await.unwrap().0,
+            Decimal::from(103)
+        );
+        assert_eq!(bulk.load(Ordering::SeqCst), calls);
+    }
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
 async fn bulk_mark_requests_are_shared_and_failures_are_cooled_down() {
     let bulk = Arc::new(AtomicUsize::new(0));
     let single = Arc::new(AtomicUsize::new(0));
