@@ -1,7 +1,7 @@
 # -------------------------------------------------------------------
 # Stage 1: Build binary with cargo
 # -------------------------------------------------------------------
-FROM rust:1.98.1-bookworm AS builder
+FROM rust:1.99.1-bookworm AS builder
 WORKDIR /usr/src/app
 
 # Copy dependency specifications first to leverage Docker layer caching
