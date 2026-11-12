@@ -136,7 +136,7 @@ pub(super) async fn accounts_ws_handler(
     };
     let (ws, token) = match authorize_and_configure_ws(ws, &headers, &auth).await {
         Ok(ready) => ready,
-        Err(response) => return response,
+        Err(rejection) => return rejection.into_response(),
     };
     ws.on_upgrade(move |socket| run_accounts_socket(socket, hub, auth, token, retired))
 }

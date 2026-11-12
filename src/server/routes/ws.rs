@@ -133,13 +133,12 @@ pub(super) async fn authorize_and_configure_ws(
     ws: WebSocketUpgrade,
     headers: &HeaderMap,
     auth: &AuthContext,
-) -> Result<(WebSocketUpgrade, String), Response> {
+) -> Result<(WebSocketUpgrade, String), (StatusCode, &'static str)> {
     if !ws_origin_allowed(headers) {
         return Err((
             StatusCode::FORBIDDEN,
             "Forbidden: Cross-origin WebSocket connection rejected",
-        )
-            .into_response());
+        ));
     }
     let token = websocket_token(headers);
     match auth.check_token_valid(token).await {
@@ -148,23 +147,20 @@ pub(super) async fn authorize_and_configure_ws(
             return Err((
                 StatusCode::UNAUTHORIZED,
                 "Unauthorized: Missing or invalid authentication token",
-            )
-                .into_response());
+            ));
         }
         Err(SessionCheckError::Busy) => {
             return Err((
                 StatusCode::SERVICE_UNAVAILABLE,
                 "Service Unavailable: Session validation busy, retry shortly",
-            )
-                .into_response());
+            ));
         }
         Err(SessionCheckError::Database(err)) => {
             error!("Failed to validate WebSocket session: {}", err);
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Internal Server Error: Authentication service unavailable",
-            )
-                .into_response());
+            ));
         }
     }
     let configured = ws
@@ -180,7 +176,7 @@ pub(super) async fn ws_handler(
 ) -> Response {
     let (ws, token) = match authorize_and_configure_ws(ws, &headers, &state.auth).await {
         Ok(ready) => ready,
-        Err(response) => return response,
+        Err(rejection) => return rejection.into_response(),
     };
     ws.on_upgrade(move |socket| handle_socket(socket, state, token))
 }
