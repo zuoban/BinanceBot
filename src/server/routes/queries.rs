@@ -29,18 +29,18 @@ pub(super) async fn get_pairs_handler(
 }
 
 async fn collect_pairs(states: &[Arc<AppState>]) -> Json<ApiResponse<Vec<TradingPairView>>> {
-    let mut pairs = Vec::with_capacity(states.len());
-    for state in states.iter() {
+    let pairs = futures_util::future::join_all(states.iter().map(|state| async move {
         let config = state.config.read().await;
-        pairs.push(TradingPairView {
+        TradingPairView {
             symbol: config.exchange.symbol.clone(),
             scoped: state.pair_scope().is_some(),
             status: *state.status.read().await,
             mode: config.exchange.trading_mode(),
             account_scope: config.exchange.account_scope(),
             grid_config: config.summary(),
-        });
-    }
+        }
+    }))
+    .await;
     json_ok(pairs)
 }
 
