@@ -10,7 +10,7 @@ const formatHour = (hour: number) => isValidEpochMs(hour * 1000) ? hourFormat.fo
 const formatDay = (hour: number) => isValidEpochMs(hour * 1000) ? dayFormat.format(hour * 1000) : '--';
 const axisTick = { fontSize: 11, fontFamily: 'var(--font-mono)', fill: 'var(--text-muted)' };
 const tooltipCursor = { stroke: 'var(--border-strong)', strokeDasharray: '3 4' };
-const tooltipContentStyle = { background: 'var(--bg-raised)', borderColor: 'var(--border-strong)', borderRadius: 8, boxShadow: 'var(--overlay-shadow)', color: 'var(--text-primary)', fontSize: 12 };
+const tooltipContentStyle = { background: 'var(--bg-elevated)', borderColor: 'var(--border-strong)', borderRadius: 8, boxShadow: 'var(--overlay-shadow)', color: 'var(--text-primary)', fontSize: 12 };
 const tooltipLabelStyle = { color: 'var(--text-primary)', fontFamily: 'var(--font-mono)', fontWeight: 600, marginBottom: 4 };
 const tooltipItemStyle = { color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' };
 const dailyMargin = { top: 12, right: 16, bottom: 0, left: 4 };

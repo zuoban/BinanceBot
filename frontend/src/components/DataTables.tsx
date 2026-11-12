@@ -167,9 +167,10 @@ function TableFilterBar<T extends string>({ label, value, onChange, options, sho
     <Button size="small" icon={<DownloadOutlined />} disabled={!shown} onClick={onExport}>导出 CSV</Button>
   </div>;
 }
-function ResponsiveTableSection({ isNarrow, hint, renderDesktop, hasRows, totalCount, emptyFilteredText, emptyAllText, listLabel, renderMobileRows, truncatedLimit, totalFilteredCount }: {
+function ResponsiveTableSection({ isNarrow, hint, compactScroll = false, renderDesktop, hasRows, totalCount, emptyFilteredText, emptyAllText, listLabel, renderMobileRows, truncatedLimit, totalFilteredCount }: {
   isNarrow: boolean;
   hint: string;
+  compactScroll?: boolean;
   renderDesktop: () => React.ReactNode;
   hasRows: boolean;
   totalCount: number;
@@ -181,7 +182,7 @@ function ResponsiveTableSection({ isNarrow, hint, renderDesktop, hasRows, totalC
   totalFilteredCount?: number;
 }) {
   if (!isNarrow) {
-    return <div className="table-desktop"><p className="table-scroll-hint">{hint}</p>{renderDesktop()}</div>;
+    return <div className="table-desktop"><p className={`table-scroll-hint${compactScroll ? ' table-scroll-hint-compact' : ''}`}>{hint}</p>{renderDesktop()}</div>;
   }
   return <div className="table-mobile">
     {hasRows ? <ul className="trade-list" aria-label={listLabel}>{renderMobileRows()}</ul> : <div className="trade-list-empty">{totalCount ? emptyFilteredText : emptyAllText}</div>}
@@ -343,6 +344,7 @@ export const LogsTable = memo(function LogsTable({ logs }: { logs: Log[] }) {
     <ResponsiveTableSection
       isNarrow={isNarrow}
       hint="左右滑动查看完整日志"
+      compactScroll
       renderDesktop={() => <Table<Log> rowKey="key" rowClassName={logRowClassName} dataSource={rows} size="small" scroll={logScroll} pagination={logPagination} columns={logColumns} />}
       hasRows={rows.length > 0}
       totalCount={logs.length}

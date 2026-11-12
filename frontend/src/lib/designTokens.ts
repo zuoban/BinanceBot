@@ -8,11 +8,14 @@ const lightPalette = {
   '--border-strong': 'rgba(23, 24, 28, 0.16)',
   '--text-primary': '#17181c',
   '--text-secondary': '#52555d',
-  '--text-muted': '#70747e',
+  '--text-muted': '#636771',
+  '--bg-elevated': '#ffffff',
   '--accent': '#9a6700',
   '--accent-soft': 'rgba(154, 103, 0, 0.08)',
   '--positive': '#15803d',
+  '--positive-stale': '#388258',
   '--negative': '#dc2626',
+  '--negative-stale': '#bf4343',
   '--danger-border': 'rgba(220, 38, 38, 0.28)',
   '--history-equity': '#b47800',
   '--sig-calm': '#15803d', '--sig-calm-bg': 'rgba(21, 128, 61, 0.07)', '--sig-calm-line': 'rgba(21, 128, 61, 0.2)',
@@ -38,9 +41,10 @@ export const palettes = {
     ...lightPalette,
     '--bg-page': '#131416', '--bg-card': '#18191c', '--bg-raised': '#212328',
     '--border-hairline': 'rgba(237, 238, 240, 0.08)', '--border-strong': 'rgba(237, 238, 240, 0.16)',
-    '--text-primary': '#edeef0', '--text-secondary': '#a0a3ab', '--text-muted': '#848892',
+    '--text-primary': '#edeef0', '--text-secondary': '#a0a3ab', '--text-muted': '#90949e',
+    '--bg-elevated': '#212328',
     '--accent': '#e5a910', '--accent-soft': 'rgba(229, 169, 16, 0.12)',
-    '--positive': '#4cc38a', '--negative': '#e5484d', '--danger-border': 'rgba(229, 72, 77, 0.32)',
+    '--positive': '#4cc38a', '--positive-stale': '#4ea67c', '--negative': '#e5484d', '--negative-stale': '#cf6a6e', '--danger-border': 'rgba(229, 72, 77, 0.32)',
     '--history-equity': '#e5a910',
     '--sig-calm': '#4cc38a', '--sig-calm-bg': 'rgba(76, 195, 138, 0.1)', '--sig-calm-line': 'rgba(76, 195, 138, 0.22)',
     '--sig-blue': '#a0a3ab', '--sig-blue-bg': '#212328', '--sig-blue-line': 'rgba(237, 238, 240, 0.12)',
@@ -77,7 +81,7 @@ const sharedCssTokens = {
 // Ant Design-only surfaces and interaction states share the palette's semantic values.
 export const componentColors = {
   light: {
-    elevated: palettes.light['--bg-card'], disabledText: '#8a8e98', disabledBg: '#f1f2f4',
+    elevated: palettes.light['--bg-elevated'], disabledText: '#8a8e98', disabledBg: '#f1f2f4',
     border: '#d8dadf', borderSecondary: '#e9eaee',
     hover: '#f1f2f4', active: palettes.light['--accent-soft'], activeHover: 'rgba(154, 103, 0, 0.13)',
     tableHeader: palettes.light['--bg-raised'], tableHover: '#f7f7f8', segmentedTrack: '#eceef1',
@@ -85,7 +89,7 @@ export const componentColors = {
     buttonForeground: '#ffffff', dangerForeground: '#ffffff',
   },
   dark: {
-    elevated: palettes.dark['--bg-raised'], disabledText: '#686c76', disabledBg: '#1d1f24',
+    elevated: palettes.dark['--bg-elevated'], disabledText: '#686c76', disabledBg: '#1d1f24',
     border: '#34373f', borderSecondary: '#25272d',
     hover: '#23252b', active: palettes.dark['--accent-soft'], activeHover: 'rgba(229, 169, 16, 0.2)',
     tableHeader: '#151619', tableHover: '#1d1f24', segmentedTrack: '#141518',
@@ -94,5 +98,5 @@ export const componentColors = {
   },
 } as const;
 
-const declarations = (tokens: Readonly<Record<string, string>>) => Object.entries(tokens).filter(([name]) => name !== '--accent-soft').map(([name, value]) => `${name}:${value};`).join('');
+const declarations = (tokens: Readonly<Record<string, string>>) => Object.entries(tokens).map(([name, value]) => `${name}:${value};`).join('');
 export const designTokensCss = `:root{${declarations(sharedCssTokens)}${declarations(palettes.light)}}[data-theme="dark"]{${declarations(palettes.dark)}}`;

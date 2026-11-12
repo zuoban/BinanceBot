@@ -59,7 +59,7 @@ export const StrategyCard = memo(function StrategyCard({
   return <Card className="strategy-card">
     <div className="section-line strategy-card-heading">
       <div className="strategy-identity"><Link className="pair-name" to={pairRoute(s.symbol)}>{s.symbol}</Link></div>
-      <Space className="strategy-card-actions" size={6}><Popover trigger="click" placement="bottom" title={`${s.symbol} 策略配置`} content={<StrategyConfigPopover symbol={s.symbol} config={s.grid_config} quoteUnit={quoteUnit} />}><Button size="small" icon={<EyeOutlined />} aria-label={`查看 ${s.symbol} 策略配置`} /></Popover><StrategyToggle pair={pair} stale={stale} /><StrategyMenu pair={pair} stale={stale} /></Space>
+      <Space className="strategy-card-actions"><Popover trigger="click" placement="bottom" title={`${s.symbol} 策略配置`} content={<StrategyConfigPopover symbol={s.symbol} config={s.grid_config} quoteUnit={quoteUnit} />}><Button size="small" icon={<EyeOutlined />} aria-label={`查看 ${s.symbol} 策略配置`} /></Popover><StrategyToggle pair={pair} stale={stale} /><StrategyMenu pair={pair} stale={stale} /></Space>
     </div>
     <div className="strategy-main">
       <div className="strategy-price"><span className="muted">标记价格{quoteSuffix}</span><strong>{positivePrice(s.ticker.mark_price, true)}</strong></div>

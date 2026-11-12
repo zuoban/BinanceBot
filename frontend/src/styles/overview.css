@@ -20,7 +20,7 @@
 }
 
 /* ---------- Overview: bulletin band ---------- */
-.overview-banner { container: overview-banner / inline-size; margin-bottom: 24px; border: 1px solid var(--border-hairline); border-radius: 12px; background: var(--bg-card); overflow: hidden; }
+.overview-banner { container: overview-banner / inline-size; margin-bottom: 24px; border: 1px solid var(--border-hairline); border-radius: var(--radius-panel); background: var(--bg-card); overflow: hidden; }
 .overview-banner > .signal-strip { padding: 12px 20px; border-bottom: 1px solid var(--border-hairline); background: var(--bg-raised); }
 .overview-banner > .signal-strip:empty { display: none; }
 .overview-banner > .signal-strip .freshness { order: 2; margin-left: auto; }
@@ -83,7 +83,7 @@
 .filter-bar .ant-select { min-width: 176px; }
 .filter-bar > .ant-btn { color: var(--text-secondary); }
 .filter-count { margin-left: auto; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
-.strategy-grid, .skeleton-grid-strategies { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 522px), 1fr)); gap: var(--space-5); }
+.strategy-grid, .skeleton-grid-strategies { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 522px), 1fr)); gap: var(--space-5); }
 .strategy-empty { grid-column: 1 / -1; }
 .strategy-empty .ant-card-body { padding: 32px 20px; }
 .strategy-card { container: strategy-card / inline-size; min-width: 0; height: 100%; }
@@ -94,7 +94,7 @@
 @media (hover: hover) and (pointer: fine) { .pair-name:hover { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; } }
 .strategy-main { display: flex; align-items: flex-end; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; margin-bottom: 16px; }
 .strategy-tags { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex: none; margin-left: auto; }
-.strategy-card-actions { flex: none; align-items: center; margin-left: auto; }
+.strategy-card-actions { flex: none; align-items: center; gap: 6px; margin-left: auto; }
 .strategy-card-actions .ant-btn { min-height: 32px; border-radius: var(--radius-control); }
 .strategy-card-actions .ant-btn-icon-only { width: 32px; }
 .strategy-toggle.ant-btn { min-width: 76px; padding-inline: 10px; }
@@ -147,8 +147,14 @@
 .batch-results-head a { font: 500 14px var(--font-mono); text-decoration: none; }
 .batch-results-head a:hover { color: var(--accent); }
 
-.is-stale .overview-stat strong, .is-stale .ant-statistic-content, .is-stale .finance-metrics strong,
-.is-stale .strategy-price strong, .is-stale .strategy-metrics strong, .finance-summary-values.is-stale strong { opacity: 0.7; }
+.is-stale .overview-stat strong:not(.positive, .negative, :has(.positive, .negative)),
+.is-stale .ant-statistic-content:not(:has(.positive, .negative)),
+.is-stale .finance-metrics strong:not(.position-long, .position-short, :has(.positive, .negative)),
+.is-stale .strategy-price strong,
+.is-stale .strategy-metrics strong:not(.positive, .negative, :has(.positive, .negative)),
+.finance-summary-values.is-stale strong:not(:has(.positive, .negative)) { opacity: 0.7; }
+.is-stale .positive, .is-stale .position-long { color: var(--positive-stale) !important; }
+.is-stale .negative, .is-stale .position-short { color: var(--negative-stale) !important; }
 
 .paper-guide { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: var(--space-2); margin-bottom: var(--space-4); padding: var(--space-3) var(--space-4); border: 1px solid var(--border-hairline); border-radius: var(--radius-panel); background: var(--bg-card); }
 .paper-guide-details { min-width: 0; }
@@ -164,7 +170,7 @@
 .paper-guide .muted { margin: 0; }
 
 @media (pointer: coarse), (max-width: 600px) {
-  .strategy-card-actions { gap: 8px !important; }
+  .strategy-card-actions { gap: 8px; }
   .strategy-card-actions .ant-btn { position: relative; min-width: 36px; min-height: 36px; touch-action: manipulation; }
   .strategy-card-actions .ant-btn::before { content: ''; position: absolute; left: 50%; right: auto; top: 50%; width: 100%; min-width: var(--control-touch); height: var(--control-touch); transform: translate(-50%, -50%); }
   .strategy-toggle.ant-btn { min-width: 72px; padding-inline: 8px; }
