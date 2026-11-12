@@ -17,6 +17,7 @@ enum CachedSymbolPosition {
 struct PositionSnapshot {
     positions: HashMap<String, CachedSymbolPosition>,
     received_instant: Instant,
+    cached_at: Instant,
 }
 
 impl PositionSnapshot {
@@ -52,6 +53,7 @@ impl PositionSnapshot {
         Self {
             positions,
             received_instant,
+            cached_at: Instant::now(),
         }
     }
 
@@ -122,7 +124,7 @@ impl PositionCache {
                 .get_or_fetch(
                     &key,
                     "position",
-                    |snapshot| snapshot.received_instant.elapsed() < MAX_AGE,
+                    |snapshot| snapshot.cached_at.elapsed() < MAX_AGE,
                     || async {
                         let requested_instant = Instant::now();
                         let positions = client.get_all_positions().await?;

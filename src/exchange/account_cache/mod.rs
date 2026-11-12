@@ -14,6 +14,7 @@ pub(crate) struct AccountSnapshot {
     pub(crate) account: Arc<BinanceAccountInfoResponse>,
     pub(crate) received_at: DateTime<Utc>,
     pub(crate) received_instant: Instant,
+    cached_at: Instant,
 }
 
 #[derive(Default)]
@@ -44,6 +45,7 @@ impl AccountCache {
                     account: Arc::new(account),
                     received_at: requested_at,
                     received_instant: requested_instant,
+                    cached_at: Instant::now(),
                 })
             })
             .await
@@ -64,7 +66,9 @@ impl AccountCache {
             .get_or_fetch(
                 &key,
                 "account",
-                |snapshot| !force && snapshot.received_instant.elapsed() < MAX_AGE,
+                // Reuse a completed response for one second, while preserving
+                // request-start timestamps for trading freshness checks.
+                |snapshot| !force && snapshot.cached_at.elapsed() < MAX_AGE,
                 || async {
                     let requested_at = Utc::now();
                     let requested_instant = Instant::now();
@@ -73,6 +77,7 @@ impl AccountCache {
                         account: Arc::new(account),
                         received_at: requested_at,
                         received_instant: requested_instant,
+                        cached_at: Instant::now(),
                     })
                 },
                 Clone::clone,

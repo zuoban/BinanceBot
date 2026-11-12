@@ -1,4 +1,21 @@
 use super::*;
+use crate::exchange::SharedRequestPending;
+
+#[derive(Clone, Copy)]
+enum AccountSyncResult {
+    Ready(Instant),
+    Pending,
+    Failed,
+}
+
+impl AccountSyncResult {
+    fn instant(self) -> Option<Instant> {
+        match self {
+            Self::Ready(at) => Some(at),
+            Self::Pending | Self::Failed => None,
+        }
+    }
+}
 
 pub(super) fn build_sync_timer(sync_secs: u64) -> tokio::time::Interval {
     let sync_secs = sync_secs.clamp(1, crate::config::MAX_SYNC_INTERVAL_SECS);
@@ -31,6 +48,10 @@ impl GridTradingEngine {
     // Compatibility recovery only: adopted exchange orders are reconciled, but
     // an absent legacy counter-order is retired instead of creating a new pair.
     pub(super) fn sync_timestamps_fresh(&self) -> bool {
+        !self.account_sync_pending && self.reconciliation_data_fresh()
+    }
+
+    fn reconciliation_data_fresh(&self) -> bool {
         let freshness = self.sync_freshness();
         self.last_account_sync
             .is_some_and(|at| at.elapsed() < freshness)
@@ -40,9 +61,10 @@ impl GridTradingEngine {
     }
 
     pub(super) async fn refresh_position_then_account(&mut self, shared: bool) -> bool {
-        let position = self.sync_position(shared).await;
+        self.account_sync_pending = false;
+        let position = self.sync_position(shared).await.instant();
         let account = if position.is_some() {
-            self.sync_account(shared, !shared).await
+            self.sync_account(shared, !shared).await.instant()
         } else {
             None
         };
@@ -130,9 +152,35 @@ impl GridTradingEngine {
                 "Periodic sync stage finished"
             );
         }
-        let ready = orders_ready && account_ready && !self.state.is_stats_dirty();
-        self.set_global_reconciliation_ready(ready).await;
-        Ok(ready)
+        // Waiting for a sibling's HTTP request does not invalidate an otherwise
+        // fresh risk snapshot. Replenishment still waits for this refresh.
+        let risk_ready = orders_ready
+            && (account_ready || self.account_sync_pending)
+            && self.reconciliation_data_fresh()
+            && !self.state.is_stats_dirty();
+        self.set_global_reconciliation_ready(risk_ready).await;
+        Ok(risk_ready && account_ready)
+    }
+
+    pub(super) async fn retry_pending_account_sync(&mut self) {
+        if !self.account_sync_pending || self.state.is_shutting_down() {
+            return;
+        }
+        let risk = RiskConfigSnapshot::from_config(&*self.state.config.read().await);
+        if risk.is_paper {
+            self.account_sync_pending = false;
+            return;
+        }
+        let pause_epoch = self.state.pause_epoch();
+        let account_ready = self.sync_account_and_position_inner(true).await;
+        let risk_ready = !self.reconciliation_blocked
+            && (account_ready || self.account_sync_pending)
+            && self.reconciliation_data_fresh()
+            && !self.state.is_stats_dirty();
+        self.set_global_reconciliation_ready(risk_ready).await;
+        if self.state.pause_epoch() == pause_epoch {
+            Box::pin(self.finish_sync_cycle_window(risk, risk_ready && account_ready, None)).await;
+        }
     }
 
     async fn maybe_sync_server_time(&mut self) {
@@ -222,6 +270,8 @@ impl GridTradingEngine {
             debug!(
                 result = if account_ready {
                     "complete"
+                } else if self.account_sync_pending {
+                    "account_position_pending"
                 } else {
                     "reconciliation_failed"
                 },
@@ -237,8 +287,9 @@ impl GridTradingEngine {
         self.sync_account_and_position_inner(false).await
     }
 
-    async fn sync_position(&self, shared_position: bool) -> Option<Instant> {
+    async fn sync_position(&self, shared_position: bool) -> AccountSyncResult {
         let symbol = self.state.config.read().await.exchange.symbol.clone();
+        let started = Instant::now();
         let position_result = if shared_position {
             self.position_cache.get(&self.client, &symbol).await
         } else {
@@ -246,22 +297,34 @@ impl GridTradingEngine {
                 .refresh_critical(&self.client, &symbol)
                 .await
         };
-        if let Ok((Some(pos), received_at)) = position_result {
-            let synced_at = chrono::Duration::from_std(received_at.elapsed())
-                .ok()
-                .map(|age| Utc::now() - age);
-            *self.state.position.write().await = pos.into_position_info(synced_at);
-            Some(received_at)
-        } else {
-            self.state.position.write().await.update_time = None;
-            warn!("Could not sync Binance position for {}", symbol);
-            self.set_global_reconciliation_ready(false).await;
-            None
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        match position_result {
+            Ok((Some(pos), received_at)) => {
+                let synced_at = chrono::Duration::from_std(received_at.elapsed())
+                    .ok()
+                    .map(|age| Utc::now() - age);
+                *self.state.position.write().await = pos.into_position_info(synced_at);
+                return AccountSyncResult::Ready(received_at);
+            }
+            Err(error) if error.is::<SharedRequestPending>() => {
+                debug!(%symbol, elapsed_ms, "Binance position sync is waiting for a shared request");
+                return AccountSyncResult::Pending;
+            }
+            Err(error) => {
+                warn!(%symbol, elapsed_ms, error = %error, "Could not sync Binance position");
+            }
+            Ok((None, _)) => {
+                warn!(%symbol, elapsed_ms, "Binance position response contains no record for symbol");
+            }
         }
+        self.state.position.write().await.update_time = None;
+        self.set_global_reconciliation_ready(false).await;
+        AccountSyncResult::Failed
     }
 
-    async fn sync_account(&self, shared: bool, critical: bool) -> Option<Instant> {
+    async fn sync_account(&self, shared: bool, critical: bool) -> AccountSyncResult {
         let symbol = self.state.config.read().await.exchange.symbol.clone();
+        let started = Instant::now();
         let account = if critical {
             self.account_cache.refresh_critical(&self.client).await
         } else if shared {
@@ -279,23 +342,38 @@ impl GridTradingEngine {
                     state_acc.margin_balance = asset.margin_balance;
                     state_acc.unrealized_profit = asset.unrealized_profit;
                     state_acc.update_time = snapshot.received_at;
-                    Some(snapshot.received_instant)
+                    AccountSyncResult::Ready(snapshot.received_instant)
                 } else {
                     warn!(
+                        %symbol,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
                         "No matching margin asset in Binance account response for {}",
                         symbol
                     );
                     self.state.account.write().await.update_time =
                         chrono::DateTime::<Utc>::default();
                     self.set_global_reconciliation_ready(false).await;
-                    None
+                    AccountSyncResult::Failed
                 }
             }
+            Err(error) if error.is::<SharedRequestPending>() => {
+                debug!(
+                    %symbol,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "Binance account sync is waiting for a shared request"
+                );
+                AccountSyncResult::Pending
+            }
             Err(e) => {
-                warn!("Could not sync Binance account balance: {}", e);
+                warn!(
+                    %symbol,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    error = %e,
+                    "Could not sync Binance account balance"
+                );
                 self.state.account.write().await.update_time = chrono::DateTime::<Utc>::default();
                 self.set_global_reconciliation_ready(false).await;
-                None
+                AccountSyncResult::Failed
             }
         }
     }
@@ -304,6 +382,7 @@ impl GridTradingEngine {
         self.account_cache.invalidate(&self.client);
         self.position_cache.invalidate(&self.client);
         self.last_account_sync = None;
+        self.account_sync_pending = false;
     }
 
     pub(super) async fn block_reconciliation_and_invalidate_caches(&mut self) {
@@ -313,23 +392,43 @@ impl GridTradingEngine {
 
     pub(super) async fn sync_account_and_position_inner(&mut self, shared_position: bool) -> bool {
         let pause_epoch = self.state.pause_epoch();
-        let position_instant = self.sync_position(shared_position).await;
-        let position_ok = position_instant.is_some();
+        self.account_sync_pending = false;
+        let position = self.sync_position(shared_position).await;
         if self.state.pause_epoch() != pause_epoch {
+            self.last_account_sync = None;
             return false;
         }
-        let account_instant = self.sync_account(shared_position, !shared_position).await;
-        let account_ok = account_instant.is_some();
+        let account = self.sync_account(shared_position, !shared_position).await;
+        let ready = match (position, account) {
+            (AccountSyncResult::Ready(position), AccountSyncResult::Ready(account)) => {
+                self.last_account_sync = Some(account.min(position));
+                true
+            }
+            (AccountSyncResult::Failed, _) | (_, AccountSyncResult::Failed) => {
+                self.last_account_sync = None;
+                false
+            }
+            _ => {
+                self.account_sync_pending = true;
+                if self
+                    .last_account_sync
+                    .is_none_or(|at| at.elapsed() >= self.sync_freshness())
+                {
+                    if let Some(previous_sync) = self.last_account_sync.take() {
+                        let symbol = self.state.config.read().await.exchange.symbol.clone();
+                        warn!(
+                            %symbol,
+                            snapshot_age_ms = previous_sync.elapsed().as_millis() as u64,
+                            "Binance account sync is still pending and the previous risk snapshot expired"
+                        );
+                    }
+                    self.set_global_reconciliation_ready(false).await;
+                }
+                false
+            }
+        };
         self.state.check_global_position_limit().await;
-        if position_ok && account_ok {
-            self.last_account_sync = account_instant
-                .zip(position_instant)
-                .map(|(account, position)| account.min(position));
-            true
-        } else {
-            self.last_account_sync = None;
-            false
-        }
+        ready
     }
 
     pub(super) async fn acquire_live_sync_fill_guard(

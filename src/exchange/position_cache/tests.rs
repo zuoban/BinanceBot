@@ -1,4 +1,4 @@
-use super::super::cache_entries::FAILURE_COOLDOWN;
+use super::super::cache_entries::{SharedRequestPending, FAILURE_COOLDOWN};
 use super::*;
 use crate::config::AppConfig;
 use axum::{extract::Query, http::StatusCode, routing::get, Json, Router};
@@ -112,6 +112,39 @@ async fn concurrent_symbols_share_bulk_request_and_credentials_are_isolated() {
 }
 
 #[tokio::test]
+async fn slow_response_is_shared_without_resetting_its_observation_time() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let app = Router::new().route(
+        "/fapi/v2/positionRisk",
+        get({
+            let calls = calls.clone();
+            move || {
+                let calls = calls.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(MAX_AGE).await;
+                    Json(json!([{"symbol":"SOLUSDC", "positionSide":"BOTH",
+                    "positionAmt":"1", "entryPrice":"100", "markPrice":"100",
+                    "unRealizedProfit":"0", "liquidationPrice":"0", "leverage":"20"}]))
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = BinanceFuturesClient::with_base_url(&AppConfig::default().exchange, url);
+    let cache = PositionCache::default();
+    let first = cache.get(&client, "SOLUSDC").await.unwrap();
+    assert!(first.1.elapsed() >= MAX_AGE);
+    let shared = cache.get(&client, "SOLUSDC").await.unwrap();
+    assert_eq!(shared.1, first.1);
+    assert_eq!(shared.0.unwrap().position_amt, rust_decimal_macros::dec!(1));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    server.abort();
+}
+
+#[tokio::test]
 async fn missing_positions_use_symbol_fallback_and_hedge_is_rejected() {
     let (url, calls, mode, server) = server().await;
     let client = BinanceFuturesClient::with_base_url(&AppConfig::default().exchange, url);
@@ -137,13 +170,7 @@ async fn expired_positions_are_not_served_after_failure_and_can_recover() {
     let cache = PositionCache::default();
     cache.get(&client, "SOLUSDC").await.unwrap();
     let (_epoch, entry) = cache.entries.entry(&client.account_cache_key());
-    entry
-        .lock()
-        .await
-        .snapshot
-        .as_mut()
-        .unwrap()
-        .received_instant = Instant::now() - MAX_AGE;
+    entry.lock().await.snapshot.as_mut().unwrap().cached_at = Instant::now() - MAX_AGE;
     mode.store(1, Ordering::SeqCst);
     let failed =
         futures_util::future::join_all((0..20).map(|_| cache.get(&client, "SOLUSDC"))).await;
@@ -246,7 +273,10 @@ async fn ordinary_wait_is_bounded_and_retired_failure_cannot_poison_new_generati
     let waiting = tokio::time::timeout(Duration::from_secs(1), waiting)
         .await
         .unwrap();
-    assert!(waiting.iter().all(Result::is_err));
+    assert!(waiting.iter().all(|result| result
+        .as_ref()
+        .err()
+        .is_some_and(|err| err.is::<SharedRequestPending>())));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     cache.invalidate(&client);
     let fresh = tokio::time::timeout(Duration::from_secs(1), cache.get(&client, "SOLUSDC"))

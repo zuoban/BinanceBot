@@ -10,6 +10,7 @@ pub(crate) mod rate_limit;
 pub(crate) mod signature;
 pub(crate) mod ws;
 
+pub(crate) use cache_entries::SharedRequestPending;
 pub use client::BinanceFuturesClient;
 pub(crate) use client::ExchangeError;
 pub(crate) use model::*;

@@ -441,6 +441,7 @@ impl GridTradingEngine {
         self.market_data_blocked = false;
         self.paper_window_cache = None;
         self.last_account_sync = None;
+        self.account_sync_pending = false;
         self.last_orders_sync = None;
         self.evidence = OrderEvidenceBook::default();
     }

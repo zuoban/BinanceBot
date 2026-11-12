@@ -14,6 +14,13 @@ pub(super) const FAILURE_COOLDOWN: Duration = Duration::from_secs(2);
 // rather than queuing behind a slow HTTP loader. Critical refreshes detach it.
 pub(super) const ENTRY_WAIT: Duration = Duration::from_millis(100);
 
+#[derive(Debug, thiserror::Error)]
+#[error("shared {label} request is still in flight after {waited_ms} ms")]
+pub(crate) struct SharedRequestPending {
+    label: String,
+    waited_ms: u64,
+}
+
 pub(super) struct CacheEntry<T> {
     pub snapshot: Option<T>,
     pub failed_at: Option<Instant>,
@@ -187,9 +194,13 @@ impl<K: Eq + Hash, T> CacheEntries<K, T> {
     {
         loop {
             let (epoch, entry) = self.entry_sync(key);
+            let wait_started = Instant::now();
             let mut cached = tokio::time::timeout(ENTRY_WAIT, entry.lock())
                 .await
-                .map_err(|_| anyhow!("shared {label} request is still in flight"))?;
+                .map_err(|_| SharedRequestPending {
+                    label: label.to_owned(),
+                    waited_ms: wait_started.elapsed().as_millis() as u64,
+                })?;
             if !self.is_current(key, epoch, &entry) {
                 continue;
             }
@@ -202,7 +213,14 @@ impl<K: Eq + Hash, T> CacheEntries<K, T> {
             if !cached.snapshot.as_ref().is_some_and(&mut is_fresh) {
                 // Do not serve an expired or invalidated snapshot after a failure.
                 cached.snapshot = None;
+                let started = Instant::now();
                 let fetched = fetch().await;
+                tracing::debug!(
+                    resource = label,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    success = fetched.is_ok(),
+                    "Shared exchange snapshot request finished"
+                );
                 if !self.is_current(key, epoch, &entry) {
                     continue;
                 }

@@ -91,6 +91,7 @@ pub struct GridTradingEngine {
     pnl_order_ids: HashMap<String, i64>,
     pnl_clear_revision: u64,
     last_account_sync: Option<Instant>,
+    account_sync_pending: bool,
     last_orders_sync: Option<Instant>,
     sync_interval_secs: u64,
     next_time_sync_at: Instant,
@@ -165,6 +166,7 @@ impl GridTradingEngine {
             pnl_order_ids: HashMap::new(),
             pnl_clear_revision: 0,
             last_account_sync: None,
+            account_sync_pending: false,
             last_orders_sync: None,
             sync_interval_secs,
             next_time_sync_at: Instant::now() + PERIODIC_TIME_SYNC_INTERVAL,
@@ -435,6 +437,9 @@ impl GridTradingEngine {
                     self.reconcile_unverified_trades().await;
                 }
                 _ = pnl_timer.tick() => {
+                    // Retry only the deferred risk snapshot, without repeating
+                    // order reconciliation or consuming critical request budget.
+                    Box::pin(self.retry_pending_account_sync()).await;
                     self.reconcile_unverified_trades().await;
                 }
                 completion = market_completion(&mut self.mark_price_task) => {

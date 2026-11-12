@@ -329,6 +329,7 @@ async fn submit(engine: &mut GridTradingEngine) -> bool {
         .await
 }
 
+mod account_sync;
 mod batch_and_pnl;
 mod cancel_and_provisional;
 mod conflicting_snapshot_recovery;

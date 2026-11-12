@@ -1,4 +1,4 @@
-use super::super::cache_entries::FAILURE_COOLDOWN;
+use super::super::cache_entries::{SharedRequestPending, FAILURE_COOLDOWN};
 use super::*;
 use crate::config::AppConfig;
 use axum::{http::StatusCode, routing::get, Json, Router};
@@ -62,6 +62,41 @@ async fn concurrent_pairs_share_one_fresh_account_response() {
         assert!(Arc::ptr_eq(&first.account, &snapshot.account));
         assert_eq!(first.received_at, snapshot.received_at);
     }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    server.abort();
+}
+
+#[tokio::test]
+async fn slow_response_is_shared_without_resetting_its_observation_time() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let app = Router::new().route(
+        "/fapi/v2/account",
+        get({
+            let calls = calls.clone();
+            move || {
+                let calls = calls.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(MAX_AGE).await;
+                    Json(json!({"totalWalletBalance":"10", "totalMarginBalance":"10",
+                    "totalUnrealizedProfit":"0", "availableBalance":"8",
+                    "assets":[{"asset":"USDT", "walletBalance":"10",
+                        "unrealizedProfit":"0", "marginBalance":"10", "availableBalance":"8"}]}))
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = BinanceFuturesClient::with_base_url(&AppConfig::default().exchange, url);
+    let cache = AccountCache::default();
+    let first = cache.get(&client).await.unwrap();
+    assert!(first.received_instant.elapsed() >= MAX_AGE);
+    let shared = cache.get(&client).await.unwrap();
+    assert!(Arc::ptr_eq(&first.account, &shared.account));
+    assert_eq!(first.received_instant, shared.received_instant);
+    assert_eq!(first.received_at, shared.received_at);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     server.abort();
 }
@@ -163,13 +198,7 @@ async fn expired_snapshot_is_not_served_when_refresh_fails() {
     let cache = AccountCache::default();
     cache.get(&client).await.unwrap();
     let (_epoch, entry) = cache.entries.entry(&client.account_cache_key());
-    entry
-        .lock()
-        .await
-        .snapshot
-        .as_mut()
-        .unwrap()
-        .received_instant = Instant::now() - MAX_AGE;
+    entry.lock().await.snapshot.as_mut().unwrap().cached_at = Instant::now() - MAX_AGE;
     fail.store(true, Ordering::SeqCst);
     let failed = futures_util::future::join_all((0..20).map(|_| cache.get(&client))).await;
     assert!(failed.iter().all(Result::is_err));
@@ -257,7 +286,10 @@ async fn ordinary_wait_is_bounded_and_retired_failure_cannot_poison_new_generati
     let waiting = tokio::time::timeout(Duration::from_secs(1), waiting)
         .await
         .unwrap();
-    assert!(waiting.iter().all(Result::is_err));
+    assert!(waiting.iter().all(|result| result
+        .as_ref()
+        .err()
+        .is_some_and(|err| err.is::<SharedRequestPending>())));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     cache.invalidate(&client);
     let fresh = tokio::time::timeout(Duration::from_secs(1), cache.get(&client))
