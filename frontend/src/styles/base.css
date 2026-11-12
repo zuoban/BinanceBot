@@ -129,7 +129,7 @@ kbd {
 .ant-card .ant-card-head-title { font-size: var(--text-section); font-weight: 500; }
 .ant-card-extra { color: var(--text-secondary); }
 
-.ant-dropdown .ant-dropdown-menu, .ant-select-dropdown, .ant-popover .ant-popover-container {
+.ant-dropdown .ant-dropdown-menu, .ant-select-dropdown, .ant-popover .ant-popover-container, .ant-picker-dropdown .ant-picker-panel-container {
   border: 1px solid var(--border-strong); box-shadow: var(--overlay-shadow);
 }
 .ant-popover .ant-popover-title { margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px solid var(--border-hairline); font-size: 14px; font-weight: 500; }
@@ -140,6 +140,7 @@ kbd {
 [data-theme="dark"] .ant-btn-primary:not(.ant-btn-dangerous):not(:disabled) { box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22); }
 [data-theme="dark"] .ant-switch.ant-switch-checked .ant-switch-inner .ant-switch-inner-checked { color: var(--action-foreground); font-weight: 500; }
 [data-theme="dark"] .ant-checkbox-checked:not(.ant-checkbox-disabled)::after { border-color: var(--action-foreground); }
+[data-theme="dark"] .ant-picker-dropdown .ant-picker-cell-in-view.ant-picker-cell-selected .ant-picker-cell-inner { color: var(--action-foreground); font-weight: 600; }
 .ant-tabs .ant-tabs-nav::before { border-bottom-color: var(--border-hairline); }
 
 .ant-table-wrapper .ant-table { background: transparent; }

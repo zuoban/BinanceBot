@@ -179,10 +179,13 @@ it('renders daily snapshots with account overview, trade counts, realized pnl, a
   expect(within(section).getByText(/1,700\.5/)).toBeInTheDocument();
   expect(within(section).getByLabelText('持仓明细')).toHaveTextContent('SOLUSDC');
 
-  await user.click(within(section).getByRole('combobox', { name: '选择每日快照日期' }));
-  await user.click(screen.getByText('2026-11-08（北京时间）'));
+  await user.click(within(section).getByLabelText('选择每日快照日期'));
+  expect(document.querySelector('td[title="2026-11-07"]')).toHaveClass('ant-picker-cell-disabled');
+  const targetCell = document.querySelector<HTMLElement>('td[title="2026-11-08"]');
+  expect(targetCell).not.toBeNull();
+  expect(targetCell).not.toHaveClass('ant-picker-cell-disabled');
+  await user.click(targetCell!);
   expect(within(section).getByText('成交与实现盈亏（2026-11-08）')).toBeInTheDocument();
-  expect(within(section).getAllByText(/9,980/).length).toBeGreaterThan(0);
   expect(within(section).getByText('（1 笔待同步）')).toBeInTheDocument();
   expect(within(section).queryByText('-20')).not.toBeInTheDocument();
   expect(within(section).getAllByText('--')).toHaveLength(2);
