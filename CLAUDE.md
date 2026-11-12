@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 开发命令
 
-需要 Rust 1.88+、Node.js 22.22.2+（或 24.15.0+ / 26+）。以下命令从仓库根目录执行，前端命令除外。
+需要 Rust 1.89+、Node.js 22.22.2+（或 24.15.0+ / 26+）。以下命令从仓库根目录执行，前端命令除外。
 
 ```bash
 cargo run --release                    # 后端；默认数据库 data/bot.db

@@ -165,7 +165,7 @@ BOT_VERSION=0.10.10 ADMIN_PASSWORD='请替换为强密码' docker compose up -d
 ## 🛠️ 本地编译与运行
 
 ### 1. 运行环境
-- Rust 1.88+（使用 `cargo`）
+- Rust 1.89+（使用 `cargo`）
 - Node.js 22.22.2+（22 LTS）、24.15.0+ 或 26+ 和 npm；CI 与前端 Docker 构建固定使用 Node.js 22.23.4。测试使用 JSDOM 31 的选择器与样式实现，Node.js 23/25 不受测试工具支持。
 
 ### 2. 编译与运行

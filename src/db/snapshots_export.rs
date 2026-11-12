@@ -277,7 +277,7 @@ impl Database {
     /// Redaction happens only on the copy; never expose a raw live database file.
     pub(crate) fn export_analysis_snapshot(&self) -> Result<Vec<u8>> {
         let _export = self.try_analysis_export()?;
-        let snapshot = self.backup_to_memory()?;
+        let mut snapshot = self.backup_to_memory()?;
         drop_views_and_triggers(&snapshot)?;
 
         if let Some(mut config) = load_config_on(&snapshot)? {
@@ -292,13 +292,13 @@ impl Database {
         )?;
         clear_sqlite_metadata_tables(&snapshot);
         snapshot.execute_batch("VACUUM;")?;
-        Ok(snapshot.serialize(rusqlite::DatabaseName::Main)?.to_vec())
+        Ok(snapshot.serialize(rusqlite::MAIN_DB)?.to_vec())
     }
 
     /// Export only rows that can be attributed to this symbol.
     pub(crate) fn export_analysis_snapshot_for_symbol(&self, symbol: &str) -> Result<Vec<u8>> {
         let _export = self.try_analysis_export()?;
-        let snapshot = self.analysis_snapshot_with_tables(TRADE_ANALYSIS_TABLES)?;
+        let mut snapshot = self.analysis_snapshot_with_tables(TRADE_ANALYSIS_TABLES)?;
         for table in SYMBOL_SCOPED_ANALYSIS_TABLES {
             snapshot.execute(
                 &format!("DELETE FROM {table} WHERE symbol != ?1"),
@@ -306,7 +306,7 @@ impl Database {
             )?;
         }
         snapshot.execute_batch("VACUUM;")?;
-        Ok(snapshot.serialize(rusqlite::DatabaseName::Main)?.to_vec())
+        Ok(snapshot.serialize(rusqlite::MAIN_DB)?.to_vec())
     }
 
     /// Export only the selected analysis data categories.
@@ -325,9 +325,9 @@ impl Database {
         if account_hourly_snapshots {
             tables.extend(["account_hourly_snapshots", "daily_snapshots"]);
         }
-        let snapshot = self.analysis_snapshot_with_tables(&tables)?;
+        let mut snapshot = self.analysis_snapshot_with_tables(&tables)?;
         snapshot.execute_batch("VACUUM;")?;
-        Ok(snapshot.serialize(rusqlite::DatabaseName::Main)?.to_vec())
+        Ok(snapshot.serialize(rusqlite::MAIN_DB)?.to_vec())
     }
 
     fn try_analysis_export(&self) -> Result<std::sync::MutexGuard<'_, ()>> {
