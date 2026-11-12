@@ -428,44 +428,81 @@ where
     }
 }
 
+async fn close_active_listen_key(active: &mut Option<(Arc<BinanceFuturesClient>, String)>) {
+    if let Some((old_client, old_key)) = active.take() {
+        let _ = tokio::time::timeout(
+            Duration::from_secs(3),
+            old_client.close_listen_key(&old_key),
+        )
+        .await;
+    }
+}
+
 async fn run_account_user_stream(
     inner: Arc<UserDataInner>,
     account_key: [u8; 32],
     mut notify_rx: watch::Receiver<u64>,
 ) {
     let mut backoff_secs = 1u64;
+    let mut active_listen_key: Option<(Arc<BinanceFuturesClient>, String)> = None;
+    let mut refresh_listen_key = true;
     'connect: loop {
         let _ = *notify_rx.borrow_and_update();
         let Some(client) = inner.active_client_for_account(account_key) else {
-            let mut state = inner.state.lock_unpoisoned();
-            let still_none = !state.slots.values().any(|slot| {
-                slot.scope.is_live_with_credentials()
-                    && slot.scope.client.account_identity_key() == account_key
-            });
+            let still_none = {
+                let mut state = inner.state.lock_unpoisoned();
+                let none = !state.slots.values().any(|slot| {
+                    slot.scope.is_live_with_credentials()
+                        && slot.scope.client.account_identity_key() == account_key
+                });
+                if none {
+                    state.active_workers.remove(&account_key);
+                }
+                none
+            };
             if still_none {
-                state.active_workers.remove(&account_key);
+                close_active_listen_key(&mut active_listen_key).await;
                 return;
             }
-            drop(state);
             continue 'connect;
         };
+        if active_listen_key.as_ref().is_some_and(|(old_client, _)| {
+            old_client.account_cache_key() != client.account_cache_key()
+        }) {
+            close_active_listen_key(&mut active_listen_key).await;
+            refresh_listen_key = true;
+        }
 
-        let listen_key = tokio::select! {
-            res = client.create_listen_key() => {
-                match res {
-                    Ok(key) => key,
-                    Err(error) => {
-                        warn!("Failed to create Binance listenKey: {error}");
-                        String::new()
+        let listen_key = if !refresh_listen_key
+            && active_listen_key
+                .as_ref()
+                .is_some_and(|(_, k)| !k.is_empty())
+        {
+            let (_, existing_key) = active_listen_key.as_ref().unwrap();
+            existing_key.clone()
+        } else {
+            tokio::select! {
+                res = client.create_listen_key() => {
+                    match res {
+                        Ok(key) => {
+                            active_listen_key = Some((Arc::clone(&client), key.clone()));
+                            refresh_listen_key = false;
+                            key
+                        }
+                        Err(error) => {
+                            warn!("Failed to create Binance listenKey: {error}");
+                            String::new()
+                        }
                     }
                 }
-            }
-            changed = notify_rx.changed() => {
-                if changed.is_err() {
-                    inner.state.lock_unpoisoned().active_workers.remove(&account_key);
-                    return;
+                changed = notify_rx.changed() => {
+                    if changed.is_err() {
+                        inner.state.lock_unpoisoned().active_workers.remove(&account_key);
+                        close_active_listen_key(&mut active_listen_key).await;
+                        return;
+                    }
+                    continue 'connect;
                 }
-                continue 'connect;
             }
         };
 
@@ -483,6 +520,7 @@ async fn run_account_user_stream(
                 changed = notify_rx.changed() => {
                     if changed.is_err() {
                         inner.state.lock_unpoisoned().active_workers.remove(&account_key);
+                        close_active_listen_key(&mut active_listen_key).await;
                         return;
                     }
                     continue 'connect;
@@ -507,23 +545,29 @@ async fn run_account_user_stream(
                     )
                     .await
                     {
-                        UserStreamExit::RotateListenKey => continue 'connect,
+                        UserStreamExit::RotateListenKey => {
+                            active_listen_key = None;
+                            refresh_listen_key = true;
+                            continue 'connect;
+                        }
                         UserStreamExit::Shutdown => {
-                            let _ = client.close_listen_key(&listen_key).await;
                             inner
                                 .state
                                 .lock_unpoisoned()
                                 .active_workers
                                 .remove(&account_key);
+                            close_active_listen_key(&mut active_listen_key).await;
                             return;
                         }
                         UserStreamExit::Reconnect => {}
                     }
                 }
                 Ok(Err(error)) => {
+                    refresh_listen_key = true;
                     warn!("Failed to connect to Binance User Data Stream: {error}");
                 }
                 Err(_) => {
+                    refresh_listen_key = true;
                     warn!("Timed out connecting to Binance User Data Stream: {redacted_url}");
                 }
             }
@@ -540,6 +584,7 @@ async fn run_account_user_stream(
             changed = notify_rx.changed() => {
                 if changed.is_err() {
                     inner.state.lock_unpoisoned().active_workers.remove(&account_key);
+                    close_active_listen_key(&mut active_listen_key).await;
                     return;
                 }
                 continue 'connect;

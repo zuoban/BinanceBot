@@ -519,7 +519,6 @@ impl BinanceFuturesClient {
     }
 
     /// Close a user data stream listenKey (`DELETE /fapi/v1/listenKey`).
-    #[allow(dead_code)]
     pub(crate) async fn close_listen_key(&self, listen_key: &str) -> Result<()> {
         anyhow::ensure!(is_valid_listen_key(listen_key), "Invalid listenKey");
         self.reserve(1, RequestClass::Normal)?;

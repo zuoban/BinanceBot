@@ -408,3 +408,83 @@ async fn user_data_hub_rotates_expired_listen_key_and_wakes_symbol_on_order_upda
     ws_server.abort();
     http_server.abort();
 }
+
+#[tokio::test]
+async fn user_data_hub_closes_listen_key_when_deactivated_during_backoff() {
+    use axum::{extract::Query, routing::post, Json, Router};
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    let closed_keys = Arc::new(Mutex::new(Vec::<String>::new()));
+    let closed_keys_route = Arc::clone(&closed_keys);
+    let app = Router::new().route(
+        "/fapi/v1/listenKey",
+        post(|| async { Json(serde_json::json!({ "listenKey": "lk_cleanup_backoff" })) }).delete(
+            move |Query(query): Query<HashMap<String, String>>| {
+                let closed = Arc::clone(&closed_keys_route);
+                async move {
+                    if let Some(key) = query.get("listenKey") {
+                        closed.lock().unwrap().push(key.clone());
+                    }
+                    Json(serde_json::json!({}))
+                }
+            },
+        ),
+    );
+    let http_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let http_url = format!("http://{}", http_listener.local_addr().unwrap());
+    let http_server = tokio::spawn(async move { axum::serve(http_listener, app).await.unwrap() });
+
+    // Point WS to a closed ephemeral port so connect fails immediately and enters backoff.
+    let dead_ws_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dead_ws_addr = dead_ws_listener.local_addr().unwrap();
+    drop(dead_ws_listener);
+
+    let mut cfg = crate::config::AppConfig::default().exchange;
+    cfg.api_key = "live-user-key".into();
+    cfg.api_secret = "live-user-secret".into();
+    let client = Arc::new(crate::exchange::BinanceFuturesClient::with_base_url(
+        &cfg, http_url,
+    ));
+
+    let hub = UserDataHub::with_options(
+        Arc::new(crate::exchange::account_cache::AccountCache::default()),
+        Arc::new(crate::exchange::position_cache::PositionCache::default()),
+        format!("ws://{dead_ws_addr}"),
+        Duration::from_secs(60),
+        Duration::from_secs(30),
+        Duration::from_secs(5),
+    );
+    let (scope_tx, scope_rx) = watch::channel(UserDataScope {
+        client: Arc::clone(&client),
+        symbol: "BTCUSDC".to_string(),
+        is_paper: false,
+    });
+    let (_wakeup_rx, guard_task) = hub.register(scope_rx);
+
+    // Give worker time to create listenKey, fail WS connect, and enter backoff sleep.
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    // Switch pair to paper mode -> worker must wake from backoff and DELETE the created listenKey!
+    scope_tx
+        .send(UserDataScope {
+            client,
+            symbol: "BTCUSDC".to_string(),
+            is_paper: true,
+        })
+        .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while closed_keys.lock().unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        closed_keys.lock().unwrap().as_slice(),
+        &["lk_cleanup_backoff".to_string()]
+    );
+
+    guard_task.abort();
+    http_server.abort();
+}
