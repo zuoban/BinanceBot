@@ -18,7 +18,7 @@ sha2 = "0.10"
 hex = "0.4"
 url = "2.5"
 
-axum = { version = "0.7", features = ["ws"] }
+axum = { version = "0.8", features = ["ws"] }
 tower = { version = "0.5" }
 
 rust_decimal = { version = "1.36", features = ["serde-str", "maths"] }
