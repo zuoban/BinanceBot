@@ -1,5 +1,5 @@
 import { createElement } from 'react';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import { expect, it, vi } from 'vitest';
 import { DepthChart, HourlyChart, todayHourlyData } from '../components/Charts';
 import { resolveTrades } from '../pages/PairDetail';
@@ -29,7 +29,7 @@ it('shows all Beijing hours and leaves future hours without counts', () => {
   expect(data[23]).toEqual({ hour: '02:00', 买入: null, 卖出: null });
 });
 
-it('skips hourly chart work on clock and ticker changes but refreshes for a new hour, new counts and a new day', () => {
+it('skips hourly chart work on clock and ticker changes but refreshes for a new hour, new counts and a new day', async () => {
   const now = Date.parse('2026-11-05T00:59:59Z');
   const s = snapshot();
   s.hourly_trade_stats = {
@@ -38,6 +38,10 @@ it('skips hourly chart work on clock and ticker changes but refreshes for a new 
   };
   chartRender.mockClear();
   const { rerender } = render(createElement(HourlyChart, { snapshot: s, now }));
+  await waitFor(() => {
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    expect(chartRender.mock.calls.length).toBeGreaterThan(0);
+  });
   const initialRenders = chartRender.mock.calls.length;
   expect(initialRenders).toBeGreaterThan(0);
   expect(chartRender.mock.calls.at(-1)![0][0]).toEqual({ hour: '08:00', 买入: 2, 卖出: 3 });

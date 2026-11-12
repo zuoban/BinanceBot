@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { render } from '@testing-library/react';
+import { render, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { HourlyChart } from '../components/Charts';
 import OverviewHistoryChart from '../components/OverviewHistoryChart';
@@ -28,7 +28,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-it('suppresses focus outlines on Recharts wrapper, surface, and zIndex layers while keeping control focus rings', () => {
+it('suppresses focus outlines on Recharts wrapper, surface, and zIndex layers while keeping control focus rings', async () => {
   const baseHour = 1_762_905_600;
   const data = [
     { hour: baseHour - 3600, equity: 2180 },
@@ -64,6 +64,7 @@ it('suppresses focus outlines on Recharts wrapper, surface, and zIndex layers wh
   button.focus();
   expect(getComputedStyle(button).outlineStyle).toBe('solid');
 
+  await waitFor(() => expect(container.querySelectorAll('.recharts-wrapper')).toHaveLength(2));
   const wrappers = container.querySelectorAll<HTMLElement>('.recharts-wrapper');
   expect(wrappers).toHaveLength(2);
 

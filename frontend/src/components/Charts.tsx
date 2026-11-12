@@ -1,6 +1,4 @@
-import { memo, useMemo, useRef } from 'react';
-import { theme } from 'antd';
-import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+import { Suspense, lazy, memo, useMemo, useRef } from 'react';
 import type { Snapshot } from '../lib/types';
 import { compareSignedDecimals, parseSignedDecimal } from '../lib/decimal';
 import { isValidEpochMs, numeric, price, quantity } from '../lib/format';
@@ -8,7 +6,12 @@ import { todayCount } from '../lib/portfolio';
 import { priceDiffPercent } from '../lib/gridPreview';
 import { serverAlignedNow, useUtcHour } from '../lib/useNow';
 import { NoData, useCenterElementScroll } from './Common';
-export function todayHourlyData(stats: NonNullable<Snapshot['hourly_trade_stats']>, now = Date.now()) {
+import type { HourlyChartPoint } from './HourlyChartView';
+import { LoadErrorBoundary } from './LoadErrorBoundary';
+
+const HourlyChartView = lazy(() => import('./HourlyChartView'));
+
+export function todayHourlyData(stats: NonNullable<Snapshot['hourly_trade_stats']>, now = Date.now()): HourlyChartPoint[] {
   const start = Date.parse(stats.window_start);
   if (!isValidEpochMs(start) || !isValidEpochMs(now)) return [];
   const currentHour = Math.min(23, Math.max(0, Math.floor((now - start) / 3600_000)));
@@ -23,9 +26,6 @@ export function todayHourlyData(stats: NonNullable<Snapshot['hourly_trade_stats'
     return { hour: `${String(hour).padStart(2, '0')}:00`, 买入: bucket?.buy_count ?? null, 卖出: bucket?.sell_count ?? null };
   });
 }
-
-const barChartMargin = { top: 12, right: 12, bottom: 4, left: -12 };
-const barRadius: [number, number, number, number] = [2, 2, 0, 0];
 
 function sameHourlyStats(a: Snapshot['hourly_trade_stats'], b: Snapshot['hourly_trade_stats']) {
   if (a === b) return true;
@@ -45,28 +45,20 @@ export const HourlyChart = memo(function HourlyChart({ snapshot, receivedAt, now
 });
 
 const HourlyChartContent = memo(function HourlyChartContent({ stats, hourBucket, available }: { stats: Snapshot['hourly_trade_stats']; hourBucket: number; available: boolean }) {
-  const { token } = theme.useToken();
   const data = useMemo(() => stats ? todayHourlyData(stats, hourBucket * 3600_000) : [], [stats, hourBucket]);
-  const axisTick = useMemo(() => ({ fontSize: 12, fontFamily: 'var(--font-mono)', fill: token.colorTextTertiary }), [token.colorTextTertiary]);
-  const tooltipCursor = useMemo(() => ({ fill: token.colorFillSecondary }), [token.colorFillSecondary]);
-  const tooltipContentStyle = useMemo(() => ({ background: token.colorBgElevated, borderColor: token.colorBorder, borderRadius: 8, boxShadow: 'var(--overlay-shadow)', color: token.colorText, fontSize: 12 }), [token.colorBgElevated, token.colorBorder, token.colorText]);
-  const tooltipLabelStyle = useMemo(() => ({ color: token.colorText, fontFamily: 'var(--font-mono)', fontWeight: 500, marginBottom: 4 }), [token.colorText]);
-  const tooltipItemStyle = useMemo(() => ({ fontFamily: 'var(--font-mono)' }), []);
   if (!available) return <NoData />;
   return <>
     <div className="chart-caption-row">
       <span className="muted">北京时间 · 最近时段在左侧</span>
       <span className="chart-legend" aria-hidden="true"><span className="chart-legend-item"><i className="chart-dot chart-dot-buy" />买入</span><span className="chart-legend-item"><i className="chart-dot chart-dot-sell" />卖出</span></span>
     </div>
-    <div className="chart" role="region" aria-label="北京时间今日每小时成交笔数"><ResponsiveContainer width="100%" height={264}>
-      <BarChart accessibilityLayer data={data} barGap={2} maxBarSize={12} margin={barChartMargin}>
-        <CartesianGrid vertical={false} stroke={token.colorBorderSecondary} />
-        <XAxis dataKey="hour" interval="preserveStartEnd" minTickGap={24} tickLine={false} axisLine={false} tick={axisTick} />
-        <YAxis allowDecimals={false} axisLine={false} tickLine={false} tick={axisTick} />
-        <Tooltip cursor={tooltipCursor} contentStyle={tooltipContentStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle} />
-        <Bar dataKey="买入" fill={token.colorSuccess} radius={barRadius} isAnimationActive={false} /><Bar dataKey="卖出" fill={token.colorError} radius={barRadius} isAnimationActive={false} />
-      </BarChart>
-    </ResponsiveContainer></div>
+    <div className="chart" role="region" aria-label="北京时间今日每小时成交笔数">
+      <LoadErrorBoundary label="今日成交图">
+        <Suspense fallback={<div className="history-empty history-plot-loading" role="status">正在加载图表…</div>}>
+          <HourlyChartView data={data} />
+        </Suspense>
+      </LoadErrorBoundary>
+    </div>
   </>;
 }, (prev, next) => prev.available === next.available && prev.hourBucket === next.hourBucket && sameHourlyStats(prev.stats, next.stats));
 function sameDepthOrders(a: Snapshot['active_orders'], b: Snapshot['active_orders']) {

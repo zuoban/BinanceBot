@@ -6,12 +6,15 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeEach, expect, it, vi } from 'vitest';
 import type * as Api from '../lib/api';
 import type * as Queries from '../lib/queries';
+import { DepthChart, HourlyChart } from '../components/Charts';
 import { LoadErrorBoundary } from '../components/LoadErrorBoundary';
 import { OverviewHistory } from '../components/OverviewHistory';
 import { MemoryRouter } from 'react-router-dom';
 import Settings from '../pages/Settings';
+import { snapshot } from './fixtures';
 
 vi.mock('../components/OverviewHistoryChart', () => { throw new Error('chart module unavailable'); });
+vi.mock('../components/HourlyChartView', () => { throw new Error('hourly chart module unavailable'); });
 vi.mock('../components/DatabaseSettings', () => { throw new Error('database module unavailable'); });
 vi.mock('../lib/queries', async importOriginal => {
   const actual = await importOriginal<typeof Queries>();
@@ -52,4 +55,23 @@ it('offers the supplied recovery action after a lazy import fails', async () => 
   render(<LoadErrorBoundary label="面板" onReload={reload}><Suspense fallback="加载中"><Broken /></Suspense></LoadErrorBoundary>);
   await userEvent.click(await screen.findByRole('button', { name: '刷新页面' }));
   expect(reload).toHaveBeenCalledOnce();
+});
+
+it('keeps depth levels interactive when the lazy hourly chart chunk fails to load', async () => {
+  const now = Date.parse('2026-11-05T00:30:00Z');
+  const s = snapshot('SOLUSDC');
+  s.hourly_trade_stats = {
+    window_start: '2026-11-04T16:00:00Z',
+    window_end: new Date(now).toISOString(),
+    realized_pnl: '0',
+    pending_pnl_count: 0,
+    buckets: [{ hour_start: '2026-11-05T00:00:00Z', buy_count: 1, sell_count: 2 }],
+  };
+  s.active_orders = [
+    { client_order_id: 'b1', order_id: 1, symbol: 'SOLUSDC', side: 'BUY', price: '98.5', quantity: '1', amount_usdc: '98.5', status: 'NEW', created_at: '2026-11-05T00:00:00Z', grid_level: -1, is_take_profit: false, purpose: 'GRID', merge_sources: [] },
+  ];
+  render(<><HourlyChart snapshot={s} now={now} /><DepthChart snapshot={s} /></>);
+  expect(await screen.findByText('今日成交图加载失败，请刷新页面重试。')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: '刷新页面' })).toBeEnabled();
+  expect(screen.getByRole('region', { name: '按价格从高到低排列的实时网格挂单' })).toBeInTheDocument();
 });
