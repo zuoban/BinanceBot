@@ -145,7 +145,7 @@ function TelegramSettingsCard({ form, hasBotToken, version, formDisabled, armed 
           validateTrigger: armed ? undefined : 'onSubmit',
           validator: (_, value: string | undefined) => {
             if (getFieldValue('clear_telegram_credentials') || !(getFieldValue('telegram_enabled') || Boolean(getFieldValue('telegram_bot_token')?.trim()))) return Promise.resolve();
-            return Boolean(value?.trim()) ? Promise.resolve() : Promise.reject(new Error('请填写 Chat ID'));
+            return value?.trim() ? Promise.resolve() : Promise.reject(new Error('请填写 Chat ID'));
           },
         }),
       ]}><Input className="numeric" disabled={credDisabled} /></Form.Item></Col>
