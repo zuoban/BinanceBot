@@ -31,7 +31,7 @@ rusqlite = { version = "0.41", features = ["bundled", "chrono", "backup", "seria
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1.0"
-thiserror = "1.0"
+thiserror = "2.0"
 clap = { version = "4.5", features = ["derive"] }
 rand = "0.8"
 argon2 = "0.5"
