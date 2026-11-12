@@ -126,9 +126,9 @@ it('keeps duplicate log keys unique across pages and stable when new logs arrive
   const pageKeys = () => [...screen.getByRole('table').querySelectorAll('tbody tr.ant-table-row')].map(row => row.getAttribute('data-row-key'));
   const keys = pageKeys();
   const user = userEvent.setup();
-  await user.click(screen.getByTitle('2'));
+  await user.click(screen.getByTitle('2').querySelector('a')!);
   keys.push(...pageKeys());
-  await user.click(screen.getByTitle('3'));
+  await user.click(screen.getByTitle('3').querySelector('a')!);
   const oldestKey = pageKeys()[0];
   keys.push(...pageKeys());
   expect(keys).toHaveLength(61);
