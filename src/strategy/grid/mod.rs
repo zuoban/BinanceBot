@@ -76,6 +76,7 @@ use window_prune::PaperWindowCache;
 
 const PERIODIC_TIME_SYNC_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const TIME_SYNC_RETRY_INTERVAL: Duration = Duration::from_secs(60);
+const USER_DATA_COALESCE_DELAY: Duration = Duration::from_millis(50);
 
 pub struct GridTradingEngine {
     state: Arc<AppState>,
@@ -108,6 +109,8 @@ pub struct GridTradingEngine {
     market_data_blocked: bool,
     last_remainder_change: Option<Instant>,
     market_stream_tx: Option<watch::Sender<String>>,
+    user_data_scope_tx: Option<watch::Sender<crate::exchange::UserDataScope>>,
+    user_data_rx: Option<watch::Receiver<u64>>,
     last_fill_cache: std::sync::Mutex<Option<(String, TradingMode, LastFillSnapshot)>>,
 }
 
@@ -183,12 +186,28 @@ impl GridTradingEngine {
             market_data_blocked: false,
             last_remainder_change: None,
             market_stream_tx: None,
+            user_data_scope_tx: None,
+            user_data_rx: None,
             last_fill_cache: std::sync::Mutex::new(None),
         }
     }
 
     pub(crate) fn set_market_stream_tx(&mut self, tx: watch::Sender<String>) {
         self.market_stream_tx = Some(tx);
+    }
+
+    pub(crate) fn set_user_data_channels(
+        &mut self,
+        scope_tx: watch::Sender<crate::exchange::UserDataScope>,
+        rx: watch::Receiver<u64>,
+    ) {
+        self.user_data_scope_tx = Some(scope_tx);
+        self.user_data_rx = Some(rx);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_user_data_rx(&mut self, rx: watch::Receiver<u64>) {
+        self.user_data_rx = Some(rx);
     }
 
     pub(super) async fn pause_trading(&self) {
@@ -410,6 +429,7 @@ impl GridTradingEngine {
         let mut sync_timer = build_sync_timer(sync_secs);
         let mut pnl_timer = interval(Duration::from_secs(1));
         pnl_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut pending_user_data_sync: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
 
         if *self.state.status.read().await == BotStatus::Running {
             Box::pin(self.maintain_grid_window()).await;
@@ -432,7 +452,25 @@ impl GridTradingEngine {
                         Err(broadcast::error::RecvError::Closed) => ticker_open = false,
                     }
                 }
+                _ = wait_for_user_data_wakeup(&mut self.user_data_rx) => {
+                    if pending_user_data_sync.is_none() {
+                        pending_user_data_sync = Some(Box::pin(tokio::time::sleep(USER_DATA_COALESCE_DELAY)));
+                    }
+                }
+                _ = wait_for_coalesced_user_data(&mut pending_user_data_sync) => {
+                    pending_user_data_sync = None;
+                    if let Some(rx) = &mut self.user_data_rx {
+                        let _ = *rx.borrow_and_update();
+                    }
+                    Box::pin(self.sync_cycle(false)).await;
+                    self.reconcile_unverified_trades().await;
+                    sync_timer.reset();
+                }
                 _ = sync_timer.tick() => {
+                    pending_user_data_sync = None;
+                    if let Some(rx) = &mut self.user_data_rx {
+                        let _ = *rx.borrow_and_update();
+                    }
                     Box::pin(self.sync_cycle(false)).await;
                     self.reconcile_unverified_trades().await;
                 }
@@ -451,6 +489,25 @@ impl GridTradingEngine {
             }
         }
         self.retire_market_requests();
+    }
+}
+
+async fn wait_for_user_data_wakeup(rx: &mut Option<watch::Receiver<u64>>) {
+    if let Some(receiver) = rx {
+        if receiver.changed().await.is_ok() {
+            let _ = *receiver.borrow_and_update();
+            return;
+        }
+        *rx = None;
+    }
+    std::future::pending().await
+}
+
+async fn wait_for_coalesced_user_data(timer: &mut Option<std::pin::Pin<Box<tokio::time::Sleep>>>) {
+    if let Some(sleep) = timer.as_mut() {
+        sleep.as_mut().await;
+    } else {
+        std::future::pending().await
     }
 }
 

@@ -39,6 +39,137 @@ async fn shared_http_pool_keeps_api_headers_isolated_per_request() {
     server.abort();
 }
 
+#[tokio::test]
+async fn batch_orders_and_listen_key_endpoints_sign_and_parse_mixed_items() {
+    use axum::{extract::RawQuery, http::HeaderMap, routing::post, Json, Router};
+    use serde_json::json;
+
+    let app = Router::new()
+        .route(
+            "/fapi/v1/batchOrders",
+            post(|RawQuery(query): RawQuery| async move {
+                let q = query.unwrap_or_default();
+                assert!(q.contains("batchOrders=%5B"));
+                assert!(q.contains("signature="));
+                Json(json!([
+                    {
+                        "orderId": 1001,
+                        "clientOrderId": "grid_b_1",
+                        "symbol": "BTCUSDC",
+                        "status": "NEW",
+                        "price": "50000",
+                        "origQty": "0.01",
+                        "executedQty": "0",
+                        "side": "BUY",
+                        "type": "LIMIT",
+                        "timeInForce": "GTX",
+                        "updateTime": 1700000000000i64
+                    },
+                    {
+                        "code": -5022,
+                        "msg": "Due to the order could not be executed as maker, the Post Only order will be rejected."
+                    }
+                ]))
+            })
+            .delete(|RawQuery(query): RawQuery| async move {
+                let q = query.unwrap_or_default();
+                assert!(q.contains("symbol=BTCUSDC"));
+                assert!(q.contains("orderIdList=%5B1001%2C1002%5D"));
+                assert!(q.contains("signature="));
+                Json(json!([
+                    {
+                        "orderId": 1001,
+                        "clientOrderId": "grid_b_1",
+                        "symbol": "BTCUSDC",
+                        "status": "CANCELED",
+                        "price": "50000",
+                        "origQty": "0.01",
+                        "executedQty": "0",
+                        "side": "BUY",
+                        "type": "LIMIT",
+                        "timeInForce": "GTX",
+                        "updateTime": 1700000001000i64
+                    },
+                    {
+                        "code": -2011,
+                        "msg": "Unknown order sent."
+                    }
+                ]))
+            }),
+        )
+        .route(
+            "/fapi/v1/listenKey",
+            post(|headers: HeaderMap| async move {
+                assert_eq!(
+                    headers.get("X-MBX-APIKEY").and_then(|v| v.to_str().ok()),
+                    Some("batch-key")
+                );
+                Json(json!({ "listenKey": "valid_listen_key_123" }))
+            })
+            .put(|RawQuery(query): RawQuery| async move {
+                assert_eq!(query.as_deref(), Some("listenKey=valid_listen_key_123"));
+                Json(json!({}))
+            })
+            .delete(|RawQuery(query): RawQuery| async move {
+                assert_eq!(query.as_deref(), Some("listenKey=valid_listen_key_123"));
+                Json(json!({}))
+            }),
+        );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let mut config = crate::config::AppConfig::default().exchange;
+    config.api_key = "batch-key".into();
+    config.api_secret = "batch-secret".into();
+    let client = BinanceFuturesClient::with_base_url(&config, url);
+
+    assert!(client.place_batch_orders(&[]).await.is_err());
+    let placed = client
+        .place_batch_orders(&[
+            NewOrderRequest {
+                symbol: "BTCUSDC",
+                side: "BUY",
+                price: "50000",
+                quantity: "0.01",
+                client_order_id: "grid_b_1",
+                post_only: true,
+                reduce_only: false,
+            },
+            NewOrderRequest {
+                symbol: "BTCUSDC",
+                side: "SELL",
+                price: "50100",
+                quantity: "0.01",
+                client_order_id: "grid_s_2",
+                post_only: true,
+                reduce_only: true,
+            },
+        ])
+        .await
+        .unwrap();
+    assert_eq!(placed.len(), 2);
+    assert!(matches!(placed[0], BinanceBatchOrderItem::Order(ref o) if o.order_id == 1001));
+    assert!(matches!(placed[1], BinanceBatchOrderItem::Error(ref e) if e.code == -5022));
+
+    let canceled = client
+        .cancel_batch_orders("BTCUSDC", CancelBatchTarget::OrderIds(&[1001, 1002]))
+        .await
+        .unwrap();
+    assert_eq!(canceled.len(), 2);
+    assert!(matches!(canceled[0], BinanceBatchOrderItem::Order(ref o) if o.status == "CANCELED"));
+    assert!(matches!(canceled[1], BinanceBatchOrderItem::Error(ref e) if e.code == -2011));
+
+    let listen_key = client.create_listen_key().await.unwrap();
+    assert_eq!(listen_key, "valid_listen_key_123");
+    client.keepalive_listen_key(&listen_key).await.unwrap();
+    client.close_listen_key(&listen_key).await.unwrap();
+    assert!(client.keepalive_listen_key("bad/key?x=1").await.is_err());
+
+    server.abort();
+}
+
 #[test]
 fn exchange_environment_uses_mainnet_url() {
     let config = crate::config::AppConfig::default().exchange;

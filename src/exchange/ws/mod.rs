@@ -12,13 +12,19 @@ use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{error, info, warn};
 
-const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const WS_READ_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
-const WS_PONG_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
-const WS_MAX_FRAME_BYTES: usize = 64 * 1024;
+pub(crate) mod market_hub;
+pub(crate) mod user_data;
+
+pub(crate) use market_hub::MarketStreamHub;
+pub(crate) use user_data::{UserDataHub, UserDataScope};
+
+pub(super) const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+pub(super) const WS_READ_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
+pub(super) const WS_PONG_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+pub(super) const WS_MAX_FRAME_BYTES: usize = 64 * 1024;
 
 #[allow(deprecated)]
-fn upstream_ws_config() -> WebSocketConfig {
+pub(super) fn upstream_ws_config() -> WebSocketConfig {
     WebSocketConfig {
         max_message_size: Some(WS_MAX_FRAME_BYTES),
         max_frame_size: Some(WS_MAX_FRAME_BYTES),
@@ -37,7 +43,7 @@ fn stream_url(symbol: &str) -> String {
 }
 
 #[derive(Default)]
-struct EventTimes {
+pub(super) struct EventTimes {
     ticker: Option<i64>,
     mark: Option<i64>,
 }
@@ -174,6 +180,33 @@ fn parse_market_update(
     if !fields.symbol.eq_ignore_ascii_case(symbol) {
         return None;
     }
+    parse_extracted_market_fields(stream.as_deref(), &fields, symbol, now, times)
+}
+
+pub(super) fn parse_multiplexed_market_update(
+    text: &str,
+    now: DateTime<Utc>,
+    times_by_symbol: &mut std::collections::HashMap<String, EventTimes>,
+) -> Option<(String, TickerInfo)> {
+    let raw: WsRawFrame<'_> = serde_json::from_str(text).ok()?;
+    let (stream, fields) = extract_ws_market_fields(raw)?;
+    let canonical_symbol = fields.symbol.to_ascii_uppercase();
+    if canonical_symbol.is_empty() {
+        return None;
+    }
+    let times = times_by_symbol.get_mut(&canonical_symbol)?;
+    let update =
+        parse_extracted_market_fields(stream.as_deref(), &fields, &canonical_symbol, now, times)?;
+    Some((canonical_symbol, update))
+}
+
+fn parse_extracted_market_fields(
+    stream: Option<&str>,
+    fields: &WsMarketFields<'_>,
+    symbol: &str,
+    now: DateTime<Utc>,
+    times: &mut EventTimes,
+) -> Option<TickerInfo> {
     let event_at = DateTime::from_timestamp_millis(fields.event_time)?;
     let age = now.signed_duration_since(event_at);
     if age < chrono::Duration::seconds(-2) || age >= chrono::Duration::seconds(15) {
@@ -181,10 +214,10 @@ fn parse_market_update(
     }
     let observed_at = event_at.min(now);
     match fields.event_type.as_ref() {
-        "24hrTicker" if stream_matches_symbol(stream.as_deref(), "@ticker", symbol) => {
-            build_24hr_ticker(&fields, symbol, observed_at, times)
+        "24hrTicker" if stream_matches_symbol(stream, "@ticker", symbol) => {
+            build_24hr_ticker(fields, symbol, observed_at, times)
         }
-        "markPriceUpdate" if stream_matches_symbol(stream.as_deref(), "@markPrice@1s", symbol) => {
+        "markPriceUpdate" if stream_matches_symbol(stream, "@markPrice@1s", symbol) => {
             let mark_price = fields.price_field?;
             if mark_price <= Decimal::ZERO
                 || times.mark.is_some_and(|last| fields.event_time <= last)
@@ -203,7 +236,7 @@ fn parse_market_update(
     }
 }
 
-async fn send_ws_pong<W>(write: &mut W, payload: Vec<u8>, ws_url: &str) -> bool
+pub(super) async fn send_ws_pong<W>(write: &mut W, payload: Vec<u8>, ws_url: &str) -> bool
 where
     W: futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
 {
@@ -229,7 +262,32 @@ fn local_observed_time(
     local_now.checked_sub_signed(age).unwrap_or(local_now)
 }
 
+pub(super) fn current_local_and_exchange_now() -> (DateTime<Utc>, DateTime<Utc>) {
+    let local_now = Utc::now();
+    let exchange_now = local_now
+        .checked_add_signed(chrono::Duration::milliseconds(
+            super::client::mainnet_time_offset_ms(),
+        ))
+        .unwrap_or(local_now);
+    (local_now, exchange_now)
+}
+
+pub(super) fn apply_local_observed_times(
+    update: &mut TickerInfo,
+    local_now: DateTime<Utc>,
+    exchange_now: DateTime<Utc>,
+) {
+    if update.last_price > Decimal::ZERO {
+        update.update_time = local_observed_time(local_now, exchange_now, update.update_time);
+    }
+    if update.mark_price > Decimal::ZERO {
+        update.mark_update_time =
+            local_observed_time(local_now, exchange_now, update.mark_update_time);
+    }
+}
+
 impl BinanceWsStream {
+    #[allow(dead_code)]
     pub(crate) fn new(
         config_rx: watch::Receiver<String>,
         ticker_tx: broadcast::Sender<TickerInfo>,
@@ -240,6 +298,7 @@ impl BinanceWsStream {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn run(self) {
         self.run_with_url_and_timeout(stream_url, WS_READ_IDLE_TIMEOUT)
             .await;
@@ -255,22 +314,11 @@ impl BinanceWsStream {
     }
 
     fn forward_ws_text_frame(&self, text: &str, symbol: &str, event_times: &mut EventTimes) {
-        let local_now = Utc::now();
-        let exchange_now = local_now
-            .checked_add_signed(chrono::Duration::milliseconds(
-                super::client::mainnet_time_offset_ms(),
-            ))
-            .unwrap_or(local_now);
+        let (local_now, exchange_now) = current_local_and_exchange_now();
         let Some(mut update) = parse_market_update(text, symbol, exchange_now, event_times) else {
             return;
         };
-        if update.last_price > Decimal::ZERO {
-            update.update_time = local_observed_time(local_now, exchange_now, update.update_time);
-        }
-        if update.mark_price > Decimal::ZERO {
-            update.mark_update_time =
-                local_observed_time(local_now, exchange_now, update.mark_update_time);
-        }
+        apply_local_observed_times(&mut update, local_now, exchange_now);
         let _ = self.ticker_tx.send(update);
     }
 

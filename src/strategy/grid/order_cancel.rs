@@ -1,6 +1,8 @@
 use super::*;
+use futures_util::stream::{self, StreamExt};
 
 type RecoverySources = (HashMap<String, GridOrder>, Option<RemainderPlan>);
+const MAX_CONCURRENT_ORDER_CANCELS: usize = 8;
 
 struct CancelRecoveryMetadata {
     recovery_sources: Option<RecoverySources>,
@@ -173,38 +175,38 @@ impl GridTradingEngine {
             .values()
             .cloned()
             .collect();
-        for order in known
-            .iter()
-            .filter(|order| is_grid_order(&order.client_order_id))
-        {
-            if let Err(error) = self
-                .client
-                .cancel_order(symbol, order.order_id, Some(&order.client_order_id))
-                .await
-            {
-                warn!(
-                    "Failed to cancel known managed order {}: {}",
-                    order.client_order_id, error
-                );
+        let client = Arc::clone(&self.client);
+        stream::iter(
+            known
+                .into_iter()
+                .filter(|order| is_grid_order(&order.client_order_id)),
+        )
+        .for_each_concurrent(MAX_CONCURRENT_ORDER_CANCELS, |order| {
+            let client = Arc::clone(&client);
+            async move {
+                if let Err(error) = client
+                    .cancel_order(symbol, order.order_id, Some(&order.client_order_id))
+                    .await
+                {
+                    warn!(
+                        "Failed to cancel known managed order {}: {}",
+                        order.client_order_id, error
+                    );
+                }
             }
-        }
+        })
+        .await;
     }
 
-    async fn cancel_open_grid_order(
+    async fn confirm_failed_grid_order_cancel(
         &mut self,
         symbol: &str,
         order: BinanceOrderResponse,
+        cancel_error: anyhow::Error,
         managed_sources: &HashMap<String, GridOrder>,
         recovery: &CancelRecoveryMetadata,
         managed_read_failed: bool,
     ) -> bool {
-        let Err(e) = self
-            .client
-            .cancel_order(symbol, Some(order.order_id), None)
-            .await
-        else {
-            return true;
-        };
         let confirmation = self.client.get_order(symbol, order.order_id).await;
         if confirmation.as_ref().is_ok_and(unresolved_filled_quantity) {
             self.retain_uncertain_canceled_order(UncertainCanceledOrder {
@@ -228,7 +230,7 @@ impl GridTradingEngine {
         }
         error!(
             "Failed to cancel managed order {}: {}",
-            order.client_order_id, e
+            order.client_order_id, cancel_error
         );
         self.pause_trading().await;
         false
@@ -267,22 +269,41 @@ impl GridTradingEngine {
                 return false;
             }
         };
+        let client = Arc::clone(&self.client);
+        let cancel_outcomes: Vec<(BinanceOrderResponse, Result<()>)> = stream::iter(
+            live_orders
+                .into_iter()
+                .filter(|order| is_grid_order(&order.client_order_id)),
+        )
+        .map(|order| {
+            let client = Arc::clone(&client);
+            async move {
+                let res = client
+                    .cancel_order(symbol, Some(order.order_id), None)
+                    .await;
+                (order, res)
+            }
+        })
+        .buffered(MAX_CONCURRENT_ORDER_CANCELS)
+        .collect()
+        .await;
+
         let mut cancellation_failed = false;
-        for order in live_orders
-            .into_iter()
-            .filter(|order| is_grid_order(&order.client_order_id))
-        {
-            if !self
-                .cancel_open_grid_order(
-                    symbol,
-                    order,
-                    &managed_sources,
-                    recovery,
-                    managed_read_failed,
-                )
-                .await
-            {
-                cancellation_failed = true;
+        for (order, cancel_result) in cancel_outcomes {
+            if let Err(error) = cancel_result {
+                if !self
+                    .confirm_failed_grid_order_cancel(
+                        symbol,
+                        order,
+                        error,
+                        &managed_sources,
+                        recovery,
+                        managed_read_failed,
+                    )
+                    .await
+                {
+                    cancellation_failed = true;
+                }
             }
         }
         // Without the complete recovery metadata, even a terminal exchange

@@ -479,5 +479,14 @@ impl GridTradingEngine {
             };
             *self.state.account.write().await = AccountInfo::default();
         }
+        if reset.flags.scope_changed() || reset.flags.client_changed {
+            if let Some(tx) = &self.user_data_scope_tx {
+                let _ = tx.send(crate::exchange::UserDataScope {
+                    client: Arc::clone(&self.client),
+                    symbol: new_config.exchange.symbol.clone(),
+                    is_paper: new_config.exchange.is_paper(),
+                });
+            }
+        }
     }
 }

@@ -777,3 +777,69 @@ fn per_pair_engine_futures_remain_compact() {
     assert!(size_of_val(&engine.apply_config(config)) < 16_384);
     assert!(size_of_val(&engine.handle_control_action(BotControlAction::Pause)) < 16_384);
 }
+
+#[tokio::test]
+async fn user_data_wakeup_triggers_immediate_sync_cycle_without_waiting_for_timer() {
+    use std::time::Duration;
+    let (mut config, db, order) = pending_pair_fixture();
+    config.exchange.sync_interval_secs = 60;
+    db.save_managed_order(&order).unwrap();
+    let fake = PairExchange::default();
+    fake.orders.lock().unwrap().insert(
+        order.client_order_id.clone(),
+        BinanceOrderResponse {
+            order_id: 901,
+            client_order_id: order.client_order_id.clone(),
+            symbol: order.symbol.clone(),
+            status: "CANCELED".into(),
+            price: order.price,
+            avg_price: None,
+            orig_qty: order.quantity,
+            executed_qty: Decimal::ZERO,
+            side: order.side.as_str().into(),
+            order_type: "LIMIT".into(),
+            time_in_force: "GTX".into(),
+            update_time: Some(Utc::now().timestamp_millis()),
+        },
+    );
+    let (url, server) = pair_exchange_server(fake).await;
+    let mut engine = pair_recovery_engine(&config, db.clone(), url).await;
+    *engine.state.status.write().await = BotStatus::Paused;
+    engine
+        .state
+        .active_orders
+        .write()
+        .await
+        .insert(order.client_order_id.clone(), order.clone());
+    let state = engine.state.clone();
+    let (wakeup_tx, wakeup_rx) = tokio::sync::watch::channel(0u64);
+    engine.set_user_data_rx(wakeup_rx);
+
+    let run_task = tokio::spawn(async move {
+        engine.run().await;
+    });
+
+    // Signal user-data wakeup; the canceled order should be reconciled and removed within < 1s
+    // despite sync_interval_secs being 60s.
+    wakeup_tx.send(1).unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !state.active_orders.read().await.is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+    state
+        .action_tx
+        .send(BotControlAction::Shutdown {
+            removing: false,
+            reply: ack_tx,
+        })
+        .await
+        .unwrap();
+    let _ = ack_rx.await;
+    let _ = run_task.await;
+    server.abort();
+}

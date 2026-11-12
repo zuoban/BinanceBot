@@ -5,6 +5,7 @@ use crate::exchange::account_cache::AccountCache;
 use crate::exchange::market_cache::MarketCache;
 use crate::exchange::position_cache::PositionCache;
 use crate::exchange::rate_limit::RateLimiter;
+use crate::exchange::{MarketStreamHub, UserDataHub};
 use crate::fx::CnyRateCache;
 use crate::runtime::RuntimeHandle;
 use std::sync::Arc;
@@ -35,6 +36,13 @@ impl TradingRuntime {
             rate_limiter.clone(),
             commands,
         );
+        let account_cache = Arc::new(AccountCache::default());
+        let position_cache = Arc::new(PositionCache::default());
+        let market_hub = Arc::new(MarketStreamHub::new());
+        let user_data_hub = Arc::new(UserDataHub::new(
+            account_cache.clone(),
+            position_cache.clone(),
+        ));
         Self {
             pairs,
             global_position_limit,
@@ -43,9 +51,11 @@ impl TradingRuntime {
             trade_lock,
             cny_rates: Arc::new(CnyRateCache::new()),
             cny_refresh_task: None,
-            account_cache: Arc::new(AccountCache::default()),
-            position_cache: Arc::new(PositionCache::default()),
+            account_cache,
+            position_cache,
             market_cache: Arc::new(MarketCache::default()),
+            market_hub,
+            user_data_hub,
             rate_limiter,
             auth,
             #[cfg(test)]

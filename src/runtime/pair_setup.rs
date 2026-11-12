@@ -1,6 +1,6 @@
 use super::{PairTask, PreparePairOptions, TradingRuntime};
 use crate::config::AppConfig;
-use crate::exchange::BinanceWsStream;
+use crate::exchange::UserDataScope;
 use crate::server::AppState;
 use crate::strategy::GridTradingEngine;
 use crate::types::TickerInfo;
@@ -134,7 +134,7 @@ impl TradingRuntime {
         Self::notify_test_prepare_hook(&mut options, &strategy.exchange.symbol).await;
         let mut engine = GridTradingEngine::new_with_caches(
             state.clone(),
-            client,
+            client.clone(),
             action_rx,
             ticker_rx,
             self.account_cache.clone(),
@@ -142,7 +142,19 @@ impl TradingRuntime {
             self.market_cache.clone(),
         );
         engine.set_market_stream_tx(market_tx);
-        let stream = BinanceWsStream::new(market_rx, ticker_tx);
+        let (user_scope_tx, user_scope_rx) = watch::channel(UserDataScope {
+            client,
+            symbol: strategy.exchange.symbol.clone(),
+            is_paper: strategy.exchange.is_paper(),
+        });
+        let background = self.spawn_pair_background_tasks(
+            &mut engine,
+            market_rx,
+            ticker_tx,
+            user_scope_tx,
+            user_scope_rx,
+            &state,
+        );
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let engine_task = Self::spawn_pair_engine_task(
             engine,
@@ -152,7 +164,6 @@ impl TradingRuntime {
             Some(self.handle.stop.subscribe()),
             shutdown_rx,
         );
-        let background = self.spawn_pair_background_tasks(stream, &state);
         Ok(PairTask {
             state,
             engine: engine_task,
@@ -175,15 +186,23 @@ impl TradingRuntime {
 
     fn spawn_pair_background_tasks(
         &self,
-        stream: BinanceWsStream,
+        engine: &mut GridTradingEngine,
+        market_rx: watch::Receiver<String>,
+        ticker_tx: broadcast::Sender<TickerInfo>,
+        user_scope_tx: watch::Sender<UserDataScope>,
+        user_scope_rx: watch::Receiver<UserDataScope>,
         state: &Arc<AppState>,
     ) -> Vec<JoinHandle<()>> {
         #[cfg(test)]
         if self.test_exchange_url.is_some() {
             return Vec::new();
         }
+        let market_task = self.market_hub.register(market_rx, ticker_tx);
+        let (user_data_rx, user_data_task) = self.user_data_hub.register(user_scope_rx);
+        engine.set_user_data_channels(user_scope_tx, user_data_rx);
         vec![
-            tokio::spawn(stream.run()),
+            market_task,
+            user_data_task,
             tokio::spawn(state.clone().run_snapshot_broadcast()),
         ]
     }

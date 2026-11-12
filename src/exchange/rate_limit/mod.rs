@@ -178,6 +178,18 @@ impl RateLimiter {
         weight: u64,
         class: RequestClass,
     ) -> Result<(), String> {
+        let order_count = u64::from(class.order());
+        self.reserve_with_orders(endpoint, account, weight, order_count, class)
+    }
+
+    pub(crate) fn reserve_with_orders(
+        &self,
+        endpoint: &str,
+        account: [u8; 32],
+        weight: u64,
+        order_count: u64,
+        class: RequestClass,
+    ) -> Result<(), String> {
         let mut endpoints = self.endpoints.lock_unpoisoned();
         let now = Instant::now();
         let endpoint = Self::endpoint_mut(&mut endpoints, endpoint);
@@ -218,7 +230,7 @@ impl RateLimiter {
                 ));
             }
         }
-        Self::reserve_account_order_budget(endpoint, account, now, class)?;
+        Self::reserve_account_order_budget(endpoint, account, now, order_count, class)?;
         if weight > 0 {
             endpoint.weight.record(now, weight);
             if matches!(class, RequestClass::PnlReconciliation) {
@@ -232,12 +244,13 @@ impl RateLimiter {
         endpoint: &mut EndpointLimits,
         account: [u8; 32],
         now: Instant,
+        order_count: u64,
         class: RequestClass,
     ) -> Result<(), String> {
         let account = Self::account_limits_mut(&mut endpoint.accounts, account, now);
         account.orders_10s.prune(now, TEN_SECONDS);
         account.orders_1m.prune(now, MINUTE);
-        if class.order() {
+        if class.order() && order_count > 0 {
             let limit_10s = scaled_limit(
                 ORDERS_NORMAL_10S,
                 ORDERS_CRITICAL_10S,
@@ -254,11 +267,13 @@ impl RateLimiter {
                 95,
                 class.critical(),
             );
-            if account.orders_10s.total() >= limit_10s || account.orders_1m.total() >= limit_1m {
+            if account.orders_10s.total().saturating_add(order_count) > limit_10s
+                || account.orders_1m.total().saturating_add(order_count) > limit_1m
+            {
                 return Err("local Binance order-rate budget reached".into());
             }
-            account.orders_10s.record(now, 1);
-            account.orders_1m.record(now, 1);
+            account.orders_10s.record(now, order_count);
+            account.orders_1m.record(now, order_count);
         }
         Ok(())
     }

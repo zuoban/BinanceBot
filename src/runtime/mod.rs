@@ -3,7 +3,7 @@ use crate::exchange::account_cache::AccountCache;
 use crate::exchange::market_cache::MarketCache;
 use crate::exchange::position_cache::PositionCache;
 use crate::exchange::rate_limit::RateLimiter;
-use crate::exchange::BinanceFuturesClient;
+use crate::exchange::{BinanceFuturesClient, MarketStreamHub, UserDataHub};
 use crate::fx::CnyRateCache;
 use crate::lifecycle::stop_engine;
 use crate::server::AppState;
@@ -90,6 +90,8 @@ pub struct TradingRuntime {
     account_cache: Arc<AccountCache>,
     position_cache: Arc<PositionCache>,
     market_cache: Arc<MarketCache>,
+    market_hub: Arc<MarketStreamHub>,
+    user_data_hub: Arc<UserDataHub>,
     rate_limiter: Arc<RateLimiter>,
     global_position_limit: Arc<crate::server::state::GlobalPositionLimit>,
     auth: Arc<crate::server::state::AuthContext>,

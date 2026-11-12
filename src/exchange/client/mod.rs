@@ -79,6 +79,13 @@ impl BinanceFuturesClient {
     pub(crate) fn market_cache_key(&self) -> &str {
         &self.base_url
     }
+
+    #[must_use]
+    #[inline]
+    pub(crate) fn has_api_key(&self) -> bool {
+        self.api_key_header.is_some()
+    }
+
     pub fn new(config: &ExchangeConfig) -> Self {
         Self::new_with_limiter(config, Arc::new(RateLimiter::default()))
     }
@@ -296,6 +303,26 @@ impl BinanceFuturesClient {
     pub(super) fn reserve(&self, weight: u64, class: RequestClass) -> Result<()> {
         self.limiter
             .reserve(&self.base_url, self.rate_account_key, weight, class)
+            .map_err(|error| {
+                tracing::warn!("{}", error);
+                anyhow!(LocalRateLimitError(error))
+            })
+    }
+
+    pub(super) fn reserve_with_orders(
+        &self,
+        weight: u64,
+        order_count: u64,
+        class: RequestClass,
+    ) -> Result<()> {
+        self.limiter
+            .reserve_with_orders(
+                &self.base_url,
+                self.rate_account_key,
+                weight,
+                order_count,
+                class,
+            )
             .map_err(|error| {
                 tracing::warn!("{}", error);
                 anyhow!(LocalRateLimitError(error))

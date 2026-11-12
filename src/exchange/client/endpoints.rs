@@ -17,6 +17,43 @@ pub(crate) struct NewOrderRequest<'a> {
     pub(crate) reduce_only: bool,
 }
 
+#[derive(serde::Serialize)]
+struct BatchOrderWireItem<'a> {
+    symbol: &'a str,
+    side: &'a str,
+    #[serde(rename = "type")]
+    order_type: &'static str,
+    #[serde(rename = "timeInForce")]
+    time_in_force: &'static str,
+    price: &'a str,
+    quantity: &'a str,
+    #[serde(rename = "newClientOrderId")]
+    new_client_order_id: &'a str,
+    #[serde(rename = "reduceOnly", skip_serializing_if = "Option::is_none")]
+    reduce_only: Option<&'static str>,
+}
+
+fn is_valid_listen_key(listen_key: &str) -> bool {
+    !listen_key.is_empty()
+        && listen_key.len() <= 128
+        && listen_key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+}
+
+fn percent_encode_query_value(input: &str) -> String {
+    use std::fmt::Write;
+    let mut encoded = String::with_capacity(input.len() * 2);
+    for byte in input.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            let _ = write!(encoded, "%{:02X}", byte);
+        }
+    }
+    encoded
+}
+
 impl BinanceFuturesClient {
     pub(crate) async fn get_all_mark_prices_for_fallback(
         &self,
@@ -324,6 +361,171 @@ impl BinanceFuturesClient {
             "Failed to cancel order",
         )
         .await?;
+        Ok(())
+    }
+
+    /// Place 1..=5 limit orders in a single `/fapi/v1/batchOrders` call.
+    #[allow(dead_code)]
+    pub(crate) async fn place_batch_orders(
+        &self,
+        orders: &[NewOrderRequest<'_>],
+    ) -> std::result::Result<Vec<BinanceBatchOrderItem>, ExchangeError> {
+        if orders.is_empty() || orders.len() > 5 {
+            return Err(ExchangeError::RequestRejected(
+                "batchOrders requires 1..=5 orders".to_string(),
+            ));
+        }
+        let mut wire_items = Vec::with_capacity(orders.len());
+        let mut all_reduce_only = true;
+        for order in orders {
+            if !is_valid_client_order_id(order.client_order_id) {
+                return Err(ExchangeError::RequestRejected(
+                    "Invalid client_order_id".to_string(),
+                ));
+            }
+            if order.symbol.is_empty()
+                || order.side.is_empty()
+                || order.price.is_empty()
+                || order.quantity.is_empty()
+            {
+                return Err(ExchangeError::RequestRejected(
+                    "Batch order contains empty required field".to_string(),
+                ));
+            }
+            all_reduce_only &= order.reduce_only;
+            wire_items.push(BatchOrderWireItem {
+                symbol: order.symbol,
+                side: order.side,
+                order_type: "LIMIT",
+                time_in_force: if order.post_only { "GTX" } else { "GTC" },
+                price: order.price,
+                quantity: order.quantity,
+                new_client_order_id: order.client_order_id,
+                reduce_only: order.reduce_only.then_some("true"),
+            });
+        }
+        let class = if all_reduce_only {
+            RequestClass::ClosingOrder
+        } else {
+            RequestClass::OpeningOrder
+        };
+        self.reserve_with_orders(5, orders.len() as u64, class)
+            .map_err(|error| ExchangeError::RequestRejected(error.to_string()))?;
+
+        let batch_json = serde_json::to_string(&wire_items).map_err(|error| {
+            ExchangeError::RequestRejected(format!("Failed to serialize batchOrders: {error}"))
+        })?;
+        let encoded_batch = percent_encode_query_value(&batch_json);
+        let url = self.signed_url_fmt(
+            "/fapi/v1/batchOrders",
+            format_args!("batchOrders={}", encoded_batch),
+        );
+        let resp = self.send(self.client.post(&url)).await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = read_bounded_error_body(resp).await?;
+            self.maybe_resync_on_invalid_timestamp(&body).await;
+            return Err(order_response_error(status, &body));
+        }
+        let items: Vec<BinanceBatchOrderItem> =
+            read_bounded_json(resp, 256 * 1024).await.map_err(|error| {
+                ExchangeError::Other(format!("Failed to parse batchOrders response: {error}"))
+            })?;
+        if items.len() != orders.len() {
+            return Err(ExchangeError::Other(format!(
+                "batchOrders response length mismatch: expected {}, got {}",
+                orders.len(),
+                items.len()
+            )));
+        }
+        Ok(items)
+    }
+
+    /// Cancel 1..=10 orders for a symbol in a single `/fapi/v1/batchOrders` call.
+    #[allow(dead_code)]
+    pub(crate) async fn cancel_batch_orders(
+        &self,
+        symbol: &str,
+        target: CancelBatchTarget<'_>,
+    ) -> Result<Vec<BinanceBatchOrderItem>> {
+        anyhow::ensure!(!symbol.is_empty(), "Symbol cannot be empty");
+        let (param_name, raw_json, expected_len) = match target {
+            CancelBatchTarget::OrderIds(ids) => {
+                anyhow::ensure!(
+                    (1..=10).contains(&ids.len()),
+                    "cancel_batch_orders requires 1..=10 order IDs"
+                );
+                anyhow::ensure!(ids.iter().all(|&id| id > 0), "Invalid order_id in batch");
+                ("orderIdList", serde_json::to_string(ids)?, ids.len())
+            }
+            CancelBatchTarget::ClientOrderIds(cids) => {
+                anyhow::ensure!(
+                    (1..=10).contains(&cids.len()),
+                    "cancel_batch_orders requires 1..=10 client order IDs"
+                );
+                anyhow::ensure!(
+                    cids.iter().all(|cid| is_valid_client_order_id(cid)),
+                    "Invalid client_order_id in batch"
+                );
+                (
+                    "origClientOrderIdList",
+                    serde_json::to_string(cids)?,
+                    cids.len(),
+                )
+            }
+        };
+        self.reserve(1, RequestClass::Critical)?;
+        let encoded_list = percent_encode_query_value(&raw_json);
+        let url = self.signed_url_fmt(
+            "/fapi/v1/batchOrders",
+            format_args!("symbol={}&{}={}", symbol, param_name, encoded_list),
+        );
+        let resp = self
+            .ensure_signed_success(
+                self.send(self.client.delete(&url)).await?,
+                "Failed to cancel batch orders",
+            )
+            .await?;
+        let items: Vec<BinanceBatchOrderItem> = read_bounded_json(resp, 256 * 1024).await?;
+        anyhow::ensure!(
+            items.len() == expected_len,
+            "cancel_batch_orders response length mismatch: expected {expected_len}, got {}",
+            items.len()
+        );
+        Ok(items)
+    }
+
+    /// Create a user data stream listenKey (`POST /fapi/v1/listenKey`).
+    pub(crate) async fn create_listen_key(&self) -> Result<String> {
+        self.reserve(1, RequestClass::Normal)?;
+        let url = format!("{}/fapi/v1/listenKey", self.base_url);
+        let resp = checked_response(self.send(self.client.post(&url)).await?).await?;
+        let parsed: BinanceListenKeyResponse = read_bounded_json(resp, 16 * 1024).await?;
+        anyhow::ensure!(
+            is_valid_listen_key(&parsed.listen_key),
+            "Invalid listenKey returned by Binance"
+        );
+        Ok(parsed.listen_key)
+    }
+
+    /// Keepalive an active user data stream listenKey (`PUT /fapi/v1/listenKey`).
+    pub(crate) async fn keepalive_listen_key(&self, listen_key: &str) -> Result<()> {
+        anyhow::ensure!(is_valid_listen_key(listen_key), "Invalid listenKey");
+        self.reserve(1, RequestClass::Normal)?;
+        let url = format!("{}/fapi/v1/listenKey", self.base_url);
+        let req = self.client.put(&url).query(&[("listenKey", listen_key)]);
+        let _ = checked_response(self.send(req).await?).await?;
+        Ok(())
+    }
+
+    /// Close a user data stream listenKey (`DELETE /fapi/v1/listenKey`).
+    #[allow(dead_code)]
+    pub(crate) async fn close_listen_key(&self, listen_key: &str) -> Result<()> {
+        anyhow::ensure!(is_valid_listen_key(listen_key), "Invalid listenKey");
+        self.reserve(1, RequestClass::Normal)?;
+        let url = format!("{}/fapi/v1/listenKey", self.base_url);
+        let req = self.client.delete(&url).query(&[("listenKey", listen_key)]);
+        let _ = checked_response(self.send(req).await?).await?;
         Ok(())
     }
 

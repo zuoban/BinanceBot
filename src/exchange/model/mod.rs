@@ -10,10 +10,31 @@ pub(crate) struct BinanceServerTime {
     pub(crate) server_time: i64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 pub(crate) struct BinanceApiError {
     pub(crate) code: i64,
     pub(crate) msg: String,
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+pub(crate) struct BinanceListenKeyResponse {
+    #[serde(rename = "listenKey")]
+    pub(crate) listen_key: String,
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+#[serde(untagged)]
+#[allow(dead_code, clippy::large_enum_variant)]
+pub(crate) enum BinanceBatchOrderItem {
+    Order(BinanceOrderResponse),
+    Error(BinanceApiError),
+}
+
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+pub(crate) enum CancelBatchTarget<'a> {
+    OrderIds(&'a [i64]),
+    ClientOrderIds(&'a [&'a str]),
 }
 
 #[derive(Debug, Deserialize)]

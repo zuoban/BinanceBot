@@ -247,3 +247,164 @@ async fn rejects_oversized_upstream_ws_frames_and_reconnects_cleanly() {
     client.abort();
     server.abort();
 }
+
+#[tokio::test]
+async fn market_stream_hub_multiplexes_pairs_and_sends_live_subscribe_unsubscribe() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (sub_tx, mut sub_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+        let now_ms = Utc::now().timestamp_millis();
+        let btc_mark = serde_json::json!({
+            "stream": "btcusdc@markPrice@1s",
+            "data": {"e": "markPriceUpdate", "E": now_ms, "s": "BTCUSDC", "p": "50000"}
+        });
+        ws.send(Message::Text(btc_mark.to_string())).await.unwrap();
+
+        while let Some(Ok(msg)) = ws.next().await {
+            if let Message::Text(text) = msg {
+                let _ = sub_tx.send(text.clone());
+                if text.contains("\"SUBSCRIBE\"") && text.contains("ethusdc@markPrice@1s") {
+                    let eth_mark = serde_json::json!({
+                        "stream": "ethusdc@markPrice@1s",
+                        "data": {"e": "markPriceUpdate", "E": Utc::now().timestamp_millis(), "s": "ETHUSDC", "p": "3000"}
+                    });
+                    ws.send(Message::Text(eth_mark.to_string())).await.unwrap();
+                }
+            }
+        }
+    });
+
+    let hub = MarketStreamHub::with_base_url_and_timeout(
+        format!("ws://{address}"),
+        Duration::from_secs(5),
+    );
+    let (_btc_cfg_tx, btc_cfg_rx) = watch::channel("BTCUSDC".to_string());
+    let (btc_tx, mut btc_rx) = broadcast::channel(8);
+    let btc_handle = hub.register(btc_cfg_rx, btc_tx);
+
+    let btc_update = tokio::time::timeout(Duration::from_secs(3), btc_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(btc_update.symbol, "BTCUSDC");
+    assert_eq!(btc_update.mark_price, dec!(50000));
+
+    // Register a second symbol on the same hub; it should send a live SUBSCRIBE without reconnecting.
+    let (_eth_cfg_tx, eth_cfg_rx) = watch::channel("ETHUSDC".to_string());
+    let (eth_tx, mut eth_rx) = broadcast::channel(8);
+    let eth_handle = hub.register(eth_cfg_rx, eth_tx);
+
+    let subscribe_cmd = tokio::time::timeout(Duration::from_secs(3), sub_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(subscribe_cmd.contains("\"SUBSCRIBE\""));
+    assert!(subscribe_cmd.contains("ethusdc@ticker"));
+    assert!(subscribe_cmd.contains("ethusdc@markPrice@1s"));
+
+    let eth_update = tokio::time::timeout(Duration::from_secs(3), eth_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(eth_update.symbol, "ETHUSDC");
+    assert_eq!(eth_update.mark_price, dec!(3000));
+
+    // Unregister ETH; hub should send live UNSUBSCRIBE.
+    eth_handle.abort();
+    let unsubscribe_cmd = tokio::time::timeout(Duration::from_secs(3), sub_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(unsubscribe_cmd.contains("\"UNSUBSCRIBE\""));
+    assert!(unsubscribe_cmd.contains("ethusdc@ticker"));
+
+    btc_handle.abort();
+    server.abort();
+}
+
+#[tokio::test]
+async fn user_data_hub_rotates_expired_listen_key_and_wakes_symbol_on_order_update() {
+    use axum::{routing::post, Json, Router};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let key_seq = Arc::new(AtomicUsize::new(0));
+    let key_seq_route = Arc::clone(&key_seq);
+    let app = Router::new().route(
+        "/fapi/v1/listenKey",
+        post(move || {
+            let seq = key_seq_route.fetch_add(1, Ordering::SeqCst) + 1;
+            async move { Json(serde_json::json!({ "listenKey": format!("lk_{seq}") })) }
+        })
+        .put(|| async { Json(serde_json::json!({})) })
+        .delete(|| async { Json(serde_json::json!({})) }),
+    );
+    let http_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let http_url = format!("http://{}", http_listener.local_addr().unwrap());
+    let http_server = tokio::spawn(async move { axum::serve(http_listener, app).await.unwrap() });
+
+    let ws_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ws_addr = ws_listener.local_addr().unwrap();
+    let ws_server = tokio::spawn(async move {
+        // First connection receives listenKeyExpired to trigger immediate rotation.
+        let (sock1, _) = ws_listener.accept().await.unwrap();
+        let mut ws1 = tokio_tungstenite::accept_async(sock1).await.unwrap();
+        ws1.send(Message::Text(
+            r#"{"e":"listenKeyExpired","E":1700000000000}"#.to_string(),
+        ))
+        .await
+        .unwrap();
+
+        // Second connection sends an ORDER_TRADE_UPDATE for BTCUSDC.
+        let (sock2, _) = ws_listener.accept().await.unwrap();
+        let mut ws2 = tokio_tungstenite::accept_async(sock2).await.unwrap();
+        ws2.send(Message::Text(
+            r#"{"e":"ORDER_TRADE_UPDATE","E":1700000001000,"o":{"s":"BTCUSDC","x":"TRADE","X":"FILLED"}}"#
+                .to_string(),
+        ))
+        .await
+        .unwrap();
+        while ws2.next().await.is_some() {}
+    });
+
+    let mut cfg = crate::config::AppConfig::default().exchange;
+    cfg.api_key = "live-user-key".into();
+    cfg.api_secret = "live-user-secret".into();
+    let client = Arc::new(crate::exchange::BinanceFuturesClient::with_base_url(
+        &cfg, http_url,
+    ));
+
+    let account_cache = Arc::new(crate::exchange::account_cache::AccountCache::default());
+    let position_cache = Arc::new(crate::exchange::position_cache::PositionCache::default());
+    let hub = UserDataHub::with_options(
+        account_cache,
+        position_cache,
+        format!("ws://{ws_addr}"),
+        Duration::from_secs(60),
+        Duration::from_secs(30),
+        Duration::from_secs(10),
+    );
+    let (_scope_tx, scope_rx) = watch::channel(UserDataScope {
+        client,
+        symbol: "BTCUSDC".to_string(),
+        is_paper: false,
+    });
+    let (mut wakeup_rx, guard_task) = hub.register(scope_rx);
+
+    // Wait for wakeup counter to advance at least twice (initial connect + second connect order update).
+    tokio::time::timeout(Duration::from_secs(4), async {
+        while *wakeup_rx.borrow_and_update() < 3 {
+            wakeup_rx.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert!(key_seq.load(Ordering::SeqCst) >= 2);
+
+    guard_task.abort();
+    ws_server.abort();
+    http_server.abort();
+}
