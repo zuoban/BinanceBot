@@ -1,0 +1,53 @@
+name: Dependency Security Audit
+
+on:
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - frontend/package.json
+      - frontend/package-lock.json
+      - .github/workflows/security.yml
+  push:
+    branches: [ "main" ]
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - frontend/package.json
+      - frontend/package-lock.json
+      - .github/workflows/security.yml
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rust-audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: cargo-audit
+          cache-bin: true
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Audit Cargo.lock
+        run: cargo audit --deny warnings
+
+  frontend-audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22.23.4'
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=moderate
+        working-directory: frontend
