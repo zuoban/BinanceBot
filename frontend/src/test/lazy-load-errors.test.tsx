@@ -7,18 +7,26 @@ import { beforeEach, expect, it, vi } from 'vitest';
 import type * as Api from '../lib/api';
 import type * as Queries from '../lib/queries';
 import { DepthChart, HourlyChart } from '../components/Charts';
+import { ControlProvider } from '../components/Controls';
 import { LoadErrorBoundary } from '../components/LoadErrorBoundary';
 import { OverviewHistory } from '../components/OverviewHistory';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import PairDetail from '../pages/PairDetail';
 import Settings from '../pages/Settings';
-import { snapshot } from './fixtures';
+import { pair, snapshot } from './fixtures';
 
 vi.mock('../components/OverviewHistoryChart', () => { throw new Error('chart module unavailable'); });
 vi.mock('../components/HourlyChartView', () => { throw new Error('hourly chart module unavailable'); });
 vi.mock('../components/DatabaseSettings', () => { throw new Error('database module unavailable'); });
+vi.mock('../components/DataTables', () => { throw new Error('data tables module unavailable'); });
 vi.mock('../lib/queries', async importOriginal => {
   const actual = await importOriginal<typeof Queries>();
-  return { ...actual, useOverviewHistory: () => ({ data: { snapshots: [{ hour: Math.floor(Date.now() / 3600000) * 3600, groups: [{ mode: 'PAPER', asset: 'USDC', account_id: null, equity: '100' }] }], current_accounts: [{ mode: 'PAPER', asset: 'USDC', account_id: null }] }, isPending: false, error: null }) };
+  return {
+    ...actual,
+    useOverviewHistory: () => ({ data: { snapshots: [{ hour: Math.floor(Date.now() / 3600000) * 3600, groups: [{ mode: 'PAPER', asset: 'USDC', account_id: null, equity: '100' }] }], current_accounts: [{ mode: 'PAPER', asset: 'USDC', account_id: null }] }, isPending: false, error: null }),
+    usePairs: () => ({ data: [pair('SOLUSDC')], error: null, isPending: false, isFetching: false, refetch: vi.fn() }),
+    usePairSnapshot: () => ({ data: snapshot('SOLUSDC'), dataUpdatedAt: Date.now(), error: null, live: true, stale: false, isPending: false, refetch: vi.fn() }),
+  };
 });
 vi.mock('../lib/api', async importOriginal => {
   const actual = await importOriginal<typeof Api>();
@@ -74,4 +82,31 @@ it('keeps depth levels interactive when the lazy hourly chart chunk fails to loa
   expect(await screen.findByText('今日成交图加载失败，请刷新页面重试。')).toBeInTheDocument();
   expect(screen.getByRole('button', { name: '刷新页面' })).toBeEnabled();
   expect(screen.getByRole('region', { name: '按价格从高到低排列的实时网格挂单' })).toBeInTheDocument();
+});
+
+it('isolates DataTables chunk failures on PairDetail tabs while keeping monitor and history actions usable', async () => {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const user = userEvent.setup();
+  render(
+    <QueryClientProvider client={client}>
+      <MemoryRouter initialEntries={['/pairs/SOLUSDC']}>
+        <App>
+          <ControlProvider>
+            <Routes><Route path="/pairs/:symbol" element={<PairDetail />} /></Routes>
+          </ControlProvider>
+        </App>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+  expect(screen.getByText('仓位与策略明细')).toBeInTheDocument();
+
+  await user.click(screen.getByRole('tab', { name: /挂单/ }));
+  expect(await screen.findByText('挂单列表加载失败，请刷新页面重试。')).toBeInTheDocument();
+
+  await user.click(screen.getByRole('tab', { name: '成交历史' }));
+  expect(await screen.findByText('成交历史加载失败，请刷新页面重试。')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: /导出当前币种分析快照/ })).toBeEnabled();
+
+  await user.click(screen.getByRole('tab', { name: '实时监控' }));
+  expect(screen.getByText('仓位与策略明细')).toBeInTheDocument();
 });

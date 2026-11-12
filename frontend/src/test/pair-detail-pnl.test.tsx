@@ -209,7 +209,7 @@ it('lazily fetches full buffered trades and logs on tab activation and falls bac
   state.api.mockRejectedValue(new Error('接口不可用'));
   render(<QueryClientProvider client={failingClient}>{view('/pairs/SOLUSDC?tab=trades')}</QueryClientProvider>);
   await waitFor(() => expect(state.api).toHaveBeenCalledWith('/api/pairs/SOLUSDC/trades', expect.anything()));
-  expect(screen.getByTestId('trades-ids')).toHaveTextContent('snap-t1');
+  expect(await screen.findByTestId('trades-ids')).toHaveTextContent('snap-t1');
 });
 
 it('never resurrects pre-clear fetched trades after clearing trades and receiving a new fill', async () => {

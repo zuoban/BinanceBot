@@ -1,4 +1,4 @@
-import { useContext, useMemo } from 'react';
+import { Suspense, lazy, useContext, useMemo, type ReactNode } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { Alert, Button, Card, Col, Descriptions, Row, Statistic, Tabs } from 'antd';
 import { SettingOutlined } from '@ant-design/icons';
@@ -13,15 +13,25 @@ import type { AccountObservation, Log, Pair, Snapshot, Trade } from '../lib/type
 import { ControlResultBanner, DirectionTag, DirectionText, ErrorNotice, FreshnessText, ModeTag, PageBreadcrumb, PageTitle, Pnl, SignalChip, StatusTag } from '../components/Common';
 import { PairControls, useControls } from '../components/Controls';
 import { DepthChart, HourlyChart } from '../components/Charts';
-import { LogsTable, OrdersTable, TradesTable } from '../components/DataTables';
 import { HistoryActions } from '../components/HistoryActions';
+import { LoadErrorBoundary } from '../components/LoadErrorBoundary';
 import { DetailLoading } from '../components/Loading';
 import { useDocumentTitle } from '../lib/documentTitle';
 import { useUrlParam } from '../lib/urlState';
 import { useAccountGroups, useBeijingDay } from '../lib/useNow';
 
+const OrdersTable = lazy(() => import('../components/DataTables').then(m => ({ default: m.OrdersTable })));
+const TradesTable = lazy(() => import('../components/DataTables').then(m => ({ default: m.TradesTable })));
+const LogsTable = lazy(() => import('../components/DataTables').then(m => ({ default: m.LogsTable })));
+
 const detailTabs = ['monitor', 'orders', 'trades', 'logs'] as const;
 const fallbackClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+function LazyTabTable({ label, activeTab, children }: { label: string; activeTab: string; children: ReactNode }) {
+  return <LoadErrorBoundary label={label} resetKey={activeTab}>
+    <Suspense fallback={<div className="history-empty history-plot-loading" role="status">正在加载{label}…</div>}>{children}</Suspense>
+  </LoadErrorBoundary>;
+}
 
 export function resolveTrades(snapshot: Snapshot | undefined, fetched: Trade[] | undefined, isError: boolean, fetchedAt: number, snapshotAt: number): Trade[] {
   const recent = snapshot?.recent_trades ?? [];
@@ -166,8 +176,8 @@ export default function PairDetail() {
         <Col xs={12} xl={6} className="metric-col"><Card><Statistic title={`持仓未实现 / ${asset}`} value={s.position.unrealized_pnl} formatter={() => <Pnl value={s.position.unrealized_pnl} />} /><div className="muted">持仓数量 {quantity(s.position.size)}</div></Card></Col>
         <Col xs={12} xl={6} className="metric-col"><Card><Statistic title={`账户权益 / ${account?.asset || asset}`} value={account?.equity ?? '--'} formatter={() => number(account?.equity)} /><div className="muted">{cnyText(account?.cny)} · 可用 {number(account?.available)}</div></Card></Col>
       </Row>
-      <Tabs className="detail-tabs" activeKey={tab} onChange={key => { const next = detailTabs.find(t => t === key); if (next) setTab(next); }} items={[
-        { key: 'monitor', label: '实时监控', children: <>
+      <Tabs className="detail-tabs" destroyOnHidden activeKey={tab} onChange={key => { const next = detailTabs.find(t => t === key); if (next) setTab(next); }} items={[
+        { key: 'monitor', label: '实时监控', children: tab === 'monitor' ? <>
           <Row gutter={[20, 20]}><Col xs={24} xl={14}><Card title="今日成交"><div className="today-trade-summary" aria-label="今日成交汇总">
             <div><span>成交总数</span><strong>{today ? today.buy + today.sell : '--'} <small>笔</small></strong></div>
             <div><span>买入</span><strong>{today?.buy ?? '--'} <small>笔</small></strong></div>
@@ -189,10 +199,10 @@ export default function PairDetail() {
             { key: 'volume', label: '累计成交额', children: `${number(s.stats.total_volume_usdc)} ${asset}` },
             { key: 'available', label: '可用比例（按钱包余额）', children: ratioText(account?.ratio) },
           ]} /></Card>
-        </> },
-        { key: 'orders', label: `挂单 (${s.active_orders.length})`, children: <Card><OrdersTable key={symbol} orders={s.active_orders} mark={s.ticker.mark_price} /></Card> },
-        { key: 'trades', label: '成交历史', children: <Card title="最近成交" extra={pair ? <HistoryActions key={pair.symbol} symbol={pair.symbol} /> : null}><Alert type="info" title={`此处展示当前模式的最近成交；导出和清理作用于 ${symbol ?? ''} 的全部模式。`} /><TradesTable key={symbol} trades={trades} /></Card> },
-        { key: 'logs', label: '运行日志', children: <Card><LogsTable key={symbol} logs={logs} /></Card> },
+        </> : null },
+        { key: 'orders', label: `挂单 (${s.active_orders.length})`, children: tab === 'orders' ? <Card><LazyTabTable label="挂单列表" activeTab={tab}><OrdersTable key={symbol} orders={s.active_orders} mark={s.ticker.mark_price} /></LazyTabTable></Card> : null },
+        { key: 'trades', label: '成交历史', children: tab === 'trades' ? <Card title="最近成交" extra={pair ? <HistoryActions key={pair.symbol} symbol={pair.symbol} /> : null}><Alert type="info" title={`此处展示当前模式的最近成交；导出和清理作用于 ${symbol ?? ''} 的全部模式。`} /><LazyTabTable label="成交历史" activeTab={tab}><TradesTable key={symbol} trades={trades} /></LazyTabTable></Card> : null },
+        { key: 'logs', label: '运行日志', children: tab === 'logs' ? <Card><LazyTabTable label="运行日志" activeTab={tab}><LogsTable key={symbol} logs={logs} /></LazyTabTable></Card> : null },
       ]} />
     </>}
   </div>;
