@@ -49,17 +49,6 @@ pub(super) fn trade(side: OrderSide) -> TradeRecord {
     }
 }
 
-pub(super) fn account(now: DateTime<Utc>) -> AccountInfo {
-    AccountInfo {
-        asset: "USDC".into(),
-        total_wallet_balance: dec!(10000),
-        available_balance: dec!(3878.03),
-        margin_balance: dec!(11254.48),
-        unrealized_profit: dec!(1254.48),
-        update_time: now,
-    }
-}
-
 fn context(trade: &TradeRecord) -> TradeNotificationContext {
     let start = trade.timestamp - Duration::minutes(26) - Duration::hours(20);
     let stats = HourlyTradeStats {
@@ -80,20 +69,7 @@ fn context(trade: &TradeRecord) -> TradeNotificationContext {
             },
         ],
     };
-    let rate = CnyRate {
-        asset: "USDC".into(),
-        cny_per_unit: dec!(6.7043),
-        updated_at: trade.timestamp,
-    };
-    TradeNotificationContext::for_trade(
-        trade,
-        Some(&stats),
-        &account(trade.timestamp),
-        Some(&rate),
-        trade.timestamp,
-        3,
-    )
-    .with_position(
+    TradeNotificationContext::for_trade(trade, Some(&stats), trade.timestamp, 3).with_position(
         trade,
         &PositionInfo {
             symbol: trade.symbol.clone(),
@@ -180,8 +156,11 @@ fn position_amount_prefers_newer_position_mark_over_stale_ticker_mark() {
         fresh_position.market_valuation_price(Some(&stale_ticker)),
         dec!(112.5)
     );
-    let ctx = TradeNotificationContext::for_trade(&fill, None, &account(now), None, now, 3)
-        .with_position(&fill, &fresh_position, &stale_ticker);
+    let ctx = TradeNotificationContext::for_trade(&fill, None, now, 3).with_position(
+        &fill,
+        &fresh_position,
+        &stale_ticker,
+    );
     assert_eq!(ctx.position_amount, Some(dec!(2250)));
 
     // Even when both marks are fresh, the newer position mark wins over an older ticker mark.
@@ -194,9 +173,11 @@ fn position_amount_prefers_newer_position_mark_over_stale_ticker_mark() {
         fresh_position.market_valuation_price(Some(&older_fresh_ticker)),
         dec!(112.5)
     );
-    let both_fresh_ctx =
-        TradeNotificationContext::for_trade(&fill, None, &account(now), None, now, 3)
-            .with_position(&fill, &fresh_position, &older_fresh_ticker);
+    let both_fresh_ctx = TradeNotificationContext::for_trade(&fill, None, now, 3).with_position(
+        &fill,
+        &fresh_position,
+        &older_fresh_ticker,
+    );
     assert_eq!(both_fresh_ctx.position_amount, Some(dec!(2250)));
 
     // When ticker mark is newer than position mark, ticker mark wins.
@@ -210,9 +191,11 @@ fn position_amount_prefers_newer_position_mark_over_stale_ticker_mark() {
         fresh_position.market_valuation_price(Some(&newer_ticker)),
         dec!(115)
     );
-    let newer_ticker_ctx =
-        TradeNotificationContext::for_trade(&fill, None, &account(now), None, now, 3)
-            .with_position(&fill, &fresh_position, &newer_ticker);
+    let newer_ticker_ctx = TradeNotificationContext::for_trade(&fill, None, now, 3).with_position(
+        &fill,
+        &fresh_position,
+        &newer_ticker,
+    );
     assert_eq!(newer_ticker_ctx.position_amount, Some(dec!(2300)));
 
     // When ticker mark is stale and position mark is zero, a fresh last_price is used.
@@ -226,8 +209,11 @@ fn position_amount_prefers_newer_position_mark_over_stale_ticker_mark() {
         update_time: now - Duration::seconds(2),
         ..stale_ticker
     };
-    let last_ctx = TradeNotificationContext::for_trade(&fill, None, &account(now), None, now, 3)
-        .with_position(&fill, &no_pos_mark, &fresh_last_ticker);
+    let last_ctx = TradeNotificationContext::for_trade(&fill, None, now, 3).with_position(
+        &fill,
+        &no_pos_mark,
+        &fresh_last_ticker,
+    );
     assert_eq!(last_ctx.position_amount, Some(dec!(2180)));
 }
 
@@ -337,100 +323,6 @@ fn title_preserves_small_execution_price() {
 }
 
 #[test]
-fn stale_or_mismatched_account_does_not_display_balances() {
-    let trade = trade(OrderSide::Buy);
-    for account in [
-        account(trade.timestamp - Duration::seconds(30)),
-        AccountInfo {
-            asset: "USDT".into(),
-            ..account(trade.timestamp)
-        },
-    ] {
-        let context =
-            TradeNotificationContext::for_trade(&trade, None, &account, None, trade.timestamp, 3);
-        assert_eq!(context.account_equity, None);
-        assert_eq!(context.available_balance, None);
-        let message = format_trade_message(&trade, &context);
-        assert!(message.contains("\n成交笔数：--D｜--H\n"));
-        assert!(!message.contains("账户权益"));
-        assert!(!message.contains("可用余额"));
-    }
-    let mut unknown_symbol = trade.clone();
-    unknown_symbol.symbol = "BTCETH".into();
-    let fallback_account = AccountInfo {
-        asset: "计价资产".into(),
-        ..account(trade.timestamp)
-    };
-    let context = TradeNotificationContext::for_trade(
-        &unknown_symbol,
-        None,
-        &fallback_account,
-        None,
-        trade.timestamp,
-        3,
-    );
-    assert_eq!(context.available_balance, None);
-    assert!(format_trade_message(&unknown_symbol, &context).contains("计价资产"));
-}
-
-#[test]
-fn live_trade_freshness_scales_with_sync_interval() {
-    let trade = trade(OrderSide::Buy);
-    let synced_45s_ago = account(trade.timestamp - Duration::seconds(45));
-    let stale_under_default = TradeNotificationContext::for_trade(
-        &trade,
-        None,
-        &synced_45s_ago,
-        None,
-        trade.timestamp,
-        3,
-    );
-    assert_eq!(stale_under_default.account_equity, None);
-    assert_eq!(stale_under_default.available_balance, None);
-
-    let fresh_under_30s = TradeNotificationContext::for_trade(
-        &trade,
-        None,
-        &synced_45s_ago,
-        None,
-        trade.timestamp,
-        30,
-    );
-    assert_eq!(
-        fresh_under_30s.account_equity,
-        Some(synced_45s_ago.margin_balance)
-    );
-    assert_eq!(
-        fresh_under_30s.available_balance,
-        Some(synced_45s_ago.available_balance)
-    );
-
-    let expired_at_90s = TradeNotificationContext::for_trade(
-        &trade,
-        None,
-        &account(trade.timestamp - Duration::seconds(90)),
-        None,
-        trade.timestamp,
-        30,
-    );
-    assert_eq!(expired_at_90s.account_equity, None);
-    assert_eq!(expired_at_90s.available_balance, None);
-}
-
-#[test]
-fn paper_context_uses_shared_account_equity() {
-    let mut trade = trade(OrderSide::Buy);
-    trade.mode = TradingMode::Paper;
-    let shared = account(trade.timestamp);
-    let context =
-        TradeNotificationContext::for_trade(&trade, None, &shared, None, trade.timestamp, 3);
-    assert_eq!(context.account_equity, Some(shared.margin_balance));
-    assert_eq!(context.available_balance, Some(shared.available_balance));
-    assert_eq!(context.wallet_balance, Some(shared.total_wallet_balance));
-    assert_eq!(context.cny_per_unit, None);
-}
-
-#[test]
 fn ratio_handles_zero_wallet_and_zero_available_balance() {
     assert_eq!(
         format_available_ratio(Some(dec!(3878.03)), Some(Decimal::ZERO)),
@@ -440,33 +332,6 @@ fn ratio_handles_zero_wallet_and_zero_available_balance() {
         format_available_ratio(Some(Decimal::ZERO), Some(dec!(10000))),
         "0.00%"
     );
-}
-
-#[test]
-fn rate_must_match_the_account_asset_and_be_recent() {
-    let trade = trade(OrderSide::Buy);
-    for rate in [
-        CnyRate {
-            asset: "USDT".into(),
-            cny_per_unit: dec!(7),
-            updated_at: trade.timestamp,
-        },
-        CnyRate {
-            asset: "USDC".into(),
-            cny_per_unit: dec!(7),
-            updated_at: trade.timestamp - Duration::hours(1),
-        },
-    ] {
-        let context = TradeNotificationContext::for_trade(
-            &trade,
-            None,
-            &account(trade.timestamp),
-            Some(&rate),
-            trade.timestamp,
-            3,
-        );
-        assert_eq!(context.cny_per_unit, None);
-    }
 }
 
 #[test]
@@ -529,14 +394,7 @@ fn ordinals_survive_restart_and_reset_at_beijing_hour_and_day_boundaries() {
         let stats = db
             .get_hourly_trade_stats(&fill.symbol, fill.mode, timestamp)
             .unwrap();
-        let context = TradeNotificationContext::for_trade(
-            &fill,
-            Some(&stats),
-            &account(timestamp),
-            None,
-            timestamp,
-            3,
-        );
+        let context = TradeNotificationContext::for_trade(&fill, Some(&stats), timestamp, 3);
         assert_eq!(
             (context.today_count, context.hour_count),
             (Some(expected.0), Some(expected.1))
@@ -565,14 +423,7 @@ fn ordinals_survive_restart_and_reset_at_beijing_hour_and_day_boundaries() {
     let stats = reopened
         .get_hourly_trade_stats(&fill.symbol, fill.mode, fill.timestamp)
         .unwrap();
-    let context = TradeNotificationContext::for_trade(
-        &fill,
-        Some(&stats),
-        &account(fill.timestamp),
-        None,
-        fill.timestamp,
-        3,
-    );
+    let context = TradeNotificationContext::for_trade(&fill, Some(&stats), fill.timestamp, 3);
     assert_eq!(context.today_count, Some(5));
     assert_eq!(context.hour_count, Some(3));
     drop(reopened);

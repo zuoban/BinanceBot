@@ -1,8 +1,6 @@
 use crate::config::NtfyConfig;
 use crate::telegram::daily_snapshot::format_daily_snapshot_plain_body;
-use crate::telegram::{
-    format_available_ratio, format_beijing_time, format_optional_money, TradeNotificationContext,
-};
+use crate::telegram::{format_beijing_time, format_optional_money, TradeNotificationContext};
 use crate::types::{format_decimal_dp, OrderSide, TradeRecord};
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
@@ -194,15 +192,6 @@ pub(crate) fn format_ntfy_trade_message(
     let average_price = trade.price.normalize();
     let count = |value: Option<u64>| value.map_or_else(|| "--".to_string(), |n| n.to_string());
     let money = |value: Option<Decimal>| format_optional_money(value, quote, false);
-    let cny = context
-        .account_equity
-        .zip(context.cny_per_unit)
-        .and_then(|(equity, rate)| equity.checked_mul(rate))
-        .map_or_else(
-            || "--".to_string(),
-            |value| format!("≈ ¥{}", format_decimal_dp(value, 2, false)),
-        );
-    let ratio = format_available_ratio(context.available_balance, context.wallet_balance);
     let pnl_line = match (
         trade.side == context.direction.closing_side(),
         trade.pnl_verified,
@@ -215,17 +204,15 @@ pub(crate) fn format_ntfy_trade_message(
         (false, _) => String::new(),
     };
     let title = format!(
-        "{icon} {direction}｜{symbol}｜{average_price}｜{amount} {quote}｜{today}D｜{hour}H",
+        "{icon} {direction}｜{symbol}｜{average_price}｜{amount} {quote}",
         direction = trade.side.as_str(),
         symbol = trade.symbol,
         amount = format_decimal_dp(trade.amount_usdc, 2, false),
-        today = count(context.today_count),
-        hour = count(context.hour_count),
     );
     let message = format!(
-        "账户权益：{equity}｜{cny}\n持仓金额：{position_amount}\n可用余额：{available}｜{ratio}{pnl_line}",
-        equity = money(context.account_equity),
-        available = money(context.available_balance),
+        "成交笔数：{today}D｜{hour}H\n持仓金额：{position_amount}{pnl_line}",
+        today = count(context.today_count),
+        hour = count(context.hour_count),
         position_amount = money(context.position_amount),
     );
     (title, message)

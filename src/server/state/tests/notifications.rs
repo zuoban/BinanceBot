@@ -541,6 +541,10 @@ async fn ntfy_notifications_deliver_independently_and_alongside_failing_telegram
         .as_str()
         .unwrap()
         .starts_with("🟢 BUY｜SOLUSDC｜"));
+    let body = ntfy_trade["message"].as_str().unwrap();
+    assert!(body.starts_with("成交笔数：1D｜1H\n"), "{body}");
+    assert!(!body.contains("账户权益"), "{body}");
+    assert!(!body.contains("可用余额"), "{body}");
 
     // Global risk notifies ntfy with priority 4 even when Telegram fails.
     fixture.state.account.write().await.asset = "USDC".into();

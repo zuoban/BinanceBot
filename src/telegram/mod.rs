@@ -1,8 +1,7 @@
 use crate::config::TelegramConfig;
-use crate::fx::CnyRate;
 use crate::types::{
-    format_decimal_dp, AccountInfo, GridDirection, HourlyTradeStats, OrderSide, PositionInfo,
-    TickerInfo, TradeRecord, TradingMode,
+    format_decimal_dp, GridDirection, HourlyTradeStats, OrderSide, PositionInfo, TickerInfo,
+    TradeRecord, TradingMode,
 };
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
@@ -145,11 +144,7 @@ pub(crate) struct TradeNotificationContext {
     pub(crate) direction: GridDirection,
     pub(crate) today_count: Option<u64>,
     pub(crate) hour_count: Option<u64>,
-    pub(crate) account_equity: Option<Decimal>,
-    pub(crate) wallet_balance: Option<Decimal>,
-    pub(crate) available_balance: Option<Decimal>,
     pub(crate) position_amount: Option<Decimal>,
-    pub(crate) cny_per_unit: Option<Decimal>,
     reference_time: Option<DateTime<Utc>>,
     max_age_secs: i64,
 }
@@ -158,8 +153,6 @@ impl TradeNotificationContext {
     pub(crate) fn for_trade(
         trade: &TradeRecord,
         hourly_stats: Option<&HourlyTradeStats>,
-        account: &AccountInfo,
-        cny_rate: Option<&CnyRate>,
         now: DateTime<Utc>,
         sync_interval_secs: u64,
     ) -> Self {
@@ -174,38 +167,16 @@ impl TradeNotificationContext {
                 .last()
                 .map(|bucket| select_side((bucket.buy_count, bucket.sell_count)))
         });
-        let flat_paper = trade.mode == TradingMode::Paper
-            && account.margin_balance == account.available_balance
-            && account.unrealized_profit.is_zero();
         let max_age = if trade.mode == TradingMode::Paper {
             crate::types::MARKET_PRICE_MAX_AGE_SECS
         } else {
             crate::types::max_reconciliation_age_secs(sync_interval_secs)
         };
-        let fresh =
-            flat_paper || crate::types::is_timestamp_fresh(account.update_time, now, max_age);
-        let matching_asset =
-            crate::types::quote_asset(&trade.symbol).is_some_and(|asset| account.asset == asset);
-        let account_equity = (fresh && matching_asset).then_some(account.margin_balance);
-        let wallet_balance = ((trade.mode == TradingMode::Paper || fresh) && matching_asset)
-            .then_some(account.total_wallet_balance);
-        let available_balance = (fresh && matching_asset).then_some(account.available_balance);
-        let cny_per_unit = cny_rate
-            .filter(|rate| {
-                rate.asset == account.asset
-                    && rate.cny_per_unit > Decimal::ZERO
-                    && crate::types::is_timestamp_fresh(rate.updated_at, now, 3600)
-            })
-            .map(|rate| rate.cny_per_unit);
         Self {
             direction: GridDirection::Long,
             today_count,
             hour_count,
-            account_equity,
-            wallet_balance,
-            available_balance,
             position_amount: None,
-            cny_per_unit,
             reference_time: Some(now),
             max_age_secs: max_age,
         }

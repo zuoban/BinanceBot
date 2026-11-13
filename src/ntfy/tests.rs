@@ -1,9 +1,8 @@
 use super::*;
 use crate::config::NtfyConfig;
-use crate::fx::CnyRate;
 use crate::types::{
-    AccountInfo, GridDirection, HourlyTradeCount, HourlyTradeStats, OrderSide, PositionInfo,
-    TickerInfo, TradeRecord, TradingMode,
+    GridDirection, HourlyTradeCount, HourlyTradeStats, OrderSide, PositionInfo, TickerInfo,
+    TradeRecord, TradingMode,
 };
 use chrono::Duration;
 use rust_decimal_macros::dec;
@@ -45,44 +44,24 @@ fn formats_ntfy_trade_risk_daily_and_test_messages_as_plain_title_and_body() {
             sell_count: 3,
         }],
     };
-    let account = AccountInfo {
-        asset: "USDC".into(),
-        total_wallet_balance: dec!(10000),
-        available_balance: dec!(3878.03),
-        margin_balance: dec!(11254.48),
-        unrealized_profit: dec!(1254.48),
-        update_time: trade.timestamp,
-    };
-    let rate = CnyRate {
-        asset: "USDC".into(),
-        cny_per_unit: dec!(7.10),
-        updated_at: trade.timestamp,
-    };
-    let context = TradeNotificationContext::for_trade(
-        &trade,
-        Some(&stats),
-        &account,
-        Some(&rate),
-        trade.timestamp,
-        3,
-    )
-    .with_position(
-        &trade,
-        &PositionInfo {
-            symbol: "SOLUSDC".into(),
-            size: dec!(10),
-            mark_price: dec!(123.45),
-            ..Default::default()
-        },
-        &TickerInfo::default(),
-    )
-    .with_direction(GridDirection::Long);
+    let context = TradeNotificationContext::for_trade(&trade, Some(&stats), trade.timestamp, 3)
+        .with_position(
+            &trade,
+            &PositionInfo {
+                symbol: "SOLUSDC".into(),
+                size: dec!(10),
+                mark_price: dec!(123.45),
+                ..Default::default()
+            },
+            &TickerInfo::default(),
+        )
+        .with_direction(GridDirection::Long);
 
     let (title, body) = format_ntfy_trade_message(&trade, &context);
-    assert_eq!(title, "🔴 SELL｜SOLUSDC｜123.45｜246.90 USDC｜3D｜3H");
+    assert_eq!(title, "🔴 SELL｜SOLUSDC｜123.45｜246.90 USDC");
     assert_eq!(
         body,
-        "账户权益：11254.48 USDC｜≈ ¥79906.81\n持仓金额：1234.50 USDC\n可用余额：3878.03 USDC｜38.78%\n已实现盈亏：+3.2500 USDC"
+        "成交笔数：3D｜3H\n持仓金额：1234.50 USDC\n已实现盈亏：+3.2500 USDC"
     );
 
     let now = DateTime::parse_from_rfc3339("2026-10-11T18:26:00Z")

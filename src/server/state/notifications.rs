@@ -60,16 +60,12 @@ impl AppState {
         direction: GridDirection,
         sync_interval_secs: u64,
     ) {
-        let account = self.current_account().await;
         let position = self.position.read().await.clone();
         let ticker = self.ticker.read().await.clone();
-        let cny_rate = self.cny_rates.get(&account.asset).await;
         let context = Arc::new(
             TradeNotificationContext::for_trade(
                 &trade,
                 notification_stats.as_ref(),
-                &account,
-                cny_rate.as_ref(),
                 Utc::now(),
                 sync_interval_secs,
             )

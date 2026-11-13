@@ -1,10 +1,6 @@
-use super::{account, trade};
 use crate::config::TelegramConfig;
-use crate::telegram::{
-    format_daily_snapshot_message, truncate_telegram_html, TelegramNotifier,
-    TradeNotificationContext,
-};
-use crate::types::{GridDirection, OrderSide, TradingMode};
+use crate::telegram::{format_daily_snapshot_message, truncate_telegram_html, TelegramNotifier};
+use crate::types::{GridDirection, TradingMode};
 use chrono::{DateTime, Duration, Utc};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -196,45 +192,6 @@ async fn send_message_validates_trims_bounds_gateway_responses_and_summarizes_er
         .to_string();
     assert!(!summary_err.contains("<html") && summary_err.contains("upstream HTML error response"));
     server.abort();
-}
-
-#[test]
-fn trade_context_rejects_future_dated_cny_rate_and_live_account_timestamps() {
-    let fill = trade(OrderSide::Buy);
-    let now = fill.timestamp;
-    let fresh_account = account(now);
-    let future_rate = crate::fx::CnyRate {
-        asset: "USDC".into(),
-        cny_per_unit: dec!(7.12),
-        updated_at: now + Duration::seconds(5),
-    };
-    let ctx = TradeNotificationContext::for_trade(
-        &fill,
-        None,
-        &fresh_account,
-        Some(&future_rate),
-        now,
-        3,
-    );
-    assert_eq!(ctx.cny_per_unit, None);
-    assert_eq!(ctx.account_equity, Some(fresh_account.margin_balance));
-
-    let future_account = account(now + Duration::seconds(5));
-    let valid_rate = crate::fx::CnyRate {
-        updated_at: now - Duration::minutes(5),
-        ..future_rate
-    };
-    let future_acc_ctx = TradeNotificationContext::for_trade(
-        &fill,
-        None,
-        &future_account,
-        Some(&valid_rate),
-        now,
-        3,
-    );
-    assert_eq!(future_acc_ctx.account_equity, None);
-    assert_eq!(future_acc_ctx.available_balance, None);
-    assert_eq!(future_acc_ctx.cny_per_unit, Some(dec!(7.12)));
 }
 
 fn rendered_utf16_units_and_balanced_bold(html: &str) -> (usize, bool) {
