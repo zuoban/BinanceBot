@@ -70,17 +70,26 @@ async fn credentials_are_masked_preserved_and_explicitly_cleared() {
     update["telegram_enabled"] = json!(true);
     update["telegram_bot_token"] = json!("telegram-secret-token");
     update["telegram_chat_id"] = json!("123456");
+    update["ntfy_enabled"] = json!(true);
+    update["ntfy_server_url"] = json!("https://ntfy.example.com");
+    update["ntfy_topic"] = json!("grid_alerts");
+    update["ntfy_token"] = json!("tk_ntfy_secret_token");
     let saved = json_response(app.clone().oneshot(request(Some(update))).await.unwrap()).await;
     assert_eq!(saved["success"], true);
     assert_eq!(saved["data"]["has_api_key"], true);
     assert_eq!(saved["data"]["has_api_secret"], true);
     assert_eq!(saved["data"]["has_telegram_bot_token"], true);
+    assert_eq!(saved["data"]["ntfy_enabled"], true);
+    assert_eq!(saved["data"]["ntfy_server_url"], "https://ntfy.example.com");
+    assert_eq!(saved["data"]["ntfy_topic"], "grid_alerts");
+    assert_eq!(saved["data"]["has_ntfy_token"], true);
     assert_eq!(saved["data"]["api_key_preview"], "abcd...wxyz");
     let serialized = saved.to_string();
     for secret in [
         "abcd-credential-wxyz",
         "secret-credential-value",
         "telegram-secret-token",
+        "tk_ntfy_secret_token",
     ] {
         assert!(!serialized.contains(secret));
     }
@@ -89,27 +98,36 @@ async fn credentials_are_masked_preserved_and_explicitly_cleared() {
     blank["api_key"] = json!("  ");
     blank["api_secret"] = json!("");
     blank["telegram_bot_token"] = json!("");
+    blank["ntfy_token"] = json!("  ");
     let preserved = json_response(app.clone().oneshot(request(Some(blank))).await.unwrap()).await;
     assert_eq!(preserved["success"], true);
     let persisted = db.load_config().unwrap().unwrap();
     assert_eq!(persisted.exchange.api_key, "abcd-credential-wxyz");
     assert_eq!(persisted.exchange.api_secret, "secret-credential-value");
     assert_eq!(persisted.telegram.bot_token, "telegram-secret-token");
+    assert_eq!(persisted.ntfy.token, "tk_ntfy_secret_token");
 
     let mut clear = payload(&preserved["data"]["config_version"]);
     clear["clear_api_credentials"] = json!(true);
     clear["clear_telegram_credentials"] = json!(true);
     clear["telegram_enabled"] = json!(false);
+    clear["clear_ntfy_credentials"] = json!(true);
+    clear["ntfy_enabled"] = json!(false);
     let cleared = json_response(app.clone().oneshot(request(Some(clear))).await.unwrap()).await;
     assert_eq!(cleared["success"], true);
     assert_eq!(cleared["data"]["has_api_key"], false);
     assert_eq!(cleared["data"]["has_api_secret"], false);
     assert_eq!(cleared["data"]["has_telegram_bot_token"], false);
+    assert_eq!(cleared["data"]["has_ntfy_token"], false);
+    assert_eq!(cleared["data"]["ntfy_topic"], "");
+    assert_eq!(cleared["data"]["ntfy_server_url"], "https://ntfy.sh");
     let persisted = db.load_config().unwrap().unwrap();
     assert!(persisted.exchange.api_key.is_empty());
     assert!(persisted.exchange.api_secret.is_empty());
     assert!(persisted.telegram.bot_token.is_empty());
     assert!(persisted.telegram.chat_id.is_empty());
+    assert!(persisted.ntfy.topic.is_empty());
+    assert!(persisted.ntfy.token.is_empty());
 }
 
 #[tokio::test]

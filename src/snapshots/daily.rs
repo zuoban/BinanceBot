@@ -275,24 +275,42 @@ pub(super) async fn notify_daily_snapshot(handle: &RuntimeHandle, snapshot: &Dai
     let Some(first) = states.first().cloned() else {
         return;
     };
-    let telegram = match handle.db.load_saved_config().await {
-        Ok(saved) => saved.telegram,
-        Err(_) => first.config.read().await.telegram.clone(),
+    let channels = match handle.db.load_saved_config().await {
+        Ok(saved) => crate::server::state::NotificationChannels::from_app(&saved),
+        Err(_) => crate::server::state::NotificationChannels::from_app(&*first.config.read().await),
     };
-    if !telegram.enabled {
-        return;
+    if channels.telegram.enabled {
+        let notifier = first.telegram_notifier().clone();
+        let telegram = channels.telegram;
+        let snapshot = snapshot.clone();
+        let state = first.clone();
+        tokio::spawn(async move {
+            if let Err(error) = notifier
+                .send_daily_snapshot_notification(&telegram, &snapshot)
+                .await
+            {
+                tracing::warn!(%error, "Failed to send Telegram daily snapshot notification");
+                state
+                    .add_log("WARN", format!("Telegram 每日快照通知发送失败: {}", error))
+                    .await;
+            }
+        });
     }
-    let notifier = first.telegram_notifier().clone();
-    let snapshot = snapshot.clone();
-    tokio::spawn(async move {
-        if let Err(error) = notifier
-            .send_daily_snapshot_notification(&telegram, &snapshot)
-            .await
-        {
-            tracing::warn!(%error, "Failed to send Telegram daily snapshot notification");
-            first
-                .add_log("WARN", format!("Telegram 每日快照通知发送失败: {}", error))
-                .await;
-        }
-    });
+    if channels.ntfy.enabled {
+        let notifier = first.ntfy_notifier().clone();
+        let ntfy = channels.ntfy;
+        let snapshot = snapshot.clone();
+        let state = first.clone();
+        tokio::spawn(async move {
+            if let Err(error) = notifier
+                .send_daily_snapshot_notification(&ntfy, &snapshot)
+                .await
+            {
+                tracing::warn!(%error, "Failed to send ntfy daily snapshot notification");
+                state
+                    .add_log("WARN", format!("ntfy 每日快照通知发送失败: {}", error))
+                    .await;
+            }
+        });
+    }
 }

@@ -339,3 +339,98 @@ it('拒绝含 %/@/非 ASCII 的 Bot Token、超长凭证与含控制字符的 Ch
   await act(async () => { resolveConfirm(true); });
   expect(mocks.post).not.toHaveBeenCalled();
 }, 40000);
+
+it('支持配置 ntfy 通知、发送测试消息并在清除凭证时要求确认', async () => {
+  setup();
+  const user = userEvent.setup();
+  const serverUrl = await screen.findByLabelText('服务地址');
+  await waitFor(() => expect(serverUrl).toHaveValue('https://ntfy.sh'));
+  const topic = screen.getByLabelText('Topic');
+  const token = screen.getByLabelText('访问令牌（可选）');
+
+  await user.clear(serverUrl);
+  await user.type(serverUrl, 'https://ntfy.example.com');
+  await user.type(topic, 'bot_alerts-01');
+  await user.type(token, 'tk_secret123');
+
+  mocks.post.mockResolvedValueOnce('测试消息已发送，请在 ntfy 中查看');
+  await user.click(screen.getByRole('button', { name: '发送 ntfy 测试消息' }));
+  await waitFor(() => expect(mocks.post).toHaveBeenCalledWith(
+    '/api/global/test-ntfy',
+    { server_url: 'https://ntfy.example.com', topic: 'bot_alerts-01', token: 'tk_secret123' },
+    { readOnly: true },
+  ));
+  expect(await screen.findByText(/请在 ntfy 中查看/)).toBeInTheDocument();
+
+  await user.click(screen.getByRole('switch', { name: 'ntfy 通知开关' }));
+  mocks.post.mockImplementationOnce(async (_url, values) => ({
+    ...config,
+    ...values,
+    ntfy_enabled: true,
+    ntfy_server_url: 'https://ntfy.example.com',
+    ntfy_topic: 'bot_alerts-01',
+    has_ntfy_token: true,
+  }));
+  await user.click(screen.getByRole('button', { name: '保存全局设置' }));
+  await waitFor(() => expect(mocks.post).toHaveBeenLastCalledWith('/api/global/config', expect.objectContaining({
+    ntfy_enabled: true,
+    ntfy_server_url: 'https://ntfy.example.com',
+    ntfy_topic: 'bot_alerts-01',
+    ntfy_token: 'tk_secret123',
+    clear_ntfy_credentials: false,
+  })));
+  expect(await screen.findByText('已保存访问令牌，留空保持不变')).toBeInTheDocument();
+
+  await user.click(screen.getByRole('switch', { name: 'ntfy 通知开关' }));
+  await user.click(screen.getByRole('checkbox', { name: /清除 ntfy 凭证/ }));
+  await user.click(screen.getByRole('button', { name: '保存全局设置' }));
+  await waitFor(() => expect(mocks.confirm).toHaveBeenCalled());
+  await waitFor(() => expect(mocks.post).toHaveBeenLastCalledWith('/api/global/config', expect.objectContaining({
+    ntfy_enabled: false,
+    ntfy_server_url: '',
+    ntfy_topic: '',
+    ntfy_token: '',
+    clear_ntfy_credentials: true,
+  })));
+}, 40000);
+
+it('校验 ntfy 服务地址、Topic、访问令牌与开启通知及清除冲突', async () => {
+  setup();
+  const user = userEvent.setup();
+  const serverUrl = await screen.findByLabelText('服务地址');
+  await waitFor(() => expect(serverUrl).toBeEnabled());
+  const topic = screen.getByLabelText('Topic');
+  const token = screen.getByLabelText('访问令牌（可选）');
+
+  await user.click(screen.getByRole('switch', { name: 'ntfy 通知开关' }));
+  expect(screen.queryByText('请填写 Topic')).not.toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: '保存全局设置' }));
+  expect(await screen.findByText('请填写 Topic')).toBeInTheDocument();
+
+  await user.click(screen.getByRole('checkbox', { name: /清除 ntfy 凭证/ }));
+  await user.click(screen.getByRole('button', { name: '保存全局设置' }));
+  expect(await screen.findByText('请先关闭通知后再清除 ntfy 凭证')).toBeInTheDocument();
+
+  await user.click(screen.getByRole('checkbox', { name: /清除 ntfy 凭证/ }));
+  await user.clear(serverUrl);
+  await user.type(serverUrl, 'https://ntfy.sh/subpath');
+  expect(await screen.findByText(/ntfy 服务地址格式无效/)).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: '发送 ntfy 测试消息' })).toBeDisabled();
+
+  await user.clear(serverUrl);
+  await user.type(serverUrl, 'https://ntfy.sh');
+  await user.type(topic, 'bad/topic');
+  expect(await screen.findByText(/ntfy Topic 格式无效/)).toBeInTheDocument();
+
+  await user.clear(topic);
+  await user.type(topic, 'valid_topic');
+  await user.type(token, 'bad token');
+  expect(await screen.findByText('ntfy 访问令牌格式无效')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: '发送 ntfy 测试消息' })).toBeDisabled();
+
+  await user.clear(token);
+  await waitFor(() => expect(screen.queryByText('ntfy 访问令牌格式无效')).not.toBeInTheDocument());
+  await waitFor(() => expect(screen.queryByText('请填写 Topic')).not.toBeInTheDocument());
+  expect(screen.getByRole('button', { name: '发送 ntfy 测试消息' })).toBeEnabled();
+  expect(mocks.post).not.toHaveBeenCalled();
+}, 40000);

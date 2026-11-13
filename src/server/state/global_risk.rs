@@ -334,12 +334,14 @@ impl GlobalPositionLimit {
         committed_ref: Option<&crate::config::GlobalConfig>,
         reason: String,
     ) {
-        let telegram = match committed_ref {
-            Some(committed) => committed.telegram.clone(),
-            None => first.config.read().await.telegram.clone(),
+        let channels = match committed_ref {
+            Some(committed) => super::NotificationChannels::from_global(committed),
+            None => super::NotificationChannels::from_app(&*first.config.read().await),
         };
-        if telegram.enabled {
+        if channels.telegram.enabled {
             let notifier = first.telegram_notifier.clone();
+            let telegram = channels.telegram;
+            let reason = reason.clone();
             let state = Arc::clone(first);
             tokio::spawn(async move {
                 if let Err(error) = notifier
@@ -352,6 +354,19 @@ impl GlobalPositionLimit {
                     );
                     state
                         .add_log("WARN", format!("Telegram 全局风控通知发送失败: {}", error))
+                        .await;
+                }
+            });
+        }
+        if channels.ntfy.enabled {
+            let notifier = first.ntfy_notifier.clone();
+            let ntfy = channels.ntfy;
+            let state = Arc::clone(first);
+            tokio::spawn(async move {
+                if let Err(error) = notifier.send_global_risk_notification(&ntfy, &reason).await {
+                    warn!("Failed to send ntfy global risk notification: {}", error);
+                    state
+                        .add_log("WARN", format!("ntfy 全局风控通知发送失败: {}", error))
                         .await;
                 }
             });

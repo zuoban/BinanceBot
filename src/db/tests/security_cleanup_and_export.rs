@@ -413,6 +413,9 @@ fn analysis_export_captures_wal_and_preserves_records_without_credentials() {
     config.exchange.api_secret = "export-test-api-secret".into();
     config.telegram.bot_token = "export-test-telegram-token".into();
     config.telegram.chat_id = "export-test-chat-id".into();
+    config.ntfy.server_url = "https://export-test-ntfy.example.com".into();
+    config.ntfy.topic = "export-test-ntfy-topic".into();
+    config.ntfy.token = "export-test-ntfy-token".into();
     db.save_config(&config).unwrap();
     db.create_session("export-test-session-token").unwrap();
     db.save_bot_status(BotStatus::Running).unwrap();
@@ -446,6 +449,9 @@ fn analysis_export_captures_wal_and_preserves_records_without_credentials() {
         "historical-secret-marker",
         "export-test-telegram-token",
         "export-test-chat-id",
+        "export-test-ntfy.example.com",
+        "export-test-ntfy-topic",
+        "export-test-ntfy-token",
         "export-test-session-token",
     ] {
         assert!(!raw.contains(secret), "Credential bytes leaked: {secret}");
@@ -527,6 +533,9 @@ fn analysis_export_captures_wal_and_preserves_records_without_credentials() {
     assert!(exported.exchange.api_secret.is_empty());
     assert!(exported.telegram.bot_token.is_empty());
     assert!(exported.telegram.chat_id.is_empty());
+    assert!(exported.ntfy.server_url.is_empty());
+    assert!(exported.ntfy.topic.is_empty());
+    assert!(exported.ntfy.token.is_empty());
     assert_eq!(exported.grid, config.grid);
     assert_eq!(db.load_config().unwrap().unwrap().exchange, config.exchange);
     assert_eq!(

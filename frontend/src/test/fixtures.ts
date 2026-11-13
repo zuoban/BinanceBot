@@ -44,6 +44,10 @@ export function globalConfig(overrides: Partial<GlobalConfig> = {}): GlobalConfi
     telegram_enabled: false,
     has_telegram_bot_token: false,
     telegram_chat_id: '',
+    ntfy_enabled: false,
+    ntfy_server_url: 'https://ntfy.sh',
+    ntfy_topic: '',
+    has_ntfy_token: false,
     ...overrides,
   };
 }

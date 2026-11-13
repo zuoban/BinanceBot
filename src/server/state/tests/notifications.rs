@@ -490,3 +490,79 @@ async fn live_trade_notification_uses_configured_sync_interval_for_account_fresh
     assert!(text.contains("可用余额：8000.00 USDC｜80.00%"), "{text}");
     fixture.server.abort();
 }
+
+#[tokio::test]
+async fn ntfy_notifications_deliver_independently_and_alongside_failing_telegram() {
+    use axum::{routing::post, Json, Router};
+
+    let (ntfy_tx, mut ntfy_rx) = mpsc::unbounded_channel();
+    let app = Router::new().route(
+        "/",
+        post(move |Json(payload): Json<serde_json::Value>| {
+            let tx = ntfy_tx.clone();
+            async move {
+                let topic = payload["topic"].as_str().unwrap_or("").to_string();
+                tx.send(payload).unwrap();
+                Json(serde_json::json!({"id": "ntfy-msg-1", "event": "message", "topic": topic}))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ntfy_url = format!("http://{}", listener.local_addr().unwrap());
+    let ntfy_server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    // Telegram enabled and rejecting, ntfy enabled and succeeding.
+    let mut fixture = notification_fixture(true, true).await;
+    Arc::get_mut(&mut fixture.state).unwrap().ntfy_notifier =
+        crate::ntfy::NtfyNotifier::with_client(reqwest::Client::new());
+    {
+        let mut config = fixture.state.config.write().await;
+        config.ntfy = crate::config::NtfyConfig {
+            enabled: true,
+            server_url: ntfy_url,
+            topic: "grid_alerts".into(),
+            token: String::new(),
+        };
+        config.pause_on_zero_available_margin = true;
+    }
+
+    let mut buy = cache_test_trade("ntfy-buy-1", 1, TradingMode::Paper);
+    buy.side = OrderSide::Buy;
+    buy.pnl_verified = true;
+    assert!(fixture.state.record_trade(buy, None, None, None).await);
+    let _ = next_notification(&mut fixture).await;
+    let ntfy_trade = tokio::time::timeout(Duration::from_secs(1), ntfy_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(ntfy_trade["topic"], "grid_alerts");
+    assert!(ntfy_trade["title"]
+        .as_str()
+        .unwrap()
+        .starts_with("🟢 BUY｜SOLUSDC｜"));
+
+    // Global risk notifies ntfy with priority 4 even when Telegram fails.
+    fixture.state.account.write().await.asset = "USDC".into();
+    fixture.state.account.write().await.total_wallet_balance = Decimal::ZERO;
+    fixture
+        .state
+        .global_position_initialized
+        .store(true, Ordering::SeqCst);
+    fixture
+        .state
+        .global_position_ready
+        .store(true, Ordering::SeqCst);
+    let global = GlobalPositionLimit::new(Arc::new(RwLock::new(vec![fixture.state.clone()])));
+    global.membership_ready.store(true, Ordering::SeqCst);
+    assert!(global.check().await);
+    let _ = next_notification(&mut fixture).await;
+    let ntfy_risk = tokio::time::timeout(Duration::from_secs(1), ntfy_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(ntfy_risk["title"], "⚠️ 全局风控已触发");
+    assert_eq!(ntfy_risk["priority"], 4);
+
+    fixture.server.abort();
+    ntfy_server.abort();
+}

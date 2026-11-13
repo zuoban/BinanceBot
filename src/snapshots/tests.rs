@@ -541,3 +541,72 @@ async fn try_capture_hour_retries_after_transient_config_update_lock_contention(
 
     let _ = runtime.shutdown(Duration::from_secs(2)).await;
 }
+
+#[tokio::test]
+async fn notify_daily_snapshot_delivers_to_ntfy() {
+    use axum::{routing::post, Json, Router};
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let app = Router::new().route(
+        "/",
+        post(move |Json(payload): Json<serde_json::Value>| {
+            let tx = tx.clone();
+            async move {
+                let topic = payload["topic"].as_str().unwrap_or("").to_string();
+                tx.send(payload).unwrap();
+                Json(serde_json::json!({"id": "daily-ntfy-1", "event": "message", "topic": topic}))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let server_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    let mut config = AppConfig::default();
+    config.pairs = vec![crate::config::TradingPairConfig::new("SOLUSDC".into())];
+    config.ntfy = crate::config::NtfyConfig {
+        enabled: true,
+        server_url,
+        topic: "daily_report".into(),
+        token: String::new(),
+    };
+    db.save_config(&config).unwrap();
+    db.save_pair_status(
+        "SOLUSDC",
+        TradingMode::Paper,
+        crate::types::BotStatus::Paused,
+    )
+    .unwrap();
+    let mut runtime = crate::runtime::TradingRuntime::start_with_test_exchange(
+        &config,
+        db,
+        "http://127.0.0.1:1".into(),
+    )
+    .await
+    .unwrap();
+    let handle = runtime.handle();
+    let now = Utc::now();
+    let snapshot = DailySnapshot {
+        date: "2026-11-09".into(),
+        window_start: now - chrono::Duration::days(1),
+        window_end: now,
+        generated_at: now,
+        accounts: Vec::new(),
+        positions: Vec::new(),
+        pair_positions: Vec::new(),
+        trades: Vec::new(),
+    };
+
+    notify_daily_snapshot(&handle, &snapshot).await;
+    let received = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(received["topic"], "daily_report");
+    assert_eq!(received["title"], "📊 每日运行数据快照（2026-11-09）");
+    assert_eq!(received["priority"], 3);
+
+    let _ = runtime.shutdown(Duration::from_secs(2)).await;
+    server.abort();
+}

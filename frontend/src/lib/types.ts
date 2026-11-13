@@ -136,5 +136,6 @@ export interface GlobalConfig {
   version: string;
   recv_window: number; sync_interval_secs: number; global_max_position_notional: Decimal | null; pause_on_zero_available_margin: boolean; min_available_margin_pct: Decimal | null; has_api_key: boolean; has_api_secret: boolean;
   api_key_preview: string; telegram_enabled: boolean; has_telegram_bot_token: boolean; telegram_chat_id: string;
+  ntfy_enabled: boolean; ntfy_server_url: string; ntfy_topic: string; has_ntfy_token: boolean;
 }
 export interface ServerConfig { version: string; saved: { host: string; port: number }; active: { host: string; port: number } }

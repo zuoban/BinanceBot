@@ -54,6 +54,35 @@ fn global_config_payload_allows_clearing_chat_id_while_preserving_omitted_fields
     .apply_to(&mut global);
     assert!(global.telegram.bot_token.is_empty());
     assert!(global.telegram.chat_id.is_empty());
+
+    global.ntfy.server_url = "https://ntfy.example.com".into();
+    global.ntfy.topic = "grid_alerts".into();
+    global.ntfy.token = "tk_saved_token".into();
+    UpdateGlobalConfigPayload {
+        ntfy_enabled: Some(false),
+        ntfy_server_url: Some("   ".into()),
+        ntfy_token: Some("   ".into()),
+        ..Default::default()
+    }
+    .apply_to(&mut global);
+    assert_eq!(
+        global.ntfy.server_url,
+        crate::config::DEFAULT_NTFY_SERVER_URL
+    );
+    assert_eq!(global.ntfy.topic, "grid_alerts");
+    assert_eq!(global.ntfy.token, "tk_saved_token");
+
+    UpdateGlobalConfigPayload {
+        clear_ntfy_credentials: true,
+        ..Default::default()
+    }
+    .apply_to(&mut global);
+    assert_eq!(
+        global.ntfy.server_url,
+        crate::config::DEFAULT_NTFY_SERVER_URL
+    );
+    assert!(global.ntfy.topic.is_empty());
+    assert!(global.ntfy.token.is_empty());
 }
 
 #[test]
@@ -125,6 +154,8 @@ fn config_payload_debug_redacts_secrets() {
         api_secret: Some("payload-api-secret".into()),
         telegram_bot_token: Some("payload-bot-token".into()),
         telegram_chat_id: Some("12345".into()),
+        ntfy_topic: Some("payload-ntfy-topic".into()),
+        ntfy_token: Some("payload-ntfy-token".into()),
         ..Default::default()
     };
     let pair = UpdateConfigPayload {
@@ -147,6 +178,11 @@ fn config_payload_debug_redacts_secrets() {
         telegram_enabled: None,
         telegram_bot_token: Some("pair-payload-token".into()),
         telegram_chat_id: None,
+        clear_ntfy_credentials: false,
+        ntfy_enabled: None,
+        ntfy_server_url: None,
+        ntfy_topic: Some("pair-ntfy-topic".into()),
+        ntfy_token: Some("pair-ntfy-token".into()),
         min_price: None,
         max_price: None,
         max_position_usdc: None,
@@ -165,9 +201,13 @@ fn config_payload_debug_redacts_secrets() {
         "payload-api-key",
         "payload-api-secret",
         "payload-bot-token",
+        "payload-ntfy-topic",
+        "payload-ntfy-token",
         "pair-payload-key",
         "pair-payload-secret",
         "pair-payload-token",
+        "pair-ntfy-topic",
+        "pair-ntfy-token",
         "login-secret-password",
         "session-bearer-secret-token",
     ] {
@@ -361,6 +401,19 @@ fn validate_credential_updates_rejects_contradictory_or_half_configured_payloads
     assert_eq!(
         clear_tg_conflict,
         "清除 Telegram 凭证时请勿同时提交新的 Bot Token 或 Chat ID"
+    );
+
+    let clear_ntfy_conflict = UpdateGlobalConfigPayload {
+        clear_ntfy_credentials: true,
+        ntfy_topic: Some("grid_topic".into()),
+        ..Default::default()
+    }
+    .validate_credential_updates()
+    .unwrap_err()
+    .to_string();
+    assert_eq!(
+        clear_ntfy_conflict,
+        "清除 ntfy 凭证时请勿同时提交新的服务地址、Topic 或访问令牌"
     );
 
     let partial_api = UpdateGlobalConfigPayload {

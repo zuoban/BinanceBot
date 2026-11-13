@@ -104,6 +104,7 @@ async fn management_authenticates_add_remove_server_settings_and_pair_resources(
         ("/api/global/config", "POST", json!({"recv_window":8000})),
         ("/api/global/test-exchange", "POST", json!({})),
         ("/api/global/test-telegram", "POST", json!({})),
+        ("/api/global/test-ntfy", "POST", json!({})),
     ] {
         assert_eq!(
             request(&router, path, method, body, false).await.0,

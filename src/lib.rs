@@ -5,6 +5,7 @@ pub mod exchange;
 pub(crate) mod fx;
 pub mod lifecycle;
 pub(crate) mod metrics;
+pub(crate) mod ntfy;
 pub mod runtime;
 pub mod server;
 pub mod snapshots;

@@ -185,7 +185,7 @@ export const PaletteHost = memo(function PaletteHost({ open, setOpen, pairs, sta
     const go = (target: string) => { if (currentUrl !== target) navigate(target); };
     const all: Command[] = [
       { key: 'go-overview', group: '页面', label: '策略总览', hint: 'g o', keywords: 'overview home 总览 首页', icon: <AppstoreOutlined />, run: () => go('/') },
-      { key: 'go-settings', group: '页面', label: '全局设置', hint: 'g s', keywords: 'settings 设置 api telegram', icon: <SettingOutlined />, run: () => go('/settings') },
+      { key: 'go-settings', group: '页面', label: '全局设置', hint: 'g s', keywords: 'settings 设置 api telegram ntfy', icon: <SettingOutlined />, run: () => go('/settings') },
       { key: 'go-new', group: '页面', label: '新增交易对', hint: 'g n', keywords: 'new add 新增 添加', icon: <PlusOutlined />, run: () => go('/pairs/new') },
       ...(pairs ?? []).flatMap(pair => {
         const guard = strategyActionGuard(pair, stale, Boolean(busy?.has(pair.symbol)));

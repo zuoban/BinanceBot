@@ -108,6 +108,12 @@ pub(crate) struct UpdateGlobalConfigPayload {
     pub(crate) telegram_enabled: Option<bool>,
     pub(crate) telegram_bot_token: Option<String>,
     pub(crate) telegram_chat_id: Option<String>,
+    #[serde(default)]
+    pub(crate) clear_ntfy_credentials: bool,
+    pub(crate) ntfy_enabled: Option<bool>,
+    pub(crate) ntfy_server_url: Option<String>,
+    pub(crate) ntfy_topic: Option<String>,
+    pub(crate) ntfy_token: Option<String>,
     #[serde(
         default,
         deserialize_with = "deserialize_optional_decimal_update",
@@ -136,6 +142,11 @@ impl std::fmt::Debug for UpdateGlobalConfigPayload {
             telegram_enabled,
             telegram_bot_token,
             telegram_chat_id,
+            clear_ntfy_credentials,
+            ntfy_enabled,
+            ntfy_server_url,
+            ntfy_topic,
+            ntfy_token,
             global_max_position_notional,
             pause_on_zero_available_margin,
             min_available_margin_pct,
@@ -157,6 +168,17 @@ impl std::fmt::Debug for UpdateGlobalConfigPayload {
                 &crate::config::redact_optional_secret(telegram_bot_token),
             )
             .field("telegram_chat_id", telegram_chat_id)
+            .field("clear_ntfy_credentials", clear_ntfy_credentials)
+            .field("ntfy_enabled", ntfy_enabled)
+            .field("ntfy_server_url", ntfy_server_url)
+            .field(
+                "ntfy_topic",
+                &crate::config::redact_optional_secret(ntfy_topic),
+            )
+            .field(
+                "ntfy_token",
+                &crate::config::redact_optional_secret(ntfy_token),
+            )
             .field("global_max_position_notional", global_max_position_notional)
             .field(
                 "pause_on_zero_available_margin",
@@ -193,6 +215,13 @@ impl UpdateGlobalConfigPayload {
                 && (has_non_blank(&self.telegram_bot_token)
                     || has_non_blank(&self.telegram_chat_id))),
             "清除 Telegram 凭证时请勿同时提交新的 Bot Token 或 Chat ID"
+        );
+        anyhow::ensure!(
+            !(self.clear_ntfy_credentials
+                && (has_non_blank(&self.ntfy_server_url)
+                    || has_non_blank(&self.ntfy_topic)
+                    || has_non_blank(&self.ntfy_token))),
+            "清除 ntfy 凭证时请勿同时提交新的服务地址、Topic 或访问令牌"
         );
         anyhow::ensure!(
             self.clear_api_credentials
@@ -245,6 +274,29 @@ impl UpdateGlobalConfigPayload {
                 config.telegram.chat_id = chat_id.trim().to_string();
             }
         }
+        if let Some(enabled) = self.ntfy_enabled {
+            config.ntfy.enabled = enabled;
+        }
+        if self.clear_ntfy_credentials {
+            config.ntfy.server_url = crate::config::DEFAULT_NTFY_SERVER_URL.to_string();
+            config.ntfy.topic.clear();
+            config.ntfy.token.clear();
+        } else {
+            if let Some(server_url) = self.ntfy_server_url {
+                let trimmed = server_url.trim();
+                config.ntfy.server_url = if trimmed.is_empty() {
+                    crate::config::DEFAULT_NTFY_SERVER_URL.to_string()
+                } else {
+                    trimmed.to_string()
+                };
+            }
+            if let Some(topic) = self.ntfy_topic {
+                config.ntfy.topic = topic.trim().to_string();
+            }
+            if let Some(token) = non_blank(self.ntfy_token) {
+                config.ntfy.token = token;
+            }
+        }
     }
 }
 
@@ -262,6 +314,10 @@ pub(crate) struct WebGlobalConfigView {
     pub(crate) telegram_enabled: bool,
     pub(crate) has_telegram_bot_token: bool,
     pub(crate) telegram_chat_id: String,
+    pub(crate) ntfy_enabled: bool,
+    pub(crate) ntfy_server_url: String,
+    pub(crate) ntfy_topic: String,
+    pub(crate) has_ntfy_token: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -298,6 +354,13 @@ pub(crate) struct UpdateConfigPayload {
     pub(crate) telegram_enabled: Option<bool>,
     pub(crate) telegram_bot_token: Option<String>,
     pub(crate) telegram_chat_id: Option<String>,
+    #[serde(default)]
+    pub(crate) clear_ntfy_credentials: bool,
+    #[serde(default)]
+    pub(crate) ntfy_enabled: Option<bool>,
+    pub(crate) ntfy_server_url: Option<String>,
+    pub(crate) ntfy_topic: Option<String>,
+    pub(crate) ntfy_token: Option<String>,
     pub(crate) min_price: Option<Decimal>,
     pub(crate) max_price: Option<Decimal>,
     pub(crate) max_position_usdc: Option<Decimal>,
@@ -332,6 +395,11 @@ impl std::fmt::Debug for UpdateConfigPayload {
             telegram_enabled,
             telegram_bot_token,
             telegram_chat_id,
+            clear_ntfy_credentials,
+            ntfy_enabled,
+            ntfy_server_url,
+            ntfy_topic,
+            ntfy_token,
             min_price,
             max_price,
             max_position_usdc,
@@ -365,6 +433,17 @@ impl std::fmt::Debug for UpdateConfigPayload {
                 &crate::config::redact_optional_secret(telegram_bot_token),
             )
             .field("telegram_chat_id", telegram_chat_id)
+            .field("clear_ntfy_credentials", clear_ntfy_credentials)
+            .field("ntfy_enabled", ntfy_enabled)
+            .field("ntfy_server_url", ntfy_server_url)
+            .field(
+                "ntfy_topic",
+                &crate::config::redact_optional_secret(ntfy_topic),
+            )
+            .field(
+                "ntfy_token",
+                &crate::config::redact_optional_secret(ntfy_token),
+            )
             .field("min_price", min_price)
             .field("max_price", max_price)
             .field("max_position_usdc", max_position_usdc)
@@ -391,6 +470,11 @@ impl UpdateConfigPayload {
             || self.telegram_enabled.is_some()
             || self.telegram_bot_token.is_some()
             || self.telegram_chat_id.is_some()
+            || self.clear_ntfy_credentials
+            || self.ntfy_enabled.is_some()
+            || self.ntfy_server_url.is_some()
+            || self.ntfy_topic.is_some()
+            || self.ntfy_token.is_some()
     }
 }
 
@@ -412,6 +496,10 @@ pub(crate) struct WebConfigView {
     pub(crate) telegram_enabled: bool,
     pub(crate) has_telegram_bot_token: bool,
     pub(crate) telegram_chat_id: String,
+    pub(crate) ntfy_enabled: bool,
+    pub(crate) ntfy_server_url: String,
+    pub(crate) ntfy_topic: String,
+    pub(crate) has_ntfy_token: bool,
     pub(crate) min_price: Option<Decimal>,
     pub(crate) max_price: Option<Decimal>,
     pub(crate) max_position_usdc: Option<Decimal>,

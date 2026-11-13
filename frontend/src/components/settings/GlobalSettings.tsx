@@ -13,9 +13,30 @@ import { ProbeButton, useSettingsFormLifecycle, type GlobalForm } from './settin
 const API_KEY_RE = /^[\x21-\x7E]{1,256}$/;
 const INVALID_BOT_TOKEN_RE = /[^\x21-\x7E]|[/\\?#%@]/;
 const CONTROL_CHAR_RE = /[\x00-\x1F\x7F-\x9F]/;
+const NTFY_TOPIC_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const validBotToken = (v: string) => v.length > 0 && v.length <= 256 && !INVALID_BOT_TOKEN_RE.test(v);
 const validChatId = (v: string) => v.length > 0 && new TextEncoder().encode(v).length <= 128 && !CONTROL_CHAR_RE.test(v);
-const CROSS_FIELDS: (keyof GlobalForm)[] = ['api_key', 'api_secret', 'telegram_bot_token', 'telegram_chat_id', 'clear_telegram_credentials'];
+const validNtfyTopic = (v: string) => NTFY_TOPIC_RE.test(v);
+function validNtfyServerUrl(v: string): boolean {
+  if (!v || new TextEncoder().encode(v).length > 256 || /\s/.test(v) || CONTROL_CHAR_RE.test(v) || v.includes('?') || v.includes('#')) return false;
+  try {
+    const parsed = new URL(v);
+    return (parsed.protocol === 'http:' || parsed.protocol === 'https:')
+      && Boolean(parsed.hostname)
+      && !parsed.username
+      && !parsed.password
+      && parsed.pathname === '/'
+      && !parsed.search
+      && !parsed.hash;
+  } catch {
+    return false;
+  }
+}
+const CROSS_FIELDS: (keyof GlobalForm)[] = [
+  'api_key', 'api_secret',
+  'telegram_bot_token', 'telegram_chat_id', 'clear_telegram_credentials',
+  'ntfy_server_url', 'ntfy_topic', 'ntfy_token', 'clear_ntfy_credentials',
+];
 
 function apiCredentialError(side: 'key' | 'secret', keyVal: string | undefined, secretVal: string | undefined, clearApi: boolean, data: GlobalConfig | undefined): string | null {
   if (clearApi) return null;
@@ -87,17 +108,17 @@ function ExchangeCredentialsCard({ form, data, version, formDisabled, armed }: {
 }
 
 function GlobalRiskCard() {
-  return <Card title="全局风控" className="settings-card settings-card-fill">
+  return <Card title="全局风控" className="settings-card">
     <Row gutter={[20, 16]}>
-      <Col span={24}><Form.Item name="global_max_position_notional" label="全局最大持仓金额" extra={<div className="field-help"><p><strong>触发条件：</strong>所有已配置策略的持仓绝对金额直接相加，达到设定金额。</p><p><strong>执行动作：</strong>暂停所有策略。</p><p><strong>注意：</strong>留空表示关闭；计算包括不同模式和计价资产，不进行汇率换算。</p></div>} rules={[{
+      <Col xs={24} md={12}><Form.Item name="global_max_position_notional" label="全局最大持仓金额" extra={<div className="field-help"><p><strong>触发条件：</strong>所有已配置策略的持仓绝对金额直接相加，达到设定金额。</p><p><strong>执行动作：</strong>暂停所有策略。</p><p><strong>注意：</strong>留空表示关闭；计算包括不同模式和计价资产，不进行汇率换算。</p></div>} rules={[{
         validator: (_, value: string | null | undefined) => {
           if (!value) return Promise.resolve();
           if (!isPositiveDecimal(value)) return Promise.reject(new Error('请输入大于 0 的金额'));
           return exceeds(value, MAX_CONFIG_NOTIONAL_OR_PRICE) ? Promise.reject(new Error('全局最大持仓金额超出允许上限')) : Promise.resolve();
         },
       }]}><InputNumber stringMode min="0" className="full-width-input" /></Form.Item></Col>
+      <Col xs={24} md={12}><Form.Item name="min_available_margin_pct" label="可用保证金比例下限（%）" extra={<div className="field-help"><p><strong>触发条件：</strong>任意已配置策略的可用保证金占保证金余额的比例小于或等于该值。</p><p><strong>执行动作：</strong>暂停所有策略、撤销机器人挂单并保留持仓，处理方式与“可用保证金不足时暂停”相同。</p><p><strong>注意：</strong>留空表示关闭。</p></div>} rules={[{ validator: (_, value: string | null | undefined) => !value || isPercentDecimal(value) ? Promise.resolve() : Promise.reject(new Error('请输入大于 0 且小于 100 的百分比')) }]}><InputNumber stringMode min="0" max="100" className="full-width-input" /></Form.Item></Col>
       <Col span={24}><Form.Item name="pause_on_zero_available_margin" label="可用保证金不足时暂停" valuePropName="checked" extra={<div className="field-help"><p><strong>触发条件：</strong>开启后，任意已配置策略的可用保证金小于或等于零。</p><p><strong>执行动作：</strong>暂停所有策略、撤销机器人挂单并保留持仓。</p></div>}><Switch checkedChildren="开启" unCheckedChildren="关闭" /></Form.Item></Col>
-      <Col span={24}><Form.Item name="min_available_margin_pct" label="可用保证金比例下限（%）" extra={<div className="field-help"><p><strong>触发条件：</strong>任意已配置策略的可用保证金占保证金余额的比例小于或等于该值。</p><p><strong>执行动作：</strong>暂停所有策略、撤销机器人挂单并保留持仓，处理方式与“可用保证金不足时暂停”相同。</p><p><strong>注意：</strong>留空表示关闭。</p></div>} rules={[{ validator: (_, value: string | null | undefined) => !value || isPercentDecimal(value) ? Promise.resolve() : Promise.reject(new Error('请输入大于 0 且小于 100 的百分比')) }]}><InputNumber stringMode min="0" max="100" className="full-width-input" /></Form.Item></Col>
     </Row>
   </Card>;
 }
@@ -161,13 +182,85 @@ function TelegramSettingsCard({ form, hasBotToken, version, formDisabled, armed 
   </Card>;
 }
 
+function NtfySettingsCard({ form, hasNtfyToken, version, formDisabled, armed }: {
+  form: FormInstance<GlobalForm>;
+  hasNtfyToken: boolean | undefined;
+  version: string;
+  formDisabled: boolean;
+  armed: boolean;
+}) {
+  const serverUrl = Form.useWatch('ntfy_server_url', form);
+  const topic = Form.useWatch('ntfy_topic', form);
+  const ntfyToken = Form.useWatch('ntfy_token', form);
+  const clearNtfy = !!Form.useWatch('clear_ntfy_credentials', form);
+  const credDisabled = formDisabled || clearNtfy;
+  const invalidNtfy = Boolean(
+    (serverUrl?.trim() && !validNtfyServerUrl(serverUrl.trim()))
+    || (topic?.trim() && !validNtfyTopic(topic.trim()))
+    || (ntfyToken && (!ntfyToken.trim() || !API_KEY_RE.test(ntfyToken.trim()))),
+  );
+  return <Card title="ntfy 通知" className="settings-card settings-card-fill">
+    <Row gutter={[16, 16]}>
+      <Col span={24}><Form.Item name="ntfy_enabled" label="ntfy 通知开关" valuePropName="checked"><Switch checkedChildren="开启" unCheckedChildren="关闭" /></Form.Item></Col>
+      <Col xs={24} md={12}><Form.Item name="ntfy_server_url" label="服务地址" extra="填写 http:// 或 https:// 根地址（不含 Topic 路径），留空默认 https://ntfy.sh" rules={[
+        ({ getFieldValue }) => ({
+          validator: (_, value: string | undefined) => {
+            const trimmed = value?.trim();
+            if (getFieldValue('clear_ntfy_credentials') || !trimmed) return Promise.resolve();
+            return validNtfyServerUrl(trimmed) ? Promise.resolve() : Promise.reject(new Error('ntfy 服务地址格式无效（请填写 http:// 或 https:// 根地址，不含路径或查询参数）'));
+          },
+        }),
+      ]}><Input autoComplete="off" placeholder="https://ntfy.sh" disabled={credDisabled} /></Form.Item></Col>
+      <Col xs={24} md={12}><Form.Item name="ntfy_topic" label="Topic" extra="建议使用随机字符串作为私有主题名" rules={[
+        ({ getFieldValue }) => ({
+          validator: (_, value: string | undefined) => {
+            const trimmed = value?.trim();
+            if (getFieldValue('clear_ntfy_credentials') || !trimmed) return Promise.resolve();
+            return validNtfyTopic(trimmed) ? Promise.resolve() : Promise.reject(new Error('ntfy Topic 格式无效（仅允许 1-64 位字母、数字、下划线或连字符）'));
+          },
+        }),
+        ({ getFieldValue }) => ({
+          validateTrigger: armed ? undefined : 'onSubmit',
+          validator: (_, value: string | undefined) => {
+            if (getFieldValue('clear_ntfy_credentials') || !(getFieldValue('ntfy_enabled') || Boolean(getFieldValue('ntfy_token')?.trim()))) return Promise.resolve();
+            return value?.trim() ? Promise.resolve() : Promise.reject(new Error('请填写 Topic'));
+          },
+        }),
+      ]}><Input autoComplete="off" disabled={credDisabled} /></Form.Item></Col>
+      <Col span={24}><Form.Item name="ntfy_token" label="访问令牌（可选）" extra={hasNtfyToken ? '已保存访问令牌，留空保持不变' : '公开主题可留空；受保护或自建服务支持 Bearer Token'} rules={[
+        ({ getFieldValue }) => ({
+          validator: (_, value: string | undefined) => {
+            if (getFieldValue('clear_ntfy_credentials') || !value) return Promise.resolve();
+            const trimmed = value.trim();
+            return trimmed && API_KEY_RE.test(trimmed) ? Promise.resolve() : Promise.reject(new Error('ntfy 访问令牌格式无效'));
+          },
+        }),
+      ]}><Input.Password autoComplete="new-password" placeholder={hasNtfyToken ? '留空保留已保存的值' : '可选 Bearer Token（如 tk_...）'} disabled={credDisabled} /></Form.Item></Col>
+    </Row>
+    <div className="settings-card-footer">
+      <ProbeButton label="发送 ntfy 测试消息" path="/api/global/test-ntfy" disabled={credDisabled || invalidNtfy}
+        resetKey={JSON.stringify([version, serverUrl ?? '', topic ?? '', ntfyToken ?? '', clearNtfy])}
+        body={() => ({ server_url: form.getFieldValue('ntfy_server_url'), topic: form.getFieldValue('ntfy_topic'), token: form.getFieldValue('ntfy_token') })} />
+      <Form.Item name="clear_ntfy_credentials" valuePropName="checked" className="settings-checkbox-item" rules={[({ getFieldValue }) => ({
+        validator: (_, value: boolean | undefined) => value && getFieldValue('ntfy_enabled') ? Promise.reject(new Error('请先关闭通知后再清除 ntfy 凭证')) : Promise.resolve(),
+      })]}><Checkbox>清除 ntfy 凭证（请先关闭通知）</Checkbox></Form.Item>
+    </div>
+  </Card>;
+}
+
 export function GlobalSettings() {
   const [form] = Form.useForm<GlobalForm>(), { message } = App.useApp(), { confirm } = useConfirmDialog(), client = useQueryClient();
   const query = useQuery({ queryKey: ['global-config'], queryFn: ({ signal }) => api<GlobalConfig>('/api/global/config', { signal }), refetchOnWindowFocus: false });
-  const [armedCross, setArmedCross] = useState({ api: false, telegram: false });
+  const [armedCross, setArmedCross] = useState({ api: false, telegram: false, ntfy: false });
   const { edit, ready, baseline, mounted, submitting, fill } = useSettingsFormLifecycle(query.data, data => {
-    setArmedCross({ api: false, telegram: false });
-    form.setFieldsValue({ ...data, pause_on_zero_available_margin: data.pause_on_zero_available_margin ?? false, api_key: '', api_secret: '', telegram_bot_token: '', clear_api_credentials: false, clear_telegram_credentials: false });
+    setArmedCross({ api: false, telegram: false, ntfy: false });
+    form.setFieldsValue({
+      ...data,
+      pause_on_zero_available_margin: data.pause_on_zero_available_margin ?? false,
+      ntfy_server_url: data.ntfy_server_url || 'https://ntfy.sh',
+      api_key: '', api_secret: '', telegram_bot_token: '', ntfy_token: '',
+      clear_api_credentials: false, clear_telegram_credentials: false, clear_ntfy_credentials: false,
+    });
   });
   const mutation = useMutation({
     mutationFn: async (v: GlobalForm) => {
@@ -177,7 +270,12 @@ export function GlobalSettings() {
         global_max_position_notional: v.global_max_position_notional || null, pause_on_zero_available_margin: v.pause_on_zero_available_margin ?? false, min_available_margin_pct: v.min_available_margin_pct || null,
         api_key: v.clear_api_credentials ? '' : v.api_key?.trim() || null, api_secret: v.clear_api_credentials ? '' : v.api_secret?.trim() || null,
         telegram_bot_token: v.clear_telegram_credentials ? '' : v.telegram_bot_token?.trim() || null, telegram_chat_id: v.clear_telegram_credentials ? '' : v.telegram_chat_id?.trim() || '',
-        telegram_enabled: !!v.telegram_enabled, clear_api_credentials: !!v.clear_api_credentials, clear_telegram_credentials: !!v.clear_telegram_credentials,
+        telegram_enabled: !!v.telegram_enabled,
+        ntfy_enabled: !!v.ntfy_enabled,
+        ntfy_server_url: v.clear_ntfy_credentials ? '' : v.ntfy_server_url?.trim() || '',
+        ntfy_topic: v.clear_ntfy_credentials ? '' : v.ntfy_topic?.trim() || '',
+        ntfy_token: v.clear_ntfy_credentials ? '' : v.ntfy_token?.trim() || null,
+        clear_api_credentials: !!v.clear_api_credentials, clear_telegram_credentials: !!v.clear_telegram_credentials, clear_ntfy_credentials: !!v.clear_ntfy_credentials,
       });
     },
     onMutate: () => edit.setSaving(true),
@@ -218,14 +316,19 @@ export function GlobalSettings() {
       submitting.current = null;
       const apiTouched = 'api_key' in changed || 'api_secret' in changed || 'clear_api_credentials' in changed;
       const telegramTouched = 'telegram_bot_token' in changed || 'telegram_chat_id' in changed || 'telegram_enabled' in changed || 'clear_telegram_credentials' in changed;
+      const ntfyTouched = 'ntfy_server_url' in changed || 'ntfy_topic' in changed || 'ntfy_token' in changed || 'ntfy_enabled' in changed || 'clear_ntfy_credentials' in changed;
       const uncheckApi = 'clear_api_credentials' in changed && !changed.clear_api_credentials;
       const uncheckTelegram = 'clear_telegram_credentials' in changed && !changed.clear_telegram_credentials;
+      const uncheckNtfy = 'clear_ntfy_credentials' in changed && !changed.clear_ntfy_credentials;
       const invalidUncheckedFormat = (name: keyof GlobalForm) => {
         const raw = form.getFieldValue(name) as string | undefined;
         if (name === 'api_key') return Boolean(raw && (!raw.trim() || !API_KEY_RE.test(raw.trim())));
         if (name === 'api_secret') return Boolean(raw?.trim() && !API_KEY_RE.test(raw.trim()));
         if (name === 'telegram_bot_token') return Boolean(raw && (!raw.trim() || !validBotToken(raw.trim())));
         if (name === 'telegram_chat_id') return Boolean(raw?.trim() && !validChatId(raw.trim()));
+        if (name === 'ntfy_server_url') return Boolean(raw?.trim() && !validNtfyServerUrl(raw.trim()));
+        if (name === 'ntfy_topic') return Boolean(raw?.trim() && !validNtfyTopic(raw.trim()));
+        if (name === 'ntfy_token') return Boolean(raw && (!raw.trim() || !API_KEY_RE.test(raw.trim())));
         return false;
       };
       const revalidate = CROSS_FIELDS.filter(name => {
@@ -233,21 +336,26 @@ export function GlobalSettings() {
         if (form.getFieldError(name).length > 0 || form.isFieldValidating(name)) return true;
         if ((name === 'api_key' || name === 'api_secret') && ((armedCross.api && apiTouched) || (uncheckApi && invalidUncheckedFormat(name)))) return true;
         if ((name === 'telegram_bot_token' || name === 'telegram_chat_id') && ((armedCross.telegram && telegramTouched) || (uncheckTelegram && invalidUncheckedFormat(name)))) return true;
+        if ((name === 'ntfy_server_url' || name === 'ntfy_topic' || name === 'ntfy_token') && ((armedCross.ntfy && ntfyTouched) || (uncheckNtfy && invalidUncheckedFormat(name)))) return true;
+        if (name === 'clear_ntfy_credentials' && 'ntfy_enabled' in changed && Boolean(form.getFieldValue('clear_ntfy_credentials'))) return true;
         return name === 'clear_telegram_credentials' && 'telegram_enabled' in changed && Boolean(form.getFieldValue('clear_telegram_credentials'));
       });
       if (revalidate.length) void form.validateFields(revalidate).catch(() => {});
       edit.setDirty(true);
     }} onFinishFailed={({ errorFields }) => {
       const failed = new Set(errorFields.flatMap(f => f.errors.length > 0 ? [f.name[0] as keyof GlobalForm] : []));
-      const apiErr = failed.has('api_key') || failed.has('api_secret'), tgErr = failed.has('telegram_bot_token') || failed.has('telegram_chat_id');
-      if (apiErr || tgErr) setArmedCross(prev => ({ api: prev.api || apiErr, telegram: prev.telegram || tgErr }));
+      const apiErr = failed.has('api_key') || failed.has('api_secret');
+      const tgErr = failed.has('telegram_bot_token') || failed.has('telegram_chat_id');
+      const ntfyErr = failed.has('ntfy_topic');
+      if (apiErr || tgErr || ntfyErr) setArmedCross(prev => ({ api: prev.api || apiErr, telegram: prev.telegram || tgErr, ntfy: prev.ntfy || ntfyErr }));
     }} onFinish={v => void submit(v)}>
       <ExchangeCredentialsCard form={form} data={activeData} version={version} formDisabled={formDisabled} armed={armedCross.api} />
+      <GlobalRiskCard />
       <div className="settings-grid-row">
-        <div className="settings-grid-col"><GlobalRiskCard /></div>
         <div className="settings-grid-col"><TelegramSettingsCard form={form} hasBotToken={activeData?.has_telegram_bot_token} version={version} formDisabled={formDisabled} armed={armedCross.telegram} /></div>
+        <div className="settings-grid-col"><NtfySettingsCard form={form} hasNtfyToken={activeData?.has_ntfy_token} version={version} formDisabled={formDisabled} armed={armedCross.ntfy} /></div>
       </div>
-      <div className={`save-bar${edit.dirty ? ' save-bar-dirty' : ''}`}><span className="muted" role="status">{edit.dirty ? '有未保存的修改' : '所有修改已保存'}</span><Space wrap><FormRevertButton form={form} activeRef={mounted} onReset={mutation.reset} onRevert={() => { submitting.current = null; setArmedCross({ api: false, telegram: false }); const source = baseline.current ?? query.data; if (source) fill(source); }} /><Button type="primary" htmlType="submit" loading={mutation.isPending}>保存全局设置</Button></Space></div>
+      <div className={`save-bar${edit.dirty ? ' save-bar-dirty' : ''}`}><span className="muted" role="status">{edit.dirty ? '有未保存的修改' : '所有修改已保存'}</span><Space wrap><FormRevertButton form={form} activeRef={mounted} onReset={mutation.reset} onRevert={() => { submitting.current = null; setArmedCross({ api: false, telegram: false, ntfy: false }); const source = baseline.current ?? query.data; if (source) fill(source); }} /><Button type="primary" htmlType="submit" loading={mutation.isPending}>保存全局设置</Button></Space></div>
     </Form>
   </>;
 }

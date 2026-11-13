@@ -480,6 +480,9 @@ fn redact_config_credentials(config: &mut AppConfig) {
     config.exchange.api_secret.clear();
     config.telegram.bot_token.clear();
     config.telegram.chat_id.clear();
+    config.ntfy.server_url.clear();
+    config.ntfy.topic.clear();
+    config.ntfy.token.clear();
     for pair in &mut config.pairs {
         pair.exchange.api_key = None;
         pair.exchange.api_secret = None;

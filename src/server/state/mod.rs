@@ -1,6 +1,7 @@
 use crate::config::AppConfig;
 use crate::db::Database;
 use crate::fx::CnyRateCache;
+use crate::ntfy::NtfyNotifier;
 use crate::strategy::SymbolRules;
 use crate::telegram::TelegramNotifier;
 use crate::types::{
@@ -28,6 +29,7 @@ mod tests;
 
 pub(crate) use auth_context::{sanitize_session_token, AuthContext, SessionCheckError};
 pub(crate) use global_risk::GlobalPositionLimit;
+pub(crate) use notifications::NotificationChannels;
 pub(crate) use risk_guards::{ExchangeSubmissionGuard, PendingFillReconciliation};
 pub(crate) use state_cleanup::MembershipGuard;
 use state_trades::{build_grid_stats, recent_trade_cache, RECENT_TRADE_LIMIT};
@@ -85,6 +87,7 @@ pub struct AppState {
     // Cache route definitions only: a router bound to Arc<Self> would retain itself.
     pub(crate) managed_router: std::sync::OnceLock<axum::Router<Arc<AppState>>>,
     telegram_notifier: TelegramNotifier,
+    ntfy_notifier: NtfyNotifier,
 }
 
 struct RestoredPairState {
@@ -353,6 +356,7 @@ impl AppState {
             ws_broadcast_tx: broadcast::channel(100).0,
             managed_router: std::sync::OnceLock::new(),
             telegram_notifier: TelegramNotifier::new(),
+            ntfy_notifier: NtfyNotifier::new(),
         })
     }
 
@@ -392,6 +396,10 @@ impl AppState {
 
     pub(crate) fn telegram_notifier(&self) -> &TelegramNotifier {
         &self.telegram_notifier
+    }
+
+    pub(crate) fn ntfy_notifier(&self) -> &NtfyNotifier {
+        &self.ntfy_notifier
     }
 
     pub(crate) fn account_view(

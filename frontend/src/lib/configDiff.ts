@@ -54,6 +54,7 @@ export function diffGlobalConfig(
     api_secret?: string;
     clear_api_credentials?: boolean;
     clear_telegram_credentials?: boolean;
+    clear_ntfy_credentials?: boolean;
   },
 ): string[] {
   const changes: string[] = [];
@@ -74,5 +75,6 @@ export function diffGlobalConfig(
     changes.push(baseline?.has_api_key ? '更新 API Key 或 Secret（所有交易对将以新账户实盘运行并保持暂停）' : '配置 API Key 和 Secret（所有交易对将以实盘运行并保持暂停）');
   }
   if (values.clear_telegram_credentials) changes.push('清除已保存的 Telegram 凭证');
+  if (values.clear_ntfy_credentials) changes.push('清除已保存的 ntfy 凭证');
   return changes;
 }

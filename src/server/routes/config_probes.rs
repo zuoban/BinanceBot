@@ -21,7 +21,7 @@ pub(super) async fn add_pair_handler(
     let result = async {
         anyhow::ensure!(
             !payload.has_global_updates(),
-            "连接和 Telegram 通知请在全局设置中保存"
+            "连接和通知设置请在全局设置中保存"
         );
         let saved = handle.db.load_saved_config().await?;
         let mut defaults = AppConfig::default();
@@ -172,6 +172,10 @@ fn web_global_config_view(global: &crate::config::GlobalConfig) -> WebGlobalConf
         telegram_enabled: global.telegram.enabled,
         has_telegram_bot_token: !global.telegram.bot_token.trim().is_empty(),
         telegram_chat_id: global.telegram.chat_id.clone(),
+        ntfy_enabled: global.ntfy.enabled,
+        ntfy_server_url: global.ntfy.effective_server_url().to_string(),
+        ntfy_topic: global.ntfy.topic.clone(),
+        has_ntfy_token: !global.ntfy.token.trim().is_empty(),
     }
 }
 
@@ -250,6 +254,7 @@ pub(super) fn pair_config_version(config: &AppConfig, instance: u128) -> String 
         &config.exchange,
         &config.grid,
         &config.telegram,
+        &config.ntfy,
         config.global_max_position_notional,
         config.pause_on_zero_available_margin,
         config.min_available_margin_pct,
@@ -303,6 +308,10 @@ fn web_config_view(config: &AppConfig, instance: u128, rules: &SymbolRules) -> W
         telegram_enabled: global.telegram_enabled,
         has_telegram_bot_token: global.has_telegram_bot_token,
         telegram_chat_id: global.telegram_chat_id,
+        ntfy_enabled: global.ntfy_enabled,
+        ntfy_server_url: global.ntfy_server_url,
+        ntfy_topic: global.ntfy_topic,
+        has_ntfy_token: global.has_ntfy_token,
         min_price: config.grid.min_price,
         max_price: config.grid.max_price,
         max_position_usdc: config.grid.max_position_usdc,
@@ -361,6 +370,11 @@ pub(super) fn apply_config_payload(
         telegram_enabled: payload.telegram_enabled,
         telegram_bot_token: payload.telegram_bot_token,
         telegram_chat_id: payload.telegram_chat_id,
+        clear_ntfy_credentials: payload.clear_ntfy_credentials,
+        ntfy_enabled: payload.ntfy_enabled,
+        ntfy_server_url: payload.ntfy_server_url,
+        ntfy_topic: payload.ntfy_topic,
+        ntfy_token: payload.ntfy_token,
         ..Default::default()
     };
     global_update.validate_credential_updates()?;
@@ -420,6 +434,10 @@ async fn apply_pair_config(
             clear_telegram_credentials: payload.clear_telegram_credentials,
             telegram_bot_token: payload.telegram_bot_token.clone(),
             telegram_chat_id: payload.telegram_chat_id.clone(),
+            clear_ntfy_credentials: payload.clear_ntfy_credentials,
+            ntfy_server_url: payload.ntfy_server_url.clone(),
+            ntfy_topic: payload.ntfy_topic.clone(),
+            ntfy_token: payload.ntfy_token.clone(),
             ..Default::default()
         };
         if let Err(error) = credential_check.validate_credential_updates() {
@@ -438,7 +456,7 @@ async fn apply_pair_config_inner(
     payload: UpdateConfigPayload,
 ) -> Json<ApiResponse<WebConfigView>> {
     if state.pair_scope().is_some() && payload.has_global_updates() {
-        return json_err("连接和 Telegram 通知请在全局设置中保存");
+        return json_err("连接和通知设置请在全局设置中保存");
     }
     let current_config = match apply_config_payload(current, payload) {
         Ok(config) => config,

@@ -581,3 +581,78 @@ fn telegram_bot_token_and_chat_id_enforce_format_and_length_bounds() {
         }
     }
 }
+
+#[test]
+fn ntfy_config_validates_server_url_topic_optional_token_and_legacy_defaults() {
+    let mut legacy = serde_json::to_value(AppConfig::default()).unwrap();
+    legacy.as_object_mut().unwrap().remove("ntfy");
+    let loaded: AppConfig = serde_json::from_value(legacy).unwrap();
+    assert!(!loaded.ntfy.enabled);
+    assert_eq!(loaded.ntfy.server_url, super::DEFAULT_NTFY_SERVER_URL);
+    assert!(loaded.ntfy.topic.is_empty());
+    assert!(loaded.ntfy.token.is_empty());
+    assert!(loaded.validate().is_ok());
+
+    let mut config = AppConfig::default();
+    config.ntfy.enabled = true;
+    assert!(config
+        .validate()
+        .unwrap_err()
+        .to_string()
+        .contains("启用 ntfy 通知前请填写 Topic"));
+
+    for valid_url in [
+        "https://ntfy.sh",
+        "https://ntfy.sh/",
+        "http://127.0.0.1:8080",
+        "https://push.example.com:8443",
+    ] {
+        config.ntfy.server_url = valid_url.into();
+        config.ntfy.topic = "Grid_Alerts-01".into();
+        config.ntfy.token.clear();
+        assert!(config.validate().is_ok(), "{valid_url}");
+    }
+
+    config.ntfy.token = "tk_validToken_123".into();
+    assert!(config.validate().is_ok());
+    let debug_str = format!("{:?}", config.ntfy);
+    assert!(!debug_str.contains("Grid_Alerts-01"));
+    assert!(!debug_str.contains("tk_validToken_123"));
+    assert!(debug_str.contains("[REDACTED]"));
+
+    for bad_url in [
+        "ftp://ntfy.sh",
+        "https://ntfy.sh/mytopic",
+        "https://ntfy.sh?auth=1",
+        "https://ntfy.sh#frag",
+        "https://user:pass@ntfy.sh",
+        " https://ntfy.sh",
+    ] {
+        config.ntfy.server_url = bad_url.into();
+        let err = format!("{:#}", config.validate().unwrap_err());
+        assert!(err.contains("ntfy 服务地址格式无效"), "{bad_url:?}: {err}");
+    }
+
+    config.ntfy.server_url = "https://ntfy.sh".into();
+    for bad_topic in [
+        "bad/topic",
+        "bad.topic",
+        "bad topic",
+        "中文topic",
+        &"a".repeat(65),
+    ] {
+        config.ntfy.topic = bad_topic.into();
+        let err = format!("{:#}", config.validate().unwrap_err());
+        assert!(err.contains("ntfy Topic 格式无效"), "{bad_topic:?}: {err}");
+    }
+
+    config.ntfy.topic = "valid_topic".into();
+    for bad_token in ["Bearer tk_123", "tk\n123", "令牌", &"t".repeat(257)] {
+        config.ntfy.token = bad_token.into();
+        let err = format!("{:#}", config.validate().unwrap_err());
+        assert!(
+            err.contains("ntfy 访问令牌格式无效"),
+            "{bad_token:?}: {err}"
+        );
+    }
+}

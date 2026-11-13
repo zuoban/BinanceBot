@@ -2,6 +2,8 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 
+pub const DEFAULT_NTFY_SERVER_URL: &str = "https://ntfy.sh";
+
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 pub(crate) struct ConfigVersionConflict(pub &'static str);
@@ -16,6 +18,8 @@ pub struct AppConfig {
     pub server: ServerConfig,
     #[serde(default)]
     pub telegram: TelegramConfig,
+    #[serde(default)]
+    pub ntfy: NtfyConfig,
     #[serde(default)]
     pub global_max_position_notional: Option<Decimal>,
     #[serde(default)]
@@ -38,7 +42,7 @@ pub struct TradingPairConfig {
 }
 
 mod internal {
-    use super::{redact_optional_secret, redact_secret, AppConfig, TelegramConfig};
+    use super::{redact_optional_secret, redact_secret, AppConfig, NtfyConfig, TelegramConfig};
     use rust_decimal::Decimal;
     use serde::{Deserialize, Serialize};
 
@@ -80,6 +84,7 @@ mod internal {
         pub(crate) recv_window: u64,
         pub(crate) sync_interval_secs: u64,
         pub(crate) telegram: TelegramConfig,
+        pub(crate) ntfy: NtfyConfig,
         pub(crate) global_max_position_notional: Option<Decimal>,
         pub(crate) pause_on_zero_available_margin: bool,
         pub(crate) min_available_margin_pct: Option<Decimal>,
@@ -93,6 +98,7 @@ mod internal {
                 recv_window: config.exchange.recv_window,
                 sync_interval_secs: config.exchange.sync_interval_secs,
                 telegram: config.telegram.clone(),
+                ntfy: config.ntfy.clone(),
                 global_max_position_notional: config.global_max_position_notional,
                 pause_on_zero_available_margin: config.pause_on_zero_available_margin,
                 min_available_margin_pct: config.min_available_margin_pct,
@@ -105,6 +111,7 @@ mod internal {
             config.exchange.recv_window = self.recv_window;
             config.exchange.sync_interval_secs = self.sync_interval_secs;
             config.telegram = self.telegram.clone();
+            config.ntfy = self.ntfy.clone();
             config.global_max_position_notional = self.global_max_position_notional;
             config.pause_on_zero_available_margin = self.pause_on_zero_available_margin;
             config.min_available_margin_pct = self.min_available_margin_pct;
@@ -119,6 +126,7 @@ mod internal {
                 recv_window,
                 sync_interval_secs,
                 telegram,
+                ntfy,
                 global_max_position_notional,
                 pause_on_zero_available_margin,
                 min_available_margin_pct,
@@ -129,6 +137,7 @@ mod internal {
                 .field("recv_window", recv_window)
                 .field("sync_interval_secs", sync_interval_secs)
                 .field("telegram", telegram)
+                .field("ntfy", ntfy)
                 .field("global_max_position_notional", global_max_position_notional)
                 .field(
                     "pause_on_zero_available_margin",
@@ -166,6 +175,42 @@ pub struct TelegramConfig {
     pub bot_token: String,
     #[serde(default)]
     pub chat_id: String,
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct NtfyConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_ntfy_server_url")]
+    pub server_url: String,
+    #[serde(default)]
+    pub topic: String,
+    #[serde(default)]
+    pub token: String,
+}
+
+impl NtfyConfig {
+    #[must_use]
+    #[inline]
+    pub fn effective_server_url(&self) -> &str {
+        let trimmed = self.server_url.trim();
+        if trimmed.is_empty() {
+            DEFAULT_NTFY_SERVER_URL
+        } else {
+            trimmed
+        }
+    }
+}
+
+impl Default for NtfyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            server_url: default_ntfy_server_url(),
+            topic: String::new(),
+            token: String::new(),
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -209,6 +254,23 @@ impl std::fmt::Debug for TelegramConfig {
             .field("enabled", enabled)
             .field("bot_token", &redact_secret(bot_token))
             .field("chat_id", chat_id)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for NtfyConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            enabled,
+            server_url,
+            topic,
+            token,
+        } = self;
+        f.debug_struct("NtfyConfig")
+            .field("enabled", enabled)
+            .field("server_url", server_url)
+            .field("topic", &redact_secret(topic))
+            .field("token", &redact_secret(token))
             .finish()
     }
 }
@@ -331,6 +393,10 @@ fn default_host() -> String {
 
 fn default_port() -> u16 {
     8080
+}
+
+fn default_ntfy_server_url() -> String {
+    DEFAULT_NTFY_SERVER_URL.to_string()
 }
 
 impl Default for ExchangeConfig {

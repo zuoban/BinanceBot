@@ -4,7 +4,9 @@ use super::super::config_probes::{
 use super::super::exchange_preview::{
     fetch_exchange_symbol_preview, fetch_exchange_symbols, ExchangePreviewService,
 };
-use super::super::probes::{resolve_exchange_probe, resolve_telegram_probe, PROBE_COOLDOWN};
+use super::super::probes::{
+    resolve_exchange_probe, resolve_ntfy_probe, resolve_telegram_probe, PROBE_COOLDOWN,
+};
 use super::super::*;
 use super::auth_state;
 use crate::config::AppConfig;
@@ -699,11 +701,41 @@ fn probe_payload_debug_redacts_secrets_and_error_sanitizer_handles_exchange_erro
         "chat_id": "456"
     }))
     .unwrap();
-    let debug_str = format!("{exchange_payload:?} {telegram_payload:?}");
+    let ntfy_payload: probes::TestNtfyPayload = serde_json::from_value(serde_json::json!({
+        "server_url": "https://ntfy.sh",
+        "topic": "probe-ntfy-topic",
+        "token": "probe-ntfy-token"
+    }))
+    .unwrap();
+    let debug_str = format!("{exchange_payload:?} {telegram_payload:?} {ntfy_payload:?}");
     assert!(!debug_str.contains("probe-secret-key"));
     assert!(!debug_str.contains("probe-secret-val"));
     assert!(!debug_str.contains("probe-bot-secret"));
+    assert!(!debug_str.contains("probe-ntfy-topic"));
+    assert!(!debug_str.contains("probe-ntfy-token"));
     assert!(debug_str.contains("[REDACTED]"));
+
+    let saved_ntfy = crate::config::NtfyConfig {
+        enabled: false,
+        server_url: "https://ntfy.example.com".into(),
+        topic: "saved_topic".into(),
+        token: "tk_saved".into(),
+    };
+    let inherited = resolve_ntfy_probe(
+        &saved_ntfy,
+        serde_json::from_value(serde_json::json!({"token": "   "})).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(inherited.server_url, "https://ntfy.example.com");
+    assert_eq!(inherited.topic, "saved_topic");
+    assert_eq!(inherited.token, "tk_saved");
+
+    let bad_ntfy = resolve_ntfy_probe(
+        &saved_ntfy,
+        serde_json::from_value(serde_json::json!({"topic": "bad/topic"})).unwrap(),
+    )
+    .unwrap_err();
+    assert!(bad_ntfy.contains("ntfy Topic 格式无效"), "{bad_ntfy}");
 
     let api_err: anyhow::Error = crate::exchange::ExchangeError::ApiError {
         code: -2015,

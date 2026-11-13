@@ -411,12 +411,12 @@ impl AppState {
         paper_state: Option<(PositionInfo, AccountInfo)>,
         dedup_client_order_id: bool,
     ) -> Option<OrderFillDbOutcome> {
-        let (current_symbol, current_mode, telegram, direction, sync_interval_secs) = {
+        let (current_symbol, current_mode, channels, direction, sync_interval_secs) = {
             let cfg = self.config.read().await;
             (
                 cfg.exchange.symbol.clone(),
                 cfg.exchange.trading_mode(),
-                cfg.telegram.clone(),
+                super::NotificationChannels::from_app(&cfg),
                 cfg.grid.direction,
                 cfg.exchange.sync_interval_secs,
             )
@@ -428,8 +428,8 @@ impl AppState {
             );
             return None;
         }
-        let notify_trade =
-            telegram.enabled && (trade.pnl_verified || trade.side != direction.closing_side());
+        let notify_trade = channels.any_enabled()
+            && (trade.pnl_verified || trade.side != direction.closing_side());
         let Ok((status, notification_stats)) = self
             .commit_trade_to_db_and_caches(
                 &trade,
@@ -452,8 +452,8 @@ impl AppState {
             }
         }
         if notify_trade {
-            self.spawn_trade_telegram_notification(
-                telegram,
+            self.spawn_trade_notifications(
+                channels,
                 trade,
                 notification_stats,
                 direction,

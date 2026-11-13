@@ -113,6 +113,57 @@ pub(super) fn resolve_telegram_probe(
     Ok(config)
 }
 
+pub(super) fn resolve_ntfy_probe(
+    saved: &crate::config::NtfyConfig,
+    payload: TestNtfyPayload,
+) -> Result<crate::config::NtfyConfig, String> {
+    let mut config = saved.clone();
+    if payload
+        .server_url
+        .as_deref()
+        .is_some_and(|raw| !raw.trim().is_empty() && raw.chars().any(char::is_control))
+    {
+        return Err(
+            "ntfy 服务地址格式无效（请填写 http:// 或 https:// 根地址，不含路径或查询参数）".into(),
+        );
+    }
+    if let Some(server_url) = non_blank(payload.server_url) {
+        config.server_url = server_url;
+    } else if config.server_url.trim().is_empty() {
+        config.server_url = crate::config::DEFAULT_NTFY_SERVER_URL.to_string();
+    }
+    if payload
+        .topic
+        .as_deref()
+        .is_some_and(|raw| !raw.trim().is_empty() && raw.chars().any(char::is_control))
+    {
+        return Err("ntfy Topic 格式无效（仅允许 1-64 位字母、数字、下划线或连字符）".into());
+    }
+    if let Some(topic) = non_blank(payload.topic) {
+        config.topic = topic;
+    }
+    if payload
+        .token
+        .as_deref()
+        .is_some_and(|raw| !raw.trim().is_empty() && raw.chars().any(char::is_control))
+    {
+        return Err("ntfy 访问令牌格式无效".into());
+    }
+    if let Some(token) = non_blank(payload.token) {
+        config.token = token;
+    }
+    if config.topic.trim().is_empty() {
+        return Err("请填写 Topic（或先保存后再测试）".into());
+    }
+    crate::config::NtfyConfig::validate_server_url(config.effective_server_url())
+        .map_err(|e| e.to_string())?;
+    crate::config::NtfyConfig::validate_topic(&config.topic).map_err(|e| e.to_string())?;
+    if !config.token.trim().is_empty() {
+        crate::config::NtfyConfig::validate_token(&config.token).map_err(|e| e.to_string())?;
+    }
+    Ok(config)
+}
+
 /// Probes talk to the exchange with credentials the engine does not use, so they get their own
 /// request budget and a short cooldown: repeated clicks must never consume the engine's weight.
 pub(super) const PROBE_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(3);
@@ -145,6 +196,7 @@ impl ProbeGate {
 pub(crate) struct ProbeGates {
     pub(crate) exchange: ProbeGate,
     pub(crate) telegram: ProbeGate,
+    pub(crate) ntfy: ProbeGate,
 }
 
 fn probe_throttled(gate: &ProbeGate) -> Option<Json<ApiResponse<String>>> {
@@ -250,6 +302,48 @@ pub(super) async fn test_telegram_handler(
     let notifier = crate::telegram::TelegramNotifier::new();
     match notifier.send_test_message(&config).await {
         Ok(()) => json_ok("测试消息已发送，请在 Telegram 中查看".into()),
+        Err(error) => json_err(format!("测试消息发送失败：{error}")),
+    }
+}
+
+#[derive(Deserialize)]
+pub(super) struct TestNtfyPayload {
+    server_url: Option<String>,
+    topic: Option<String>,
+    token: Option<String>,
+}
+
+impl std::fmt::Debug for TestNtfyPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            server_url,
+            topic,
+            token,
+        } = self;
+        f.debug_struct("TestNtfyPayload")
+            .field("server_url", server_url)
+            .field("topic", &crate::config::redact_optional_secret(topic))
+            .field("token", &crate::config::redact_optional_secret(token))
+            .finish()
+    }
+}
+
+/// Send one fixed probe message with the (possibly unsaved) ntfy settings.
+pub(super) async fn test_ntfy_handler(
+    State(handle): State<RuntimeHandle>,
+    Json(payload): Json<TestNtfyPayload>,
+) -> Json<ApiResponse<String>> {
+    let config = match load_probe_config(&handle, &handle.probes.ntfy, payload, |saved, payload| {
+        resolve_ntfy_probe(&saved.ntfy, payload)
+    })
+    .await
+    {
+        Ok(config) => config,
+        Err(response) => return response,
+    };
+    let notifier = crate::ntfy::NtfyNotifier::new();
+    match notifier.send_test_message(&config).await {
+        Ok(()) => json_ok("测试消息已发送，请在 ntfy 中查看".into()),
         Err(error) => json_err(format!("测试消息发送失败：{error}")),
     }
 }

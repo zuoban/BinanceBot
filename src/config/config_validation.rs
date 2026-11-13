@@ -1,4 +1,4 @@
-use super::{AppConfig, ExchangeConfig, GridConfig, ServerConfig, TelegramConfig};
+use super::{AppConfig, ExchangeConfig, GridConfig, NtfyConfig, ServerConfig, TelegramConfig};
 use anyhow::Context;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -22,6 +22,7 @@ impl AppConfig {
         self.grid.validate()?;
         self.exchange.validate()?;
         self.telegram.validate()?;
+        self.ntfy.validate()?;
         Ok(())
     }
 
@@ -207,6 +208,75 @@ impl TelegramConfig {
         }
         if self.enabled || !self.chat_id.is_empty() {
             Self::validate_chat_id(&self.chat_id)?;
+        }
+        Ok(())
+    }
+}
+
+impl NtfyConfig {
+    pub fn validate_server_url(raw: &str) -> anyhow::Result<()> {
+        let valid = !raw.is_empty()
+            && raw.trim() == raw
+            && raw.len() <= 256
+            && !raw.contains('?')
+            && !raw.contains('#')
+            && !raw.chars().any(char::is_control)
+            && url::Url::parse(raw).is_ok_and(|parsed| {
+                matches!(parsed.scheme(), "http" | "https")
+                    && parsed.host_str().is_some_and(|host| !host.is_empty())
+                    && parsed.username().is_empty()
+                    && parsed.password().is_none()
+                    && parsed.path() == "/"
+                    && parsed.query().is_none()
+                    && parsed.fragment().is_none()
+            });
+        anyhow::ensure!(
+            valid,
+            "ntfy 服务地址格式无效（请填写 http:// 或 https:// 根地址，不含路径或查询参数）"
+        );
+        Ok(())
+    }
+
+    pub fn validate_topic(topic: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !topic.is_empty()
+                && topic.trim() == topic
+                && topic.len() <= 64
+                && topic
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_')),
+            "ntfy Topic 格式无效（仅允许 1-64 位字母、数字、下划线或连字符）"
+        );
+        Ok(())
+    }
+
+    pub fn validate_token(token: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !token.is_empty()
+                && token.trim() == token
+                && token.len() <= 256
+                && token.chars().all(|ch| ch.is_ascii_graphic())
+                && reqwest::header::HeaderValue::from_str(&format!("Bearer {token}")).is_ok(),
+            "ntfy 访问令牌格式无效"
+        );
+        Ok(())
+    }
+
+    pub(super) fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.enabled || !self.topic.trim().is_empty(),
+            "启用 ntfy 通知前请填写 Topic"
+        );
+        if !self.server_url.is_empty() {
+            Self::validate_server_url(&self.server_url)?;
+        } else if self.enabled {
+            Self::validate_server_url(self.effective_server_url())?;
+        }
+        if self.enabled || !self.topic.is_empty() {
+            Self::validate_topic(&self.topic)?;
+        }
+        if !self.token.is_empty() {
+            Self::validate_token(&self.token)?;
         }
         Ok(())
     }

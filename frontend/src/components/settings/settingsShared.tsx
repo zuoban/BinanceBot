@@ -9,11 +9,13 @@ export type GlobalForm = GlobalConfig & {
   api_key?: string;
   api_secret?: string;
   telegram_bot_token?: string;
+  ntfy_token?: string;
   clear_api_credentials: boolean;
   clear_telegram_credentials: boolean;
+  clear_ntfy_credentials: boolean;
 };
 
-/** Verify unsaved credentials against the exchange or Telegram; nothing is persisted by the probe. */
+/** Verify unsaved credentials against the exchange, Telegram, or ntfy; nothing is persisted by the probe. */
 export function ProbeButton({ label, path, body, disabled, resetKey }: { label: string; path: string; body: () => Record<string, unknown>; disabled?: boolean; resetKey?: string }) {
   const { message } = App.useApp();
   const [busy, setBusy] = useState(false);

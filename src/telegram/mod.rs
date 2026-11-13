@@ -10,7 +10,7 @@ use reqwest::Client;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-mod daily_snapshot;
+pub(crate) mod daily_snapshot;
 pub(crate) use daily_snapshot::format_daily_snapshot_message;
 
 const MAX_TELEGRAM_RESPONSE_BYTES: usize = 8 * 1024;
@@ -293,7 +293,7 @@ impl TradeNotificationContext {
     }
 }
 
-pub(super) fn format_available_ratio(
+pub(crate) fn format_available_ratio(
     available: Option<Decimal>,
     wallet: Option<Decimal>,
 ) -> String {
@@ -353,7 +353,7 @@ pub(crate) fn format_trade_message(
     )
 }
 
-pub(super) fn format_beijing_time(now: DateTime<Utc>) -> String {
+pub(crate) fn format_beijing_time(now: DateTime<Utc>) -> String {
     now.with_timezone(&crate::types::beijing_offset())
         .format("%Y-%m-%d %H:%M:%S")
         .to_string()
@@ -367,7 +367,7 @@ fn format_global_risk_message(reason: &str, now: DateTime<Utc>) -> String {
     )
 }
 
-pub(super) fn mode_label(mode: TradingMode) -> &'static str {
+pub(crate) fn mode_label(mode: TradingMode) -> &'static str {
     match mode {
         TradingMode::Paper => "模拟盘",
         TradingMode::Live => "实盘",
@@ -375,7 +375,7 @@ pub(super) fn mode_label(mode: TradingMode) -> &'static str {
     }
 }
 
-pub(super) fn format_optional_money(
+pub(crate) fn format_optional_money(
     value: Option<Decimal>,
     asset: &str,
     force_sign: bool,

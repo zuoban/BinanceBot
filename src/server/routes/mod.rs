@@ -52,7 +52,7 @@ use database::{
 use exchange_preview::{
     exchange_symbol_preview_handler, exchange_symbols_handler, ExchangePreviewService,
 };
-use probes::{test_exchange_handler, test_telegram_handler};
+use probes::{test_exchange_handler, test_ntfy_handler, test_telegram_handler};
 use queries::{
     get_logs_handler, get_managed_overview_handler, get_managed_pairs_handler, get_orders_handler,
     get_overview_handler, get_overview_history_handler, get_pairs_handler,
@@ -317,6 +317,7 @@ pub fn create_managed_router(handle: RuntimeHandle) -> Router {
         )
         .route("/api/global/test-exchange", post(test_exchange_handler))
         .route("/api/global/test-telegram", post(test_telegram_handler))
+        .route("/api/global/test-ntfy", post(test_ntfy_handler))
         .route(
             "/api/server/config",
             get(get_server_config_handler).post(post_server_config_handler),

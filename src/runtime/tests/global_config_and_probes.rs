@@ -313,6 +313,8 @@ async fn global_config_rejects_partial_credential_rotation_and_contradictory_cle
         json!({"clear_api_credentials": true, "api_secret": "contradictory-secret"}),
         json!({"clear_telegram_credentials": true, "telegram_bot_token": "contradictory-token"}),
         json!({"clear_telegram_credentials": true, "telegram_chat_id": "99999"}),
+        json!({"clear_ntfy_credentials": true, "ntfy_topic": "grid_topic"}),
+        json!({"clear_ntfy_credentials": true, "ntfy_token": "tk_contradictory"}),
     ] {
         let (bad_status, body) = request(
             &router,
@@ -596,6 +598,11 @@ async fn credential_probes_reject_incomplete_input_without_network_or_persistenc
             json!({"bot_token": "123:abc"}),
             "请填写 Bot Token 和 Chat ID",
         ),
+        (
+            "/api/global/test-ntfy",
+            json!({"server_url": "https://ntfy.sh"}),
+            "请填写 Topic",
+        ),
     ] {
         // Each case gets a fresh runtime, so the per-kind cooldown never interferes.
         let runtime = fixture_with_database(db.clone(), false, false);
@@ -649,4 +656,6 @@ async fn credential_probes_are_throttled_per_kind_and_independently() {
         .as_str()
         .unwrap()
         .contains("请填写 Bot Token"));
+    let (_, ntfy) = request(&router, "/api/global/test-ntfy", "POST", json!({}), true).await;
+    assert!(ntfy["message"].as_str().unwrap().contains("请填写 Topic"));
 }
