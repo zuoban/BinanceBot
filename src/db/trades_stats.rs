@@ -212,7 +212,7 @@ impl Database {
         client_order_id: &str,
         mode: TradingMode,
     ) -> Result<bool> {
-        let conn = self.lock_connection("has_recorded_order");
+        let conn = self.lock_read_connection("has_recorded_order");
         has_recorded_order_on(&conn, client_order_id, mode)
     }
 
@@ -296,6 +296,7 @@ impl Database {
         let tx = immediate_tx(&mut conn)?;
         let mut verified = Vec::with_capacity(candidates.len());
         let mut updated_symbols = Vec::new();
+        let mut verified_timestamps = Vec::with_capacity(candidates.len());
         for (trade, _) in candidates {
             let normalized_asset = trade
                 .normalized_commission_asset()
@@ -326,20 +327,30 @@ impl Database {
                 committed.commission_asset = committed
                     .normalized_commission_asset()
                     .map(str::to_ascii_uppercase);
-                hourly::verify_on(
-                    &tx,
-                    &symbol,
-                    committed.mode,
-                    timestamp,
-                    committed.realized_pnl,
-                    committed.quote_commission(),
-                    committed.has_non_quote_commission(),
-                )?;
                 if !updated_symbols.contains(&symbol) {
                     updated_symbols.push(symbol.clone());
                 }
+                verified_timestamps.push(timestamp);
                 verified.push(committed);
             }
+        }
+        if !verified.is_empty() {
+            hourly::verify_batch_on(
+                &tx,
+                verified
+                    .iter()
+                    .zip(verified_timestamps.iter())
+                    .map(|(committed, timestamp)| {
+                        (
+                            committed.symbol.as_str(),
+                            committed.mode,
+                            *timestamp,
+                            committed.realized_pnl,
+                            committed.quote_commission(),
+                            committed.has_non_quote_commission(),
+                        )
+                    }),
+            )?;
         }
         let _commit_guard = (!updated_symbols.is_empty()).then(|| self.begin_trade_commit());
         tx.commit()?;

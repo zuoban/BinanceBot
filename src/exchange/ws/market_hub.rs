@@ -112,12 +112,15 @@ impl HubInner {
     }
 
     fn dispatch_ticker(&self, symbol: &str, update: TickerInfo) {
-        let state = self.state.lock_unpoisoned();
-        let Some(subscribers) = state.by_symbol.get(symbol) else {
-            return;
+        let senders: Vec<broadcast::Sender<TickerInfo>> = {
+            let state = self.state.lock_unpoisoned();
+            let Some(subscribers) = state.by_symbol.get(symbol) else {
+                return;
+            };
+            subscribers.iter().map(|(_, tx)| tx.clone()).collect()
         };
-        if let Some(((_, last_tx), rest)) = subscribers.split_last() {
-            for (_, tx) in rest {
+        if let Some((last_tx, rest)) = senders.split_last() {
+            for tx in rest {
                 let _ = tx.send(update.clone());
             }
             let _ = last_tx.send(update);

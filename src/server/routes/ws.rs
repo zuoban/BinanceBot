@@ -336,16 +336,16 @@ fn spawn_socket_send_task(
             tokio::select! {
                 _ = retired.changed() => break,
                 _ = check_auth.tick() => {
-                    if !send_state.is_token_valid(&send_token).await { break; }
+                    if !send_state.auth.is_ws_session_valid(&send_token).await { break; }
                 }
                 Some(msg) = result_rx.recv() => {
-                    if !send_state.is_token_valid(&send_token).await { break; }
+                    if !send_state.auth.is_ws_session_valid(&send_token).await { break; }
                     if !send_with_timeout(&mut sender, Message::Text(msg), &mut retired).await { break; }
                 }
                 message = rx.recv() => {
                     match message {
                         Ok(msg) => {
-                            if !send_state.is_token_valid(&send_token).await { break; }
+                            if !send_state.auth.is_ws_session_valid(&send_token).await { break; }
                             if !send_with_timeout(
                                 &mut sender,
                                 Message::Text(msg.as_ref().to_owned()),
@@ -358,7 +358,7 @@ fn spawn_socket_send_task(
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                             crate::metrics::WS_CLIENT_LAGGED.inc();
-                            if !send_state.is_token_valid(&send_token).await { break; }
+                            if !send_state.auth.is_ws_session_valid(&send_token).await { break; }
                             if let Some(json) = send_state.resync_snapshot_frame().await {
                                 if !send_with_timeout(
                                     &mut sender,

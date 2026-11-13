@@ -127,6 +127,33 @@ impl AuthContext {
         self.check_token_valid(token).await.unwrap_or(false)
     }
 
+    /// Re-validate an already-upgraded WebSocket session without tearing down
+    /// valid connections if all cold-lookup permits are momentarily saturated.
+    pub(crate) async fn is_ws_session_valid(&self, token: &str) -> bool {
+        match self.check_token_valid(token).await {
+            Ok(valid) => valid,
+            Err(SessionCheckError::Busy) => {
+                let Ok(Ok(permit)) = tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    self.session_lookup_permits.clone().acquire_owned(),
+                )
+                .await
+                else {
+                    return true;
+                };
+                let token = token.to_string();
+                self.db
+                    .run_blocking(move |db| {
+                        let _permit = permit;
+                        db.is_session_valid(&token)
+                    })
+                    .await
+                    .unwrap_or(false)
+            }
+            Err(SessionCheckError::Database(_)) => false,
+        }
+    }
+
     pub(crate) async fn create_session(&self, token: &str) -> anyhow::Result<()> {
         let token = token.to_string();
         self.db

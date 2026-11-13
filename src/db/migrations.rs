@@ -462,6 +462,11 @@ fn finalize_legacy_retirements_and_rollups(conn: &mut Connection) -> Result<()> 
     let tx = super::immediate_tx(conn)?;
     retire_legacy_testnet_config(&tx)?;
     retire_legacy_dry_run_intent(&tx)?;
+    // Partial indexes keep normal inserts free while turning startup legacy scans into O(1) lookups.
+    tx.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_trades_legacy_testnet ON trades (mode) WHERE mode = 'TESTNET';
+         CREATE INDEX IF NOT EXISTS idx_trades_legacy_timestamp ON trades (timestamp) WHERE length(timestamp) != 30 OR substr(timestamp, 30, 1) != 'Z' OR substr(timestamp, 11, 1) != 'T';",
+    )?;
     retire_legacy_testnet_rows(&tx)?;
     normalize_legacy_timestamps_on(&tx)?;
     tx.execute_batch(

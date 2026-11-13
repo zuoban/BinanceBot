@@ -139,7 +139,7 @@ impl Database {
         symbol: &str,
         client_order_id: &str,
     ) -> Result<Vec<(String, crate::exchange::BinanceOrderResponse)>> {
-        let conn = self.lock_connection("load_initial_order_responses");
+        let conn = self.lock_read_connection("load_initial_order_responses");
         let mut statement = conn.prepare_cached("SELECT batch_id, response_json FROM initial_order_responses WHERE account_key=?1 AND expected_symbol=?2 AND client_order_id=?3 ORDER BY rowid")?;
         let rows = statement.query_map(params![&account[..], symbol, client_order_id], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -208,7 +208,7 @@ impl Database {
             crate::exchange::BinanceOrderResponse,
         )>,
     > {
-        let conn = self.lock_connection("load_terminal_order_disagreements");
+        let conn = self.lock_read_connection("load_terminal_order_disagreements");
         load_terminal_order_disagreements_on(&conn, account, symbol)
     }
 
@@ -263,7 +263,7 @@ impl Database {
         account: [u8; 32],
         symbol: &str,
     ) -> Result<Vec<(GridOrder, crate::types::ObservedOrderIdentity)>> {
-        let conn = self.lock_connection("load_identity_observations");
+        let conn = self.lock_read_connection("load_identity_observations");
         let mut stmt = conn.prepare_cached("SELECT expected_json, observed_json FROM order_identity_observations WHERE account_key=?1 AND expected_symbol=?2")?;
         let rows = stmt.query_map(params![&account[..], symbol], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))

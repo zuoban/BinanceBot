@@ -229,11 +229,13 @@ pub(crate) async fn current_accounts(
     };
     let mut accounts: BTreeMap<SnapshotBucketKey, TradingMode> = BTreeMap::new();
     let mut identities = HashMap::new();
+    let committed_by_symbol: HashMap<&str, &crate::config::AppConfig> = committed
+        .iter()
+        .map(|config| (config.exchange.symbol.as_str(), config))
+        .collect();
     for state in states {
         let config = match state.pair_scope() {
-            Some(symbol) => committed
-                .iter()
-                .find(|config| config.exchange.symbol == symbol),
+            Some(symbol) => committed_by_symbol.get(symbol).copied(),
             None => committed.first(),
         };
         let Some(config) = config else { continue };

@@ -103,7 +103,7 @@ impl UserDataInner {
     fn notify_account_symbols(
         &self,
         account_key: [u8; 32],
-        target_symbol: Option<&str>,
+        target_symbols: Option<&[String]>,
         invalidate_caches: bool,
     ) {
         let mut invalidated_client: Option<Arc<BinanceFuturesClient>> = None;
@@ -115,8 +115,11 @@ impl UserDataInner {
                 .filter(|slot| {
                     slot.scope.is_live_with_credentials()
                         && slot.scope.client.account_identity_key() == account_key
-                        && target_symbol
-                            .is_none_or(|sym| slot.scope.symbol.eq_ignore_ascii_case(sym))
+                        && target_symbols.is_none_or(|symbols| {
+                            symbols
+                                .iter()
+                                .any(|sym| slot.scope.symbol.eq_ignore_ascii_case(sym))
+                        })
                 })
                 .map(|slot| {
                     if invalidate_caches && invalidated_client.is_none() {
@@ -223,11 +226,14 @@ pub(super) fn parse_user_data_frame(text: &str) -> ParsedUserDataAction {
             let symbols = frame
                 .account
                 .map(|acc| {
-                    acc.positions
-                        .into_iter()
-                        .map(|pos| pos.symbol.trim().to_ascii_uppercase())
-                        .filter(|sym| !sym.is_empty())
-                        .collect()
+                    let mut seen = Vec::new();
+                    for pos in acc.positions {
+                        let sym = pos.symbol.trim().to_ascii_uppercase();
+                        if !sym.is_empty() && !seen.contains(&sym) {
+                            seen.push(sym);
+                        }
+                    }
+                    seen
                 })
                 .unwrap_or_default();
             ParsedUserDataAction::AccountUpdate { symbols }
@@ -402,7 +408,7 @@ where
                         } => {
                             inner.notify_account_symbols(
                                 account_key,
-                                Some(&symbol),
+                                Some(std::slice::from_ref(&symbol)),
                                 invalidate_caches,
                             );
                         }
@@ -410,9 +416,7 @@ where
                             if symbols.is_empty() {
                                 inner.notify_account_symbols(account_key, None, true);
                             } else {
-                                for symbol in &symbols {
-                                    inner.notify_account_symbols(account_key, Some(symbol), true);
-                                }
+                                inner.notify_account_symbols(account_key, Some(&symbols), true);
                             }
                         }
                         ParsedUserDataAction::Ignore => {}

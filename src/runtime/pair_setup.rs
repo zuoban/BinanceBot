@@ -5,7 +5,7 @@ use crate::server::AppState;
 use crate::strategy::GridTradingEngine;
 use crate::types::TickerInfo;
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc, oneshot, watch};
+use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex};
 use tokio::task::JoinHandle;
 
 impl TradingRuntime {
@@ -50,7 +50,9 @@ impl TradingRuntime {
         // Keep that work off the Tokio thread that handles membership and shutdown.
         let state_config = strategy.clone();
         let state_db = db.clone();
-        let trade_lock = self.trade_lock.clone();
+        // Per-pair commit lock avoids cross-pair SQLite fsync serialization while
+        // keeping each pair's DB writes and in-memory caches consistent.
+        let trade_lock = Arc::new(Mutex::new(()));
         let cny_rates = self.cny_rates.clone();
         let auth = self.auth.clone();
         let pair_scope = options.multi.then(|| state_config.exchange.symbol.clone());

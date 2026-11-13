@@ -42,7 +42,7 @@ pub(crate) struct NtfyNotifier {
 impl NtfyNotifier {
     pub(crate) fn new() -> Self {
         Self {
-            client: crate::exchange::client::shared_http_client(),
+            client: crate::exchange::client::shared_aux_http_client(),
         }
     }
 

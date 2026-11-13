@@ -39,7 +39,7 @@ pub(crate) struct TelegramNotifier {
 impl TelegramNotifier {
     pub(crate) fn new() -> Self {
         Self {
-            client: crate::exchange::client::shared_http_client(),
+            client: crate::exchange::client::shared_aux_http_client(),
             api_base_url: "https://api.telegram.org".into(),
         }
     }

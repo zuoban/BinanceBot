@@ -84,6 +84,7 @@ pub struct TradingRuntime {
     pairs: Vec<PairTask>,
     handle: RuntimeHandle,
     command_rx: mpsc::Receiver<RuntimeCommand>,
+    #[cfg_attr(not(test), allow(dead_code))]
     trade_lock: Arc<Mutex<()>>,
     cny_rates: Arc<CnyRateCache>,
     cny_refresh_task: Option<JoinHandle<()>>,

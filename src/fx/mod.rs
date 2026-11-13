@@ -12,7 +12,7 @@ const CACHE_TTL: Duration = Duration::from_secs(15 * 60);
 const RETRY_DELAY: Duration = Duration::from_secs(60);
 const MAX_DISPLAY_AGE: Duration = Duration::from_secs(60 * 60);
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CnyRate {
     pub asset: String,
     pub cny_per_unit: Decimal,
@@ -56,7 +56,7 @@ impl CnyRateCache {
 
     fn with_endpoint(endpoint: String) -> Self {
         Self {
-            client: crate::exchange::client::shared_http_client(),
+            client: crate::exchange::client::shared_aux_http_client(),
             endpoint,
             entries: Mutex::new(HashMap::new()),
         }

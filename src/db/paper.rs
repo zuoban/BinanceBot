@@ -398,7 +398,7 @@ impl Database {
         &self,
         symbol: &str,
     ) -> Result<Option<(PositionInfo, AccountInfo)>> {
-        let conn = self.lock_connection("load_paper_state");
+        let conn = self.lock_read_connection("load_paper_state");
         let saved: Option<(String, String)> = conn
             .prepare_cached(
                 "SELECT position_json, account_json FROM paper_accounts WHERE symbol = ?1",

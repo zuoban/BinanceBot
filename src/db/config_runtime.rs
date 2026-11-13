@@ -8,7 +8,7 @@ use tracing::warn;
 
 impl Database {
     pub(crate) fn load_bot_status(&self) -> Result<Option<BotStatus>> {
-        let conn = self.lock_connection("load_bot_status");
+        let conn = self.lock_read_connection("load_bot_status");
         let value: Option<String> = conn
             .prepare_cached("SELECT status FROM bot_runtime WHERE id = 1;")?
             .query_row([], |row| row.get(0))
@@ -23,7 +23,7 @@ impl Database {
 
     pub fn load_pair_status(&self, symbol: &str, mode: TradingMode) -> Result<Option<BotStatus>> {
         let value: Option<String> = {
-            let conn = self.lock_connection("load_pair_status");
+            let conn = self.lock_read_connection("load_pair_status");
             let mut stmt = conn.prepare_cached(
                 "SELECT status FROM pair_runtime WHERE symbol = ?1 AND mode = ?2",
             )?;
@@ -62,7 +62,7 @@ impl Database {
     }
 
     pub fn load_config(&self) -> Result<Option<AppConfig>> {
-        load_config_on(&self.lock_connection("load_config"))
+        load_config_on(&self.lock_read_connection("load_config"))
     }
 
     pub(crate) async fn load_saved_config(self: &std::sync::Arc<Self>) -> Result<AppConfig> {

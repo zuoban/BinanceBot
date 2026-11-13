@@ -307,33 +307,67 @@ pub(super) fn insert_on(conn: &Connection, trade: &TradeRecord) -> Result<()> {
     save_pnl_on(conn, &trade.symbol, trade.mode.as_str(), &pnl_rollup)
 }
 
-pub(super) fn verify_on(
+pub(super) fn verify_batch_on<'a>(
     conn: &Connection,
-    symbol: &str,
-    mode: TradingMode,
-    timestamp: DateTime<Utc>,
-    pnl: Decimal,
-    quote_commission: Decimal,
-    has_non_quote_commission: bool,
+    items: impl IntoIterator<Item = (&'a str, TradingMode, DateTime<Utc>, Decimal, Decimal, bool)>,
 ) -> Result<()> {
-    let bucket = hour(timestamp);
-    let mut rollup = load_on(conn, symbol, mode.as_str(), bucket)?;
-    anyhow::ensure!(rollup.pending > 0, "Missing pending trade in hourly rollup");
-    rollup.pending -= 1;
-    rollup.pnl = rollup.pnl.saturating_add(pnl);
-    save_on(conn, symbol, mode.as_str(), bucket, &rollup)?;
-    let mut pnl_rollup = load_pnl_on(conn, symbol, mode.as_str())?;
-    anyhow::ensure!(
-        pnl_rollup.pending > 0,
-        "Missing pending trade in PnL rollup"
-    );
-    pnl_rollup.pending -= 1;
-    pnl_rollup.pnl = pnl_rollup.pnl.saturating_add(pnl);
-    pnl_rollup.commission = pnl_rollup.commission.saturating_add(quote_commission);
-    if has_non_quote_commission {
-        pnl_rollup.non_quote_commission = pnl_rollup.non_quote_commission.saturating_add(1);
+    #[derive(Default)]
+    struct HourlyDelta {
+        count: i64,
+        pnl: Decimal,
     }
-    save_pnl_on(conn, symbol, mode.as_str(), &pnl_rollup)
+    #[derive(Default)]
+    struct PnlDelta {
+        count: i64,
+        pnl: Decimal,
+        quote_commission: Decimal,
+        non_quote_commission: i64,
+    }
+
+    let mut hourly_deltas: BTreeMap<(&'a str, &'static str, i64), HourlyDelta> = BTreeMap::new();
+    let mut pnl_deltas: BTreeMap<(&'a str, &'static str), PnlDelta> = BTreeMap::new();
+    for (symbol, mode, timestamp, pnl, quote_commission, has_non_quote_commission) in items {
+        let mode_str = mode.as_str();
+        let bucket = hour(timestamp);
+        let h = hourly_deltas.entry((symbol, mode_str, bucket)).or_default();
+        h.count += 1;
+        h.pnl = h.pnl.saturating_add(pnl);
+
+        let p = pnl_deltas.entry((symbol, mode_str)).or_default();
+        p.count += 1;
+        p.pnl = p.pnl.saturating_add(pnl);
+        p.quote_commission = p.quote_commission.saturating_add(quote_commission);
+        if has_non_quote_commission {
+            p.non_quote_commission = p.non_quote_commission.saturating_add(1);
+        }
+    }
+
+    for ((symbol, mode_str, bucket), delta) in hourly_deltas {
+        let mut rollup = load_on(conn, symbol, mode_str, bucket)?;
+        anyhow::ensure!(
+            rollup.pending >= delta.count,
+            "Missing pending trade in hourly rollup"
+        );
+        rollup.pending -= delta.count;
+        rollup.pnl = rollup.pnl.saturating_add(delta.pnl);
+        save_on(conn, symbol, mode_str, bucket, &rollup)?;
+    }
+
+    for ((symbol, mode_str), delta) in pnl_deltas {
+        let mut pnl_rollup = load_pnl_on(conn, symbol, mode_str)?;
+        anyhow::ensure!(
+            pnl_rollup.pending >= delta.count,
+            "Missing pending trade in PnL rollup"
+        );
+        pnl_rollup.pending -= delta.count;
+        pnl_rollup.pnl = pnl_rollup.pnl.saturating_add(delta.pnl);
+        pnl_rollup.commission = pnl_rollup.commission.saturating_add(delta.quote_commission);
+        pnl_rollup.non_quote_commission = pnl_rollup
+            .non_quote_commission
+            .saturating_add(delta.non_quote_commission);
+        save_pnl_on(conn, symbol, mode_str, &pnl_rollup)?;
+    }
+    Ok(())
 }
 pub(super) fn stats_on(
     conn: &Connection,

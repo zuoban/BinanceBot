@@ -15,13 +15,13 @@ const RESYNC_FRAME_TTL: Duration = Duration::from_millis(250);
 const TRADE_CACHE_TTL: Duration = Duration::from_secs(5);
 const QUERY_RETRY_DELAY: Duration = Duration::from_secs(5);
 
-#[derive(Serialize)]
+#[derive(PartialEq, Serialize)]
 pub(crate) struct AccountSnapshot {
     pub(super) mode: TradingMode,
     pub(super) snapshot: AccountSnapshotData,
 }
 
-#[derive(Serialize)]
+#[derive(PartialEq, Serialize)]
 pub(super) struct AccountSnapshotData {
     pub(super) symbol: String,
     pub(super) status: BotStatus,
@@ -33,13 +33,13 @@ pub(super) struct AccountSnapshotData {
     pub(super) account_cny_rate: Option<crate::fx::CnyRate>,
 }
 
-#[derive(Serialize)]
+#[derive(PartialEq, Eq, Serialize)]
 pub(super) struct AccountTicker {
     pub(super) mark_price: Decimal,
     pub(super) mark_update_time: DateTime<Utc>,
 }
 
-#[derive(Serialize)]
+#[derive(PartialEq, Eq, Serialize)]
 pub(super) struct AccountPosition {
     pub(super) size: Decimal,
     pub(super) unrealized_pnl: Decimal,
@@ -53,8 +53,12 @@ pub(crate) struct AccountFrame {
 
 #[derive(Serialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
-pub(crate) enum AccountMessage {
-    Accounts(AccountFrame),
+enum AccountMessageRef<'a> {
+    Accounts(&'a AccountFrame),
+}
+
+pub(crate) fn encode_accounts_frame(frame: &AccountFrame) -> serde_json::Result<String> {
+    serde_json::to_string(&AccountMessageRef::Accounts(frame))
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -138,9 +142,41 @@ impl ResyncFrame {
 pub(in crate::server::state) struct LastSnapshotBroadcast {
     pub(super) sent_at: Instant,
     pub(super) receivers: usize,
-    pub(super) frame: Arc<str>,
+    pub(super) snapshot: crate::types::BotSnapshot,
 }
 
+pub(super) fn bot_snapshot_content_unchanged(
+    previous: &crate::types::BotSnapshot,
+    current: &crate::types::BotSnapshot,
+) -> bool {
+    previous.status == current.status
+        && previous.mode == current.mode
+        && previous.account_scope == current.account_scope
+        && previous.symbol == current.symbol
+        && previous.sync_interval_secs == current.sync_interval_secs
+        && previous.ticker == current.ticker
+        && previous.position == current.position
+        && previous.account == current.account
+        && previous.account_cny_rate == current.account_cny_rate
+        && previous.grid_config == current.grid_config
+        && previous.active_orders == current.active_orders
+        && previous.recent_trades == current.recent_trades
+        && previous.hourly_trade_stats == current.hourly_trade_stats
+        && previous.recent_logs == current.recent_logs
+        && previous.stats.total_trades == current.stats.total_trades
+        && previous.stats.completed_cycles == current.stats.completed_cycles
+        && previous.stats.total_realized_profit == current.stats.total_realized_profit
+        && previous.stats.total_realized_pnl == current.stats.total_realized_pnl
+        && previous.stats.total_commission == current.stats.total_commission
+        && previous.stats.non_quote_commission_trades == current.stats.non_quote_commission_trades
+        && previous.stats.pending_pnl_trades == current.stats.pending_pnl_trades
+        && previous.stats.total_volume_usdc == current.stats.total_volume_usdc
+        && previous.stats.start_time == current.stats.start_time
+        && previous.stats.active_buy_orders == current.stats.active_buy_orders
+        && previous.stats.active_sell_orders == current.stats.active_sell_orders
+}
+
+#[cfg(test)]
 fn split_volatile_field<'a>(s: &'a str, needle: &str) -> Option<(&'a str, &'a str)> {
     let pos = s.find(needle)?;
     let before = &s[..pos];
@@ -154,6 +190,7 @@ fn split_volatile_field<'a>(s: &'a str, needle: &str) -> Option<(&'a str, &'a st
     }
 }
 
+#[cfg(test)]
 pub(crate) fn snapshot_frame_unchanged(previous: &str, current: &str) -> bool {
     fn strip_volatile(frame: &str) -> (&str, &str, &str) {
         let (head, after_gen) =

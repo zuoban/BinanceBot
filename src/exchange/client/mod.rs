@@ -51,9 +51,25 @@ pub(crate) fn shared_http_client() -> Client {
         Client::builder()
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(10))
+            .tcp_nodelay(true)
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("Failed to build HTTP client")
+    });
+    CLIENT.clone()
+}
+
+/// Dedicated HTTP pool for auxiliary external calls (FX rates, Telegram, ntfy)
+/// so slow third-party hosts do not share pool capacity with trading requests.
+pub(crate) fn shared_aux_http_client() -> Client {
+    static CLIENT: std::sync::LazyLock<Client> = std::sync::LazyLock::new(|| {
+        Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(10))
+            .tcp_nodelay(true)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("Failed to build auxiliary HTTP client")
     });
     CLIENT.clone()
 }

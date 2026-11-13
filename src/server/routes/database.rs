@@ -101,7 +101,7 @@ async fn export_symbol(state: &AppState, symbol: String) -> Response {
     database_export_response(
         state
             .db
-            .run_blocking(move |db| db.export_analysis_snapshot_for_symbol(&symbol))
+            .run_blocking(move |db| db.export_analysis_snapshot_file_for_symbol(&symbol))
             .await,
     )
 }
@@ -160,7 +160,7 @@ pub(super) async fn export_selected_database_handler(
     };
     database_export_response(
         auth.db
-            .run_blocking(move |db| db.export_selected_analysis_snapshot(trades, snapshots))
+            .run_blocking(move |db| db.export_selected_analysis_snapshot_file(trades, snapshots))
             .await,
     )
 }
@@ -332,20 +332,43 @@ pub(super) async fn clear_trade_history_handler(
 pub(super) async fn export_database_handler(State(auth): State<Arc<AuthContext>>) -> Response {
     database_export_response(
         auth.db
-            .run_blocking(|db| db.export_analysis_snapshot())
+            .run_blocking(|db| db.export_analysis_snapshot_file())
             .await,
     )
 }
 
-fn database_export_response(result: anyhow::Result<Vec<u8>>) -> Response {
+fn database_export_response(result: anyhow::Result<crate::db::ExportedAnalysisFile>) -> Response {
     match result {
-        Ok(bytes) => {
+        Ok(exported) => {
             let filename = format!(
                 "binancebot-analysis-{}.db",
                 chrono::Utc::now()
                     .with_timezone(&beijing_offset())
                     .format("%Y%m%d-%H%M%S")
             );
+            let content_length = exported.len.to_string();
+            let stream = futures_util::stream::unfold(Some(exported), |state| async move {
+                let mut exported = state?;
+                let result = tokio::task::spawn_blocking(move || {
+                    use std::io::Read;
+                    let mut buf = vec![0u8; 64 * 1024];
+                    match exported.file.read(&mut buf) {
+                        Ok(0) => Ok((None, exported)),
+                        Ok(n) => {
+                            buf.truncate(n);
+                            Ok((Some(axum::body::Bytes::from(buf)), exported))
+                        }
+                        Err(err) => Err(err),
+                    }
+                })
+                .await;
+                match result {
+                    Ok(Ok((Some(chunk), exported))) => Some((Ok(chunk), Some(exported))),
+                    Ok(Ok((None, _exported))) => None,
+                    Ok(Err(err)) => Some((Err(err), None)),
+                    Err(err) => Some((Err(std::io::Error::other(err)), None)),
+                }
+            });
             (
                 [
                     (
@@ -356,13 +379,14 @@ fn database_export_response(result: anyhow::Result<Vec<u8>>) -> Response {
                         axum::http::header::CONTENT_DISPOSITION,
                         format!("attachment; filename=\"{}\"", filename),
                     ),
+                    (axum::http::header::CONTENT_LENGTH, content_length),
                     (axum::http::header::CACHE_CONTROL, "no-store".to_string()),
                     (
                         axum::http::header::X_CONTENT_TYPE_OPTIONS,
                         "nosniff".to_string(),
                     ),
                 ],
-                bytes,
+                axum::body::Body::from_stream(stream),
             )
                 .into_response()
         }

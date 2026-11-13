@@ -39,7 +39,7 @@ fn load_remainder_plan_on(
 
 impl Database {
     pub fn load_pair_intents(&self, symbol: &str, mode: TradingMode) -> Result<Vec<GridOrder>> {
-        let conn = self.lock_connection("load_pair_intents");
+        let conn = self.lock_read_connection("load_pair_intents");
         load_pair_intents_on(&conn, symbol, mode)
     }
 
@@ -50,7 +50,7 @@ impl Database {
         mode: TradingMode,
         check_disagreements: bool,
     ) -> LiveSyncPreflightDbResult {
-        let conn = self.lock_connection("load_live_sync_preflight");
+        let conn = self.lock_read_connection("load_live_sync_preflight");
         let intents = match load_pair_intents_on(&conn, symbol, mode) {
             Ok(orders) => orders,
             Err(err) => return Err((true, err)),
@@ -115,7 +115,7 @@ impl Database {
         symbol: &str,
         mode: TradingMode,
     ) -> Result<Option<RemainderPlan>> {
-        let conn = self.lock_connection("load_remainder_plan");
+        let conn = self.lock_read_connection("load_remainder_plan");
         load_remainder_plan_on(&conn, symbol, mode)
     }
 
@@ -191,7 +191,7 @@ impl Database {
     }
 
     pub fn load_managed_orders(&self, symbol: &str) -> Result<Vec<GridOrder>> {
-        let conn = self.lock_connection("load_managed_orders");
+        let conn = self.lock_read_connection("load_managed_orders");
         super::query_json_vec(
             &conn,
             "SELECT order_json FROM managed_orders WHERE symbol = ?1;",

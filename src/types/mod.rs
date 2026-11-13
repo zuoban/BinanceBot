@@ -47,7 +47,7 @@ impl BotStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GridStats {
     pub total_trades: usize,
     pub completed_cycles: usize,
@@ -126,7 +126,7 @@ pub(crate) fn max_reconciliation_age_secs(sync_interval_secs: u64) -> i64 {
         .min(i64::MAX as u64) as i64
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct TickerInfo {
     pub symbol: String,
     pub last_price: Decimal,
@@ -170,21 +170,21 @@ impl TickerInfo {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LogEntry {
     pub timestamp: DateTime<Utc>,
     pub level: String,
     pub message: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HourlyTradeCount {
     pub hour_start: DateTime<Utc>,
     pub buy_count: u64,
     pub sell_count: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HourlyTradeStats {
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
@@ -212,7 +212,7 @@ pub(super) fn default_sync_interval_secs() -> u64 {
     3
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BotSnapshot {
     #[serde(default = "chrono::Utc::now")]
     pub generated_at: DateTime<Utc>,

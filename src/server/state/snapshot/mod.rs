@@ -15,13 +15,15 @@ use std::time::Instant;
 
 mod cache;
 
-pub(crate) use cache::{
-    snapshot_frame_unchanged, sort_and_truncate_recent_trades, AccountFrame, AccountMessage,
-    AccountSnapshot, SNAPSHOT_IDLE_HEARTBEAT,
-};
+#[cfg(test)]
+pub(crate) use cache::snapshot_frame_unchanged;
 use cache::{
-    AccountPosition, AccountSnapshotData, AccountTicker, SnapshotCharts, SnapshotScope,
-    SNAPSHOT_INTERVAL,
+    bot_snapshot_content_unchanged, AccountPosition, AccountSnapshotData, AccountTicker,
+    SnapshotCharts, SnapshotScope, SNAPSHOT_INTERVAL,
+};
+pub(crate) use cache::{
+    encode_accounts_frame, sort_and_truncate_recent_trades, AccountFrame, AccountSnapshot,
+    SNAPSHOT_IDLE_HEARTBEAT,
 };
 pub(in crate::server::state) use cache::{LastSnapshotBroadcast, ResyncFrame, SnapshotCache};
 
@@ -361,19 +363,19 @@ impl AppState {
             *last = None;
             return snapshot;
         }
-        if let Some(json) = crate::types::ws_frame_json("snapshot", &snapshot) {
-            let skip = !force
-                && last.as_ref().is_some_and(|prev| {
-                    receivers <= prev.receivers
-                        && prev.sent_at.elapsed() < SNAPSHOT_IDLE_HEARTBEAT
-                        && snapshot_frame_unchanged(&prev.frame, &json)
-                });
-            if !skip {
+        let skip = !force
+            && last.as_ref().is_some_and(|prev| {
+                receivers <= prev.receivers
+                    && prev.sent_at.elapsed() < SNAPSHOT_IDLE_HEARTBEAT
+                    && bot_snapshot_content_unchanged(&prev.snapshot, &snapshot)
+            });
+        if !skip {
+            if let Some(json) = crate::types::ws_frame_json("snapshot", &snapshot) {
                 let _ = self.ws_broadcast_tx.send(Arc::clone(&json));
                 *last = Some(LastSnapshotBroadcast {
                     sent_at: Instant::now(),
                     receivers,
-                    frame: json,
+                    snapshot: snapshot.clone(),
                 });
             }
         }

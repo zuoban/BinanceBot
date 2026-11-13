@@ -7,6 +7,48 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 #[cfg(unix)]
 use std::path::Path;
+use std::path::PathBuf;
+
+pub(crate) struct ExportedAnalysisFile {
+    pub(crate) file: std::fs::File,
+    pub(crate) len: u64,
+    _dir: TempExportDir,
+}
+
+struct TempExportDir(PathBuf);
+
+impl Drop for TempExportDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn open_temp_export_db() -> Result<(TempExportDir, PathBuf, Connection)> {
+    let dir = std::env::temp_dir().join(format!("binancebot-export-{}", uuid::Uuid::new_v4()));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir(&dir)?;
+    }
+    let dir = std::fs::canonicalize(&dir)?;
+    let guard = TempExportDir(dir.clone());
+    let path = dir.join("export.db");
+    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+        | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
+        | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
+        | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW;
+    let conn = Connection::open_with_flags(&path, flags)?;
+    conn.execute_batch(
+        "PRAGMA journal_mode = DELETE;
+         PRAGMA synchronous = OFF;
+         PRAGMA temp_store = MEMORY;",
+    )?;
+    Ok((guard, path, conn))
+}
 
 const MAX_ANALYSIS_EXPORT_DB_BYTES: u64 = 256 * 1024 * 1024;
 const TRADE_ANALYSIS_TABLES: &[&str] = &[
@@ -281,9 +323,32 @@ impl Database {
 
     /// A consistent analysis snapshot, including committed WAL transactions.
     /// Redaction happens only on the copy; never expose a raw live database file.
+    #[cfg(test)]
     pub(crate) fn export_analysis_snapshot(&self) -> Result<Vec<u8>> {
+        read_exported_file(self.export_analysis_snapshot_file()?)
+    }
+
+    /// Export only rows that can be attributed to this symbol.
+    #[cfg(test)]
+    pub(crate) fn export_analysis_snapshot_for_symbol(&self, symbol: &str) -> Result<Vec<u8>> {
+        read_exported_file(self.export_analysis_snapshot_file_for_symbol(symbol)?)
+    }
+
+    /// Export only the selected analysis data categories.
+    #[cfg(test)]
+    pub(crate) fn export_selected_analysis_snapshot(
+        &self,
+        trade_history: bool,
+        account_hourly_snapshots: bool,
+    ) -> Result<Vec<u8>> {
+        read_exported_file(
+            self.export_selected_analysis_snapshot_file(trade_history, account_hourly_snapshots)?,
+        )
+    }
+
+    pub(crate) fn export_analysis_snapshot_file(&self) -> Result<ExportedAnalysisFile> {
         let _export = self.try_analysis_export()?;
-        let mut snapshot = self.backup_to_memory()?;
+        let (dir, path, snapshot) = self.backup_to_temp_file()?;
         drop_views_and_triggers(&snapshot)?;
 
         if let Some(mut config) = load_config_on(&snapshot)? {
@@ -298,13 +363,16 @@ impl Database {
         )?;
         clear_sqlite_metadata_tables(&snapshot);
         snapshot.execute_batch("VACUUM;")?;
-        Ok(snapshot.serialize(rusqlite::MAIN_DB)?.to_vec())
+        finish_temp_export(dir, path, snapshot)
     }
 
-    /// Export only rows that can be attributed to this symbol.
-    pub(crate) fn export_analysis_snapshot_for_symbol(&self, symbol: &str) -> Result<Vec<u8>> {
+    pub(crate) fn export_analysis_snapshot_file_for_symbol(
+        &self,
+        symbol: &str,
+    ) -> Result<ExportedAnalysisFile> {
         let _export = self.try_analysis_export()?;
-        let mut snapshot = self.analysis_snapshot_with_tables(TRADE_ANALYSIS_TABLES)?;
+        let (dir, path, snapshot) =
+            self.analysis_snapshot_file_with_tables(TRADE_ANALYSIS_TABLES)?;
         for table in SYMBOL_SCOPED_ANALYSIS_TABLES {
             snapshot.execute(
                 &format!("DELETE FROM {table} WHERE symbol != ?1"),
@@ -312,15 +380,14 @@ impl Database {
             )?;
         }
         snapshot.execute_batch("VACUUM;")?;
-        Ok(snapshot.serialize(rusqlite::MAIN_DB)?.to_vec())
+        finish_temp_export(dir, path, snapshot)
     }
 
-    /// Export only the selected analysis data categories.
-    pub(crate) fn export_selected_analysis_snapshot(
+    pub(crate) fn export_selected_analysis_snapshot_file(
         &self,
         trade_history: bool,
         account_hourly_snapshots: bool,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<ExportedAnalysisFile> {
         let _export = self.try_analysis_export()?;
         let mut tables = Vec::new();
         if trade_history {
@@ -331,9 +398,9 @@ impl Database {
         if account_hourly_snapshots {
             tables.extend(["account_hourly_snapshots", "daily_snapshots"]);
         }
-        let mut snapshot = self.analysis_snapshot_with_tables(&tables)?;
+        let (dir, path, snapshot) = self.analysis_snapshot_file_with_tables(&tables)?;
         snapshot.execute_batch("VACUUM;")?;
-        Ok(snapshot.serialize(rusqlite::MAIN_DB)?.to_vec())
+        finish_temp_export(dir, path, snapshot)
     }
 
     fn try_analysis_export(&self) -> Result<std::sync::MutexGuard<'_, ()>> {
@@ -356,8 +423,8 @@ impl Database {
         Ok(())
     }
 
-    fn backup_to_memory(&self) -> Result<Connection> {
-        let mut snapshot = Connection::open_in_memory()?;
+    fn backup_to_temp_file(&self) -> Result<(TempExportDir, PathBuf, Connection)> {
+        let (dir, path, mut snapshot) = open_temp_export_db()?;
         if self.path != ":memory:" {
             #[cfg(unix)]
             self.verify_on_disk_identity()?;
@@ -389,7 +456,7 @@ impl Database {
             ensure_logical_export_size_within_limit(&snapshot)?;
             #[cfg(unix)]
             self.verify_on_disk_identity()?;
-            return Ok(snapshot);
+            return Ok((dir, path, snapshot));
         }
         {
             let source = self.lock_connection("backup_to_memory");
@@ -401,11 +468,14 @@ impl Database {
             );
         }
         ensure_logical_export_size_within_limit(&snapshot)?;
-        Ok(snapshot)
+        Ok((dir, path, snapshot))
     }
 
-    fn analysis_snapshot_with_tables(&self, tables: &[&str]) -> Result<Connection> {
-        let snapshot = self.backup_to_memory()?;
+    fn analysis_snapshot_file_with_tables(
+        &self,
+        tables: &[&str],
+    ) -> Result<(TempExportDir, PathBuf, Connection)> {
+        let (dir, path, snapshot) = self.backup_to_temp_file()?;
         // Remove triggers and views before clearing unselected tables so their
         // contents cannot affect the export or reveal data through a view.
         drop_views_and_triggers(&snapshot)?;
@@ -423,8 +493,31 @@ impl Database {
             }
         }
         clear_sqlite_metadata_tables(&snapshot);
-        Ok(snapshot)
+        Ok((dir, path, snapshot))
     }
+}
+
+fn finish_temp_export(
+    dir: TempExportDir,
+    path: PathBuf,
+    snapshot: Connection,
+) -> Result<ExportedAnalysisFile> {
+    drop(snapshot);
+    let file = std::fs::File::open(&path)?;
+    let len = file.metadata()?.len();
+    Ok(ExportedAnalysisFile {
+        file,
+        len,
+        _dir: dir,
+    })
+}
+
+#[cfg(test)]
+fn read_exported_file(mut exported: ExportedAnalysisFile) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let mut bytes = Vec::with_capacity(usize::try_from(exported.len).unwrap_or(0));
+    exported.file.read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 fn ensure_logical_export_size_within_limit(conn: &Connection) -> Result<()> {

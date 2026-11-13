@@ -36,6 +36,7 @@ pub(crate) use config_runtime::config_version;
 pub use process_lock::{
     read_active_listen_addr, read_saved_server_config, ActiveListenGuard, DatabaseProcessLock,
 };
+pub(crate) use snapshots_export::ExportedAnalysisFile;
 pub(crate) use trades_stats::OrderFillDbOutcome;
 
 pub(crate) fn beijing_midnight(now: DateTime<Utc>) -> DateTime<Utc> {
@@ -122,7 +123,10 @@ fn open_configured_connection(open_path: &Path, is_memory: bool) -> Result<Conne
     )
     .context("Failed to configure SQLite synchronous mode")?;
     if !is_memory {
-        let _ = conn.execute_batch("PRAGMA mmap_size = 67108864;");
+        let _ = conn.execute_batch(
+            "PRAGMA mmap_size = 67108864;
+             PRAGMA journal_size_limit = 67108864;",
+        );
     }
     let synchronous: i64 = conn
         .query_row("PRAGMA synchronous", [], |row| row.get(0))

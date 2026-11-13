@@ -57,27 +57,50 @@ impl Database {
 }
 
 fn clear_trades_on(tx: &Connection, symbol: Option<&str>) -> Result<usize> {
-    tx.execute(
-        "INSERT INTO execution_frontiers (symbol, mode, side, price, timestamp)
-         SELECT symbol, mode, side, price, timestamp FROM (
-             SELECT symbol, mode, side, price, timestamp,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY symbol, mode ORDER BY timestamp DESC, rowid DESC
-                    ) AS rank
-             FROM trades WHERE (?1 IS NULL OR symbol = ?1) AND trade_id NOT LIKE 'reverse:%'
-         ) WHERE rank = 1
-         ON CONFLICT(symbol, mode) DO UPDATE SET
-             side = excluded.side, price = excluded.price, timestamp = excluded.timestamp
-         WHERE excluded.timestamp >= execution_frontiers.timestamp",
-        params![symbol],
-    )?;
-    tx.execute(
-        "INSERT OR IGNORE INTO cleared_trade_ids (trade_id, client_order_id, mode)
-         SELECT trade_id, client_order_id, mode FROM trades
-         WHERE (?1 IS NULL OR symbol = ?1)
-         ORDER BY timestamp ASC, rowid ASC",
-        params![symbol],
-    )?;
+    if let Some(symbol) = symbol {
+        tx.execute(
+            "INSERT INTO execution_frontiers (symbol, mode, side, price, timestamp)
+             SELECT symbol, mode, side, price, timestamp FROM (
+                 SELECT symbol, mode, side, price, timestamp,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY symbol, mode ORDER BY timestamp DESC, rowid DESC
+                        ) AS rank
+                 FROM trades WHERE symbol = ?1 AND trade_id NOT LIKE 'reverse:%'
+             ) WHERE rank = 1
+             ON CONFLICT(symbol, mode) DO UPDATE SET
+                 side = excluded.side, price = excluded.price, timestamp = excluded.timestamp
+             WHERE excluded.timestamp >= execution_frontiers.timestamp",
+            params![symbol],
+        )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO cleared_trade_ids (trade_id, client_order_id, mode)
+             SELECT trade_id, client_order_id, mode FROM trades
+             WHERE symbol = ?1
+             ORDER BY timestamp ASC, rowid ASC",
+            params![symbol],
+        )?;
+    } else {
+        tx.execute(
+            "INSERT INTO execution_frontiers (symbol, mode, side, price, timestamp)
+             SELECT symbol, mode, side, price, timestamp FROM (
+                 SELECT symbol, mode, side, price, timestamp,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY symbol, mode ORDER BY timestamp DESC, rowid DESC
+                        ) AS rank
+                 FROM trades WHERE trade_id NOT LIKE 'reverse:%'
+             ) WHERE rank = 1
+             ON CONFLICT(symbol, mode) DO UPDATE SET
+                 side = excluded.side, price = excluded.price, timestamp = excluded.timestamp
+             WHERE excluded.timestamp >= execution_frontiers.timestamp",
+            [],
+        )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO cleared_trade_ids (trade_id, client_order_id, mode)
+             SELECT trade_id, client_order_id, mode FROM trades
+             ORDER BY timestamp ASC, rowid ASC",
+            [],
+        )?;
+    }
     tx.execute(
         "DELETE FROM cleared_trade_ids
          WHERE rowid IN (
@@ -89,50 +112,78 @@ fn clear_trades_on(tx: &Connection, symbol: Option<&str>) -> Result<usize> {
         params![MAX_CLEARED_TRADE_IDS_PER_MODE],
     )?;
     preserve_pair_openings_on(tx, symbol)?;
-    let deleted = tx.execute(
-        "DELETE FROM trades WHERE (?1 IS NULL OR symbol = ?1)",
-        params![symbol],
-    )?;
-    tx.execute(
-        "DELETE FROM trade_hourly_rollups WHERE (?1 IS NULL OR symbol = ?1)",
-        params![symbol],
-    )?;
-    tx.execute(
-        "DELETE FROM trade_pnl_rollups WHERE (?1 IS NULL OR symbol = ?1)",
-        params![symbol],
-    )?;
-    tx.execute(
-        "DELETE FROM scoped_grid_stats WHERE (?1 IS NULL OR symbol = ?1)",
-        params![symbol],
-    )?;
-    if symbol.is_none() {
+    let deleted = if let Some(symbol) = symbol {
+        let deleted = tx.execute("DELETE FROM trades WHERE symbol = ?1", params![symbol])?;
+        tx.execute(
+            "DELETE FROM trade_hourly_rollups WHERE symbol = ?1",
+            params![symbol],
+        )?;
+        tx.execute(
+            "DELETE FROM trade_pnl_rollups WHERE symbol = ?1",
+            params![symbol],
+        )?;
+        tx.execute(
+            "DELETE FROM scoped_grid_stats WHERE symbol = ?1",
+            params![symbol],
+        )?;
+        deleted
+    } else {
+        let deleted = tx.execute("DELETE FROM trades", [])?;
+        tx.execute("DELETE FROM trade_hourly_rollups", [])?;
+        tx.execute("DELETE FROM trade_pnl_rollups", [])?;
+        tx.execute("DELETE FROM scoped_grid_stats", [])?;
         tx.execute("DELETE FROM grid_stats", [])?;
-    }
+        deleted
+    };
     Ok(deleted)
 }
 
 fn preserve_pair_openings_on(conn: &Connection, symbol: Option<&str>) -> Result<()> {
-    conn.execute(
-        "INSERT OR IGNORE INTO cleared_pair_openings (symbol, mode, client_order_id, side, price, quantity)
-         SELECT symbol, mode, client_order_id, side, price, quantity FROM (
-             SELECT symbol, mode, client_order_id, side, price, quantity, timestamp, rowid AS src_rowid,
-                    ROW_NUMBER() OVER (PARTITION BY symbol, mode, client_order_id
-                                       ORDER BY timestamp DESC, rowid DESC) AS rank
-             FROM trades WHERE (?1 IS NULL OR symbol = ?1)
-         ) WHERE rank = 1
-         ORDER BY timestamp ASC, src_rowid ASC",
-        params![symbol],
-    )?;
-    conn.execute(
-        "DELETE FROM cleared_pair_openings
-         WHERE rowid IN (
-             SELECT rowid FROM (
-                 SELECT rowid, ROW_NUMBER() OVER (PARTITION BY symbol, mode ORDER BY rowid DESC) AS rn
-                 FROM cleared_pair_openings
-                 WHERE (?1 IS NULL OR symbol = ?1)
-             ) WHERE rn > ?2
-         )",
-        params![symbol, MAX_CLEARED_PAIR_OPENINGS_PER_SCOPE],
-    )?;
+    if let Some(symbol) = symbol {
+        conn.execute(
+            "INSERT OR IGNORE INTO cleared_pair_openings (symbol, mode, client_order_id, side, price, quantity)
+             SELECT symbol, mode, client_order_id, side, price, quantity FROM (
+                 SELECT symbol, mode, client_order_id, side, price, quantity, timestamp, rowid AS src_rowid,
+                        ROW_NUMBER() OVER (PARTITION BY symbol, mode, client_order_id
+                                           ORDER BY timestamp DESC, rowid DESC) AS rank
+                 FROM trades WHERE symbol = ?1
+             ) WHERE rank = 1
+             ORDER BY timestamp ASC, src_rowid ASC",
+            params![symbol],
+        )?;
+        conn.execute(
+            "DELETE FROM cleared_pair_openings
+             WHERE rowid IN (
+                 SELECT rowid FROM (
+                     SELECT rowid, ROW_NUMBER() OVER (PARTITION BY symbol, mode ORDER BY rowid DESC) AS rn
+                     FROM cleared_pair_openings
+                     WHERE symbol = ?1
+                 ) WHERE rn > ?2
+             )",
+            params![symbol, MAX_CLEARED_PAIR_OPENINGS_PER_SCOPE],
+        )?;
+    } else {
+        conn.execute(
+            "INSERT OR IGNORE INTO cleared_pair_openings (symbol, mode, client_order_id, side, price, quantity)
+             SELECT symbol, mode, client_order_id, side, price, quantity FROM (
+                 SELECT symbol, mode, client_order_id, side, price, quantity, timestamp, rowid AS src_rowid,
+                        ROW_NUMBER() OVER (PARTITION BY symbol, mode, client_order_id
+                                           ORDER BY timestamp DESC, rowid DESC) AS rank
+                 FROM trades
+             ) WHERE rank = 1
+             ORDER BY timestamp ASC, src_rowid ASC",
+            [],
+        )?;
+        conn.execute(
+            "DELETE FROM cleared_pair_openings
+             WHERE rowid IN (
+                 SELECT rowid FROM (
+                     SELECT rowid, ROW_NUMBER() OVER (PARTITION BY symbol, mode ORDER BY rowid DESC) AS rn
+                     FROM cleared_pair_openings
+                 ) WHERE rn > ?1
+             )",
+            params![MAX_CLEARED_PAIR_OPENINGS_PER_SCOPE],
+        )?;
+    }
     Ok(())
 }

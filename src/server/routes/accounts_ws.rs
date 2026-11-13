@@ -2,7 +2,7 @@ use super::ws::{authorize_and_configure_ws, send_with_timeout};
 use super::{json_ok, ApiResponse};
 use crate::runtime::RuntimeHandle;
 use crate::server::state::snapshot::{
-    snapshot_frame_unchanged, AccountFrame, AccountMessage, SNAPSHOT_IDLE_HEARTBEAT,
+    encode_accounts_frame, AccountFrame, AccountSnapshot, SNAPSHOT_IDLE_HEARTBEAT,
 };
 use crate::server::state::{AppState, AuthContext};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -82,7 +82,8 @@ impl AccountHub {
         tokio::spawn(async move {
             let mut ticks = tokio::time::interval(std::time::Duration::from_secs(1));
             ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            let mut last_broadcast: Option<(std::time::Instant, usize, Arc<str>)> = None;
+            let mut last_broadcast: Option<(std::time::Instant, usize, Vec<AccountSnapshot>)> =
+                None;
             loop {
                 tokio::select! {
                     biased;
@@ -101,32 +102,32 @@ impl AccountHub {
                         }
                         break;
                     }
-                    message = async {
+                    frame = async {
                         ticks.tick().await;
-                        serde_json::to_string(&AccountMessage::Accounts(source.frame().await))
+                        source.frame().await
                     } => {
-                        let Ok(message) = message else {
-                            let mut guard = lifecycle.lock().await;
-                            if guard.as_ref().is_some_and(|active| active.same_channel(&sender)) {
-                                *guard = None;
-                            }
-                            break;
-                        };
                         // If the last subscriber left during collection, the
                         // closed branch performs the synchronized shutdown.
                         let receivers = sender.receiver_count();
                         let skip = last_broadcast.as_ref().is_some_and(
-                            |(sent_at, prev_receivers, prev_frame)| {
+                            |(sent_at, prev_receivers, prev_pairs)| {
                                 receivers <= *prev_receivers
                                     && sent_at.elapsed() < SNAPSHOT_IDLE_HEARTBEAT
-                                    && snapshot_frame_unchanged(prev_frame, &message)
+                                    && *prev_pairs == frame.pairs
                             },
                         );
                         if !skip {
+                            let Ok(message) = encode_accounts_frame(&frame) else {
+                                let mut guard = lifecycle.lock().await;
+                                if guard.as_ref().is_some_and(|active| active.same_channel(&sender)) {
+                                    *guard = None;
+                                }
+                                break;
+                            };
                             let arc_msg = Arc::<str>::from(message);
                             let _ = sender.send(Some(Arc::clone(&arc_msg)));
                             last_broadcast =
-                                Some((std::time::Instant::now(), receivers, arc_msg));
+                                Some((std::time::Instant::now(), receivers, frame.pairs));
                         }
                     }
                 }
@@ -173,7 +174,7 @@ async fn run_accounts_socket(
     loop {
         let frame = frames.borrow_and_update().clone();
         if let Some(frame) = frame {
-            if !auth.is_token_valid(&token).await {
+            if !auth.is_ws_session_valid(&token).await {
                 break;
             }
             if !send_with_timeout(
@@ -191,7 +192,7 @@ async fn run_accounts_socket(
                 biased;
                 _ = retired.changed() => return,
                 _ = check_auth.tick() => {
-                    if !auth.is_token_valid(&token).await { return; }
+                    if !auth.is_ws_session_valid(&token).await { return; }
                 }
                 changed = frames.changed() => {
                     if changed.is_err() { return; }
