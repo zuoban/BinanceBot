@@ -128,8 +128,8 @@ export function PairGridParamsSection({
 }
 
 export function PairRiskAndRangeSection() {
-  return <Row gutter={[20, 20]}>
-    <Col xs={24} xl={14} className="config-risk-col">
+  return <div className="config-risk-grid">
+    <div className="config-risk-col">
       <Card title="仓位限制">
         <Row gutter={[20, 16]}>
           <Col span={24}><Form.Item name="max_position_usdc" label="最大持仓名义价值" extra={<div className="field-help"><p><strong>注意：</strong>留空表示不设置；选择暂停策略或仅撤销开仓单时须填写大于 0 的上限。</p></div>} dependencies={['pause_on_max_position', 'cancel_opening_on_max_position']} rules={[({ getFieldValue }) => ({ validator: (_, value) => { const pause = Boolean(getFieldValue('pause_on_max_position')); const cancelOpening = Boolean(getFieldValue('cancel_opening_on_max_position')); if (pause || cancelOpening) { if (!isPositiveDecimal(value)) return Promise.reject(new Error(pause ? '暂停策略需要大于 0 的持仓上限' : '撤销开仓单需要大于 0 的持仓上限')); return exceeds(value, MAX_CONFIG_NOTIONAL_OR_PRICE) ? Promise.reject(new Error('最大持仓金额超出允许上限')) : Promise.resolve(); } if (value == null || value === '') return Promise.resolve(); if (!isPositiveDecimal(value)) return Promise.reject(new Error('请输入大于 0 的持仓上限')); return exceeds(value, MAX_CONFIG_NOTIONAL_OR_PRICE) ? Promise.reject(new Error('最大持仓金额超出允许上限')) : Promise.resolve(); } })]}><InputNumber stringMode min="0" className="full-width-input" /></Form.Item></Col>
@@ -138,8 +138,8 @@ export function PairRiskAndRangeSection() {
           <Col span={24}><Form.Item name="min_liquidation_distance_pct" label="强平距离阈值（%）" extra={<div className="field-help"><p><strong>触发条件：</strong>持仓的标记价格距强平价不超过该百分比（占标记价）时。</p><p><strong>执行动作：</strong>只撤销开仓方向的挂单并保持运行，继续维护平仓单。</p><p><strong>恢复：</strong>距离回升后自动恢复开仓。</p><p><strong>注意：</strong>留空表示不启用。依赖交易所返回的强平价，模拟盘或无强平价时不生效。</p></div>} rules={[{ validator: (_, value) => value == null || value === '' || isPercentDecimal(value) ? Promise.resolve() : Promise.reject(new Error('请输入大于 0 且小于 100 的百分比')) }]}><InputNumber stringMode min="0" max="100" className="full-width-input" /></Form.Item></Col>
         </Row>
       </Card>
-    </Col>
-    <Col xs={24} xl={10} className="config-risk-col">
+    </div>
+    <div className="config-risk-col">
       <Card title="价格范围与订单">
         <Row gutter={[20, 16]}>
           <Col span={24}><Form.Item name="min_price" label="最低价格（可选）" dependencies={['max_price']} rules={[({ getFieldValue }) => ({ validator: (_, value) => { const error = priceRangeError('min', value, getFieldValue('max_price')); return error ? Promise.reject(new Error(error)) : Promise.resolve(); } })]}><InputNumber stringMode min="0" className="full-width-input" /></Form.Item></Col>
@@ -147,8 +147,8 @@ export function PairRiskAndRangeSection() {
         </Row>
         <div className="settings-card-footer config-card-note"><p className="muted">订单仅作为挂单成交（Post Only）；如果订单会立即成交，交易所会拒绝该订单。</p></div>
       </Card>
-    </Col>
-  </Row>;
+    </div>
+  </div>;
 }
 
 export function SaveBarStatus({ form, adding, dirty, symbol, baseline }: { form: FormInstance<FormValues>; adding: boolean; dirty: boolean; symbol: string | undefined; baseline: { symbol: string; config: GridConfig } | null }) {

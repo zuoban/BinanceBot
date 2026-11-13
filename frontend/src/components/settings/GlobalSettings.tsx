@@ -117,7 +117,7 @@ function TelegramSettingsCard({ form, hasBotToken, version, formDisabled, armed 
   return <Card title="Telegram 通知" className="settings-card settings-card-fill">
     <Row gutter={[16, 16]}>
       <Col span={24}><Form.Item name="telegram_enabled" label="通知开关" valuePropName="checked"><Switch checkedChildren="开启" unCheckedChildren="关闭" /></Form.Item></Col>
-      <Col xs={24} sm={12}><Form.Item name="telegram_bot_token" label="Bot Token" extra={hasBotToken ? '已保存 Token，留空保持不变' : '尚未配置 Token'} rules={[
+      <Col xs={24} md={12}><Form.Item name="telegram_bot_token" label="Bot Token" extra={hasBotToken ? '已保存 Token，留空保持不变' : '尚未配置 Token'} rules={[
         ({ getFieldValue }) => ({
           validator: (_, value: string | undefined) => {
             if (getFieldValue('clear_telegram_credentials') || !value) return Promise.resolve();
@@ -133,7 +133,7 @@ function TelegramSettingsCard({ form, hasBotToken, version, formDisabled, armed 
           },
         }),
       ]}><Input.Password autoComplete="new-password" disabled={credDisabled} /></Form.Item></Col>
-      <Col xs={24} sm={12}><Form.Item name="telegram_chat_id" label="Chat ID" extra="向机器人发送消息后，可通过 Telegram Bot API 的 getUpdates 获取会话 ID" rules={[
+      <Col xs={24} md={12}><Form.Item name="telegram_chat_id" label="Chat ID" extra="向机器人发送消息后，可通过 Telegram Bot API 的 getUpdates 获取会话 ID" rules={[
         ({ getFieldValue }) => ({
           validator: (_, value: string | undefined) => {
             const trimmed = value?.trim();
@@ -243,10 +243,10 @@ export function GlobalSettings() {
       if (apiErr || tgErr) setArmedCross(prev => ({ api: prev.api || apiErr, telegram: prev.telegram || tgErr }));
     }} onFinish={v => void submit(v)}>
       <ExchangeCredentialsCard form={form} data={activeData} version={version} formDisabled={formDisabled} armed={armedCross.api} />
-      <Row gutter={[20, 20]} className="settings-grid-row">
-        <Col xs={24} xl={12} className="settings-grid-col"><GlobalRiskCard /></Col>
-        <Col xs={24} xl={12} className="settings-grid-col"><TelegramSettingsCard form={form} hasBotToken={activeData?.has_telegram_bot_token} version={version} formDisabled={formDisabled} armed={armedCross.telegram} /></Col>
-      </Row>
+      <div className="settings-grid-row">
+        <div className="settings-grid-col"><GlobalRiskCard /></div>
+        <div className="settings-grid-col"><TelegramSettingsCard form={form} hasBotToken={activeData?.has_telegram_bot_token} version={version} formDisabled={formDisabled} armed={armedCross.telegram} /></div>
+      </div>
       <div className={`save-bar${edit.dirty ? ' save-bar-dirty' : ''}`}><span className="muted" role="status">{edit.dirty ? '有未保存的修改' : '所有修改已保存'}</span><Space wrap><FormRevertButton form={form} activeRef={mounted} onReset={mutation.reset} onRevert={() => { submitting.current = null; setArmedCross({ api: false, telegram: false }); const source = baseline.current ?? query.data; if (source) fill(source); }} /><Button type="primary" htmlType="submit" loading={mutation.isPending}>保存全局设置</Button></Space></div>
     </Form>
   </>;

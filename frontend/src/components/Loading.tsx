@@ -33,7 +33,7 @@ export function PageLoading() {
 }
 export function OverviewPageLoading() {
   return <div role="status" aria-label="正在加载页面">
-    <div className="skeleton-section-heading"><SkeletonLine width="110px" /></div>
+    <div className="skeleton-page-heading"><SkeletonLine width="180px" size="large" /><SkeletonLine width="240px" /></div>
     <div className="overview-banner skeleton-overview-banner" aria-hidden="true">
       <div className="overview-stats">
         {[0, 1, 2, 3].map(item => <div className="overview-stat" key={item}><SkeletonLine width="72px" size="small" /><SkeletonLine width="48px" size="large" /></div>)}
@@ -43,11 +43,19 @@ export function OverviewPageLoading() {
   </div>;
 }
 
-
 export function OverviewLoading({ addPairLink }: { addPairLink?: ReactNode }) {
   return <div className="overview-placeholder" role="status" aria-label="正在同步策略数据">
-    <div className="skeleton-section-heading"><SkeletonLine width="110px" /></div>
-    <div className="skeleton-grid skeleton-grid-finances">{[0, 1].map(item => <SkeletonCard key={item} variant="strategy" />)}</div>
+    <div className="skeleton-card skeleton-finance-disclosure" aria-hidden="true">
+      <SkeletonLine width="132px" size="small" />
+      <div className="skeleton-finance-summary">
+        <div><SkeletonLine width="84px" size="small" /><SkeletonLine width="72%" size="large" /></div>
+        <div><SkeletonLine width="84px" size="small" /><SkeletonLine width="64%" size="large" /></div>
+      </div>
+    </div>
+    <div className="skeleton-finance-full" aria-hidden="true">
+      <div className="skeleton-section-heading"><SkeletonLine width="110px" /></div>
+      <div className="skeleton-grid skeleton-grid-finances">{[0, 1].map(item => <SkeletonCard key={item} variant="strategy" />)}</div>
+    </div>
     <div className="skeleton-section-heading"><SkeletonLine width="110px" />{addPairLink ?? <SkeletonLine width="112px" />}</div>
     <div className="skeleton-filters"><SkeletonLine width="180px" /><SkeletonLine width="140px" /></div>
     <div className="skeleton-grid skeleton-grid-strategies">{[0, 1, 2].map(item => <SkeletonCard key={item} variant="strategy" />)}</div>

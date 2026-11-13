@@ -171,6 +171,19 @@ it('lists the pairs in the sidebar and keeps the config page when switching pair
   expect(within(pairs).getByRole('link', { name: /ETHUSDC/ })).toHaveAttribute('href', '/pairs/ETHUSDC/config');
 });
 
+it('marks 新增交易对 in the sidebar with aria-current="page" when visiting /pairs/new', async () => {
+  const router = setup('/pairs/new');
+  const sidebar = within(screen.getByRole('complementary'));
+  const addLink = sidebar.getByRole('link', { name: '新增交易对' });
+  expect(addLink).toHaveAttribute('aria-current', 'page');
+  const pairs = sidebar.getByRole('navigation', { name: '交易对' });
+  expect(within(pairs).getByRole('link', { name: /BTCUSDC/ })).not.toHaveAttribute('aria-current');
+
+  await act(async () => { await router.navigate('/pairs/BTCUSDC'); });
+  expect(addLink).not.toHaveAttribute('aria-current');
+  expect(within(pairs).getByRole('link', { name: /BTCUSDC/ })).toHaveAttribute('aria-current', 'page');
+});
+
 it('runs a pair action from the palette through the guarded control flow', async () => {
   setup();
   const user = userEvent.setup();

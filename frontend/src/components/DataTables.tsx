@@ -1,5 +1,5 @@
 import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { App, Button, Segmented, Table, Tag } from 'antd';
+import { App, Button, Segmented, Table } from 'antd';
 import { CheckOutlined, CopyOutlined, DownloadOutlined } from '@ant-design/icons';
 import { Link, useInRouterContext } from 'react-router-dom';
 import type { ColumnsType } from 'antd/es/table';
@@ -10,10 +10,11 @@ import { ageText, beijingDay, number, price, quantity, time, trimFractionZeros }
 import { priceDiffPercent } from '../lib/gridPreview';
 import { useNow } from '../lib/useNow';
 import type { Log, Order, Trade } from '../lib/types';
-import { Pnl, SideTag } from './Common';
+import { Pnl, SideTag, SignalChip } from './Common';
 import { copyText, downloadCsv, toCsv } from '../lib/exportCsv';
 
 const side = (value: string) => <SideTag side={value === 'BUY' ? 'BUY' : 'SELL'} />;
+const pendingSync = <SignalChip tier="yellow" compact>待同步</SignalChip>;
 const purposeLabel: Record<string, string> = { GRID: '网格', TAKE_PROFIT: '止盈', REMAINDER: '余量合并', LEGACY: '历史订单', UNVERIFIED: '待核实' };
 function orderPurpose(o: Order) {
   return purposeLabel[o.purpose] ?? (o.is_take_profit ? '止盈' : '历史订单');
@@ -277,9 +278,9 @@ export const TradesTable = memo(function TradesTable({ trades: allTrades, overvi
     { title: '成交价格', align: 'right', className: 'table-numeric', dataIndex: 'price', render: (v: string) => overview ? price(v) : <Copyable value={v}>{price(v)}</Copyable> },
     { title: '数量', align: 'right', className: 'table-numeric', dataIndex: 'quantity', render: quantity },
     { title: '金额', align: 'right', className: 'table-numeric', dataIndex: 'amount_usdc', render: (v: string) => number(v) },
-    { title: overview ? '盈亏' : '已实现盈亏', align: 'right', className: 'table-numeric', render: (_, t) => t.pnl_verified ? <Pnl value={t.realized_pnl} /> : <Tag>待同步</Tag> },
-    { title: '手续费', align: 'right', className: 'table-numeric', render: (_, t) => t.pnl_verified ? formatTradeCommission(t) : <Tag>待同步</Tag> },
-    { title: '成交方式', render: (_, t) => t.pnl_verified ? (t.is_maker ? 'Maker' : 'Taker') : <Tag>待同步</Tag> },
+    { title: overview ? '盈亏' : '已实现盈亏', align: 'right', className: 'table-numeric', render: (_, t) => t.pnl_verified ? <Pnl value={t.realized_pnl} /> : pendingSync },
+    { title: '手续费', align: 'right', className: 'table-numeric', render: (_, t) => t.pnl_verified ? formatTradeCommission(t) : pendingSync },
+    { title: '成交方式', render: (_, t) => t.pnl_verified ? (t.is_maker ? 'Maker' : 'Taker') : pendingSync },
     { title: '备注', dataIndex: 'note', ellipsis: true },
   ], [overview]);
   const body = useMemo(() => <div>
@@ -300,7 +301,7 @@ export const TradesTable = memo(function TradesTable({ trades: allTrades, overvi
         <dl>
           <div><dt>{overview ? '成交均价' : '数量'}</dt><dd>{overview ? price(trade.price) : quantity(trade.quantity)}</dd></div>
           <div><dt>金额</dt><dd>{number(trade.amount_usdc)}</dd></div>
-          <div><dt>盈亏</dt><dd>{trade.pnl_verified ? <Pnl value={trade.realized_pnl} /> : <Tag>待同步</Tag>}</dd></div>
+          <div><dt>盈亏</dt><dd>{trade.pnl_verified ? <Pnl value={trade.realized_pnl} /> : pendingSync}</dd></div>
         </dl>
       </li>)}
     />

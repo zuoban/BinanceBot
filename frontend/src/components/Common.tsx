@@ -37,8 +37,8 @@ export function ControlResultBanner({ symbol, results, result: directResult, cle
   </div>;
 }
 /** Tiered state chip: colour is never the only channel, every tier carries an icon and words. */
-export function SignalChip({ tier, icon, children, title }: { tier: Signal; icon?: React.ReactNode; children: React.ReactNode; title?: string }) {
-  return <span className={`signal signal-${tier}`} title={title}><span className="signal-icon" aria-hidden="true">{icon ?? signalIcon[tier]}</span>{children}</span>;
+export function SignalChip({ tier, icon, compact = false, children, title }: { tier: Signal; icon?: React.ReactNode; compact?: boolean; children: React.ReactNode; title?: string }) {
+  return <span className={`signal signal-${tier}${compact ? ' signal-compact' : ''}`} title={title}><span className="signal-icon" aria-hidden="true">{icon ?? signalIcon[tier]}</span>{children}</span>;
 }
 /** A signal chip that filters the list below it; the pressed state is exposed to assistive tech. */
 export function SignalButton({ tier, active, onClick, children }: { tier: Signal; active: boolean; onClick: () => void; children: React.ReactNode }) {

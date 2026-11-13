@@ -1,5 +1,6 @@
 /* ---------- Charts ---------- */
 .chart { width: 100%; min-width: 0; -webkit-tap-highlight-color: transparent; }
+.chart:has(:focus-visible) { border-radius: var(--radius-control); outline: 2px solid var(--accent); outline-offset: 4px; }
 .recharts-wrapper, .recharts-wrapper *:focus, .recharts-wrapper *:focus-visible { outline: none; }
 .recharts-surface { user-select: none; -webkit-user-select: none; }
 .chart-caption, .chart-caption-row { margin-bottom: 8px; }
@@ -9,8 +10,24 @@
 .chart-dot { display: inline-block; width: 8px; height: 8px; border-radius: 2px; }
 .chart-dot-buy { background: var(--positive); }
 .chart-dot-sell { background: var(--negative); }
-.grid-levels { position: relative; max-height: 380px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 4px 0; border-block: 1px solid var(--border-hairline); border-radius: var(--radius-control); }
-.grid-level { display: flex; align-items: center; gap: 12px; min-height: 32px; padding: 0 8px; border-radius: 6px; font-size: 12px; line-height: 16px; color: var(--text-secondary); transition: background-color 140ms var(--ease-out); }
+:is(.grid-levels, .grid-preview-ladder) {
+  position: relative;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  padding: 4px 0;
+  border-block: 1px solid var(--border-hairline);
+  background:
+    linear-gradient(var(--bg-card) 30%, transparent) center top,
+    linear-gradient(transparent, var(--bg-card) 70%) center bottom,
+    linear-gradient(to bottom, var(--border-strong), transparent) center top,
+    linear-gradient(to top, var(--border-strong), transparent) center bottom;
+  background-repeat: no-repeat;
+  background-size: 100% 20px, 100% 20px, 100% 6px, 100% 6px;
+  background-attachment: local, local, scroll, scroll;
+}
+.grid-levels { max-height: 380px; border-radius: var(--radius-control); }
+.grid-level { display: flex; align-items: center; gap: 12px; min-height: 32px; padding: 0 8px; border-radius: var(--radius-chip); font-size: var(--text-xs); line-height: 16px; color: var(--text-secondary); transition: background-color 140ms var(--ease-out); }
 @media (hover: hover) and (pointer: fine) { .grid-level:not(.grid-level-mark):hover { background: var(--bg-raised); } }
 .grid-level > span:first-child { flex: 0 0 auto; white-space: nowrap; }
 .grid-level strong { flex: 0 0 auto; color: var(--text-primary); font: 500 12px/16px var(--font-mono); font-variant-numeric: tabular-nums; }
@@ -40,15 +57,17 @@
 .history-actions > p { margin: 0; }
 .today-trade-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
 .today-trade-summary > div { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.today-trade-summary > div > span, .today-trade-summary small { color: var(--text-secondary); font-size: 12px; line-height: 16px; }
-.today-trade-summary strong { font: 500 20px/28px var(--font-mono); font-variant-numeric: tabular-nums; }
+.today-trade-summary > div > span, .today-trade-summary small { font-size: 12px; line-height: 16px; }
+.today-trade-summary > div > span, .today-trade-summary small:not(.pending-pnl-warn) { color: var(--text-secondary); }
+.today-trade-summary strong { font: 500 var(--text-metric)/28px var(--font-mono); font-variant-numeric: tabular-nums; }
 .ant-descriptions .ant-descriptions-item-label { color: var(--text-secondary); }
 .ant-descriptions .ant-descriptions-item-content { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 
 /* ---------- Forms & settings ---------- */
 .config-page, .settings-page { max-width: 1040px; }
 .config-page { container: config-page / inline-size; }
-.config-editor-grid { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: var(--space-5); margin-bottom: var(--space-5); }
+.settings-page { container: settings-page / inline-size; }
+.config-editor-grid, .config-risk-grid { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: var(--space-5); margin-bottom: var(--space-5); }
 .config-editor-grid > .grid-preview { margin-bottom: 0; }
 .config-risk-col { min-width: 0; }
 .field-help { display: grid; gap: var(--space-2); font-size: var(--text-sm); line-height: 1.6; }
@@ -56,13 +75,17 @@
 .field-help strong { color: var(--text-secondary); font-weight: 500; }
 @container config-page (min-width: 900px) {
   .config-editor-grid { grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); }
+  .config-risk-grid { grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); }
 }
-.config-form > .ant-card, .config-form > .ant-row, .settings-tabs .ant-card { margin-bottom: 20px; }
+.config-form > .ant-card, .settings-tabs .ant-card { margin-bottom: var(--space-5); }
 .config-form .ant-form-item, .settings-page .ant-form-item { margin-bottom: 0; }
 .ant-form-item .ant-form-item-label > label { font-weight: 500; }
 .ant-form-item .ant-form-item-extra { margin-top: 6px; color: var(--text-muted); font-size: 12px; line-height: 18px; }
-.settings-grid-row { margin-bottom: 20px; }
-.settings-grid-col { display: flex; }
+.settings-grid-row { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-5); margin-bottom: var(--space-5); }
+.settings-grid-col { display: flex; min-width: 0; }
+@container settings-page (min-width: 900px) {
+  .settings-grid-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 .settings-card-fill { width: 100%; }
 .settings-tabs .ant-card.settings-card-fill { margin-bottom: 0; }
 .settings-card .ant-alert { margin-bottom: 20px; }
@@ -79,7 +102,7 @@
   margin-top: 20px; padding: 12px 16px; border: 1px solid var(--border-hairline); border-radius: var(--radius-panel); background: var(--bg-card);
   transition: background-color 180ms var(--ease-out), border-color 180ms var(--ease-out), box-shadow 180ms var(--ease-out);
 }
-.save-bar-dirty { position: sticky; bottom: var(--space-4); z-index: 4; border-color: var(--sig-yellow-line); background: linear-gradient(var(--sig-yellow-bg), var(--sig-yellow-bg)), var(--bg-card); box-shadow: var(--savebar-shadow); }
+.save-bar-dirty { position: sticky; bottom: var(--space-4); z-index: var(--z-savebar); border-color: var(--sig-yellow-line); background: var(--sig-yellow-bg); box-shadow: var(--savebar-shadow); }
 .save-bar-dirty .muted { color: var(--sig-yellow); font-weight: 500; }
 .save-bar-status { display: flex; align-items: center; flex-wrap: wrap; gap: 0 8px; min-width: 0; }
 .save-bar-status .ant-btn-link { padding-inline: 4px; font-weight: 500; }
@@ -89,7 +112,7 @@
 .save-bar-changes s { color: var(--text-muted); }
 .save-bar-changes .confirm-risky { background: transparent; box-shadow: inset 0 0 0 1px var(--sig-yellow-line); }
 
-.ant-card.danger-zone { margin-top: 32px; border-color: var(--danger-border); }
+.ant-card.danger-zone { margin-top: var(--space-8); border-color: var(--danger-border); }
 .danger-zone p { margin: 0 0 16px; color: var(--text-secondary); }
 .database-intro p { margin: 0 0 8px; }
 .database-targets { display: grid; gap: 12px; margin: 16px 0; }
@@ -97,7 +120,7 @@
 .security-guide { display: grid; gap: 16px; margin: 20px 0 0; }
 .security-guide dt { margin-bottom: 4px; font-weight: 500; }
 .security-guide dd { margin: 0; color: var(--text-secondary); line-height: 1.7; }
-.settings-tabs > .ant-tabs-nav, .detail-tabs > .ant-tabs-nav { position: sticky; top: 0; z-index: 3; padding-top: 4px; background: var(--bg-page); background: color-mix(in srgb, var(--bg-page) 92%, transparent); backdrop-filter: blur(8px); }
+.settings-tabs > .ant-tabs-nav, .detail-tabs > .ant-tabs-nav { position: sticky; top: 0; z-index: var(--z-sticky-tabs); padding-top: 4px; background: var(--bg-page); background: color-mix(in srgb, var(--bg-page) 92%, transparent); backdrop-filter: blur(8px); }
 
 .confirm-changes p { margin: 0 0 10px; }
 .confirm-changes dl, .confirm-changes ul { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; max-height: min(48vh, 360px); overflow-y: auto; overscroll-behavior: contain; }
@@ -118,7 +141,7 @@
 .grid-preview-meta { display: flex; align-items: center; gap: var(--space-2) var(--space-3); flex-wrap: wrap; min-width: 0; }
 .grid-preview-reference { width: 160px; font-family: var(--font-mono); }
 .grid-preview-empty { margin: 0; }
-.grid-preview-ladder { position: relative; margin: 0 0 var(--space-3); padding: 4px 0; list-style: none; max-height: 320px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; border-block: 1px solid var(--border-hairline); }
+.grid-preview-ladder { margin: 0 0 var(--space-3); list-style: none; max-height: 320px; }
 .grid-preview-ladder li { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: center; gap: var(--space-2) var(--space-3); min-height: 28px; padding: var(--space-1) var(--space-2); border-radius: var(--radius-chip); font-size: var(--text-xs); transition: background-color 140ms var(--ease-out); }
 @media (hover: hover) and (pointer: fine) { .grid-preview-ladder li:not(.grid-preview-mark):not(.grid-preview-unplaceable):hover { background: var(--bg-raised); } }
 .grid-preview-ladder li > span { min-width: 0; overflow-wrap: anywhere; }
@@ -144,7 +167,7 @@
 .probe-fail { color: var(--sig-red); }
 
 @media (pointer: coarse), (max-width: 600px) {
-  .config-form .ant-switch, .settings-page .ant-switch { margin-block: var(--space-3); touch-action: manipulation; }
+  .config-form .ant-switch, .settings-page .ant-switch { position: relative; margin-block: var(--space-3); touch-action: manipulation; }
   .config-form .ant-switch:not(:disabled)::before, .settings-page .ant-switch:not(:disabled)::before { content: ''; position: absolute; inset-inline: 0; top: 50%; height: var(--control-touch); transform: translateY(-50%); cursor: pointer; }
   .config-form .ant-checkbox-wrapper, .settings-page .ant-checkbox-wrapper { min-height: var(--control-touch); align-items: center; }
   .save-bar-status .ant-btn-link { min-height: var(--control-touch); padding-inline: var(--space-2); }
@@ -153,6 +176,7 @@
 @media (max-width: 900px) {
   .settings-tabs > .ant-tabs-nav, .detail-tabs > .ant-tabs-nav { top: calc(56px + var(--safe-top)); }
   .save-bar-dirty { bottom: calc(68px + var(--safe-bottom)); }
+  .save-bar-dirty::after { content: ''; position: absolute; inset-inline: -2px; top: calc(100% + 1px); height: 12px; background: var(--bg-page); background: linear-gradient(to bottom, color-mix(in srgb, var(--bg-page) 88%, transparent), var(--bg-page)); pointer-events: none; }
 }
 
 @media (max-width: 600px) {

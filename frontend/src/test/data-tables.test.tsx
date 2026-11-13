@@ -189,3 +189,34 @@ it('renders recent trade times with ageText so slight browser clock lag never re
   expect(screen.queryByText(/后/)).not.toBeInTheDocument();
   expect(screen.getAllByText('刚刚').length).toBeGreaterThan(0);
 });
+
+it('renders unverified trades with compact yellow SignalChip instead of Antd Tag in both desktop and narrow layouts', () => {
+  const setNarrow = stubNarrowViewport(false);
+  const unverified = makeTrade({ trade_id: 'u-1', pnl_verified: false });
+  const { container } = view(<TradesTable trades={[unverified]} />);
+
+  const desktopChips = screen.getAllByText('待同步').map(node => node.closest('.signal'));
+  expect(desktopChips).toHaveLength(3);
+  for (const chip of desktopChips) {
+    expect(chip).toHaveClass('signal', 'signal-yellow', 'signal-compact');
+  }
+  expect(container.querySelector('.ant-tag')).toBeNull();
+
+  setNarrow(true);
+  const mobileChips = screen.getAllByText('待同步').map(node => node.closest('.signal'));
+  expect(mobileChips).toHaveLength(1);
+  expect(mobileChips[0]).toHaveClass('signal', 'signal-yellow', 'signal-compact');
+  expect(container.querySelector('.ant-tag')).toBeNull();
+});
+
+it('marks ERROR and WARN log rows on desktop and narrow layouts with semantic row/item classes', () => {
+  const setNarrow = stubNarrowViewport(false);
+  const { container } = view(<LogsTable logs={[log('ERROR', '连接断开'), log('WARN', '触发限流'), log('INFO', '正常同步')]} />);
+  expect(container.querySelectorAll('tbody tr.log-row-error')).toHaveLength(1);
+  expect(container.querySelectorAll('tbody tr.log-row-warn')).toHaveLength(1);
+
+  setNarrow(true);
+  const list = screen.getByRole('list', { name: '日志列表' });
+  expect(list.querySelectorAll('li.log-item-error')).toHaveLength(1);
+  expect(list.querySelectorAll('li.log-item-warn')).toHaveLength(1);
+});
