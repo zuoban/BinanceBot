@@ -36,6 +36,11 @@ single quotes, and semicolons; use `PascalCase` for React components and
 Chinese user-facing copy. Use decimal types for prices and quantities rather
 than introducing floating-point trading calculations.
 
+Keep Telegram and ntfy notifications in sync. When changing notification
+content, layout, fields, or trigger behavior, update both channels and their
+relevant tests together unless the user explicitly requests a channel-specific
+change. Preserve each channel's supported formatting.
+
 ## Testing Guidelines
 
 Add focused tests for behavior changes, particularly order reconciliation,
