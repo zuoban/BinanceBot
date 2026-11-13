@@ -22,7 +22,7 @@ Use Rust 1.89+ and Node.js 22.22.2+ (or 24.15.0+ / 26+).
 - `cd frontend && npm ci`: install the locked frontend dependencies.
 - `cd frontend && npm run dev`: start Vite; API requests proxy to
   `127.0.0.1:8080` by default.
-- `cd frontend && npm run lint`: run ESLint (TypeScript and React Hooks rules; `exhaustive-deps` findings are warnings).
+- `cd frontend && npm run lint`: run ESLint (TypeScript and React Hooks rules, including `exhaustive-deps`, enforced as errors).
 - `cd frontend && npm test`: run the Vitest suite.
 - `cd frontend && npm run build`: type-check and build the production console.
 - `docker compose up -d --build`: build and start both services.

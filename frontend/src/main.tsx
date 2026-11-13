@@ -1,17 +1,18 @@
 import React, { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react';
 import ReactDOM from 'react-dom/client';
-import { App as AntApp, Button, Modal } from 'antd';
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
 import { createBrowserRouter, Navigate, RouterProvider, useLocation } from 'react-router-dom';
 import { api, ApiError, post, tokenStore } from './lib/api';
+import { destroyOpenModals } from './lib/modalCleanup';
 import type { AuthStatus } from './lib/types';
 import { SessionContext } from './lib/session';
 const Login = lazy(() => import('./pages/Login'));
 import { DetailPageLoading, LoadingScreen, OverviewPageLoading, PageLoading } from './components/Loading';
 import { LoadErrorBoundary } from './components/LoadErrorBoundary';
-import { ThemeProvider } from './lib/theme';
+import { ThemeStateProvider } from './lib/themeState';
 import './style.css';
 
+const UiShell = lazy(() => import('./components/UiShell'));
 const Shell = lazy(() => import('./components/Shell'));
 const Overview = lazy(() => import('./pages/Overview'));
 const PairDetail = lazy(() => import('./pages/PairDetail'));
@@ -42,23 +43,31 @@ function Root() {
       catch (error) { if (!(error instanceof ApiError && error.status === 401)) throw error; }
     }
     if (tokenStore.get() !== token) return;
-    Modal.destroyAll(); tokenStore.clear(); client.clear(); setLoggedIn(false);
+    destroyOpenModals(); tokenStore.clear(); client.clear(); setLoggedIn(false);
   }, []);
   useEffect(() => {
-    const expire = () => { Modal.destroyAll(); tokenStore.clear(); client.clear(); setLoggedIn(false); };
+    const expire = () => { destroyOpenModals(); tokenStore.clear(); client.clear(); setLoggedIn(false); };
     window.addEventListener('auth-expired', expire);
     return () => window.removeEventListener('auth-expired', expire);
   }, []);
-  useEffect(() => { if (loggedIn && authEnabled && authStatus.data && !authStatus.data.authenticated) { Modal.destroyAll(); tokenStore.clear(); client.removeQueries({ predicate: query => query.queryKey[0] !== 'auth-status' }); setLoggedIn(false); } }, [loggedIn, authEnabled, authStatus.data]);
+  useEffect(() => { if (loggedIn && authEnabled && authStatus.data && !authStatus.data.authenticated) { destroyOpenModals(); tokenStore.clear(); client.removeQueries({ predicate: query => query.queryKey[0] !== 'auth-status' }); setLoggedIn(false); } }, [loggedIn, authEnabled, authStatus.data]);
   const session = useMemo(() => ({ logout, authEnabled }), [logout, authEnabled]);
   if (authStatus.isPending) return <LoadingScreen label={loggedIn ? '正在验证会话' : '正在连接控制台'} />;
-  if (authStatus.error && !authStatus.data) return <div className="loading-screen" role="alert"><div className="loading-brand"><img className="brand-symbol" src="/logo.svg" alt="" /><span>Grid Console<small>Strategy Workspace</small></span></div><p>无法连接后端服务：{authStatus.error.message}</p><Button onClick={() => void authStatus.refetch()}>重试</Button></div>;
-  if (!authEnabled) return <SessionContext.Provider value={session}><RouterProvider router={router} /></SessionContext.Provider>;
-  return <SessionContext.Provider value={session}>{loggedIn && authStatus.data?.authenticated ? <RouterProvider router={router} /> : <LoadErrorBoundary label="登录页"><Suspense fallback={<LoadingScreen label="正在加载登录页" />}><Login onLogin={async () => { await client.cancelQueries({ queryKey: ['auth-status'] }); Modal.destroyAll(); client.clear(); client.setQueryData(['auth-status'], { initialized: true, authenticated: true }); setLoggedIn(true); }} /></Suspense></LoadErrorBoundary>}</SessionContext.Provider>;
+  if (authStatus.error && !authStatus.data) return <div className="loading-screen" role="alert"><div className="loading-brand"><img className="brand-symbol" src="/logo.svg" alt="" /><span>Grid Console<small>Strategy Workspace</small></span></div><p>无法连接后端服务：{authStatus.error.message}</p><button type="button" className="ui-action-btn" onClick={() => void authStatus.refetch()}>重试</button></div>;
+  const workspace = !authEnabled || (loggedIn && authStatus.data?.authenticated);
+  return <SessionContext.Provider value={session}>
+    <LoadErrorBoundary label="界面组件">
+      <Suspense fallback={<LoadingScreen label={workspace ? '正在加载控制台' : '正在加载登录页'} />}>
+        <UiShell>
+          {workspace ? <RouterProvider router={router} /> : <LoadErrorBoundary label="登录页"><Suspense fallback={<LoadingScreen label="正在加载登录页" />}><Login onLogin={async () => { await client.cancelQueries({ queryKey: ['auth-status'] }); destroyOpenModals(); client.clear(); client.setQueryData(['auth-status'], { initialized: true, authenticated: true }); setLoggedIn(true); }} /></Suspense></LoadErrorBoundary>}
+        </UiShell>
+      </Suspense>
+    </LoadErrorBoundary>
+  </SessionContext.Provider>;
 }
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
-  <React.StrictMode><ThemeProvider>
-    <AntApp><QueryClientProvider client={client}><Root /></QueryClientProvider></AntApp>
-  </ThemeProvider></React.StrictMode>,
+  <React.StrictMode><ThemeStateProvider>
+    <QueryClientProvider client={client}><Root /></QueryClientProvider>
+  </ThemeStateProvider></React.StrictMode>,
 );

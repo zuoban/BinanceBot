@@ -1,4 +1,4 @@
-import { formatDecimal, formatDecimalDisplay, parseSignedDecimal, parseUnsignedDecimal, type Fixed } from './decimal';
+import { formatDecimal, formatDecimalDisplay, parseSignedDecimal, parseUnsignedDecimal, type Fixed, type Numeric } from './decimal';
 import type { GridConfig, Mode, Status } from './types';
 
 export const modeLabel: Record<Mode, string> = { PAPER: '模拟盘', LIVE: '实盘', UNKNOWN: '未知模式' };
@@ -56,8 +56,10 @@ export function positiveDecimalText(value: unknown): string | null {
   const parsed = parseUnsignedDecimal(value);
   return parsed && parsed.n > 0n ? formatDecimal(parsed.n, parsed.s) : null;
 }
-export function cnyText(value: number | null | undefined, compact = false) {
-  return value != null && Number.isFinite(value) ? `≈ ¥${compact ? compactNumber(value) : number(value)}` : '人民币估值待更新';
+export function cnyText(value: Numeric | null | undefined, compact = false) {
+  if (value == null) return '人民币估值待更新';
+  const formatted = compact ? compactNumber(value) : number(value);
+  return formatted !== '--' ? `≈ ¥${formatted}` : '人民币估值待更新';
 }
 export function ratioText(value: number | null | undefined, compact = false) {
   return value != null && Number.isFinite(value) ? `${compact ? compactNumber(value) : number(value)}%` : '--';
@@ -84,7 +86,12 @@ export const time = (value: string | number) => {
   const ts = typeof value === 'number' ? value : Date.parse(value);
   const formatted = isValidEpochMs(ts) ? beijingTimeFormat.format(ts) : '--';
   if (canCache) {
-    if (timeFormatCache.size >= TIME_CACHE_LIMIT) timeFormatCache.clear();
+    if (timeFormatCache.has(value)) {
+      timeFormatCache.delete(value);
+    } else if (timeFormatCache.size >= TIME_CACHE_LIMIT) {
+      const oldest = timeFormatCache.keys().next().value;
+      if (oldest !== undefined) timeFormatCache.delete(oldest);
+    }
     timeFormatCache.set(value, formatted);
   }
   return formatted;

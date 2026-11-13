@@ -87,7 +87,7 @@ export const DepthChart = memo(function DepthChart({ snapshot }: { snapshot: Sna
   const parsedMark = parseSignedDecimal(markPrice);
   const mark = numeric(markPrice);
   const hasMark = parsedMark ? parsedMark.n > 0n : mark !== null && mark > 0;
-  useCenterElementScroll(containerRef, '.grid-level-mark', [snapshot.symbol, orders.length, hasMark]);
+  useCenterElementScroll(containerRef, '.grid-level-mark', `${snapshot.symbol}:${orders.length}:${hasMark ? 1 : 0}`);
   const { buyCount, sellCount, orderRows } = useMemo(() => {
     let buy = 0, sell = 0;
     for (const order of orders) {

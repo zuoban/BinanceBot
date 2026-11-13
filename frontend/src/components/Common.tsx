@@ -1,4 +1,4 @@
-import { useContext, useLayoutEffect, type DependencyList, type RefObject } from 'react';
+import { useContext, useLayoutEffect, useMemo, type RefObject } from 'react';
 import { Alert, App, Button, Empty, Space, type FormInstance } from 'antd';
 import { ArrowDownOutlined, ArrowUpOutlined, CheckCircleOutlined, CloseCircleOutlined, CloseOutlined, ExclamationCircleOutlined, InfoCircleOutlined, ReloadOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { Link } from 'react-router-dom';
@@ -10,7 +10,7 @@ import { parseSignedDecimal } from '../lib/decimal';
 import type { GridConfig, Mode, Status } from '../lib/types';
 type Direction = GridConfig['direction'];
 import { ageText, compactNumber, directionLabel, modeLabel, number, numeric, sig3Format, statusLabel } from '../lib/format';
-import { useNow } from '../lib/useNow';
+import { useRelativeNow } from '../lib/useNow';
 export function ErrorNotice({ error, retry }: { error: Error | null; retry?: () => void }) {
   if (!error) return null;
   return <Alert type="error" showIcon title={error.message} action={retry && <Button size="small" onClick={retry} icon={<ReloadOutlined />}>重试</Button>} />;
@@ -97,14 +97,15 @@ export function PageBreadcrumb({ items, disabled = false }: { items: { label: st
 export function PageTitle({ title, description, extra }: { title: string; description?: string; extra?: React.ReactNode }) {
   return <div className="page-heading"><div><h1>{title}</h1>{description && <p>{description}</p>}</div>{extra != null && extra !== false && <Space wrap>{extra}</Space>}</div>;
 }
-export function useCenterElementScroll<T extends HTMLElement>(ref: RefObject<T | null>, selector: string, deps: DependencyList) {
+export function useCenterElementScroll<T extends HTMLElement>(ref: RefObject<T | null>, selector: string, triggerKey: string) {
   useLayoutEffect(() => {
+    void triggerKey;
     const container = ref.current;
     const target = container?.querySelector<HTMLElement>(selector);
     if (container && target && container.scrollHeight > container.clientHeight) {
       container.scrollTop = Math.max(0, target.offsetTop - container.clientHeight / 2 + target.clientHeight / 2);
     }
-  }, deps);
+  }, [ref, selector, triggerKey]);
 }
 export function isConfigConflict(error: Error | null | undefined, ...messageFragments: string[]): boolean {
   return Boolean(error && (('status' in error && error.status === 409) || messageFragments.some(fragment => error.message.includes(fragment))));
@@ -169,6 +170,7 @@ export function FormRevertButton({ form, activeRef, resetKey, onRevert, onReset 
 }
 
 export function FreshnessText({ updatedAt, prefix }: { updatedAt: number; prefix: string }) {
-  const now = useNow(1000, updatedAt > 0);
+  const timestamps = useMemo(() => (updatedAt > 0 ? [updatedAt] : []), [updatedAt]);
+  const now = useRelativeNow(timestamps, updatedAt > 0);
   return <>{prefix}{ageText(updatedAt, now)}</>;
 }

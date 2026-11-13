@@ -6,7 +6,7 @@ import { pairRoute } from '../lib/api';
 import { useAsyncLock } from '../lib/asyncGuard';
 import { useConfirmDialog } from '../lib/confirmDialog';
 import { useLiveAccounts, usePairs } from '../lib/queries';
-import { AccountsContext, EditContext, useSession } from '../lib/session';
+import { AccountsContext, EditContext, useSession, type RouteLeaveListener } from '../lib/session';
 import { compactNumber, directionLabel, modeLabel, ratioText, statusLabel } from '../lib/format';
 import { PAIRS_STALE_MS } from '../lib/portfolio';
 import type { AccountObservation, Mode, Pair } from '../lib/types';
@@ -27,8 +27,8 @@ function ShellTitle({ accounts, alert, active }: { accounts: AccountObservation[
   const title = !groups.length
     ? defaultTitle
     : groups.length === 1
-      ? `${compactNumber(groups[0].equity)} | ${ratioText(groups[0].ratio, true)}`
-      : groups.map(group => `${dupAssets.has(group.asset) ? `${modeLabel[group.mode]} ` : ''}${group.asset} ${compactNumber(group.equity)} | ${ratioText(group.ratio, true)}`).join(' / ');
+      ? `${compactNumber(groups[0].equityText ?? groups[0].equity)} | ${ratioText(groups[0].ratio, true)}`
+      : groups.map(group => `${dupAssets.has(group.asset) ? `${modeLabel[group.mode]} ` : ''}${group.asset} ${compactNumber(group.equityText ?? group.equity)} | ${ratioText(group.ratio, true)}`).join(' / ');
   useDocumentTitle(active ? `${alert ? '[!] ' : ''}${title}` : null);
   return null;
 }
@@ -88,20 +88,32 @@ function useLivePairStatuses(pairsData: Pair[] | undefined, accounts: AccountObs
 
 const settingsTab = (loc: { pathname: string; search: string }) => loc.pathname === '/settings' ? (new URLSearchParams(loc.search).get('tab') || 'global') : null;
 
-function useDirtyNavigationBlocker(dirty: boolean, saving: boolean, setDirty: (value: boolean) => void) {
-  const blockerDialog = useConfirmDialog();
-  const blocker = useBlocker(({ currentLocation, nextLocation }) => (dirty || saving) && (currentLocation.pathname !== nextLocation.pathname || settingsTab(currentLocation) !== settingsTab(nextLocation)));
+function useDirtyNavigationBlocker(dirty: boolean, saving: boolean, setDirty: (value: boolean) => void, onRouteLeave: RouteLeaveListener) {
+  const { confirm: confirmBlocker, destroyAll: destroyBlocker } = useConfirmDialog();
+  const blocker = useBlocker(({ currentLocation, nextLocation }) => {
+    const blocked = (dirty || saving) && (currentLocation.pathname !== nextLocation.pathname || settingsTab(currentLocation) !== settingsTab(nextLocation));
+    if (!blocked && currentLocation.pathname !== nextLocation.pathname) {
+      onRouteLeave(nextLocation.pathname);
+    }
+    return blocked;
+  });
   useEffect(() => {
     if (blocker.state !== 'blocked') return;
     if (saving) { blocker.reset(); return; }
     let active = true;
     void (async () => {
-      const confirmed = await blockerDialog.confirm({ title: '放弃未保存的修改？', content: '当前表单的修改尚未保存。', okText: '放弃修改', cancelText: '继续编辑' });
+      const confirmed = await confirmBlocker({ title: '放弃未保存的修改？', content: '当前表单的修改尚未保存。', okText: '放弃修改', cancelText: '继续编辑' });
       if (!active) return;
-      if (confirmed) { setDirty(false); blocker.proceed(); } else blocker.reset();
+      if (confirmed) {
+        setDirty(false);
+        if (blocker.location) onRouteLeave(blocker.location.pathname);
+        blocker.proceed();
+      } else {
+        blocker.reset();
+      }
     })();
-    return () => { active = false; blockerDialog.destroyAll(); };
-  }, [blocker, saving, setDirty, blockerDialog.confirm, blockerDialog.destroyAll]);
+    return () => { active = false; destroyBlocker(); };
+  }, [blocker, saving, setDirty, onRouteLeave, confirmBlocker, destroyBlocker]);
   useEffect(() => {
     if (!dirty && !saving) return;
     const beforeUnload = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = ''; };
@@ -118,15 +130,23 @@ export default function Shell() {
   const savingRef = useRef(false);
   savingRef.current = saving;
   const updateSaving = useCallback((value: boolean) => { savingRef.current = value; setSaving(value); }, []);
-  useDirtyNavigationBlocker(dirty, saving, setDirty);
-  const context = useMemo(() => ({ dirty, setDirty, saving, setSaving: updateSaving }), [dirty, saving, updateSaving]);
-  const runLogout = useAsyncLock(), { message } = App.useApp(), logoutDialog = useConfirmDialog(), { logout, authEnabled } = useSession();
+  const routeLeaveListeners = useRef(new Set<RouteLeaveListener>());
+  const notifyRouteLeave = useCallback((nextPathname: string) => {
+    for (const listener of routeLeaveListeners.current) listener(nextPathname);
+  }, []);
+  const subscribeRouteLeave = useCallback((listener: RouteLeaveListener) => {
+    routeLeaveListeners.current.add(listener);
+    return () => { routeLeaveListeners.current.delete(listener); };
+  }, []);
+  useDirtyNavigationBlocker(dirty, saving, setDirty, notifyRouteLeave);
+  const context = useMemo(() => ({ dirty, setDirty, saving, setSaving: updateSaving, subscribeRouteLeave }), [dirty, saving, updateSaving, subscribeRouteLeave]);
+  const runLogout = useAsyncLock(), { message } = App.useApp(), { confirm: confirmLogout } = useConfirmDialog(), { logout, authEnabled } = useSession();
   const logOut = useCallback(() => runLogout(async () => {
     if (savingRef.current) return;
-    if (dirty && !await logoutDialog.confirm({ title: '放弃未保存的修改并退出？', okText: '退出', cancelText: '继续编辑' })) return;
+    if (dirty && !await confirmLogout({ title: '放弃未保存的修改并退出？', okText: '退出', cancelText: '继续编辑' })) return;
     if (savingRef.current) return;
     try { await logout(); } catch { message.error('退出失败，会话可能仍然有效，请重试'); }
-  }), [dirty, logout, logoutDialog.confirm, message, runLogout]);
+  }), [dirty, logout, confirmLogout, message, runLogout]);
   const pairsStale = useExpired(pairs.data ? pairs.dataUpdatedAt + PAIRS_STALE_MS : -Infinity);
   const alert = !!liveAccounts.error || liveAccounts.stale || mixedAccountScopes || accounts.some(entry => entry.account_observation_stale || entry.snapshot.status === 'ERROR');
   const symbol = routeSymbol(location.pathname);

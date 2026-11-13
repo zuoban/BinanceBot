@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { App, type ModalFuncProps } from 'antd';
 
 interface ConfirmDialogHandle {
@@ -78,5 +78,5 @@ export function useConfirmDialog(resetKey?: unknown) {
     [confirmWithHandle],
   );
 
-  return { confirm, confirmWithHandle, destroyAll };
+  return useMemo(() => ({ confirm, confirmWithHandle, destroyAll }), [confirm, confirmWithHandle, destroyAll]);
 }

@@ -138,8 +138,8 @@ function buildDetailAccountEntries(s: Snapshot | undefined, pair: Pair | undefin
 export default function PairDetail() {
   const { symbol } = useParams(), navigate = useNavigate(), liveAccounts = useContext(AccountsContext);
   const pairs = usePairs(), pair = pairs.data?.find(p => p.symbol === symbol);
-  const query = usePairSnapshot(pair), controls = useControls();
-  const s = query.data, asset = quoteAsset(symbol ?? ''), stale = query.stale || !!query.error;
+  const query = usePairSnapshot(pair), controls = useControls(symbol ?? '');
+  const s = query.data, asset = quoteAsset(symbol ?? '', s?.account.asset), stale = query.stale || !!query.error;
   const dayNow = useBeijingDay(s?.generated_at, query.dataUpdatedAt);
   const [tab, setTab] = useUrlParam('tab', 'monitor', detailTabs);
   const { trades, logs } = usePairTabHistory(pair, tab, s, query.dataUpdatedAt);
@@ -174,7 +174,7 @@ export default function PairDetail() {
         <Col xs={12} xl={6} className="metric-col"><Card><Statistic title={`标记价格 / ${asset}`} value={positivePrice(s.ticker.mark_price)} /><div className="muted">最新成交 {positivePrice(s.ticker.last_price)}</div></Card></Col>
         <Col xs={12} xl={6} className="metric-col"><Card><Statistic title={`已实现盈亏 / ${asset}`} value={s.stats.total_realized_pnl} formatter={() => <Pnl value={s.stats.total_realized_pnl} />} /><div className="muted">{netPnlText}</div></Card></Col>
         <Col xs={12} xl={6} className="metric-col"><Card><Statistic title={`持仓未实现 / ${asset}`} value={s.position.unrealized_pnl} formatter={() => <Pnl value={s.position.unrealized_pnl} />} /><div className="muted">持仓数量 {quantity(s.position.size)}</div></Card></Col>
-        <Col xs={12} xl={6} className="metric-col"><Card><Statistic title={`账户权益 / ${account?.asset || asset}`} value={account?.equity ?? '--'} formatter={() => number(account?.equity)} /><div className="muted">{cnyText(account?.cny)} · 可用 {number(account?.available)}</div></Card></Col>
+        <Col xs={12} xl={6} className="metric-col"><Card><Statistic title={`账户权益 / ${account?.asset || asset}`} value={account?.equityText ?? account?.equity ?? '--'} formatter={() => number(account?.equityText ?? account?.equity)} /><div className="muted">{cnyText(account?.cnyText ?? account?.cny)} · 可用 {number(account?.availableText ?? account?.available)}</div></Card></Col>
       </Row>
       <Tabs className="detail-tabs" destroyOnHidden activeKey={tab} onChange={key => { const next = detailTabs.find(t => t === key); if (next) setTab(next); }} items={[
         { key: 'monitor', label: '实时监控', children: tab === 'monitor' ? <>

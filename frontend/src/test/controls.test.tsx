@@ -1,4 +1,4 @@
-import { act, renderHook } from '@testing-library/react';
+import { act, render, renderHook } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { App } from 'antd';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -201,5 +201,50 @@ it('aborts pending confirmation timers and skips state/message updates on unmoun
   expect(await pending).toBe('state_unconfirmed');
   expect(api).not.toHaveBeenCalled();
   expect(messages.warning).not.toHaveBeenCalled();
+  client.clear();
+});
+
+it('isolates per-symbol useControls subscriptions from unrelated symbol transitions', async () => {
+  let finishPost!: () => void;
+  vi.mocked(post).mockReturnValue(new Promise<void>(resolve => { finishPost = resolve; }));
+  vi.mocked(api).mockResolvedValue({ ...snapshot('SOLUSDC'), status: 'PAUSED' });
+  const client = new QueryClient();
+  let solRenders = 0;
+  let btcRenders = 0;
+  let staticRenders = 0;
+  function Probe() {
+    const sol = useControls('SOLUSDC');
+    solRenders++;
+    return <button type="button" onClick={() => void sol.run(pair('SOLUSDC'), 'pause', true)}>{sol.busy.has('SOLUSDC') ? 'busy' : 'idle'}</button>;
+  }
+  function UnrelatedProbe() {
+    useControls('BTCUSDC');
+    btcRenders++;
+    return null;
+  }
+  function StaticProbe() {
+    useControls('');
+    staticRenders++;
+    return null;
+  }
+  const { getByRole, unmount } = render(
+    <QueryClientProvider client={client}>
+      <App>
+        <ControlProvider>
+          <Probe />
+          <UnrelatedProbe />
+          <StaticProbe />
+        </ControlProvider>
+      </App>
+    </QueryClientProvider>,
+  );
+  const initialBtc = btcRenders;
+  const initialStatic = staticRenders;
+  act(() => { getByRole('button').click(); });
+  expect(solRenders).toBeGreaterThan(1);
+  expect(btcRenders).toBe(initialBtc);
+  expect(staticRenders).toBe(initialStatic);
+  await act(async () => { finishPost(); });
+  unmount();
   client.clear();
 });

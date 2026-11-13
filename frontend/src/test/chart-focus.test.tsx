@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { render, waitFor } from '@testing-library/react';
+import { fireEvent, render, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { HourlyChart } from '../components/Charts';
 import OverviewHistoryChart from '../components/OverviewHistoryChart';
@@ -28,7 +28,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-it('suppresses focus outlines on Recharts wrapper, surface, and zIndex layers while keeping control focus rings', async () => {
+it('suppresses focus outlines on chart wrapper, surface, and plot layers while keeping control focus rings and keyboard tooltips', async () => {
   const baseHour = 1_762_905_600;
   const data = [
     { hour: baseHour - 3600, equity: 2180 },
@@ -64,25 +64,34 @@ it('suppresses focus outlines on Recharts wrapper, surface, and zIndex layers wh
   button.focus();
   expect(getComputedStyle(button).outlineStyle).toBe('solid');
 
-  await waitFor(() => expect(container.querySelectorAll('.recharts-wrapper')).toHaveLength(2));
-  const wrappers = container.querySelectorAll<HTMLElement>('.recharts-wrapper');
+  await waitFor(() => expect(container.querySelectorAll('.chart-wrap')).toHaveLength(2));
+  const wrappers = container.querySelectorAll<HTMLElement>('.chart-wrap');
   expect(wrappers).toHaveLength(2);
 
   for (const wrapper of wrappers) {
-    const surface = wrapper.querySelector<SVGElement>('.recharts-surface');
-    const zIndexLayer = wrapper.querySelector<SVGGElement>('[class*="recharts-zIndex-layer_"][tabindex="-1"]');
+    const surface = wrapper.querySelector<SVGElement>('.chart-surface');
+    const plotLayer = wrapper.querySelector<SVGGElement>('.chart-plot-layer[tabindex="-1"]');
     expect(surface).not.toBeNull();
-    expect(zIndexLayer).not.toBeNull();
+    expect(plotLayer).not.toBeNull();
     expect(getComputedStyle(wrapper).outlineStyle).toBe('none');
 
     surface!.focus();
     expect(document.activeElement).toBe(surface);
     expect(getComputedStyle(surface!).outlineStyle).toBe('none');
 
-    zIndexLayer!.focus();
-    expect(document.activeElement).toBe(zIndexLayer);
-    expect(getComputedStyle(zIndexLayer!).outlineStyle).toBe('none');
+    plotLayer!.focus();
+    expect(document.activeElement).toBe(plotLayer);
+    expect(getComputedStyle(plotLayer!).outlineStyle).toBe('none');
   }
+
+  const historySurface = wrappers[0].querySelector<SVGElement>('.chart-surface')!;
+  historySurface.focus();
+  fireEvent.keyDown(historySurface, { key: 'ArrowRight' });
+  expect(wrappers[0].querySelector('.chart-tooltip')).toHaveTextContent('2180 USDC');
+  fireEvent.keyDown(historySurface, { key: 'ArrowRight' });
+  expect(wrappers[0].querySelector('.chart-tooltip')).toHaveTextContent('2340.84 USDC');
+  fireEvent.keyDown(historySurface, { key: 'Escape' });
+  expect(wrappers[0].querySelector('.chart-tooltip')).toBeNull();
 });
 
 function hexToRgb(hex: string) {

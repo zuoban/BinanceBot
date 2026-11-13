@@ -265,7 +265,7 @@ it('shows five newest trades and expands to twenty across strategies', async () 
   render(<MemoryRouter><App><OverviewPage /></App></MemoryRouter>);
   const table = screen.getByText('最近成交').closest('.ant-card')!;
   const card = within(table as HTMLElement);
-  expect(card.getAllByRole('row').slice(1)).toHaveLength(5);
+  expect((await card.findAllByRole('row')).slice(1)).toHaveLength(5);
   expect(table.querySelector('.table-mobile')).toBeNull();
   const summary = within(card.getByLabelText('当前显示成交汇总'));
   expect(summary.getByText(/当前显示/)).toHaveTextContent('当前显示 5 笔');
@@ -401,7 +401,7 @@ it('links recent trade symbols to their strategy detail pages', async () => {
   function Location() { return <output data-testid="location">{useLocation().pathname}</output>; }
   render(<MemoryRouter><App><OverviewPage /><Location /></App></MemoryRouter>);
   const table = screen.getByText('最近成交').closest('.ant-card') as HTMLElement;
-  const links = within(table).getAllByRole('link', { name: 'BTCUSDC' });
+  const links = await within(table).findAllByRole('link', { name: 'BTCUSDC' });
   expect(links[0]).toHaveAttribute('href', '/pairs/BTCUSDC');
   await userEvent.setup().click(links[0]);
   expect(screen.getByTestId('location')).toHaveTextContent('/pairs/BTCUSDC');

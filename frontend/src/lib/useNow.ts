@@ -7,14 +7,75 @@ export function useNow(intervalMs = 1000, enabled = true) {
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
     if (!enabled) return;
-    setNow(Date.now());
-    const timer = window.setInterval(() => setNow(Date.now()), intervalMs);
-    return () => window.clearInterval(timer);
+    let timer: number | undefined;
+    const start = () => {
+      window.clearInterval(timer);
+      setNow(Date.now());
+      if (typeof document === 'undefined' || document.visibilityState !== 'hidden') {
+        timer = window.setInterval(() => setNow(Date.now()), intervalMs);
+      }
+    };
+    start();
+    const onVisibility = () => start();
+    if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.clearInterval(timer);
+      if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibility);
+    };
   }, [intervalMs, enabled]);
   return now;
 }
 
 const MAX_TIMEOUT_MS = 2_147_483_647;
+
+export function nextAgeBoundaryDelay(timestamps: readonly number[], now = Date.now()): number {
+  let minDelay = Infinity;
+  for (const ts of timestamps) {
+    if (!Number.isFinite(ts)) continue;
+    const elapsed = now - ts;
+    let nextAt: number;
+    if (elapsed < 2_000) {
+      nextAt = ts + 2_000;
+    } else if (elapsed < 60_000) {
+      nextAt = ts + (Math.floor(elapsed / 1_000) + 1) * 1_000;
+    } else if (elapsed < 3_600_000) {
+      nextAt = ts + (Math.floor(elapsed / 60_000) + 1) * 60_000;
+    } else if (elapsed < 86_400_000) {
+      nextAt = ts + (Math.floor(elapsed / 3_600_000) + 1) * 3_600_000;
+    } else {
+      nextAt = ts + (Math.floor(elapsed / 86_400_000) + 1) * 86_400_000;
+    }
+    const delay = Math.max(50, nextAt - now + 5);
+    if (delay < minDelay) minDelay = delay;
+  }
+  return minDelay;
+}
+
+export function useRelativeNow(timestamps: readonly number[], enabled = true) {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    if (!enabled || !timestamps.length) return;
+    let timer: number | undefined;
+    const schedule = () => {
+      window.clearTimeout(timer);
+      const current = Date.now();
+      setNow(current);
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      const delay = nextAgeBoundaryDelay(timestamps, current);
+      if (Number.isFinite(delay)) {
+        timer = window.setTimeout(schedule, Math.min(delay, MAX_TIMEOUT_MS));
+      }
+    };
+    schedule();
+    const onVisibility = () => { if (document.visibilityState === 'visible') schedule(); else window.clearTimeout(timer); };
+    if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.clearTimeout(timer);
+      if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [timestamps, enabled]);
+  return now;
+}
 
 /** Re-render at an expiry boundary instead of on every clock tick. */
 export function useExpired(deadline: number) {
@@ -63,5 +124,9 @@ export function useUtcHour(enabled = true, generatedAt?: string, receivedAt?: nu
 export function useAccountGroups(entries: AccountObservation[], enabled = true) {
   const deadline = enabled ? nextAccountExpiry(entries, Date.now()) : Infinity;
   const expired = useExpired(deadline);
-  return useMemo(() => enabled ? accountGroups(entries, Date.now()) : [], [entries, enabled, deadline, expired]);
+  return useMemo(() => {
+    void deadline;
+    void expired;
+    return enabled ? accountGroups(entries, Date.now()) : [];
+  }, [entries, enabled, deadline, expired]);
 }

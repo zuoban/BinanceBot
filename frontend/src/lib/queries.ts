@@ -1,12 +1,49 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useQueryClient, type QueryClient, type QueryKey, type UseQueryResult } from '@tanstack/react-query';
 import { api, pairPath, socketUrl, tokenStore } from './api';
+import { sameGridConfig } from './configDiff';
 import { SNAPSHOT_STALE_MS } from './portfolio';
 import type { AccountFrame, AccountObservation, OverviewHistoryData, Overview, Pair, Snapshot, SocketMessage } from './types';
 import { useExpired } from './useNow';
 const SOCKET_LIVE_MS = 5000;
 const HTTP_FALLBACK_MS = 3000;
+const PAIRS_SYNC_REFRESH_MS = 8000;
 const TOKEN_CHAR_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+
+function samePair(left: Pair, right: Pair): boolean {
+  return left === right || (
+    left.symbol === right.symbol
+    && left.scoped === right.scoped
+    && left.status === right.status
+    && left.mode === right.mode
+    && left.account_scope === right.account_scope
+    && sameGridConfig(left.grid_config, right.grid_config)
+  );
+}
+
+function syncPairsCacheFromOverview(client: QueryClient, entries: Overview['pairs']) {
+  if (client.isFetching({ queryKey: ['pairs'] }) > 0) return;
+  const pairsState = client.getQueryState<Pair[]>(['pairs']);
+  const prevPairs = pairsState?.data;
+  const prevBySymbol = prevPairs ? new Map(prevPairs.map(item => [item.symbol, item])) : undefined;
+  const mapped: Pair[] = entries.map(entry => {
+    const next: Pair = {
+      symbol: entry.snapshot.symbol,
+      status: entry.snapshot.status,
+      mode: entry.mode,
+      grid_config: entry.snapshot.grid_config,
+      scoped: entry.scoped,
+      ...(entry.snapshot.account_scope !== undefined && { account_scope: entry.snapshot.account_scope }),
+    };
+    const existing = prevBySymbol?.get(next.symbol);
+    return existing && samePair(existing, next) ? existing : next;
+  });
+  const unchanged = prevPairs !== undefined && prevPairs.length === mapped.length && mapped.every((item, idx) => item === prevPairs[idx]);
+  const nextPairs = unchanged ? prevPairs : mapped;
+  if (!unchanged || Date.now() - (pairsState?.dataUpdatedAt ?? 0) >= PAIRS_SYNC_REFRESH_MS) {
+    client.setQueryData(['pairs'], nextPairs);
+  }
+}
 
 export async function invalidateStrategyQueries(client: QueryClient, options: {
   pairs?: boolean;
@@ -44,13 +81,23 @@ export async function invalidateStrategyQueries(client: QueryClient, options: {
   ]);
 }
 export function usePairs() {
-  return useQuery({ queryKey: ['pairs'], queryFn: ({ signal }) => api<Pair[]>('/api/pairs', { signal }), refetchInterval: 10_000 });
+  return useQuery({ queryKey: ['pairs'], queryFn: ({ signal }) => api<Pair[]>('/api/pairs', { signal }), staleTime: 5_000, refetchInterval: 10_000 });
 }
 export function useOverview() {
-  return useQuery({ queryKey: ['overview'], queryFn: ({ signal }) => api<Overview>('/api/overview', { signal }), refetchInterval: 3000 });
+  const client = useQueryClient();
+  return useQuery({
+    queryKey: ['overview'],
+    queryFn: async ({ signal }) => {
+      const data = await api<Overview>('/api/overview', { signal });
+      syncPairsCacheFromOverview(client, data.pairs);
+      return data;
+    },
+    staleTime: 1_500,
+    refetchInterval: 3000,
+  });
 }
 export function useOverviewHistory() {
-  return useQuery({ queryKey: ['overview-history'], queryFn: ({ signal }) => api<OverviewHistoryData>('/api/overview/history', { signal }), refetchInterval: 60_000 });
+  return useQuery({ queryKey: ['overview-history'], queryFn: ({ signal }) => api<OverviewHistoryData>('/api/overview/history', { signal }), staleTime: 60_000, refetchInterval: 5 * 60_000 });
 }
 
 type SocketDataByType = { [Message in SocketMessage as Message['type']]: Message['data'] };
@@ -67,20 +114,31 @@ export function useSocket<T extends keyof SocketDataByType>(path: string | undef
     lastReceivedRef.current = { path, time: 0 };
     setState({ path, connected: false, epoch: 0 });
     if (!path) return;
-    let stopped = false, socket: WebSocket | undefined, retry: ReturnType<typeof setTimeout>;
-    let attempts = 0, receiving = false;
+    let stopped = false, socket: WebSocket | undefined, retry: ReturnType<typeof setTimeout> | undefined;
+    let attempts = 0, receiving = false, waitingRetry = false;
+    const detachSocket = () => {
+      if (!socket) return;
+      socket.onmessage = socket.onclose = socket.onerror = null;
+      socket.close();
+      socket = undefined;
+    };
     const scheduleRetry = () => {
       if (stopped) return;
+      socket = undefined;
+      waitingRetry = true;
       if (receiving) {
         receiving = false;
         setState(prev => prev.path === path ? { ...prev, connected: false } : prev);
       }
+      clearTimeout(retry);
       retry = setTimeout(connect, Math.min(1000 * 2 ** attempts++, 15_000));
     };
     const connect = () => {
+      if (stopped) return;
+      clearTimeout(retry);
+      waitingRetry = false;
       const rawToken = tokenStore.get();
       const token = rawToken && TOKEN_CHAR_RE.test(rawToken) ? rawToken : null;
-      if (stopped) return;
       try {
         socket = new WebSocket(socketUrl(path), token ? ['auth', `token.${token}`] : ['auth']);
       } catch {
@@ -88,8 +146,9 @@ export function useSocket<T extends keyof SocketDataByType>(path: string | undef
         scheduleRetry();
         return;
       }
-      socket.onmessage = event => {
-        if (stopped) return;
+      const activeSocket = socket;
+      activeSocket.onmessage = event => {
+        if (stopped || socket !== activeSocket) return;
         try {
           const envelope = JSON.parse(event.data) as Partial<SocketMessage> | null;
           if (!envelope || typeof envelope !== 'object' || envelope.type !== type) return;
@@ -103,30 +162,58 @@ export function useSocket<T extends keyof SocketDataByType>(path: string | undef
           attempts = 0;
           if (!receiving || prevTime === 0 || receivedAt - prevTime >= SOCKET_LIVE_MS) {
             receiving = true;
-            setState(s => ({ path, connected: true, epoch: s.epoch + 1 }));
+            setState(prevState => ({ path, connected: true, epoch: prevState.epoch + 1 }));
           }
         } catch { /* Ignore malformed frames; HTTP remains the fallback. */ }
       };
-      socket.onclose = scheduleRetry;
-      socket.onerror = () => socket?.close();
+      activeSocket.onclose = () => {
+        if (socket !== activeSocket) return;
+        scheduleRetry();
+      };
+      activeSocket.onerror = () => activeSocket.close();
     };
+    const reconnectNow = (forceSilentReconnect: boolean) => {
+      if (stopped) return;
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      const lastTime = lastReceivedRef.current.path === path ? lastReceivedRef.current.time : 0;
+      const silent = forceSilentReconnect && (!receiving || Date.now() - lastTime >= SOCKET_LIVE_MS);
+      if (!waitingRetry && !silent) return;
+      clearTimeout(retry);
+      waitingRetry = false;
+      attempts = 0;
+      if (socket) {
+        if (receiving) {
+          receiving = false;
+          setState(prev => prev.path === path ? { ...prev, connected: false } : prev);
+        }
+        detachSocket();
+      }
+      connect();
+    };
+    const onOnline = () => reconnectNow(true);
+    const onVisibility = () => { if (document.visibilityState === 'visible') reconnectNow(false); };
     connect();
+    window.addEventListener('online', onOnline);
+    if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisibility);
     return () => {
       stopped = true;
       clearTimeout(retry);
-      if (socket) {
-        socket.onmessage = socket.onclose = socket.onerror = null;
-        socket.close();
-      }
+      window.removeEventListener('online', onOnline);
+      if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibility);
+      detachSocket();
     };
   }, [path, type]);
   const connected = state.path === path ? state.connected : false;
-  return useMemo(() => ({
-    get lastReceived() {
-      return lastReceivedRef.current.path === path ? lastReceivedRef.current.time : 0;
-    },
-    connected,
-  }), [path, connected, state.epoch]);
+  const epoch = state.path === path ? state.epoch : 0;
+  return useMemo(() => {
+    void epoch;
+    return {
+      get lastReceived() {
+        return lastReceivedRef.current.path === path ? lastReceivedRef.current.time : 0;
+      },
+      connected,
+    };
+  }, [path, connected, epoch]);
 }
 
 function useSocketFallbackQuery<TData>(key: QueryKey, queryFn: (signal: AbortSignal) => Promise<TData>, socket: { connected: boolean; lastReceived: number }, enabled = true) {
@@ -136,6 +223,7 @@ function useSocketFallbackQuery<TData>(key: QueryKey, queryFn: (signal: AbortSig
     queryKey: key,
     queryFn: ({ signal }) => queryFn(signal),
     enabled,
+    refetchOnWindowFocus: () => !(socket.connected && Date.now() - socket.lastReceived < SOCKET_LIVE_MS),
     refetchInterval: () => socket.connected && Date.now() - socket.lastReceived < SOCKET_LIVE_MS ? false : HTTP_FALLBACK_MS,
   });
   const latestRef = useRef({ socket, dataUpdatedAt: query.dataUpdatedAt, isFetching: query.isFetching, refetch: query.refetch });

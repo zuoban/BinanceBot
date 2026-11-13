@@ -7,7 +7,6 @@ import { useUrlParams } from '../lib/urlState';
 import { errorMessage } from '../lib/api';
 import { useAsyncLock, useMountedRef } from '../lib/asyncGuard';
 import { useConfirmDialog } from '../lib/confirmDialog';
-import { beijingDay } from '../lib/format';
 import { positionGroups, SNAPSHOT_STALE_MS, todayPnlGroups, todayTradeCounts } from '../lib/portfolio';
 import { ErrorNotice, PageTitle } from '../components/Common';
 import { runBatchControls, useControls } from '../components/Controls';
@@ -139,13 +138,12 @@ export default function OverviewPage() {
     if (p.mode === 'LIVE') liveCount++;
     if (p.mode !== 'PAPER') allPaper = false;
   }
-  const currentDay = beijingDay(dayNow);
-  const tradeCountsBySymbol = useMemo(() => new Map(entries.map(e => [e.snapshot.symbol, todayTradeCounts(e.snapshot, dayNow)])), [entries, currentDay, dayNow]);
+  const tradeCountsBySymbol = useMemo(() => new Map(entries.map(entry => [entry.snapshot.symbol, todayTradeCounts(entry.snapshot, dayNow)])), [entries, dayNow]);
   const visible = useMemo(() => filterAndSortOverviewEntries(entries, search, statusFilter, sort, tradeCountsBySymbol), [entries, search, statusFilter, sort, tradeCountsBySymbol]);
   const clearFilters = () => updateFilters({ q: '', sort: 'position', status: 'all' });
   const counts = [...tradeCountsBySymbol.values()];
   const today = counts.every(c => c !== null) ? counts.reduce<{ buy: number; sell: number }>((sum, c) => ({ buy: sum.buy + c.buy, sell: sum.sell + c.sell }), { buy: 0, sell: 0 }) : null;
-  const pnlGroups = useMemo(() => todayPnlGroups(overview.data?.today_pnl, dayNow), [overview.data?.today_pnl, currentDay, dayNow]);
+  const pnlGroups = useMemo(() => todayPnlGroups(overview.data?.today_pnl, dayNow), [overview.data?.today_pnl, dayNow]);
   const positionList = useMemo(() => positionGroups(entries), [entries]);
   return <>
     <PageTitle title="策略运行概览" description="账户、持仓与全部策略的实时状态" />

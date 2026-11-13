@@ -4,10 +4,15 @@ import type { AccountObservation, Mode, Overview, PairSummary, Snapshot, Trade }
 
 export const SNAPSHOT_STALE_MS = 10_000;
 export const PAIRS_STALE_MS = 25_000;
-export const quoteAsset = (symbol: string) => ['USDC', 'USDT', 'FDUSD', 'BUSD'].find(a => symbol.endsWith(a)) ?? '';
+const QUOTE_SUFFIXES = ['FDUSD', 'BFUSD', 'USDC', 'USDT', 'BUSD', 'TUSD', 'USDP', 'DAI', 'EUR', 'BTC', 'ETH', 'BNB'] as const;
+export const quoteAsset = (symbol: string, fallbackAsset = '') => {
+  const normalized = symbol.trim().toUpperCase();
+  const matched = QUOTE_SUFFIXES.find(asset => normalized.length > asset.length && normalized.endsWith(asset));
+  return matched ?? fallbackAsset.trim().toUpperCase();
+};
 
-const modeAsset = (mode: Mode, symbol: string) => {
-  const asset = quoteAsset(symbol) || symbol;
+const modeAsset = (mode: Mode, symbol: string, fallbackAsset = '') => {
+  const asset = quoteAsset(symbol, fallbackAsset) || symbol;
   return { asset, key: `${mode}:${asset}` };
 };
 
@@ -85,11 +90,11 @@ export interface PositionGroup {
   totalText: string | null;
 }
 
-export function positionGroups<T extends { mode: Mode; snapshot: ValuedPosition }>(entries: T[]): PositionGroup[] {
+export function positionGroups<T extends { mode: Mode; snapshot: ValuedPosition & { account?: { asset?: string } } }>(entries: T[]): PositionGroup[] {
   const groups = groupByKey(
     entries,
-    ({ mode, snapshot }) => modeAsset(mode, snapshot.symbol).key,
-    ({ mode, snapshot }) => ({ mode, asset: modeAsset(mode, snapshot.symbol).asset, snapshots: [] as ValuedPosition[] }),
+    ({ mode, snapshot }) => modeAsset(mode, snapshot.symbol, snapshot.account?.asset).key,
+    ({ mode, snapshot }) => ({ mode, asset: modeAsset(mode, snapshot.symbol, snapshot.account?.asset).asset, snapshots: [] as ValuedPosition[] }),
     (group, { snapshot }) => { group.snapshots.push(snapshot); },
   );
   return [...groups.entries()].map(([key, group]) => {
@@ -270,11 +275,16 @@ export interface AccountGroup {
   account_scope?: string;
   count: number;
   equity: number | null;
+  equityText: string | null;
   available: number | null;
+  availableText: string | null;
   wallet: number | null;
+  walletText: string | null;
   unrealized: number | null;
+  unrealizedText: string | null;
   ratio: number | null;
   cny: number | null;
+  cnyText: string | null;
 }
 
 const entryRefNow = (entry: Pick<AccountObservation, 'generated_at_ms' | 'received_at_ms'>, now: number) =>
@@ -321,13 +331,21 @@ export function accountGroups<T extends AccountObservation>(entries: T[], now = 
     // Its valuation time follows the oldest open position's mark price.
     const paperValued = items.every(entry => {
       const s = entry.snapshot;
-      const size = numeric(s.position.size);
-      if (size === null) return false;
-      if (size === 0) return true;
+      const sizeDec = parseSignedDecimal(s.position.size);
+      if (sizeDec) {
+        if (sizeDec.n === 0n) return true;
+      } else {
+        const size = numeric(s.position.size);
+        if (size === null) return false;
+        if (size === 0) return true;
+      }
       const refNow = entryRefNow(entry, now);
-      return recentAt(s.account.update_time, 30_000, refNow) && recentAt(s.ticker.mark_update_time, 15_000, refNow) && (numeric(s.ticker.mark_price) ?? 0) > 0;
+      const markDec = parseUnsignedDecimal(s.ticker.mark_price);
+      const markPositive = markDec ? markDec.n > 0n : (numeric(s.ticker.mark_price) ?? 0) > 0;
+      return recentAt(s.account.update_time, 30_000, refNow) && recentAt(s.ticker.mark_update_time, 15_000, refNow) && markPositive;
     });
     const marginDec = parseSignedDecimal(account.account.margin_balance), availDec = parseSignedDecimal(account.account.available_balance), unrealDec = parseSignedDecimal(account.account.unrealized_profit);
+    const walletDec = parseSignedDecimal(account.account.total_wallet_balance);
     const balanceDiff = marginDec && availDec ? scaleDecimalPair(marginDec, availDec)[0] !== scaleDecimalPair(marginDec, availDec)[1] : numeric(account.account.margin_balance) !== numeric(account.account.available_balance);
     const sharedPosition = balanceDiff || (unrealDec ? unrealDec.n !== 0n : (numeric(account.account.unrealized_profit) ?? 0) !== 0);
     const valued = !unavailable && (mode !== 'PAPER' || (paperValued && (!sharedPosition || recentAt(account.account.update_time, 15_000, entryRefNow(chosen, now)))));
@@ -335,8 +353,34 @@ export function accountGroups<T extends AccountObservation>(entries: T[], now = 
     const available = valued ? numeric(account.account.available_balance) : null;
     const wallet = unavailable ? null : numeric(account.account.total_wallet_balance);
     const unrealized = valued ? numeric(account.account.unrealized_profit) : null;
-    const rate = account.account_cny_rate?.asset === asset ? numeric(account.account_cny_rate.cny_per_unit) : null;
-    return { key: `${mode}:${asset}`, mode, asset, account_scope, count: items.length, equity, available, wallet, unrealized, ratio: availableRatio(available, wallet), cny: equity !== null && rate !== null && rate > 0 && Number.isFinite(equity * rate) ? equity * rate : null };
+    const equityText = valued ? (marginDec ? formatDecimal(marginDec.n, marginDec.s) : (equity !== null ? String(equity) : null)) : null;
+    const availableText = valued ? (availDec ? formatDecimal(availDec.n, availDec.s) : (available !== null ? String(available) : null)) : null;
+    const walletText = unavailable ? null : (walletDec ? formatDecimal(walletDec.n, walletDec.s) : (wallet !== null ? String(wallet) : null));
+    const unrealizedText = valued ? (unrealDec ? formatDecimal(unrealDec.n, unrealDec.s) : (unrealized !== null ? String(unrealized) : null)) : null;
+    let ratio = availableRatio(available, wallet);
+    if (ratio === null && valued && !unavailable && availDec && walletDec && walletDec.n > 0n) {
+      const [availScaled, walletScaled] = scaleDecimalPair(availDec, walletDec);
+      const ratioParsed = Number(formatDecimal((availScaled * 1_000_000n) / walletScaled, 4));
+      ratio = Number.isFinite(ratioParsed) ? ratioParsed : null;
+    }
+    const rateRaw = account.account_cny_rate?.asset === asset ? account.account_cny_rate.cny_per_unit : null;
+    const rateDec = parseUnsignedDecimal(rateRaw);
+    const rate = numeric(rateRaw);
+    let cny: number | null = null;
+    let cnyText: string | null = null;
+    if (valued && marginDec && rateDec && rateDec.n > 0n) {
+      cnyText = formatDecimal(marginDec.n * rateDec.n, marginDec.s + rateDec.s);
+      const cnyParsed = Number(cnyText);
+      cny = Number.isFinite(cnyParsed) ? cnyParsed : null;
+    } else if (equity !== null && rate !== null && rate > 0 && Number.isFinite(equity * rate)) {
+      cny = equity * rate;
+      cnyText = String(cny);
+    }
+    return {
+      key: `${mode}:${asset}`, mode, asset, account_scope, count: items.length,
+      equity, equityText, available, availableText, wallet, walletText, unrealized, unrealizedText,
+      ratio, cny, cnyText,
+    };
   });
 }
 

@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react';
+import { act, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, expect, it, vi } from 'vitest';
 import { OverviewHistory } from '../components/OverviewHistory';
@@ -170,7 +170,7 @@ it('renders daily snapshots with account overview, trade counts, realized pnl, a
   };
   const user = userEvent.setup();
   render(<OverviewHistory />);
-  const section = screen.getByLabelText('每日运行快照');
+  const section = await screen.findByLabelText('每日运行快照');
   expect(within(section).getByText('每日运行快照')).toBeInTheDocument();
   expect(within(section).getByText('成交与实现盈亏（2026-11-09）')).toBeInTheDocument();
   expect(within(section).getByText(/10,050\.25/)).toBeInTheDocument();
@@ -219,7 +219,7 @@ it('surfaces a background poll error and retry action without unmounting existin
   const user = userEvent.setup();
   const view = render(<OverviewHistory />);
   const initialCharts = await screen.findAllByTestId('history-chart');
-  const initialDaily = screen.getByLabelText('每日运行快照');
+  const initialDaily = await screen.findByLabelText('每日运行快照');
   expect(within(screen.getByLabelText('最近一次快照')).getByText('10,050')).toBeInTheDocument();
 
   history.error = new Error('网络波动，快照刷新失败');
@@ -235,7 +235,7 @@ it('surfaces a background poll error and retry action without unmounting existin
   expect(history.refetch).toHaveBeenCalledOnce();
 });
 
-it('skips empty hourly charts when only daily snapshots exist', () => {
+it('skips empty hourly charts when only daily snapshots exist', async () => {
   history.data = {
     snapshots: [],
     current_accounts: [],
@@ -252,5 +252,20 @@ it('skips empty hourly charts when only daily snapshots exist', () => {
   };
   render(<OverviewHistory />);
   expect(screen.queryByText('近 24 小时')).not.toBeInTheDocument();
-  expect(screen.getByLabelText('每日运行快照')).toBeInTheDocument();
+  expect(await screen.findByLabelText('每日运行快照')).toBeInTheDocument();
+});
+
+it('refetches history immediately when the UTC hour rolls over', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-11-10T01:59:50Z'));
+  history.data = { snapshots: [{ hour: Math.floor(Date.now() / 3600000) * 3600, groups: [group(paper, '100')] }], current_accounts: [paper] };
+  const view = render(<OverviewHistory />);
+  try {
+    expect(history.refetch).not.toHaveBeenCalled();
+    await act(async () => { await vi.advanceTimersByTimeAsync(11_000); });
+    expect(history.refetch).toHaveBeenCalledOnce();
+  } finally {
+    view.unmount();
+    vi.useRealTimers();
+  }
 });

@@ -1,10 +1,13 @@
-import { memo, useMemo, useState } from 'react';
+import { Suspense, lazy, memo, useMemo, useState } from 'react';
 import { Button, Card } from 'antd';
 import { modeLabel } from '../lib/format';
 import { groupTradePnl, positionAmount } from '../lib/portfolio';
+import { sameTrades } from '../lib/tableEqual';
 import type { Mode, Overview, Status, Trade } from '../lib/types';
-import { FreshnessText, Pnl, SignalButton, SignalChip, type Signal } from './Common';
-import { sameTrades, TradesTable } from './DataTables';
+import { FreshnessText, NoData, Pnl, SignalButton, SignalChip, type Signal } from './Common';
+import { LoadErrorBoundary } from './LoadErrorBoundary';
+
+const LazyTradesTable = lazy(() => import('./DataTables').then(mod => ({ default: mod.TradesTable })));
 
 type StatusFilter = 'all' | Status | 'LIVE';
 type OverviewSort = 'position' | 'symbol' | 'today' | 'orders';
@@ -109,7 +112,7 @@ export const OverviewTradesCard = memo(function OverviewTradesCard({ recentTrade
       <span>卖出 <strong>{sellTrades}</strong> 笔</span>
       <span>合计盈亏 {tradePnlGroups.size === 0 ? <strong>--</strong> : [...tradePnlGroups.entries()].map(([key, group]) => <span key={key}> {modeLabel[group.mode]} <strong>{group.available && group.totalText !== null ? <Pnl value={group.totalText} compact /> : <span className="pending-pnl-warn">待核实</span>}</strong> {group.asset}</span>)}</span>
     </div>
-    <div id="recent-trades-list"><TradesTable overview trades={displayedTrades} /></div>
+    <div id="recent-trades-list">{displayedTrades.length > 0 ? <LoadErrorBoundary label="最近成交"><Suspense fallback={<div className="history-empty history-plot-loading" role="status">正在加载最近成交…</div>}><LazyTradesTable overview trades={displayedTrades} /></Suspense></LoadErrorBoundary> : <NoData />}</div>
     {recentTrades.length > 5 && <div className="overview-trades-toggle"><Button type="text" aria-expanded={tradesExpanded} aria-controls="recent-trades-list" onClick={() => setTradesExpanded(value => !value)}>{tradesExpanded ? '收起' : '展开最近 20 条'}</Button></div>}
   </Card>;
 }, (prev, next) => sameTrades(prev.recentTrades, next.recentTrades));

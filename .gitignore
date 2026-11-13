@@ -11,6 +11,7 @@ config.toml
 .env.*
 frontend/node_modules/
 frontend/dist/
+frontend/.vitest/
 frontend/*.tsbuildinfo
 
 # Local tooling and macOS metadata

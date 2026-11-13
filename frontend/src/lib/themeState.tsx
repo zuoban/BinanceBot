@@ -1,0 +1,72 @@
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useState, type ReactNode } from 'react';
+import { palettes } from './designTokens';
+
+export type ThemePreference = 'system' | 'light' | 'dark';
+const storageKey = 'binance_bot_theme';
+const isPreference = (value: string | null): value is ThemePreference => value === 'system' || value === 'light' || value === 'dark';
+const readPreference = (): ThemePreference => {
+  try {
+    const value = localStorage.getItem(storageKey);
+    return isPreference(value) ? value : 'system';
+  } catch { return 'system'; }
+};
+const systemDark = () => {
+  try { return typeof window.matchMedia === 'function' && window.matchMedia('(prefers-color-scheme: dark)').matches; } catch { return false; }
+};
+
+interface ThemeStateValue {
+  preference: ThemePreference;
+  setPreference: (value: ThemePreference) => void;
+  dark: boolean;
+  provided: boolean;
+}
+
+const ThemeContext = createContext<ThemeStateValue>({
+  preference: 'system',
+  setPreference: () => {},
+  dark: false,
+  provided: false,
+});
+
+export function useTheme() {
+  const { preference, setPreference } = useContext(ThemeContext);
+  return { preference, setPreference };
+}
+
+export const useThemeDark = () => useContext(ThemeContext).dark;
+export const useHasOuterThemeState = () => useContext(ThemeContext).provided;
+
+export function ThemeStateProvider({ children }: { children: ReactNode }) {
+  const [preference, setPreferenceState] = useState<ThemePreference>(readPreference);
+  const [darkSystem, setDarkSystem] = useState(systemDark);
+  const dark = preference === 'dark' || (preference === 'system' && darkSystem);
+  const palette = palettes[dark ? 'dark' : 'light'];
+  const setPreference = useCallback((value: ThemePreference) => {
+    setPreferenceState(value);
+    try { localStorage.setItem(storageKey, value); } catch { void 0; }
+  }, []);
+  const value = useMemo<ThemeStateValue>(() => ({ preference, setPreference, dark, provided: true }), [preference, setPreference, dark]);
+
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return;
+    const media = window.matchMedia('(prefers-color-scheme: dark)');
+    const update = () => setDarkSystem(media.matches);
+    update();
+    media.addEventListener('change', update);
+    return () => media.removeEventListener('change', update);
+  }, []);
+  useEffect(() => {
+    const update = (event: StorageEvent) => {
+      if (event.key === storageKey || event.key === null) setPreferenceState(readPreference());
+    };
+    window.addEventListener('storage', update);
+    return () => window.removeEventListener('storage', update);
+  }, []);
+  useLayoutEffect(() => {
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+    document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
+    document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')?.setAttribute('content', palette['--bg-page']);
+  }, [dark, palette]);
+
+  return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
+}

@@ -171,6 +171,17 @@ it('caps the card list but keeps the export complete', async () => {
   expect(String(exported.download.mock.calls[0][1]).split('\r\n')).toHaveLength(121);
 });
 
+it('caps the mobile order card list at 100 items while exporting all matching orders', async () => {
+  stubNarrowViewport(true);
+  const manyOrders = Array.from({ length: 115 }, (_, idx) => order(`o-${idx}`, 'BUY', String(100 + idx)));
+  view(<OrdersTable orders={manyOrders} mark="100" />);
+  expect(screen.queryByRole('table')).not.toBeInTheDocument();
+  expect(screen.getByRole('list', { name: '挂单列表' }).querySelectorAll('li')).toHaveLength(100);
+  expect(screen.getByText('仅显示最近 100 条，完整数据请导出 CSV。')).toBeInTheDocument();
+  await userEvent.setup().click(screen.getByRole('button', { name: /导出 CSV/ }));
+  expect(String(exported.download.mock.calls[0][1]).split('\r\n')).toHaveLength(116);
+});
+
 it('exposes SUCCESS instead of DEBUG in the log level filter and styles success badges', async () => {
   view(<LogsTable logs={[log('INFO', '常规同步'), log('SUCCESS', '止盈成交并补挂网格')]} />);
   const group = screen.getByRole('radiogroup', { name: '按级别筛选' });

@@ -12,7 +12,7 @@ export function useDeleteStrategy(resetKey?: unknown) {
   const { message } = App.useApp();
   const { confirmWithHandle } = useConfirmDialog(resetKey);
   const client = useQueryClient();
-  const controls = useControls();
+  const controls = useControls('');
   const runDelete = useAsyncLock();
   const [busy, setBusy] = useState(false);
   const mounted = useMountedRef();

@@ -14,6 +14,16 @@ const DECIMAL_CACHE_LIMIT = 4096;
 const unsignedDecimalCache = new Map<string, Fixed | null>();
 const signedDecimalCache = new Map<string, Fixed | null>();
 
+function setDecimalCache(cache: Map<string, Fixed | null>, key: string, value: Fixed | null) {
+  if (cache.has(key)) {
+    cache.delete(key);
+  } else if (cache.size >= DECIMAL_CACHE_LIMIT) {
+    const oldest = cache.keys().next().value;
+    if (oldest !== undefined) cache.delete(oldest);
+  }
+  cache.set(key, value);
+}
+
 export function parseUnsignedDecimal(value: unknown): Fixed | null {
   if (value === null || value === undefined) return null;
   if (typeof value === 'string' && value.length <= MAX_DECIMAL_INPUT_LENGTH) {
@@ -23,23 +33,20 @@ export function parseUnsignedDecimal(value: unknown): Fixed | null {
   const text = String(value).trim();
   if (text.length > MAX_DECIMAL_INPUT_LENGTH || !UNSIGNED_DECIMAL_PATTERN.test(text)) {
     if (typeof value === 'string' && value.length <= MAX_DECIMAL_INPUT_LENGTH) {
-      if (unsignedDecimalCache.size >= DECIMAL_CACHE_LIMIT) unsignedDecimalCache.clear();
-      unsignedDecimalCache.set(value, null);
+      setDecimalCache(unsignedDecimalCache, value, null);
     }
     return null;
   }
   const [whole, fraction = ''] = text.split('.');
   if (whole.replace(/^0+/, '').length > MAX_DECIMAL_PART_DIGITS || fraction.length > MAX_DECIMAL_PART_DIGITS) {
     if (typeof value === 'string' && value.length <= MAX_DECIMAL_INPUT_LENGTH) {
-      if (unsignedDecimalCache.size >= DECIMAL_CACHE_LIMIT) unsignedDecimalCache.clear();
-      unsignedDecimalCache.set(value, null);
+      setDecimalCache(unsignedDecimalCache, value, null);
     }
     return null;
   }
   const parsed: Fixed = { n: BigInt(whole + fraction), s: fraction.length };
   if (typeof value === 'string' && value.length <= MAX_DECIMAL_INPUT_LENGTH) {
-    if (unsignedDecimalCache.size >= DECIMAL_CACHE_LIMIT) unsignedDecimalCache.clear();
-    unsignedDecimalCache.set(value, parsed);
+    setDecimalCache(unsignedDecimalCache, value, parsed);
   }
   return parsed;
 }
@@ -63,32 +70,28 @@ export function parseSignedDecimal(value: unknown): Fixed | null {
   }
   if (text.length > MAX_DECIMAL_INPUT_LENGTH) {
     if (typeof value === 'string' && value.length <= MAX_DECIMAL_INPUT_LENGTH) {
-      if (signedDecimalCache.size >= DECIMAL_CACHE_LIMIT) signedDecimalCache.clear();
-      signedDecimalCache.set(value, null);
+      setDecimalCache(signedDecimalCache, value, null);
     }
     return null;
   }
   const match = SIGNED_DECIMAL_PATTERN.exec(text);
   if (!match) {
     if (typeof value === 'string' && value.length <= MAX_DECIMAL_INPUT_LENGTH) {
-      if (signedDecimalCache.size >= DECIMAL_CACHE_LIMIT) signedDecimalCache.clear();
-      signedDecimalCache.set(value, null);
+      setDecimalCache(signedDecimalCache, value, null);
     }
     return null;
   }
   const [, sign, whole, fraction = ''] = match;
   if (whole.replace(/^0+/, '').length > MAX_DECIMAL_PART_DIGITS || fraction.length > MAX_DECIMAL_PART_DIGITS) {
     if (typeof value === 'string' && value.length <= MAX_DECIMAL_INPUT_LENGTH) {
-      if (signedDecimalCache.size >= DECIMAL_CACHE_LIMIT) signedDecimalCache.clear();
-      signedDecimalCache.set(value, null);
+      setDecimalCache(signedDecimalCache, value, null);
     }
     return null;
   }
   const magnitude = BigInt(whole + fraction);
   const parsed: Fixed = { n: sign === '-' && magnitude !== 0n ? -magnitude : magnitude, s: fraction.length };
   if (typeof value === 'string' && value.length <= MAX_DECIMAL_INPUT_LENGTH) {
-    if (signedDecimalCache.size >= DECIMAL_CACHE_LIMIT) signedDecimalCache.clear();
-    signedDecimalCache.set(value, parsed);
+    setDecimalCache(signedDecimalCache, value, parsed);
   }
   return parsed;
 }

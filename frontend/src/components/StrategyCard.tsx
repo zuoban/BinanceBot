@@ -54,7 +54,7 @@ export const StrategyCard = memo(function StrategyCard({
 }) {
   const { snapshot: s } = entry;
   const pair = useMemo(() => toPair(entry), [entry]);
-  const quote = quoteAsset(s.symbol), quoteSuffix = quote ? ` / ${quote}` : '', quoteUnit = quote ? ` ${quote}` : '';
+  const quote = quoteAsset(s.symbol, s.account.asset), quoteSuffix = quote ? ` / ${quote}` : '', quoteUnit = quote ? ` ${quote}` : '';
   const change = entryChange(s.position, s.ticker.mark_price);
   return <Card className="strategy-card">
     <div className="section-line strategy-card-heading">
@@ -83,6 +83,7 @@ export const StrategyCard = memo(function StrategyCard({
   if (a === b) return true;
   const sa = a.snapshot, sb = b.snapshot;
   return a.mode === b.mode && a.scoped === b.scoped && sa.account_scope === sb.account_scope && sa.symbol === sb.symbol && sa.status === sb.status &&
+    sa.account.asset === sb.account.asset &&
     sa.ticker.mark_price === sb.ticker.mark_price &&
     sa.position.size === sb.position.size && sa.position.entry_price === sb.position.entry_price &&
     sa.position.mark_price === sb.position.mark_price && sa.position.unrealized_pnl === sb.position.unrealized_pnl &&

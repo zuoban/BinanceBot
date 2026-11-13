@@ -1,18 +1,18 @@
-import { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type MutableRefObject } from 'react';
 import { flushSync } from 'react-dom';
-import { UNSAFE_DataRouterContext, useLocation, useNavigate, useParams, type NavigateFunction } from 'react-router-dom';
+import { useLocation, useNavigate, useParams, type NavigateFunction } from 'react-router-dom';
 import { Alert, App, Button, Card, Form, Space, type FormInstance } from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, pairPath, pairRoute, post } from '../lib/api';
 import { useConfirmDialog } from '../lib/confirmDialog';
 import { invalidateStrategyQueries, usePairs } from '../lib/queries';
 import { EditContext } from '../lib/session';
-import type { GlobalConfig, GridConfig, Pair } from '../lib/types';
+import type { GlobalConfig, GridConfig, Mode, Pair } from '../lib/types';
 import { ConflictReloadButton, ErrorNotice, FormRevertButton, isConfigConflict, PageBreadcrumb, PageTitle } from '../components/Common';
 import { useDeleteStrategy } from '../components/DeleteStrategy';
 import { GridPreview } from '../components/GridPreview';
-import { AccountMarkBridge, defaults, LiveConfigConfirmContent, PairBasicSection, PairGridParamsSection, PairRiskAndRangeSection, SaveBarStatus, type FormValues } from '../components/PairConfigSections';
-import { defaultGridInterval } from '../lib/gridPreview';
+import { defaults, LiveConfigConfirmContent, PairBasicSection, PairGridParamsSection, PairRiskAndRangeSection, SaveBarStatus, useLiveSymbolMark, type FormValues } from '../components/PairConfigSections';
+import { defaultGridInterval, isPositiveDecimal, orderAmountError } from '../lib/gridPreview';
 import { positiveDecimalText } from '../lib/format';
 import { quoteAsset } from '../lib/portfolio';
 import { diffGridConfig } from '../lib/configDiff';
@@ -21,7 +21,7 @@ type BaselineState = { symbol: string; config: GridConfig & { config_version: st
 type LoadedGridConfig = GridConfig & { config_version: string; tick_size?: string; step_size?: string; min_qty?: string; min_notional?: string };
 
 function usePageSubmissionGuard(pathname: string) {
-  const router = useContext(UNSAFE_DataRouterContext)?.router;
+  const { subscribeRouteLeave } = useContext(EditContext);
   const removing = useRef(false), submission = useRef<object | null>(null), page = useRef<object | null>(null), activePreflight = useRef<object | null>(null);
   const [preflightPending, setPreflightPending] = useState(false);
   useLayoutEffect(() => {
@@ -34,11 +34,11 @@ function usePageSubmissionGuard(pathname: string) {
         if (activePreflight.current) { activePreflight.current = null; setPreflightPending(false); }
       }
     };
-    // Router state can change before React commits the new route and runs cleanup.
-    const unsubscribe = router?.subscribe(state => { if (state.location.pathname !== pathname) invalidate(); });
-    if (router && router.state.location.pathname !== pathname) invalidate();
+    const unsubscribe = subscribeRouteLeave?.(nextPathname => {
+      if (nextPathname !== pathname) invalidate();
+    });
     return () => { unsubscribe?.(); invalidate(); };
-  }, [pathname, router]);
+  }, [pathname, subscribeRouteLeave]);
   return { page, removing, submission, activePreflight, preflightPending, setPreflightPending };
 }
 
@@ -158,51 +158,97 @@ function PairConfigSaveBar({ form, adding, dirty, saving, isPending, symbol, pag
   </>;
 }
 
+function PairConfigPreviewPane({
+  adding,
+  ready,
+  symbol,
+  selectedSymbol,
+  mode,
+  previewMark,
+  effectiveMarkRef,
+  editedFields,
+  form,
+  tickSize,
+  stepSize,
+  minQty,
+  minNotional,
+  quote,
+}: {
+  adding: boolean;
+  ready: boolean;
+  symbol: string | undefined;
+  selectedSymbol: string | undefined;
+  mode: Mode | undefined;
+  previewMark: string | undefined;
+  effectiveMarkRef: MutableRefObject<string | undefined>;
+  editedFields: MutableRefObject<Set<string>>;
+  form: FormInstance<FormValues>;
+  tickSize: string | undefined;
+  stepSize: string | undefined;
+  minQty: string | undefined;
+  minNotional: string | undefined;
+  quote: string;
+}) {
+  const liveMark = useLiveSymbolMark(symbol, mode, !adding && !!symbol);
+  const effectiveMark = adding ? previewMark : liveMark;
+  effectiveMarkRef.current = effectiveMark;
+  useEffect(() => {
+    if (!ready || (!stepSize && !minQty && !minNotional)) return;
+    const currentErrors = form.getFieldError('order_amount_usdc');
+    if (!editedFields.current.has('order_amount_usdc') && currentErrors.length === 0) return;
+    const amountValue = form.getFieldValue('order_amount_usdc');
+    if (amountValue == null || amountValue === '' || !isPositiveDecimal(amountValue)) return;
+    const nextError = orderAmountError(amountValue, effectiveMark, { stepSize, minQty, minNotional });
+    if (nextError !== (currentErrors[0] ?? null)) {
+      void form.validateFields(['order_amount_usdc']).catch(() => {});
+    }
+  }, [stepSize, minQty, minNotional, effectiveMark, ready, form, editedFields]);
+  return <GridPreview key={selectedSymbol ?? 'new'} form={form} markPrice={effectiveMark} tickSize={tickSize} stepSize={stepSize} minQty={minQty} minNotional={minNotional} quote={quote || '报价资产'} />;
+}
+
 export default function PairConfig() {
   const { symbol } = useParams(), adding = !symbol, navigate = useNavigate(), { pathname } = useLocation();
   const pairs = usePairs(), pair = pairs.data?.find(p => p.symbol === symbol);
-  const [liveMark, setLiveMark] = useState<string | undefined>(undefined), [ready, setReady] = useState(adding);
+  const [ready, setReady] = useState(adding);
   const [form] = Form.useForm<FormValues>();
-  const baseline = useRef<BaselineState | null>(null), customInterval = useRef(false), appliedSymbol = useRef<string | undefined>(undefined), editedFields = useRef(new Set<string>()), resetMutation = useRef(() => {});
+  const baseline = useRef<BaselineState | null>(null), customInterval = useRef(false), appliedSymbol = useRef<string | undefined>(undefined), editedFields = useRef(new Set<string>()), effectiveMarkRef = useRef<string | undefined>(undefined), resetMutation = useRef(() => {});
   const global = useQuery({ queryKey: ['global-config'], queryFn: ({ signal }) => api<GlobalConfig>('/api/global/config', { signal }), refetchOnWindowFocus: false });
   const live = global.data ? global.data.has_api_key && global.data.has_api_secret : pair ? pair.mode === 'LIVE' : true;
   const symbols = useQuery({ queryKey: ['exchange-symbols'], queryFn: ({ signal }) => api<string[]>('/api/exchange/symbols?environment=mainnet', { signal }), enabled: adding, retry: false, refetchOnWindowFocus: false });
   const config = useQuery({ queryKey: ['config', symbol, pair?.scoped], queryFn: ({ signal }) => { if (!pair) throw new Error('该交易对不存在或已移除'); return api<LoadedGridConfig>(pairPath(pair, 'config'), { signal }); }, enabled: !!pair, refetchOnWindowFocus: false });
   const { page, submission, preflightPending, edit, mutation, deletionBusy, remove, submit } = usePairConfigActions({ adding, symbol, pair, baseline, form, refetchGlobal: global.refetch, pathname, navigate });
+  const { dirty: editDirty, saving: editSaving, setDirty: setEditDirty, setSaving: setEditSaving } = edit;
   resetMutation.current = mutation.reset;
   useEffect(() => {
-    setReady(adding); setLiveMark(undefined); baseline.current = null; customInterval.current = false; appliedSymbol.current = undefined; editedFields.current.clear();
-    resetMutation.current(); edit.setDirty(false); edit.setSaving(false); form.resetFields();
+    setReady(adding); effectiveMarkRef.current = undefined; baseline.current = null; customInterval.current = false; appliedSymbol.current = undefined; editedFields.current.clear();
+    resetMutation.current(); setEditDirty(false); setEditSaving(false); form.resetFields();
     if (adding) form.setFieldsValue(defaults);
-  }, [symbol, adding, form, edit.setDirty, edit.setSaving]);
+  }, [symbol, adding, form, setEditDirty, setEditSaving]);
   useEffect(() => {
     if (config.data && config.data.symbol === symbol && !ready && !adding && symbol) { baseline.current = { symbol, config: config.data }; form.setFieldsValue(config.data); setReady(true); }
   }, [config.data, ready, adding, form, symbol]);
-  useEffect(() => () => { edit.setDirty(false); edit.setSaving(false); }, [edit.setDirty, edit.setSaving]);
-  const disabled = !ready || edit.saving || deletionBusy || (!adding && !pair);
+  useEffect(() => () => { setEditDirty(false); setEditSaving(false); }, [setEditDirty, setEditSaving]);
+  const disabled = !ready || editSaving || deletionBusy || (!adding && !pair);
   const formDisabled = disabled || preflightPending || mutation.isPending;
   const watchedSymbol = Form.useWatch('symbol', form) as string | undefined;
   const selectedSymbol = adding ? watchedSymbol?.trim().toUpperCase() : symbol, quote = quoteAsset(selectedSymbol ?? '');
   const symbolPreview = useQuery({ queryKey: ['symbol-preview', selectedSymbol], queryFn: ({ signal }) => api<{ symbol: string; last_price?: string | null; mark_price?: string | null; tick_size?: string; step_size?: string; min_qty?: string; min_notional?: string }>(`/api/exchange/symbol-preview?environment=mainnet&symbol=${encodeURIComponent(selectedSymbol ?? '')}`, { signal }), enabled: adding && !!selectedSymbol, retry: false, refetchOnWindowFocus: false });
   const previewLast = positiveDecimalText(symbolPreview.data?.last_price), previewMark = positiveDecimalText(symbolPreview.data?.mark_price);
-  const latestPrice = adding ? (previewLast ?? previewMark) : null, effectiveMark = (adding ? (previewMark ?? previewLast) : liveMark) ?? undefined;
+  const latestPrice = adding ? (previewLast ?? previewMark) : null, previewEffectiveMark = (previewMark ?? previewLast) ?? undefined;
+  if (adding) effectiveMarkRef.current = previewEffectiveMark;
   const symbolOptions = useMemo(() => (symbols.data ?? []).map(value => ({ value, label: value })), [symbols.data]);
   const tickSize = adding ? symbolPreview.data?.tick_size : config.data?.tick_size, stepSize = adding ? symbolPreview.data?.step_size : config.data?.step_size;
   const minQty = adding ? symbolPreview.data?.min_qty : config.data?.min_qty, minNotional = adding ? symbolPreview.data?.min_notional : config.data?.min_notional;
   useEffect(() => {
-    if (!adding || !ready || edit.saving || submission.current || !selectedSymbol || !effectiveMark || customInterval.current || appliedSymbol.current === selectedSymbol) return;
-    const nextInterval = defaultGridInterval(effectiveMark, tickSize);
+    if (!adding || !ready || editSaving || submission.current || !selectedSymbol || !previewEffectiveMark || customInterval.current || appliedSymbol.current === selectedSymbol) return;
+    const nextInterval = defaultGridInterval(previewEffectiveMark, tickSize);
     if (nextInterval) { appliedSymbol.current = selectedSymbol; editedFields.current.add('grid_interval'); form.setFieldValue('grid_interval', nextInterval); void form.validateFields(['grid_interval', 'order_amount_usdc']).catch(() => {}); }
-  }, [adding, ready, edit.saving, selectedSymbol, effectiveMark, tickSize, form, submission]);
+  }, [adding, ready, editSaving, selectedSymbol, previewEffectiveMark, tickSize, form, submission]);
   useEffect(() => {
     if (tickSize && ready && (editedFields.current.has('grid_interval') || form.getFieldError('grid_interval').length > 0)) void form.validateFields(['grid_interval']).catch(() => {});
   }, [tickSize, ready, form]);
-  useEffect(() => {
-    if ((stepSize || minQty || minNotional) && ready && (editedFields.current.has('order_amount_usdc') || form.getFieldError('order_amount_usdc').length > 0)) void form.validateFields(['order_amount_usdc']).catch(() => {});
-  }, [stepSize, minQty, minNotional, effectiveMark, ready, form]);
   return <div className="config-page">
-    {!adding && symbol && <AccountMarkBridge symbol={symbol} mode={global.data ? (live ? 'LIVE' : 'PAPER') : pair?.mode} onMark={setLiveMark} />}
-    <PageBreadcrumb disabled={edit.saving} items={!symbol ? [{ label: '策略总览', to: '/' }, { label: '新增交易对' }] : [{ label: '策略总览', to: '/' }, { label: symbol, to: pairRoute(symbol) }, { label: '策略参数' }]} />
+    <PageBreadcrumb disabled={editSaving} items={!symbol ? [{ label: '策略总览', to: '/' }, { label: '新增交易对' }] : [{ label: '策略总览', to: '/' }, { label: symbol, to: pairRoute(symbol) }, { label: '策略参数' }]} />
     <PageTitle title={adding ? '新增交易对' : `${symbol} 策略参数`} description={adding ? '新策略创建后保持暂停，检查参数后手动恢复' : '参数保存后立即生效，请先核对策略设置'} />
     <ErrorNotice error={pairs.error || config.error} retry={() => { if (pairs.error) void pairs.refetch(); if (!adding && pair) void config.refetch(); }} />
     <ErrorNotice error={mutation.error} />
@@ -215,17 +261,17 @@ export default function PairConfig() {
       else if ('grid_interval' in changed) customInterval.current = true;
       if (changed.pause_on_max_position) { form.setFieldValue('cancel_opening_on_max_position', false); void form.validateFields(['max_position_usdc']).catch(() => {}); }
       else if (changed.cancel_opening_on_max_position) { form.setFieldValue('pause_on_max_position', false); void form.validateFields(['max_position_usdc']).catch(() => {}); }
-      edit.setDirty(true);
+      setEditDirty(true);
     }}>
       <PairBasicSection live={live} adding={adding} formDisabled={formDisabled} selectedSymbol={selectedSymbol} latestPrice={latestPrice} quote={quote}
         symbolOptions={symbolOptions} symbolsFetching={symbols.isFetching} symbolsError={symbols.isError} previewFetching={symbolPreview.isFetching}
         previewError={adding ? symbolPreview.error : null} onRetrySymbols={() => void symbols.refetch()} onRetryPreview={() => void symbolPreview.refetch()} />
       <div className="config-editor-grid">
-        <PairGridParamsSection effectiveMark={effectiveMark} tickSize={tickSize} stepSize={stepSize} minQty={minQty} minNotional={minNotional} />
-        <GridPreview key={selectedSymbol ?? 'new'} form={form} markPrice={effectiveMark} tickSize={tickSize} stepSize={stepSize} minQty={minQty} minNotional={minNotional} quote={quote || '报价资产'} />
+        <PairGridParamsSection effectiveMarkRef={effectiveMarkRef} tickSize={tickSize} stepSize={stepSize} minQty={minQty} minNotional={minNotional} />
+        <PairConfigPreviewPane adding={adding} ready={ready} symbol={symbol} selectedSymbol={selectedSymbol} mode={global.data ? (live ? 'LIVE' : 'PAPER') : pair?.mode} previewMark={previewEffectiveMark} effectiveMarkRef={effectiveMarkRef} editedFields={editedFields} form={form} tickSize={tickSize} stepSize={stepSize} minQty={minQty} minNotional={minNotional} quote={quote} />
       </div>
       <PairRiskAndRangeSection />
-      <PairConfigSaveBar form={form} adding={adding} dirty={edit.dirty} saving={edit.saving} isPending={preflightPending || mutation.isPending} symbol={symbol} page={page} baseline={baseline.current} hasPair={!!pair} deletionBusy={deletionBusy} onReset={mutation.reset} onRemove={() => void remove()}
+      <PairConfigSaveBar form={form} adding={adding} dirty={editDirty} saving={editSaving} isPending={preflightPending || mutation.isPending} symbol={symbol} page={page} baseline={baseline.current} hasPair={!!pair} deletionBusy={deletionBusy} onReset={mutation.reset} onRemove={() => void remove()}
         onRevert={() => { submission.current = null; editedFields.current.clear(); if (adding) { customInterval.current = false; appliedSymbol.current = undefined; form.setFieldsValue(defaults); } else if (baseline.current?.symbol === symbol) { form.setFieldsValue(baseline.current.config); } }} />
     </Form>
   </div>;

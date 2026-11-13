@@ -28,7 +28,7 @@ export function strategySecondaryItems(pair: Pair, stale = false) {
   ];
 }
 export function StrategyToggle({ pair, stale = false, size = 'small', className = 'strategy-toggle', withSymbolAriaLabel = true }: { pair: Pair; stale?: boolean; size?: 'small' | 'middle'; className?: string; withSymbolAriaLabel?: boolean }) {
-  const { busy, pending, run } = useControls();
+  const { busy, pending, run } = useControls(pair.symbol);
   const isBusy = busy.has(pair.symbol);
   const guard = strategyActionGuard(pair, stale, isBusy);
   const active = pending[pair.symbol];
@@ -41,7 +41,7 @@ export function StrategyToggle({ pair, stale = false, size = 'small', className 
 }
 export function StrategyMenu({ pair, stale }: { pair: Pair; stale: boolean }) {
   const navigate = useNavigate();
-  const { busy, run } = useControls();
+  const { busy, run } = useControls(pair.symbol);
   return <Dropdown trigger={['click']} disabled={busy.has(pair.symbol)} menu={{
     items: [
       { key: 'view', icon: <EyeOutlined aria-hidden="true" />, label: '查看策略' },

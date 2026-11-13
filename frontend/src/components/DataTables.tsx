@@ -8,91 +8,23 @@ import { useMountedRef } from '../lib/asyncGuard';
 import { compareSignedDecimals, parseSignedDecimal } from '../lib/decimal';
 import { ageText, beijingDay, number, price, quantity, time, trimFractionZeros } from '../lib/format';
 import { priceDiffPercent } from '../lib/gridPreview';
-import { useNow } from '../lib/useNow';
+import { sameLogs, sameOrders, sameTrades } from '../lib/tableEqual';
+import { useRelativeNow } from '../lib/useNow';
 import type { Log, Order, Trade } from '../lib/types';
 import { Pnl, SideTag, SignalChip } from './Common';
 import { copyText, downloadCsv, toCsv } from '../lib/exportCsv';
+export { sameTrades };
 
 const side = (value: string) => <SideTag side={value === 'BUY' ? 'BUY' : 'SELL'} />;
 const pendingSync = <SignalChip tier="yellow" compact>待同步</SignalChip>;
 const purposeLabel: Record<string, string> = { GRID: '网格', TAKE_PROFIT: '止盈', REMAINDER: '余量合并', LEGACY: '历史订单', UNVERIFIED: '待核实' };
-function orderPurpose(o: Order) {
-  return purposeLabel[o.purpose] ?? (o.is_take_profit ? '止盈' : '历史订单');
-}
-
-function sameMergeSources(a: Order['merge_sources'], b: Order['merge_sources']) {
-  if (a === b) return true;
-  const left = a ?? [], right = b ?? [];
-  if (left.length !== right.length) return false;
-  for (let i = 0; i < left.length; i++) {
-    if (
-      left[i].client_order_id !== right[i].client_order_id ||
-      left[i].price !== right[i].price ||
-      left[i].quantity !== right[i].quantity
-    ) return false;
-  }
-  return true;
-}
-
-function sameOrders(a: Order[], b: Order[]) {
-  if (a === b) return true;
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) {
-    const l = a[i], r = b[i];
-    if (
-      l.client_order_id !== r.client_order_id ||
-      l.side !== r.side ||
-      l.price !== r.price ||
-      l.quantity !== r.quantity ||
-      l.amount_usdc !== r.amount_usdc ||
-      l.purpose !== r.purpose ||
-      l.is_take_profit !== r.is_take_profit ||
-      l.status !== r.status ||
-      l.created_at !== r.created_at ||
-      !sameMergeSources(l.merge_sources, r.merge_sources)
-    ) return false;
-  }
-  return true;
-}
-
-export function sameTrades(a: Trade[], b: Trade[]) {
-  if (a === b) return true;
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) {
-    const l = a[i], r = b[i];
-    if (
-      l.trade_id !== r.trade_id ||
-      l.symbol !== r.symbol ||
-      l.mode !== r.mode ||
-      l.side !== r.side ||
-      l.price !== r.price ||
-      l.quantity !== r.quantity ||
-      l.amount_usdc !== r.amount_usdc ||
-      l.realized_pnl !== r.realized_pnl ||
-      l.commission !== r.commission ||
-      (l.commission_asset ?? null) !== (r.commission_asset ?? null) ||
-      l.pnl_verified !== r.pnl_verified ||
-      l.is_maker !== r.is_maker ||
-      l.timestamp !== r.timestamp ||
-      l.note !== r.note
-    ) return false;
-  }
-  return true;
-}
-
-function sameLogs(a: Log[], b: Log[]) {
-  if (a === b) return true;
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) {
-    const l = a[i], r = b[i];
-    if (l.timestamp !== r.timestamp || l.level !== r.level || l.message !== r.message) return false;
-  }
-  return true;
+function orderPurpose(order: Order) {
+  return purposeLabel[order.purpose] ?? (order.is_take_profit ? '止盈' : '历史订单');
 }
 
 const NowContext = createContext(0);
-function NowProvider({ currentNow, enabled, children }: { currentNow?: number; enabled: boolean; children: React.ReactNode }) {
-  const fallbackNow = useNow(1000, currentNow === undefined && enabled);
+function NowProvider({ currentNow, timestamps, enabled, children }: { currentNow?: number; timestamps: readonly number[]; enabled: boolean; children: React.ReactNode }) {
+  const fallbackNow = useRelativeNow(timestamps, currentNow === undefined && enabled);
   return <NowContext.Provider value={currentNow ?? fallbackNow}>{children}</NowContext.Provider>;
 }
 const NARROW_MEDIA_QUERY = '(max-width: 600px)';
@@ -131,13 +63,15 @@ function RelativeTime({ value, className }: { value: string; className?: string 
   return <span className={className} title={Number.isFinite(timestamp) ? `${time(timestamp)}（北京时间）` : undefined}>{ageText(timestamp, now)}</span>;
 }
 const MarkPriceContext = createContext<string | undefined>(undefined);
+type MessageInstance = ReturnType<typeof App.useApp>['message'];
+const TableMessageContext = createContext<MessageInstance | null>(null);
 function OrderMarkDiff({ orderPrice }: { orderPrice: string }) {
   const mark = useContext(MarkPriceContext);
   return <>{priceDiffPercent(orderPrice, mark) ?? '--'}</>;
 }
 /** Click-to-copy for a price or quantity. The visible text stays the formatted value; the raw value is what gets copied. */
 function Copyable({ value, children }: { value: string; children: React.ReactNode }) {
-  const { message } = App.useApp();
+  const message = useContext(TableMessageContext);
   const [copied, setCopied] = useState(false);
   const timer = useRef<number | null>(null);
   const mounted = useMountedRef(() => { if (timer.current !== null) window.clearTimeout(timer.current); });
@@ -147,9 +81,9 @@ function Copyable({ value, children }: { value: string; children: React.ReactNod
       setCopied(true);
       if (timer.current !== null) window.clearTimeout(timer.current);
       timer.current = window.setTimeout(() => { if (mounted.current) setCopied(false); }, 1500);
-      void message.success(`已复制 ${value}`);
+      void message?.success(`已复制 ${value}`);
     } else {
-      void message.error('复制失败，请手动选择文本');
+      void message?.error('复制失败，请手动选择文本');
     }
   })}>
     {children}{copied ? <CheckOutlined aria-hidden="true" /> : <CopyOutlined aria-hidden="true" />}
@@ -218,12 +152,13 @@ const OrderMobileItem = memo(function OrderMobileItem({ order: o }: { order: Ord
   </li>;
 });
 export const OrdersTable = memo(function OrdersTable({ orders, mark }: { orders: Order[]; mark?: string }) {
+  const { message } = App.useApp();
   const [filter, setFilter] = useState<SideFilter>('ALL');
   const isNarrow = useNarrowViewport();
   const rows = useMemo(() => filter === 'ALL' ? orders : orders.filter(order => order.side === filter), [orders, filter]);
   const exportRows = useCallback(() => downloadCsv(`orders-${beijingDay()}.csv`, toCsv(
     ['方向', '价格', '数量', '金额', '用途', '状态', '时间（北京）'],
-    rows.map(o => [o.side === 'BUY' ? '买入' : '卖出', o.price, o.quantity, o.amount_usdc, orderPurpose(o), o.status, time(o.created_at)]),
+    rows.map(order => [order.side === 'BUY' ? '买入' : '卖出', order.price, order.quantity, order.amount_usdc, orderPurpose(order), order.status, time(order.created_at)]),
   )), [rows]);
   const body = useMemo(() => <>
     <TableFilterBar label="按方向筛选" value={filter} onChange={setFilter} options={sideOptions} shown={rows.length} total={orders.length} onExport={exportRows} />
@@ -238,10 +173,12 @@ export const OrdersTable = memo(function OrdersTable({ orders, mark }: { orders:
       emptyFilteredText="没有符合筛选条件的挂单"
       emptyAllText="暂无挂单"
       listLabel="挂单列表"
-      renderMobileRows={() => rows.map(o => <OrderMobileItem key={o.client_order_id} order={o} />)}
+      truncatedLimit={100}
+      totalFilteredCount={rows.length}
+      renderMobileRows={() => rows.slice(0, 100).map(order => <OrderMobileItem key={order.client_order_id} order={order} />)}
     />
   </>, [filter, isNarrow, rows, orders.length, exportRows]);
-  return <MarkPriceContext.Provider value={mark}>{body}</MarkPriceContext.Provider>;
+  return <TableMessageContext.Provider value={message}><MarkPriceContext.Provider value={mark}>{body}</MarkPriceContext.Provider></TableMessageContext.Provider>;
 }, (prev, next) => prev.mark === next.mark && sameOrders(prev.orders, next.orders));
 const tradePagination = { pageSize: 15, showSizeChanger: false, hideOnSinglePage: true } as const;
 const tradeScroll = { x: 1000 } as const;
@@ -264,9 +201,14 @@ function exportTradeCommission(t: Trade) {
   return `${trimFractionZeros(t.commission)} ${asset}`;
 }
 export const TradesTable = memo(function TradesTable({ trades: allTrades, overview = false, now: currentNow }: { trades: Trade[]; overview?: boolean; now?: number }) {
+  const { message } = App.useApp();
   const [filter, setFilter] = useState<SideFilter>('ALL');
   const isNarrow = useNarrowViewport();
   const trades = useMemo(() => overview || filter === 'ALL' ? allTrades : allTrades.filter(trade => trade.side === filter), [allTrades, filter, overview]);
+  const tradeTimestamps = useMemo(
+    () => (overview || isNarrow) ? (overview ? trades : trades.slice(0, 50)).map(trade => Date.parse(trade.timestamp)).filter(Number.isFinite) : [],
+    [trades, overview, isNarrow],
+  );
   const exportRows = useCallback(() => downloadCsv(`trades-${beijingDay()}.csv`, toCsv(
     ['时间（北京）', '方向', '成交价格', '数量', '金额', '已实现盈亏', '手续费', '成交方式', '备注'],
     trades.map(t => [time(t.timestamp), t.side === 'BUY' ? '买入' : '卖出', t.price, t.quantity, t.amount_usdc, t.pnl_verified ? t.realized_pnl : '待同步', t.pnl_verified ? exportTradeCommission(t) : '待同步', t.pnl_verified ? (t.is_maker ? 'Maker' : 'Taker') : '待同步', t.note]),
@@ -306,7 +248,7 @@ export const TradesTable = memo(function TradesTable({ trades: allTrades, overvi
       </li>)}
     />
   </div>, [overview, isNarrow, filter, trades, allTrades.length, exportRows, columns]);
-  return <NowProvider currentNow={currentNow} enabled={trades.length > 0 && (overview || isNarrow)}>{body}</NowProvider>;
+  return <TableMessageContext.Provider value={message}><NowProvider currentNow={currentNow} timestamps={tradeTimestamps} enabled={tradeTimestamps.length > 0}>{body}</NowProvider></TableMessageContext.Provider>;
 }, (prev, next) =>
   prev.overview === next.overview &&
   prev.now === next.now &&

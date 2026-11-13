@@ -147,6 +147,12 @@ kbd {
 .ant-btn { font-weight: 500; transition: transform 140ms var(--ease-out), background-color 150ms var(--ease-out), border-color 150ms var(--ease-out), color 150ms var(--ease-out); }
 .ant-btn:not(:disabled):active { transform: scale(0.97); }
 .ant-btn-default { border-color: var(--border-strong); }
+.ui-action-btn { display: inline-flex; align-items: center; justify-content: center; height: var(--control-height); padding: 0 15px; border: 1px solid var(--border-strong); border-radius: var(--radius-control); background: var(--bg-card); color: var(--text-primary); font: 500 var(--text-base)/1 var(--font-sans); cursor: pointer; transition: transform 140ms var(--ease-out), background-color 150ms var(--ease-out), border-color 150ms var(--ease-out), color 150ms var(--ease-out); }
+.ui-action-btn-sm { height: var(--control-height-sm); padding: 0 10px; border-radius: var(--radius-chip); font-size: var(--text-xs); }
+.ui-action-btn:not(:disabled):active { transform: scale(0.97); }
+@media (hover: hover) and (pointer: fine) {
+  .ui-action-btn:not(:disabled):hover { border-color: var(--text-muted); background: var(--bg-raised); }
+}
 .ant-tabs .ant-tabs-nav::before { border-bottom-color: var(--border-hairline); }
 
 .ant-table-wrapper .ant-table { background: transparent; }
@@ -225,6 +231,7 @@ kbd {
   .signal-button { position: relative; touch-action: manipulation; }
   .signal-button::before { content: ''; position: absolute; left: 50%; right: auto; top: 50%; width: 100%; min-width: var(--control-touch); height: var(--control-touch); transform: translate(-50%, -50%); }
   .operation-result-close { min-width: var(--control-touch); min-height: var(--control-touch); margin: -12px -12px -12px 0; touch-action: manipulation; }
+  .ui-action-btn { min-height: var(--control-touch); touch-action: manipulation; }
   .table-toolbar .ant-segmented-item { min-width: var(--control-touch); min-height: var(--control-touch); display: flex; align-items: center; justify-content: center; }
   .copyable { min-height: var(--control-touch); padding: var(--space-1); margin: 0 -4px; border-radius: 4px; touch-action: manipulation; }
 }

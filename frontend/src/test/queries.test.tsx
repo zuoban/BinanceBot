@@ -3,7 +3,7 @@ import { useLayoutEffect } from 'react';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterEach, expect, it, vi } from 'vitest';
-import { useLiveAccounts, usePairSnapshot, useSocket } from '../lib/queries';
+import { useLiveAccounts, useOverview, usePairSnapshot, useSocket } from '../lib/queries';
 import { tokenStore } from '../lib/api';
 import { pair, snapshot } from './fixtures';
 import { beijingDay } from '../lib/format';
@@ -535,6 +535,60 @@ it.each([
     expect(result.current.accounts[0].mode).toBe('LIVE');
     expect(result.current.stale).toBe(false);
     expect(result.current.error).toBeNull();
+  } finally {
+    unmount();
+    client.clear();
+    vi.useRealTimers();
+  }
+});
+
+it('reconnects a closed backoff socket immediately on browser online or tab visibility', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+  vi.stubGlobal('WebSocket', FakeSocket);
+  const onData = vi.fn();
+  const { unmount } = renderHook(() => useSocket('/api/accounts/ws', 'accounts', onData));
+  try {
+    expect(FakeSocket.instances).toHaveLength(1);
+    act(() => FakeSocket.instances[0].close());
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(FakeSocket.instances).toHaveLength(2);
+    act(() => FakeSocket.instances[1].close());
+    act(() => { window.dispatchEvent(new Event('online')); });
+    expect(FakeSocket.instances).toHaveLength(3);
+    act(() => FakeSocket.instances[2].close());
+    act(() => { document.dispatchEvent(new Event('visibilitychange')); });
+    expect(FakeSocket.instances).toHaveLength(4);
+  } finally {
+    unmount();
+    vi.useRealTimers();
+  }
+});
+
+it('syncs pairs cache from overview with structural sharing when pairs are unchanged', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+  const snap = snapshot('SOLUSDC');
+  const initialPair = pair('SOLUSDC');
+  const overviewPayload = {
+    generated_at: new Date().toISOString(),
+    pairs: [{
+      scoped: initialPair.scoped,
+      mode: initialPair.mode,
+      snapshot: { ...snap, status: initialPair.status, grid_config: initialPair.grid_config },
+    }],
+    recent_trades: [],
+  };
+  vi.stubGlobal('fetch', vi.fn().mockImplementation(() => Promise.resolve(new Response(JSON.stringify({ success: true, data: overviewPayload }), { status: 200 }))));
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  client.setQueryData(['pairs'], [initialPair]);
+  const wrapper = ({ children }: { children: React.ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+  const { result, unmount } = renderHook(() => useOverview(), { wrapper });
+  try {
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(result.current.data).toBeDefined();
+    const cachedPairs = client.getQueryData<ReturnType<typeof pair>[]>(['pairs'])!;
+    expect(cachedPairs[0]).toBe(initialPair);
   } finally {
     unmount();
     client.clear();

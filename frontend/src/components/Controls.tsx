@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useSyncExternalStore } from 'react';
 import { App, Button, Dropdown, Space } from 'antd';
 import { MoreOutlined } from '@ant-design/icons';
 import { useQueryClient } from '@tanstack/react-query';
@@ -23,6 +23,16 @@ async function confirmControlState(pair: Pair, action: Action, sleep: (ms: numbe
 const BATCH_PAUSE_CONCURRENCY = 6;
 export type ControlResult = 'confirmed' | 'cancellation_unconfirmed' | 'state_unconfirmed' | 'request_unconfirmed' | 'failed' | 'not_submitted';
 interface ControlState { busy: Set<string>; pending: Record<string, Action>; results: Record<string, string>; clearResult: (symbol: string) => void; run: (pair: Pair, action: Action, confirmed?: boolean) => Promise<ControlResult> }
+interface ControlStore {
+  subscribe: (listener: () => void) => () => void;
+  getSnapshot: () => ControlState;
+  getSymbolSnapshot: (symbol: string) => ControlState;
+}
+const emptyBusySet = new Set<string>();
+const emptyPendingMap: Record<string, Action> = {};
+const emptyResultsMap: Record<string, string> = {};
+const noopSubscribe = () => () => {};
+
 export async function runBatchControls(pairs: Pair[], action: 'pause' | 'resume', run: ControlState['run']): Promise<{ pair: Pair; result: Exclude<ControlResult, 'confirmed'> }[]> {
   const outcomes: { pair: Pair; result: Exclude<ControlResult, 'confirmed'> }[] = [];
   const record = (pair: Pair, result: ControlResult) => {
@@ -74,11 +84,14 @@ function resolveControlOutcome(action: Action, observedState: boolean): { result
     outcome: confirmedState ? 'confirmed' : 'state_unconfirmed',
   };
 }
-const Context = createContext<ControlState | null>(null);
-export function useControls(): ControlState {
-  const context = useContext(Context);
-  if (!context) throw new Error('useControls must be used within ControlProvider');
-  return context;
+const Context = createContext<ControlStore | null>(null);
+export function useControls(symbol?: string): ControlState {
+  const store = useContext(Context);
+  if (!store) throw new Error('useControls must be used within ControlProvider');
+  return useSyncExternalStore(
+    symbol === '' ? noopSubscribe : store.subscribe,
+    () => (symbol === undefined ? store.getSnapshot() : store.getSymbolSnapshot(symbol)),
+  );
 }
 function useAbortableSleep() {
   const wakeups = useRef(new Set<() => void>());
@@ -98,7 +111,7 @@ function useAbortableSleep() {
     const wake = () => { window.clearTimeout(timer); wakeups.current.delete(wake); resolve(false); };
     const timer = window.setTimeout(() => { wakeups.current.delete(wake); resolve(mounted.current); }, ms);
     wakeups.current.add(wake);
-  }), []);
+  }), [mounted]);
   return { mounted, abortRef, sleep };
 }
 
@@ -113,28 +126,97 @@ export function ControlProvider({ pairs, children }: { pairs?: Pair[]; children:
   const { message } = App.useApp(), { confirm } = useConfirmDialog(), client = useQueryClient();
   const locked = useRef(new Set<string>());
   const { mounted, abortRef, sleep } = useAbortableSleep();
-  const [busy, setBusy] = useState<Set<string>>(new Set());
-  const [pending, setPending] = useState<Record<string, Action>>({});
-  const [results, setResults] = useState<Record<string, string>>({});
-  const clearResult = useCallback((symbol: string) => {
-    setResults(current => {
-      if (!(symbol in current)) return current;
-      const { [symbol]: _removed, ...rest } = current;
-      return rest;
-    });
+  const runRef = useRef<ControlState['run']>(async () => 'not_submitted');
+  const store = useMemo(() => {
+    const listeners = new Set<() => void>();
+    let busy: Set<string> = emptyBusySet;
+    let pending: Record<string, Action> = emptyPendingMap;
+    let results: Record<string, string> = emptyResultsMap;
+    const symbolCache = new Map<string, { isBusy: boolean; pendingAction: Action | undefined; resultText: string | undefined; snapshot: ControlState }>();
+    const stableRun: ControlState['run'] = (pair, action, confirmed) => runRef.current(pair, action, confirmed);
+    const clearResult = (symbol: string) => {
+      if (!(symbol in results)) return;
+      const { [symbol]: _removed, ...rest } = results;
+      results = Object.keys(rest).length ? rest : emptyResultsMap;
+      refreshFull();
+    };
+    let fullSnapshot: ControlState = { busy, pending, results, clearResult, run: stableRun };
+    const emptySnapshot: ControlState = { busy: emptyBusySet, pending: emptyPendingMap, results: emptyResultsMap, clearResult, run: stableRun };
+    const notify = () => {
+      for (const listener of listeners) listener();
+    };
+    const refreshFull = () => {
+      fullSnapshot = { busy, pending, results, clearResult, run: stableRun };
+      notify();
+    };
+    return {
+      subscribe: (listener: () => void) => {
+        listeners.add(listener);
+        return () => { listeners.delete(listener); };
+      },
+      getSnapshot: () => fullSnapshot,
+      getSymbolSnapshot: (symbol: string) => {
+        if (!symbol) return emptySnapshot;
+        const isBusy = busy.has(symbol);
+        const pendingAction = pending[symbol];
+        const resultText = results[symbol];
+        const cached = symbolCache.get(symbol);
+        if (cached && cached.isBusy === isBusy && cached.pendingAction === pendingAction && cached.resultText === resultText) {
+          return cached.snapshot;
+        }
+        const snapshot: ControlState = {
+          busy: isBusy ? new Set([symbol]) : emptyBusySet,
+          pending: pendingAction ? { [symbol]: pendingAction } : emptyPendingMap,
+          results: resultText !== undefined ? { [symbol]: resultText } : emptyResultsMap,
+          clearResult,
+          run: stableRun,
+        };
+        symbolCache.set(symbol, { isBusy, pendingAction, resultText, snapshot });
+        return snapshot;
+      },
+      setBusyFromLocked: (currentLocked: Set<string>) => {
+        busy = currentLocked.size ? new Set(currentLocked) : emptyBusySet;
+        refreshFull();
+      },
+      startSubmission: (symbol: string, action: Action) => {
+        results = { ...results, [symbol]: '正在提交…' };
+        pending = { ...pending, [symbol]: action };
+        refreshFull();
+      },
+      setResult: (symbol: string, text: string) => {
+        if (results[symbol] === text) return;
+        results = { ...results, [symbol]: text };
+        refreshFull();
+      },
+      finishSymbol: (symbol: string, currentLocked: Set<string>, updateMounted: boolean) => {
+        if (!updateMounted) return;
+        busy = currentLocked.size ? new Set(currentLocked) : emptyBusySet;
+        if (symbol in pending) {
+          const { [symbol]: _done, ...rest } = pending;
+          pending = Object.keys(rest).length ? rest : emptyPendingMap;
+        }
+        refreshFull();
+      },
+      pruneResults: (active: Set<string>) => {
+        const keys = Object.keys(results);
+        if (keys.every(key => active.has(key))) return;
+        const filtered = Object.entries(results).filter(([key]) => active.has(key));
+        results = filtered.length ? Object.fromEntries(filtered) : emptyResultsMap;
+        for (const cachedSymbol of symbolCache.keys()) {
+          if (!active.has(cachedSymbol)) symbolCache.delete(cachedSymbol);
+        }
+        refreshFull();
+      },
+    };
   }, []);
   useEffect(() => {
     if (!pairs) return;
-    const active = new Set(pairs.map(pair => pair.symbol));
-    setResults(current => {
-      const keys = Object.keys(current);
-      if (keys.every(key => active.has(key))) return current;
-      return Object.fromEntries(Object.entries(current).filter(([key]) => active.has(key)));
-    });
-  }, [pairs]);
+    store.pruneResults(new Set(pairs.map(pair => pair.symbol)));
+  }, [pairs, store]);
   const run = useCallback(async (pair: Pair, action: Action, confirmed = false): Promise<ControlResult> => {
     if (locked.current.has(pair.symbol) || !mounted.current) return 'not_submitted';
-    locked.current.add(pair.symbol); setBusy(new Set(locked.current));
+    locked.current.add(pair.symbol);
+    store.setBusyFromLocked(locked.current);
     let submitted = false;
     try {
       const dangerous = action === 'rebalance' || action === 'cancel_all' || (action === 'resume' && pair.mode === 'LIVE');
@@ -143,15 +225,14 @@ export function ControlProvider({ pairs, children }: { pairs?: Pair[]; children:
         if (!await confirm({ title, content, okText: '确认执行', cancelText: '取消' }) || !mounted.current) return 'not_submitted';
       }
       if (!mounted.current) return 'not_submitted';
-      setResults(r => ({ ...r, [pair.symbol]: '正在提交…' }));
-      setPending(p => ({ ...p, [pair.symbol]: action }));
+      store.startSubmission(pair.symbol, action);
       submitted = true;
       await post(pairPath(pair, 'control'), action === 'resume' || action === 'rebalance' ? { action, expected_mode: pair.mode } : { action });
       if (!mounted.current) return 'state_unconfirmed';
       const observedState = await confirmControlState(pair, action, sleep, abortRef.current!.signal).catch(() => false);
       const { resultText, confirmedState, outcome } = resolveControlOutcome(action, observedState);
       if (mounted.current) {
-        setResults(r => ({ ...r, [pair.symbol]: resultText }));
+        store.setResult(pair.symbol, resultText);
         if (!confirmedState) message.warning(`${pair.symbol}：${resultText}`);
       }
       return outcome;
@@ -159,25 +240,22 @@ export function ControlProvider({ pairs, children }: { pairs?: Pair[]; children:
       const text = errorMessage(error);
       const { resultText, outcome, warn } = formatControlFailure(submitted, text);
       if (mounted.current) {
-        setResults(r => ({ ...r, [pair.symbol]: resultText }));
+        store.setResult(pair.symbol, resultText);
         if (warn) message.warning(`${pair.symbol}：${resultText}`);
         else message.error(`${pair.symbol}：${text}`);
       }
       return outcome;
     } finally {
       locked.current.delete(pair.symbol);
-      if (mounted.current) {
-        setBusy(new Set(locked.current));
-        setPending(p => { const { [pair.symbol]: _done, ...rest } = p; return rest; });
-      }
+      store.finishSymbol(pair.symbol, locked.current, mounted.current);
       if (submitted) void invalidateStrategyQueries(client, { accounts: true, snapshot: pair.symbol });
     }
-  }, [abortRef, client, confirm, message, mounted, sleep]);
-  const value = useMemo(() => ({ busy, pending, results, clearResult, run }), [busy, pending, results, clearResult, run]);
-  return <Context.Provider value={value}>{children}</Context.Provider>;
+  }, [abortRef, client, confirm, message, mounted, sleep, store]);
+  runRef.current = run;
+  return <Context.Provider value={store}>{children}</Context.Provider>;
 }
 export function PairControls({ pair, stale = false }: { pair: Pair; stale?: boolean }) {
-  const { busy, run } = useControls();
+  const { busy, run } = useControls(pair.symbol);
   return <Space>
     <StrategyToggle pair={pair} stale={stale} size="middle" className={undefined} withSymbolAriaLabel={false} />
     <Dropdown trigger={['click']} menu={{ items: strategySecondaryItems(pair, stale), onClick: ({ key }) => void run(pair, key as Action) }} disabled={busy.has(pair.symbol)}>

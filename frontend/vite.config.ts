@@ -22,14 +22,14 @@ export default defineConfig({
   build: {
     rollupOptions: {
       output: {
-        manualChunks(id) {
-          const normalized = id.replaceAll('\\', '/');
-          if (!normalized.includes('/node_modules/')) return;
-          if (normalized.includes('/@ant-design/icons') || normalized.includes('/@ant-design/cssinjs')) return 'antd-core';
-          if (normalized.includes('/@rc-component/') || normalized.includes('/rc-')) return 'antd-rc';
-          if (normalized.includes('/d3-') || normalized.includes('/victory-vendor/')) return 'd3-vendor';
-          if (normalized.includes('/recharts/')) return 'charts';
-          if (normalized.includes('/react/') || normalized.includes('/react-dom/') || normalized.includes('/scheduler/') || normalized.includes('/react-router') || normalized.includes('/@tanstack/')) return 'vendor';
+        codeSplitting: {
+          groups: [
+            { name: 'vendor', test: /node_modules[\\/](react|react-dom|scheduler|react-router|@tanstack)[\\/]/, priority: 30 },
+            { name: 'antd-table', test: /node_modules[\\/](@rc-component[\\/]table|rc-table)[\\/]/, priority: 20 },
+            { name: 'antd-picker', test: /node_modules[\\/](@rc-component[\\/]picker|rc-picker|dayjs)[\\/]/, priority: 20 },
+            { name: 'antd-core', test: /node_modules[\\/](@ant-design[\\/](icons|icons-svg|cssinjs|cssinjs-utils|colors|fast-color)|@rc-component[\\/]util)[\\/]/, priority: 15 },
+            { name: 'antd-rc', test: /node_modules[\\/](@rc-component|rc-)/, priority: 10 },
+          ],
         },
       },
     },

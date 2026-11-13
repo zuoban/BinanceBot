@@ -2,15 +2,21 @@ import { createElement } from 'react';
 import { render, screen, waitFor } from '@testing-library/react';
 import { expect, it, vi } from 'vitest';
 import { DepthChart, HourlyChart, todayHourlyData } from '../components/Charts';
+import type { HourlyChartPoint } from '../components/HourlyChartView';
 import { resolveTrades } from '../pages/PairDetail';
 import { snapshot, trade } from './fixtures';
 
 const chartRender = vi.hoisted(() => vi.fn());
-vi.mock('recharts', async importOriginal => ({
-  ...await importOriginal<typeof import('recharts')>(),
-  ResponsiveContainer: ({ children }: { children: React.ReactNode }) => children,
-  BarChart: ({ data }: { data: unknown }) => { chartRender(data); return null; },
-}));
+vi.mock('../components/HourlyChartView', async importOriginal => {
+  const actual = await importOriginal<typeof import('../components/HourlyChartView')>();
+  return {
+    ...actual,
+    default: (props: { data: HourlyChartPoint[] }) => {
+      chartRender(props.data);
+      return createElement(actual.default, props);
+    },
+  };
+});
 
 it('shows all Beijing hours and leaves future hours without counts', () => {
   const data = todayHourlyData({

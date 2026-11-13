@@ -1,4 +1,4 @@
-import { useContext, useEffect, useLayoutEffect, useState } from 'react';
+import { useContext, useEffect, useState, type RefObject } from 'react';
 import { Alert, Button, Card, Col, Form, Input, InputNumber, Row, Select, Switch, type FormInstance } from 'antd';
 import { describeNewGridConfig, diffGridConfig, type FieldChange } from '../lib/configDiff';
 import { positiveDecimalText } from '../lib/format';
@@ -12,13 +12,15 @@ export type FormValues = Omit<GridConfig, 'post_only'>;
 export const defaults: FormValues = { symbol: '', direction: 'LONG', grid_interval: '0.1', order_amount_usdc: '100', buy_window: 3, sell_window: 3, min_price: null, max_price: null, max_position_usdc: '1000', pause_on_max_position: true, cancel_opening_on_max_position: false, min_liquidation_distance_pct: null };
 const directionOptions = [{ value: 'LONG', label: '做多 · 买入开仓 / 卖出平仓' }, { value: 'SHORT', label: '做空 · 卖出开仓 / 买入平仓' }];
 
-export function AccountMarkBridge({ symbol, mode, onMark }: { symbol: string; mode: Mode | undefined; onMark: (mark: string | undefined) => void }) {
+export function useLiveSymbolMark(symbol: string | undefined, mode: Mode | undefined, enabled: boolean): string | undefined {
   const accounts = useContext(AccountsContext);
-  const entry = accounts.find(item => item.snapshot.symbol === symbol && item.mode === mode && !item.account_observation_stale);
+  const entry = enabled && symbol
+    ? accounts.find(item => item.snapshot.symbol === symbol && item.mode === mode && !item.account_observation_stale)
+    : undefined;
   useExpired(entry ? entryMarkExpiry(entry, Date.now()) : Infinity);
-  const next = entry && isEntryMarkFresh(entry, Date.now()) ? positiveDecimalText(entry.snapshot.ticker.mark_price) ?? undefined : undefined;
-  useLayoutEffect(() => { onMark(next); }, [next, onMark]);
-  return null;
+  return entry && isEntryMarkFresh(entry, Date.now())
+    ? positiveDecimalText(entry.snapshot.ticker.mark_price) ?? undefined
+    : undefined;
 }
 
 export function LiveConfigConfirmContent({ changes, values }: { changes: FieldChange[] | null; values: FormValues }) {
@@ -105,13 +107,13 @@ export function PairBasicSection({
 }
 
 export function PairGridParamsSection({
-  effectiveMark,
+  effectiveMarkRef,
   tickSize,
   stepSize,
   minQty,
   minNotional,
 }: {
-  effectiveMark: string | undefined;
+  effectiveMarkRef: RefObject<string | undefined>;
   tickSize: string | undefined;
   stepSize: string | undefined;
   minQty: string | undefined;
@@ -120,7 +122,7 @@ export function PairGridParamsSection({
   return <Card title="网格参数">
     <Row gutter={[20, 16]}>
       <Col xs={24} md={12}><Form.Item name="grid_interval" label="网格间距" dependencies={['symbol']} extra="相邻网格价格的固定差值，单位为报价资产" rules={[{ required: true, message: '请输入网格间距' }, () => ({ validator: (_, value) => { if (value == null || value === '') return Promise.resolve(); if (!isPositiveDecimal(value)) return Promise.reject(new Error('网格间距必须大于 0')); const error = gridIntervalError(value, tickSize); return error ? Promise.reject(new Error(error)) : Promise.resolve(); } })]}><InputNumber stringMode min="0" className="full-width-input" /></Form.Item></Col>
-      <Col xs={24} md={12}><Form.Item name="order_amount_usdc" label="每格金额（报价资产）" dependencies={['symbol']} rules={[{ required: true, message: '请输入每格金额' }, () => ({ validator: (_, value) => { if (value == null || value === '') return Promise.resolve(); if (!isPositiveDecimal(value)) return Promise.reject(new Error('每格金额必须大于 0')); const error = orderAmountError(value, effectiveMark, { stepSize, minQty, minNotional }); return error ? Promise.reject(new Error(error)) : Promise.resolve(); } })]}><InputNumber stringMode min="0" className="full-width-input" /></Form.Item></Col>
+      <Col xs={24} md={12}><Form.Item name="order_amount_usdc" label="每格金额（报价资产）" dependencies={['symbol']} rules={[{ required: true, message: '请输入每格金额' }, () => ({ validator: (_, value) => { if (value == null || value === '') return Promise.resolve(); if (!isPositiveDecimal(value)) return Promise.reject(new Error('每格金额必须大于 0')); const error = orderAmountError(value, effectiveMarkRef.current, { stepSize, minQty, minNotional }); return error ? Promise.reject(new Error(error)) : Promise.resolve(); } })]}><InputNumber stringMode min="0" className="full-width-input" /></Form.Item></Col>
       <Col xs={24} md={12}><Form.Item name="buy_window" label="买单窗口" extra="当前价格下方预挂的买单数量，范围为 1–50" rules={[{ required: true }]}><InputNumber min={1} max={50} precision={0} className="full-width-input" /></Form.Item></Col>
       <Col xs={24} md={12}><Form.Item name="sell_window" label="卖单窗口" extra="当前价格上方预挂的卖单数量，范围为 1–50" rules={[{ required: true }]}><InputNumber min={1} max={50} precision={0} className="full-width-input" /></Form.Item></Col>
     </Row>
@@ -151,20 +153,24 @@ export function PairRiskAndRangeSection() {
   </div>;
 }
 
-export function SaveBarStatus({ form, adding, dirty, symbol, baseline }: { form: FormInstance<FormValues>; adding: boolean; dirty: boolean; symbol: string | undefined; baseline: { symbol: string; config: GridConfig } | null }) {
+function DirtySaveBarStatus({ form, symbol, baseline }: { form: FormInstance<FormValues>; symbol: string | undefined; baseline: { symbol: string; config: GridConfig } | null }) {
   const watched = Form.useWatch([], form) as FormValues | undefined;
   const [showChanges, setShowChanges] = useState(false);
   useEffect(() => {
-    if (!dirty) setShowChanges(false);
-  }, [dirty]);
-  useEffect(() => {
     setShowChanges(false);
   }, [symbol]);
-  const pending = !adding && dirty && watched && baseline && baseline.symbol === symbol ? diffGridConfig(baseline.config, watched) : [];
+  const pending = watched && baseline && baseline.symbol === symbol ? diffGridConfig(baseline.config, watched) : [];
   const expanded = showChanges && pending.length > 0;
   return <div className="save-bar-status">
-    <span className="muted" role="status">{dirty ? (pending.length ? `已修改 ${pending.length} 项` : '有未保存的修改') : adding ? '确认参数后保存并添加交易对' : '所有修改已保存'}</span>
+    <span className="muted" role="status">{pending.length ? `已修改 ${pending.length} 项` : '有未保存的修改'}</span>
     {pending.length > 0 && <Button type="link" size="small" aria-expanded={expanded} aria-controls="pending-changes" onClick={() => setShowChanges(value => !value)}>{expanded ? '收起' : '查看'}</Button>}
     {expanded && <ul id="pending-changes" className="save-bar-changes">{pending.map(change => <li key={change.key} className={change.risky ? 'confirm-risky' : undefined}><span>{change.label}</span><span><s>{change.before}</s> → <strong>{change.after}</strong></span></li>)}</ul>}
+  </div>;
+}
+
+export function SaveBarStatus({ form, adding, dirty, symbol, baseline }: { form: FormInstance<FormValues>; adding: boolean; dirty: boolean; symbol: string | undefined; baseline: { symbol: string; config: GridConfig } | null }) {
+  if (!adding && dirty) return <DirtySaveBarStatus form={form} symbol={symbol} baseline={baseline} />;
+  return <div className="save-bar-status">
+    <span className="muted" role="status">{dirty ? '有未保存的修改' : adding ? '确认参数后保存并添加交易对' : '所有修改已保存'}</span>
   </div>;
 }

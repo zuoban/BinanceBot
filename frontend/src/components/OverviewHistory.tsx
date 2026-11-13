@@ -1,14 +1,14 @@
-import { Suspense, lazy, useMemo, useState } from 'react';
+import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
 import { Card, Select } from 'antd';
 import { useOverviewHistory } from '../lib/queries';
 import { compactNumber, isValidEpochMs, modeLabel, numeric } from '../lib/format';
 import { useUtcHour } from '../lib/useNow';
 import type { HistoryAccount, OverviewHistoryData } from '../lib/types';
 import { ErrorNotice } from './Common';
-import { DailySnapshotsSection } from './DailySnapshotsSection';
 import { LoadErrorBoundary } from './LoadErrorBoundary';
 
 const OverviewHistoryChart = lazy(() => import('./OverviewHistoryChart'));
+const LazyDailySnapshotsSection = lazy(() => import('./DailySnapshotsSection').then(mod => ({ default: mod.DailySnapshotsSection })));
 const historyDateFormat = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
 const formatDate = (hour: number) => isValidEpochMs(hour * 1000) ? historyDateFormat.format(hour * 1000) : '--';
 const accountKey = (account: HistoryAccount) => account.account_id === null ? `${account.mode}\0${account.asset}` : `${account.mode}\0${account.asset}\0${account.account_id}`;
@@ -77,7 +77,17 @@ function buildHistorySeries(
 
 export function OverviewHistory() {
   const history = useOverviewHistory();
-  const lastHour = useUtcHour() * 3600;
+  const utcHour = useUtcHour();
+  const lastHour = utcHour * 3600;
+  const initialHourRef = useRef(utcHour);
+  const refetchHistory = 'refetch' in history && typeof history.refetch === 'function' ? history.refetch : undefined;
+  const refetchHistoryRef = useRef(refetchHistory);
+  refetchHistoryRef.current = refetchHistory;
+  useEffect(() => {
+    if (initialHourRef.current === utcHour) return;
+    initialHourRef.current = utcHour;
+    void refetchHistoryRef.current?.();
+  }, [utcHour]);
   const [selected, setSelected] = useState<{ current: string; key: string }>();
   const snapshots = history.data?.snapshots;
   const currentAccounts = history.data?.current_accounts;
@@ -145,7 +155,7 @@ export function OverviewHistory() {
             </div>
           </div>
         )}
-        {dailySnapshots.length > 0 && <DailySnapshotsSection snapshots={dailySnapshots} />}
+        {dailySnapshots.length > 0 && <LoadErrorBoundary label="每日运行快照"><Suspense fallback={<div className="history-empty history-plot-loading" role="status">正在加载每日运行快照…</div>}><LazyDailySnapshotsSection snapshots={dailySnapshots} /></Suspense></LoadErrorBoundary>}
       </>
     )}
   </Card>;

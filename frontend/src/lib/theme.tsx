@@ -1,26 +1,9 @@
-import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useState } from 'react';
+import type { ReactNode } from 'react';
 import { ConfigProvider, theme as antdTheme } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import { componentColors, dimensions, fonts, palettes } from './designTokens';
-
-export type ThemePreference = 'system' | 'light' | 'dark';
-const storageKey = 'binance_bot_theme';
-const isPreference = (value: string | null): value is ThemePreference => value === 'system' || value === 'light' || value === 'dark';
-const readPreference = (): ThemePreference => {
-  try {
-    const value = localStorage.getItem(storageKey);
-    return isPreference(value) ? value : 'system';
-  } catch { return 'system'; }
-};
-const systemDark = () => {
-  try { return typeof window.matchMedia === 'function' && window.matchMedia('(prefers-color-scheme: dark)').matches; } catch { return false; }
-};
-
-const ThemeContext = createContext<{ preference: ThemePreference; setPreference: (value: ThemePreference) => void }>({
-  preference: 'system', setPreference: () => {},
-});
-
-export const useTheme = () => useContext(ThemeContext);
+import { ThemeStateProvider, useHasOuterThemeState, useThemeDark } from './themeState';
+export { useTheme, type ThemePreference } from './themeState';
 
 function buildAntdTheme(dark: boolean) {
   const palette = palettes[dark ? 'dark' : 'light'];
@@ -102,39 +85,13 @@ function buildAntdTheme(dark: boolean) {
 }
 const antdThemes = { light: buildAntdTheme(false), dark: buildAntdTheme(true) };
 
-export function ThemeProvider({ children }: { children: React.ReactNode }) {
-  const [preference, setPreferenceState] = useState<ThemePreference>(readPreference);
-  const [darkSystem, setDarkSystem] = useState(systemDark);
-  const dark = preference === 'dark' || (preference === 'system' && darkSystem);
-  const palette = palettes[dark ? 'dark' : 'light'];
-  const setPreference = useCallback((value: ThemePreference) => {
-    setPreferenceState(value);
-    try { localStorage.setItem(storageKey, value); } catch { /* Keep the choice for this session. */ }
-  }, []);
-  const value = useMemo(() => ({ preference, setPreference }), [preference, setPreference]);
+function AntdThemeBridge({ children }: { children: ReactNode }) {
+  const dark = useThemeDark();
+  return <ConfigProvider locale={zhCN} theme={antdThemes[dark ? 'dark' : 'light']}>{children}</ConfigProvider>;
+}
 
-  useEffect(() => {
-    if (typeof window.matchMedia !== 'function') return;
-    const media = window.matchMedia('(prefers-color-scheme: dark)');
-    const update = () => setDarkSystem(media.matches);
-    update();
-    media.addEventListener('change', update);
-    return () => media.removeEventListener('change', update);
-  }, []);
-  useEffect(() => {
-    const update = (event: StorageEvent) => {
-      if (event.key === storageKey || event.key === null) setPreferenceState(readPreference());
-    };
-    window.addEventListener('storage', update);
-    return () => window.removeEventListener('storage', update);
-  }, []);
-  useLayoutEffect(() => {
-    document.documentElement.dataset.theme = dark ? 'dark' : 'light';
-    document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
-    document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')?.setAttribute('content', palette['--bg-page']);
-  }, [dark, palette]);
-
-  return <ThemeContext.Provider value={value}>
-    <ConfigProvider locale={zhCN} theme={antdThemes[dark ? 'dark' : 'light']}>{children}</ConfigProvider>
-  </ThemeContext.Provider>;
+export function ThemeProvider({ children }: { children: ReactNode }) {
+  const hasOuterState = useHasOuterThemeState();
+  const bridged = <AntdThemeBridge>{children}</AntdThemeBridge>;
+  return hasOuterState ? bridged : <ThemeStateProvider>{bridged}</ThemeStateProvider>;
 }

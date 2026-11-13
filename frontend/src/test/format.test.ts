@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { compareSignedDecimals, formatDecimalDisplay, parseSignedDecimal, parseUnsignedDecimal, subSignedDecimals } from '../lib/decimal';
-import { ageText, beijingDay, isValidEpochMs, number, positiveDecimalText, positivePrice, price, quantity, time, trimFractionZeros } from '../lib/format';
-import { accountGroups, availableRatio, comparePositionAmount, entryChange, entryMarkExpiry, groupTradePnl, isEntryMarkFresh, nextAccountExpiry, positionAmount, positionGroups, todayCount, todayPnlGroups } from '../lib/portfolio';
+import { ageText, beijingDay, cnyText, isValidEpochMs, number, positiveDecimalText, positivePrice, price, quantity, time, trimFractionZeros } from '../lib/format';
+import { accountGroups, availableRatio, comparePositionAmount, entryChange, entryMarkExpiry, groupTradePnl, isEntryMarkFresh, nextAccountExpiry, positionAmount, positionGroups, quoteAsset, todayCount, todayPnlGroups } from '../lib/portfolio';
+import { nextAgeBoundaryDelay } from '../lib/useNow';
 import { snapshot } from './fixtures';
 
 it('removes only insignificant fractional zeros and normalizes negative zero after rounding', () => {
@@ -364,4 +365,36 @@ it('evaluates mark freshness and exact expiry boundaries across clock skew', () 
   expect(isEntryMarkFresh(skewed, now)).toBe(true);
   expect(entryMarkExpiry(skewed, now)).toBe(now + 10_000 - 1);
   expect(isEntryMarkFresh(skewed, now + 10_000)).toBe(false);
+});
+
+it('resolves expanded quote assets and preserves >2^53 decimal precision in AccountGroup and cnyText', () => {
+  expect(quoteAsset('BTCBFUSD')).toBe('BFUSD');
+  expect(quoteAsset('ETHBTC')).toBe('BTC');
+  expect(quoteAsset('SOLDAI')).toBe('DAI');
+  expect(quoteAsset('UNKNOWNPERP', 'usdt')).toBe('USDT');
+  expect(quoteAsset('BTC')).toBe('');
+
+  const now = Date.now();
+  const large = snapshot('BTCUSDC', 'LIVE');
+  large.account = {
+    ...large.account,
+    margin_balance: '9007199254740993.12',
+    available_balance: '9007199254740993.12',
+    total_wallet_balance: '9007199254740993.12',
+    unrealized_profit: '0',
+    update_time: new Date(now).toISOString(),
+  };
+  large.account_cny_rate = { asset: 'USDC', cny_per_unit: '7', updated_at: new Date(now).toISOString() };
+  const group = accountGroups([{ snapshot: large, mode: 'LIVE' }], now)[0];
+  expect(group.equityText).toBe('9007199254740993.12');
+  expect(group.cnyText).toBe('63050394783186951.84');
+  expect(cnyText(group.cnyText)).toBe('≈ ¥63,050,394,783,186,951.84');
+});
+
+it('schedules exact delays to the next ageText unit transition', () => {
+  const now = 1_700_000_000_000;
+  expect(nextAgeBoundaryDelay([now - 500], now)).toBe(1505);
+  expect(nextAgeBoundaryDelay([now - 10_200], now)).toBe(805);
+  expect(nextAgeBoundaryDelay([now - 125_000], now)).toBe(55_005);
+  expect(nextAgeBoundaryDelay([now - 3_700_000], now)).toBe(3_500_005);
 });
