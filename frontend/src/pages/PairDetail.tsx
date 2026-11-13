@@ -1,4 +1,4 @@
-import { Suspense, lazy, useContext, useMemo, type ReactNode } from 'react';
+import { Suspense, lazy, useContext, useMemo, useRef, type ReactNode } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { Alert, Button, Card, Col, Descriptions, Row, Statistic, Tabs } from 'antd';
 import { SettingOutlined } from '@ant-design/icons';
@@ -20,12 +20,15 @@ import { DetailLoading } from '../components/Loading';
 import { useDocumentTitle } from '../lib/documentTitle';
 import { useUrlParam } from '../lib/urlState';
 import { useAccountGroups, useBeijingDay } from '../lib/useNow';
+import { sameLogs, sameTrades } from '../lib/tableEqual';
 
 const OrdersTable = lazy(() => import('../components/DataTables').then(m => ({ default: m.OrdersTable })));
 const TradesTable = lazy(() => import('../components/DataTables').then(m => ({ default: m.TradesTable })));
 const LogsTable = lazy(() => import('../components/DataTables').then(m => ({ default: m.LogsTable })));
 
 const detailTabs = ['monitor', 'orders', 'trades', 'logs'] as const;
+const EMPTY_TRADES: Trade[] = [];
+const EMPTY_LOGS: Log[] = [];
 
 function LazyTabTable({ label, activeTab, children }: { label: string; activeTab: string; children: ReactNode }) {
   return <LoadErrorBoundary label={label} resetKey={activeTab}>
@@ -90,14 +93,93 @@ function usePairTabHistory(pair: Pair | undefined, tab: (typeof detailTabs)[numb
     enabled: !!pair && tab === 'logs',
     refetchInterval: 5_000,
   });
-  const trades = useMemo(
-    () => (tab === 'trades' ? resolveTrades(snapshot, tradesQuery.data, tradesQuery.isError, tradesQuery.dataUpdatedAt, snapshotUpdatedAt) : []),
-    [tab, snapshot, tradesQuery.data, tradesQuery.isError, tradesQuery.dataUpdatedAt, snapshotUpdatedAt],
-  );
-  const logs = useMemo(
-    () => (tab === 'logs' ? resolveLogs(snapshot, logsQuery.data, logsQuery.isError, logsQuery.dataUpdatedAt, snapshotUpdatedAt) : []),
-    [tab, snapshot, logsQuery.data, logsQuery.isError, logsQuery.dataUpdatedAt, snapshotUpdatedAt],
-  );
+  const tradesCacheRef = useRef<{
+    symbol: string | undefined;
+    mode: Snapshot['mode'] | undefined;
+    totalTrades: number | undefined;
+    recentTrades: Trade[] | undefined;
+    fetched: Trade[] | undefined;
+    isError: boolean;
+    fetchedAt: number;
+    fetchOrder: number;
+    result: Trade[];
+  } | null>(null);
+  const logsCacheRef = useRef<{
+    hasSnapshot: boolean;
+    recentLogs: Log[] | undefined;
+    fetched: Log[] | undefined;
+    isError: boolean;
+    fetchedAt: number;
+    fetchOrder: number;
+    result: Log[];
+  } | null>(null);
+  let trades: Trade[];
+  if (tab !== 'trades') {
+    trades = EMPTY_TRADES;
+  } else {
+    const fetchOrder = tradesQuery.dataUpdatedAt > snapshotUpdatedAt ? 1 : snapshotUpdatedAt > tradesQuery.dataUpdatedAt ? -1 : 0;
+    const recentTrades = snapshot?.recent_trades;
+    const cached = tradesCacheRef.current;
+    if (
+      cached
+      && cached.symbol === snapshot?.symbol
+      && cached.mode === snapshot?.mode
+      && cached.totalTrades === snapshot?.stats.total_trades
+      && cached.fetched === tradesQuery.data
+      && cached.isError === tradesQuery.isError
+      && cached.fetchedAt === tradesQuery.dataUpdatedAt
+      && cached.fetchOrder === fetchOrder
+      && (cached.recentTrades === undefined) === (recentTrades === undefined)
+      && sameTrades(cached.recentTrades ?? EMPTY_TRADES, recentTrades ?? EMPTY_TRADES)
+    ) {
+      trades = cached.result;
+    } else {
+      trades = resolveTrades(snapshot, tradesQuery.data, tradesQuery.isError, tradesQuery.dataUpdatedAt, snapshotUpdatedAt);
+      tradesCacheRef.current = {
+        symbol: snapshot?.symbol,
+        mode: snapshot?.mode,
+        totalTrades: snapshot?.stats.total_trades,
+        recentTrades,
+        fetched: tradesQuery.data,
+        isError: tradesQuery.isError,
+        fetchedAt: tradesQuery.dataUpdatedAt,
+        fetchOrder,
+        result: trades,
+      };
+    }
+  }
+  let logs: Log[];
+  if (tab !== 'logs') {
+    logs = EMPTY_LOGS;
+  } else {
+    const fetchOrder = logsQuery.dataUpdatedAt > snapshotUpdatedAt ? 1 : snapshotUpdatedAt > logsQuery.dataUpdatedAt ? -1 : 0;
+    const hasSnapshot = Boolean(snapshot);
+    const recentLogs = snapshot?.recent_logs;
+    const cached = logsCacheRef.current;
+    if (
+      cached
+      && cached.hasSnapshot === hasSnapshot
+      && cached.fetched === logsQuery.data
+      && cached.isError === logsQuery.isError
+      && cached.fetchedAt === logsQuery.dataUpdatedAt
+      && cached.fetchOrder === fetchOrder
+      && (cached.recentLogs === undefined) === (recentLogs === undefined)
+      && sameLogs(cached.recentLogs ?? EMPTY_LOGS, recentLogs ?? EMPTY_LOGS)
+    ) {
+      logs = cached.result;
+    } else {
+      logs = resolveLogs(snapshot, logsQuery.data, logsQuery.isError, logsQuery.dataUpdatedAt, snapshotUpdatedAt);
+      logsCacheRef.current = {
+        hasSnapshot,
+        recentLogs,
+        fetched: logsQuery.data,
+        isError: logsQuery.isError,
+        fetchedAt: logsQuery.dataUpdatedAt,
+        fetchOrder,
+        result: logs,
+      };
+    }
+  }
   return { trades, logs };
 }
 

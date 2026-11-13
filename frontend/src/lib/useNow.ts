@@ -63,7 +63,7 @@ export function useRelativeNow(timestamps: readonly number[], enabled = true) {
       if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
       const delay = nextAgeBoundaryDelay(timestamps, current);
       if (Number.isFinite(delay)) {
-        timer = window.setTimeout(schedule, Math.min(delay, MAX_TIMEOUT_MS));
+        timer = window.setTimeout(schedule, Math.min(Math.max(500, delay), MAX_TIMEOUT_MS));
       }
     };
     schedule();

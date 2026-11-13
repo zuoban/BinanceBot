@@ -1,4 +1,4 @@
-import { memo, useId, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from 'react';
+import { memo, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from 'react';
 import { buildMonotoneCurve, estimateYAxisWidth, niceLinearTicks, useChartWidth, type PlotPoint } from '../lib/chartMath';
 import { isValidEpochMs } from '../lib/format';
 
@@ -20,8 +20,10 @@ export default memo(function OverviewHistoryChart({ data, ticks, asset, formatVa
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const width = useChartWidth(wrapRef);
+  const rectRef = useRef<DOMRect | null>(null);
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const [focusIndex, setFocusIndex] = useState<number | null>(null);
+  useEffect(() => { rectRef.current = null; }, [width]);
   const rawId = useId().replace(/[^a-zA-Z0-9_-]/g, '');
   const fillId = `equityAreaFill-${rawId}`;
   const useWan = data.some(point => point.equity !== null && Math.abs(point.equity) >= 100_000);
@@ -115,7 +117,7 @@ export default memo(function OverviewHistoryChart({ data, ticks, asset, formatVa
 
   const handleMouseMove = (event: MouseEvent<SVGSVGElement>) => {
     if (!plottedPoints.length) return;
-    const rect = event.currentTarget.getBoundingClientRect();
+    const rect = rectRef.current ?? (rectRef.current = event.currentTarget.getBoundingClientRect());
     const cursorX = event.clientX - rect.left;
     if (cursorX < plotLeft - 8 || cursorX > plotRight + 8) {
       setHoverIndex(null);
@@ -159,7 +161,7 @@ export default memo(function OverviewHistoryChart({ data, ticks, asset, formatVa
 
   const placeTooltipLeft = activePlot ? activePlot.cx > width * 0.55 : false;
 
-  return <div ref={wrapRef} className="chart-wrap" style={{ height: chartHeight }} onMouseLeave={() => setHoverIndex(null)}>
+  return <div ref={wrapRef} className="chart-wrap" style={{ height: chartHeight }} onMouseEnter={() => { rectRef.current = null; }} onMouseLeave={() => { rectRef.current = null; setHoverIndex(null); }}>
     <svg
       className="chart-surface"
       width={width}

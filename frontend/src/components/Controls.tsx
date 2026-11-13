@@ -193,6 +193,12 @@ function formatControlFailure(submitted: boolean, text: string): { resultText: s
 export function ControlProvider({ pairs, children }: { pairs?: Pair[]; children: React.ReactNode }) {
   const { message } = App.useApp(), { confirm } = useConfirmDialog(), client = useQueryClient();
   const locked = useRef(new Set<string>());
+  const pendingInvalidations = useRef<{
+    scheduled: boolean;
+    accounts: boolean;
+    snapshots: Set<string>;
+    configSymbols: Set<string>;
+  }>({ scheduled: false, accounts: false, snapshots: new Set(), configSymbols: new Set() });
   const { mounted, abortRef, sleep } = useAbortableSleep();
   const runRef = useRef<ControlState['run']>(async () => 'not_submitted');
   const store = useMemo(() => {
@@ -349,11 +355,34 @@ export function ControlProvider({ pairs, children }: { pairs?: Pair[]; children:
       locked.current.delete(pair.symbol);
       store.finishSymbol(pair.symbol, locked.current, mounted.current);
       if (submitted) {
-        void invalidateStrategyQueries(client, {
-          accounts: true,
-          snapshot: pair.symbol,
-          ...(action === 'reverse' ? { configSymbol: pair.symbol } : {}),
-        });
+        const batch = pendingInvalidations.current;
+        batch.accounts = true;
+        batch.snapshots.add(pair.symbol);
+        if (action === 'reverse') batch.configSymbols.add(pair.symbol);
+        if (!batch.scheduled) {
+          batch.scheduled = true;
+          queueMicrotask(() => {
+            const current = pendingInvalidations.current;
+            const accounts = current.accounts;
+            const snapshots = [...current.snapshots];
+            const configSymbols = [...current.configSymbols];
+            current.scheduled = false;
+            current.accounts = false;
+            current.snapshots.clear();
+            current.configSymbols.clear();
+            if (snapshots.length <= 1 && configSymbols.length <= 1) {
+              void invalidateStrategyQueries(client, {
+                accounts,
+                snapshot: snapshots[0] ?? false,
+                ...(configSymbols[0] ? { configSymbol: configSymbols[0] } : {}),
+              });
+              return;
+            }
+            void invalidateStrategyQueries(client, { accounts, snapshot: false });
+            for (const sym of snapshots) void client.invalidateQueries({ queryKey: ['snapshot', sym] });
+            for (const sym of configSymbols) void client.invalidateQueries({ queryKey: ['config', sym] });
+          });
+        }
       }
     }
   }, [abortRef, client, confirm, message, mounted, sleep, store]);

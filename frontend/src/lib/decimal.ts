@@ -13,8 +13,9 @@ const MAX_DECIMAL_PART_DIGITS = 30;
 const DECIMAL_CACHE_LIMIT = 4096;
 const unsignedDecimalCache = new Map<string, Fixed | null>();
 const signedDecimalCache = new Map<string, Fixed | null>();
+const decimalDisplayCache = new Map<string, string | null>();
 
-function setDecimalCache(cache: Map<string, Fixed | null>, key: string, value: Fixed | null) {
+function setDecimalCache<V>(cache: Map<string, V>, key: string, value: V) {
   if (cache.has(key)) {
     cache.delete(key);
   } else if (cache.size >= DECIMAL_CACHE_LIMIT) {
@@ -140,9 +141,19 @@ interface DecimalDisplayOptions {
 }
 
 export function formatDecimalDisplay(value: unknown, options: DecimalDisplayOptions = {}): string | null {
-  const parsed = parseSignedDecimal(value);
-  if (!parsed) return null;
   const { minFractionDigits = 0, maxFractionDigits, trimZeros = true } = options;
+  const cacheKey = typeof value === 'string' && value.length <= MAX_DECIMAL_INPUT_LENGTH
+    ? `${minFractionDigits}:${maxFractionDigits ?? ''}:${trimZeros ? 1 : 0}:${value}`
+    : null;
+  if (cacheKey !== null) {
+    const cached = decimalDisplayCache.get(cacheKey);
+    if (cached !== undefined) return cached;
+  }
+  const parsed = parseSignedDecimal(value);
+  if (!parsed) {
+    if (cacheKey !== null) setDecimalCache(decimalDisplayCache, cacheKey, null);
+    return null;
+  }
   let { n, s } = parsed;
   if (maxFractionDigits !== undefined && s > maxFractionDigits) {
     const factor = 10n ** BigInt(s - maxFractionDigits);
@@ -155,7 +166,9 @@ export function formatDecimalDisplay(value: unknown, options: DecimalDisplayOpti
     s = minFractionDigits;
   }
   if (n === 0n) {
-    return !trimZeros && minFractionDigits > 0 ? `0.${'0'.repeat(minFractionDigits)}` : '0';
+    const zero = !trimZeros && minFractionDigits > 0 ? `0.${'0'.repeat(minFractionDigits)}` : '0';
+    if (cacheKey !== null) setDecimalCache(decimalDisplayCache, cacheKey, zero);
+    return zero;
   }
   const negative = n < 0n;
   const abs = negative ? -n : n;
@@ -168,5 +181,7 @@ export function formatDecimalDisplay(value: unknown, options: DecimalDisplayOpti
     if (fraction.length < minFractionDigits) fraction = fraction.padEnd(minFractionDigits, '0');
   }
   const unsigned = fraction ? `${whole}.${fraction}` : whole;
-  return negative ? `-${unsigned}` : unsigned;
+  const formatted = negative ? `-${unsigned}` : unsigned;
+  if (cacheKey !== null) setDecimalCache(decimalDisplayCache, cacheKey, formatted);
+  return formatted;
 }

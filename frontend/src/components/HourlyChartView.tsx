@@ -1,4 +1,4 @@
-import { memo, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from 'react';
+import { memo, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from 'react';
 import { estimateYAxisWidth, niceIntegerTicks, topRoundedBarPath, useChartWidth } from '../lib/chartMath';
 
 export type HourlyChartPoint = { hour: string; 买入: number | null; 卖出: number | null };
@@ -14,8 +14,10 @@ const MAX_BAR_SIZE = 12;
 export default memo(function HourlyChartView({ data }: { data: HourlyChartPoint[] }) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const width = useChartWidth(wrapRef);
+  const rectRef = useRef<DOMRect | null>(null);
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const [focusIndex, setFocusIndex] = useState<number | null>(null);
+  useEffect(() => { rectRef.current = null; }, [width]);
 
   const { yTicks, domainMax, yAxisWidth } = useMemo(() => {
     let maxCount = 0;
@@ -72,7 +74,7 @@ export default memo(function HourlyChartView({ data }: { data: HourlyChartPoint[
 
   const handleMouseMove = (event: MouseEvent<SVGSVGElement>) => {
     if (!data.length) return;
-    const rect = event.currentTarget.getBoundingClientRect();
+    const rect = rectRef.current ?? (rectRef.current = event.currentTarget.getBoundingClientRect());
     const offsetX = event.clientX - rect.left - plotLeft;
     if (offsetX < 0 || offsetX > plotWidth) {
       setHoverIndex(null);
@@ -109,7 +111,7 @@ export default memo(function HourlyChartView({ data }: { data: HourlyChartPoint[
   const activeCenterX = activeIndex !== null ? plotLeft + (activeIndex + 0.5) * slotWidth : 0;
   const placeTooltipLeft = activeCenterX > width * 0.55;
 
-  return <div ref={wrapRef} className="chart-wrap" style={{ height: CHART_HEIGHT }} onMouseLeave={() => setHoverIndex(null)}>
+  return <div ref={wrapRef} className="chart-wrap" style={{ height: CHART_HEIGHT }} onMouseEnter={() => { rectRef.current = null; }} onMouseLeave={() => { rectRef.current = null; setHoverIndex(null); }}>
     <svg
       className="chart-surface"
       width={width}
