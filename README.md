@@ -69,7 +69,7 @@
 9. **全套 Docker 容器化与 GitHub Packages 支持**：
    - 包含多阶段构建 `Dockerfile` 与 `docker-compose.yml`。
    - 配置 GitHub Actions 自动化 CI/CD，仅在发布 GitHub Release 后编译多架构镜像，将后端和前端镜像发布至 GitHub Packages（`ghcr.io/zuoban/binancebot` 和 `ghcr.io/zuoban/binancebot-frontend`）。
-10. **Telegram 与 ntfy 通知**：支持独立或同时启用 Telegram（Bot Token + Chat ID）与 ntfy（默认 `https://ntfy.sh` 或自建服务根地址 + Topic + 可选 Bearer 访问令牌）。启用后，每笔确认成交的标题按“方向｜交易对｜成交均价｜成交金额｜当天计数D｜本小时计数H”显示，成交均价按该订单实际成交均价去除尾随零展示，成交金额保留 2 位小数。计数按北京时间当天 00:00 起和成交所在小时分别统计，买单、卖单分开计数。同时展示账户权益、人民币估值、成交后的持仓金额、可用保证金及占比，平仓单附已实现盈亏（做多为卖单，做空为买单）。持仓金额按持仓数量绝对值 × 标记价格计算，以计价资产显示并保留 2 位小数；没有标记价格时暂用最新成交价，持仓或估值价格暂不可用时显示 `--`。每天北京时间 00:00 生成前一日运行数据快照（账户概览、成交笔数、已实现盈亏、持仓概览）并自动发送通知。策略启动、恢复及暂停不发送通知；全局风控触发时发送告警（ntfy 使用高优先级 `priority: 4`），包含触发原因和北京时间，同一轮持续触发只发送一次，风险解除后再次触发会重新通知。各通知渠道异步独立发送，单渠道失败记录日志且互不阻塞。模拟盘及实盘均支持。
+10. **Telegram 与 ntfy 通知**：支持独立或同时启用 Telegram（Bot Token + Chat ID）与 ntfy（默认 `https://ntfy.sh` 或自建服务根地址 + Topic + 可选 Bearer 访问令牌）。启用后，每笔确认成交的标题按“方向｜交易对｜成交均价｜成交金额”显示，成交均价按该订单实际成交均价去除尾随零展示，成交金额保留 2 位小数。计数按北京时间当天 00:00 起和成交所在小时分别统计，买单、卖单分开计数。正文展示“成交笔数：当天计数D｜本小时计数H”和成交后的持仓金额，不再展示账户权益、人民币估值及可用余额；平仓单附已实现盈亏（做多为卖单，做空为买单）。持仓金额按持仓数量绝对值 × 标记价格计算，以计价资产显示并保留 2 位小数；没有标记价格时暂用最新成交价，持仓或估值价格暂不可用时显示 `--`。每天北京时间 00:00 生成前一日运行数据快照（账户概览、成交笔数、已实现盈亏、持仓概览）并自动发送通知。策略启动、恢复及暂停不发送通知；全局风控触发时发送告警（ntfy 使用高优先级 `priority: 4`），包含触发原因和北京时间，同一轮持续触发只发送一次，风险解除后再次触发会重新通知。各通知渠道异步独立发送，单渠道失败记录日志且互不阻塞。模拟盘及实盘均支持。
 
 ---
 
@@ -146,15 +146,15 @@ Unix 上新建的数据库及目录使用私有权限；已有数据库及其 `-
 
 ### 2. 使用预构建镜像
 
-镜像仅在发布 GitHub Release 时构建并推送；面向 `main` 的 Pull Request 和推送到 `main` 都执行后端及前端质量检查（含前端 ESLint），单独推送版本标签或保存 Release 草稿不会更新镜像。版本标签应与 `Cargo.toml` 一致，例如 `v0.11.0`；应在最终代码提交后创建新标签，不移动已推送的旧标签。正式 Release 会更新 `latest`，预发布 Release 会发布对应版本镜像，但不会覆盖 `latest`。每次发布仍须通过后端和前端检查后才会构建镜像。CI 与后端 Docker 构建均固定使用 Rust 1.98.1，镜像构建按 `Cargo.lock` 锁定依赖。依赖安全审计（`cargo audit` 与前端生产依赖的 `npm audit`）由独立的 [安全审计工作流](.github/workflows/security.yml) 在依赖文件变更及每周定时执行，Dependabot 只提交次要和补丁版本更新（Cargo 与 npm 按生态合并为一个 Pull Request），大版本、Rust 与 Node 基础镜像需手动评估和升级；安全公告触发的更新不受此限制。
+镜像仅在发布 GitHub Release 时构建并推送；面向 `main` 的 Pull Request 和推送到 `main` 都执行后端及前端质量检查（含前端 ESLint），单独推送版本标签或保存 Release 草稿不会更新镜像。版本标签应与 `Cargo.toml` 一致，例如 `v0.12.0`；应在最终代码提交后创建新标签，不移动已推送的旧标签。正式 Release 会更新 `latest`，预发布 Release 会发布对应版本镜像，但不会覆盖 `latest`。每次发布仍须通过后端和前端检查后才会构建镜像。CI 与后端 Docker 构建均固定使用 Rust 1.98.1，镜像构建按 `Cargo.lock` 锁定依赖。依赖安全审计（`cargo audit` 与前端生产依赖的 `npm audit`）由独立的 [安全审计工作流](.github/workflows/security.yml) 在依赖文件变更及每周定时执行，Dependabot 只提交次要和补丁版本更新（Cargo 与 npm 按生态合并为一个 Pull Request），大版本、Rust 与 Node 基础镜像需手动评估和升级；安全公告触发的更新不受此限制。
 
 仓库 `main` 已将 GitHub Actions 的 `checks` 设为必需状态检查，并要求待合并分支跟上最新 `main`；管理员保留默认豁免。对应触发与检查定义见 [GitHub 工作流](.github/workflows/docker-publish.yml)。
 
-发布后的两个镜像均需要。Compose 默认固定使用 `0.11.0`；可通过同一个 `BOT_VERSION` 同时选择前后端版本，避免独立跟随 `latest`。使用仓库内的 Compose 配置运行：
+发布后的两个镜像均需要。Compose 默认固定使用 `0.12.0`；可通过同一个 `BOT_VERSION` 同时选择前后端版本，避免独立跟随 `latest`。使用仓库内的 Compose 配置运行：
 
 ```bash
-BOT_VERSION=0.11.0 ADMIN_PASSWORD='请替换为强密码' docker compose pull
-BOT_VERSION=0.11.0 ADMIN_PASSWORD='请替换为强密码' docker compose up -d
+BOT_VERSION=0.12.0 ADMIN_PASSWORD='请替换为强密码' docker compose pull
+BOT_VERSION=0.12.0 ADMIN_PASSWORD='请替换为强密码' docker compose up -d
 ```
 
 不设置 `ADMIN_PASSWORD` 时容器以无认证模式运行。后端镜像本身只提供 API，单独运行后端容器不会提供网页。镜像默认在容器内监听 `0.0.0.0`，端口沿用数据库配置（新数据库为 `8080`），不修改数据库中保存的监听配置；直接使用 `docker run` 时可通过 `-e ADMIN_PASSWORD=...` 启用登录，发布默认端口时请指定 `-p 127.0.0.1:8080:8080`，避免将未加密的 HTTP 服务暴露到所有宿主机接口。若覆盖镜像默认命令，需自行指定 `--host 0.0.0.0` 才能通过容器网络访问后端。前端通过同源 `/api`、`/ws` 代理连接后端，内置 Nginx 对 `POST /api/auth/login` 提供独立的源 IP 速率限制并传递 `X-Real-IP`；若后端仅能通过受控反向代理访问，可通过 `TRUSTED_PROXIES`（或 `--trusted-proxies`，逗号分隔 IP/CIDR，默认不信任任何转发头）允许后端按真实客户端 IP 隔离登录频控。生产反向代理必须支持 WebSocket Upgrade、透传包含端口的原始 `Host` 请求头并显式覆盖转发协议头（例如外层 TLS Nginx 必须配置 `proxy_set_header Host $http_host; proxy_set_header X-Forwarded-Proto $scheme;`，切勿使用 `$proxy_add_x_forwarded_proto` 追加，以通过后端 WebSocket 同源 `Origin` 校验），并将所有前端路由回退到 `index.html`。
