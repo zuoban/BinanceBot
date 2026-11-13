@@ -559,7 +559,7 @@ async fn wal_read_pool_serves_queries_without_blocking_on_held_write_transaction
     let dir = crate::test_support::TempTestDir::new("wal-read-pool");
     let path = dir.join("bot.db");
     let db = Arc::new(Database::open(&path).unwrap());
-    assert_eq!(db.read_conns.len(), 4);
+    assert_eq!(db.read_conns.len(), read_pool_size());
     for slot in &db.read_conns {
         let conn = slot.lock().unwrap();
         assert!(conn.execute("DELETE FROM trades", []).is_err());

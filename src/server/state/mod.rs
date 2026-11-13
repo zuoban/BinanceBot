@@ -35,6 +35,7 @@ pub(crate) use state_cleanup::MembershipGuard;
 use state_trades::{build_grid_stats, recent_trade_cache, RECENT_TRADE_LIMIT};
 
 const MAX_RECENT_LOGS: usize = 250;
+pub(crate) const WS_BROADCAST_CAPACITY: usize = 256;
 
 pub struct AppState {
     pub db: Arc<Database>,
@@ -353,7 +354,7 @@ impl AppState {
             snapshot_cache: snapshot::SnapshotCache::default(),
             auth,
             action_tx,
-            ws_broadcast_tx: broadcast::channel(100).0,
+            ws_broadcast_tx: broadcast::channel(WS_BROADCAST_CAPACITY).0,
             managed_router: std::sync::OnceLock::new(),
             telegram_notifier: TelegramNotifier::new(),
             ntfy_notifier: NtfyNotifier::new(),

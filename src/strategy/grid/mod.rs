@@ -449,7 +449,11 @@ impl GridTradingEngine {
                 ticker_res = self.ticker_rx.recv(), if ticker_open => {
                     match ticker_res {
                         Ok(ticker_update) => self.handle_ticker_update(ticker_update).await,
-                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            crate::metrics::TICKER_BROADCAST_LAGGED.inc();
+                            debug!(skipped, "Ticker receiver lagged");
+                            continue;
+                        }
                         Err(broadcast::error::RecvError::Closed) => ticker_open = false,
                     }
                 }

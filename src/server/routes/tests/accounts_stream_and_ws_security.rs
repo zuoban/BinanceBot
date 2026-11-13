@@ -508,7 +508,7 @@ async fn websocket_lagged_receiver_resyncs_snapshot_without_disconnecting() {
     assert_eq!(initial_json["type"], "snapshot");
 
     state.ticker.write().await.last_price = dec!(777.77);
-    for index in 0..150 {
+    for index in 0..crate::server::state::WS_BROADCAST_CAPACITY * 2 {
         let payload = serde_json::json!({
             "type": "log",
             "data": {"message": format!("burst-{index}")}

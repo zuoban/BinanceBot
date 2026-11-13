@@ -131,7 +131,14 @@ fn open_configured_connection(open_path: &Path, is_memory: bool) -> Result<Conne
     Ok(conn)
 }
 
-const READ_POOL_SIZE: usize = 4;
+const MIN_READ_POOL_SIZE: usize = 2;
+const MAX_READ_POOL_SIZE: usize = 8;
+
+fn read_pool_size() -> usize {
+    std::thread::available_parallelism()
+        .map_or(4, std::num::NonZeroUsize::get)
+        .clamp(MIN_READ_POOL_SIZE, MAX_READ_POOL_SIZE)
+}
 
 fn open_read_only_connection(open_path: &Path) -> Result<Connection> {
     // Open with VFS read-write flags so WAL shared-memory (`-shm`) can always
@@ -163,8 +170,9 @@ fn open_read_connection_pool(
     open_path: &Path,
     #[cfg(unix)] expected_identity: Option<(u64, u64)>,
 ) -> Result<Vec<Mutex<Connection>>> {
-    let mut pool = Vec::with_capacity(READ_POOL_SIZE);
-    for _ in 0..READ_POOL_SIZE {
+    let pool_size = read_pool_size();
+    let mut pool = Vec::with_capacity(pool_size);
+    for _ in 0..pool_size {
         #[cfg(unix)]
         if let Some(expected_id) = expected_identity {
             use std::os::unix::fs::MetadataExt;
@@ -548,18 +556,14 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_managed_orders_symbol ON managed_orders (symbol);
             CREATE TABLE IF NOT EXISTS order_identity_observations (account_key BLOB NOT NULL, client_order_id TEXT NOT NULL, expected_symbol TEXT NOT NULL, observed_client_order_id TEXT NOT NULL, observed_symbol TEXT NOT NULL, observed_side TEXT NOT NULL, observed_order_id INTEGER NOT NULL, expected_json TEXT NOT NULL, observed_json TEXT NOT NULL, PRIMARY KEY (account_key, client_order_id, expected_symbol, observed_client_order_id, observed_symbol, observed_side, observed_order_id));
             CREATE TABLE IF NOT EXISTS initial_order_responses (account_key BLOB NOT NULL, expected_symbol TEXT NOT NULL, client_order_id TEXT NOT NULL, observed_client_order_id TEXT NOT NULL, observed_symbol TEXT NOT NULL, observed_side TEXT NOT NULL, observed_order_id INTEGER NOT NULL, response_json TEXT NOT NULL, observation_id TEXT NOT NULL UNIQUE, batch_id TEXT NOT NULL);
-            CREATE INDEX IF NOT EXISTS idx_initial_order_responses_snapshot_scope ON initial_order_responses (account_key, expected_symbol) WHERE batch_id GLOB 'snapshot:*';
             CREATE TABLE IF NOT EXISTS terminal_order_disagreements (account_key BLOB NOT NULL, expected_symbol TEXT NOT NULL, client_order_id TEXT NOT NULL, first_json TEXT NOT NULL, conflicting_json TEXT NOT NULL, PRIMARY KEY (account_key, expected_symbol, client_order_id, first_json, conflicting_json));
             CREATE TABLE IF NOT EXISTS pair_intents (parent_client_order_id TEXT PRIMARY KEY, symbol TEXT NOT NULL, mode TEXT NOT NULL, order_json TEXT NOT NULL, created_at TEXT NOT NULL);
-            CREATE INDEX IF NOT EXISTS idx_pair_intents_scope_created ON pair_intents (symbol, mode, created_at);
             CREATE TABLE IF NOT EXISTS remainder_plans (target_client_order_id TEXT PRIMARY KEY, symbol TEXT NOT NULL, mode TEXT NOT NULL, active INTEGER NOT NULL, plan_json TEXT NOT NULL, updated_at TEXT NOT NULL);
             CREATE UNIQUE INDEX IF NOT EXISTS idx_active_remainder_plan ON remainder_plans (symbol, mode) WHERE active = 1;
-            CREATE INDEX IF NOT EXISTS idx_remainder_plans_inactive_scope ON remainder_plans (symbol, mode) WHERE active = 0;
             CREATE TABLE IF NOT EXISTS bot_runtime (id INTEGER PRIMARY KEY CHECK (id = 1), status TEXT NOT NULL, updated_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS grid_stats (id INTEGER PRIMARY KEY CHECK (id = 1), total_trades INTEGER NOT NULL, completed_cycles INTEGER NOT NULL, total_realized_profit TEXT NOT NULL, total_volume_usdc TEXT NOT NULL, updated_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS scoped_grid_stats (symbol TEXT NOT NULL, mode TEXT NOT NULL, total_trades INTEGER NOT NULL, completed_cycles INTEGER NOT NULL, total_realized_profit TEXT NOT NULL, total_volume_usdc TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (symbol, mode));
             CREATE TABLE IF NOT EXISTS auth_sessions (token TEXT PRIMARY KEY, created_at TEXT NOT NULL);
-            CREATE INDEX IF NOT EXISTS idx_auth_sessions_created_at ON auth_sessions (created_at);
             "#,
         )
         .context("Failed to initialize SQLite tables")?;

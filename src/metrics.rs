@@ -73,6 +73,8 @@ pub(crate) static USER_DATA_WS_RECONNECTS: Counter = Counter::new();
 pub(crate) static ORDER_RECONCILIATION_FAILURES: Counter = Counter::new();
 pub(crate) static POSITION_SYNC_FAILURES: Counter = Counter::new();
 pub(crate) static ACCOUNT_SYNC_FAILURES: Counter = Counter::new();
+pub(crate) static TICKER_BROADCAST_LAGGED: Counter = Counter::new();
+pub(crate) static WS_CLIENT_LAGGED: Counter = Counter::new();
 pub(crate) static HTTP_REQUESTS_2XX: Counter = Counter::new();
 pub(crate) static HTTP_REQUESTS_4XX: Counter = Counter::new();
 pub(crate) static HTTP_REQUESTS_5XX: Counter = Counter::new();
@@ -127,6 +129,15 @@ pub(crate) fn render() -> String {
             ("kind=\"open_orders\"", &ORDER_RECONCILIATION_FAILURES),
             ("kind=\"position\"", &POSITION_SYNC_FAILURES),
             ("kind=\"account\"", &ACCOUNT_SYNC_FAILURES),
+        ],
+    );
+    render_counter(
+        &mut out,
+        "binance_bot_broadcast_lagged_total",
+        "Broadcast receivers that fell behind and skipped messages.",
+        &[
+            ("channel=\"ticker\"", &TICKER_BROADCAST_LAGGED),
+            ("channel=\"websocket_client\"", &WS_CLIENT_LAGGED),
         ],
     );
     render_counter(

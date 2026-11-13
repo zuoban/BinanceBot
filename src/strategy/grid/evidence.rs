@@ -39,7 +39,7 @@ impl GridTradingEngine {
             .or_default()
             .entry(symbol.to_owned())
             .or_default()
-            .push(InitialOrderResponseBatch {
+            .push_back(InitialOrderResponseBatch {
                 batch_id: batch_id.to_owned(),
                 responses: vec![observation],
                 identities: Vec::new(),
@@ -84,7 +84,7 @@ impl GridTradingEngine {
                     return false;
                 }
             } else {
-                batches.push(InitialOrderResponseBatch {
+                batches.push_back(InitialOrderResponseBatch {
                     batch_id: batch_id.to_owned(),
                     responses: observations,
                     identities: identities.to_vec(),
@@ -220,7 +220,7 @@ impl GridTradingEngine {
             .or_default()
             .entry(expected_client_id.to_owned())
             .or_default()
-            .push(evidence);
+            .push_back(evidence);
         self.mark_orders_reconciliation_blocked().await;
         self.flush_terminal_disagreements(account, symbol).await
     }

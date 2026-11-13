@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::VecDeque;
 
 pub(super) type InitialResponseObservation = (String, String, String, BinanceOrderResponse);
 pub(super) type IdentityObservationPair = (GridOrder, ObservedOrderIdentity);
@@ -11,7 +12,7 @@ pub(super) struct InitialOrderResponseBatch {
 }
 
 pub(super) type DisagreementPair = (BinanceOrderResponse, BinanceOrderResponse);
-pub(super) type SymbolDisagreements = BTreeMap<String, Vec<DisagreementPair>>;
+pub(super) type SymbolDisagreements = BTreeMap<String, VecDeque<DisagreementPair>>;
 
 #[derive(Default)]
 pub(crate) struct OrderEvidenceBook {
@@ -25,7 +26,7 @@ pub(crate) struct OrderEvidenceBook {
     pub(super) terminal_order_disagreements:
         HashMap<[u8; 32], BTreeMap<String, SymbolDisagreements>>,
     pub(super) initial_order_responses:
-        HashMap<[u8; 32], HashMap<String, Vec<InitialOrderResponseBatch>>>,
+        HashMap<[u8; 32], HashMap<String, VecDeque<InitialOrderResponseBatch>>>,
 }
 
 impl OrderEvidenceBook {
@@ -189,16 +190,14 @@ impl OrderEvidenceBook {
         self.initial_order_responses
             .get(&account)
             .and_then(|symbols| symbols.get(symbol))
-            .and_then(|batches| batches.first())
+            .and_then(|batches| batches.front())
             .cloned()
     }
 
     pub(super) fn pop_initial_response_batch(&mut self, account: [u8; 32], symbol: &str) {
         if let Some(symbols) = self.initial_order_responses.get_mut(&account) {
             if let Some(batches) = symbols.get_mut(symbol) {
-                if !batches.is_empty() {
-                    batches.remove(0);
-                }
+                batches.pop_front();
                 if batches.is_empty() {
                     symbols.remove(symbol);
                 }
@@ -227,7 +226,7 @@ impl OrderEvidenceBook {
             .and_then(|orders| {
                 orders
                     .iter()
-                    .find_map(|(id, list)| list.first().map(|pair| (id.clone(), pair.clone())))
+                    .find_map(|(id, list)| list.front().map(|pair| (id.clone(), pair.clone())))
             })
     }
 
@@ -240,9 +239,7 @@ impl OrderEvidenceBook {
         if let Some(symbols) = self.terminal_order_disagreements.get_mut(&account) {
             if let Some(orders) = symbols.get_mut(symbol) {
                 if let Some(list) = orders.get_mut(client_id) {
-                    if !list.is_empty() {
-                        list.remove(0);
-                    }
+                    list.pop_front();
                     if list.is_empty() {
                         orders.remove(client_id);
                     }

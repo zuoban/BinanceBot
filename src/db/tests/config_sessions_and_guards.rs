@@ -575,3 +575,31 @@ fn paper_ledger_accepts_first_mark_valuation_with_earlier_mark_timestamp() {
         .to_string();
     assert!(err.contains("ADAUSDC"), "unexpected error: {err}");
 }
+
+#[test]
+fn fresh_database_keeps_indexes_created_only_by_migrations() {
+    let db = Database::open(":memory:").unwrap();
+    let conn = db.lock_connection("test_indexes");
+    for name in [
+        "idx_pair_intents_scope_created",
+        "idx_remainder_plans_inactive_scope",
+        "idx_auth_sessions_created_at",
+        "idx_initial_order_responses_snapshot_scope",
+        "idx_trades_unverified_scope",
+    ] {
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                [name],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "missing index {name}");
+    }
+}
+
+#[test]
+fn read_pool_size_stays_within_bounds() {
+    let size = read_pool_size();
+    assert!((MIN_READ_POOL_SIZE..=MAX_READ_POOL_SIZE).contains(&size));
+}

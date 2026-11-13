@@ -753,6 +753,8 @@ async fn metrics_endpoint_requires_authentication_and_exposes_prometheus_text() 
         "binance_bot_websocket_reconnects_total{stream=\"user_data\"}",
         "binance_bot_sync_failures_total{kind=\"open_orders\"}",
         "binance_bot_http_requests_total{status=\"4xx\"}",
+        "binance_bot_broadcast_lagged_total{channel=\"ticker\"}",
+        "binance_bot_broadcast_lagged_total{channel=\"websocket_client\"}",
     ] {
         assert!(text.contains(name), "missing metric {name}");
     }
