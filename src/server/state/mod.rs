@@ -34,6 +34,23 @@ pub(crate) use risk_guards::{ExchangeSubmissionGuard, PendingFillReconciliation}
 pub(crate) use state_cleanup::MembershipGuard;
 use state_trades::{build_grid_stats, recent_trade_cache, RECENT_TRADE_LIMIT};
 
+// Lock ordering observed in `AppState` code paths. Keep new code consistent
+// with these orders, and never wait on an earlier lock while holding a later one:
+//
+// - `snapshot_scope_lock` is taken before `trade_commit_lock`: every snapshot
+//   reader takes the scope reader, then the commit lock; scope transitions
+//   (config change, direction flip) take the scope writer.
+// - `safety_pause_admission` is taken and released before `status_update_lock`
+//   in `pause_trading`; the two are never held together by the pause path.
+// - `trade_commit_lock` is held across a trade's database write and the matching
+//   cache updates, and data locks (`config`, `status`, `stats`, `position`,
+//   `account`, `active_orders`, `recent_trades`) are leaves taken under it.
+//   `recent_logs` does not need to match a commit, so snapshots read it after
+//   releasing the commit lock.
+// - `snapshot_publish_lock` and `resync_frame` guard broadcast frames. They are
+//   the outermost locks: `publish_snapshot` and `resync_snapshot_frame` hold
+//   them while building a snapshot, so no code path may wait for either one
+//   while holding the scope or commit lock.
 const MAX_RECENT_LOGS: usize = 250;
 pub(crate) const WS_BROADCAST_CAPACITY: usize = 256;
 
