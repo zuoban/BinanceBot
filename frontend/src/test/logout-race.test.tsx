@@ -6,10 +6,11 @@ vi.mock('../lib/api', async importOriginal => ({ ...await importOriginal<typeof 
 vi.mock('../components/Shell', async () => {
   const React = await import('react');
   const { SessionContext } = await import('../lib/session');
-  return { default: () => {
+  function MockShell() {
     const { logout } = React.useContext(SessionContext);
     return <button onClick={() => void logout()}>退出测试</button>;
-  } };
+  }
+  return { default: MockShell };
 });
 vi.mock('../pages/Login', () => ({ default: ({ onLogin }: { onLogin: () => void }) => <button onClick={() => { sessionStorage.setItem('binance_bot_auth_token', 'new-token'); onLogin(); }}>重新登录</button> }));
 vi.mock('../lib/theme', () => ({ ThemeProvider: ({ children }: { children: React.ReactNode }) => children }));

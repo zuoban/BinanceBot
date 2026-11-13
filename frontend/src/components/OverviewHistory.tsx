@@ -4,7 +4,7 @@ import { useOverviewHistory } from '../lib/queries';
 import { compactNumber, isValidEpochMs, modeLabel, numeric } from '../lib/format';
 import { useUtcHour } from '../lib/useNow';
 import type { HistoryAccount, OverviewHistoryData } from '../lib/types';
-import { ErrorNotice } from './Common';
+import { ErrorNotice } from './ErrorNotice';
 import { LoadErrorBoundary } from './LoadErrorBoundary';
 
 const OverviewHistoryChart = lazy(() => import('./OverviewHistoryChart'));

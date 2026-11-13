@@ -2,7 +2,8 @@ import { Alert, App, Button, Card, Col, Form, Input, InputNumber, Row, Space } f
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, post } from '../../lib/api';
 import type { ServerConfig } from '../../lib/types';
-import { ConflictReloadButton, ErrorNotice, FormRevertButton, isConfigConflict } from '../Common';
+import { ErrorNotice } from '../ErrorNotice';
+import { ConflictReloadButton, FormRevertButton, isConfigConflict } from '../FormActions';
 import { useSettingsFormLifecycle } from './settingsShared';
 
 export function ServerSettings() {

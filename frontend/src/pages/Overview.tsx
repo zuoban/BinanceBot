@@ -1,4 +1,4 @@
-import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { App, Button, Card, Dropdown, Empty, Grid, Input, Select } from 'antd';
 import { PlusOutlined, SearchOutlined, ThunderboltOutlined } from '@ant-design/icons';
@@ -8,7 +8,8 @@ import { errorMessage } from '../lib/api';
 import { useAsyncLock, useMountedRef } from '../lib/asyncGuard';
 import { useConfirmDialog } from '../lib/confirmDialog';
 import { positionGroups, SNAPSHOT_STALE_MS, todayPnlGroups, todayTradeCounts } from '../lib/portfolio';
-import { ErrorNotice, PageTitle } from '../components/Common';
+import { PageTitle } from '../components/Common';
+import { ErrorNotice } from '../components/ErrorNotice';
 import { runBatchControls, useControls } from '../components/Controls';
 import type { Action, Overview, Pair, Trade } from '../lib/types';
 import { OverviewLoading } from '../components/Loading';
@@ -118,11 +119,35 @@ export default function OverviewPage() {
     if (event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) { event.preventDefault(); navigate('/pairs/new'); }
   }}>新增交易对</Button>;
   const addPairLink = addPairButton({ ref: setAddLink, icon: <PlusOutlined /> });
-  const [{ q: search, sort, status: statusFilter }, updateFilters] = useUrlParams({
+  const [{ q: urlSearch, sort, status: statusFilter }, updateFilters] = useUrlParams({
     q: { fallback: '' },
     sort: { fallback: 'position', allowed: ['position', 'symbol', 'today', 'orders'] },
     status: { fallback: 'all', allowed: ['all', 'RUNNING', 'PAUSED', 'ERROR', 'STOPPED', 'LIVE'] },
   });
+  const [searchInput, setSearchInput] = useState(urlSearch);
+  const lastSyncedSearchRef = useRef(urlSearch);
+  const searchTimerRef = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    if (urlSearch !== lastSyncedSearchRef.current) {
+      window.clearTimeout(searchTimerRef.current);
+      lastSyncedSearchRef.current = urlSearch;
+      setSearchInput(urlSearch);
+    }
+  }, [urlSearch]);
+  useEffect(() => () => window.clearTimeout(searchTimerRef.current), []);
+  const handleSearchChange = (value: string) => {
+    setSearchInput(value);
+    window.clearTimeout(searchTimerRef.current);
+    if (!value) {
+      lastSyncedSearchRef.current = '';
+      updateFilters({ q: '' });
+      return;
+    }
+    searchTimerRef.current = window.setTimeout(() => {
+      lastSyncedSearchRef.current = value;
+      updateFilters({ q: value });
+    }, 150);
+  };
   const compactFinance = Grid.useBreakpoint().md === false, [financesExpanded, setFinancesExpanded] = useState(false);
   const dayNow = useBeijingDay(overview.data?.generated_at, overview.dataUpdatedAt), dataExpired = useExpired(overview.data ? overview.dataUpdatedAt + SNAPSHOT_STALE_MS : Infinity);
   const entries = overview.data?.pairs ?? emptyPairs, recentTrades = overview.data?.recent_trades ?? emptyTrades;
@@ -139,8 +164,13 @@ export default function OverviewPage() {
     if (p.mode !== 'PAPER') allPaper = false;
   }
   const tradeCountsBySymbol = useMemo(() => new Map(entries.map(entry => [entry.snapshot.symbol, todayTradeCounts(entry.snapshot, dayNow)])), [entries, dayNow]);
-  const visible = useMemo(() => filterAndSortOverviewEntries(entries, search, statusFilter, sort, tradeCountsBySymbol), [entries, search, statusFilter, sort, tradeCountsBySymbol]);
-  const clearFilters = () => updateFilters({ q: '', sort: 'position', status: 'all' });
+  const visible = useMemo(() => filterAndSortOverviewEntries(entries, searchInput, statusFilter, sort, tradeCountsBySymbol), [entries, searchInput, statusFilter, sort, tradeCountsBySymbol]);
+  const clearFilters = () => {
+    window.clearTimeout(searchTimerRef.current);
+    lastSyncedSearchRef.current = '';
+    setSearchInput('');
+    updateFilters({ q: '', sort: 'position', status: 'all' });
+  };
   const counts = [...tradeCountsBySymbol.values()];
   const today = counts.every(c => c !== null) ? counts.reduce<{ buy: number; sell: number }>((sum, c) => ({ buy: sum.buy + c.buy, sell: sum.sell + c.sell }), { buy: 0, sell: 0 }) : null;
   const pnlGroups = useMemo(() => todayPnlGroups(overview.data?.today_pnl, dayNow), [overview.data?.today_pnl, dayNow]);
@@ -152,7 +182,13 @@ export default function OverviewPage() {
     <OverviewBanner hasData={!!overview.data} stale={stale} dataUpdatedAt={overview.dataUpdatedAt} statusFilter={statusFilter}
       onToggleStatus={value => updateFilters({ status: statusFilter === value ? 'all' : value })}
       counts={{ total: pairs.length, running: runningCount, paused: pausedCount, stopped: stoppedCount, error: errorCount, live: liveCount }} today={today} pnlGroups={pnlGroups} />
-    {overview.isPending && !overview.data ? <OverviewLoading addPairLink={addPairLink} /> : !overview.data ? <section className="strategies-section" aria-labelledby="strategies-heading"><div className="section-heading"><h2 id="strategies-heading">交易策略</h2>{addPairLink}</div></section> : <>
+    {overview.isPending && !overview.data ? (
+      <OverviewLoading addPairLink={addPairLink} />
+    ) : !overview.data ? (
+      <section className="strategies-section" aria-labelledby="strategies-heading">
+        <div className="section-heading"><h2 id="strategies-heading">交易策略</h2>{addPairLink}</div>
+      </section>
+    ) : <>
       <OverviewFinanceDisclosure positionList={positionList} stale={stale} compactFinance={compactFinance} financesExpanded={financesExpanded} setFinancesExpanded={setFinancesExpanded} />
       <section className={`strategies-section${stale ? ' is-stale' : ''}`} aria-labelledby="strategies-heading">
         <div className="section-heading"><h2 id="strategies-heading">交易策略</h2>
@@ -164,10 +200,10 @@ export default function OverviewPage() {
           </div>
         </div>
         <div className="filter-bar">
-          <Input prefix={<SearchOutlined />} placeholder="搜索交易对" aria-label="搜索交易对" allowClear value={search} onChange={e => updateFilters({ q: e.target.value })} />
+          <Input prefix={<SearchOutlined />} placeholder="搜索交易对" aria-label="搜索交易对" allowClear value={searchInput} onChange={e => handleSearchChange(e.target.value)} />
           <Select aria-label="策略排序" value={sort} onChange={value => updateFilters({ sort: value })} options={[{ value: 'position', label: '按状态与持仓排序' }, { value: 'symbol', label: '按交易对排序' }, { value: 'today', label: '按今日成交排序' }, { value: 'orders', label: '按挂单数排序' }]} />
-          {(search || statusFilter !== 'all') && <span className="muted filter-count">显示 {visible.length} / {entries.length} 个</span>}
-          {(search || sort !== 'position' || statusFilter !== 'all') && <Button type="text" onClick={clearFilters}>清除筛选</Button>}
+          {(searchInput || statusFilter !== 'all') && <span className="muted filter-count">显示 {visible.length} / {entries.length} 个</span>}
+          {(searchInput || sort !== 'position' || statusFilter !== 'all') && <Button type="text" onClick={clearFilters}>清除筛选</Button>}
         </div>
         <div className="strategy-grid">
           {visible.map(entry => {

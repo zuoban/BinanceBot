@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { App } from 'antd';
 import { MemoryRouter, useLocation } from 'react-router-dom';
@@ -396,4 +396,27 @@ it('disambiguates multi-group labels when PAPER and LIVE share USDC while keepin
   const pnlSection = within(screen.getByLabelText('策略运行概览')).getByLabelText('今日已实现盈亏');
   expect(within(pnlSection).getByText('模拟盘 USDC')).toBeInTheDocument();
   expect(within(pnlSection).getByText('实盘 USDC')).toBeInTheDocument();
+});
+
+it('filters cards immediately while debouncing URL query updates', () => {
+  vi.useFakeTimers();
+  try {
+    overview.data = {
+      generated_at: new Date().toISOString(),
+      pairs: ['BTCUSDC', 'ETHUSDC'].map(symbol => ({ snapshot: summarySnapshot(symbol), mode: 'PAPER' as const, scoped: true })),
+      recent_trades: [],
+    };
+    function Location() { const l = useLocation(); return <output data-testid="url">{l.pathname}{l.search}</output>; }
+    render(<MemoryRouter><App><OverviewPage /><Location /></App></MemoryRouter>);
+    const input = screen.getByRole('textbox', { name: '搜索交易对' });
+    fireEvent.change(input, { target: { value: 'eth' } });
+    expect(screen.getByRole('link', { name: 'ETHUSDC' })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'BTCUSDC' })).not.toBeInTheDocument();
+    expect(screen.getByTestId('url')).toHaveTextContent(/^\/$/);
+
+    act(() => { vi.advanceTimersByTime(150); });
+    expect(screen.getByTestId('url')).toHaveTextContent('/?q=eth');
+  } finally {
+    vi.useRealTimers();
+  }
 });

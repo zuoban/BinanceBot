@@ -4,7 +4,7 @@ import { LockOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, post, tokenStore } from '../lib/api';
 import type { AuthStatus } from '../lib/types';
-import { ErrorNotice } from '../components/Common';
+import { ErrorNotice } from '../components/ErrorNotice';
 import { LoadingScreen } from '../components/Loading';
 import { ThemeSwitch } from '../components/ThemeSwitch';
 
@@ -24,7 +24,12 @@ const buyLevels = [
 
 export default function Login({ onLogin }: { onLogin: () => void | Promise<void> }) {
   const client = useQueryClient();
-  const status = useQuery({ queryKey: ['auth-status'], queryFn: ({ signal }) => api<AuthStatus>('/api/auth/status', { signal }), retry: false });
+  const status = useQuery({
+    queryKey: ['auth-status'],
+    queryFn: ({ signal }) => api<AuthStatus>('/api/auth/status', { signal }),
+    retry: false,
+    staleTime: 10_000,
+  });
   const configured = status.data?.initialized !== false;
   const submitting = useRef(false);
   const mutation = useMutation({

@@ -34,7 +34,12 @@ const router = createBrowserRouter([{ element: <RouteBoundary component={<Shell 
 
 function Root() {
   const [loggedIn, setLoggedIn] = useState(!!tokenStore.get());
-  const authStatus = useQuery({ queryKey: ['auth-status'], queryFn: ({ signal }) => api<AuthStatus>('/api/auth/status', { signal }), retry: false });
+  const authStatus = useQuery({
+    queryKey: ['auth-status'],
+    queryFn: ({ signal }) => api<AuthStatus>('/api/auth/status', { signal }),
+    retry: false,
+    staleTime: 10_000,
+  });
   const authEnabled = authStatus.data?.initialized !== false;
   const logout = useCallback(async () => {
     const token = tokenStore.get();
@@ -43,23 +48,64 @@ function Root() {
       catch (error) { if (!(error instanceof ApiError && error.status === 401)) throw error; }
     }
     if (tokenStore.get() !== token) return;
-    destroyOpenModals(); tokenStore.clear(); client.clear(); setLoggedIn(false);
+    destroyOpenModals();
+    tokenStore.clear();
+    client.clear();
+    setLoggedIn(false);
   }, []);
   useEffect(() => {
-    const expire = () => { destroyOpenModals(); tokenStore.clear(); client.clear(); setLoggedIn(false); };
+    const expire = () => {
+      destroyOpenModals();
+      tokenStore.clear();
+      client.clear();
+      setLoggedIn(false);
+    };
     window.addEventListener('auth-expired', expire);
     return () => window.removeEventListener('auth-expired', expire);
   }, []);
-  useEffect(() => { if (loggedIn && authEnabled && authStatus.data && !authStatus.data.authenticated) { destroyOpenModals(); tokenStore.clear(); client.removeQueries({ predicate: query => query.queryKey[0] !== 'auth-status' }); setLoggedIn(false); } }, [loggedIn, authEnabled, authStatus.data]);
+  useEffect(() => {
+    if (loggedIn && authEnabled && authStatus.data && !authStatus.data.authenticated) {
+      destroyOpenModals();
+      tokenStore.clear();
+      client.removeQueries({ predicate: query => query.queryKey[0] !== 'auth-status' });
+      setLoggedIn(false);
+    }
+  }, [loggedIn, authEnabled, authStatus.data]);
   const session = useMemo(() => ({ logout, authEnabled }), [logout, authEnabled]);
   if (authStatus.isPending) return <LoadingScreen label={loggedIn ? '正在验证会话' : '正在连接控制台'} />;
-  if (authStatus.error && !authStatus.data) return <div className="loading-screen" role="alert"><div className="loading-brand"><img className="brand-symbol" src="/logo.svg" alt="" /><span>Grid Console<small>Strategy Workspace</small></span></div><p>无法连接后端服务：{authStatus.error.message}</p><button type="button" className="ui-action-btn" onClick={() => void authStatus.refetch()}>重试</button></div>;
+  if (authStatus.error && !authStatus.data) {
+    return (
+      <div className="loading-screen" role="alert">
+        <div className="loading-brand">
+          <img className="brand-symbol" src="/logo.svg" alt="" />
+          <span>Grid Console<small>Strategy Workspace</small></span>
+        </div>
+        <p>无法连接后端服务：{authStatus.error.message}</p>
+        <button type="button" className="ui-action-btn" onClick={() => void authStatus.refetch()}>重试</button>
+      </div>
+    );
+  }
   const workspace = !authEnabled || (loggedIn && authStatus.data?.authenticated);
+  const handleLogin = async () => {
+    await client.cancelQueries({ queryKey: ['auth-status'] });
+    destroyOpenModals();
+    client.clear();
+    client.setQueryData(['auth-status'], { initialized: true, authenticated: true });
+    setLoggedIn(true);
+  };
   return <SessionContext.Provider value={session}>
     <LoadErrorBoundary label="界面组件">
       <Suspense fallback={<LoadingScreen label={workspace ? '正在加载控制台' : '正在加载登录页'} />}>
         <UiShell>
-          {workspace ? <RouterProvider router={router} /> : <LoadErrorBoundary label="登录页"><Suspense fallback={<LoadingScreen label="正在加载登录页" />}><Login onLogin={async () => { await client.cancelQueries({ queryKey: ['auth-status'] }); destroyOpenModals(); client.clear(); client.setQueryData(['auth-status'], { initialized: true, authenticated: true }); setLoggedIn(true); }} /></Suspense></LoadErrorBoundary>}
+          {workspace
+            ? <RouterProvider router={router} />
+            : (
+              <LoadErrorBoundary label="登录页">
+                <Suspense fallback={<LoadingScreen label="正在加载登录页" />}>
+                  <Login onLogin={handleLogin} />
+                </Suspense>
+              </LoadErrorBoundary>
+            )}
         </UiShell>
       </Suspense>
     </LoadErrorBoundary>

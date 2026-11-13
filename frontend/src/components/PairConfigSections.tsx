@@ -1,4 +1,4 @@
-import { useContext, useEffect, useState, type RefObject } from 'react';
+import { useContext, useDeferredValue, useEffect, useState, type RefObject } from 'react';
 import { Alert, Button, Card, Col, Form, Input, InputNumber, Row, Select, Switch, type FormInstance } from 'antd';
 import { describeNewGridConfig, diffGridConfig, type FieldChange } from '../lib/configDiff';
 import { positiveDecimalText } from '../lib/format';
@@ -155,11 +155,12 @@ export function PairRiskAndRangeSection() {
 
 function DirtySaveBarStatus({ form, symbol, baseline }: { form: FormInstance<FormValues>; symbol: string | undefined; baseline: { symbol: string; config: GridConfig } | null }) {
   const watched = Form.useWatch([], form) as FormValues | undefined;
+  const deferredWatched = useDeferredValue(watched);
   const [showChanges, setShowChanges] = useState(false);
   useEffect(() => {
     setShowChanges(false);
   }, [symbol]);
-  const pending = watched && baseline && baseline.symbol === symbol ? diffGridConfig(baseline.config, watched) : [];
+  const pending = deferredWatched && baseline && baseline.symbol === symbol ? diffGridConfig(baseline.config, deferredWatched) : [];
   const expanded = showChanges && pending.length > 0;
   return <div className="save-bar-status">
     <span className="muted" role="status">{pending.length ? `已修改 ${pending.length} 项` : '有未保存的修改'}</span>

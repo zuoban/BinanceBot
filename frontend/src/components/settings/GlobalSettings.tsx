@@ -7,7 +7,8 @@ import { useConfirmDialog } from '../../lib/confirmDialog';
 import { exceeds, isPercentDecimal, isPositiveDecimal, MAX_CONFIG_NOTIONAL_OR_PRICE } from '../../lib/gridPreview';
 import { invalidateStrategyQueries } from '../../lib/queries';
 import type { GlobalConfig } from '../../lib/types';
-import { ConflictReloadButton, ErrorNotice, FormRevertButton, isConfigConflict } from '../Common';
+import { ErrorNotice } from '../ErrorNotice';
+import { ConflictReloadButton, FormRevertButton, isConfigConflict } from '../FormActions';
 import { ProbeButton, useSettingsFormLifecycle, type GlobalForm } from './settingsShared';
 
 const API_KEY_RE = /^[\x21-\x7E]{1,256}$/;

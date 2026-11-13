@@ -188,8 +188,8 @@ describe('account and trade summaries', () => {
     scopeB.account = { ...scopeB.account, margin_balance: '450', update_time: new Date(now).toISOString() };
     const scopedGroups = accountGroups([{ snapshot: scopeA, mode: 'LIVE' }, { snapshot: scopeB, mode: 'LIVE' }], now);
     expect(scopedGroups).toHaveLength(2);
-    expect(scopedGroups.find(g => g.account_scope === 'scope-a')).toMatchObject({ key: 'LIVE:USDC', equity: 120 });
-    expect(scopedGroups.find(g => g.account_scope === 'scope-b')).toMatchObject({ key: 'LIVE:USDC', equity: 450 });
+    expect(scopedGroups.find(g => g.account_scope === 'scope-a')).toMatchObject({ key: 'LIVE:USDC', scopeKey: 'LIVE:USDC:scope-a', equity: 120 });
+    expect(scopedGroups.find(g => g.account_scope === 'scope-b')).toMatchObject({ key: 'LIVE:USDC', scopeKey: 'LIVE:USDC:scope-b', equity: 450 });
   });
   it('honors dynamic sync_interval_secs and tolerates client/server clock skew on live accounts', () => {
     const now = 1_700_000_000_000;

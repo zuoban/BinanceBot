@@ -21,8 +21,4 @@ export default tseslint.config(
     files: ['src/components/settings/GlobalSettings.tsx'],
     rules: { 'no-control-regex': 'off' },
   },
-  {
-    files: ['src/test/**/*.{ts,tsx}'],
-    rules: { 'react-hooks/rules-of-hooks': 'off' },
-  },
 );

@@ -12,6 +12,16 @@ const LazyTradesTable = lazy(() => import('./DataTables').then(mod => ({ default
 type StatusFilter = 'all' | Status | 'LIVE';
 type OverviewSort = 'position' | 'symbol' | 'today' | 'orders';
 
+const positionAmountCache = new WeakMap<Overview['pairs'][number]['snapshot'], number | null>();
+function cachedPositionAmount(snapshot: Overview['pairs'][number]['snapshot']): number {
+  let amount = positionAmountCache.get(snapshot);
+  if (amount === undefined) {
+    amount = positionAmount(snapshot);
+    positionAmountCache.set(snapshot, amount);
+  }
+  return amount ?? -1;
+}
+
 export function filterAndSortOverviewEntries(
   entries: Overview['pairs'],
   search: string,
@@ -24,7 +34,7 @@ export function filterAndSortOverviewEntries(
   const filtered = entries.filter(e => e.snapshot.symbol.includes(query) && matchesStatus(e));
   if (sort === 'position') {
     return filtered
-      .map(entry => ({ entry, running: Number(entry.snapshot.status === 'RUNNING'), amount: positionAmount(entry.snapshot) ?? -1 }))
+      .map(entry => ({ entry, running: Number(entry.snapshot.status === 'RUNNING'), amount: cachedPositionAmount(entry.snapshot) }))
       .sort((a, b) => (b.running - a.running) || (b.amount - a.amount) || a.entry.snapshot.symbol.localeCompare(b.entry.snapshot.symbol))
       .map(item => item.entry);
   }

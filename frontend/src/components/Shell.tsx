@@ -19,16 +19,26 @@ import { ModeTag } from './Common';
 
 function ShellTitle({ accounts, alert, active }: { accounts: AccountObservation[]; alert: boolean; active: boolean }) {
   const groups = useAccountGroups(accounts, active);
-  const dupAssets = useMemo(() => {
-    const seen = new Set<string>(), dup = new Set<string>();
-    for (const g of groups) { if (seen.has(g.asset)) dup.add(g.asset); else seen.add(g.asset); }
-    return dup;
+  const groupLabels = useMemo(() => {
+    const assetCounts = new Map<string, number>(), keyCounts = new Map<string, number>(), keySeen = new Map<string, number>();
+    for (const group of groups) {
+      assetCounts.set(group.asset, (assetCounts.get(group.asset) ?? 0) + 1);
+      keyCounts.set(group.key, (keyCounts.get(group.key) ?? 0) + 1);
+    }
+    return groups.map(group => {
+      const dupAsset = (assetCounts.get(group.asset) ?? 0) > 1;
+      if (!dupAsset) return group.asset;
+      const idx = (keySeen.get(group.key) ?? 0) + 1;
+      keySeen.set(group.key, idx);
+      const suffix = (keyCounts.get(group.key) ?? 0) > 1 ? ` #${idx}` : '';
+      return `${modeLabel[group.mode]}${suffix} ${group.asset}`;
+    });
   }, [groups]);
   const title = !groups.length
     ? defaultTitle
     : groups.length === 1
       ? `${compactNumber(groups[0].equityText ?? groups[0].equity)} | ${ratioText(groups[0].ratio, true)}`
-      : groups.map(group => `${dupAssets.has(group.asset) ? `${modeLabel[group.mode]} ` : ''}${group.asset} ${compactNumber(group.equityText ?? group.equity)} | ${ratioText(group.ratio, true)}`).join(' / ');
+      : groups.map((group, idx) => `${groupLabels[idx]} ${compactNumber(group.equityText ?? group.equity)} | ${ratioText(group.ratio, true)}`).join(' / ');
   useDocumentTitle(active ? `${alert ? '[!] ' : ''}${title}` : null);
   return null;
 }

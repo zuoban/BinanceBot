@@ -8,7 +8,9 @@ import { useConfirmDialog } from '../lib/confirmDialog';
 import { invalidateStrategyQueries, usePairs } from '../lib/queries';
 import { EditContext } from '../lib/session';
 import type { GlobalConfig, GridConfig, Mode, Pair } from '../lib/types';
-import { ConflictReloadButton, ErrorNotice, FormRevertButton, isConfigConflict, PageBreadcrumb, PageTitle } from '../components/Common';
+import { PageBreadcrumb, PageTitle } from '../components/Common';
+import { ErrorNotice } from '../components/ErrorNotice';
+import { ConflictReloadButton, FormRevertButton, isConfigConflict } from '../components/FormActions';
 import { useDeleteStrategy } from '../components/DeleteStrategy';
 import { GridPreview } from '../components/GridPreview';
 import { defaults, LiveConfigConfirmContent, PairBasicSection, PairGridParamsSection, PairRiskAndRangeSection, SaveBarStatus, useLiveSymbolMark, type FormValues } from '../components/PairConfigSections';
@@ -220,12 +222,24 @@ export default function PairConfig() {
   const { dirty: editDirty, saving: editSaving, setDirty: setEditDirty, setSaving: setEditSaving } = edit;
   resetMutation.current = mutation.reset;
   useEffect(() => {
-    setReady(adding); effectiveMarkRef.current = undefined; baseline.current = null; customInterval.current = false; appliedSymbol.current = undefined; editedFields.current.clear();
-    resetMutation.current(); setEditDirty(false); setEditSaving(false); form.resetFields();
+    setReady(adding);
+    effectiveMarkRef.current = undefined;
+    baseline.current = null;
+    customInterval.current = false;
+    appliedSymbol.current = undefined;
+    editedFields.current.clear();
+    resetMutation.current();
+    setEditDirty(false);
+    setEditSaving(false);
+    form.resetFields();
     if (adding) form.setFieldsValue(defaults);
   }, [symbol, adding, form, setEditDirty, setEditSaving]);
   useEffect(() => {
-    if (config.data && config.data.symbol === symbol && !ready && !adding && symbol) { baseline.current = { symbol, config: config.data }; form.setFieldsValue(config.data); setReady(true); }
+    if (config.data && config.data.symbol === symbol && !ready && !adding && symbol) {
+      baseline.current = { symbol, config: config.data };
+      form.setFieldsValue(config.data);
+      setReady(true);
+    }
   }, [config.data, ready, adding, form, symbol]);
   useEffect(() => () => { setEditDirty(false); setEditSaving(false); }, [setEditDirty, setEditSaving]);
   const disabled = !ready || editSaving || deletionBusy || (!adding && !pair);
@@ -242,7 +256,12 @@ export default function PairConfig() {
   useEffect(() => {
     if (!adding || !ready || editSaving || submission.current || !selectedSymbol || !previewEffectiveMark || customInterval.current || appliedSymbol.current === selectedSymbol) return;
     const nextInterval = defaultGridInterval(previewEffectiveMark, tickSize);
-    if (nextInterval) { appliedSymbol.current = selectedSymbol; editedFields.current.add('grid_interval'); form.setFieldValue('grid_interval', nextInterval); void form.validateFields(['grid_interval', 'order_amount_usdc']).catch(() => {}); }
+    if (nextInterval) {
+      appliedSymbol.current = selectedSymbol;
+      editedFields.current.add('grid_interval');
+      form.setFieldValue('grid_interval', nextInterval);
+      void form.validateFields(['grid_interval', 'order_amount_usdc']).catch(() => {});
+    }
   }, [adding, ready, editSaving, selectedSymbol, previewEffectiveMark, tickSize, form, submission]);
   useEffect(() => {
     if (tickSize && ready && (editedFields.current.has('grid_interval') || form.getFieldError('grid_interval').length > 0)) void form.validateFields(['grid_interval']).catch(() => {});

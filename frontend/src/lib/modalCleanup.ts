@@ -1,12 +1,14 @@
-let activeDestroyer: (() => void) | null = null;
+const activeDestroyers = new Set<() => void>();
 
 export function registerModalDestroyer(destroyer: () => void) {
-  activeDestroyer = destroyer;
+  activeDestroyers.add(destroyer);
   return () => {
-    if (activeDestroyer === destroyer) activeDestroyer = null;
+    activeDestroyers.delete(destroyer);
   };
 }
 
 export function destroyOpenModals() {
-  activeDestroyer?.();
+  for (const destroyer of activeDestroyers) {
+    destroyer();
+  }
 }

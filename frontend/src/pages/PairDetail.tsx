@@ -2,7 +2,7 @@ import { Suspense, lazy, useContext, useMemo, type ReactNode } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { Alert, Button, Card, Col, Descriptions, Row, Statistic, Tabs } from 'antd';
 import { SettingOutlined } from '@ant-design/icons';
-import { QueryClient, QueryClientContext, useQuery } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import { api, pairPath, pairRoute } from '../lib/api';
 import { usePairSnapshot, usePairs } from '../lib/queries';
 import { subSignedDecimals } from '../lib/decimal';
@@ -10,7 +10,8 @@ import { beijingClockFormat, cnyText, isValidEpochMs, number, positivePrice, qua
 import { entryPriceText, quoteAsset, todayTradeCounts } from '../lib/portfolio';
 import { AccountsContext } from '../lib/session';
 import type { AccountObservation, Log, Pair, Snapshot, Trade } from '../lib/types';
-import { ControlResultBanner, DirectionTag, DirectionText, ErrorNotice, FreshnessText, ModeTag, PageBreadcrumb, PageTitle, Pnl, SignalChip, StatusTag } from '../components/Common';
+import { ControlResultBanner, DirectionTag, DirectionText, FreshnessText, ModeTag, PageBreadcrumb, PageTitle, Pnl, SignalChip, StatusTag } from '../components/Common';
+import { ErrorNotice } from '../components/ErrorNotice';
 import { PairControls, useControls } from '../components/Controls';
 import { DepthChart, HourlyChart } from '../components/Charts';
 import { HistoryActions } from '../components/HistoryActions';
@@ -25,7 +26,6 @@ const TradesTable = lazy(() => import('../components/DataTables').then(m => ({ d
 const LogsTable = lazy(() => import('../components/DataTables').then(m => ({ default: m.LogsTable })));
 
 const detailTabs = ['monitor', 'orders', 'trades', 'logs'] as const;
-const fallbackClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 
 function LazyTabTable({ label, activeTab, children }: { label: string; activeTab: string; children: ReactNode }) {
   return <LoadErrorBoundary label={label} resetKey={activeTab}>
@@ -77,20 +77,19 @@ export function resolveLogs(snapshot: Snapshot | undefined, fetched: Log[] | und
   return fetchedAt >= snapshotAt || fetched.length >= recent.length ? fetched : recent;
 }
 function usePairTabHistory(pair: Pair | undefined, tab: (typeof detailTabs)[number], snapshot: Snapshot | undefined, snapshotUpdatedAt = 0) {
-  const client = useContext(QueryClientContext) ?? fallbackClient;
   const activeMode = snapshot?.mode ?? pair?.mode;
   const tradesQuery = useQuery({
     queryKey: ['snapshot', pair?.symbol, pair?.scoped, 'trades', activeMode],
     queryFn: ({ signal }) => { if (!pair) throw new Error('该交易对不存在或已移除'); return api<Trade[]>(pairPath(pair, 'trades'), { signal }); },
     enabled: !!pair && tab === 'trades',
     refetchInterval: 5_000,
-  }, client);
+  });
   const logsQuery = useQuery({
     queryKey: ['snapshot', pair?.symbol, pair?.scoped, 'logs', activeMode],
     queryFn: ({ signal }) => { if (!pair) throw new Error('该交易对不存在或已移除'); return api<Log[]>(pairPath(pair, 'logs'), { signal }); },
     enabled: !!pair && tab === 'logs',
     refetchInterval: 5_000,
-  }, client);
+  });
   const trades = useMemo(
     () => (tab === 'trades' ? resolveTrades(snapshot, tradesQuery.data, tradesQuery.isError, tradesQuery.dataUpdatedAt, snapshotUpdatedAt) : []),
     [tab, snapshot, tradesQuery.data, tradesQuery.isError, tradesQuery.dataUpdatedAt, snapshotUpdatedAt],

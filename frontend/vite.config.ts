@@ -22,13 +22,13 @@ export default defineConfig({
   build: {
     rollupOptions: {
       output: {
+        strictExecutionOrder: true,
         codeSplitting: {
           groups: [
             { name: 'vendor', test: /node_modules[\\/](react|react-dom|scheduler|react-router|@tanstack)[\\/]/, priority: 30 },
-            { name: 'antd-table', test: /node_modules[\\/](@rc-component[\\/]table|rc-table)[\\/]/, priority: 20 },
-            { name: 'antd-picker', test: /node_modules[\\/](@rc-component[\\/]picker|rc-picker|dayjs)[\\/]/, priority: 20 },
-            { name: 'antd-core', test: /node_modules[\\/](@ant-design[\\/](icons|icons-svg|cssinjs|cssinjs-utils|colors|fast-color)|@rc-component[\\/]util)[\\/]/, priority: 15 },
-            { name: 'antd-rc', test: /node_modules[\\/](@rc-component|rc-)/, priority: 10 },
+            { name: 'antd-core', test: /node_modules[\\/](@ant-design[\\/](icons|icons-svg|cssinjs|cssinjs-utils|colors|fast-color)|@rc-component[\\/](util|motion|portal|trigger|resize-observer|context|overflow|mutate-observer))[\\/]/, priority: 25 },
+            { name: 'antd-table', test: /node_modules[\\/]@rc-component[\\/]table[\\/]/, priority: 20, includeDependenciesRecursively: false },
+            { name: 'antd-picker', test: /node_modules[\\/](@rc-component[\\/]picker[\\/](?!es[\\/]locale|lib[\\/]locale)|dayjs[\\/])/, priority: 20, includeDependenciesRecursively: false },
           ],
         },
       },

@@ -1,5 +1,6 @@
 import { memo, useMemo, useState } from 'react';
 import { DatePicker } from 'antd';
+import zhCN from 'antd/locale/zh_CN';
 import dayjs from 'dayjs';
 import 'dayjs/locale/zh-cn';
 import { Link, useInRouterContext } from 'react-router-dom';
@@ -232,6 +233,7 @@ export const DailySnapshotsSection = memo(function DailySnapshotsSection({ snaps
         <DatePicker
           className="daily-snapshot-picker"
           classNames={{ popup: { root: 'daily-snapshot-picker-popup' } }}
+          locale={zhCN.DatePicker}
           aria-label="选择每日快照日期"
           value={activeValue}
           format="YYYY-MM-DD"

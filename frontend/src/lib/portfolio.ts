@@ -270,6 +270,7 @@ export function availableRatio(available: number | null, wallet: number | null):
 
 export interface AccountGroup {
   key: string;
+  scopeKey: string;
   mode: Mode;
   asset: string;
   account_scope?: string;
@@ -377,7 +378,7 @@ export function accountGroups<T extends AccountObservation>(entries: T[], now = 
       cnyText = String(cny);
     }
     return {
-      key: `${mode}:${asset}`, mode, asset, account_scope, count: items.length,
+      key: `${mode}:${asset}`, scopeKey: `${mode}:${asset}:${account_scope ?? ''}`, mode, asset, account_scope, count: items.length,
       equity, equityText, available, availableText, wallet, walletText, unrealized, unrealizedText,
       ratio, cny, cnyText,
     };

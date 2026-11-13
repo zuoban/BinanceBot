@@ -1,20 +1,12 @@
-import { useContext, useLayoutEffect, useMemo, type RefObject } from 'react';
-import { Alert, App, Button, Empty, Space, type FormInstance } from 'antd';
-import { ArrowDownOutlined, ArrowUpOutlined, CheckCircleOutlined, CloseCircleOutlined, CloseOutlined, ExclamationCircleOutlined, InfoCircleOutlined, ReloadOutlined, ThunderboltOutlined } from '@ant-design/icons';
+import { useLayoutEffect, useMemo, type RefObject } from 'react';
+import { Alert, Empty, Space } from 'antd';
+import { ArrowDownOutlined, ArrowUpOutlined, CheckCircleOutlined, CloseCircleOutlined, CloseOutlined, ExclamationCircleOutlined, InfoCircleOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { Link } from 'react-router-dom';
-import { EditContext } from '../lib/session';
-import { errorMessage } from '../lib/api';
-import { useAsyncLock } from '../lib/asyncGuard';
-import { useConfirmDialog } from '../lib/confirmDialog';
 import { parseSignedDecimal } from '../lib/decimal';
 import type { GridConfig, Mode, Status } from '../lib/types';
 type Direction = GridConfig['direction'];
 import { ageText, compactNumber, directionLabel, modeLabel, number, numeric, sig3Format, statusLabel } from '../lib/format';
 import { useRelativeNow } from '../lib/useNow';
-export function ErrorNotice({ error, retry }: { error: Error | null; retry?: () => void }) {
-  if (!error) return null;
-  return <Alert type="error" showIcon title={error.message} action={retry && <Button size="small" onClick={retry} icon={<ReloadOutlined />}>重试</Button>} />;
-}
 export type Signal = 'calm' | 'blue' | 'yellow' | 'orange' | 'red';
 const signalIcon: Record<Signal, React.ReactNode> = { calm: <CheckCircleOutlined />, blue: <InfoCircleOutlined />, yellow: <ExclamationCircleOutlined />, orange: <ThunderboltOutlined />, red: <CloseCircleOutlined /> };
 function controlResultMeta(result: string): { tier: Signal; alertType: 'error' | 'warning' | 'success' | 'info'; pending: boolean } {
@@ -106,67 +98,6 @@ export function useCenterElementScroll<T extends HTMLElement>(ref: RefObject<T |
       container.scrollTop = Math.max(0, target.offsetTop - container.clientHeight / 2 + target.clientHeight / 2);
     }
   }, [ref, selector, triggerKey]);
-}
-export function isConfigConflict(error: Error | null | undefined, ...messageFragments: string[]): boolean {
-  return Boolean(error && (('status' in error && error.status === 409) || messageFragments.some(fragment => error.message.includes(fragment))));
-}
-export function ConflictReloadButton<T>({ form, label, activeRef, resetKey, refetch, onLoaded, onReset }: {
-  form?: FormInstance;
-  label: string;
-  activeRef: { current: unknown };
-  resetKey?: unknown;
-  refetch: () => Promise<{ data?: T; error: unknown }>;
-  onLoaded: (data: NonNullable<T>) => boolean | void;
-  onReset: () => void;
-}) {
-  const { message } = App.useApp();
-  const { confirm } = useConfirmDialog(resetKey);
-  const edit = useContext(EditContext);
-  const runReload = useAsyncLock();
-  return <Button className="conflict-reload-btn" disabled={edit.saving} onClick={() => {
-    const current = activeRef.current;
-    if (edit.saving || !current) return;
-    void runReload(async () => {
-      if (!await confirm({ title: `重新加载${label}？`, content: '重新加载会放弃当前未保存的修改，请先记录需要保留的内容。', okText: '重新加载', cancelText: '继续编辑' })) return;
-      if (activeRef.current !== current) return;
-      const result = await refetch();
-      if (activeRef.current !== current) return;
-      if (result.error) { message.error(errorMessage(result.error)); return; }
-      if (!result.data || onLoaded(result.data) === false) return;
-      if (form) clearFormErrors(form);
-      edit.setDirty(false);
-      onReset();
-    });
-  }}>重新加载{label}</Button>;
-}
-function clearFormErrors(form: FormInstance) {
-  const fields = form.getFieldsError().filter(item => item.errors.length > 0 || item.warnings.length > 0);
-  if (fields.length > 0) {
-    form.setFields(fields.map(item => ({ name: item.name, errors: [], warnings: [] })));
-  }
-}
-export function FormRevertButton({ form, activeRef, resetKey, onRevert, onReset }: {
-  form?: FormInstance;
-  activeRef: { current: unknown };
-  resetKey?: unknown;
-  onRevert: () => void;
-  onReset: () => void;
-}) {
-  const { confirm } = useConfirmDialog(resetKey);
-  const edit = useContext(EditContext);
-  const runRevert = useAsyncLock();
-  return <Button onClick={() => {
-    const current = activeRef.current;
-    if (!current) return;
-    void runRevert(async () => {
-      if (edit.dirty && !await confirm({ title: '放弃未保存的修改？', okText: '还原', cancelText: '继续编辑' })) return;
-      if (activeRef.current !== current) return;
-      onRevert();
-      if (form) clearFormErrors(form);
-      edit.setDirty(false);
-      onReset();
-    });
-  }}>还原</Button>;
 }
 
 export function FreshnessText({ updatedAt, prefix }: { updatedAt: number; prefix: string }) {

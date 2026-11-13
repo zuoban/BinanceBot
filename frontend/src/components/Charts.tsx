@@ -1,4 +1,4 @@
-import { Suspense, lazy, memo, useMemo, useRef } from 'react';
+import { createContext, Suspense, lazy, memo, useContext, useMemo, useRef } from 'react';
 import type { Snapshot } from '../lib/types';
 import { compareSignedDecimals, parseSignedDecimal } from '../lib/decimal';
 import { isValidEpochMs, numeric, price, quantity } from '../lib/format';
@@ -76,6 +76,35 @@ function sameDepthOrders(a: Snapshot['active_orders'], b: Snapshot['active_order
   return true;
 }
 
+const DepthMarkPriceContext = createContext<string | null>(null);
+
+const DepthOrderDiff = memo(function DepthOrderDiff({ orderPrice }: { orderPrice: string }) {
+  const markPrice = useContext(DepthMarkPriceContext);
+  const diff = markPrice ? priceDiffPercent(orderPrice, markPrice) : null;
+  return diff ? <span className="grid-level-diff">{diff}</span> : null;
+});
+
+const DepthOrderRow = memo(function DepthOrderRow({
+  side,
+  orderPrice,
+  priceText,
+  qtyText,
+}: {
+  side: 'BUY' | 'SELL';
+  orderPrice: string;
+  priceText: string;
+  qtyText: string;
+}) {
+  return (
+    <div className={`grid-level grid-level-${side.toLowerCase()}`}>
+      <span>{side === 'BUY' ? '买单' : '卖单'} <span className="grid-level-quantity">{qtyText}</span></span>
+      <span className="grid-level-line" />
+      <DepthOrderDiff orderPrice={orderPrice} />
+      <strong>{priceText}</strong>
+    </div>
+  );
+});
+
 export const DepthChart = memo(function DepthChart({ snapshot }: { snapshot: Snapshot }) {
   const stableOrdersRef = useRef(snapshot.active_orders);
   if (!sameDepthOrders(stableOrdersRef.current, snapshot.active_orders)) {
@@ -99,30 +128,36 @@ export const DepthChart = memo(function DepthChart({ snapshot }: { snapshot: Sna
       .sort((a, b) => compareSignedDecimals(b.order.price, a.order.price));
     return { buyCount: buy, sellCount: sell, orderRows: sorted };
   }, [orders]);
+  const insertIdx = hasMark ? orderRows.findIndex(r => compareSignedDecimals(r.order.price, markPrice) < 0) : -2;
   const rows = useMemo(() => {
-    const withDiff = orderRows.map(r => ({
-      ...r,
-      diff: hasMark ? priceDiffPercent(r.order.price, markPrice) : null,
-    }));
-    if (!hasMark) return withDiff;
-    const result: (typeof withDiff[number] | { kind: 'mark'; priceText: string })[] = [...withDiff];
-    const insertIdx = orderRows.findIndex(r => compareSignedDecimals(r.order.price, markPrice) < 0);
-    const markRow = { kind: 'mark' as const, priceText: price(markPrice) };
-    if (insertIdx === -1) result.push(markRow);
-    else result.splice(insertIdx, 0, markRow);
+    if (insertIdx === -2) return orderRows;
+    const result: (typeof orderRows[number] | { kind: 'mark' })[] = [...orderRows];
+    if (insertIdx === -1) result.push({ kind: 'mark' });
+    else result.splice(insertIdx, 0, { kind: 'mark' });
     return result;
-  }, [orderRows, hasMark, markPrice]);
+  }, [orderRows, insertIdx]);
+  const markPriceText = hasMark ? price(markPrice) : null;
   if (!orders.length) return <NoData />;
   return <>
     <div className="muted chart-caption">买单 {buyCount} 笔 · 卖单 {sellCount} 笔</div>
-    <div ref={containerRef} className="grid-levels" role="region" aria-label="按价格从高到低排列的实时网格挂单" tabIndex={0}>
-      {rows.map(row => {
-        if (row.kind === 'mark') return <div className="grid-level grid-level-mark" key="mark"><span>标记价</span><span className="grid-level-line" /><strong>{row.priceText}</strong></div>;
-        return <div className={`grid-level grid-level-${row.order.side.toLowerCase()}`} key={row.order.client_order_id}>
-          <span>{row.order.side === 'BUY' ? '买单' : '卖单'} <span className="grid-level-quantity">{row.qtyText}</span></span><span className="grid-level-line" />{row.diff && <span className="grid-level-diff">{row.diff}</span>}<strong>{row.priceText}</strong>
-        </div>;
-      })}
-    </div>
+    <DepthMarkPriceContext.Provider value={hasMark ? markPrice : null}>
+      <div ref={containerRef} className="grid-levels" role="region" aria-label="按价格从高到低排列的实时网格挂单" tabIndex={0}>
+        {rows.map(row => {
+          if (row.kind === 'mark') {
+            return <div className="grid-level grid-level-mark" key="mark"><span>标记价</span><span className="grid-level-line" /><strong>{markPriceText}</strong></div>;
+          }
+          return (
+            <DepthOrderRow
+              key={row.order.client_order_id}
+              side={row.order.side}
+              orderPrice={row.order.price}
+              priceText={row.priceText}
+              qtyText={row.qtyText}
+            />
+          );
+        })}
+      </div>
+    </DepthMarkPriceContext.Provider>
   </>;
 }, (prev, next) =>
   prev.snapshot.symbol === next.snapshot.symbol &&

@@ -7,7 +7,7 @@ import type { AccountFrame, AccountObservation, OverviewHistoryData, Overview, P
 import { useExpired } from './useNow';
 const SOCKET_LIVE_MS = 5000;
 const HTTP_FALLBACK_MS = 3000;
-const PAIRS_SYNC_REFRESH_MS = 8000;
+const PAIRS_SYNC_REFRESH_MS = 6000;
 const TOKEN_CHAR_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 
 function samePair(left: Pair, right: Pair): boolean {

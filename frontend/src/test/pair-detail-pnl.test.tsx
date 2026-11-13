@@ -43,7 +43,10 @@ vi.mock('../components/DataTables', () => ({
 }));
 vi.mock('../components/HistoryActions', () => ({ HistoryActions: () => null }));
 
+let testClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
 beforeEach(() => {
+  testClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   state.data = snapshot();
   state.dataUpdatedAt = 0;
   state.pairs = [pair()];
@@ -58,7 +61,13 @@ beforeEach(() => {
 });
 
 function view(initialEntry = '/pairs/SOLUSDC') {
-  return <MemoryRouter initialEntries={[initialEntry]}><Routes><Route path="/pairs/:symbol" element={<PairDetail />} /></Routes></MemoryRouter>;
+  return (
+    <QueryClientProvider client={testClient}>
+      <MemoryRouter initialEntries={[initialEntry]}>
+        <Routes><Route path="/pairs/:symbol" element={<PairDetail />} /></Routes>
+      </MemoryRouter>
+    </QueryClientProvider>
+  );
 }
 
 it('updates the net realized profit only after pending trades are verified', () => {
