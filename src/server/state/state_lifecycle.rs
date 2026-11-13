@@ -307,6 +307,11 @@ impl AppState {
         self.pause_epoch.load(Ordering::SeqCst)
     }
 
+    pub(crate) fn has_pending_pause(&self) -> bool {
+        *self.pending_control_pauses.borrow() != 0
+            || self.safety_pauses_pending.load(Ordering::SeqCst) != 0
+    }
+
     pub(crate) fn subscribe_retirement(&self) -> watch::Receiver<bool> {
         self.retired.subscribe()
     }

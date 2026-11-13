@@ -337,6 +337,15 @@ impl GridTradingEngine {
         order: &GridOrder,
         mode: TradingMode,
     ) -> Option<(Decimal, bool, String)> {
+        if order.purpose == OrderPurpose::Reverse {
+            let note = format!(
+                "Reverse market {} filled at {} (Qty: {})",
+                order.side.as_str(),
+                order.price,
+                order.quantity
+            );
+            return Some((Decimal::ZERO, false, note));
+        }
         let mut cycle_profit = Decimal::ZERO;
         let mut is_completed_cycle = false;
         let mut note = format!(

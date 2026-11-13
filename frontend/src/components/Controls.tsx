@@ -5,16 +5,39 @@ import { useQueryClient } from '@tanstack/react-query';
 import { api, errorMessage, pairPath, post } from '../lib/api';
 import { useMountedRef } from '../lib/asyncGuard';
 import { useConfirmDialog } from '../lib/confirmDialog';
+import { formatDecimal, parseSignedDecimal } from '../lib/decimal';
+import { directionLabel, modeLabel, positiveDecimalText, positivePrice, quantity } from '../lib/format';
+import { quoteAsset } from '../lib/portfolio';
 import { invalidateStrategyQueries } from '../lib/queries';
-import type { Action, Pair, Snapshot } from '../lib/types';
+import type { Action, GridConfig, Mode, Pair, Snapshot, Status } from '../lib/types';
 import { StrategyToggle, strategySecondaryItems } from './StrategyMenu';
-async function confirmControlState(pair: Pair, action: Action, sleep: (ms: number) => Promise<boolean>, signal: AbortSignal): Promise<boolean> {
+
+interface ReverseExpectation {
+  targetDirection: GridConfig['direction'];
+  expectedStatus: Status;
+}
+
+async function confirmControlState(
+  pair: Pair,
+  action: Action,
+  sleep: (ms: number) => Promise<boolean>,
+  signal: AbortSignal,
+  reverseExpectation?: ReverseExpectation,
+): Promise<boolean> {
   if (action === 'rebalance') return true;
   for (let attempt = 0; attempt < 5; attempt++) {
     if (!await sleep(800) || signal.aborted) return false;
     const snapshot = await api<Snapshot>(pairPath(pair, 'status'), { signal });
     if (signal.aborted) return false;
-    const matches = action === 'resume' ? snapshot.status === 'RUNNING' : snapshot.status === 'PAUSED';
+    const matches = action === 'reverse'
+      ? Boolean(
+          reverseExpectation
+          && snapshot.grid_config.direction === reverseExpectation.targetDirection
+          && (reverseExpectation.expectedStatus === 'RUNNING' ? snapshot.status === 'RUNNING' : snapshot.status === 'PAUSED'),
+        )
+      : action === 'resume'
+        ? snapshot.status === 'RUNNING'
+        : snapshot.status === 'PAUSED';
     if (matches) return true;
   }
   return false;
@@ -66,6 +89,49 @@ function controlConfirmCopy(pair: Pair, action: Action) {
       : '将撤销此交易对的机器人挂单并暂停，保留持仓。';
   return { title: `${pair.symbol} · ${titleAction}`, content };
 }
+
+function buildReversePlan(latest: Snapshot) {
+  const fromDirection = latest.grid_config.direction;
+  const toDirection: GridConfig['direction'] = fromDirection === 'LONG' ? 'SHORT' : 'LONG';
+  const parsedSize = parseSignedDecimal(latest.position.size);
+  if (parsedSize && ((fromDirection === 'LONG' && parsedSize.n < 0n) || (fromDirection === 'SHORT' && parsedSize.n > 0n))) {
+    throw new Error('当前持仓方向与策略方向不一致，请刷新并核实仓位后再操作');
+  }
+  const hasPosition = Boolean(parsedSize && parsedSize.n !== 0n);
+  const absQtyText = hasPosition && parsedSize ? formatDecimal(parsedSize.n < 0n ? -parsedSize.n : parsedSize.n, parsedSize.s) : '0';
+  const formattedQty = hasPosition ? quantity(absQtyText) : '0';
+  const currentSideLabel = fromDirection === 'LONG' ? '多头' : '空头';
+  const nextOpenVerb = toDirection === 'LONG' ? '开多' : '开空';
+  const rawRefPrice = latest.mode === 'PAPER'
+    ? (positiveDecimalText(latest.ticker.last_price) ?? positiveDecimalText(latest.ticker.mark_price) ?? positiveDecimalText(latest.position.mark_price))
+    : (positiveDecimalText(latest.ticker.mark_price) ?? positiveDecimalText(latest.position.mark_price) ?? positiveDecimalText(latest.ticker.last_price));
+  const formattedRefPrice = rawRefPrice ? positivePrice(rawRefPrice) : '--';
+  const quote = quoteAsset(latest.symbol, latest.account.asset);
+  const stepOneContent = <div className="confirm-changes">
+    <p>请核对当前最新仓位与反手执行计划，确认无误后进入最终确认：</p>
+    <dl>
+      <div className={latest.mode === 'LIVE' ? 'confirm-risky' : undefined}><dt>运行模式</dt><dd><strong>{modeLabel[latest.mode]}</strong></dd></div>
+      <div className="confirm-risky"><dt>方向变更</dt><dd><s>{directionLabel(fromDirection)}</s> → <strong>{directionLabel(toDirection)}</strong></dd></div>
+      <div><dt>当前持仓</dt><dd><strong>{hasPosition ? `${currentSideLabel} ${formattedQty}` : '空仓（0）'}</strong></dd></div>
+      {hasPosition && <div><dt>参考市价</dt><dd>{formattedRefPrice !== '--' ? `${formattedRefPrice}${quote ? ` ${quote}` : ''}` : '待获取'}</dd></div>}
+      <div><dt>执行步骤</dt><dd>{hasPosition ? `撤单 → 市价平${currentSideLabel} ${formattedQty} → 切换方向 → 市价${nextOpenVerb} ${formattedQty}` : '撤销策略挂单 → 切换策略方向（不提交市价单）'}</dd></div>
+      <div><dt>反手后状态</dt><dd>{latest.status === 'RUNNING' ? '保持运行并按新方向重建网格' : '保持已暂停'}</dd></div>
+    </dl>
+  </div>;
+  const stepTwoContent = <div className="confirm-changes">
+    <p>{hasPosition
+      ? (latest.mode === 'LIVE'
+        ? `即将使用真实资金对 ${latest.symbol} 执行市价平仓并等量反向市价开仓，可能产生滑点与 Taker 手续费，提交后无法撤销。`
+        : `即将对 ${latest.symbol}（模拟盘）执行市价平仓并等量反向市价开仓。`)
+      : `当前 ${latest.symbol} 为空仓，确认后将撤销策略挂单并将交易方向切换为${directionLabel(toDirection)}。`}</p>
+    <dl>
+      <div className="confirm-risky"><dt>最终执行</dt><dd><strong>{directionLabel(fromDirection)} → {directionLabel(toDirection)}{hasPosition ? `（等量 ${formattedQty}）` : '（空仓切换）'}</strong></dd></div>
+      {hasPosition && <div><dt>异常保护</dt><dd>若中途平仓或反向开仓异常，策略将自动暂停保护</dd></div>}
+    </dl>
+  </div>;
+  return { fromDirection, toDirection, expectedStatus: latest.status, stepOneContent, stepTwoContent };
+}
+
 function resolveControlOutcome(action: Action, observedState: boolean): { resultText: string; confirmedState: boolean; outcome: ControlResult } {
   const cancellationUnverified = action === 'pause' || action === 'cancel_all';
   const confirmedState = observedState && !cancellationUnverified;
@@ -79,7 +145,9 @@ function resolveControlOutcome(action: Action, observedState: boolean): { result
     };
   }
   return {
-    resultText: confirmedState ? (action === 'rebalance' ? '重建请求已提交，请查看挂单及日志' : '已确认') : '已提交，状态尚未确认，请查看日志',
+    resultText: confirmedState
+      ? (action === 'rebalance' ? '重建请求已提交，请查看挂单及日志' : action === 'reverse' ? '反手交易已完成' : '已确认')
+      : '已提交，状态尚未确认，请查看日志',
     confirmedState,
     outcome: confirmedState ? 'confirmed' : 'state_unconfirmed',
   };
@@ -219,17 +287,49 @@ export function ControlProvider({ pairs, children }: { pairs?: Pair[]; children:
     store.setBusyFromLocked(locked.current);
     let submitted = false;
     try {
-      const dangerous = action === 'rebalance' || action === 'cancel_all' || (action === 'resume' && pair.mode === 'LIVE');
-      if (dangerous && !confirmed) {
-        const { title, content } = controlConfirmCopy(pair, action);
-        if (!await confirm({ title, content, okText: '确认执行', cancelText: '取消' }) || !mounted.current) return 'not_submitted';
+      let expectedMode: Mode = pair.mode;
+      let expectedDirection: GridConfig['direction'] = pair.grid_config.direction;
+      let reverseExpectation: ReverseExpectation | undefined;
+      if (action === 'reverse') {
+        if (!confirmed) {
+          const latest = await api<Snapshot>(pairPath(pair, 'status'), { signal: abortRef.current!.signal, readOnly: true });
+          if (!mounted.current) return 'not_submitted';
+          if (!latest || latest.symbol !== pair.symbol) throw new Error('获取交易对最新状态异常，请刷新后重试');
+          if (latest.mode === 'UNKNOWN') throw new Error('策略运行模式未知，无法执行反手交易');
+          const plan = buildReversePlan(latest);
+          expectedMode = latest.mode;
+          expectedDirection = plan.fromDirection;
+          reverseExpectation = { targetDirection: plan.toDirection, expectedStatus: plan.expectedStatus };
+          if (!await confirm({ title: `${latest.symbol} · 反手交易确认（1/2）`, content: plan.stepOneContent, okText: '下一步', cancelText: '取消' }) || !mounted.current) {
+            return 'not_submitted';
+          }
+          if (!await confirm({ title: `${latest.symbol} · 最终执行确认（2/2）`, content: plan.stepTwoContent, okText: '确认反手', okButtonProps: { danger: true }, cancelText: '取消' }) || !mounted.current) {
+            return 'not_submitted';
+          }
+        } else {
+          if (expectedMode === 'UNKNOWN') throw new Error('策略运行模式未知，无法执行反手交易');
+          reverseExpectation = {
+            targetDirection: expectedDirection === 'LONG' ? 'SHORT' : 'LONG',
+            expectedStatus: pair.status,
+          };
+        }
+      } else {
+        const dangerous = action === 'rebalance' || action === 'cancel_all' || (action === 'resume' && pair.mode === 'LIVE');
+        if (dangerous && !confirmed) {
+          const { title, content } = controlConfirmCopy(pair, action);
+          if (!await confirm({ title, content, okText: '确认执行', cancelText: '取消' }) || !mounted.current) return 'not_submitted';
+        }
       }
       if (!mounted.current) return 'not_submitted';
       store.startSubmission(pair.symbol, action);
       submitted = true;
-      await post(pairPath(pair, 'control'), action === 'resume' || action === 'rebalance' ? { action, expected_mode: pair.mode } : { action });
+      if (action === 'reverse') {
+        await post(pairPath(pair, 'control'), { action: 'reverse', expected_mode: expectedMode, expected_direction: expectedDirection }, { timeoutMs: 60_000 });
+      } else {
+        await post(pairPath(pair, 'control'), action === 'resume' || action === 'rebalance' ? { action, expected_mode: pair.mode } : { action });
+      }
       if (!mounted.current) return 'state_unconfirmed';
-      const observedState = await confirmControlState(pair, action, sleep, abortRef.current!.signal).catch(() => false);
+      const observedState = await confirmControlState(pair, action, sleep, abortRef.current!.signal, reverseExpectation).catch(() => false);
       const { resultText, confirmedState, outcome } = resolveControlOutcome(action, observedState);
       if (mounted.current) {
         store.setResult(pair.symbol, resultText);
@@ -248,7 +348,13 @@ export function ControlProvider({ pairs, children }: { pairs?: Pair[]; children:
     } finally {
       locked.current.delete(pair.symbol);
       store.finishSymbol(pair.symbol, locked.current, mounted.current);
-      if (submitted) void invalidateStrategyQueries(client, { accounts: true, snapshot: pair.symbol });
+      if (submitted) {
+        void invalidateStrategyQueries(client, {
+          accounts: true,
+          snapshot: pair.symbol,
+          ...(action === 'reverse' ? { configSymbol: pair.symbol } : {}),
+        });
+      }
     }
   }, [abortRef, client, confirm, message, mounted, sleep, store]);
   runRef.current = run;

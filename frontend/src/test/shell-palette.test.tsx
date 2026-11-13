@@ -5,7 +5,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { createMemoryRouter, MemoryRouter, RouterProvider } from 'react-router-dom';
 import { beforeEach, expect, it, vi } from 'vitest';
 import Shell from '../components/Shell';
-import { StrategyToggle, strategyActionGuard } from '../components/StrategyMenu';
+import { StrategyToggle, strategyActionGuard, strategySecondaryItems } from '../components/StrategyMenu';
 import PairConfig from '../pages/PairConfig';
 import PairDetail from '../pages/PairDetail';
 import Settings from '../pages/Settings';
@@ -192,6 +192,38 @@ it('runs a pair action from the palette through the guarded control flow', async
   await user.type(search, '恢复 ETHUSDC');
   await user.keyboard('{Enter}');
   expect(mocks.run).toHaveBeenCalledWith(expect.objectContaining({ symbol: 'ETHUSDC' }), 'resume');
+});
+
+it('exposes reverse trade in menu items and command palette with stale and mode guards', async () => {
+  const longRunning = { ...pair('SOLUSDC'), status: 'RUNNING' as const };
+  const shortPaused = {
+    ...pair('SOLUSDC'),
+    status: 'PAUSED' as const,
+    grid_config: { ...pair('SOLUSDC').grid_config, direction: 'SHORT' as const },
+  };
+  const unknownMode = { ...pair('SOLUSDC'), mode: 'UNKNOWN' as const };
+
+  expect(strategyActionGuard(longRunning, false, false)).toMatchObject({ nextDirection: 'SHORT', reverseDisabled: false });
+  expect(strategyActionGuard(shortPaused, false, false)).toMatchObject({ nextDirection: 'LONG', reverseDisabled: false });
+  expect(strategyActionGuard(longRunning, true, false).reverseDisabled).toBe(true);
+  expect(strategyActionGuard(longRunning, false, true).reverseDisabled).toBe(true);
+  expect(strategyActionGuard(unknownMode, false, false).reverseDisabled).toBe(true);
+
+  const items = strategySecondaryItems(shortPaused, false);
+  expect(items.find(item => item.key === 'reverse')).toMatchObject({
+    label: '反手交易（转做多）',
+    disabled: false,
+  });
+
+  setup();
+  const user = userEvent.setup();
+  await user.keyboard('{Control>}k{/Control}');
+  const search = await screen.findByRole('combobox', { name: '搜索命令' });
+  await user.type(search, '反手 ETHUSDC');
+  const option = await screen.findByRole('option', { name: /反手 ETHUSDC（转做空）/ });
+  expect(option).toHaveTextContent('二次确认');
+  await user.keyboard('{Enter}');
+  expect(mocks.run).toHaveBeenCalledWith(expect.objectContaining({ symbol: 'ETHUSDC' }), 'reverse');
 });
 
 it('keeps CommandPalette resume actions enabled across 10s poll intervals until PAIRS_STALE_MS elapses', () => {

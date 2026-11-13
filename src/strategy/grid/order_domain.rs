@@ -34,7 +34,9 @@ pub(super) fn unresolved_filled_quantity(order: &BinanceOrderResponse) -> bool {
 #[must_use]
 #[inline]
 pub(super) fn is_window_order(order: &GridOrder) -> bool {
-    is_grid_order(&order.client_order_id) && order.status == OrderStatus::New
+    is_grid_order(&order.client_order_id)
+        && order.status == OrderStatus::New
+        && order.purpose != OrderPurpose::Reverse
 }
 
 // Paper accounts have no exchange-provided leverage until one is explicitly set.

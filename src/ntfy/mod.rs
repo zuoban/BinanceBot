@@ -1,6 +1,9 @@
 use crate::config::NtfyConfig;
 use crate::telegram::daily_snapshot::format_daily_snapshot_plain_body;
-use crate::telegram::{format_beijing_time, format_optional_money, TradeNotificationContext};
+use crate::telegram::{
+    format_beijing_time, format_optional_money, format_reverse_plain_parts, ReverseNotification,
+    TradeNotificationContext,
+};
 use crate::types::{format_decimal_dp, OrderSide, TradeRecord};
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
@@ -67,6 +70,20 @@ impl NtfyNotifier {
         let (title, message) = format_ntfy_global_risk_message(reason, Utc::now());
         self.send_message(config, title, message, HIGH_PRIORITY)
             .await
+    }
+
+    pub(crate) async fn send_reverse_notification(
+        &self,
+        config: &NtfyConfig,
+        notification: &ReverseNotification,
+    ) -> Result<()> {
+        let (title, message) = format_ntfy_reverse_message(notification);
+        let priority = if notification.failure_reason.is_some() {
+            HIGH_PRIORITY
+        } else {
+            DEFAULT_PRIORITY
+        };
+        self.send_message(config, title, message, priority).await
     }
 
     pub(crate) async fn send_daily_snapshot_notification(
@@ -227,6 +244,10 @@ pub(crate) fn format_ntfy_global_risk_message(
         "⚠️ 全局风控已触发".to_string(),
         format!("原因：{reason}\n时间：{time}（北京时间）"),
     )
+}
+
+pub(crate) fn format_ntfy_reverse_message(notification: &ReverseNotification) -> (String, String) {
+    format_reverse_plain_parts(notification)
 }
 
 pub(crate) fn format_ntfy_daily_snapshot_message(

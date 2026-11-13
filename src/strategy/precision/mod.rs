@@ -17,6 +17,11 @@ pub(crate) struct SymbolRules {
     pub(crate) min_qty: Decimal,
     pub(crate) max_qty: Decimal,
 
+    pub(crate) market_step_size: Decimal,
+    pub(crate) market_quantity_scale: u32,
+    pub(crate) market_min_qty: Decimal,
+    pub(crate) market_max_qty: Decimal,
+
     pub(crate) min_notional: Decimal,
 }
 
@@ -32,6 +37,10 @@ impl Default for SymbolRules {
             quantity_scale: 2,
             min_qty: dec!(0.01),
             max_qty: dec!(800000.0),
+            market_step_size: dec!(0.01),
+            market_quantity_scale: 2,
+            market_min_qty: dec!(0.01),
+            market_max_qty: dec!(800000.0),
             min_notional: dec!(5.0),
         }
     }
@@ -123,6 +132,7 @@ impl SymbolRules {
         let (mut tick_size, mut min_price, mut max_price) =
             (dec!(0.01), dec!(0.0001), dec!(1000000.0));
         let (mut step_size, mut min_qty, mut max_qty) = (dec!(0.01), dec!(0.01), dec!(1000000.0));
+        let mut market_lot: Option<(Decimal, Decimal, Decimal)> = None;
         let mut min_notional = dec!(5.0);
         for filter in &sym.filters {
             match filter {
@@ -152,6 +162,13 @@ impl SymbolRules {
                         max_qty = *max_q;
                     }
                 }
+                BinanceFilter::MarketLotSize {
+                    min_qty: min_q,
+                    max_qty: max_q,
+                    step_size: step,
+                } => {
+                    market_lot = Some((*min_q, *max_q, *step));
+                }
                 BinanceFilter::MinNotional { notional: Some(n) } if *n > Decimal::ZERO => {
                     min_notional = *n;
                 }
@@ -161,6 +178,22 @@ impl SymbolRules {
 
         let price_scale = calculate_scale(tick_size);
         let quantity_scale = calculate_scale(step_size);
+        let mut market_step_size = step_size;
+        let mut market_min_qty = min_qty;
+        let mut market_max_qty = max_qty;
+        if let Some((m_min, m_max, m_step)) = market_lot {
+            if m_step > Decimal::ZERO {
+                market_step_size = m_step.max(step_size);
+            }
+            if m_min > Decimal::ZERO {
+                market_min_qty = m_min.max(min_qty);
+            }
+            if m_max > Decimal::ZERO && m_max >= market_min_qty {
+                market_max_qty = m_max.min(max_qty);
+            }
+        }
+        market_max_qty = market_max_qty.max(market_min_qty);
+        let market_quantity_scale = calculate_scale(market_step_size);
 
         debug!(
             "Loaded symbol rules for {}: tick_size={}, step_size={}, min_notional={}",
@@ -177,6 +210,10 @@ impl SymbolRules {
             quantity_scale,
             min_qty,
             max_qty,
+            market_step_size,
+            market_quantity_scale,
+            market_min_qty,
+            market_max_qty,
             min_notional,
         })
     }
@@ -189,6 +226,8 @@ impl SymbolRules {
     pub(crate) fn set_step_size(&mut self, step_size: Decimal) {
         self.step_size = step_size;
         self.quantity_scale = calculate_scale(step_size);
+        self.market_step_size = step_size;
+        self.market_quantity_scale = self.quantity_scale;
     }
 
     /// A fixed lattice must be exactly representable by the exchange price filter.
@@ -425,6 +464,132 @@ impl SymbolRules {
             self.quantity_scale,
             false,
         )
+    }
+
+    fn checked_round_market_quantity(&self, qty: Decimal) -> Option<Decimal> {
+        if self.market_step_size.is_zero() {
+            return Some(qty);
+        }
+        if self.market_step_size < Decimal::ZERO {
+            return None;
+        }
+        let steps = qty.checked_div(self.market_step_size)?.floor();
+        let rounded = steps.checked_mul(self.market_step_size)?;
+        Some(rounded.trunc_with_scale(self.market_quantity_scale))
+    }
+
+    #[must_use]
+    #[inline]
+    pub(crate) fn round_market_quantity(&self, qty: Decimal) -> Decimal {
+        self.checked_round_market_quantity(qty)
+            .unwrap_or(Decimal::ZERO)
+    }
+
+    #[must_use]
+    #[inline]
+    pub(crate) fn format_market_quantity(&self, qty: Decimal) -> String {
+        crate::types::format_truncated_decimal_dp(
+            self.round_market_quantity(qty),
+            self.market_quantity_scale,
+            false,
+        )
+    }
+
+    fn min_open_market_chunk_qty(&self, reference_price: Decimal) -> Option<Decimal> {
+        let mut min_chunk = self.market_min_qty.max(self.min_qty);
+        if reference_price > Decimal::ZERO
+            && self.min_notional > Decimal::ZERO
+            && self.market_step_size > Decimal::ZERO
+        {
+            let raw = self.min_notional.checked_div(reference_price)?;
+            let steps = raw.checked_div(self.market_step_size)?.ceil();
+            let notional_qty = steps
+                .checked_mul(self.market_step_size)?
+                .trunc_with_scale(self.market_quantity_scale);
+            min_chunk = min_chunk.max(notional_qty);
+        }
+        Some(min_chunk)
+    }
+
+    pub(crate) fn plan_market_chunks(
+        &self,
+        total_qty: Decimal,
+        reduce_only: bool,
+        reference_price: Decimal,
+    ) -> anyhow::Result<Vec<Decimal>> {
+        let rounded = self
+            .checked_round_market_quantity(total_qty)
+            .unwrap_or(Decimal::ZERO);
+        if reduce_only {
+            let lot_rounded = self
+                .checked_round_quantity(total_qty)
+                .unwrap_or(Decimal::ZERO);
+            anyhow::ensure!(
+                rounded > Decimal::ZERO && rounded == lot_rounded,
+                "当前持仓数量 {} 不满足市价平仓步长规则，请先手动处理残余仓位",
+                total_qty.normalize()
+            );
+        } else {
+            let min_open = self
+                .min_open_market_chunk_qty(reference_price)
+                .ok_or_else(|| anyhow::anyhow!("无法计算市价开仓数量限制"))?;
+            let notional_ok = reference_price <= Decimal::ZERO
+                || rounded
+                    .checked_mul(reference_price)
+                    .is_some_and(|notional| notional >= self.min_notional);
+            anyhow::ensure!(
+                rounded >= min_open && notional_ok,
+                "当前持仓数量 {} 低于交易所最小市价开仓门槛，请先手动处理残余仓位",
+                total_qty.normalize()
+            );
+        }
+        let max_chunk = self
+            .checked_round_market_quantity(self.market_max_qty)
+            .filter(|qty| *qty > Decimal::ZERO)
+            .ok_or_else(|| anyhow::anyhow!("交易对市价最大下单数量规则无效"))?;
+        let min_chunk = if reduce_only {
+            self.market_min_qty.max(self.min_qty)
+        } else {
+            self.min_open_market_chunk_qty(reference_price)
+                .ok_or_else(|| anyhow::anyhow!("无法计算市价开仓数量限制"))?
+        };
+        if !reduce_only {
+            anyhow::ensure!(
+                max_chunk >= min_chunk,
+                "当前价格下最小开仓门槛高于单笔市价数量上限，无法执行反手开仓"
+            );
+        }
+        let mut chunks = Vec::new();
+        let mut remaining = rounded;
+        while remaining > max_chunk {
+            chunks.push(max_chunk);
+            remaining = remaining
+                .checked_sub(max_chunk)
+                .ok_or_else(|| anyhow::anyhow!("市价分片数量计算溢出"))?;
+        }
+        if remaining > Decimal::ZERO {
+            chunks.push(remaining);
+        }
+        if chunks.len() >= 2 {
+            let last_idx = chunks.len() - 1;
+            if chunks[last_idx] < min_chunk {
+                let combined = chunks[last_idx - 1]
+                    .checked_add(chunks[last_idx])
+                    .ok_or_else(|| anyhow::anyhow!("市价分片数量计算溢出"))?;
+                let first = self.round_market_quantity(combined / Decimal::TWO);
+                let second = combined.saturating_sub(first);
+                if first >= min_chunk && second >= min_chunk && second <= max_chunk {
+                    chunks[last_idx - 1] = first;
+                    chunks[last_idx] = second;
+                } else if !reduce_only {
+                    anyhow::bail!(
+                        "当前持仓数量 {} 无法拆分为满足交易所最小门槛的市价订单",
+                        total_qty.normalize()
+                    );
+                }
+            }
+        }
+        Ok(chunks)
     }
 }
 

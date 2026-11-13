@@ -363,3 +363,4 @@ mod market_identity;
 mod pair_intent_lifecycle;
 mod paper_and_sizing;
 mod reconcile_and_mode_cancel;
+mod reverse_trade_tests;

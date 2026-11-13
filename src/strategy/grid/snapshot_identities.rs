@@ -74,10 +74,21 @@ impl ConflictObservationCandidates {
 }
 
 pub(super) fn invalid_snapshot_price(order: &BinanceOrderResponse) -> bool {
-    order.price <= Decimal::ZERO
-        && !(order.is_terminal()
-            && order.executed_qty > Decimal::ZERO
-            && order.avg_price.is_some_and(|price| price > Decimal::ZERO))
+    if order.price < Decimal::ZERO {
+        return true;
+    }
+    if order.price > Decimal::ZERO {
+        return false;
+    }
+    if order.order_type.eq_ignore_ascii_case("MARKET")
+        && (!order.is_terminal()
+            || (order.is_unfilled_terminal() && order.executed_qty <= Decimal::ZERO))
+    {
+        return false;
+    }
+    !(order.is_terminal()
+        && order.executed_qty > Decimal::ZERO
+        && order.avg_price.is_some_and(|price| price > Decimal::ZERO))
 }
 
 impl GridTradingEngine {

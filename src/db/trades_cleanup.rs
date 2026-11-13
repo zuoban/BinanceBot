@@ -64,7 +64,7 @@ fn clear_trades_on(tx: &Connection, symbol: Option<&str>) -> Result<usize> {
                     ROW_NUMBER() OVER (
                         PARTITION BY symbol, mode ORDER BY timestamp DESC, rowid DESC
                     ) AS rank
-             FROM trades WHERE (?1 IS NULL OR symbol = ?1)
+             FROM trades WHERE (?1 IS NULL OR symbol = ?1) AND trade_id NOT LIKE 'reverse:%'
          ) WHERE rank = 1
          ON CONFLICT(symbol, mode) DO UPDATE SET
              side = excluded.side, price = excluded.price, timestamp = excluded.timestamp

@@ -1,7 +1,7 @@
 type Decimal = string;
 export type Mode = 'PAPER' | 'LIVE' | 'UNKNOWN';
 export type Status = 'RUNNING' | 'PAUSED' | 'STOPPED' | 'ERROR';
-export type Action = 'pause' | 'resume' | 'cancel_all' | 'rebalance';
+export type Action = 'pause' | 'resume' | 'cancel_all' | 'rebalance' | 'reverse';
 export interface ApiResponse<T> { success: boolean; data: T; message?: string }
 export interface AuthStatus { initialized: boolean; authenticated: boolean }
 export interface GridConfig {
@@ -23,7 +23,7 @@ export interface Pair { symbol: string; scoped: boolean; status: Status; mode: M
 export interface Order {
   client_order_id: string; order_id: number | null; symbol: string; side: 'BUY' | 'SELL';
   price: Decimal; quantity: Decimal; amount_usdc: Decimal; status: string;
-  created_at: string; grid_level: number; is_take_profit: boolean; purpose: 'GRID' | 'TAKE_PROFIT' | 'REMAINDER' | 'LEGACY' | 'UNVERIFIED' | (string & {});
+  created_at: string; grid_level: number; is_take_profit: boolean; purpose: 'GRID' | 'TAKE_PROFIT' | 'REMAINDER' | 'REVERSE' | 'LEGACY' | 'UNVERIFIED' | (string & {});
   merge_sources: { client_order_id: string; price: Decimal; quantity: Decimal }[];
 }
 export interface Trade {

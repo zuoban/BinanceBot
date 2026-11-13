@@ -8,10 +8,11 @@ import { api, ApiError, post } from '../lib/api';
 import type * as Api from '../lib/api';
 import { pair, snapshot } from './fixtures';
 
+const modalConfirm = vi.hoisted(() => vi.fn());
 const messages = vi.hoisted(() => ({ warning: vi.fn(), error: vi.fn() }));
 vi.mock('antd', () => ({
   App: Object.assign(({ children }: { children: React.ReactNode }) => children, {
-    useApp: () => ({ modal: { confirm: vi.fn() }, message: messages }),
+    useApp: () => ({ modal: { confirm: modalConfirm }, message: messages }),
   }),
 }));
 vi.mock('@ant-design/icons', () => ({}));
@@ -247,4 +248,131 @@ it('isolates per-symbol useControls subscriptions from unrelated symbol transiti
   await act(async () => { finishPost(); });
   unmount();
   client.clear();
+});
+
+it('completes two-step reverse confirmation for an active position, submits mode and direction, and invalidates config', async () => {
+  const preflight = {
+    ...snapshot('SOLUSDC', 'LIVE'),
+    status: 'RUNNING' as const,
+    position: { ...snapshot('SOLUSDC', 'LIVE').position, size: '2.5' },
+  };
+  const postReverse = {
+    ...preflight,
+    grid_config: { ...preflight.grid_config, direction: 'SHORT' as const },
+    position: { ...preflight.position, size: '-2.5' },
+  };
+  vi.mocked(api).mockResolvedValueOnce(preflight).mockResolvedValue(postReverse);
+  vi.mocked(post).mockResolvedValue(undefined);
+  modalConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(true);
+
+  const client = new QueryClient();
+  const invalidate = vi.spyOn(client, 'invalidateQueries');
+  const wrapper = ({ children }: { children: React.ReactNode }) => <QueryClientProvider client={client}><App><ControlProvider>{children}</ControlProvider></App></QueryClientProvider>;
+  const { result, unmount } = renderHook(() => useControls(), { wrapper });
+  try {
+    let outcome!: ControlResult;
+    await act(async () => {
+      outcome = await result.current.run({ ...pair('SOLUSDC'), mode: 'LIVE', status: 'RUNNING' }, 'reverse');
+    });
+    expect(outcome).toBe('confirmed');
+    expect(result.current.results.SOLUSDC).toBe('反手交易已完成');
+    expect(modalConfirm).toHaveBeenCalledTimes(2);
+    expect(modalConfirm.mock.calls[0][0]).toMatchObject({
+      title: 'SOLUSDC · 反手交易确认（1/2）',
+      okText: '下一步',
+      cancelText: '取消',
+    });
+    expect(modalConfirm.mock.calls[1][0]).toMatchObject({
+      title: 'SOLUSDC · 最终执行确认（2/2）',
+      okText: '确认反手',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+    });
+    const { unmount: unmountStepOne, container: stepOneContainer } = render(<>{modalConfirm.mock.calls[0][0].content}</>);
+    expect(stepOneContainer.textContent).toContain('多头 2.5');
+    expect(stepOneContainer.textContent).toContain('撤单 → 市价平多头 2.5 → 切换方向 → 市价开空 2.5');
+    expect(stepOneContainer.textContent).toContain('保持运行并按新方向重建网格');
+    unmountStepOne();
+
+    const { unmount: unmountStepTwo, container: stepTwoContainer } = render(<>{modalConfirm.mock.calls[1][0].content}</>);
+    expect(stepTwoContainer.textContent).toContain('滑点与 Taker 手续费');
+    unmountStepTwo();
+
+    expect(post).toHaveBeenCalledWith(
+      '/api/pairs/SOLUSDC/control',
+      { action: 'reverse', expected_mode: 'LIVE', expected_direction: 'LONG' },
+      { timeoutMs: 60_000 },
+    );
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['config', 'SOLUSDC'] });
+  } finally {
+    unmount();
+    client.clear();
+  }
+});
+
+it('aborts reverse without submitting when canceled at step 1 or step 2', async () => {
+  vi.mocked(api).mockResolvedValue(snapshot('SOLUSDC', 'PAPER'));
+  const client = new QueryClient();
+  const wrapper = ({ children }: { children: React.ReactNode }) => <QueryClientProvider client={client}><App><ControlProvider>{children}</ControlProvider></App></QueryClientProvider>;
+  const { result, unmount } = renderHook(() => useControls(), { wrapper });
+  try {
+    modalConfirm.mockResolvedValueOnce(false);
+    let firstOutcome!: ControlResult;
+    await act(async () => { firstOutcome = await result.current.run(pair('SOLUSDC'), 'reverse'); });
+    expect(firstOutcome).toBe('not_submitted');
+    expect(modalConfirm).toHaveBeenCalledTimes(1);
+    expect(post).not.toHaveBeenCalled();
+
+    modalConfirm.mockClear();
+    modalConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    let secondOutcome!: ControlResult;
+    await act(async () => { secondOutcome = await result.current.run(pair('SOLUSDC'), 'reverse'); });
+    expect(secondOutcome).toBe('not_submitted');
+    expect(modalConfirm).toHaveBeenCalledTimes(2);
+    expect(post).not.toHaveBeenCalled();
+  } finally {
+    unmount();
+    client.clear();
+  }
+});
+
+it('handles empty-position reverse confirmation and preserves PAUSED status expectation', async () => {
+  const base = snapshot('SOLUSDC', 'PAPER');
+  const preflight = {
+    ...base,
+    status: 'PAUSED' as const,
+    grid_config: { ...base.grid_config, direction: 'SHORT' as const },
+    position: { ...base.position, size: '0' },
+  };
+  const postReverse = {
+    ...preflight,
+    grid_config: { ...preflight.grid_config, direction: 'LONG' as const },
+  };
+  vi.mocked(api).mockResolvedValueOnce(preflight).mockResolvedValue(postReverse);
+  vi.mocked(post).mockResolvedValue(undefined);
+  modalConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(true);
+
+  const client = new QueryClient();
+  const wrapper = ({ children }: { children: React.ReactNode }) => <QueryClientProvider client={client}><App><ControlProvider>{children}</ControlProvider></App></QueryClientProvider>;
+  const { result, unmount } = renderHook(() => useControls(), { wrapper });
+  try {
+    let outcome!: ControlResult;
+    const pausedShortPair = { ...pair('SOLUSDC'), status: 'PAUSED' as const, grid_config: preflight.grid_config };
+    await act(async () => { outcome = await result.current.run(pausedShortPair, 'reverse'); });
+    expect(outcome).toBe('confirmed');
+    expect(result.current.results.SOLUSDC).toBe('反手交易已完成');
+    const { unmount: unmountStepOne, container } = render(<>{modalConfirm.mock.calls[0][0].content}</>);
+    expect(container.textContent).toContain('空仓（0）');
+    expect(container.textContent).toContain('撤销策略挂单 → 切换策略方向（不提交市价单）');
+    expect(container.textContent).toContain('保持已暂停');
+    unmountStepOne();
+    expect(post).toHaveBeenCalledWith(
+      '/api/pairs/SOLUSDC/control',
+      { action: 'reverse', expected_mode: 'PAPER', expected_direction: 'SHORT' },
+      { timeoutMs: 60_000 },
+    );
+  } finally {
+    unmount();
+    client.clear();
+  }
 });

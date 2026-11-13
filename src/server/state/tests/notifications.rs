@@ -571,3 +571,143 @@ async fn ntfy_notifications_deliver_independently_and_alongside_failing_telegram
     fixture.server.abort();
     ntfy_server.abort();
 }
+
+#[tokio::test]
+async fn reverse_trades_suppress_trade_alerts_and_deliver_synchronized_reverse_notifications() {
+    use crate::telegram::ReverseNotification;
+    use axum::{routing::post, Json, Router};
+
+    let (ntfy_tx, mut ntfy_rx) = mpsc::unbounded_channel();
+    let app = Router::new().route(
+        "/",
+        post(move |Json(payload): Json<serde_json::Value>| {
+            let tx = ntfy_tx.clone();
+            async move {
+                let topic = payload["topic"].as_str().unwrap_or("").to_string();
+                tx.send(payload).unwrap();
+                Json(serde_json::json!({"id": "ntfy-rev-1", "event": "message", "topic": topic}))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ntfy_url = format!("http://{}", listener.local_addr().unwrap());
+    let ntfy_server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let mut fixture = notification_fixture(true, false).await;
+    Arc::get_mut(&mut fixture.state).unwrap().ntfy_notifier =
+        crate::ntfy::NtfyNotifier::with_client(reqwest::Client::new());
+    {
+        let mut config = fixture.state.config.write().await;
+        config.exchange.api_key = "live-key".into();
+        config.exchange.api_secret = "live-secret".into();
+        config.ntfy = crate::config::NtfyConfig {
+            enabled: true,
+            server_url: ntfy_url,
+            topic: "grid_reverse".into(),
+            token: String::new(),
+        };
+    }
+
+    let mut reverse_open = cache_test_trade("reverse:open-1", 1, TradingMode::Live);
+    reverse_open.side = OrderSide::Buy;
+    reverse_open.pnl_verified = true;
+    reverse_open.is_maker = false;
+    assert!(
+        fixture
+            .state
+            .record_trade(reverse_open, None, None, None)
+            .await
+    );
+
+    let mut reverse_close = cache_test_trade("reverse:close-1", 2, TradingMode::Live);
+    reverse_close.side = OrderSide::Sell;
+    reverse_close.pnl_verified = false;
+    reverse_close.is_maker = false;
+    assert!(
+        fixture
+            .state
+            .record_trade(reverse_close.clone(), None, None, None)
+            .await
+    );
+    let mut verified_close = reverse_close;
+    verified_close.realized_pnl = dec!(4.2);
+    verified_close.commission = dec!(0.1);
+    verified_close.pnl_verified = true;
+    let clear_rev = fixture.state.db.symbol_trade_clear_revision("SOLUSDC");
+    fixture
+        .state
+        .verify_trade_pnl(verified_close, clear_rev)
+        .await
+        .unwrap();
+
+    no_more_notifications(&mut fixture).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), ntfy_rx.recv())
+            .await
+            .is_err()
+    );
+
+    let now = Utc::now();
+    fixture
+        .state
+        .notify_reverse_result(ReverseNotification {
+            symbol: "SOLUSDC".into(),
+            mode: TradingMode::Live,
+            from_direction: GridDirection::Long,
+            to_direction: GridDirection::Short,
+            effective_direction: GridDirection::Short,
+            closed_qty: dec!(1.5),
+            close_avg_price: Some(dec!(120)),
+            opened_qty: dec!(1.5),
+            open_avg_price: Some(dec!(119.9)),
+            status: BotStatus::Running,
+            failure_reason: None,
+            timestamp: now,
+        })
+        .await;
+
+    let tg_ok = next_notification(&mut fixture).await;
+    assert!(tg_ok["text"]
+        .as_str()
+        .unwrap()
+        .starts_with("<b>🔄 反手交易已完成｜SOLUSDC｜实盘</b>"));
+    let ntfy_ok = tokio::time::timeout(Duration::from_secs(1), ntfy_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(ntfy_ok["title"], "🔄 反手交易已完成｜SOLUSDC｜实盘");
+    assert_eq!(ntfy_ok["priority"], 3);
+
+    fixture
+        .state
+        .notify_reverse_result(ReverseNotification {
+            symbol: "SOLUSDC".into(),
+            mode: TradingMode::Live,
+            from_direction: GridDirection::Short,
+            to_direction: GridDirection::Long,
+            effective_direction: GridDirection::Short,
+            closed_qty: Decimal::ZERO,
+            close_avg_price: None,
+            opened_qty: Decimal::ZERO,
+            open_avg_price: None,
+            status: BotStatus::Paused,
+            failure_reason: Some("市价平仓未完成".into()),
+            timestamp: now,
+        })
+        .await;
+
+    let tg_err = next_notification(&mut fixture).await;
+    assert!(tg_err["text"]
+        .as_str()
+        .unwrap()
+        .starts_with("<b>⚠️ 反手交易异常暂停｜SOLUSDC｜实盘</b>"));
+    let ntfy_err = tokio::time::timeout(Duration::from_secs(1), ntfy_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(ntfy_err["title"], "⚠️ 反手交易异常暂停｜SOLUSDC｜实盘");
+    assert_eq!(ntfy_err["priority"], 4);
+
+    fixture.server.abort();
+    ntfy_server.abort();
+}

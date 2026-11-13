@@ -42,7 +42,7 @@ pub(crate) use error::{
 
 #[cfg(test)]
 use endpoints::one_way_position;
-pub(crate) use endpoints::NewOrderRequest;
+pub(crate) use endpoints::{NewMarketOrderRequest, NewOrderRequest};
 use fill_reconciler::FillReconcilerState;
 #[cfg(test)]
 use fill_reconciler::{ExecutionFill, FillCacheCleanup, FillCacheEntry, FillProgress};

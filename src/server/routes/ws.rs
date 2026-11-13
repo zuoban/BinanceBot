@@ -226,6 +226,8 @@ fn known_control_action(action: &str) -> Option<&'static str> {
         Some("resume")
     } else if action.eq_ignore_ascii_case("rebalance") {
         Some("rebalance")
+    } else if action.eq_ignore_ascii_case("reverse") {
+        Some("reverse")
     } else {
         None
     }

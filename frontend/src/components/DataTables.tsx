@@ -17,7 +17,7 @@ export { sameTrades };
 
 const side = (value: string) => <SideTag side={value === 'BUY' ? 'BUY' : 'SELL'} />;
 const pendingSync = <SignalChip tier="yellow" compact>待同步</SignalChip>;
-const purposeLabel: Record<string, string> = { GRID: '网格', TAKE_PROFIT: '止盈', REMAINDER: '余量合并', LEGACY: '历史订单', UNVERIFIED: '待核实' };
+const purposeLabel: Record<string, string> = { GRID: '网格', TAKE_PROFIT: '止盈', REMAINDER: '余量合并', REVERSE: '反手市价', LEGACY: '历史订单', UNVERIFIED: '待核实' };
 function orderPurpose(order: Order) {
   return purposeLabel[order.purpose] ?? (order.is_take_profit ? '止盈' : '历史订单');
 }

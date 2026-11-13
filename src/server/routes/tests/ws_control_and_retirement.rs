@@ -6,7 +6,7 @@ use super::super::*;
 use super::auth_state;
 use crate::config::AppConfig;
 use crate::db::Database;
-use crate::types::{BotControlAction, BotStatus, TradingMode};
+use crate::types::{BotControlAction, BotStatus, GridDirection, TradingMode};
 use axum::extract::ws::Message;
 use futures_util::{SinkExt, StreamExt};
 
@@ -78,6 +78,7 @@ async fn revoked_socket_commands_waiting_for_capacity_are_not_submitted() {
             &ControlRequest {
                 action: name.into(),
                 expected_mode: Some(TradingMode::Paper),
+                expected_direction: None,
             },
             state.pause_epoch(),
         )
@@ -115,6 +116,7 @@ async fn pending_persisted_pause_blocks_other_clients_until_queued() {
             &ControlRequest {
                 action: name.into(),
                 expected_mode: None,
+                expected_direction: None,
             },
             state.pause_epoch(),
         )
@@ -125,6 +127,7 @@ async fn pending_persisted_pause_blocks_other_clients_until_queued() {
             &ControlRequest {
                 action: "resume".into(),
                 expected_mode: Some(TradingMode::Paper),
+                expected_direction: None,
             },
             state.pause_epoch(),
         )
@@ -267,6 +270,7 @@ async fn retirement_releases_control_waiting_for_queue_capacity() {
             Json(ControlRequest {
                 action: "rebalance".into(),
                 expected_mode: Some(TradingMode::Paper),
+                expected_direction: None,
             }),
         )
         .await
@@ -364,6 +368,92 @@ async fn socket_orders_pause_before_resume_and_reports_failures() {
     })
     .await
     .unwrap();
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn socket_reverse_dispatches_and_reports_validation_and_completion() {
+    use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
+
+    let db = Arc::new(Database::open(":memory:").unwrap());
+    db.create_session("reverse-ws-token").unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+    let state = AppState::new(AppConfig::default(), db, tx);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let router = create_router(state);
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let mut request = format!("ws://{address}/ws").into_client_request().unwrap();
+    request.headers_mut().insert(
+        "Sec-WebSocket-Protocol",
+        "auth, token.reverse-ws-token".parse().unwrap(),
+    );
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    socket.next().await.unwrap().unwrap();
+
+    socket
+        .send(Message::Text(
+            r#"{"action":"reverse","expected_mode":"PAPER"}"#.into(),
+        ))
+        .await
+        .unwrap();
+    let invalid_frame = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let frame = socket.next().await.unwrap().unwrap();
+            let value: serde_json::Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            if value["type"] == "control" {
+                break value;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(invalid_frame["action"], "reverse");
+    assert_eq!(invalid_frame["success"], false);
+    assert_eq!(invalid_frame["message"], "反手交易需要提供确认时的交易方向");
+
+    socket
+        .send(Message::Text(
+            r#"{"action":"reverse","expected_mode":"PAPER","expected_direction":"LONG"}"#.into(),
+        ))
+        .await
+        .unwrap();
+    let dispatched = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    match dispatched {
+        BotControlAction::Reverse {
+            expected_mode,
+            expected_direction,
+            reply,
+        } => {
+            assert_eq!(expected_mode, TradingMode::Paper);
+            assert_eq!(expected_direction, GridDirection::Long);
+            reply.send(Ok(())).unwrap();
+        }
+        other => panic!("unexpected action: {:?}", other),
+    }
+
+    let completed_frame = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let frame = socket.next().await.unwrap().unwrap();
+            let value: serde_json::Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            if value["type"] == "control" {
+                break value;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(completed_frame["action"], "reverse");
+    assert_eq!(completed_frame["success"], true);
+    assert_eq!(
+        completed_frame["data"],
+        "Action reverse triggered successfully"
+    );
+
     server.abort();
     let _ = server.await;
 }

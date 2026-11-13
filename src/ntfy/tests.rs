@@ -1,8 +1,8 @@
 use super::*;
 use crate::config::NtfyConfig;
 use crate::types::{
-    GridDirection, HourlyTradeCount, HourlyTradeStats, OrderSide, PositionInfo, TickerInfo,
-    TradeRecord, TradingMode,
+    BotStatus, GridDirection, HourlyTradeCount, HourlyTradeStats, OrderSide, PositionInfo,
+    TickerInfo, TradeRecord, TradingMode,
 };
 use chrono::Duration;
 use rust_decimal_macros::dec;
@@ -95,6 +95,69 @@ fn formats_ntfy_trade_risk_daily_and_test_messages_as_plain_title_and_body() {
     assert_eq!(daily_title, "📊 每日运行数据快照（2026-11-09）");
     assert!(daily_body.contains("【账户概览】\n暂无账户数据"));
     assert!(!daily_body.contains("<b>"));
+
+    let reverse_ok = ReverseNotification {
+        symbol: "SOLUSDC".into(),
+        mode: TradingMode::Live,
+        from_direction: GridDirection::Long,
+        to_direction: GridDirection::Short,
+        effective_direction: GridDirection::Short,
+        closed_qty: dec!(2.50),
+        close_avg_price: Some(dec!(120.50)),
+        opened_qty: dec!(2.50),
+        open_avg_price: Some(dec!(120.40)),
+        status: BotStatus::Running,
+        failure_reason: None,
+        timestamp: now,
+    };
+    let (rev_title, rev_body) = format_ntfy_reverse_message(&reverse_ok);
+    assert_eq!(rev_title, "🔄 反手交易已完成｜SOLUSDC｜实盘");
+    assert_eq!(
+        rev_body,
+        "方向变更：做多 → 做空\n仓位执行：平仓 2.5 @ 120.5，反向开仓 2.5 @ 120.4\n当前状态：运行中\n时间：2026-10-12 02:26:00（北京时间）"
+    );
+
+    let reverse_flat = ReverseNotification {
+        symbol: "ETHUSDC".into(),
+        mode: TradingMode::Paper,
+        from_direction: GridDirection::Short,
+        to_direction: GridDirection::Long,
+        effective_direction: GridDirection::Long,
+        closed_qty: Decimal::ZERO,
+        close_avg_price: None,
+        opened_qty: Decimal::ZERO,
+        open_avg_price: None,
+        status: BotStatus::Paused,
+        failure_reason: None,
+        timestamp: now,
+    };
+    let (flat_title, flat_body) = format_ntfy_reverse_message(&reverse_flat);
+    assert_eq!(flat_title, "🔄 反手交易已完成｜ETHUSDC｜模拟盘");
+    assert_eq!(
+        flat_body,
+        "方向变更：做空 → 做多\n仓位执行：空仓切换方向（未提交市价单）\n当前状态：已暂停\n时间：2026-10-12 02:26:00（北京时间）"
+    );
+
+    let reverse_err = ReverseNotification {
+        symbol: "BTCUSDC".into(),
+        mode: TradingMode::Live,
+        from_direction: GridDirection::Long,
+        to_direction: GridDirection::Short,
+        effective_direction: GridDirection::Long,
+        closed_qty: dec!(0.10),
+        close_avg_price: Some(dec!(65000.00)),
+        opened_qty: Decimal::ZERO,
+        open_avg_price: None,
+        status: BotStatus::Paused,
+        failure_reason: Some("余额 < 0 & 异常".into()),
+        timestamp: now,
+    };
+    let (err_title, err_body) = format_ntfy_reverse_message(&reverse_err);
+    assert_eq!(err_title, "⚠️ 反手交易异常暂停｜BTCUSDC｜实盘");
+    assert_eq!(
+        err_body,
+        "方向变更：做多 → 做空（当前仍为做多）\n仓位执行：平仓 0.1 @ 65000，反向开仓 0\n当前状态：已暂停\n异常说明：余额 < 0 & 异常\n时间：2026-10-12 02:26:00（北京时间）"
+    );
 }
 
 #[test]

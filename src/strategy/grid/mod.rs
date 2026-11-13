@@ -49,6 +49,7 @@ mod reconciliation_anomalies;
 mod reconciliation_settlement;
 mod remainder;
 mod remainder_settlement;
+mod reverse_trade;
 mod risk_guards;
 mod snapshot_conflicts;
 mod snapshot_identities;

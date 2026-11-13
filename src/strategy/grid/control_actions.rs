@@ -5,7 +5,8 @@ impl GridTradingEngine {
         if let BotControlAction::UpdateConfig { reply, .. }
         | BotControlAction::UpdateGlobalConfig { reply, .. }
         | BotControlAction::Resume { reply, .. }
-        | BotControlAction::Rebalance { reply, .. } = action
+        | BotControlAction::Rebalance { reply, .. }
+        | BotControlAction::Reverse { reply, .. } = action
         {
             let _ = reply.send(Err("程序正在退出，操作未执行".into()));
         }
@@ -58,6 +59,14 @@ impl GridTradingEngine {
                 reply,
             } => {
                 Box::pin(self.handle_rebalance_action(expected_mode, reply)).await;
+            }
+            BotControlAction::Reverse {
+                expected_mode,
+                expected_direction,
+                reply,
+            } => {
+                let fut = self.handle_reverse_action(expected_mode, expected_direction, reply);
+                Box::pin(fut).await;
             }
             BotControlAction::UpdateConfig { config, reply } => {
                 self.apply_and_reply_config(*config, "Configuration update rejected", reply)
@@ -125,15 +134,16 @@ impl GridTradingEngine {
         }
     }
 
-    async fn ensure_resume_rules_ready(
+    pub(super) async fn ensure_action_rules_ready(
         &mut self,
         config: &crate::config::AppConfig,
+        action_prefix: &str,
     ) -> std::result::Result<(), String> {
         if !self.exchange_rules_loaded {
             if let Err(error) = self.load_exchange_rules(&config.exchange.symbol).await {
                 if !config.exchange.is_paper() {
                     let message = format!(
-                        "Resume failed: could not load Binance exchange rules for {}: {}",
+                        "{action_prefix} failed: could not load Binance exchange rules for {}: {}",
                         config.exchange.symbol, error
                     );
                     self.state.add_log("ERROR", &message).await;
@@ -157,7 +167,7 @@ impl GridTradingEngine {
             .await
             .validate_grid_interval(config.grid.grid_interval)
         {
-            let message = format!("Resume failed: {}", error);
+            let message = format!("{action_prefix} failed: {}", error);
             self.state.add_log("ERROR", &message).await;
             return Err(message);
         }
@@ -176,7 +186,7 @@ impl GridTradingEngine {
             let _ = reply.send(Err("策略运行模式已改变，无法恢复策略".into()));
             return;
         }
-        if let Err(message) = Box::pin(self.ensure_resume_rules_ready(&config)).await {
+        if let Err(message) = Box::pin(self.ensure_action_rules_ready(&config, "Resume")).await {
             let _ = reply.send(Err(message));
             return;
         }

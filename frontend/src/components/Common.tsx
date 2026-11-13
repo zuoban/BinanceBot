@@ -20,7 +20,7 @@ const signalIcon: Record<Signal, React.ReactNode> = { calm: <CheckCircleOutlined
 function controlResultMeta(result: string): { tier: Signal; alertType: 'error' | 'warning' | 'success' | 'info'; pending: boolean } {
   if (result.startsWith('未提交')) return { tier: 'red', alertType: 'error', pending: false };
   if (result.includes('尚未确认') || result.includes('结果不明')) return { tier: 'yellow', alertType: 'warning', pending: false };
-  if (result === '已确认') return { tier: 'calm', alertType: 'success', pending: false };
+  if (result === '已确认' || result === '反手交易已完成') return { tier: 'calm', alertType: 'success', pending: false };
   return { tier: 'blue', alertType: 'info', pending: result === '正在提交…' };
 }
 export function ControlResultBanner({ symbol, results, result: directResult, clearResult, variant = 'inline' }: { symbol: string; results?: Record<string, string>; result?: string; clearResult?: (symbol: string) => void; variant?: 'inline' | 'alert' }) {

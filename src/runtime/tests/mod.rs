@@ -153,6 +153,9 @@ pub(super) fn fixture_with_unresponsive_engine(
                         BotControlAction::Rebalance { reply, .. } => {
                             let _ = reply.send(Ok(()));
                         }
+                        BotControlAction::Reverse { reply, .. } => {
+                            let _ = reply.send(Ok(()));
+                        }
                         BotControlAction::GlobalRiskCancel => {}
                     }
                 }

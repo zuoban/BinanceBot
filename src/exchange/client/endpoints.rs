@@ -17,6 +17,14 @@ pub(crate) struct NewOrderRequest<'a> {
     pub(crate) reduce_only: bool,
 }
 
+pub(crate) struct NewMarketOrderRequest<'a> {
+    pub(crate) symbol: &'a str,
+    pub(crate) side: &'a str,
+    pub(crate) quantity: &'a str,
+    pub(crate) client_order_id: &'a str,
+    pub(crate) reduce_only: bool,
+}
+
 #[derive(serde::Serialize)]
 struct BatchOrderWireItem<'a> {
     symbol: &'a str,
@@ -326,6 +334,66 @@ impl BinanceFuturesClient {
         let order: BinanceOrderResponse = read_bounded_json(resp, 64 * 1024)
             .await
             .map_err(|e| ExchangeError::Other(format!("Failed to parse order response: {e}")))?;
+        Ok(order)
+    }
+
+    pub(crate) async fn place_market_order(
+        &self,
+        order: NewMarketOrderRequest<'_>,
+    ) -> std::result::Result<BinanceOrderResponse, ExchangeError> {
+        if !is_valid_client_order_id(order.client_order_id) {
+            return Err(ExchangeError::RequestRejected(
+                "Invalid client_order_id".to_string(),
+            ));
+        }
+        if order.symbol.is_empty() || order.side.is_empty() || order.quantity.is_empty() {
+            return Err(ExchangeError::RequestRejected(
+                "Market order contains empty required field".to_string(),
+            ));
+        }
+        self.reserve(
+            0,
+            if order.reduce_only {
+                RequestClass::ClosingOrder
+            } else {
+                RequestClass::OpeningOrder
+            },
+        )
+        .map_err(|error| ExchangeError::RequestRejected(error.to_string()))?;
+        let reduce_only_param = if order.reduce_only {
+            "&reduceOnly=true"
+        } else {
+            ""
+        };
+        let url = self.signed_url_fmt(
+            "/fapi/v1/order",
+            format_args!(
+                "symbol={}&side={}&type=MARKET&quantity={}&newClientOrderId={}&newOrderRespType=RESULT{}",
+                order.symbol,
+                order.side,
+                order.quantity,
+                order.client_order_id,
+                reduce_only_param
+            ),
+        );
+
+        debug!(
+            "Sending Binance market order request: side={}, qty={}, reduce_only={}",
+            order.side, order.quantity, order.reduce_only
+        );
+        let resp = self.send(self.client.post(&url)).await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = read_bounded_error_body(resp).await?;
+            self.maybe_resync_on_invalid_timestamp(&body).await;
+            return Err(order_response_error(status, &body));
+        }
+
+        let order: BinanceOrderResponse =
+            read_bounded_json(resp, 64 * 1024).await.map_err(|err| {
+                ExchangeError::Other(format!("Failed to parse order response: {err}"))
+            })?;
         Ok(order)
     }
 

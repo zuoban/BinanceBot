@@ -1,5 +1,5 @@
 use super::AppState;
-use crate::telegram::TradeNotificationContext;
+use crate::telegram::{ReverseNotification, TradeNotificationContext};
 use crate::types::{GridDirection, HourlyTradeStats, TradeRecord};
 use chrono::Utc;
 use std::sync::Arc;
@@ -118,6 +118,7 @@ impl AppState {
         let config = self.config.read().await;
         let channels = NotificationChannels::from_app(&config);
         (channels.any_enabled()
+            && !trade.is_reverse_trade()
             && trade.symbol == config.exchange.symbol
             && trade.mode == config.exchange.trading_mode()
             && trade.side == config.grid.direction.closing_side())
@@ -128,6 +129,48 @@ impl AppState {
                 config.exchange.sync_interval_secs,
             )
         })
+    }
+
+    pub(crate) async fn notify_reverse_result(self: &Arc<Self>, notification: ReverseNotification) {
+        let channels = {
+            let config = self.config.read().await;
+            NotificationChannels::from_app(&config)
+        };
+        if !channels.any_enabled() {
+            return;
+        }
+        let payload = Arc::new(notification);
+        if channels.telegram.enabled {
+            let notifier = self.telegram_notifier.clone();
+            let telegram = channels.telegram;
+            let payload = Arc::clone(&payload);
+            let state = Arc::clone(self);
+            tokio::spawn(async move {
+                if let Err(err) = notifier
+                    .send_reverse_notification(&telegram, &payload)
+                    .await
+                {
+                    warn!("Failed to send Telegram reverse notification: {}", err);
+                    state
+                        .add_log("WARN", format!("Telegram 反手通知发送失败: {}", err))
+                        .await;
+                }
+            });
+        }
+        if channels.ntfy.enabled {
+            let notifier = self.ntfy_notifier.clone();
+            let ntfy = channels.ntfy;
+            let payload = Arc::clone(&payload);
+            let state = Arc::clone(self);
+            tokio::spawn(async move {
+                if let Err(err) = notifier.send_reverse_notification(&ntfy, &payload).await {
+                    warn!("Failed to send ntfy reverse notification: {}", err);
+                    state
+                        .add_log("WARN", format!("ntfy 反手通知发送失败: {}", err))
+                        .await;
+                }
+            });
+        }
     }
 
     pub(super) async fn notify_verified_closing_trade(

@@ -227,7 +227,7 @@ impl Database {
             "SELECT side, price FROM (
                  SELECT * FROM (
                      SELECT side, price, timestamp, rowid AS sequence FROM trades
-                     WHERE symbol = ?1 AND mode = ?2
+                     WHERE symbol = ?1 AND mode = ?2 AND trade_id NOT LIKE 'reverse:%'
                      ORDER BY timestamp DESC, rowid DESC LIMIT 1
                  )
                  UNION ALL

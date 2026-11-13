@@ -116,6 +116,7 @@ fn test_symbol_rules_rounding() {
         min_qty: dec!(0.01),
         max_qty: dec!(1000.0),
         min_notional: dec!(5.0),
+        ..SymbolRules::default()
     };
 
     assert_eq!(rules.round_price(dec!(115.4849)), dec!(115.48));
@@ -227,4 +228,52 @@ fn exchange_filters_ignore_invalid_bounds_and_extremes_do_not_overflow() {
         rules.plan_remainder_quantity(dec!(100), dec!(100), Decimal::MAX),
         None
     );
+}
+
+#[test]
+fn market_lot_size_parses_and_plans_market_chunks() {
+    let info: BinanceExchangeInfo = serde_json::from_value(serde_json::json!({
+        "symbols": [{
+            "symbol": "SOLUSDC",
+            "status": "TRADING",
+            "contractType": "PERPETUAL",
+            "filters": [
+                {"filterType": "PRICE_FILTER", "minPrice": "0.01", "maxPrice": "100000", "tickSize": "0.01"},
+                {"filterType": "LOT_SIZE", "minQty": "0.01", "maxQty": "1000", "stepSize": "0.01"},
+                {"filterType": "MARKET_LOT_SIZE", "minQty": "0.1", "maxQty": "10", "stepSize": "0.1"},
+                {"filterType": "MIN_NOTIONAL", "notional": "5"}
+            ]
+        }]
+    }))
+    .unwrap();
+    let rules = SymbolRules::from_exchange_info(&info, "SOLUSDC").unwrap();
+    assert_eq!(rules.market_step_size, dec!(0.1));
+    assert_eq!(rules.market_min_qty, dec!(0.1));
+    assert_eq!(rules.market_max_qty, dec!(10));
+    assert_eq!(rules.format_market_quantity(dec!(1.29)), "1.2");
+
+    assert_eq!(
+        rules
+            .plan_market_chunks(dec!(3.5), false, dec!(100))
+            .unwrap(),
+        vec![dec!(3.5)]
+    );
+    assert_eq!(
+        rules
+            .plan_market_chunks(dec!(20.0), false, dec!(100))
+            .unwrap(),
+        vec![dec!(10), dec!(10)]
+    );
+    assert_eq!(
+        rules
+            .plan_market_chunks(dec!(10.2), false, dec!(10))
+            .unwrap(),
+        vec![dec!(5.1), dec!(5.1)]
+    );
+    assert!(rules
+        .plan_market_chunks(dec!(1.05), true, dec!(100))
+        .is_err());
+    assert!(rules
+        .plan_market_chunks(dec!(0.1), false, dec!(10))
+        .is_err());
 }

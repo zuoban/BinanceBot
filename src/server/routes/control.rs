@@ -1,6 +1,6 @@
 use super::{json_err, json_ok, ApiResponse};
 use crate::server::state::AppState;
-use crate::types::{BotControlAction, TradingMode};
+use crate::types::{BotControlAction, GridDirection, TradingMode};
 use axum::extract::State;
 use axum::Json;
 use serde::Deserialize;
@@ -11,6 +11,8 @@ use tracing::error;
 pub(crate) struct ControlRequest {
     pub action: String,
     pub expected_mode: Option<TradingMode>,
+    #[serde(default)]
+    pub expected_direction: Option<GridDirection>,
 }
 
 pub(super) type ControlReply = tokio::sync::oneshot::Receiver<Result<(), String>>;
@@ -84,6 +86,21 @@ pub(super) fn control_action(
                 Some(receiver),
             ))
         }
+        "reverse" => {
+            let expected_mode = require_expected_mode(payload, "反手交易")?;
+            let expected_direction = payload
+                .expected_direction
+                .ok_or_else(|| "反手交易需要提供确认时的交易方向".to_string())?;
+            let (reply, receiver) = tokio::sync::oneshot::channel();
+            Ok((
+                BotControlAction::Reverse {
+                    expected_mode,
+                    expected_direction,
+                    reply,
+                },
+                Some(receiver),
+            ))
+        }
         _ => Err("未知操作指令".into()),
     }
 }
@@ -146,6 +163,7 @@ fn control_action_label(action: &BotControlAction) -> &'static str {
         BotControlAction::Resume { .. } => "resume",
         BotControlAction::CancelAll | BotControlAction::CancelAllAlreadyPersisted => "cancel_all",
         BotControlAction::Rebalance { .. } => "rebalance",
+        BotControlAction::Reverse { .. } => "reverse",
         BotControlAction::UpdateConfig { .. } => "update_config",
         BotControlAction::UpdateGlobalConfig { .. } => "update_global_config",
         BotControlAction::GlobalRiskCancel => "global_risk_cancel",

@@ -28,6 +28,12 @@ pub struct TradeRecord {
 impl TradeRecord {
     #[must_use]
     #[inline]
+    pub(crate) fn is_reverse_trade(&self) -> bool {
+        self.trade_id.starts_with("reverse:")
+    }
+
+    #[must_use]
+    #[inline]
     pub(crate) fn normalized_commission_asset(&self) -> Option<&str> {
         let asset = self.commission_asset.as_deref()?.trim();
         if asset.is_empty()

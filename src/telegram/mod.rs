@@ -1,7 +1,7 @@
 use crate::config::TelegramConfig;
 use crate::types::{
-    format_decimal_dp, GridDirection, HourlyTradeStats, OrderSide, PositionInfo, TickerInfo,
-    TradeRecord, TradingMode,
+    format_decimal_dp, BotStatus, GridDirection, HourlyTradeStats, OrderSide, PositionInfo,
+    TickerInfo, TradeRecord, TradingMode,
 };
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
@@ -69,6 +69,16 @@ impl TelegramNotifier {
         self.send_message(config, format_global_risk_message(reason, Utc::now()))
             .await
     }
+
+    pub(crate) async fn send_reverse_notification(
+        &self,
+        config: &TelegramConfig,
+        notification: &ReverseNotification,
+    ) -> Result<()> {
+        self.send_message(config, format_reverse_message(notification))
+            .await
+    }
+
     pub(crate) async fn send_daily_snapshot_notification(
         &self,
         config: &TelegramConfig,
@@ -147,6 +157,92 @@ pub(crate) struct TradeNotificationContext {
     pub(crate) position_amount: Option<Decimal>,
     reference_time: Option<DateTime<Utc>>,
     max_age_secs: i64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ReverseNotification {
+    pub(crate) symbol: String,
+    pub(crate) mode: TradingMode,
+    pub(crate) from_direction: GridDirection,
+    pub(crate) to_direction: GridDirection,
+    pub(crate) effective_direction: GridDirection,
+    pub(crate) closed_qty: Decimal,
+    pub(crate) close_avg_price: Option<Decimal>,
+    pub(crate) opened_qty: Decimal,
+    pub(crate) open_avg_price: Option<Decimal>,
+    pub(crate) status: BotStatus,
+    pub(crate) failure_reason: Option<String>,
+    pub(crate) timestamp: DateTime<Utc>,
+}
+
+pub(crate) fn bot_status_label(status: BotStatus) -> &'static str {
+    match status {
+        BotStatus::Running => "运行中",
+        BotStatus::Paused => "已暂停",
+        BotStatus::Stopped => "已停止",
+        BotStatus::Error => "异常",
+    }
+}
+
+fn format_leg_execution(qty: Decimal, avg_price: Option<Decimal>) -> String {
+    if qty <= Decimal::ZERO {
+        return "0".to_string();
+    }
+    match avg_price.filter(|price| *price > Decimal::ZERO) {
+        Some(price) => format!("{} @ {}", qty.normalize(), price.normalize()),
+        None => qty.normalize().to_string(),
+    }
+}
+
+pub(crate) fn format_reverse_plain_parts(notification: &ReverseNotification) -> (String, String) {
+    let header_prefix = if notification.failure_reason.is_some() {
+        "⚠️ 反手交易异常暂停"
+    } else {
+        "🔄 反手交易已完成"
+    };
+    let title = format!(
+        "{header_prefix}｜{}｜{}",
+        notification.symbol,
+        mode_label(notification.mode)
+    );
+    let direction_note = if notification.effective_direction != notification.to_direction {
+        format!(
+            "（当前仍为{}）",
+            notification.effective_direction.label_zh()
+        )
+    } else {
+        String::new()
+    };
+    let position_line = if notification.closed_qty <= Decimal::ZERO
+        && notification.opened_qty <= Decimal::ZERO
+        && notification.failure_reason.is_none()
+    {
+        "空仓切换方向（未提交市价单）".to_string()
+    } else {
+        format!(
+            "平仓 {}，反向开仓 {}",
+            format_leg_execution(notification.closed_qty, notification.close_avg_price),
+            format_leg_execution(notification.opened_qty, notification.open_avg_price),
+        )
+    };
+    let failure_line = notification
+        .failure_reason
+        .as_deref()
+        .map(|reason| format!("\n异常说明：{reason}"))
+        .unwrap_or_default();
+    let time = format_beijing_time(notification.timestamp);
+    let body = format!(
+        "方向变更：{} → {}{direction_note}\n仓位执行：{position_line}\n当前状态：{}{failure_line}\n时间：{time}（北京时间）",
+        notification.from_direction.label_zh(),
+        notification.to_direction.label_zh(),
+        bot_status_label(notification.status),
+    );
+    (title, body)
+}
+
+pub(crate) fn format_reverse_message(notification: &ReverseNotification) -> String {
+    let (title, body) = format_reverse_plain_parts(notification);
+    format!("<b>{}</b>\n{}", escape_html(&title), escape_html(&body))
 }
 
 impl TradeNotificationContext {

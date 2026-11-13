@@ -194,6 +194,7 @@ async fn control_requires_confirmation_mode_and_propagates_engine_rejections() {
                 Json(ControlRequest {
                     action: action.into(),
                     expected_mode,
+                    expected_direction: None,
                 }),
             )
             .await;
@@ -209,6 +210,7 @@ async fn control_requires_confirmation_mode_and_propagates_engine_rejections() {
                 Json(ControlRequest {
                     action: action.into(),
                     expected_mode: Some(TradingMode::Paper),
+                    expected_direction: None,
                 }),
             )
             .await
@@ -236,6 +238,55 @@ async fn control_requires_confirmation_mode_and_propagates_engine_rejections() {
         assert!(!response.success);
         assert_eq!(response.message.as_deref(), Some("操作被拒绝"));
     }
+
+    for (expected_mode, expected_direction) in [
+        (None, Some(crate::types::GridDirection::Long)),
+        (
+            Some(TradingMode::Unknown),
+            Some(crate::types::GridDirection::Long),
+        ),
+        (Some(TradingMode::Live), None),
+    ] {
+        let response = post_control_handler(
+            State(state.clone()),
+            Json(ControlRequest {
+                action: "reverse".into(),
+                expected_mode,
+                expected_direction,
+            }),
+        )
+        .await;
+        assert!(!response.0.success);
+        assert!(action_rx.try_recv().is_err());
+    }
+
+    let request_state = state.clone();
+    let request = tokio::spawn(async move {
+        post_control_handler(
+            State(request_state),
+            Json(ControlRequest {
+                action: "reverse".into(),
+                expected_mode: Some(TradingMode::Live),
+                expected_direction: Some(crate::types::GridDirection::Long),
+            }),
+        )
+        .await
+    });
+    let reply = match action_rx.recv().await.unwrap() {
+        BotControlAction::Reverse {
+            expected_mode,
+            expected_direction,
+            reply,
+        } => {
+            assert_eq!(expected_mode, TradingMode::Live);
+            assert_eq!(expected_direction, crate::types::GridDirection::Long);
+            reply
+        }
+        other => panic!("unexpected action: {:?}", other),
+    };
+    reply.send(Ok(())).unwrap();
+    let response = request.await.unwrap().0;
+    assert!(response.success);
 }
 
 async fn overview_response(
@@ -399,6 +450,7 @@ async fn retired_control_cannot_change_recreated_pair() {
                 Json(ControlRequest {
                     action: action.into(),
                     expected_mode: None,
+                    expected_direction: None,
                 }),
             )
             .await
@@ -424,6 +476,7 @@ async fn retired_control_cannot_change_recreated_pair() {
             Json(ControlRequest {
                 action: action.into(),
                 expected_mode: None,
+                expected_direction: None,
             }),
         )
         .await;
@@ -453,6 +506,7 @@ async fn cancelled_control_finishes_before_retirement_and_recreation() {
                 Json(ControlRequest {
                     action: action.into(),
                     expected_mode: None,
+                    expected_direction: None,
                 }),
             )
             .await
@@ -510,6 +564,7 @@ async fn pause_updates_status_before_engine_accepts_action() {
             Json(ControlRequest {
                 action: "pause".into(),
                 expected_mode: None,
+                expected_direction: None,
             }),
         )
         .await

@@ -360,8 +360,13 @@ impl GridTradingEngine {
             // are verified. Pagination must never hold the global risk barrier.
             (Decimal::ZERO, false, None)
         };
+        let trade_prefix = if order.purpose == OrderPurpose::Reverse {
+            "reverse"
+        } else {
+            "grid"
+        };
         let trade = TradeRecord {
-            trade_id: format!("grid:{}", order.client_order_id),
+            trade_id: format!("{trade_prefix}:{}", order.client_order_id),
             client_order_id: order.client_order_id.clone(),
             symbol: order.symbol.clone(),
             mode,
@@ -376,7 +381,7 @@ impl GridTradingEngine {
             commission: Decimal::ZERO,
             commission_asset: None,
             pnl_verified,
-            is_maker: true,
+            is_maker: order.purpose != OrderPurpose::Reverse,
             timestamp: order.updated_at,
             note: note.clone(),
         };

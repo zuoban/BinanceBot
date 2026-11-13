@@ -60,6 +60,24 @@ pub enum GridDirection {
 impl GridDirection {
     #[must_use]
     #[inline]
+    pub const fn opposite(self) -> Self {
+        match self {
+            Self::Long => Self::Short,
+            Self::Short => Self::Long,
+        }
+    }
+
+    #[must_use]
+    #[inline]
+    pub const fn label_zh(self) -> &'static str {
+        match self {
+            Self::Long => "做多",
+            Self::Short => "做空",
+        }
+    }
+
+    #[must_use]
+    #[inline]
     pub const fn opening_side(self) -> OrderSide {
         match self {
             Self::Long => OrderSide::Buy,
@@ -328,6 +346,7 @@ pub enum OrderPurpose {
     Grid,
     TakeProfit,
     Remainder,
+    Reverse,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

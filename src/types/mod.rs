@@ -253,6 +253,11 @@ pub enum BotControlAction {
         expected_mode: TradingMode,
         reply: tokio::sync::oneshot::Sender<Result<(), String>>,
     },
+    Reverse {
+        expected_mode: TradingMode,
+        expected_direction: GridDirection,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
     Shutdown {
         removing: bool,
         reply: tokio::sync::oneshot::Sender<Result<(), String>>,

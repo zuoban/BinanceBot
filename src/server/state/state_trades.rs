@@ -429,6 +429,7 @@ impl AppState {
             return None;
         }
         let notify_trade = channels.any_enabled()
+            && !trade.is_reverse_trade()
             && (trade.pnl_verified || trade.side != direction.closing_side());
         let Ok((status, notification_stats)) = self
             .commit_trade_to_db_and_caches(

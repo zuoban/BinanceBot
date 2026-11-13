@@ -258,7 +258,11 @@ impl GridTradingEngine {
             .insert(client_order_id, order);
     }
 
-    async fn delete_unsubmitted_order_intent(&mut self, client_order_id: &str, context: &str) {
+    pub(super) async fn delete_unsubmitted_order_intent(
+        &mut self,
+        client_order_id: &str,
+        context: &str,
+    ) {
         if let Err(error) = self.delete_managed_order(client_order_id).await {
             error!(
                 "Could not clear {} order intent {}: {}",

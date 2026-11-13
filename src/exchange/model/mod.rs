@@ -83,6 +83,15 @@ pub(crate) enum BinanceFilter {
         #[serde(rename = "stepSize")]
         step_size: Decimal,
     },
+    #[serde(rename = "MARKET_LOT_SIZE")]
+    MarketLotSize {
+        #[serde(rename = "minQty")]
+        min_qty: Decimal,
+        #[serde(rename = "maxQty")]
+        max_qty: Decimal,
+        #[serde(rename = "stepSize")]
+        step_size: Decimal,
+    },
     #[serde(rename = "MIN_NOTIONAL")]
     MinNotional {
         #[serde(default)]
