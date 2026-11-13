@@ -131,6 +131,9 @@ fn open_configured_connection(open_path: &Path, is_memory: bool) -> Result<Conne
     Ok(conn)
 }
 
+// Jobs beyond this wait asynchronously instead of parking blocking-pool threads
+// on the SQLite connection mutexes. Waiting never rejects a write.
+const MAX_INFLIGHT_BLOCKING: usize = 32;
 const MIN_READ_POOL_SIZE: usize = 2;
 const MAX_READ_POOL_SIZE: usize = 8;
 
@@ -267,6 +270,7 @@ pub struct Database {
     // allowing the primary read-write handle to run SQLite's clean WAL close.
     read_conns: Vec<Mutex<Connection>>,
     next_reader: AtomicUsize,
+    blocking_permits: std::sync::Arc<tokio::sync::Semaphore>,
     conn: Mutex<Connection>,
     path: String,
     #[cfg(unix)]
@@ -310,7 +314,12 @@ impl Database {
             .cloned()
             .map(|samples| (samples, std::time::Instant::now()));
         let queued_at = std::time::Instant::now();
+        let permit = std::sync::Arc::clone(&self.blocking_permits)
+            .acquire_owned()
+            .await
+            .context("Database worker queue closed")?;
         tokio::task::spawn_blocking(move || {
+            let _permit = permit;
             #[cfg(test)]
             if let Some((samples, queued_at)) = benchmark_wait {
                 let elapsed = queued_at.elapsed().as_secs_f64() * 1000.0;
@@ -490,6 +499,9 @@ impl Database {
         };
         let mut db = Self {
             read_conns: Vec::new(),
+            blocking_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
+                MAX_INFLIGHT_BLOCKING,
+            )),
             next_reader: AtomicUsize::new(0),
             conn: Mutex::new(conn),
             path: path_str,

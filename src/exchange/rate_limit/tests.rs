@@ -337,3 +337,56 @@ fn idle_account_limits_are_pruned_when_accounts_exceed_bound() {
     assert!(accounts.contains_key(&[200; 32]));
     assert!(accounts.contains_key(&[69; 32]));
 }
+
+#[test]
+fn pnl_budget_is_split_fairly_between_symbols() {
+    let limiter = RateLimiter::default();
+    let reserve = |symbol: &str, weight| {
+        limiter.reserve_scoped(
+            "main",
+            [1; 32],
+            weight,
+            0,
+            RequestClass::PnlReconciliation,
+            Some(symbol),
+        )
+    };
+    reserve("AAAUSDC", 5).unwrap();
+    reserve("BBBUSDC", 5).unwrap();
+    // Two symbols compete, so each gets 30 of the 60 weight per minute.
+    for _ in 0..5 {
+        reserve("AAAUSDC", 5).unwrap();
+    }
+    assert!(reserve("AAAUSDC", 5).is_err());
+    // The other symbol still has its share even though the first one is spent.
+    reserve("BBBUSDC", 5).unwrap();
+    // A symbol joining late is never starved by its own empty history.
+    reserve("CCCUSDC", 5).unwrap();
+}
+
+#[test]
+fn single_symbol_keeps_the_whole_pnl_budget() {
+    let limiter = RateLimiter::default();
+    for _ in 0..12 {
+        limiter
+            .reserve_scoped(
+                "main",
+                [1; 32],
+                5,
+                0,
+                RequestClass::PnlReconciliation,
+                Some("AAAUSDC"),
+            )
+            .unwrap();
+    }
+    assert!(limiter
+        .reserve_scoped(
+            "main",
+            [1; 32],
+            5,
+            0,
+            RequestClass::PnlReconciliation,
+            Some("AAAUSDC"),
+        )
+        .is_err());
+}

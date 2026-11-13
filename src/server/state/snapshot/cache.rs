@@ -11,6 +11,7 @@ use tracing::warn;
 
 pub(super) const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(800);
 pub(crate) const SNAPSHOT_IDLE_HEARTBEAT: Duration = Duration::from_secs(3);
+const RESYNC_FRAME_TTL: Duration = Duration::from_millis(250);
 const TRADE_CACHE_TTL: Duration = Duration::from_secs(5);
 const QUERY_RETRY_DELAY: Duration = Duration::from_secs(5);
 
@@ -114,6 +115,24 @@ impl<K: PartialEq, V> CachedQuery<K, V> {
 #[derive(Default)]
 pub(in crate::server::state) struct SnapshotCache {
     trades: Mutex<Option<CachedQuery<TradeKey, HourlyTradeStats>>>,
+}
+
+pub(in crate::server::state) struct ResyncFrame {
+    generated: Instant,
+    frame: Arc<str>,
+}
+
+impl ResyncFrame {
+    pub(super) fn new(frame: Arc<str>) -> Self {
+        Self {
+            generated: Instant::now(),
+            frame,
+        }
+    }
+
+    pub(super) fn fresh(&self) -> Option<Arc<str>> {
+        (self.generated.elapsed() < RESYNC_FRAME_TTL).then(|| Arc::clone(&self.frame))
+    }
 }
 
 pub(in crate::server::state) struct LastSnapshotBroadcast {

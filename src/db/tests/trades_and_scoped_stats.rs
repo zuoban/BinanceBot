@@ -486,6 +486,7 @@ fn legacy_trades_can_be_backfilled_without_double_counting() {
     let db = Database {
         read_conns: Vec::new(),
         next_reader: AtomicUsize::new(0),
+        blocking_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT_BLOCKING)),
         conn: Mutex::new(conn),
         path: ":memory:".into(),
         #[cfg(unix)]

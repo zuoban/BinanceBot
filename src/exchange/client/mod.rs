@@ -310,6 +310,27 @@ impl BinanceFuturesClient {
             })
     }
 
+    pub(super) fn reserve_for_symbol(
+        &self,
+        weight: u64,
+        class: RequestClass,
+        symbol: &str,
+    ) -> Result<()> {
+        self.limiter
+            .reserve_scoped(
+                &self.base_url,
+                self.rate_account_key,
+                weight,
+                0,
+                class,
+                Some(symbol),
+            )
+            .map_err(|error| {
+                tracing::warn!("{}", error);
+                anyhow!(LocalRateLimitError(error))
+            })
+    }
+
     pub(super) fn reserve_with_orders(
         &self,
         weight: u64,

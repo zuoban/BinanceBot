@@ -255,7 +255,7 @@ impl BinanceFuturesClient {
             is_valid_client_order_id(client_order_id),
             "Invalid client_order_id"
         );
-        self.reserve(1, class)?;
+        self.reserve_for_symbol(1, class, symbol)?;
         let url = self.signed_url_fmt(
             "/fapi/v1/order",
             format_args!("symbol={}&origClientOrderId={}", symbol, client_order_id),

@@ -371,3 +371,19 @@ async fn snapshot_frame_unchanged_ignores_generated_at_and_uptime_but_detects_ac
     let f3 = crate::types::ws_frame_json("snapshot", &changed).unwrap();
     assert!(!snapshot_frame_unchanged(&f1, &f3));
 }
+
+#[tokio::test]
+async fn lagged_clients_share_one_resync_frame_until_it_expires() {
+    let state = fixture();
+    let first = state.resync_snapshot_frame().await.unwrap();
+    let second = state.resync_snapshot_frame().await.unwrap();
+    assert!(Arc::ptr_eq(&first, &second));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let third = state.resync_snapshot_frame().await.unwrap();
+    assert!(!Arc::ptr_eq(&first, &third));
+    state.broadcast_snapshot().await;
+    let fourth = state.resync_snapshot_frame().await.unwrap();
+    assert!(!Arc::ptr_eq(&third, &fourth));
+    let frame: serde_json::Value = serde_json::from_str(&third).unwrap();
+    assert_eq!(frame["type"], "snapshot");
+}

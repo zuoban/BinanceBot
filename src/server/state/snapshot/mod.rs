@@ -23,7 +23,7 @@ use cache::{
     AccountPosition, AccountSnapshotData, AccountTicker, SnapshotCharts, SnapshotScope,
     SNAPSHOT_INTERVAL,
 };
-pub(in crate::server::state) use cache::{LastSnapshotBroadcast, SnapshotCache};
+pub(in crate::server::state) use cache::{LastSnapshotBroadcast, ResyncFrame, SnapshotCache};
 
 fn count_active_order_sides<'a>(
     orders: impl ExactSizeIterator<Item = &'a GridOrder>,
@@ -309,17 +309,18 @@ impl AppState {
                 .take(50)
                 .cloned()
                 .collect();
-            base.recent_logs = self
-                .recent_logs
-                .read()
-                .await
-                .iter()
-                .rev()
-                .take(50)
-                .cloned()
-                .collect();
             (base, active_orders)
         };
+        // Logs are not part of the trade-commit consistency boundary.
+        snapshot.recent_logs = self
+            .recent_logs
+            .read()
+            .await
+            .iter()
+            .rev()
+            .take(50)
+            .cloned()
+            .collect();
         sort_active_orders_desc(&mut active_orders);
         snapshot.account_cny_rate = self.cny_rates.get(&snapshot.account.asset).await;
         let (buy, sell) = count_active_order_sides(active_orders.iter());
@@ -331,7 +332,22 @@ impl AppState {
         Some(snapshot)
     }
 
+    /// Snapshot frame for clients that lagged behind the broadcast. Clients that
+    /// lag together share one frame instead of each rebuilding the snapshot.
+    pub(crate) async fn resync_snapshot_frame(&self) -> Option<Arc<str>> {
+        let mut cached = self.resync_frame.lock().await;
+        if let Some(frame) = cached.as_ref().and_then(ResyncFrame::fresh) {
+            return Some(frame);
+        }
+        let frame = crate::types::ws_frame_json("snapshot", &self.snapshot().await)?;
+        *cached = Some(ResyncFrame::new(Arc::clone(&frame)));
+        Some(frame)
+    }
+
     pub(crate) async fn broadcast_snapshot(&self) -> BotSnapshot {
+        // A forced publish follows a state change; lagged clients must not be
+        // resynced from a frame generated before it.
+        *self.resync_frame.lock().await = None;
         self.publish_snapshot(true).await
     }
 

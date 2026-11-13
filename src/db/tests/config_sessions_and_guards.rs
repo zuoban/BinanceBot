@@ -603,3 +603,33 @@ fn read_pool_size_stays_within_bounds() {
     let size = read_pool_size();
     assert!((MIN_READ_POOL_SIZE..=MAX_READ_POOL_SIZE).contains(&size));
 }
+
+#[tokio::test]
+async fn run_blocking_bounds_inflight_jobs_without_dropping_any() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let db = std::sync::Arc::new(Database::open(":memory:").unwrap());
+    let running = std::sync::Arc::new(AtomicUsize::new(0));
+    let peak = std::sync::Arc::new(AtomicUsize::new(0));
+    let jobs = MAX_INFLIGHT_BLOCKING * 3;
+    let handles: Vec<_> = (0..jobs)
+        .map(|_| {
+            let db = db.clone();
+            let running = running.clone();
+            let peak = peak.clone();
+            tokio::spawn(async move {
+                db.run_blocking(move |_| {
+                    let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    running.fetch_sub(1, Ordering::SeqCst);
+                    Ok(())
+                })
+                .await
+            })
+        })
+        .collect();
+    for handle in handles {
+        handle.await.unwrap().unwrap();
+    }
+    assert!(peak.load(Ordering::SeqCst) <= MAX_INFLIGHT_BLOCKING);
+}

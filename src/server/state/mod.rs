@@ -80,6 +80,7 @@ pub struct AppState {
     pair_scope: Option<String>,
     pub(crate) snapshot_scope_lock: RwLock<()>,
     snapshot_publish_lock: Mutex<Option<snapshot::LastSnapshotBroadcast>>,
+    resync_frame: Mutex<Option<snapshot::ResyncFrame>>,
     snapshot_cache: snapshot::SnapshotCache,
     pub(crate) auth: Arc<AuthContext>,
 
@@ -351,6 +352,7 @@ impl AppState {
             pair_scope,
             snapshot_scope_lock: RwLock::new(()),
             snapshot_publish_lock: Mutex::new(None),
+            resync_frame: Mutex::new(None),
             snapshot_cache: snapshot::SnapshotCache::default(),
             auth,
             action_tx,

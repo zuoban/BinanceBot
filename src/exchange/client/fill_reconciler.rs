@@ -333,7 +333,7 @@ impl BinanceFuturesClient {
         from_id: Option<i64>,
         failed_query: &mut bool,
     ) -> Result<Vec<ExecutionFill>> {
-        self.reserve(5, RequestClass::PnlReconciliation)?;
+        self.reserve_for_symbol(5, RequestClass::PnlReconciliation, symbol)?;
         let url = match from_id {
             Some(id) => self.signed_url_fmt(
                 "/fapi/v1/userTrades",

@@ -359,9 +359,7 @@ fn spawn_socket_send_task(
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                             crate::metrics::WS_CLIENT_LAGGED.inc();
                             if !send_state.is_token_valid(&send_token).await { break; }
-                            if let Some(json) =
-                                crate::types::ws_frame_json("snapshot", &send_state.snapshot().await)
-                            {
+                            if let Some(json) = send_state.resync_snapshot_frame().await {
                                 if !send_with_timeout(
                                     &mut sender,
                                     Message::Text(json.as_ref().to_owned()),

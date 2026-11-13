@@ -109,6 +109,7 @@ struct AccountLimits {
 struct EndpointLimits {
     weight: Counter,
     pnl_reconciliation_weight: Counter,
+    pnl_scopes: HashMap<String, Counter>,
     accounts: HashMap<[u8; 32], AccountLimits>,
     blocked_until: Option<Instant>,
     ip_limit: Option<u64>,
@@ -190,6 +191,20 @@ impl RateLimiter {
         order_count: u64,
         class: RequestClass,
     ) -> Result<(), String> {
+        self.reserve_scoped(endpoint, account, weight, order_count, class, None)
+    }
+
+    /// Like `reserve_with_orders`, and splits the PnL reconciliation budget
+    /// fairly between the scopes (symbols) that are competing for it.
+    pub(crate) fn reserve_scoped(
+        &self,
+        endpoint: &str,
+        account: [u8; 32],
+        weight: u64,
+        order_count: u64,
+        class: RequestClass,
+        scope: Option<&str>,
+    ) -> Result<(), String> {
         let mut endpoints = self.endpoints.lock_unpoisoned();
         let now = Instant::now();
         let endpoint = Self::endpoint_mut(&mut endpoints, endpoint);
@@ -230,12 +245,47 @@ impl RateLimiter {
                 ));
             }
         }
+        let pnl_scope = scope.filter(|_| matches!(class, RequestClass::PnlReconciliation));
+        if let Some(scope) = pnl_scope {
+            Self::check_pnl_scope_share(endpoint, scope, weight, now, weight_limit)?;
+        }
         Self::reserve_account_order_budget(endpoint, account, now, order_count, class)?;
         if weight > 0 {
             endpoint.weight.record(now, weight);
             if matches!(class, RequestClass::PnlReconciliation) {
                 endpoint.pnl_reconciliation_weight.record(now, weight);
+                if let Some(scope) = pnl_scope {
+                    endpoint
+                        .pnl_scopes
+                        .entry(scope.to_owned())
+                        .or_default()
+                        .record(now, weight);
+                }
             }
+        }
+        Ok(())
+    }
+
+    fn check_pnl_scope_share(
+        endpoint: &mut EndpointLimits,
+        scope: &str,
+        weight: u64,
+        now: Instant,
+        weight_limit: u64,
+    ) -> Result<(), String> {
+        endpoint.pnl_scopes.retain(|_, counter| {
+            counter.prune(now, MINUTE);
+            !counter.is_empty()
+        });
+        let own = endpoint.pnl_scopes.get(scope).map_or(0, Counter::local);
+        let competing = endpoint.pnl_scopes.len() + usize::from(own == 0);
+        let pnl_limit = PNL_RECONCILIATION_1M.min(weight_limit / 4);
+        let share = pnl_limit / u64::try_from(competing.max(1)).unwrap_or(u64::MAX);
+        // A scope's first request in the window is never held back by its share.
+        if own > 0 && own.saturating_add(weight) > share {
+            return Err(format!(
+                "local Binance PnL reconciliation fair-share budget reached for {scope} ({share}/minute)"
+            ));
         }
         Ok(())
     }
