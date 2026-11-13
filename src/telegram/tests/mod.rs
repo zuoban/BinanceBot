@@ -110,7 +110,7 @@ fn buy_message_uses_requested_layout_and_buy_counts() {
     let trade = trade(OrderSide::Buy);
     assert_eq!(
         format_trade_message(&trade, &context(&trade)),
-        "<b>🟢 BUY｜SOLUSDC｜123.45｜246.90 USDC｜7D｜2H</b>\n<b>账户权益：11254.48 USDC｜</b>≈ ¥75453.41\n持仓金额：2469.00 USDC\n可用余额：3878.03 USDC｜38.78%"
+        "<b>🟢 BUY｜SOLUSDC｜123.45｜246.90 USDC</b>\n成交笔数：7D｜2H\n持仓金额：2469.00 USDC"
     );
 }
 
@@ -150,7 +150,7 @@ fn position_amount_uses_total_position_at_mark_price_in_all_modes() {
                 TradeNotificationContext::default().with_position(&trade, &position, &ticker);
             assert_eq!(context.position_amount, Some(dec!(2000)));
             let message = format_trade_message(&trade, &context);
-            assert!(message.contains("\n持仓金额：2000.00 USDT\n"));
+            assert!(message.contains("\n持仓金额：2000.00 USDT"));
             assert!(message.contains("246.90 USDT"));
         }
     }
@@ -297,7 +297,7 @@ fn sell_message_uses_sell_counts_and_verified_pnl() {
     trade.commission = dec!(0.80);
     assert_eq!(
         format_trade_message(&trade, &context(&trade)),
-        "<b>🔴 SELL｜SOLUSDC｜123.45｜246.90 USDC｜4D｜1H</b>\n<b>账户权益：11254.48 USDC｜</b>≈ ¥75453.41\n持仓金额：2469.00 USDC\n可用余额：3878.03 USDC｜38.78%\n已实现盈亏：-3.2500 USDC"
+        "<b>🔴 SELL｜SOLUSDC｜123.45｜246.90 USDC</b>\n成交笔数：4D｜1H\n持仓金额：2469.00 USDC\n已实现盈亏：-3.2500 USDC"
     );
     trade.realized_pnl = dec!(1.25);
     assert!(format_trade_message(&trade, &context(&trade)).ends_with("已实现盈亏：+1.2500 USDC"));
@@ -321,7 +321,7 @@ fn titles_use_execution_average_without_market_or_account_data() {
                 "🔴"
             };
             assert!(message.starts_with(&format!(
-                "<b>{icon} {}｜SOLUSDC｜117.123456｜500.12 USDC｜--D｜--H</b>",
+                "<b>{icon} {}｜SOLUSDC｜117.123456｜500.12 USDC</b>\n成交笔数：--D｜--H",
                 side.as_str()
             )));
         }
@@ -351,9 +351,9 @@ fn stale_or_mismatched_account_does_not_display_balances() {
         assert_eq!(context.account_equity, None);
         assert_eq!(context.available_balance, None);
         let message = format_trade_message(&trade, &context);
-        assert!(message.contains("｜--D｜--H</b>"));
-        assert!(message.contains("账户权益：-- USDC｜</b>--"));
-        assert!(message.ends_with("可用余额：-- USDC｜--"));
+        assert!(message.contains("\n成交笔数：--D｜--H\n"));
+        assert!(!message.contains("账户权益"));
+        assert!(!message.contains("可用余额"));
     }
     let mut unknown_symbol = trade.clone();
     unknown_symbol.symbol = "BTCETH".into();
@@ -432,13 +432,14 @@ fn paper_context_uses_shared_account_equity() {
 
 #[test]
 fn ratio_handles_zero_wallet_and_zero_available_balance() {
-    let trade = trade(OrderSide::Buy);
-    let mut context = context(&trade);
-    context.wallet_balance = Some(Decimal::ZERO);
-    assert!(format_trade_message(&trade, &context).ends_with("可用余额：3878.03 USDC｜--"));
-    context.wallet_balance = Some(dec!(10000));
-    context.available_balance = Some(Decimal::ZERO);
-    assert!(format_trade_message(&trade, &context).ends_with("可用余额：0.00 USDC｜0.00%"));
+    assert_eq!(
+        format_available_ratio(Some(dec!(3878.03)), Some(Decimal::ZERO)),
+        "--"
+    );
+    assert_eq!(
+        format_available_ratio(Some(Decimal::ZERO), Some(dec!(10000))),
+        "0.00%"
+    );
 }
 
 #[test]

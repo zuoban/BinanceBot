@@ -320,15 +320,6 @@ pub(crate) fn format_trade_message(
     let average_price = trade.price.normalize();
     let count = |value: Option<u64>| value.map_or_else(|| "--".to_string(), |n| n.to_string());
     let money = |value: Option<Decimal>| format_optional_money(value, quote, false);
-    let cny = context
-        .account_equity
-        .zip(context.cny_per_unit)
-        .and_then(|(equity, rate)| equity.checked_mul(rate))
-        .map_or_else(
-            || "--".to_string(),
-            |value| format!("≈ ¥{}", format_decimal_dp(value, 2, false)),
-        );
-    let ratio = format_available_ratio(context.available_balance, context.wallet_balance);
     let pnl_line = match (
         trade.side == context.direction.closing_side(),
         trade.pnl_verified,
@@ -341,14 +332,12 @@ pub(crate) fn format_trade_message(
         (false, _) => String::new(),
     };
     format!(
-        "<b>{icon} {direction}｜{symbol}｜{average_price}｜{amount} {quote}｜{today}D｜{hour}H</b>\n<b>账户权益：{equity}｜</b>{cny}\n持仓金额：{position_amount}\n可用余额：{available}｜{ratio}{pnl_line}",
+        "<b>{icon} {direction}｜{symbol}｜{average_price}｜{amount} {quote}</b>\n成交笔数：{today}D｜{hour}H\n持仓金额：{position_amount}{pnl_line}",
         direction = trade.side.as_str(),
         symbol = escape_html(&trade.symbol),
         amount = format_decimal_dp(trade.amount_usdc, 2, false),
         today = count(context.today_count),
         hour = count(context.hour_count),
-        equity = money(context.account_equity),
-        available = money(context.available_balance),
         position_amount = money(context.position_amount),
     )
 }

@@ -268,7 +268,7 @@ async fn trade_notifications_wait_for_closing_pnl_and_send_each_verified_trade_o
             .unwrap();
         let message = next_notification(&mut fixture).await;
         let text = message["text"].as_str().unwrap();
-        assert!(text.contains("｜1D｜1H</b>"));
+        assert!(text.contains("\n成交笔数：1D｜1H\n"));
         assert!(text.ends_with(&format!("已实现盈亏：{expected} USDC")));
 
         fixture
@@ -284,7 +284,7 @@ async fn trade_notifications_wait_for_closing_pnl_and_send_each_verified_trade_o
             .unwrap();
         let message = next_notification(&mut fixture).await;
         let text = message["text"].as_str().unwrap();
-        assert!(text.contains("｜2D｜2H</b>"));
+        assert!(text.contains("\n成交笔数：2D｜2H\n"));
         assert!(text.ends_with("已实现盈亏：+0.0000 USDC"));
         no_more_notifications(&mut fixture).await;
         assert_eq!(fixture.state.stats.read().await.pending_pnl_trades, 0);
@@ -463,7 +463,7 @@ async fn trade_notifications_capture_position_amount_after_buy_and_sell_fills() 
 }
 
 #[tokio::test]
-async fn live_trade_notification_uses_configured_sync_interval_for_account_freshness() {
+async fn live_trade_notification_omits_account_balances() {
     let mut fixture = live_notification_fixture(GridDirection::Long).await;
     fixture
         .state
@@ -486,8 +486,9 @@ async fn live_trade_notification_uses_configured_sync_interval_for_account_fresh
     assert!(fixture.state.record_trade(buy, None, None, None).await);
     let message = next_notification(&mut fixture).await;
     let text = message["text"].as_str().unwrap();
-    assert!(text.contains("账户权益：10123.45 USDC"), "{text}");
-    assert!(text.contains("可用余额：8000.00 USDC｜80.00%"), "{text}");
+    assert!(!text.contains("账户权益"), "{text}");
+    assert!(!text.contains("可用余额"), "{text}");
+    assert!(!text.contains("≈ ¥"), "{text}");
     fixture.server.abort();
 }
 
